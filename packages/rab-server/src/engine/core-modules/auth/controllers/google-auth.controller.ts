@@ -1,4 +1,9 @@
 import { Body, Controller, Get, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { AuthUser } from '../../../decorators/auth-user.decorator';
+import { AuthContext } from '../../tenant/auth-context.interface';
+import { SsoReauthStartDto } from '../dto/sso-reauth.dto';
+import { JwtAuthGuard } from '../guards/jwt-auth.guard';
+import { ManagerApplication } from '../guards/manager-application.decorator';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 
@@ -41,6 +46,21 @@ export class GoogleAuthController {
   @RateLimitRequired()
   async startInvitation(@Body() dto: ProviderInvitationStartDto, @Res() res: Response): Promise<void> {
     await this.flow.start('google', res, { intent: 'accept_invitation', invitationToken: dto.token });
+  }
+
+  /**
+   * Account security step 1 (P6): re-authenticate the SIGNED-IN user with Google (step-up for an account without a
+   * password). A top-level form POST from the web console: JwtAuthGuard authenticates it and enforces a trusted Origin for
+   * the cookie credential; manager_web only. Answers a 302 to the provider (`prompt=login`, `max_age=0`), or to the fixed
+   * return path with `?reauth=failed`. The callback below finishes it — it never signs anyone in.
+   */
+  @Post('reauthenticate')
+  @ManagerApplication()
+  @UseGuards(AuthProviderEnabledGuard('google'), JwtAuthGuard)
+  @Throttle(OAUTH_THROTTLE)
+  @RateLimitRequired()
+  async reauthenticate(@AuthUser() ctx: AuthContext, @Body() dto: SsoReauthStartDto, @Res() res: Response): Promise<void> {
+    await this.flow.startReauthentication(ctx, 'google', res, dto.returnTo);
   }
 
   @Get('callback')

@@ -1,0 +1,412 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 7.333,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 8.1,
+      "type": "move",
+      "x": 124,
+      "y": 455,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Venue Offers\"]",
+      "bbox": {
+        "x": 14,
+        "y": 439,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Venue Offers"
+    },
+    {
+      "t": 8.4,
+      "type": "click",
+      "x": 124,
+      "y": 455,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Venue Offers\"]"
+    },
+    {
+      "t": 8.833,
+      "type": "move-start",
+      "x": 124,
+      "y": 455
+    },
+    {
+      "t": 9.233,
+      "type": "move",
+      "x": 309,
+      "y": 282,
+      "selector": "tr:has-text(\"The Grand Hall\")",
+      "bbox": {
+        "x": 249,
+        "y": 262,
+        "w": 1351,
+        "h": 40
+      },
+      "label": "T The Grand Hall Event staff 20 Oct 2026 8 / 8 1 staff rejec"
+    },
+    {
+      "t": 9.533,
+      "type": "click",
+      "x": 309,
+      "y": 282,
+      "selector": "tr:has-text(\"The Grand Hall\")"
+    },
+    {
+      "t": 11.3,
+      "type": "mark",
+      "id": "summary.0",
+      "selector": ".pipeline-summary",
+      "bbox": {
+        "x": 377,
+        "y": 74,
+        "w": 1201,
+        "h": 81.3
+      },
+      "label": "Staffing summary"
+    },
+    {
+      "t": 11.3,
+      "type": "camera",
+      "id": "summary",
+      "marks": [
+        "summary.0"
+      ],
+      "chapter": "Summary",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 11.3,
+      "type": "move-start",
+      "x": 309,
+      "y": 282
+    },
+    {
+      "t": 11.667,
+      "type": "move",
+      "x": 410,
+      "y": 95,
+      "selector": "getByText('Required', { exact: true }).first()",
+      "bbox": {
+        "x": 388,
+        "y": 87,
+        "w": 44.3,
+        "h": 15.8
+      },
+      "label": "Required"
+    },
+    {
+      "t": 13.767,
+      "type": "move-start",
+      "x": 410,
+      "y": 95
+    },
+    {
+      "t": 14.133,
+      "type": "move",
+      "x": 624,
+      "y": 95,
+      "selector": "getByText('Offered', { exact: true }).first()",
+      "bbox": {
+        "x": 605,
+        "y": 87,
+        "w": 37.5,
+        "h": 15.8
+      },
+      "label": "Offered"
+    },
+    {
+      "t": 18.333,
+      "type": "camera",
+      "id": "lanes",
+      "rect": "full",
+      "chapter": "Twelve lanes",
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 33.267,
+      "type": "mark",
+      "id": "card.0",
+      "selector": ".pipeline-column.stage-clocked-in .pipeline-card",
+      "bbox": {
+        "x": 304,
+        "y": 235.3,
+        "w": 216,
+        "h": 118.9
+      },
+      "label": "AM Alex Morgan Event staff … Clocked in - 14:42 14:45 - 22:4"
+    },
+    {
+      "t": 33.267,
+      "type": "camera",
+      "id": "card",
+      "marks": [
+        "card.0"
+      ],
+      "chapter": "Cards",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 33.267,
+      "type": "move-start",
+      "x": 624,
+      "y": 95
+    },
+    {
+      "t": 33.7,
+      "type": "move",
+      "x": 412,
+      "y": 295,
+      "selector": ".pipeline-column.stage-clocked-in .pipeline-card",
+      "bbox": {
+        "x": 304,
+        "y": 235.3,
+        "w": 216,
+        "h": 118.9
+      },
+      "label": "AM Alex Morgan Event staff … Clocked in - 14:42 14:45 - 22:4"
+    },
+    {
+      "t": 37.4,
+      "type": "camera",
+      "id": "back",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 37.4,
+      "type": "move-start",
+      "x": 412,
+      "y": 295
+    },
+    {
+      "t": 37.767,
+      "type": "move",
+      "x": 315,
+      "y": 115,
+      "selector": "a.pipeline-back",
+      "bbox": {
+        "x": 271,
+        "y": 105.6,
+        "w": 88,
+        "h": 18
+      },
+      "label": "← Venue Offers"
+    },
+    {
+      "t": 38.067,
+      "type": "click",
+      "x": 315,
+      "y": 115,
+      "selector": "a.pipeline-back"
+    },
+    {
+      "t": 38.5,
+      "type": "move-start",
+      "x": 315,
+      "y": 115
+    },
+    {
+      "t": 38.867,
+      "type": "move",
+      "x": 309,
+      "y": 322,
+      "selector": "tr:has-text(\"Harbour Kitchen\"):has-text(\"Fully filled\")",
+      "bbox": {
+        "x": 249,
+        "y": 302,
+        "w": 1351,
+        "h": 40
+      },
+      "label": "H Harbour Kitchen Bartender 19 Oct 2026 3 / 3 Fully filled"
+    },
+    {
+      "t": 39.167,
+      "type": "click",
+      "x": 309,
+      "y": 322,
+      "selector": "tr:has-text(\"Harbour Kitchen\"):has-text(\"Fully filled\")"
+    },
+    {
+      "t": 42.033,
+      "type": "mark",
+      "id": "report-btn.0",
+      "selector": "button:has-text(\"Timesheet report\")",
+      "bbox": {
+        "x": 1317.1,
+        "y": 11.5,
+        "w": 140.9,
+        "h": 32
+      },
+      "label": "Timesheet report"
+    },
+    {
+      "t": 42.033,
+      "type": "mark",
+      "id": "report-btn.1",
+      "selector": ".pipeline-summary",
+      "bbox": {
+        "x": 377,
+        "y": 74,
+        "w": 1201,
+        "h": 81.3
+      },
+      "label": "Staffing summary"
+    },
+    {
+      "t": 42.033,
+      "type": "camera",
+      "id": "report-btn",
+      "marks": [
+        "report-btn.0",
+        "report-btn.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 42.533,
+      "type": "move-start",
+      "x": 309,
+      "y": 322
+    },
+    {
+      "t": 43.3,
+      "type": "move",
+      "x": 1388,
+      "y": 28,
+      "selector": "button:has-text(\"Timesheet report\")",
+      "bbox": {
+        "x": 1317.1,
+        "y": 11.5,
+        "w": 140.9,
+        "h": 32
+      },
+      "label": "Timesheet report"
+    },
+    {
+      "t": 43.6,
+      "type": "click",
+      "x": 1388,
+      "y": 28,
+      "selector": "button:has-text(\"Timesheet report\")"
+    },
+    {
+      "t": 46,
+      "type": "mark",
+      "id": "files.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) section:has-text(\"Original Timesheet\")",
+      "bbox": {
+        "x": 977,
+        "y": 137.8,
+        "w": 606,
+        "h": 106.2
+      },
+      "label": "Original Timesheet Unsigned View Download"
+    },
+    {
+      "t": 46,
+      "type": "mark",
+      "id": "files.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) section:has-text(\"Venue Signed Timesheet\")",
+      "bbox": {
+        "x": 977,
+        "y": 255.9,
+        "w": 606,
+        "h": 106.2
+      },
+      "label": "Venue Signed Timesheet Finalised by Riley Chen - 19 Oct 2026"
+    },
+    {
+      "t": 46,
+      "type": "camera",
+      "id": "files",
+      "marks": [
+        "files.0",
+        "files.1"
+      ],
+      "chapter": "Timesheet report",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 46,
+      "type": "move-start",
+      "x": 1388,
+      "y": 28
+    },
+    {
+      "t": 46.367,
+      "type": "move",
+      "x": 1280,
+      "y": 191,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) section:has-text(\"Original Timesheet\")",
+      "bbox": {
+        "x": 977,
+        "y": 137.8,
+        "w": 606,
+        "h": 106.2
+      },
+      "label": "Original Timesheet Unsigned View Download"
+    },
+    {
+      "t": 49.267,
+      "type": "move-start",
+      "x": 1280,
+      "y": 191
+    },
+    {
+      "t": 49.633,
+      "type": "move",
+      "x": 1280,
+      "y": 309,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) section:has-text(\"Venue Signed Timesheet\")",
+      "bbox": {
+        "x": 977,
+        "y": 255.9,
+        "w": 606,
+        "h": 106.2
+      },
+      "label": "Venue Signed Timesheet Finalised by Riley Chen - 19 Oct 2026"
+    },
+    {
+      "t": 52.133,
+      "type": "move-start",
+      "x": 1280,
+      "y": 309
+    },
+    {
+      "t": 52.5,
+      "type": "move",
+      "x": 1280,
+      "y": 480,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .pipeline-report-table",
+      "bbox": {
+        "x": 977,
+        "y": 400.1,
+        "w": 606,
+        "h": 160
+      },
+      "label": "STAFF ROLE CLOCK IN BREAK CLOCK OUT WORKED STATUS AM Alex Mo"
+    }
+  ]
+}

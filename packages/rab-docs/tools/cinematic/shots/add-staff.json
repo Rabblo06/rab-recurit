@@ -1,0 +1,11 @@
+{
+  "slug": "add-staff",
+  "project": "add-staff",
+  "title": "Adding a staff member",
+  "subtitle": "The four-step staff form and invitation",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

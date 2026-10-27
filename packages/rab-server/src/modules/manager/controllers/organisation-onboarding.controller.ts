@@ -5,7 +5,7 @@ import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
 import { PlatformAdminGuard } from '../../../engine/guards/platform-admin.guard';
-import { InviteCeoDto, ListCeoInvitationsDto } from '../dto/invite-ceo.dto';
+import { InviteCeoDto, ListCeoInvitationsDto, ResendCeoInviteDto } from '../dto/invite-ceo.dto';
 import { OrganisationOnboardingService } from '../services/organisation-onboarding.service';
 
 /**
@@ -34,8 +34,8 @@ export class OrganisationOnboardingController {
   // once its invited CEO accepts (`OrganisationInvitationController` below → `/invitations/accept`).
 
   @Post(':organisationId/ceo-invite/resend')
-  resendCeoInvite(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string) {
-    return this.organisationOnboarding.resendCeoInvite(ctx, organisationId);
+  resendCeoInvite(@AuthUser() ctx: AuthContext, @Param('organisationId') organisationId: string, @Body() dto: ResendCeoInviteDto) {
+    return this.organisationOnboarding.resendCeoInvite(ctx, organisationId, dto?.reason);
   }
 
   @Post(':organisationId/ceo-invite/revoke')

@@ -307,7 +307,7 @@
           {
             "group": "Operations",
             "icon": "cloud-arrow-up",
-            "pages": ["developers/deployment", "developers/troubleshooting"]
+            "pages": ["developers/deployment", "developers/troubleshooting", "developers/ai-provider-keys"]
           }
         ]
       }

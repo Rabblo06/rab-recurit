@@ -662,7 +662,7 @@ function handler(s, page, opts) {
       // Current contract: a flag -> boolean map of the display-hint permissions (auth.controller.ts `capabilities`).
       // Manager and CEO hold every one of these in their production role sets (ROLE_DEFS).
       if (p === '/auth/capabilities') return json(200, Object.fromEntries(CAPABILITY_FLAGS.map((f) => [f, me.roles.includes('manager') || me.roles.includes('ceo')])));
-      return json(200, { id: me.id, email: me.email, firstName: s.profile.firstName, lastName: s.profile.lastName, organisationId: ORG_ID, roles: me.roles, mustResetPassword: false, isPlatformAdmin: me.isPlatformAdmin, sessionId: 'sess-current', applicationTarget: 'manager_web', sessionExpiresAt: plus(new Date().toISOString(), 12 * HOUR) });
+      return json(200, { id: me.id, email: me.email, firstName: s.profile.firstName, lastName: s.profile.lastName, organisationId: ORG_ID, roles: me.roles, mustResetPassword: false, isPlatformAdmin: me.isPlatformAdmin, sessionId: 'sess-current', applicationTarget: 'manager_web', sessionExpiresAt: s.sessionExpiresAt || plus(new Date().toISOString(), 12 * HOUR) }); // a capture with a pinned story clock may set s.sessionExpiresAt
     }
     if (p === '/auth/refresh') return json(401, { statusCode: 401, message: 'Invalid refresh token.' });
     if (p === '/auth/login') return json(401, { statusCode: 401, message: 'Invalid email or password.' });

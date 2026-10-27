@@ -16,6 +16,19 @@ import 'biometric_store.dart';
 /// right after a fresh password login on hardware that supports it.
 enum AppUnlockState { locked, unlocked }
 
+/// Lane D (owner decision M10-1): thrown by [AuthProvider.login] when the server
+/// answered `409 SECOND_FACTOR_REQUIRED {requirement: 'verify'}` — the account
+/// has two-factor authentication (optional for every role since account
+/// security step 1, verified at every sign-in once on) and must enter a code.
+/// NO session exists yet: nothing was stored. The login sheet pushes
+/// `SecondFactorScreen`, which calls [AuthProvider.verifySecondFactor] (or
+/// [AuthProvider.cancelSecondFactor]).
+class SecondFactorRequired implements Exception {
+  const SecondFactorRequired();
+  @override
+  String toString() => 'SecondFactorRequired';
+}
+
 enum AuthPhase {
   loading,
   biometricLocked,
@@ -59,6 +72,12 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool _disposed = false;
 
   bool _loginPending = false;
+
+  /// Lane D (M10-1): the pending sign-in's single-use challenge token, held in
+  /// memory only (never persisted) until the code is verified or the step is
+  /// cancelled. Its presence is the only "second factor pending" state.
+  String? _pendingChallengeToken;
+  bool get secondFactorPending => _pendingChallengeToken != null;
   bool _logoutPending = false;
   bool _biometricPending = false;
   int _sessionGeneration = 0;
@@ -233,14 +252,136 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
     _loginPending = true;
     final generation = ++_sessionGeneration;
+    _pendingChallengeToken = null;
+    try {
+      final Map<String, dynamic> map;
+      try {
+        map = await api.post(
+          '/auth/login',
+          body: {'email': email, 'password': password},
+        ) as Map<String, dynamic>;
+      } on ApiException catch (e) {
+        if (e.statusCode == 409 && e.code == 'SECOND_FACTOR_REQUIRED') {
+          if (generation != _sessionGeneration) return;
+          await _handleSecondFactorChallenge(e);
+        }
+        if (e.statusCode == 409 && e.code == 'CLIENT_UPDATE_REQUIRED') {
+          // Account security step 1 (P3): the server issued no challenge and no session; nothing is stored. Show the
+          // server's readable message (screens come later).
+          throw ApiException(
+            409,
+            e.message.trim().isNotEmpty ? e.message : 'Update Crewflow to sign in.',
+            body: e.body,
+          );
+        }
+        rethrow;
+      }
+      if (generation != _sessionGeneration) return;
+      await _completeCredentialSession(map, generation);
+    } on ApiException catch (e) {
+      if (e.statusCode == 429) {
+        loginCooldownUntil = _now().add(
+          Duration(seconds: e.retryAfterSeconds ?? 60),
+        );
+      }
+      rethrow;
+    } finally {
+      _loginPending = false;
+    }
+  }
+
+  /// Lane D (M10-1). `verify` → keep the challenge in memory and ask the sheet
+  /// for the code ([SecondFactorRequired]). `enroll` (an enforced role without
+  /// a factor yet) cannot be completed in this app: FAIL CLOSED — the challenge
+  /// is abandoned server-side and the user is sent to the web console. Either
+  /// way no token is stored.
+  Future<void> _handleSecondFactorChallenge(ApiException e) async {
+    final token = e.body?['challengeToken'];
+    final requirement = e.body?['requirement'];
+    if (token is! String || token.isEmpty) {
+      throw ApiException(409, 'Unable to sign in right now. Please try again.');
+    }
+    if (requirement == 'verify') {
+      _pendingChallengeToken = token;
+      notifyListeners();
+      throw const SecondFactorRequired();
+    }
+    try {
+      await api.post('/auth/mfa/challenge/cancel', body: {'challengeToken': token});
+    } catch (_) {
+      // Best effort: an abandoned challenge also expires on its own (≤ 5 min).
+    }
+    throw ApiException(
+      409,
+      'Your account needs two-factor authentication. Set it up in the Crewflow web console, then sign in here.',
+      body: const {'code': 'SECOND_FACTOR_ENROLMENT_REQUIRED'},
+    );
+  }
+
+  /// Lane D (M10-1): finishes a challenged sign-in with the six-digit code (or a
+  /// recovery code). The server binds the challenge to this transport (the
+  /// mobile header), counts attempts, and refuses replays; this client only
+  /// relays. A wrong code keeps the step open; an expired/used challenge ends it.
+  Future<void> verifySecondFactor(String code) async {
+    final token = _pendingChallengeToken;
+    if (token == null) {
+      throw ApiException(401, 'Your sign-in expired. Please sign in again.');
+    }
+    if (_loginPending || _logoutPending) return;
+    _loginPending = true;
+    final generation = ++_sessionGeneration;
+    try {
+      final Map<String, dynamic> map;
+      try {
+        map = await api.post(
+          '/auth/mfa/challenge/verify',
+          body: {'challengeToken': token, 'code': code.replaceAll(' ', '')},
+        ) as Map<String, dynamic>;
+      } on ApiException catch (e) {
+        // The server ended the challenge (expired / used up / wrong step): drop
+        // it. A wrong code, the attempt cooldown, a timeout or a server error
+        // say nothing about the challenge, so keep it; the server stays the
+        // authority on the next attempt.
+        final keep =
+            e.code == 'MFA_CODE_INVALID' ||
+            e.statusCode == 429 ||
+            e.statusCode == 408 ||
+            e.statusCode >= 500;
+        if (!keep) {
+          _pendingChallengeToken = null;
+          notifyListeners();
+        }
+        rethrow;
+      }
+      _pendingChallengeToken = null;
+      if (generation != _sessionGeneration) return;
+      await _completeCredentialSession(map, generation);
+    } finally {
+      _loginPending = false;
+    }
+  }
+
+  /// "Back" on the code step: abandons the challenge (server-side, best effort).
+  Future<void> cancelSecondFactor() async {
+    final token = _pendingChallengeToken;
+    _pendingChallengeToken = null;
+    notifyListeners();
+    if (token == null) return;
+    try {
+      await api.post('/auth/mfa/challenge/cancel', body: {'challengeToken': token});
+    } catch (_) {
+      // Best effort: the challenge expires on its own.
+    }
+  }
+
+  /// The one place a credential sign-in (password, or password + second
+  /// factor) becomes a stored session — tokens, `/auth/me`, remembered account.
+  Future<void> _completeCredentialSession(
+    Map<String, dynamic> map,
+    int generation,
+  ) async {
     bool tokensWritten = false;
     try {
-      final data = await api.post(
-        '/auth/login',
-        body: {'email': email, 'password': password},
-      );
-      if (generation != _sessionGeneration) return;
-      final map = data as Map<String, dynamic>;
       await api.storeTokens(
         map['accessToken'] as String,
         map['refreshToken'] as String,
@@ -256,18 +397,10 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
       rememberedUserId = current.id;
       rememberedEmail = current.email;
       await _afterFreshCredentialAuth();
-    } on ApiException catch (e) {
-      if (e.statusCode == 429) {
-        loginCooldownUntil = _now().add(
-          Duration(seconds: e.retryAfterSeconds ?? 60),
-        );
-      }
-      rethrow;
     } finally {
       if (tokensWritten && (user == null || generation != _sessionGeneration)) {
         await api.clearTokens();
       }
-      _loginPending = false;
     }
   }
 
@@ -509,6 +642,7 @@ class AuthProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (_logoutPending) return;
     _logoutPending = true;
     ++_sessionGeneration;
+    _pendingChallengeToken = null;
     user = null;
     biometricEnabledForCurrentUser = false;
     _setPhase(AuthPhase.unauthenticated);

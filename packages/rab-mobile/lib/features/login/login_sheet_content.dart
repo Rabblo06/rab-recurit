@@ -10,6 +10,8 @@ import '../../core/theme/tokens.dart';
 import '../../core/widgets/rab_auth_sheet.dart';
 
 import '../forgot_password/forgot_password_screen.dart';
+import 'second_factor_screen.dart';
+import 'update_required_screen.dart';
 
 /// Login's sheet content — same `AuthProvider.login()` call and error
 /// handling as before; only the presentation moved (out of its own
@@ -68,15 +70,23 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
       _error = '';
       _loading = true;
     });
+    final email = _emailController.text.trim();
+    Widget? next;
     try {
-      await context.read<AuthProvider>().login(
-        _emailController.text.trim(),
-        _passwordController.text,
-      );
+      await context.read<AuthProvider>().login(email, _passwordController.text);
       // `AuthFlowShell` reacts to `AuthProvider.phase` on its own — no
       // Navigator pop needed here, unlike the old pushed-route version.
+    } on SecondFactorRequired {
+      // Account security: verification is its own full screen (design
+      // M7–M10); the challenge itself stays in AuthProvider, in memory only.
+      next = SecondFactorScreen(email: email);
     } on ApiException catch (e) {
       if (!mounted) return;
+      if (e.statusCode == 409 && e.code == 'CLIENT_UPDATE_REQUIRED') {
+        // No challenge and no session exist (design M11).
+        next = UpdateRequiredScreen(updateUrl: e.body?['updateUrl']);
+        return;
+      }
       if (e.statusCode == 429) {
         _cooldownUntil = DateTime.now().add(
           Duration(seconds: e.retryAfterSeconds ?? 60),
@@ -113,7 +123,21 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
       }
     } finally {
       if (mounted) setState(() => _loading = false);
+      if (mounted && next != null) unawaited(_open(next));
     }
+  }
+
+  /// Pushes the verification / update screen. Coming back from it (not signed
+  /// in) returns to a clean password step: the challenge was abandoned there.
+  Future<void> _open(Widget screen) async {
+    final outcome = await Navigator.of(context).push<SecondFactorOutcome>(
+      MaterialPageRoute(builder: (_) => screen),
+    );
+    if (!mounted || outcome == SecondFactorOutcome.signedIn) return;
+    setState(() {
+      _error = '';
+      _passwordController.clear();
+    });
   }
 
   Widget _reveal(int index, Widget child) {
@@ -318,6 +342,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
     TextInputType? keyboardType,
     Widget? trailing,
     Widget? topRight,
+    Iterable<String>? autofillHints,
   }) {
     final text = context.text;
     return Padding(
@@ -357,6 +382,7 @@ class _LoginSheetContentState extends State<LoginSheetContent> {
                     controller: controller,
                     obscureText: obscure,
                     keyboardType: keyboardType,
+                    autofillHints: autofillHints,
                     autocorrect: false,
                     onChanged: (_) => setState(() {}),
                     style: text.bodyMobile.copyWith(

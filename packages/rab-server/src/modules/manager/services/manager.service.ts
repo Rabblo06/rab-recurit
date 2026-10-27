@@ -23,7 +23,7 @@ import { PaginationDto, paginationSkipTake } from '../../../engine/dto/paginatio
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { Venue } from '../../venue/entities/venue.entity';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
-import { AddNoteDto } from '../../identity/dto/add-note.dto';
+import { AddNoteDto, NOTE_BODY_MAX_LENGTH } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
@@ -96,6 +96,7 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // changed by a platform administrator only; the organisation's own leadership SEES them read-only. settings.edit
       // stays withheld from every tenant role and guards no tenant route.
       PermissionFlag.SETTINGS_VIEW,
+      PermissionFlag.AI_USE,
     ],
   },
   [ManagerType.VENUE]: {
@@ -164,6 +165,13 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       PermissionFlag.ROLE_MANAGE,
       // W6-E2E-04: read-only organisation settings (see the `manager` entry above).
       PermissionFlag.SETTINGS_VIEW,
+      PermissionFlag.AI_USE,
+      // AI Phase 1 "real models only" (AiSettingsPermission1786720240000): choose the organisation's AI model per tier.
+      // CEO only — the service and the RLS writer predicate also require the CEO, whatever role carries the flag.
+      PermissionFlag.AI_SETTINGS,
+      // AI Phase 6a (AiAgentsPermission1786721030000, P6-D12): define AI agents (storage only until EX-3). CEO only — the
+      // service and the RLS writer predicate `core.ai_agent_writer()` also require the CEO, whatever role carries the flag.
+      PermissionFlag.AI_AGENTS_MANAGE,
     ],
   },
 };
@@ -680,6 +688,7 @@ export class ManagerService {
    * same message/shape as `resetPassword`'s pre-existing identical guard.
    */
   async setActive(ctx: AuthContext, id: string, active: boolean): Promise<ManagerSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
@@ -767,6 +776,7 @@ export class ManagerService {
 
   /** Admin-triggered reset — see `StaffService.resetPassword` / `AccountLifecycleService.adminResetPassword`. */
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
@@ -796,7 +806,11 @@ export class ManagerService {
   }
 
   /** "Resend Invitation" — issues attempt N+1 (max 3 total, see AccountInviteService), revoking whatever was active. Never confused with the Resend *email provider* — this always sends through whichever provider is currently configured. */
-  async resendInvite(ctx: AuthContext, id: string): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+  /**
+   * `audit` (Admin Panel): extra, fixed audit metadata for a platform-admin resend — `via: 'platform_admin'` (lets the
+   * admin timeline pick this row out of the tenant's own resends) and the admin's reason. Never caller-shaped metadata.
+   */
+  async resendInvite(ctx: AuthContext, id: string, audit?: { via: 'platform_admin'; reason?: string }): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
@@ -806,7 +820,7 @@ export class ManagerService {
       });
       await this.auditService.record(manager, ctx, AuditAction.INVITE_RESENT, {
         targetUserId: profile.userId,
-        metadata: { sendNumber: invite.sendNumber },
+        metadata: { sendNumber: invite.sendNumber, ...(audit ? { via: audit.via, ...(audit.reason ? { reason: audit.reason } : {}) } : {}) },
       });
       return invite;
     });
@@ -823,6 +837,7 @@ export class ManagerService {
    * every currently-active token is revoked before the email changes.
    */
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -990,6 +1005,7 @@ export class ManagerService {
     dto: ChangeEmailDto,
     requiredPermission: PermissionFlagType = PermissionFlag.MANAGER_MANAGE,
   ): Promise<{ email: string } | EmailChangeRequestResult> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
@@ -1039,11 +1055,44 @@ export class ManagerService {
     });
   }
 
-  async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
+  /**
+   * Layers (LAYER2_HARDENING_2026-10-25 follow-up): two routes reach this method with DIFFERENT guards, so the flag
+   * re-checked here is the one of the caller's route — never one flag for both:
+   *   - `POST /rest/v1/managers/:id/notes` → PermissionGuard(MANAGER_MANAGE) → this method's default, MANAGER_MANAGE;
+   *   - `POST /rest/v1/venue-managers/:id/notes` → PermissionGuard(VENUE_MANAGER_CREATE) → `VenueManagerService.addNote`
+   *     (own-workspace Venue Manager gate, 404 otherwise) → this method with VENUE_MANAGER_CREATE.
+   * The flag is checked first, in the same tenant transaction (403 for any id, before any lookup — jobs / other services
+   * never pass the guard), then the 2,000-character cap (400; a direct caller never passes the ValidationPipe), then the
+   * organisation-scoped lookup (404), then the write. The note and its `manager.note_added` audit row commit or roll back
+   * together; the audit metadata carries the note id and length, never the text.
+   */
+  async addNote(
+    ctx: AuthContext,
+    id: string,
+    dto: AddNoteDto,
+    requiredPermission: typeof PermissionFlag.MANAGER_MANAGE | typeof PermissionFlag.VENUE_MANAGER_CREATE = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<UserNoteItem> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Fail closed if a caller passes anything but one of the two route flags (e.g. through an `as never` cast).
+      if (requiredPermission !== PermissionFlag.MANAGER_MANAGE && requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) {
+        throw new ForbiddenException('Adding notes is not permitted.');
+      }
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
+        throw new ForbiddenException('Adding notes is not permitted.');
+      }
+      const body = dto?.body;
+      if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
+      if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
-      return this.userNote.add(manager, ctx, profile.userId, dto.body);
+      const note = await this.userNote.add(manager, ctx, profile.userId, body);
+      await this.auditService.record(manager, ctx, AuditAction.MANAGER_NOTE_ADDED, {
+        targetUserId: profile.userId,
+        entityType: 'manager_profile',
+        entityId: profile.id,
+        metadata: { noteId: note.id, length: body.length },
+      });
+      return note;
     });
   }
 

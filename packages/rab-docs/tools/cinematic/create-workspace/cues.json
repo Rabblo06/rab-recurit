@@ -1,0 +1,51 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 7.211,
+    "text": "The first time a manager signs in, they create their workspace. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\intro.wav"
+  },
+  {
+    "id": "logo",
+    "start": 7.733,
+    "seconds": 2.064,
+    "text": "Upload a logo, if you have one.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\logo.wav"
+  },
+  {
+    "id": "name",
+    "start": 10.3,
+    "seconds": 3.474,
+    "text": "Type the workspace name. The address fills in from the name.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\name.wav"
+  },
+  {
+    "id": "address",
+    "start": 14.3,
+    "seconds": 5.776,
+    "text": "You can shorten the address. Crewflow checks that it is available, then select Create workspace.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\address.wav"
+  },
+  {
+    "id": "profile",
+    "start": 21.7,
+    "seconds": 5.177,
+    "text": "Next, create your profile so your team knows who you are, then select Complete setup.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\profile.wav"
+  },
+  {
+    "id": "preparing",
+    "start": 29.733,
+    "seconds": 5.538,
+    "text": "Crewflow prepares your workspace. It only opens once everything is genuinely ready.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\preparing.wav"
+  },
+  {
+    "id": "ready",
+    "start": 37.367,
+    "seconds": 3.218,
+    "text": "Your workspace is ready, and you land on your Dashboard.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\create-workspace\\ready.wav"
+  }
+]

@@ -74,7 +74,8 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
 
   async function challenge(who: TestIdentity, mobile = false): Promise<string> {
     const req = http().post('/rest/v1/auth/login').set('Origin', ORIGIN);
-    if (mobile) req.set('x-client-platform', 'mobile');
+    // A current mobile build declares the code screen (account security step 1, P3).
+    if (mobile) req.set('x-client-platform', 'mobile').set('x-client-capabilities', 'mfa-verify');
     const res = await req.send({ email: who.email, password: who.password });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('SECOND_FACTOR_REQUIRED');
@@ -126,8 +127,12 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
   it('enrolment: needs the current password; the secret is generated server-side and stored only as an RAB2 envelope; confirm needs a valid code', async () => {
     const who = await manager('w4e');
     const token = await accessToken(who);
+    // Account security step 1: the password is optional in the BODY (an SSO account proves itself with a re-auth grant
+    // instead), never optional as proof — a password account's fresh sign-in alone does not count, nothing is staged.
     const noPassword = await http().post('/rest/v1/auth/mfa/enrolment').set(bearer(token)).send({});
-    expect(noPassword.status).toBe(400);
+    expect(noPassword.status).toBe(403);
+    expect(noPassword.body).toMatchObject({ code: 'STEP_UP_REQUIRED', mfa: false });
+    expect((await mfaRow(who.userId)).totp_secret_encrypted).toBeNull();
     const clientSecret = await http().post('/rest/v1/auth/mfa/enrolment').set(bearer(token)).send({ currentPassword: who.password, secret: 'JBSWY3DPEHPK3PXP' });
     expect(clientSecret.status).toBe(400); // forbidNonWhitelisted: the client can never choose the secret
     const wrong = await http().post('/rest/v1/auth/mfa/enrolment').set(bearer(token)).send({ currentPassword: 'not-the-password' });
@@ -145,7 +150,8 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
     expect(stored.totp_secret_encrypted!.toString('hex')).not.toContain(secretFromOtpauth(started.body.otpauthUri).toString('hex'));
 
     const bad = await http().post('/rest/v1/auth/mfa/enrolment/confirm').set(bearer(token)).send({ code: '000000' });
-    expect(bad.status).toBe(401);
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe('MFA_CODE_INVALID');
     expect((await mfaRow(who.userId)).totp_enabled).toBe(false);
 
     // A second, older session of the same account exists before confirmation…
@@ -218,10 +224,13 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
       const res = await verify(c, '123456');
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('MFA_CODE_INVALID');
+      // Account security step 1: the TRUE number of further attempts this challenge accepts (5, 4, … → 0).
+      expect(res.body).toMatchObject({ state: 'invalid_code', attemptsRemaining: 4 - i });
     }
     const exhausted = await verify(c, recoveryCodes[0]!);
     expect(exhausted.status).toBe(401);
     expect(exhausted.body.code).toBe('MFA_CHALLENGE_EXHAUSTED');
+    expect(exhausted.body.state).toBe('locked');
     expect((await verify(c, recoveryCodes[0]!)).body.code).toBe('MFA_CHALLENGE_EXPIRED'); // destroyed, not reset
     // The recovery code presented to the dead challenge was NOT consumed.
     const used = await owner.query(`SELECT count(*)::int AS n FROM core.user_mfa_recovery_code WHERE user_id = $1 AND used_at IS NOT NULL`, [who.userId]);
@@ -335,7 +344,11 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
 
   // ---------------------------------------------------------------- admin reset
 
-  it('ABUSE: admin reset is platform-admin only, needs the admin\'s own password + MFA, never self, and revokes the target\'s sessions (audited in both orgs)', async () => {
+  // Account security step 1 (P4): the old rule "the admin must hold their own TOTP" contradicted the owner policy (no role
+  // is ever forced to enrol). Now: a required reason + fresh proof (password, or a step-up / SSO re-auth grant) + the
+  // admin's own code ONLY when the admin is enrolled. Every denial of the old test is kept.
+  it('ABUSE: admin reset is platform-admin only, needs a reason + the admin\'s fresh proof (+ own code only if enrolled), never self, and revokes the target\'s sessions (audited in both orgs)', async () => {
+    const reset = (token: string, userId: string, body: object) => http().post(`/rest/v1/admin/users/${userId}/mfa/reset`).set(bearer(token)).send(body);
     const target = await manager('w4t');
     const targetToken = await accessToken(target);
     const { recoveryCodes } = await enrol(target, targetToken, 0);
@@ -343,28 +356,51 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
 
     const ordinary = await manager('w4o');
     const ordinaryToken = await accessToken(ordinary);
-    const denied = await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(ordinaryToken)).send({ currentPassword: ordinary.password, code: '123456' });
+    const denied = await reset(ordinaryToken, target.userId, { reason: 'lost phone', currentPassword: ordinary.password, code: '123456' });
     expect(denied.status).toBe(403);
 
     const admin = (await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, firstIsPlatformAdmin: true, label: 'w4adm' })).managers[0]!;
     const adminToken = await accessToken(admin);
-    const noOwnMfa = await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: admin.password });
-    expect(noOwnMfa.status).toBe(403);
-    expect(noOwnMfa.body.code).toBe('MFA_ENROLMENT_REQUIRED');
+    // A reason is required (trimmed, 3–500 characters).
+    expect((await reset(adminToken, target.userId, { currentPassword: admin.password })).status).toBe(400);
+    expect((await reset(adminToken, target.userId, { reason: '  x ', currentPassword: admin.password })).status).toBe(400);
+    expect((await reset(adminToken, target.userId, { reason: 'y'.repeat(501), currentPassword: admin.password })).status).toBe(400);
+    // Wrong password: refused, nothing changes.
+    expect((await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: 'wrong' })).status).toBe(403);
+    expect((await mfaRow(target.userId)).totp_enabled).toBe(true);
+
+    // An UN-ENROLLED admin is never forced to enrol: reason + own password resets another account's factor.
+    const target2 = await manager('w4t2');
+    await enrol(target2, await accessToken(target2), 0);
+    const byUnenrolled = await reset(adminToken, target2.userId, { reason: '  Lost phone, ticket #42  ', currentPassword: admin.password });
+    expect(byUnenrolled.status).toBe(200);
+    expect(byUnenrolled.body).toMatchObject({ reset: true });
+    expect((await mfaRow(target2.userId)).totp_enabled).toBe(false);
+    const reasons = await owner.query(`SELECT metadata->>'reason' AS reason FROM core.audit_log WHERE action = 'user.mfa_reset_by_admin' AND target_user_id = $1`, [target2.userId]);
+    expect(reasons.map((r: { reason: string }) => r.reason)).toEqual(['Lost phone, ticket #42', 'Lost phone, ticket #42']);
+    // Nothing left to reset: a clear no-op error, nothing changes.
+    const again = await reset(adminToken, target2.userId, { reason: 'again', currentPassword: admin.password });
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe('MFA_NOT_ENABLED');
 
     await earlyInStep(10);
     const adminMfa = await enrol(admin, adminToken, -1);
     // Admin now has MFA: every login needs it; keep using the enrolling session (still valid).
-    expect((await http().post(`/rest/v1/admin/users/${admin.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: admin.password, code: codeAt(adminMfa.secret, 0) })).status).toBe(400);
-    expect((await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: 'wrong', code: codeAt(adminMfa.secret, 1) })).status).toBe(403);
-    expect((await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: admin.password, code: '000000' })).status).toBe(403);
+    const self = await reset(adminToken, admin.userId, { reason: 'self', currentPassword: admin.password, code: codeAt(adminMfa.secret, 0) });
+    expect(self.status).toBe(400);
+    expect(self.body.code).toBe('MFA_RESET_SELF');
+    // An ENROLLED admin must add their own current code; the password alone is refused.
+    expect((await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: admin.password })).status).toBe(403);
+    expect((await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: 'wrong', code: codeAt(adminMfa.secret, 1) })).status).toBe(403);
+    expect((await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: admin.password, code: '000000' })).status).toBe(403);
     // A recovery code is not accepted as the ADMIN's proof (TOTP only for this action).
-    expect((await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: admin.password, code: adminMfa.recoveryCodes[0] })).status).toBe(403);
+    expect((await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: admin.password, code: adminMfa.recoveryCodes[0] })).status).toBe(403);
     expect((await mfaRow(target.userId)).totp_enabled).toBe(true);
 
-    const reset = await http().post(`/rest/v1/admin/users/${target.userId}/mfa/reset`).set(bearer(adminToken)).send({ currentPassword: admin.password, code: codeAt(adminMfa.secret, 1) });
-    expect(reset.status).toBe(200);
-    expect(reset.body).toEqual({ reset: true });
+    const done = await reset(adminToken, target.userId, { reason: 'lost phone', currentPassword: admin.password, code: codeAt(adminMfa.secret, 1) });
+    expect(done.status).toBe(200);
+    expect(done.body.reset).toBe(true);
+    expect(done.body.revokedSessions).toBeGreaterThanOrEqual(1);
     expect((await mfaRow(target.userId)).totp_enabled).toBe(false);
     expect(await sessions(target.userId)).toBe(0);
     expect((await http().get('/rest/v1/auth/me').set(bearer(targetSession))).status).toBe(401);
@@ -412,15 +448,18 @@ describeIfDb('wave 4 lane MFA — TOTP, recovery codes, challenge, step-up, admi
 
   // ---------------------------------------------------------------- mobile + providers
 
-  it('mobile sign-in is unaffected by default (AUTH_MFA_MOBILE_POLICY=exempt), challenged with =require; staff are never challenged by web enforcement', async () => {
+  // Lane D (owner decision M10-1): the mobile exemption covers ONLY the staff / venue-manager workforce. An ENROLLED
+  // manager is challenged on mobile exactly as on web (this case asserted the old manager-tier bypass, 200, until then).
+  it('mobile sign-in: an enrolled MANAGER is challenged on mobile too (M10-1), also with =require; staff are never challenged by web enforcement', async () => {
     const who = await manager('w4m');
     const token = await accessToken(who);
     await enrol(who, token, 0);
-    const mobile = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
-    expect(mobile.status).toBe(200);
-    expect(mobile.body.refreshToken).toBeTruthy();
+    const mobile = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').set('x-client-capabilities', 'mfa-verify').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
+    expect(mobile.status).toBe(409);
+    expect(mobile.body.code).toBe('SECOND_FACTOR_REQUIRED');
+    expect(mobile.body.refreshToken).toBeUndefined();
     overrides.AUTH_MFA_MOBILE_POLICY = 'require';
-    const required = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
+    const required = await http().post('/rest/v1/auth/login').set('x-client-platform', 'mobile').set('x-client-capabilities', 'mfa-verify').send({ email: who.email, password: who.password, applicationTarget: 'staff_app' });
     expect(required.status).toBe(409);
     delete overrides.AUTH_MFA_MOBILE_POLICY;
 

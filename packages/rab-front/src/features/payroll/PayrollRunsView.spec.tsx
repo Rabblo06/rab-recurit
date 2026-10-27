@@ -79,7 +79,7 @@ it('run detail: upload PDF per staff, provider net, and Mark paid only with payr
   expect(within(runCard).getByText(/1 late approval/)).toBeInTheDocument();
   const file = new File(['%PDF-1.4 test'], 'payslip.pdf', { type: 'application/pdf' });
   await userEvent.upload(within(runCard).getByLabelText('Upload payslip PDF for Ava Stone'), file);
-  await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/payroll/runs/run-1/payslips/sp-1/document', expect.any(FormData)));
+  await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith('/payroll/runs/run-1/payslips/sp-1/document', expect.any(FormData), expect.objectContaining({ onUploadProgress: expect.any(Function) })));
   // Net only for a payslip with a document (Ben), copied from the provider.
   expect(within(runCard).queryByRole('button', { name: 'Record net pay for Ava Stone' })).not.toBeInTheDocument();
   await userEvent.click(within(runCard).getByRole('button', { name: 'Record net pay for Ben Hall' }));

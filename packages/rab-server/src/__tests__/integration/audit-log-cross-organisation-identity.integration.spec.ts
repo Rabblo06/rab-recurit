@@ -216,9 +216,9 @@ describeIfDb('audit_log cross-organisation identity references (integration, P1)
       const adminToken = await factory.login(managerA);
       const server = app.getHttpServer();
 
-      const grant = await request(server).post(`/rest/v1/admin/platform-admins/${managerB.userId}`).set('Authorization', `Bearer ${adminToken}`).send({ currentPassword: factory.testPassword });
+      const grant = await request(server).post(`/rest/v1/admin/platform-admins/${managerB.userId}`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'P1 cross-organisation audit test' });
       expect(grant.status).toBe(201);
-      const revoke = await request(server).delete(`/rest/v1/admin/platform-admins/${managerB.userId}`).set('Authorization', `Bearer ${adminToken}`).send({ currentPassword: factory.testPassword });
+      const revoke = await request(server).delete(`/rest/v1/admin/platform-admins/${managerB.userId}`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'P1 cross-organisation audit test' });
       expect([200, 204]).toContain(revoke.status);
       expect(await auditRows(`action IN ($1, $2) AND target_user_id = $3 ORDER BY created_at`, [AuditAction.PLATFORM_ADMIN_GRANTED, AuditAction.PLATFORM_ADMIN_REVOKED, managerB.userId])).toEqual([
         { organisation_id: orgA.id, actor_user_id: managerA.userId, target_user_id: managerB.userId },
@@ -228,12 +228,12 @@ describeIfDb('audit_log cross-organisation identity references (integration, P1)
       const suspend = await request(server)
         .post(`/rest/v1/admin/organisations/${orgB.id}/suspend`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ reason: 'P1 cross-organisation audit test', confirmSlug: orgB.slug, currentPassword: factory.testPassword });
+        .send({ reason: 'P1 cross-organisation audit test', confirmSlug: orgB.slug });
       expect(suspend.status).toBe(201);
       const reactivate = await request(server)
         .post(`/rest/v1/admin/organisations/${orgB.id}/reactivate`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'P1 cross-organisation audit test' });
       expect(reactivate.status).toBe(200);
       expect(await auditRows(`entity_id = $1 AND action IN ($2, $3) ORDER BY created_at`, [orgB.id, AuditAction.ORGANISATION_SUSPENDED, AuditAction.ORGANISATION_REACTIVATED])).toEqual([
         { organisation_id: orgB.id, actor_user_id: managerA.userId, target_user_id: null },

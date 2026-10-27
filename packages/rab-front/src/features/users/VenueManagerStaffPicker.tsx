@@ -6,6 +6,7 @@ import { api } from '../../shared/api';
 import PageHeader from '../../shared/components/PageHeader';
 import { TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
 import './venue-manager-staff-picker.css';
 
 interface StaffRow {
@@ -53,6 +54,8 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
   const assign = useMutation({
     mutationFn: async () => (await api.post<{ added: string[] }>(`/venue-managers/${venueManagerId}/staff`, { staffProfileIds: [...selected] })).data,
     onSuccess: (r) => onConfirmed(r.added.length),
+    // Was silent: a refused or failed assignment now says so, and the selection stays for another try.
+    onError: (e) => { notifyApiError(e, { fallback: 'Could not add these staff members. Please try again.' }); },
   });
   const toggle = (id: string) => {
     if (assign.isPending || assignedIds.has(id)) return;

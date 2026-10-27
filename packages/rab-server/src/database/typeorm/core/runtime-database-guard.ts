@@ -41,6 +41,23 @@ import { EXPECTED_PRODUCTION_IDENTITY } from './database-target';
 
 export const RUNTIME_ENV_VAR = 'RAB_RUNTIME_ENV';
 
+/**
+ * AI Part A (owner condition 5): what this process's boot guard established, kept for the AI real-provider gate. Set ONLY by
+ * a successful `assertRuntimeDatabaseIdentity` (the same probe that lets the process listen or consume jobs); null in every
+ * process that never ran it (CLI commands, Jest), which the AI gate treats as "not the development database" (fail closed).
+ * Contains no URL, host or credential.
+ */
+export interface RecordedRuntimeDatabase {
+  processName: string;
+  runtimeEnvironment: ResolvedRuntimeDb['runtimeEnvironment'];
+  classification: ResolvedRuntimeDb['classification'];
+}
+let recordedRuntimeDb: Readonly<RecordedRuntimeDatabase> | null = null;
+
+export function recordedRuntimeDatabase(): Readonly<RecordedRuntimeDatabase> | null {
+  return recordedRuntimeDb;
+}
+
 export class RuntimeDbError extends Error {
   constructor(message: string) {
     super(message);
@@ -283,5 +300,6 @@ export async function assertRuntimeDatabaseIdentity(
   console.log(
     `[runtime-db-guard] process=${processName} runtime=${resolved.runtimeEnvironment} classification=${resolved.classification} endpoint=${resolved.app.endpointKey} database=${appProbe.database} cluster=${appProbe.systemIdentifier} role=${appProbe.currentUser} probe=read-only-ok`,
   );
+  recordedRuntimeDb = Object.freeze({ processName, runtimeEnvironment: resolved.runtimeEnvironment, classification: resolved.classification });
   return resolved;
 }

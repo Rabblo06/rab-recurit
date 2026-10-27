@@ -34,7 +34,11 @@ export class AuthCacheRedisClientProvider implements OnModuleDestroy {
     this.client.on('error', () => undefined);
   }
 
+  /**
+   * `quit()` is refused while Redis is unreachable (no offline queue → "Stream isn't writeable"), and a client that is
+   * never closed keeps its reconnect timer running, so the process cannot exit. Graceful first, then a hard disconnect.
+   */
   async onModuleDestroy(): Promise<void> {
-    await this.client.quit().catch(() => undefined);
+    await this.client.quit().catch(() => this.client.disconnect());
   }
 }

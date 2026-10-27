@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { DiscoveryModule } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
@@ -16,6 +17,7 @@ import { TenantModule } from '@rab/server/engine/core-modules/tenant/tenant.modu
 import { AttendanceModule } from '@rab/server/modules/attendance/attendance.module';
 import { MemberAccessModule } from '@rab/server/modules/identity/member-access/member-access.module';
 import { NotificationModule } from '@rab/server/modules/notification/notification.module';
+import { AiWorkerCoreModule } from '@rab/server/modules/ai/ai-worker-core.module';
 // `@Command()`-decorated classes are plain NestJS providers underneath —
 // `nest-commander`'s own CLI bootstrap is a separate, unrelated entrypoint
 // (`command/main.ts`, never invoked here). Registering the class directly
@@ -23,6 +25,38 @@ import { NotificationModule } from '@rab/server/modules/notification/notificatio
 // same reconciliation logic the manual `storage:reconcile` CLI command
 // already runs — see `queues/rab-maintenance/storage-cleanup.job.ts`.
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
+import { ProcessorExplorer } from './core/scheduler/processor-explorer';
+import { WorkerDependencies } from './core/scheduler/worker-dependencies';
+import { EmailScanProcessor, EmailSendConsumer } from './queues/rab-email/email.processors';
+import { MaintenanceScanProcessor } from './queues/rab-maintenance/maintenance.processors';
+import { OfferScanProcessor } from './queues/rab-offers/offer.processors';
+import { PushScanProcessor, PushSendConsumer } from './queues/rab-push/push.processors';
+import { RealtimeScanProcessor } from './queues/rab-realtime/realtime.processors';
+import { ReportScanProcessor, ShiftStatementConsumer } from './queues/rab-reports/report.processors';
+import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
+import { AiMaintenanceProcessor, AiTurnConsumer } from './queues/rab-ai/ai.processors';
+
+/**
+ * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 20 scans and the 4 consumers (AI Phase 1 added the
+ * `ai-retention` scan and the `rab-ai` consumer to the original 19 + 3). Ordinary
+ * providers, found at boot by `ProcessorExplorer` (Nest's own DiscoveryService). They are thin: each `@Process` method
+ * is the pre-migration main.ts loop body, calling the unchanged `run*Cycle` function.
+ */
+export const WORKER_PROCESSORS = [
+  EmailScanProcessor,
+  EmailSendConsumer,
+  PushScanProcessor,
+  PushSendConsumer,
+  ShiftScanProcessor,
+  OfferScanProcessor,
+  ReportScanProcessor,
+  ShiftStatementConsumer,
+  MaintenanceScanProcessor,
+  RealtimeScanProcessor,
+  // AI Phase 1: the rab-ai consumer and the AI retention scan (queues/rab-ai).
+  AiTurnConsumer,
+  AiMaintenanceProcessor,
+];
 
 /**
  * The Worker's Nest graph — moved here from `rab-server/src/queue-worker/`
@@ -106,7 +140,12 @@ import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.c
     // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,
     // or the jobs child refuses to boot (UnknownDependenciesException on PayrollService.fieldPolicy).
     MemberAccessModule,
+    // AI Phase 1: the shared AI services (tools, quotas, streams) — the SAME code the API uses — plus (Phase 2, P2-C11)
+    // the Worker-only model side: gateway, model factory, turn runner, title service. Only this process can call a model.
+    AiWorkerCoreModule,
+    // BullMQ migration: processor discovery (built into @nestjs/core — no new dependency).
+    DiscoveryModule,
   ],
-  providers: [StorageReconcileCommand],
+  providers: [StorageReconcileCommand, WorkerDependencies, ProcessorExplorer, ...WORKER_PROCESSORS],
 })
 export class WorkerModule {}

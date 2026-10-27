@@ -19,6 +19,25 @@ import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 import { getStaffDisplayStatus, type InvitationStatus, type PendingInvite } from './staffStatus';
 import { toast } from '../../shared/lib/toast';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import ConfirmDialog from '../../shared/components/ConfirmDialog';
+
+/** A row action waiting for the user's confirmation (replaces `window.confirm`, which is unstyled and not themed). */
+type PendingRowAction = { kind: 'reset' | 'deactivate'; id: string; name: string };
+
+function RowActionConfirm({ pending, busy, onConfirm, onCancel }: { pending: PendingRowAction | null; busy: boolean; onConfirm: (p: PendingRowAction) => void; onCancel: () => void }) {
+  return (
+    <ConfirmDialog
+      open={!!pending}
+      title={pending?.kind === 'reset' ? `Reset ${pending.name}'s password?` : `Deactivate ${pending?.name ?? ''}?`}
+      description={pending?.kind === 'reset' ? "They'll be emailed a new one-time setup link." : 'They will be signed out and cannot sign in until the account is reactivated.'}
+      confirmLabel={pending?.kind === 'reset' ? 'Reset password' : 'Deactivate'}
+      destructive={pending?.kind === 'deactivate'}
+      loading={busy}
+      onConfirm={() => pending && onConfirm(pending)}
+      onCancel={onCancel}
+    />
+  );
+}
 
 /** The server's safe, user-readable refusal (e.g. 409 "not activated yet"), never a silent failure or a fake success. */
 function serverMessage(e: unknown, fallback: string): string {
@@ -309,9 +328,11 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       api.post(`/staff/${id}/${active ? 'reactivate' : 'deactivate'}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['staff'] }),
-    onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
+    onSuccess: (_r, { active }) => { toast.success(active ? 'Account reactivated.' : 'Account deactivated.'); setPendingAction(null); },
+    onError: (e: any) => { toast.error(serverMessage(e, 'Could not update this account.')); setPendingAction(null); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['staff'] }),
   });
+  const [pendingAction, setPendingAction] = useState<PendingRowAction | null>(null);
 
   const staffArchive = useArchiveRestore<StaffRow>({
     basePath: (r) => `/staff/${r.id}`,
@@ -323,8 +344,8 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
 
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post(`/staff/${id}/reset-password`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['staff'] }),
-    onError: (e: any) => toast.error(serverMessage(e, 'Could not reset this password.')),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['staff'] }); toast.success('A new setup link has been sent.'); setPendingAction(null); },
+    onError: (e: any) => { toast.error(serverMessage(e, 'Could not reset this password.')); setPendingAction(null); },
   });
 
   const isVisible = columnVisibility.isVisible;
@@ -416,15 +437,18 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
                             <button
                               className="btn-icon"
                               title="Reset password"
-                              onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(s.id); }}
+                              aria-label={`Reset password for ${name}`}
+                              onClick={() => setPendingAction({ kind: 'reset', id: s.id, name })}
                             >
                               <IconKey size={14}/>
                             </button>
                             <button
                               className={`btn-icon ${active ? 'danger' : 'success'}`}
                               title={active ? 'Deactivate' : 'Reactivate'}
-                              onClick={() => setActive.mutate({ id: s.id, active: !active })}
-                              disabled={!!s.archivedAt}
+                              aria-label={`${active ? 'Deactivate' : 'Reactivate'} ${name}`}
+                              onClick={() => (active ? setPendingAction({ kind: 'deactivate', id: s.id, name }) : !setActive.isPending && setActive.mutate({ id: s.id, active: true }))}
+                              disabled={!!s.archivedAt || (setActive.isPending && setActive.variables?.id === s.id)}
+                              aria-busy={(setActive.isPending && setActive.variables?.id === s.id) || undefined}
                             >
                               {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
                             </button>
@@ -466,6 +490,16 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
       </div>
       {data && <RecordFooter total={total} page={page} onPage={setPage} />}
       {staffArchive.dialog}
+      <RowActionConfirm
+        pending={pendingAction}
+        busy={resetPassword.isPending || setActive.isPending}
+        onConfirm={(p) => {
+          if (resetPassword.isPending || setActive.isPending) return;
+          if (p.kind === 'reset') resetPassword.mutate(p.id);
+          else setActive.mutate({ id: p.id, active: false });
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </>
   );
 }
@@ -496,9 +530,11 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
   const setActive = useMutation({
     mutationFn: ({ id, active }: { id: string; active: boolean }) =>
       api.post(`/managers/${id}/${active ? 'reactivate' : 'deactivate'}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['managers'] }),
-    onError: (e: any) => toast.error(serverMessage(e, 'Could not update this account.')),
+    onSuccess: (_r, { active }) => { toast.success(active ? 'Account reactivated.' : 'Account deactivated.'); setPendingAction(null); },
+    onError: (e: any) => { toast.error(serverMessage(e, 'Could not update this account.')); setPendingAction(null); },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['managers'] }),
   });
+  const [pendingAction, setPendingAction] = useState<PendingRowAction | null>(null);
   const managerArchive = useArchiveRestore<ManagerRow>({
     basePath: (r) => `/managers/${r.id}`,
     noun: 'manager',
@@ -509,8 +545,8 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
 
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post(`/managers/${id}/reset-password`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['managers'] }); toast.success('A new setup link has been sent.'); },
-    onError: (e: any) => toast.error(serverMessage(e, 'Could not reset this password.')),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['managers'] }); toast.success('A new setup link has been sent.'); setPendingAction(null); },
+    onError: (e: any) => { toast.error(serverMessage(e, 'Could not reset this password.')); setPendingAction(null); },
   });
 
   const isVisible = columnVisibility.isVisible;
@@ -602,15 +638,18 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
                             <button
                               className="btn-icon"
                               title="Reset password"
-                              onClick={() => { if (confirm(`Reset ${name}'s password? They'll be emailed a new one-time setup link.`)) resetPassword.mutate(m.id); }}
+                              aria-label={`Reset password for ${name}`}
+                              onClick={() => setPendingAction({ kind: 'reset', id: m.id, name })}
                             >
                               <IconKey size={14}/>
                             </button>
                             <button
                               className={`btn-icon ${active ? 'danger' : 'success'}`}
                               title={active ? 'Deactivate' : 'Reactivate'}
-                              onClick={() => setActive.mutate({ id: m.id, active: !active })}
-                              disabled={!!m.archivedAt}
+                              aria-label={`${active ? 'Deactivate' : 'Reactivate'} ${name}`}
+                              onClick={() => (active ? setPendingAction({ kind: 'deactivate', id: m.id, name }) : !setActive.isPending && setActive.mutate({ id: m.id, active: true }))}
+                              disabled={!!m.archivedAt || (setActive.isPending && setActive.variables?.id === m.id)}
+                              aria-busy={(setActive.isPending && setActive.variables?.id === m.id) || undefined}
                             >
                               {active ? <IconUserOff size={14}/> : <IconUserCheck size={14}/>}
                             </button>
@@ -652,6 +691,16 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
       </div>
       {data && <RecordFooter total={total} page={page} onPage={setPage} />}
       {managerArchive.dialog}
+      <RowActionConfirm
+        pending={pendingAction}
+        busy={resetPassword.isPending || setActive.isPending}
+        onConfirm={(p) => {
+          if (resetPassword.isPending || setActive.isPending) return;
+          if (p.kind === 'reset') resetPassword.mutate(p.id);
+          else setActive.mutate({ id: p.id, active: false });
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </>
   );
 }

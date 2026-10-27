@@ -38,6 +38,8 @@ struct LoginView: View {
     @State private var error: String?
     @State private var loading = false
     @State private var showForgotPassword = false
+    /// 409 CLIENT_UPDATE_REQUIRED (M11). Nothing was stored.
+    @State private var updateRequired: ClientUpdateRequired?
     @FocusState private var focus: FocusField?
 
     private enum FocusField { case email, password }
@@ -115,8 +117,13 @@ struct LoginView: View {
         .sheet(isPresented: $showForgotPassword) {
             ForgotPasswordView(initialEmail: email.trimmed)
         }
+        .fullScreenCover(item: $updateRequired) { notice in
+            UpdateRequiredView(notice: notice) { updateRequired = nil }
+        }
         .onAppear {
-            if email.isEmpty { email = session.rememberedEmail ?? "" }
+            // After "Back to sign in" from the code screen, the email the
+            // person typed (memory only); otherwise the remembered account.
+            if email.isEmpty { email = session.lastSignInEmail ?? session.rememberedEmail ?? "" }
         }
     }
 
@@ -129,8 +136,20 @@ struct LoginView: View {
         let passwordValue = password
         Task { @MainActor in
             do {
-                try await session.login(email: emailValue, password: passwordValue)
-                password = ""
+                let outcome = try await session.login(email: emailValue, password: passwordValue)
+                switch outcome {
+                case .signedIn, .secondFactorRequired:
+                    // The phase moved on (shell, or the code screen M7).
+                    password = ""
+                case .updateRequired(let notice):
+                    password = ""
+                    updateRequired = notice
+                case .enrolmentRequired(let message):
+                    password = ""
+                    self.error = message
+                case .superseded:
+                    break
+                }
             } catch {
                 self.error = LoginErrorText.message(for: error)
             }

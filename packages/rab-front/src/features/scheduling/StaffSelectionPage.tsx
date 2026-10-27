@@ -9,6 +9,7 @@ import { TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import './staff-selection.css';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 export interface RequestedStaff {
   staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available?: boolean; startsAt?: string; endsAt?: string; breakMinutes?: number | null;
@@ -129,7 +130,10 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
       {selectedUnavailable && <p className="staff-selection-notice feedback-warning" role="status">A selected staff member is unavailable for this shift. Uncheck them and choose a replacement.</p>}
       {notice && <p className="staff-selection-notice feedback-warning" role="status">{notice}</p>}
       {availabilityGate.dialog}
-      {save.isError && !readAvailabilityConflict(save.error) && <p className="staff-selection-notice error" role="alert">Could not save this selection. Staff eligibility or the request may have changed. Cancel and reopen the request to reload it. Reload the latest saved selection before retrying.</p>}
+      {save.isError && !readAvailabilityConflict(save.error) && <p className="staff-selection-notice error" role="alert">{getApiErrorMessage(save.error, {
+        fallback: 'Could not save this selection. Staff eligibility or the request may have changed. Cancel and reopen the request to reload it.',
+        messages: { conflict: 'Someone else changed this selection. Cancel and reopen the request to load the latest selection, then try again.' },
+      })}</p>}
       <div className="staff-selection-table-wrap">
         {staff.isPending ? <TableSkeleton columns={8} /> : staff.isError ? (
           <div className="staff-selection-empty" role="alert"><h2>Could not load staff</h2><p className="feedback-error">Please try again.</p><button className="btn btn-outline" onClick={() => staff.refetch()}>Retry</button></div>

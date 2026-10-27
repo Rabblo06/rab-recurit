@@ -44,6 +44,28 @@ export const PermissionFlag = {
   SETTINGS_VIEW: 'settings.view',
   ROLE_VIEW: 'role.view',
   ROLE_MANAGE: 'role.manage',
+  /**
+   * AI Phase 1 (docs/ai/PHASE1_PLAN.md): use the read-only Crewflow AI assistant (web console only). Default holders: the
+   * system roles `ceo` and `manager`, narrowed in the service and in RLS to the CEO and the organisation's CURRENT Initial
+   * Manager (AiPhase1PermissionDefault1786720210000). Never sufficient on its own: the platform kill switch, the per-org
+   * switch and every tool's own permission still apply.
+   */
+  AI_USE: 'ai.use',
+  /**
+   * AI Phase 1 "real models only" (docs/ai/PHASE1_TWENTY_PLAN.md §7, D6): choose the organisation's AI model per tier in
+   * Settings → AI. Default holder: the `ceo` system role only (AiSettingsPermission1786720240000). Never sufficient on its
+   * own: the service and the RLS writer predicate `core.ai_settings_writer()` (AiModelPreference1786720250000) also
+   * require the bound user to be the organisation's CEO, so a custom role carrying the flag grants nothing to anyone else.
+   * A pin can only name a model that is security-approved in code and available on the platform.
+   */
+  AI_SETTINGS: 'ai.settings',
+  /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md §3 M6.1, P6-D12): define AI agents and their triggers in Settings → AI →
+   * Agents (STORAGE ONLY until the owner approves EX-3 — no trigger can be enabled and nothing runs). Default holder: the
+   * `ceo` system role only (AiAgentsPermission1786721030000). Never sufficient on its own: the service and the RLS writer
+   * predicate `core.ai_agent_writer()` (AiAgentSchema1786721050000) also require the bound user to be the organisation's CEO.
+   */
+  AI_AGENTS_MANAGE: 'ai.agents.manage',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];

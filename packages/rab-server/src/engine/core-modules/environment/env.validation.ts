@@ -5,6 +5,7 @@ import { EnvironmentVariables } from './environment-variables';
 import { normaliseKeyPrefix } from '../storage/storage-key-prefix';
 import { parseHostAuthority } from '@rab/shared';
 import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-encryption/keyring.util';
+import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 
 export function validate(config: Record<string, unknown>): EnvironmentVariables {
   // `KEY=` in a .env file sets an empty string, not undefined — @IsOptional()
@@ -95,6 +96,17 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
   }
   if (validated.WORKSPACE_BASE_DOMAIN && !parseHostAuthority(validated.WORKSPACE_BASE_DOMAIN)) {
     throw new Error('Invalid environment configuration:\nWORKSPACE_BASE_DOMAIN must be a bare host[:port] (no scheme, path or trailing dot).');
+  }
+
+  // AI (docs/ai/PHASE1_TWENTY_PLAN.md §5, owner requirement 1, D2): ONLY the hard AI refusals stop the boot — a mock
+  // stand-in outside test, the retired AI_PROVIDER_API_KEY alias in development/test (production: warning only, D2), and
+  // the development-only real-provider flag outside development. The retired names are no longer schema properties, so
+  // they are read from the RAW configuration (presence / stand-in verdict only). Every other AI misconfiguration (no key,
+  // nothing approved, a disabled model, a non-development database, ...) leaves AI NOT CONFIGURED at runtime
+  // (engine/core-modules/ai/ai-readiness.ts) while the API and Worker keep running. Names only, never values.
+  const aiProblems = aiBootProblems(validated, legacyAiEnvFacts((name) => normalised[name]));
+  if (aiProblems.length > 0) {
+    throw new Error(`Invalid environment configuration:\n${aiProblems.join('\n')}`);
   }
 
   // Issuer overrides exist only for local mock identity providers in tests — never in production.

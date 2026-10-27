@@ -7,6 +7,7 @@ import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityC
 import Drawer from '../../shared/components/Drawer';
 import { DetailSkeleton } from '../../shared/components/LoadingState';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { toast } from '../../shared/lib/toast';
 
 interface Shift {
   id: string;
@@ -138,6 +139,7 @@ export default function ShiftApprovalDrawer() {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
       setOpen(false);
+      toast.success('Shift request approved. Offers are being sent.');
       document.dispatchEvent(new CustomEvent('open-venue-pipeline', { detail: { shiftId } }));
     },
   });
@@ -147,6 +149,7 @@ export default function ShiftApprovalDrawer() {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
       setOpen(false);
+      toast.success('Shift request declined.');
     },
   });
 
@@ -175,7 +178,7 @@ export default function ShiftApprovalDrawer() {
         !isPending ? undefined : declining ? (
           <>
             <button className="btn btn-outline" onClick={() => setDeclining(false)}>Back</button>
-            <button className="btn btn-danger" onClick={() => decline.mutate()} disabled={decline.isPending}>
+            <button className="btn btn-danger" onClick={() => { if (!decline.isPending) decline.mutate(); }} disabled={decline.isPending}>
               {decline.isPending ? 'Declining…' : 'Confirm decline'}
             </button>
           </>
@@ -186,8 +189,8 @@ export default function ShiftApprovalDrawer() {
               onClick={() => { selectionActive.current = true; setSelection([...requestedStaff]); }}>
               {openCount ? `Select ${openCount} Staff` : 'Staff Complete ✓'}
             </button>
-            <button className="btn btn-dark" onClick={() => approve.mutate(undefined)} disabled={approve.isPending || removeStaff.isPending || loadingStaff || staffError || selectedCount === 0 || selectedCount > requiredCount}>
-              Approve
+            <button className="btn btn-dark" onClick={() => { if (!approve.isPending) approve.mutate(undefined); }} disabled={approve.isPending || removeStaff.isPending || loadingStaff || staffError || selectedCount === 0 || selectedCount > requiredCount} aria-busy={approve.isPending || undefined}>
+              {approve.isPending ? 'Approving…' : 'Approve'}
             </button>
           </>
         )
@@ -283,7 +286,7 @@ export default function ShiftApprovalDrawer() {
                 </div>
               )}
 
-              {removeStaff.isError && <p className="error" style={{ marginTop: 8 }}>Could not remove this staff member.</p>}
+              {removeStaff.isError && <p className="error" role="alert" style={{ marginTop: 8 }}>{getApiErrorMessage(removeStaff.error, 'Could not remove this staff member.')}</p>}
 
             </div>
           )}
@@ -297,7 +300,7 @@ export default function ShiftApprovalDrawer() {
 
           {approve.isError && !readAvailabilityConflict(approve.error) && <p className="error" role="alert" style={{ marginTop: 12 }}>{getApiErrorMessage(approve.error, 'Could not approve this request. It may already have been actioned.')}</p>}
           {availabilityGate.dialog}
-          {decline.isError && <p className="error" style={{ marginTop: 12 }}>Could not decline this request. It may already have been actioned.</p>}
+          {decline.isError && <p className="error" role="alert" style={{ marginTop: 12 }}>{getApiErrorMessage(decline.error, 'Could not decline this request. It may already have been actioned.')}</p>}
         </>
       )}
     </Drawer>

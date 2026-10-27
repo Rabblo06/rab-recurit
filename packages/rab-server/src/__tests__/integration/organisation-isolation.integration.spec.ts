@@ -347,7 +347,7 @@ describeIfDb('organisation isolation: Initial Manager onboarding, login and tena
     });
 
     it('22. a CEO cannot grant platform administrator authority', async () => {
-      const res = await http().post(`/rest/v1/admin/platform-admins/${im1UserId}`).set(bearer(ceo1Token)).send({ currentPassword: ceo1.password });
+      const res = await http().post(`/rest/v1/admin/platform-admins/${im1UserId}`).set(bearer(ceo1Token)).send({ reason: 'a CEO trying to grant' });
       expect(res.status).toBe(403);
       const rows = await adminDataSource.manager.query(`SELECT 1 FROM core.platform_admin WHERE user_id = $1`, [im1UserId]);
       expect(rows).toEqual([]);

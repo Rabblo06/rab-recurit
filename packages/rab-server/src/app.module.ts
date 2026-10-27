@@ -42,6 +42,7 @@ import { SearchModule } from './modules/search/search.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { StaffModule } from './modules/staff/staff.module';
 import { VenueModule } from './modules/venue/venue.module';
+import { AiModule } from './modules/ai/ai.module';
 import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-params.interceptor';
 
 @Module({
@@ -83,6 +84,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     SearchModule,
     TimelineModule,
     RealtimeGatewayModule,
+    // AI Phase 1 (docs/ai/PHASE1_PLAN.md): read-only assistant API. Off unless AI_ENABLED and the organisation's switch.
+    AiModule,
   ],
   providers: [
     // Order matters — Nest checks APP_FILTER providers in reverse

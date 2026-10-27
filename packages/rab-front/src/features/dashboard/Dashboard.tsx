@@ -10,7 +10,7 @@ import { api } from '../../shared/api';
 import Avatar from '../../shared/components/Avatar';
 import AnimatedNumber, { COUNT_EASE } from '../../shared/components/AnimatedNumber';
 import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
-import { ListError } from '../../shared/table-toolbar/ListPresentation';
+import { ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import { useCurrentProfile } from '../../shared/hooks/useCurrentProfile';
 import { getUserId, subscribeToSession } from '../../shared/lib/auth-session';
@@ -26,7 +26,10 @@ import './dashboard.css';
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 type Page<T> = { data: T[]; total: number };
-interface ShiftRow { id: string; venueId: string; startsAt: string; endsAt: string; requiredCount: number; filledCount: number; status: string }
+interface ShiftRow {
+  id: string; venueId: string; startsAt: string; endsAt: string; requiredCount: number; filledCount: number; status: string;
+  createdBy?: string | null; requestedBy?: string | null;
+}
 interface VenueRow { id: string; name: string }
 interface AttendanceRow { id: string; clockInAt: string; workedMinutes: number | null }
 interface OfferRow { id: string; status: string; sentAt: string; staffName: string; venueName: string; startsAt: string }
@@ -373,27 +376,79 @@ function ShiftsByVenue({ index, now }: { index: number; now: Date }) {
 }
 
 // ── Shift readiness + checklist for the next shift (real pipeline data) ───────
+/** The exact refusal `RequireWorkspaceGuard` returns when the session has no operational workspace. */
+const NO_WORKSPACE_MESSAGE = /no private Workspace yet/i;
+
+type ReadinessErrorKind = 'no-workspace' | 'forbidden' | 'missing' | 'failed';
+
+/** Why a readiness request failed. "No workspace" only when the server said exactly that, never inferred from a 404. */
+function readinessErrorKind(error: unknown): ReadinessErrorKind {
+  const status = listErrorStatus(error);
+  const message = (error as { response?: { data?: { message?: unknown } } } | null)?.response?.data?.message;
+  if (status === 403 && typeof message === 'string' && NO_WORKSPACE_MESSAGE.test(message)) return 'no-workspace';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'missing';
+  return 'failed';
+}
+
+/** The shift list itself failing is never "details missing": a 404 there is a genuine failure (with Retry). */
+function shiftListErrorKind(error: unknown): Exclude<ReadinessErrorKind, 'missing'> {
+  const kind = readinessErrorKind(error);
+  return kind === 'missing' ? 'failed' : kind;
+}
+
+function ReadinessError({ kind, retry }: { kind: Exclude<ReadinessErrorKind, 'missing'>; retry: () => unknown }) {
+  if (kind === 'no-workspace') {
+    return <div className="list-error" role="alert"><p className="feedback-error">No operational workspace is available for your account yet.</p><p>Set up or join a workspace to see shift readiness. Your data has not been changed.</p></div>;
+  }
+  if (kind === 'forbidden') {
+    return <div className="list-error" role="alert"><p className="feedback-error">You don’t have permission to view shift readiness.</p><p>Ask an administrator if you need access. Your data has not been changed.</p></div>;
+  }
+  return <div className="list-error" role="alert"><p className="feedback-error">We couldn’t load shift readiness.</p><p>Your data has not been changed.</p><button className="btn btn-outline" onClick={() => retry()}>Retry</button></div>;
+}
+
 function Readiness({ index, now }: { index: number; now: Date }) {
   const reduce = usePrefersReducedMotion();
   const today = startOfDay(now);
+  const userId = useSyncExternalStore(subscribeToSession, getUserId);
+  const retry = useRetryUnlessPermanent();
   const next = useQuery({
     queryKey: ['dashboard', 'next-shift', ymd(today)],
+    retry,
     queryFn: async () => {
       const rows = listOf((await api.get<Page<ShiftRow>>('/shifts', { params: { from: today.toISOString(), to: addDays(today, 14).toISOString(), sort: 'startsAt', direction: 'asc', limit: 25 } })).data);
       // The next shift that is actually being staffed or worked (not a draft/request/cancelled/finished one).
       return rows.find((s) => ['open', 'offered', 'partially_filled', 'fully_filled', 'confirmed', 'in_progress'].includes(s.status) && new Date(s.endsAt) > now) ?? null;
     },
   });
+  // The detailed pipeline is the venue-request view: the server serves it only for a shift the caller requested from a
+  // venue (their own `createdBy` with a `requestedBy`). It is requested only for such a shift; for any other shift the
+  // card shows the staffing counts the shift list already returned, and never probes the restricted endpoint.
+  const detailAllowed = !!next.data && !!userId && next.data.createdBy === userId && !!next.data.requestedBy;
   const pipeline = useQuery({
     queryKey: ['dashboard', 'pipeline', next.data?.id],
-    enabled: !!next.data,
+    enabled: detailAllowed,
+    retry,
     queryFn: async () => (await api.get<PipelineSummary>(`/shifts/${next.data!.id}/pipeline`)).data,
   });
+  const pipelineError = pipeline.isError ? readinessErrorKind(pipeline.error) : null;
+  // Basic view: the shift is not one the caller requested, or its details are no longer available (404). Only the
+  // list's own counts are shown; no check is ever presented as done without the data that proves it.
+  const basic = !!next.data && (!detailAllowed || pipelineError === 'missing');
   const s = pipeline.data?.summary ?? {};
   const required = s.required ?? next.data?.requiredCount ?? 0;
   const filled = s.filled ?? 0;
   const arrived = (s.clockedIn ?? 0) + (s.pendingReview ?? 0) + (s.clockedOut ?? 0);
-  const tasks = pipeline.data ? [
+  const basicRequired = next.data?.requiredCount ?? 0;
+  const basicFilled = next.data?.filledCount ?? 0;
+  type Task = { label: string; meta: string; done: boolean; available: boolean };
+  // Basic view: only the staffing check is known (from the shift list); every other check is shown as not available,
+  // never as done or to-do.
+  const tasks: Task[] = basic ? [
+    { label: 'Staff assigned', meta: `${basicFilled} / ${basicRequired} places filled`, done: basicRequired > 0 && basicFilled >= basicRequired, available: true },
+    ...['Offers answered', 'Staff confirmed', 'Staff clocked in', 'Attendance reviewed', 'Timesheet ready', 'Timesheet finalised']
+      .map((label) => ({ label, meta: 'Not available for this shift', done: false, available: false })),
+  ] : pipeline.data ? [
     { label: 'Staff assigned', meta: `${filled} / ${required} places filled`, done: required > 0 && filled >= required },
     { label: 'Offers answered', meta: `${(s.offered ?? 0) + (s.waiting ?? 0)} awaiting a reply`, done: (s.offered ?? 0) + (s.waiting ?? 0) === 0 && filled > 0 },
     { label: 'Staff confirmed', meta: `${s.accepted ?? 0} accepted, awaiting confirmation`, done: (s.accepted ?? 0) === 0 && filled > 0 },
@@ -401,27 +456,33 @@ function Readiness({ index, now }: { index: number; now: Date }) {
     { label: 'Attendance reviewed', meta: `${s.pendingReview ?? 0} pending review`, done: filled > 0 && (s.pendingReview ?? 0) === 0 && (s.clockedOut ?? 0) >= filled },
     { label: 'Timesheet ready', meta: pipeline.data.report?.ready ? 'All staff clocked out' : 'Waiting for clock-outs', done: !!pipeline.data.report?.ready },
     { label: 'Timesheet finalised', meta: pipeline.data.report?.finalisedAt ? new Date(pipeline.data.report.finalisedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Not yet signed', done: !!pipeline.data.report?.finalisedAt },
-  ] : [];
+  ].map((t) => ({ ...t, available: true })) : [];
   const done = tasks.filter((t) => t.done).length;
-  const stages = [
-    { label: 'Staffing', value: pct(filled, required) },
-    { label: 'Attendance', value: pct(arrived, filled) },
-    { label: 'Review', value: pct(tasks.slice(4).filter((t) => t.done).length, 3) },
-  ];
+  const stages = basic
+    ? [{ label: 'Staffing', value: pct(basicFilled, basicRequired) }]
+    : [
+      { label: 'Staffing', value: pct(filled, required) },
+      { label: 'Attendance', value: pct(arrived, filled) },
+      { label: 'Review', value: pct(tasks.slice(4).filter((t) => t.done).length, 3) },
+    ];
   const shift = pipeline.data?.shift;
-  const revealing = useRevealWindow(!!pipeline.data);
+  const when = (iso: string) => `${new Date(iso).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${fmtTime(iso)}`;
+  const subtitle = shift ? `${shift.venueName} · ${when(shift.startsAt)}` : basic && next.data ? `Next shift · ${when(next.data.startsAt)}` : 'Next shift in the coming 14 days';
+  const revealing = useRevealWindow(basic || !!pipeline.data);
   return (
     <Reveal index={index} className="dash-card dash-readiness">
       <div className="dash-card-head">
         <div>
           <h2 className="dash-card-title">Shift readiness</h2>
-          <p className="dash-card-subtitle">{shift ? `${shift.venueName} · ${new Date(shift.startsAt).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${fmtTime(shift.startsAt)}` : 'Next shift in the coming 14 days'}</p>
+          <p className="dash-card-subtitle">{subtitle}</p>
         </div>
-        {tasks.length > 0 && <p className="dash-readiness-pct"><AnimatedNumber value={pct(done, tasks.length)} format={pctFormat} reveal revealDurationS={1.25} /></p>}
+        {tasks.length > 0 && !basic && <p className="dash-readiness-pct"><AnimatedNumber value={pct(done, tasks.length)} format={pctFormat} reveal revealDurationS={1.25} /></p>}
       </div>
-      {next.isLoading || (next.data && pipeline.isLoading) ? <ListSkeleton rows={4} /> : next.isError ? <ListError retry={next.refetch} error={next.error} /> : !next.data ? (
+      {next.isLoading || (detailAllowed && pipeline.isLoading) ? <ListSkeleton rows={4} /> : next.isError ? (
+        <ReadinessError kind={shiftListErrorKind(next.error)} retry={next.refetch} />
+      ) : !next.data ? (
         <p className="dash-empty">No upcoming shifts in the next 14 days.</p>
-      ) : pipeline.isError ? <ListError retry={pipeline.refetch} error={pipeline.error} /> : (
+      ) : pipelineError && pipelineError !== 'missing' ? <ReadinessError kind={pipelineError} retry={pipeline.refetch} /> : (
         <>
           <div className="dash-stages">
             {stages.map((st, i) => (
@@ -438,17 +499,25 @@ function Readiness({ index, now }: { index: number; now: Date }) {
           <div className="dash-checklist">
             <div className="dash-checklist-head">
               <h3>Shift checklist</h3>
-              <span><AnimatedNumber value={done} reveal revealDurationS={1.0} />/{tasks.length}</span>
+              {basic ? <small className="dash-checklist-scope">Staffing only</small> : <span><AnimatedNumber value={done} reveal revealDurationS={1.0} />/{tasks.length}</span>}
             </div>
             <ul>
               {tasks.map((t) => (
-                <li key={t.label} className={t.done ? 'is-done' : ''}>
+                <li key={t.label} className={t.done ? 'is-done' : t.available ? '' : 'is-unavailable'}>
                   {t.done ? <IconCheck size={15} stroke={2} aria-hidden="true" /> : <IconCircleDashed size={15} stroke={1.6} aria-hidden="true" />}
-                  <div><p>{t.label}<span className="visually-hidden">{t.done ? ' (done)' : ' (to do)'}</span></p><small>{t.meta}</small></div>
+                  <div><p>{t.label}<span className="visually-hidden">{t.done ? ' (done)' : t.available ? ' (to do)' : ' (not available)'}</span></p><small>{t.meta}</small></div>
                 </li>
               ))}
             </ul>
-            <Link className="dash-checklist-link" to={`/venue-offers/${next.data.id}`}>Open staffing pipeline <IconArrowUpRight size={14} stroke={1.6} /></Link>
+            {basic ? (
+              <p className="dash-checklist-note">
+                {pipelineError === 'missing'
+                  ? 'The detailed checklist for this shift isn’t available.'
+                  : 'The detailed checklist is shown for shifts you requested from a venue.'}
+              </p>
+            ) : (
+              <Link className="dash-checklist-link" to={`/venue-offers/${next.data.id}`}>Open staffing pipeline <IconArrowUpRight size={14} stroke={1.6} /></Link>
+            )}
           </div>
         </>
       )}

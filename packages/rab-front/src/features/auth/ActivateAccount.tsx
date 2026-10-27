@@ -1,7 +1,7 @@
 import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
 import { loginDestination, safeApplicationTarget, postAuthSuccessCopy, ApplicationTarget } from './authErrors';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
@@ -46,11 +46,15 @@ export default function ActivateAccount() {
 
   const strength = password ? checkPasswordStrength(password) : null;
   const mismatch = confirm.length > 0 && password !== confirm;
+  const weak = Boolean(password && strength && !strength.valid);
+  const inFlight = useRef(false);
   const canSubmit = Boolean(token) && Boolean(strength?.valid) && !mismatch;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
+    // Synchronous guard: `loading` re-renders a tick late, so a fast double click / double Enter would send twice.
+    if (!canSubmit || inFlight.current) return;
+    inFlight.current = true;
     setError('');
     setLoading(true);
     try {
@@ -65,6 +69,7 @@ export default function ActivateAccount() {
       const fallback = 'Unable to activate your account right now. Please try again.';
       setError(getApiErrorMessage(err, { fallback, messages: { unauthorized: fallback } }));
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
   }
@@ -105,6 +110,8 @@ export default function ActivateAccount() {
                         autoComplete="new-password"
                         autoFocus
                         required
+                        aria-invalid={weak || undefined}
+                        aria-describedby={weak ? 'activate-strength' : undefined}
                       />
                       <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
                         {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
@@ -113,7 +120,7 @@ export default function ActivateAccount() {
                   </motion.div>
 
                   {password && strength && !strength.valid && (
-                    <ul style={s.strengthList}>
+                    <ul id="activate-strength" aria-label="Password requirements" style={s.strengthList}>
                       {strength.reasons.map(r => <li key={r}>{r}</li>)}
                     </ul>
                   )}
@@ -129,10 +136,12 @@ export default function ActivateAccount() {
                       onChange={e => setConfirm(e.target.value)}
                       autoComplete="new-password"
                       required
+                      aria-invalid={mismatch || undefined}
+                      aria-describedby={mismatch ? 'activate-mismatch' : undefined}
                     /><button type="button" aria-label={showPassword ? "Hide confirmation password" : "Show confirmation password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}</button></div>
                   </motion.div>
                   <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
-                  {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
+                  <div aria-live="polite">{mismatch && <p id="activate-mismatch" style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}</div>
 
                   {error && (
                     <motion.p role="alert" style={s.error} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={ease}>

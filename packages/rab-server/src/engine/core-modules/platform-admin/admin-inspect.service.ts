@@ -3,6 +3,7 @@ import { EntityManager } from 'typeorm';
 
 import { AdminInspectSession, User } from '../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
+import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 
@@ -29,12 +30,15 @@ export class AdminInspectService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly auditService: AuditService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   async start(ctx: AuthContext, targetUserId: string): Promise<{ sessionId: string }> {
     if (targetUserId === ctx.userId) {
       throw new BadRequestException('Cannot inspect your own account');
     }
+    // Lane D (M10-2): reading another person's account as them needs a recent step-up of THIS admin session.
+    await this.stepUp.assertRecentStepUp(ctx, 'platform.admin_inspect.start');
 
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const target = await manager.findOne(User, { where: { id: targetUserId, organisationId: ctx.organisationId! } });

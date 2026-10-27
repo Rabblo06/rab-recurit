@@ -185,6 +185,9 @@ enum UITestSupport {
     /// argument the placeholder host is never reachable, so sign-in fails
     /// closed rather than contacting a real server.
     static func stubConfiguration(_ arguments: [String]) -> URLSessionConfiguration {
+        // The 2FA stub answers the auth/2FA routes and delegates the rest to
+        // the Staff stub, so it is checked first.
+        if arguments.contains(TwoFactorUITestStub.launchArgument) { return TwoFactorUITestStub.configuration() }
         if arguments.contains(StaffUITestStub.launchArgument) { return StaffUITestStub.configuration() }
         if arguments.contains(VMUITestStub.launchArgument) { return VMUITestStub.configuration() }
         return APIClient.defaultConfiguration()

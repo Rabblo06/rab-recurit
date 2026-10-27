@@ -12,3 +12,6 @@ export * from './health-status';
 export * from './email-outbox';
 export * from './replacement-request-status';
 export * from './member-invitation';
+export * from './ai';
+// AI Phase 6a (Agent 6): agent storage request/response extras; folded into ai-agents.ts by Agent 9 at the 6a merge.
+export * from './ai-agent-storage';

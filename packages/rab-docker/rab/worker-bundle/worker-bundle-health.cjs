@@ -53,6 +53,8 @@ const ROLES = Object.freeze({
 const HEARTBEAT_MAX_AGE_MS = 45 * 1000;
 /** Redis heartbeat writes (same 15 s cadence) must have succeeded within this window. */
 const REDIS_MAX_AGE_MS = 90 * 1000;
+/** bullmq mode: the 15 s heartbeat re-confirms the BullMQ consumers are running; same window as the Redis write. */
+const BULLMQ_CONSUMERS_MAX_AGE_MS = 90 * 1000;
 
 /** Returns the parsed heartbeat, or null when absent/unreadable/malformed. Never throws. */
 function readHeartbeat(file) {
@@ -96,10 +98,27 @@ function evaluateRole(role, spec, heartbeat, now, uidOf = processUid) {
   const redisAge = age(now, heartbeat.redisOkAt);
   if (redisAge > REDIS_MAX_AGE_MS) problems.push(`no successful Redis heartbeat write for ${seconds(redisAge)}`);
   const sinceStart = age(now, heartbeat.startedAt);
-  const settledAge = heartbeat.lastCycleSettledAt == null ? sinceStart : age(now, heartbeat.lastCycleSettledAt);
-  if (settledAge > spec.settledMaxAgeMs) problems.push(`no cycle finished for ${seconds(settledAge)}`);
-  const succeededAge = heartbeat.lastCycleSucceededAt == null ? sinceStart : age(now, heartbeat.lastCycleSucceededAt);
-  if (succeededAge > spec.succeededMaxAgeMs) problems.push(`no cycle succeeded for ${seconds(succeededAge)} (database or dependency failure)`);
+  if (heartbeat.mode === 'bullmq') {
+    // WORKER_SCHEDULER=bullmq (jobs role only): one cluster-wide scheduler hands each scan tick to ONE replica, so an idle
+    // replica may legitimately finish no cycle for minutes — "a cycle finished recently" would restart-loop it. Instead:
+    // its BullMQ consumers must be running and its own scheduler reconcile (which needs Redis and re-creates lost
+    // schedulers) must have succeeded recently; and if this instance DID run cycles recently, at least one must have
+    // succeeded (all failing = database or dependency failure, as in interval mode).
+    const readyAge = heartbeat.consumersReadyAt == null ? sinceStart : age(now, heartbeat.consumersReadyAt);
+    if (readyAge > BULLMQ_CONSUMERS_MAX_AGE_MS) problems.push(`BullMQ consumers not confirmed running for ${seconds(readyAge)}`);
+    const reconcileAge = heartbeat.reconcileOkAt == null ? sinceStart : age(now, heartbeat.reconcileOkAt);
+    if (reconcileAge > spec.settledMaxAgeMs) problems.push(`scheduler reconcile has not succeeded for ${seconds(reconcileAge)}`);
+    const settled = heartbeat.lastCycleSettledAt == null ? Infinity : age(now, heartbeat.lastCycleSettledAt);
+    const succeeded = heartbeat.lastCycleSucceededAt == null ? Infinity : age(now, heartbeat.lastCycleSucceededAt);
+    if (settled <= spec.settledMaxAgeMs && succeeded > spec.succeededMaxAgeMs) {
+      problems.push(`cycles on this instance are failing: none succeeded for ${seconds(succeeded)} (database or dependency failure)`);
+    }
+  } else {
+    const settledAge = heartbeat.lastCycleSettledAt == null ? sinceStart : age(now, heartbeat.lastCycleSettledAt);
+    if (settledAge > spec.settledMaxAgeMs) problems.push(`no cycle finished for ${seconds(settledAge)}`);
+    const succeededAge = heartbeat.lastCycleSucceededAt == null ? sinceStart : age(now, heartbeat.lastCycleSucceededAt);
+    if (succeededAge > spec.succeededMaxAgeMs) problems.push(`no cycle succeeded for ${seconds(succeededAge)} (database or dependency failure)`);
+  }
   const oldest = heartbeat.oldestInFlight;
   if (oldest && typeof oldest === 'object') {
     const running = age(now, oldest.startedAt);
@@ -123,4 +142,4 @@ if (require.main === module) {
   process.exitCode = result.healthy ? 0 : 1;
 }
 
-module.exports = { ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate };
+module.exports = { ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, BULLMQ_CONSUMERS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate };

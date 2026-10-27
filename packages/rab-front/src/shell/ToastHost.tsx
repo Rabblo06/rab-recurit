@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { IconAlertCircle, IconAlertTriangle, IconCircleCheck, IconInfoCircle, IconX } from '@tabler/icons-react';
 import {
+  defaultToastDuration,
   TOAST_DISMISS_EVENT,
-  TOAST_DURATION_MS,
   TOAST_EVENT,
   TOAST_MAX_VISIBLE,
+  type ToastAction,
   type ToastDetail,
   type ToastVariant,
 } from '../shared/lib/toast';
@@ -19,6 +20,9 @@ interface ToastItem {
   message: string;
   variant: ToastVariant;
   duration: number;
+  /** No countdown: stays until the ✕ or the action is used. */
+  persistent: boolean;
+  action?: ToastAction;
   /** Bumped when an identical toast arrives: restarts the countdown (and the drain) instead of stacking a copy. */
   generation: number;
 }
@@ -30,7 +34,9 @@ interface ToastItem {
  *
  * - Max `TOAST_MAX_VISIBLE` visible; the rest queue (their timers start only once shown).
  * - Duplicate (same variant + message, visible or queued) → refreshes that toast.
- * - Hover, keyboard focus inside the card, or a hidden tab pauses the countdown.
+ * - Hover, keyboard focus inside the card, or a hidden tab pauses the countdown. A `persistent` toast has none.
+ * - Error/warning display time grows with the text length (`defaultToastDuration`) so long messages can be read.
+ * - An optional action button ("Try again", "Sign in again") runs its callback and dismisses the toast.
  * - Errors are `role="alert"` (assertive); success/warning/info are `role="status"` (polite). Nothing takes focus.
  * - Stacks above drawers, modals and popovers (`.toast-host` z-index) without blocking clicks around the cards.
  */
@@ -44,14 +50,21 @@ export default function ToastHost() {
       if (!detail?.message) return;
       setItems((prev) => {
         const same = prev.find((t) => t.variant === detail.variant && t.message === detail.message);
-        if (same) return prev.map((t) => (t === same ? { ...t, generation: t.generation + 1 } : t));
+        if (same)
+          return prev.map((t) =>
+            t === same
+              ? { ...t, generation: t.generation + 1, persistent: t.persistent || !!detail.persistent, action: detail.action ?? t.action }
+              : t,
+          );
         return [
           ...prev,
           {
             id: detail.id,
             message: detail.message,
             variant: detail.variant,
-            duration: detail.duration ?? TOAST_DURATION_MS[detail.variant] ?? TOAST_DURATION_MS.info,
+            duration: detail.duration ?? defaultToastDuration(detail.variant, detail.message),
+            persistent: !!detail.persistent,
+            action: detail.action,
             generation: 0,
           },
         ];
@@ -105,14 +118,14 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
   }, [item.generation, item.duration]);
 
   useEffect(() => {
-    if (paused) return;
+    if (paused || item.persistent) return;
     const startedAt = Date.now();
     const timer = window.setTimeout(() => onDismiss(item.id), Math.max(0, remaining.current));
     return () => {
       window.clearTimeout(timer);
       remaining.current -= Date.now() - startedAt;
     };
-  }, [paused, item.generation, item.id, onDismiss]);
+  }, [paused, item.persistent, item.generation, item.id, onDismiss]);
 
   const Icon = ICONS[item.variant];
   const isError = item.variant === 'error';
@@ -121,8 +134,9 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
       role={isError ? 'alert' : 'status'}
       aria-live={isError ? 'assertive' : 'polite'}
       aria-atomic="true"
-      className={`toast toast-${item.variant}${paused ? ' is-paused' : ''}`}
+      className={`toast toast-${item.variant}${paused ? ' is-paused' : ''}${item.persistent ? ' is-persistent' : ''}`}
       data-variant={item.variant}
+      data-persistent={item.persistent || undefined}
       layout="position"
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0, transition: { duration: duration.toastIn, ease: ease.out } }}
@@ -136,7 +150,7 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
     >
       <span
         key={item.generation}
-        className={`toast-progress${reduced ? ' toast-progress-static' : ''}`}
+        className={`toast-progress${reduced || item.persistent ? ' toast-progress-static' : ''}`}
         aria-hidden="true"
         style={{ animationDuration: `${item.duration}ms` }}
       />
@@ -145,6 +159,18 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (id: numbe
         <span className="toast-sr-label">{LABELS[item.variant]}: </span>
         <span className="toast-text">{item.message}</span>
       </span>
+      {item.action && (
+        <button
+          type="button"
+          className="toast-action"
+          onClick={() => {
+            onDismiss(item.id);
+            item.action?.onClick();
+          }}
+        >
+          {item.action.label}
+        </button>
+      )}
       <button type="button" className="toast-close" aria-label="Dismiss notification" onClick={() => onDismiss(item.id)}>
         <IconX size={15} aria-hidden="true" />
       </button>

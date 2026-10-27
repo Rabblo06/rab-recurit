@@ -1,0 +1,246 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0.8336666666666667,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "wide",
+      "t": 2.516,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "strip",
+      "t": 10.616,
+      "duration": 0.8,
+      "rect": {
+        "x": 327,
+        "y": 0,
+        "w": 2350,
+        "h": 1322
+      },
+      "zoom": 1.362,
+      "chapter": "Offer progress"
+    },
+    {
+      "id": "counts",
+      "t": 17.799,
+      "duration": 0.7,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Totals"
+    },
+    {
+      "id": "hours",
+      "t": 22.433,
+      "duration": 0.9,
+      "rect": {
+        "x": 521,
+        "y": 252,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Hours worked"
+    },
+    {
+      "id": "venues",
+      "t": 30.599,
+      "duration": 0.7,
+      "rect": {
+        "x": 1176,
+        "y": 252,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Shifts by venue"
+    },
+    {
+      "id": "context",
+      "t": 36.516,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "readiness",
+      "t": 38.016,
+      "duration": 0.85,
+      "rect": {
+        "x": 1261,
+        "y": 108,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Shift readiness"
+    },
+    {
+      "id": "checklist",
+      "t": 42.866,
+      "duration": 0.8,
+      "rect": {
+        "x": 1003,
+        "y": 564,
+        "w": 2197,
+        "h": 1236
+      },
+      "zoom": 1.457,
+      "chapter": "Shift checklist"
+    },
+    {
+      "id": "week",
+      "t": 47.266,
+      "duration": 0.9,
+      "rect": {
+        "x": 848,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "This week"
+    },
+    {
+      "id": "close",
+      "t": 53.899,
+      "duration": 1,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    }
+  ],
+  "qa": [
+    {
+      "shot": "strip",
+      "box": {
+        "x": 554,
+        "y": 337.2,
+        "w": 1895,
+        "h": 124
+      },
+      "inside": true
+    },
+    {
+      "shot": "counts",
+      "box": {
+        "x": 2505,
+        "y": 353.2,
+        "w": 639,
+        "h": 108
+      },
+      "inside": true
+    },
+    {
+      "shot": "hours",
+      "box": {
+        "x": 1178.4,
+        "y": 497.2,
+        "w": 623.6,
+        "h": 600
+      },
+      "inside": true
+    },
+    {
+      "shot": "hours",
+      "box": {
+        "x": 1529,
+        "y": 690.2,
+        "w": 234.8,
+        "h": 53
+      },
+      "inside": true
+    },
+    {
+      "shot": "venues",
+      "box": {
+        "x": 1833.8,
+        "y": 497.2,
+        "w": 623.6,
+        "h": 600
+      },
+      "inside": true
+    },
+    {
+      "shot": "readiness",
+      "box": {
+        "x": 2531.4,
+        "y": 539.2,
+        "w": 570.6,
+        "h": 90
+      },
+      "inside": true
+    },
+    {
+      "shot": "readiness",
+      "box": {
+        "x": 2531.4,
+        "y": 661.2,
+        "w": 570.6,
+        "h": 106
+      },
+      "inside": true
+    },
+    {
+      "shot": "checklist",
+      "box": {
+        "x": 2531.4,
+        "y": 803.2,
+        "w": 570.6,
+        "h": 996.8
+      },
+      "inside": true
+    },
+    {
+      "shot": "week",
+      "box": {
+        "x": 1220.4,
+        "y": 1171.2,
+        "w": 1195,
+        "h": 48
+      },
+      "inside": true
+    },
+    {
+      "shot": "week",
+      "box": {
+        "x": 1220.4,
+        "y": 1247.2,
+        "w": 1195,
+        "h": 552.8
+      },
+      "inside": true
+    }
+  ]
+}

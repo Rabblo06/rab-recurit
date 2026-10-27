@@ -102,7 +102,7 @@ describeIfDb('wave 4 lane MFA — per-user second-factor attempt limit (REAL lim
 
   it('ABUSE: wrong codes spread over several challenges and addresses hit ONE per-user bucket (429), and a refused attempt consumes nothing', async () => {
     const ctx: AuthContext = { organisationId: who.organisationId, workspaceId: who.workspaceId, userId: who.userId, role: '' };
-    const material = await mfa.startEnrolment(ctx, who.password);
+    const material = await mfa.startEnrolment(ctx, { currentPassword: who.password });
     const { recoveryCodes } = await mfa.confirmEnrolment(ctx, codeAt(secretFromOtpauth(material.otpauthUri), 0)); // attempt 1 of 4
 
     const c1 = await challenge();

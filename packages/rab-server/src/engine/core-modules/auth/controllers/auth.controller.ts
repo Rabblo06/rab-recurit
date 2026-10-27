@@ -11,6 +11,7 @@ import { resolveClientIp } from '../../../utils/client-ip.util';
 import { EnvironmentService } from '../../environment/environment.service';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { CLIENT_PLATFORM_HEADER, MOBILE_PLATFORM_VALUE } from '../constants/refresh-cookie.constants';
+import { CLIENT_CAPABILITIES_HEADER, parseClientCapabilities } from '../constants/client-capabilities';
 import {
   AuthCookieMode,
   authCookieClearOptions,
@@ -49,7 +50,10 @@ function requestMeta(request: AuthenticatedRequest, trustedProxyCidrs: readonly 
   // W6-E2E-02: the request's workspace-host routing context (WorkspaceHostMiddleware, server-derived), so a sign-in on a
   // workspace host that is not the account's own is refused BEFORE any session exists (AuthService.completeLogin).
   const workspaceHost = (request as AuthenticatedRequest & WorkspaceHostRequest).workspaceHost;
-  return { ip: resolveClientIp(request, trustedProxyCidrs), userAgent: request.headers['user-agent'], workspaceHost };
+  // Account security step 1 (P3): what the CLIENT says it can complete (X-Client-Capabilities). Client-asserted, so it can
+  // only enable the second-factor challenge path for a mobile sign-in — never skip it (AuthService.completeLogin).
+  const clientCapabilities = parseClientCapabilities(request.headers[CLIENT_CAPABILITIES_HEADER]);
+  return { ip: resolveClientIp(request, trustedProxyCidrs), userAgent: request.headers['user-agent'], workspaceHost, clientCapabilities };
 }
 
 /**

@@ -8,6 +8,13 @@ import 'package:http/http.dart' as http;
 
 import '../storage/secure_storage.dart';
 
+/// Account security step 1 (P3): what this build can complete during sign-in, sent on EVERY request. `mfa-verify`
+/// = the two-factor code step exists (login_sheet_content.dart). The server answers an older build (no header) with
+/// 409 CLIENT_UPDATE_REQUIRED instead of a challenge it could not finish. Client-asserted and never a credential: it can
+/// only enable the challenge path, never skip it.
+const kClientCapabilitiesHeader = 'X-Client-Capabilities';
+const kClientCapabilities = 'mfa-verify';
+
 class ApiException implements Exception {
   final int statusCode;
   final String message;
@@ -220,6 +227,7 @@ class ApiClient {
       ..headers.addAll({
         if (token != null) 'Authorization': 'Bearer $token',
         'X-Client-Platform': 'mobile',
+        kClientCapabilitiesHeader: kClientCapabilities,
       });
     final http.Response res;
     try {
@@ -302,6 +310,7 @@ class ApiClient {
       // in the JSON body, exactly as before, instead of trying to set a
       // cookie this client would never read.
       'X-Client-Platform': 'mobile',
+      kClientCapabilitiesHeader: kClientCapabilities,
     };
 
     final encodedBody = body != null ? jsonEncode(body) : null;
@@ -319,11 +328,7 @@ class ApiClient {
       throw ApiException(408, 'The connection timed out. Check your connection and try again.');
     }
 
-    if (res.statusCode == 401 &&
-        !retried &&
-        (!path.startsWith('/auth/') ||
-            path == '/auth/me' ||
-            path == '/auth/logout')) {
+    if (res.statusCode == 401 && !retried && _refreshesOn401(path, res.body)) {
       // CF-36: this request was sent under an identity that has since been signed out (and possibly replaced by another
       // account). Its 401 says nothing about the CURRENT session: never refresh with (and so rotate) the current
       // account's token for it, and never clear the current account's tokens because of it.
@@ -387,6 +392,30 @@ class ApiClient {
     return jsonDecode(res.body);
   }
 
+  /// Account security: the signed-in user's own two-factor routes (Bearer
+  /// authenticated, unlike the pre-session `/auth/mfa/challenge/*`). An expired
+  /// access token there must refresh like any other signed-in call. The one
+  /// 401 that is NOT about the session is a wrong first code on enrolment
+  /// confirm (`MFA_CODE_INVALID`): replaying it would only burn an attempt.
+  static const _signedInMfaPaths = {
+    '/auth/mfa',
+    '/auth/mfa/enrolment',
+    '/auth/mfa/enrolment/confirm',
+    '/auth/mfa/recovery-codes',
+    '/auth/mfa/disable',
+  };
+
+  /// Whether a 401 on [path] means "the access token expired" (refresh, retry
+  /// once) rather than a credential refusal the caller must show.
+  bool _refreshesOn401(String path, String responseBody) {
+    if (!path.startsWith('/auth/')) return true;
+    if (path == '/auth/me' || path == '/auth/logout') return true;
+    if (_signedInMfaPaths.contains(path)) {
+      return _tryDecodeBody(responseBody)?['code'] != 'MFA_CODE_INVALID';
+    }
+    return false;
+  }
+
   int? _retryDate(String? header) {
     if (header == null) return null;
     try {
@@ -417,6 +446,7 @@ class ApiClient {
             headers: {
               'Content-Type': 'application/json',
               'X-Client-Platform': 'mobile',
+              kClientCapabilitiesHeader: kClientCapabilities,
             },
             body: jsonEncode({'refreshToken': refreshToken}),
           )

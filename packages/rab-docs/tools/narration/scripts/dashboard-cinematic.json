@@ -1,0 +1,21 @@
+{
+  "slug": "dashboard-cinematic",
+  "title": "The Dashboard",
+  "subtitle": "Your workforce, offers and shifts at a glance",
+  "engine": "kokoro",
+  "voice": "bf_emma",
+  "speed": 0.88,
+  "pronounce": {},
+  "segments": [
+    { "id": "intro", "text": "Here's your Crewflow dashboard. It brings your staff, offers and shifts together, so you can see how the week's going at a glance.", "pauseAfter": 0.7 },
+    { "id": "strip", "text": "The strip along the top shows how your current offers are progressing: pending, accepted by staff, and confirmed." },
+    { "id": "counts", "text": "Beside it are your totals for staff, venue managers and venues.", "pauseAfter": 0.7 },
+    { "id": "hours", "text": "Hours worked adds up the time your team recorded over the last seven days." },
+    { "id": "hover", "text": "Hover over a day to see its exact total.", "pauseAfter": 0.8 },
+    { "id": "venues", "text": "Next to it, Shifts by venue counts the last thirty days of shifts at your busiest venues.", "pauseAfter": 0.8 },
+    { "id": "readiness", "text": "Shift readiness follows your next shift, from staffing and attendance through to the finalised timesheet." },
+    { "id": "checklist", "text": "Its checklist shows what's done, and what still needs attention.", "pauseAfter": 0.8 },
+    { "id": "week", "text": "Further down, the week view lists your shifts day by day. Use the arrows to look ahead to next week.", "pauseAfter": 0.8 },
+    { "id": "close", "text": "That's the dashboard. Select the arrow on any card to open the page behind it." }
+  ]
+}

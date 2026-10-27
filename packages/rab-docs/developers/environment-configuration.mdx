@@ -68,6 +68,20 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 
 `REALTIME_HEARTBEAT_INTERVAL_MS`, `REALTIME_MAX_CONNECTIONS_PER_USER`, `PUSH_PROVIDER`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `APNS_AUTH_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_ENVIRONMENT`, `PUSH_DELIVERY_MAX_ATTEMPTS`.
 
+## AI
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `AI_ENABLED` | `true` | Platform kill switch (production sets `false`). Every organisation's own AI switch still starts off. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY` | empty | Secret; shown as "configured" only. Only Anthropic's SDK is in this build. See [How to add or rotate an AI provider key](/developers/ai-provider-keys). |
+| `AI_MODELS_DEFAULT_FAST`, `AI_MODELS_DEFAULT_SMART` | empty | Catalogue ids used when an organisation has not chosen a model; the first available wins. |
+| `AI_MODELS_DEFAULT_DISABLED` | empty | Catalogue ids nobody may use. |
+| `AI_DEV_ALLOW_REAL_PROVIDERS` | `false` | Development only; refused at boot in test and production. |
+| `AI_DAILY_BUDGET_USD` | `2` | Estimated provider cost per organisation per day; reserved before every model step. |
+
+`AI_PROVIDER`, `AI_MODEL` and `AI_PROVIDER_API_KEY` are retired. The model is chosen per organisation in Settings → AI.
+A mock value refuses to boot outside tests, and the old key name refuses to boot in development.
+
 ## Read outside the validated schema
 
 | Variable | Used by |

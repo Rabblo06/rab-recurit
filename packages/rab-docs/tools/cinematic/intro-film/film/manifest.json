@@ -1,0 +1,1181 @@
+{
+  "total": 288.271,
+  "chapters": [
+    {
+      "title": "Why Crewflow",
+      "start": 1.4,
+      "firstSeg": "c1-need",
+      "end": 22.074,
+      "index": 1
+    },
+    {
+      "title": "Who uses it",
+      "start": 22.074,
+      "firstSeg": "c2-web",
+      "end": 42.466,
+      "index": 2,
+      "card": {
+        "start": 19.574,
+        "end": 21.974
+      }
+    },
+    {
+      "title": "Build the team",
+      "start": 42.466,
+      "firstSeg": "c3-records",
+      "end": 68.881,
+      "index": 3,
+      "card": {
+        "start": 39.966,
+        "end": 42.366
+      }
+    },
+    {
+      "title": "Request and approve",
+      "start": 68.881,
+      "firstSeg": "c4-need",
+      "end": 103.767,
+      "index": 4,
+      "card": {
+        "start": 66.381,
+        "end": 68.781
+      }
+    },
+    {
+      "title": "Offers and confirmation",
+      "start": 103.767,
+      "firstSeg": "c5-offers",
+      "end": 134.736,
+      "index": 5,
+      "card": {
+        "start": 101.267,
+        "end": 103.667
+      }
+    },
+    {
+      "title": "Shift day",
+      "start": 134.736,
+      "firstSeg": "c6-ready",
+      "end": 164.715,
+      "index": 6,
+      "card": {
+        "start": 132.236,
+        "end": 134.636
+      }
+    },
+    {
+      "title": "Review the hours",
+      "start": 164.715,
+      "firstSeg": "c7-report",
+      "end": 204.731,
+      "index": 7,
+      "card": {
+        "start": 162.215,
+        "end": 164.615
+      }
+    },
+    {
+      "title": "Final timesheet",
+      "start": 204.731,
+      "firstSeg": "c8-sign",
+      "end": 232.932,
+      "index": 8,
+      "card": {
+        "start": 202.231,
+        "end": 204.631
+      }
+    },
+    {
+      "title": "Manage the operation",
+      "start": 232.932,
+      "firstSeg": "c9-payroll",
+      "end": 256.08,
+      "index": 9,
+      "card": {
+        "start": 230.432,
+        "end": 232.832
+      }
+    },
+    {
+      "title": "Behind the scenes",
+      "start": 256.08,
+      "firstSeg": "c10-system",
+      "end": 273.161,
+      "index": 10,
+      "card": {
+        "start": 253.58,
+        "end": 255.98
+      }
+    },
+    {
+      "title": "Get started",
+      "start": 273.161,
+      "firstSeg": "c11-recap",
+      "end": 288.271,
+      "index": 11,
+      "card": {
+        "start": 270.661,
+        "end": 273.061
+      }
+    }
+  ],
+  "segments": {
+    "c1-need": {
+      "id": "c1-need",
+      "start": 1.4,
+      "end": 10.805,
+      "seconds": 9.405,
+      "text": "A venue needs a team for Friday. A manager needs to know who's booked. And staff need to know where to be, and what happens next.",
+      "chapter": "Why Crewflow",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c1-need.wav"
+    },
+    "c1-connect": {
+      "id": "c1-connect",
+      "start": 11.505,
+      "end": 16.774,
+      "seconds": 5.269,
+      "text": "Crewflow connects that whole journey, from the first request to the final timesheet.",
+      "chapter": "Why Crewflow",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c1-connect.wav"
+    },
+    "c2-web": {
+      "id": "c2-web",
+      "start": 22.074,
+      "end": 30.543,
+      "seconds": 8.469,
+      "text": "Managers run their agency from the web console. Each manager has a private workspace, with their own staff, venues and shifts.",
+      "chapter": "Who uses it",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c2-web.wav"
+    },
+    "c2-mobile": {
+      "id": "c2-mobile",
+      "start": 31.143,
+      "end": 39.566,
+      "seconds": 8.423,
+      "text": "Venue managers use the Crewflow app to request staff. Staff use the same app to see their offers, clock in, and check their hours.",
+      "chapter": "Who uses it",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c2-mobile.wav"
+    },
+    "c3-records": {
+      "id": "c3-records",
+      "start": 42.466,
+      "end": 49.624,
+      "seconds": 7.158,
+      "text": "It starts with the team. In the web console, the manager keeps a record for every staff member and every venue.",
+      "chapter": "Build the team",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c3-records.wav"
+    },
+    "c3-assign": {
+      "id": "c3-assign",
+      "start": 50.224,
+      "end": 56.368,
+      "seconds": 6.144,
+      "text": "Each venue manager is linked to a venue, and the manager decides which staff each one can work with.",
+      "chapter": "Build the team",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c3-assign.wav"
+    },
+    "c3-riley": {
+      "id": "c3-riley",
+      "start": 56.868,
+      "end": 60.857,
+      "seconds": 3.989,
+      "text": "Here, Riley Chen is the venue manager at Riverside House.",
+      "chapter": "Build the team",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c3-riley.wav"
+    },
+    "c3-scope": {
+      "id": "c3-scope",
+      "start": 61.357,
+      "end": 65.581,
+      "seconds": 4.224,
+      "text": "In the app, Riley sees that assigned team, and no one else.",
+      "chapter": "Build the team",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c3-scope.wav"
+    },
+    "c4-need": {
+      "id": "c4-need",
+      "start": 68.881,
+      "end": 73.87,
+      "seconds": 4.989,
+      "text": "On Tuesday, Riley needs four waiting staff for a wedding reception on Friday.",
+      "chapter": "Request and approve",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c4-need.wav"
+    },
+    "c4-form": {
+      "id": "c4-form",
+      "start": 74.37,
+      "end": 80.893,
+      "seconds": 6.523,
+      "text": "Riley chooses the venue, the role, the time and the break, then picks four people from the team.",
+      "chapter": "Request and approve",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c4-form.wav"
+    },
+    "c4-warn": {
+      "id": "c4-warn",
+      "start": 82.093,
+      "end": 87.725,
+      "seconds": 5.632,
+      "text": "If someone isn't normally available that day, Crewflow warns Riley before anything is sent.",
+      "chapter": "Request and approve",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c4-warn.wav"
+    },
+    "c4-send": {
+      "id": "c4-send",
+      "start": 88.325,
+      "end": 93.173,
+      "seconds": 4.848,
+      "text": "The request goes to the manager for approval. Nothing reaches the staff yet.",
+      "chapter": "Request and approve",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c4-send.wav"
+    },
+    "c4-approve": {
+      "id": "c4-approve",
+      "start": 93.873,
+      "end": 100.267,
+      "seconds": 6.394,
+      "text": "In Venue Offers, the manager checks the request, adds or removes people if needed, and approves it.",
+      "chapter": "Request and approve",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c4-approve.wav"
+    },
+    "c5-offers": {
+      "id": "c5-offers",
+      "start": 103.767,
+      "end": 109.738,
+      "seconds": 5.971,
+      "text": "Approval sends each person their own offer, with the venue, the time, and their estimated pay.",
+      "chapter": "Offers and confirmation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-offers.wav"
+    },
+    "c5-accept": {
+      "id": "c5-accept",
+      "start": 110.338,
+      "end": 116.925,
+      "seconds": 6.587,
+      "text": "Priya opens hers and accepts. Because this shift came from an approved request, she's booked straight away.",
+      "chapter": "Offers and confirmation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-accept.wav"
+    },
+    "c5-branch": {
+      "id": "c5-branch",
+      "start": 118.425,
+      "end": 125.967,
+      "seconds": 7.542,
+      "text": "It's different when the manager creates a shift directly. Then, accepting holds the place until the manager confirms it.",
+      "chapter": "Offers and confirmation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-branch.wav"
+    },
+    "c5-board": {
+      "id": "c5-board",
+      "start": 126.567,
+      "end": 131.836,
+      "seconds": 5.269,
+      "text": "Either way, the manager can follow every person on the staffing board in Venue Offers.",
+      "chapter": "Offers and confirmation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-board.wav"
+    },
+    "c6-ready": {
+      "id": "c6-ready",
+      "start": 134.736,
+      "end": 141.307,
+      "seconds": 6.571,
+      "text": "On Friday, Priya's confirmed shift is waiting in her app. Clock-in opens shortly before it starts.",
+      "chapter": "Shift day",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c6-ready.wav"
+    },
+    "c6-scan": {
+      "id": "c6-scan",
+      "start": 141.907,
+      "end": 146.835,
+      "seconds": 4.928,
+      "text": "At the venue, she scans the shift's QR code, and Crewflow's server checks it.",
+      "chapter": "Shift day",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c6-scan.wav"
+    },
+    "c6-site": {
+      "id": "c6-site",
+      "start": 147.635,
+      "end": 150.781,
+      "seconds": 3.146,
+      "text": "Some venues also require her to be on site.",
+      "chapter": "Shift day",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c6-site.wav"
+    },
+    "c6-live": {
+      "id": "c6-live",
+      "start": 151.381,
+      "end": 155.96,
+      "seconds": 4.579,
+      "text": "Her shift is now live, timed by Crewflow's own clock, not her phone's.",
+      "chapter": "Shift day",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c6-live.wav"
+    },
+    "c6-out": {
+      "id": "c6-out",
+      "start": 157.16,
+      "end": 161.815,
+      "seconds": 4.655,
+      "text": "When the shift ends, she scans the same code again to clock out.",
+      "chapter": "Shift day",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c6-out.wav"
+    },
+    "c7-report": {
+      "id": "c7-report",
+      "start": 164.715,
+      "end": 167.668,
+      "seconds": 2.953,
+      "text": "Afterwards, Riley opens the shift report.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-report.wav"
+    },
+    "c7-missing": {
+      "id": "c7-missing",
+      "start": 168.168,
+      "end": 177.256,
+      "seconds": 9.088,
+      "text": "Three people clocked in and out. Isla clocked in, but never clocked out, so Crewflow flags the missing clock-out instead of guessing her hours.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-missing.wav"
+    },
+    "c7-correct": {
+      "id": "c7-correct",
+      "start": 177.856,
+      "end": 182.305,
+      "seconds": 4.449,
+      "text": "Riley enters the right time, gives a reason, and saves the correction.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-correct.wav"
+    },
+    "c7-review": {
+      "id": "c7-review",
+      "start": 183.905,
+      "end": 190.484,
+      "seconds": 6.579,
+      "text": "Saving a correction doesn't approve it. Riley still marks each person's hours as reviewed, one by one.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-review.wav"
+    },
+    "c7-rating": {
+      "id": "c7-rating",
+      "start": 192.284,
+      "end": 196.037,
+      "seconds": 3.753,
+      "text": "Rating each person's work is a separate, optional step.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-rating.wav"
+    },
+    "c7-gate": {
+      "id": "c7-gate",
+      "start": 196.637,
+      "end": 201.431,
+      "seconds": 4.794,
+      "text": "Finalise & send only unlocks once everyone is clocked out and reviewed.",
+      "chapter": "Review the hours",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c7-gate.wav"
+    },
+    "c8-sign": {
+      "id": "c8-sign",
+      "start": 204.731,
+      "end": 211.575,
+      "seconds": 6.844,
+      "text": "Riley confirms the break details, signs off by typing a full name, and sends. That locks the hours.",
+      "chapter": "Final timesheet",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c8-sign.wav"
+    },
+    "c8-pdf": {
+      "id": "c8-pdf",
+      "start": 212.775,
+      "end": 219.655,
+      "seconds": 6.88,
+      "text": "Crewflow then creates the final timesheet as a PDF, queues it for delivery, and shows when it's been sent.",
+      "chapter": "Final timesheet",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c8-pdf.wav"
+    },
+    "c8-history": {
+      "id": "c8-history",
+      "start": 221.455,
+      "end": 224.372,
+      "seconds": 2.917,
+      "text": "In the app, the finished shift moves to History.",
+      "chapter": "Final timesheet",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c8-history.wav"
+    },
+    "c8-web": {
+      "id": "c8-web",
+      "start": 224.872,
+      "end": 230.032,
+      "seconds": 5.16,
+      "text": "In the web console, the manager can open both the original and the signed timesheet.",
+      "chapter": "Final timesheet",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c8-web.wav"
+    },
+    "c9-payroll": {
+      "id": "c9-payroll",
+      "start": 232.932,
+      "end": 239.929,
+      "seconds": 6.997,
+      "text": "Back in the web console, the hours appear in Payroll, with the pay they add up to. Crewflow doesn't move any money.",
+      "chapter": "Manage the operation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c9-payroll.wav"
+    },
+    "c9-reviews": {
+      "id": "c9-reviews",
+      "start": 240.529,
+      "end": 244.86,
+      "seconds": 4.331,
+      "text": "Ratings from venue managers build up on each staff member's record.",
+      "chapter": "Manage the operation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c9-reviews.wav"
+    },
+    "c9-dash": {
+      "id": "c9-dash",
+      "start": 245.46,
+      "end": 252.18,
+      "seconds": 6.72,
+      "text": "And the dashboard and calendar show the week ahead, the hours worked, and how ready the next shift is.",
+      "chapter": "Manage the operation",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c9-dash.wav"
+    },
+    "c10-system": {
+      "id": "c10-system",
+      "start": 256.08,
+      "end": 265.437,
+      "seconds": 9.357,
+      "text": "Behind the scenes, the web console and the app share one Crewflow service. On every request, it checks who you are, and which workspace you belong to.",
+      "chapter": "Behind the scenes",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c10-system.wav"
+    },
+    "c10-jobs": {
+      "id": "c10-jobs",
+      "start": 266.037,
+      "end": 270.261,
+      "seconds": 4.224,
+      "text": "Background jobs look after reminders, expiries and documents.",
+      "chapter": "Behind the scenes",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c10-jobs.wav"
+    },
+    "c11-recap": {
+      "id": "c11-recap",
+      "start": 273.161,
+      "end": 277.308,
+      "seconds": 4.147,
+      "text": "Request. Approve. Work. Review. Sign off. That's Crewflow.",
+      "chapter": "Get started",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c11-recap.wav"
+    },
+    "c11-guide": {
+      "id": "c11-guide",
+      "start": 279.308,
+      "end": 282.671,
+      "seconds": 3.363,
+      "text": "To get started, open the guide for your role.",
+      "chapter": "Get started",
+      "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c11-guide.wav"
+    }
+  },
+  "web": {
+    "console": {
+      "file": "assets/intro-web-console.mp4",
+      "from": 21.9,
+      "to": 42.416000000000004
+    },
+    "team": {
+      "file": "assets/intro-web-team.mp4",
+      "from": 42.3,
+      "to": 68.831
+    },
+    "approve": {
+      "file": "assets/intro-web-approve.mp4",
+      "from": 92.9,
+      "to": 104.067
+    },
+    "confirm": {
+      "file": "assets/intro-web-confirm.mp4",
+      "from": 118.425,
+      "to": 126.567
+    },
+    "board": {
+      "file": "assets/intro-web-board.mp4",
+      "from": 126.36699999999999,
+      "to": 135.036
+    },
+    "after": {
+      "file": "assets/intro-web-after.mp4",
+      "from": 224.472,
+      "to": 256.38
+    }
+  },
+  "phone": {
+    "vmIdle": {
+      "file": "assets/ph-vm-idle.mp4",
+      "from": 30.743,
+      "to": 42.416,
+      "pieces": [
+        {
+          "from": 0.3,
+          "to": 1.2,
+          "filmFrom": 30.743,
+          "filmTo": 42.416
+        }
+      ]
+    },
+    "staffIdle": {
+      "file": "assets/ph-staff-idle.mp4",
+      "from": 30.743,
+      "to": 42.416,
+      "pieces": [
+        {
+          "from": 2.6,
+          "to": 10.4,
+          "filmFrom": 30.743,
+          "filmTo": 42.416
+        }
+      ]
+    },
+    "scope": {
+      "file": "assets/ph-scope.mp4",
+      "from": 61.057,
+      "to": 68.831,
+      "pieces": [
+        {
+          "from": 60.6,
+          "to": 66.9,
+          "filmFrom": 61.057,
+          "filmTo": 68.831
+        }
+      ]
+    },
+    "request": {
+      "file": "assets/ph-request.mp4",
+      "from": 68.881,
+      "to": 93.95,
+      "pieces": [
+        {
+          "from": 0.3,
+          "to": 5.7,
+          "filmFrom": 68.881,
+          "filmTo": 74.281
+        },
+        {
+          "from": 5.6,
+          "to": 7.2,
+          "filmFrom": 74.281,
+          "filmTo": 75.881
+        },
+        {
+          "from": 14.9,
+          "to": 15.7,
+          "filmFrom": 75.881,
+          "filmTo": 76.681
+        },
+        {
+          "from": 57,
+          "to": 58.3,
+          "filmFrom": 76.681,
+          "filmTo": 77.981
+        },
+        {
+          "from": 67.4,
+          "to": 71.5,
+          "filmFrom": 77.981,
+          "filmTo": 82.081
+        },
+        {
+          "from": 76,
+          "to": 77.2,
+          "filmFrom": 82.081,
+          "filmTo": 83.281
+        },
+        {
+          "from": 79,
+          "to": 80.3,
+          "filmFrom": 83.281,
+          "filmTo": 84.581
+        },
+        {
+          "from": 85.6,
+          "to": 89.34,
+          "filmFrom": 84.581,
+          "filmTo": 88.321
+        },
+        {
+          "from": 94,
+          "to": 96.6,
+          "filmFrom": 88.321,
+          "filmTo": 90.921
+        },
+        {
+          "from": 104.5,
+          "to": 107.2,
+          "filmFrom": 90.921,
+          "filmTo": 93.95
+        }
+      ]
+    },
+    "offer": {
+      "file": "assets/ph-offer.mp4",
+      "from": 106.998,
+      "to": 118.375,
+      "pieces": [
+        {
+          "from": 2.6,
+          "to": 5.94,
+          "filmFrom": 106.998,
+          "filmTo": 110.338
+        },
+        {
+          "from": 11.2,
+          "to": 13.2,
+          "filmFrom": 110.338,
+          "filmTo": 112.338
+        },
+        {
+          "from": 18.6,
+          "to": 24.6,
+          "filmFrom": 112.338,
+          "filmTo": 118.375
+        }
+      ]
+    },
+    "shift": {
+      "file": "assets/ph-shift.mp4",
+      "from": 134.736,
+      "to": 157.16,
+      "pieces": [
+        {
+          "from": 1.6,
+          "to": 5.2,
+          "filmFrom": 134.736,
+          "filmTo": 138.336
+        },
+        {
+          "from": 8.6,
+          "to": 12.17,
+          "filmFrom": 138.336,
+          "filmTo": 141.906
+        },
+        {
+          "from": 15.5,
+          "to": 16.9,
+          "filmFrom": 141.906,
+          "filmTo": 143.306
+        },
+        {
+          "from": 34.6,
+          "to": 40.3,
+          "filmFrom": 143.306,
+          "filmTo": 151.381
+        },
+        {
+          "from": 56.6,
+          "to": 62.38,
+          "filmFrom": 151.381,
+          "filmTo": 157.16
+        }
+      ]
+    },
+    "out": {
+      "file": "assets/ph-out.mp4",
+      "from": 157.16,
+      "to": 164.665,
+      "pieces": [
+        {
+          "from": 10,
+          "to": 11.5,
+          "filmFrom": 157.16,
+          "filmTo": 158.66
+        },
+        {
+          "from": 15.3,
+          "to": 16.6,
+          "filmFrom": 158.66,
+          "filmTo": 159.96
+        },
+        {
+          "from": 35,
+          "to": 35.9,
+          "filmFrom": 159.96,
+          "filmTo": 160.86
+        },
+        {
+          "from": 53.6,
+          "to": 54.9,
+          "filmFrom": 160.86,
+          "filmTo": 164.665
+        }
+      ]
+    },
+    "review": {
+      "file": "assets/ph-review.mp4",
+      "from": 164.715,
+      "to": 196.637,
+      "pieces": [
+        {
+          "from": 2,
+          "to": 3.5,
+          "filmFrom": 164.715,
+          "filmTo": 166.215
+        },
+        {
+          "from": 5.6,
+          "to": 7.55,
+          "filmFrom": 166.215,
+          "filmTo": 168.165
+        },
+        {
+          "from": 7.55,
+          "to": 17.24,
+          "filmFrom": 168.165,
+          "filmTo": 177.855
+        },
+        {
+          "from": 25.7,
+          "to": 27.2,
+          "filmFrom": 177.855,
+          "filmTo": 179.355
+        },
+        {
+          "from": 44,
+          "to": 47.5,
+          "filmFrom": 179.355,
+          "filmTo": 182.855
+        },
+        {
+          "from": 53.2,
+          "to": 54.25,
+          "filmFrom": 182.855,
+          "filmTo": 183.905
+        },
+        {
+          "from": 54.25,
+          "to": 57,
+          "filmFrom": 183.905,
+          "filmTo": 186.655
+        },
+        {
+          "from": 62.5,
+          "to": 65.6,
+          "filmFrom": 186.655,
+          "filmTo": 189.755
+        },
+        {
+          "from": 139.1,
+          "to": 141.6,
+          "filmFrom": 189.755,
+          "filmTo": 192.255
+        },
+        {
+          "from": 77,
+          "to": 81.36,
+          "filmFrom": 192.255,
+          "filmTo": 196.637
+        }
+      ]
+    },
+    "fin": {
+      "file": "assets/ph-gate.mp4",
+      "from": 196.637,
+      "to": 204.681,
+      "pieces": [
+        {
+          "from": 0.5,
+          "to": 5.6,
+          "filmFrom": 196.637,
+          "filmTo": 204.681
+        }
+      ]
+    },
+    "sign": {
+      "file": "assets/ph-sign.mp4",
+      "from": 204.731,
+      "to": 221.455,
+      "pieces": [
+        {
+          "from": 5.6,
+          "to": 7.6,
+          "filmFrom": 204.731,
+          "filmTo": 206.731
+        },
+        {
+          "from": 11.2,
+          "to": 14.4,
+          "filmFrom": 206.731,
+          "filmTo": 209.931
+        },
+        {
+          "from": 16.4,
+          "to": 19.25,
+          "filmFrom": 209.931,
+          "filmTo": 212.781
+        },
+        {
+          "from": 20.6,
+          "to": 23,
+          "filmFrom": 212.781,
+          "filmTo": 215.181
+        },
+        {
+          "from": 27.2,
+          "to": 29,
+          "filmFrom": 215.181,
+          "filmTo": 216.981
+        },
+        {
+          "from": 37.2,
+          "to": 38.8,
+          "filmFrom": 216.981,
+          "filmTo": 218.581
+        },
+        {
+          "from": 47.5,
+          "to": 50.38,
+          "filmFrom": 218.581,
+          "filmTo": 221.455
+        }
+      ]
+    },
+    "hist": {
+      "file": "assets/ph-history.mp4",
+      "from": 221.455,
+      "to": 225.472,
+      "pieces": [
+        {
+          "from": 3.6,
+          "to": 7,
+          "filmFrom": 221.455,
+          "filmTo": 225.472
+        }
+      ]
+    }
+  },
+  "camera": [
+    {
+      "t": 21.9,
+      "d": 0,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 23.8,
+      "d": 0.8,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 30.1,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 42.3,
+      "d": 0,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 43.966,
+      "d": 0.8,
+      "r": {
+        "x": 261,
+        "y": 0,
+        "w": 2430,
+        "h": 1367
+      }
+    },
+    {
+      "t": 47.066,
+      "d": 0.8,
+      "r": {
+        "x": 261,
+        "y": 0,
+        "w": 2430,
+        "h": 1367
+      }
+    },
+    {
+      "t": 50.233,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 57.133,
+      "d": 0.8,
+      "r": {
+        "x": 868,
+        "y": 0,
+        "w": 2332,
+        "h": 1312
+      }
+    },
+    {
+      "t": 58.599,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 59.933,
+      "d": 0.8,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 61.833,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 63.833,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 407,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 92.9,
+      "d": 0,
+      "r": {
+        "x": 215,
+        "y": 0,
+        "w": 2925,
+        "h": 1645
+      }
+    },
+    {
+      "t": 93.5,
+      "d": 0.8,
+      "r": {
+        "x": 215,
+        "y": 0,
+        "w": 2925,
+        "h": 1645
+      }
+    },
+    {
+      "t": 94.967,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 96.833,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 172,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 98.633,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 101.067,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 126.36699999999999,
+      "d": 0,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 126.567,
+      "d": 0.8,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 128.734,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 224.472,
+      "d": 0,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 227.772,
+      "d": 0.8,
+      "r": {
+        "x": 222,
+        "y": 0,
+        "w": 2978,
+        "h": 1675
+      }
+    },
+    {
+      "t": 229.772,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 233.132,
+      "d": 0.9,
+      "r": {
+        "x": 538,
+        "y": 188,
+        "w": 2228,
+        "h": 1253
+      }
+    },
+    {
+      "t": 234.632,
+      "d": 0.8,
+      "r": {
+        "x": 538,
+        "y": 188,
+        "w": 2228,
+        "h": 1253
+      }
+    },
+    {
+      "t": 240.532,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 245.46,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 244,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 245.66,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 251.66,
+      "d": 0.8,
+      "r": {
+        "x": 521,
+        "y": 252,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 253.06,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 108,
+        "w": 1939,
+        "h": 1091
+      }
+    }
+  ],
+  "accents": {
+    "clicks": [
+      17.2,
+      100.033,
+      113.166,
+      211.838,
+      281
+    ],
+    "whooshes": [
+      93.1,
+      106.9,
+      224.6
+    ]
+  },
+  "provenance": {
+    "web": "tools/web/record-cinematic.cjs intro-web-* captures: real rab-front UI on an isolated Vite server; every API response from tools/web/fixtures.cjs (fictional; unknown requests fail; other origins blocked)",
+    "mobile": "tools/mobile/record-intro.cjs: real Flutter debug app (rab-mobile @ f5187172) on the Pixel_5 emulator, API = tools/mobile-fixture-server.cjs (fictional demo backend with a scene clock). QR clock-in/out: the emulator camera cannot read a QR, so the clock-in/out were posted to the demo server from the host as a stand-in for the scan (disclosed on screen).",
+    "narration": "Kokoro-82M bf_emma via hyperframes tts (local), tools/narration/build/crewflow-introduction"
+  }
+}

@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 
 export const OUTBOX_KINDS = ['email', 'push', 'realtime', 'worker_event'] as const;
 export type OutboxKind = (typeof OUTBOX_KINDS)[number];
@@ -33,4 +33,15 @@ export class ReplayFailedEmailDto {
   @Transform(({ value }) => (value === true || value === 'true' ? true : value === false || value === 'false' ? false : value))
   @IsBoolean()
   allowUncertain?: boolean;
+
+  /**
+   * Admin Panel (T1, owner: required): why the email is being replayed — trimmed, 3–500 characters. Recorded as an
+   * `admin.email_replay_reason` audit row in the SAME transaction as the replay itself. (The `outbox:replay` CLI does not
+   * use this DTO.)
+   */
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
 }

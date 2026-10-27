@@ -1,5 +1,5 @@
-import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 
 /**
  * Settings → Members → Add (platform administrator): the CEO's email ONLY. Deliberately no organisation name, no CEO
@@ -10,6 +10,18 @@ export class InviteCeoDto {
   @IsString()
   @MaxLength(320)
   email!: string;
+}
+
+/**
+ * Admin Panel: `POST /admin/organisations/:id/ceo-invite/resend` REQUIRES the admin's reason (T1, owner decision;
+ * trimmed, 3–500), stored on the `user.invite_resent` audit row with `via: platform_admin`.
+ */
+export class ResendCeoInviteDto {
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
 }
 
 export class ListCeoInvitationsDto {

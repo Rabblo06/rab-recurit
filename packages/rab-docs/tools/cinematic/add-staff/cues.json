@@ -1,0 +1,58 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 6.187,
+    "text": "This tutorial shows how to add a staff member. Everything you see uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 6.7,
+    "seconds": 5.409,
+    "text": "On the Users page, select New staff. You can also choose Add Staff from your account menu.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\open.wav"
+  },
+  {
+    "id": "step1",
+    "start": 12.633,
+    "seconds": 7.013,
+    "text": "Step one covers personal and employment details: the name, job role, employment type and default hourly rate.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\step1.wav"
+  },
+  {
+    "id": "step2",
+    "start": 21.767,
+    "seconds": 5.355,
+    "text": "Step two holds the contact details. The invitation is sent to this email address.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\step2.wav"
+  },
+  {
+    "id": "step3",
+    "start": 30.233,
+    "seconds": 2.788,
+    "text": "Step three records an emergency contact.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\step3.wav"
+  },
+  {
+    "id": "step4",
+    "start": 37.967,
+    "seconds": 5.913,
+    "text": "Step four sets availability: working days, preferred shift times, and the maximum hours per week.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\step4.wav"
+  },
+  {
+    "id": "create",
+    "start": 44.567,
+    "seconds": 5.141,
+    "text": "Select Create. Crewflow creates the staff record and queues an invitation email.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\create.wav"
+  },
+  {
+    "id": "result",
+    "start": 50.233,
+    "seconds": 7.701,
+    "text": "The new staff member's details open. Their status shows the invitation until they accept it and sign in to the mobile app.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\add-staff\\result.wav"
+  }
+]

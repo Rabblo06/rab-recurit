@@ -2,8 +2,9 @@
  * Approved Shift Statement pipeline constants, shared by the API (state projection) and the worker (dispatcher,
  * BullMQ consumer). Kept here (no Nest, no Redis import) so both processes read one definition.
  */
-export const SHIFT_STATEMENT_QUEUE_NAME = 'rab-shift-statements';
-export const SHIFT_STATEMENT_JOB_NAME = 'generate-shift-statement';
+// The queue/job names live in engine/worker-shared (the canonical queue registry must not import modules/); re-exported
+// here unchanged so every existing importer keeps working.
+export { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from '../../../engine/worker-shared/shift-statement-queue.constants';
 
 /** A failing statement is retried (dispatcher reconciliation) up to this many attempts, then reported `failed`. */
 export const SHIFT_STATEMENT_MAX_ATTEMPTS = 5;

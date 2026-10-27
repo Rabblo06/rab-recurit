@@ -10,15 +10,17 @@ import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope'
 import { assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmploymentStatus, ManagerType, NotificationType, SHIFT_TRANSITIONS, ShiftStatus, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
-import { EntityManager, QueryFailedError } from 'typeorm';
+import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
+import { shiftSeatCountsSql, vacancyFromCounts } from '../../offer/services/shift-vacancy';
+import { EntityManager, QueryFailedError, SelectQueryBuilder } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
-import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { User } from '../../identity/entities';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
@@ -27,6 +29,7 @@ import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { Venue } from '../../venue/entities/venue.entity';
 import { CreateJobRoleDto } from '../dto/create-job-role.dto';
 import { CreateShiftDto } from '../dto/create-shift.dto';
+import { UPDATE_DRAFT_SHIFT_FIELDS, UpdateDraftShiftDto } from '../dto/update-draft-shift.dto';
 import { DeclineShiftRequestDto } from '../dto/decline-shift-request.dto';
 import { ListSelectableStaffDto } from '../dto/list-selectable-staff.dto';
 import { ListShiftsDto } from '../dto/list-shifts.dto';
@@ -48,6 +51,40 @@ const SHIFT_SORT_COLUMNS: Record<string, string> = {
   status: 'shift.status',
   createdAt: 'shift.createdAt',
 };
+
+/** AI Phase 1: shift statuses that represent a shift that is (or was) to be staffed. */
+const ASSISTANT_STAFFABLE_STATUSES = [
+  ShiftStatus.OPEN, ShiftStatus.OFFERED, ShiftStatus.PARTIALLY_FILLED, ShiftStatus.FULLY_FILLED, ShiftStatus.CONFIRMED, ShiftStatus.IN_PROGRESS, ShiftStatus.COMPLETED,
+];
+/** AI Phase 1: hard bound on the shifts one staffing aggregate reads. */
+export const ASSISTANT_STAFFING_MAX_SHIFTS = 2000;
+
+/** AI Phase 1 staffing read model — operational fields only (no staff identity, note, address or rate). */
+export interface AssistantStaffingShift {
+  shiftId: string;
+  venueName: string | null;
+  jobRoleName: string;
+  startsAt: string;
+  endsAt: string;
+  status: string;
+  requiredCount: number;
+  confirmedCount: number;
+  vacancies: number;
+  pendingOffers: number;
+  awaitingConfirmation: number;
+}
+
+export interface AssistantStaffingSnapshot {
+  shiftCount: number;
+  fullyStaffedShiftCount: number;
+  shiftsWithVacancies: number;
+  seatsRequired: number;
+  seatsFilled: number;
+  seatsVacant: number;
+  truncated: boolean;
+  unfilledTotal: number;
+  unfilled: AssistantStaffingShift[];
+}
 
 @Injectable()
 export class SchedulingService {
@@ -337,32 +374,7 @@ export class SchedulingService {
       // Existing ownership/venue-assignment scoping — every filter below is
       // ANDed onto this, never OR'd or replacing it (a caller can only ever
       // narrow within their own already-authorized scope, never escape it).
-      if (scope.kind === 'venue') {
-        qb.where('shift.venueId IN (:...venueIds)', { venueIds: scope.venueIds });
-      } else {
-        // A `pending_manager_approval` request is deliberately unowned in
-        // the `createdBy` sense until an Internal Manager approves it (see
-        // `SubmitShiftRequestDto`'s own doc comment — `createdBy` is
-        // stamped as the *submitting Venue Manager*, not any Internal
-        // Manager) — a plain `createdBy = ctx.userId` here would make every
-        // pending request invisible to every possible approver, since none
-        // of them "own" it yet. Widened to org-wide visibility for this one
-        // status only, the same scope `listPendingApprovals` already grants
-        // — everything else stays strictly creator-owned.
-        if (scope.delegated) {
-          // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening — and only
-          // those their role's record filter allows.
-          qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
-          this.memberAccess.assertCanRead(policy);
-          const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
-          qb.andWhere(recordFilter.sql, recordFilter.named);
-        } else {
-          qb.where(
-            '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
-            { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
-          );
-        }
-      }
+      this.applyShiftReadScope(qb, ctx, scope, policy, { widenPendingApproval: true });
 
       if (dto.from && dto.to) {
         qb.andWhere('shift.startsAt BETWEEN :from AND :to', { from: new Date(dto.from), to: new Date(dto.to) });
@@ -395,6 +407,133 @@ export class SchedulingService {
 
       const data = await qb.getMany();
       return { data: data.map((shift) => this.memberAccess.project(policy, shift)), total };
+    });
+  }
+
+  /**
+   * The ONE shift read scope (extracted from `list()` unchanged; AI Phase 1 reuses it). A Venue Manager reads shifts at
+   * their assigned venues; a custom workspace-member reads only their workspace owner's shifts within their record
+   * filter; everyone else reads the shifts they created. `widenPendingApproval` adds `list()`'s org-wide visibility of
+   * `pending_manager_approval` requests (see the comment inside) — a staffing aggregate never wants it, since a pending
+   * request is not a staffable shift. Always the FIRST condition (`where`); callers only ever AND filters onto it.
+   */
+  applyShiftReadScope(
+    qb: SelectQueryBuilder<Shift>,
+    ctx: AuthContext,
+    scope: ResourceScope,
+    policy: ObjectAccessPolicy,
+    opts: { widenPendingApproval: boolean },
+  ): void {
+    if (scope.kind === 'venue') {
+      qb.where('shift.venueId IN (:...venueIds)', { venueIds: scope.venueIds });
+      return;
+    }
+    // A `pending_manager_approval` request is deliberately unowned in
+    // the `createdBy` sense until an Internal Manager approves it (see
+    // `SubmitShiftRequestDto`'s own doc comment — `createdBy` is
+    // stamped as the *submitting Venue Manager*, not any Internal
+    // Manager) — a plain `createdBy = ctx.userId` here would make every
+    // pending request invisible to every possible approver, since none
+    // of them "own" it yet. Widened to org-wide visibility for this one
+    // status only, the same scope `listPendingApprovals` already grants
+    // — everything else stays strictly creator-owned.
+    if (scope.delegated) {
+      // A custom workspace-member reads only their workspace owner's shifts — no org-wide widening — and only
+      // those their role's record filter allows.
+      qb.where('shift.createdBy = :createdBy', { createdBy: scope.ownerUserId });
+      this.memberAccess.assertCanRead(policy);
+      const recordFilter = this.memberAccess.qbWhere(policy, 'shift');
+      qb.andWhere(recordFilter.sql, recordFilter.named);
+    } else if (opts.widenPendingApproval) {
+      qb.where(
+        '(shift.createdBy = :createdBy OR shift.status = :pendingApproval)',
+        { createdBy: ctx.userId, pendingApproval: ShiftStatus.PENDING_MANAGER_APPROVAL },
+      );
+    } else {
+      qb.where('shift.createdBy = :createdBy', { createdBy: ctx.userId });
+    }
+  }
+
+  /**
+   * AI Phase 1 (read-only, aggregate; docs/ai/PHASE1_PLAN.md). Staffing of the caller's shifts STARTING in [from, to):
+   * seat counts per shift from the authoritative assignment rows (`shiftSeatCountsSql` + `vacancyFromCounts`, the same
+   * rule as `loadShiftVacancy`), the shift read scope of `list()` without the pending-approval widening, and only
+   * staffable statuses (draft / pending request / declined / cancelled are not shifts that need staff). No staff
+   * identity, note, address or rate is read. Bounded: at most `ASSISTANT_STAFFING_MAX_SHIFTS` shifts are aggregated
+   * (`truncated` says so) and `unfilledLimit` are listed. `schedule.view` is re-checked here (layer 2): the AI tool
+   * layer checks it too, but a service is callable directly.
+   */
+  async assistantStaffing(ctx: AuthContext, range: { from: Date; to: Date }, opts: { unfilledLimit: number }): Promise<AssistantStaffingSnapshot> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // AI Phase 3 (rule 7.3; p3 merge, Agent 3 REQUEST Q4): read only, 5 s per statement, like every other assistant read.
+      await beginAssistantRead(manager);
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW))) throw new ForbiddenException('Permission required.');
+      const empty: AssistantStaffingSnapshot = {
+        shiftCount: 0, fullyStaffedShiftCount: 0, shiftsWithVacancies: 0, seatsRequired: 0, seatsFilled: 0, seatsVacant: 0,
+        truncated: false, unfilledTotal: 0, unfilled: [],
+      };
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return empty;
+      const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
+      const qb = manager.createQueryBuilder(Shift, 'shift').select('shift.id', 'id');
+      this.applyShiftReadScope(qb, ctx, scope, policy, { widenPendingApproval: false });
+      qb.andWhere('shift.startsAt >= :from AND shift.startsAt < :to', { from: range.from, to: range.to })
+        .andWhere('shift.status IN (:...staffable)', { staffable: ASSISTANT_STAFFABLE_STATUSES })
+        .andWhere('shift.archivedAt IS NULL')
+        .orderBy('shift.startsAt', 'ASC')
+        .addOrderBy('shift.id', 'ASC')
+        .limit(ASSISTANT_STAFFING_MAX_SHIFTS + 1);
+      const ids = (await qb.getRawMany<{ id: string }>()).map((r) => r.id);
+      if (ids.length === 0) return empty;
+      const truncated = ids.length > ASSISTANT_STAFFING_MAX_SHIFTS;
+      const rows: Array<Record<string, unknown>> = await manager.query(
+        `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, v.name AS venue_name, jr.name AS job_role_name,
+                ${shiftSeatCountsSql('sa')}
+           FROM shift s
+           JOIN venue v ON v.id = s.venue_id
+           JOIN job_role jr ON jr.id = s.job_role_id
+           LEFT JOIN shift_assignment sa ON sa.shift_id = s.id
+          WHERE s.id = ANY($1::uuid[])
+          GROUP BY s.id, v.name, jr.name
+          ORDER BY s.starts_at, s.id`,
+        [ids.slice(0, ASSISTANT_STAFFING_MAX_SHIFTS)],
+      );
+      // "Venue display name where permitted": the venue name only for a caller who may list venues.
+      const venueNames = await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW);
+      const snapshot: AssistantStaffingSnapshot = { ...empty, unfilled: [], truncated };
+      for (const r of rows) {
+        const requiredCount = Number(r.required_count);
+        const { effectiveFilled, vacancy } = vacancyFromCounts({
+          requiredCount, filledCount: Number(r.filled_count), occupied: Number(r.occupied), confirmedNoShows: Number(r.confirmed_no_shows),
+        });
+        const filled = Math.min(requiredCount, effectiveFilled);
+        snapshot.shiftCount += 1;
+        snapshot.seatsRequired += requiredCount;
+        snapshot.seatsFilled += filled;
+        snapshot.seatsVacant += vacancy;
+        if (vacancy === 0) snapshot.fullyStaffedShiftCount += 1;
+        // A completed shift's gap counts toward the fill rate but no longer "needs staff".
+        if (vacancy > 0 && r.status !== ShiftStatus.COMPLETED) {
+          snapshot.shiftsWithVacancies += 1;
+          snapshot.unfilledTotal += 1;
+          if (snapshot.unfilled.length < opts.unfilledLimit) {
+            snapshot.unfilled.push({
+              shiftId: r.id as string,
+              venueName: venueNames ? (r.venue_name as string) : null,
+              jobRoleName: r.job_role_name as string,
+              startsAt: new Date(r.starts_at as string).toISOString(),
+              endsAt: new Date(r.ends_at as string).toISOString(),
+              status: r.status as string,
+              requiredCount,
+              confirmedCount: filled,
+              vacancies: vacancy,
+              pendingOffers: Number(r.pending_offers),
+              awaitingConfirmation: Number(r.accepted_awaiting),
+            });
+          }
+        }
+      }
+      return snapshot;
     });
   }
 
@@ -528,55 +667,147 @@ export class SchedulingService {
     return jobRole?.defaultRatePence ?? 0;
   }
 
+  /**
+   * Layers: route PermissionGuard(SCHEDULE_CREATE) → SCHEDULE_CREATE re-checked here, first, in the same tenant
+   * transaction (jobs / CLI / other services never pass the guard; LAYER2_HARDENING_2026-10-25 F2) → venue + job-role
+   * scope (404) → workspace RLS. 403 like the guard: a categorical lack, decided before any referenced id is looked up.
+   */
   async create(ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
-      // open: without this, a Manager could still create a shift against
-      // another Manager's private venue/job-role by reusing a known id, even
-      // though they can no longer see it in a list.
-      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
-      const jobRole = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
-      if (!jobRole) throw new NotFoundException('Job role not found.');
-      await this.assertJobRoleOwned(manager, ctx, jobRole);
-      // Wave 5: no new work at an archived venue or with an archived job role (restore first).
-      this.venueService.assertVenueNotArchived(venue);
-      this.assertJobRoleNotArchived(jobRole);
-
-      const payRatePence = await this.resolvePayRate(manager, dto);
-
-      const shift = manager.create(Shift, {
-        organisationId: ctx.organisationId!,
-        // Inherited from the Venue, not ctx.workspaceId directly — keeps
-        // Shift.workspaceId = Venue.workspaceId true by construction (the
-        // cross-boundary integrity invariant), covering the Venue-Manager
-        // case where the caller's own ctx.workspaceId can differ from the
-        // Venue's owning workspace.
-        workspaceId: venue.workspaceId,
-        venueId: dto.venueId,
-        jobRoleId: dto.jobRoleId,
-        startsAt: new Date(dto.startsAt),
-        endsAt: new Date(dto.endsAt),
-        breakMinutes: dto.breakMinutes ?? 0,
-        requiredCount: dto.requiredCount,
-        payRatePence,
-        chargeRatePence: dto.chargeRatePence ?? 0,
-        notes: dto.notes,
-        status: ShiftStatus.DRAFT,
-        createdBy: ctx.userId,
-      });
-      const saved = await manager.save(shift);
-      // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
-      await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
-        entityType: 'shift',
-        entityId: saved.id,
-        metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
-      });
-      return saved;
-    });
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.createDraftTx(manager, ctx, dto));
   }
 
+  /**
+   * Read-only: the venue and job role a new draft would use, under exactly the scope and archive rules `create` applies
+   * (404 out of scope, 409 archived). Shared by `createDraftTx` and the AI `create_draft_shift` proposal's `prepare()`, so
+   * the card and the write can never disagree about what is allowed.
+   */
+  async resolveDraftTargetsTx(manager: EntityManager, ctx: AuthContext, venueId: string, jobRoleId: string): Promise<{ venue: Venue; jobRole: JobRole }> {
+    // Closes an IDOR that Venue/JobRole ownership scoping would otherwise
+    // open: without this, a Manager could still create a shift against
+    // another Manager's private venue/job-role by reusing a known id, even
+    // though they can no longer see it in a list.
+    const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, venueId);
+    const jobRole = await manager.findOne(JobRole, { where: { id: jobRoleId } });
+    if (!jobRole) throw new NotFoundException('Job role not found.');
+    await this.assertJobRoleOwned(manager, ctx, jobRole);
+    // Wave 5: no new work at an archived venue or with an archived job role (restore first).
+    this.venueService.assertVenueNotArchived(venue);
+    this.assertJobRoleNotArchived(jobRole);
+    return { venue, jobRole };
+  }
+
+  /**
+   * `create`, inside the CALLER's transaction (PHASE5_TWENTY_PLAN C6): the AI proposal executor runs it in the same
+   * transaction as its compare-and-set, so "approved", the shift and "executed" commit or roll back together. Same layers
+   * as `create`, starting with the SCHEDULE_CREATE re-check; the caller's `ctx` is the actor (`created_by`).
+   */
+  async createDraftTx(manager: EntityManager, ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
+    await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Creating shifts is not permitted.');
+    const { venue } = await this.resolveDraftTargetsTx(manager, ctx, dto.venueId, dto.jobRoleId);
+
+    const payRatePence = await this.resolvePayRate(manager, dto);
+
+    const shift = manager.create(Shift, {
+      organisationId: ctx.organisationId!,
+      // Inherited from the Venue, not ctx.workspaceId directly — keeps
+      // Shift.workspaceId = Venue.workspaceId true by construction (the
+      // cross-boundary integrity invariant), covering the Venue-Manager
+      // case where the caller's own ctx.workspaceId can differ from the
+      // Venue's owning workspace.
+      workspaceId: venue.workspaceId,
+      venueId: dto.venueId,
+      jobRoleId: dto.jobRoleId,
+      startsAt: new Date(dto.startsAt),
+      endsAt: new Date(dto.endsAt),
+      breakMinutes: dto.breakMinutes ?? 0,
+      requiredCount: dto.requiredCount,
+      payRatePence,
+      chargeRatePence: dto.chargeRatePence ?? 0,
+      notes: dto.notes,
+      status: ShiftStatus.DRAFT,
+      createdBy: ctx.userId,
+    });
+    const saved = await manager.save(shift);
+    // Wave 5 timeline: the lifecycle's first step, in the same transaction (no pay in metadata).
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
+      entityType: 'shift',
+      entityId: saved.id,
+      metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
+    });
+    return saved;
+  }
+
+  /**
+   * Read-only: the caller's OWN draft for an edit — strict owner scope (`assertShiftOwned`, 404 otherwise, including
+   * another workspace's or organisation's shift, which RLS hides first), not archived (409 SHIFT_ARCHIVED) and still
+   * DRAFT (409 SHIFT_NOT_DRAFT). Shared by `updateDraftTx` and the AI `update_draft_shift` proposal's `prepare()`.
+   */
+  async getOwnDraftTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<Shift> {
+    const shift = await manager.findOne(Shift, { where: { id } });
+    if (!shift) throw new NotFoundException('Shift not found.');
+    await this.assertShiftOwned(manager, ctx, shift);
+    if (shift.archivedAt) throw new ConflictException({ code: 'SHIFT_ARCHIVED', message: 'This draft shift is archived. Restore it before editing.' });
+    if (shift.status !== ShiftStatus.DRAFT) throw new ConflictException({ code: 'SHIFT_NOT_DRAFT', message: 'Only draft shifts can be edited.' });
+    return shift;
+  }
+
+  /** Named action `updateDraftShift` (console route and the AI `update_draft_shift` proposal call the same code). */
+  async updateDraft(ctx: AuthContext, id: string, dto: UpdateDraftShiftDto): Promise<Shift> {
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.updateDraftTx(manager, ctx, id, dto));
+  }
+
+  /**
+   * Edits the five schedule fields of a DRAFT shift, inside the caller's transaction. Layers: route
+   * PermissionGuard(SCHEDULE_CREATE) → SCHEDULE_CREATE re-checked here, first (403 for any id, before any lookup) →
+   * explicit field mapping + service-side validation (400; a direct caller never passes the ValidationPipe) →
+   * `getOwnDraftTx` (404 / 409) → compare-and-set on (status = DRAFT, archived_at IS NULL) → workspace RLS → DB CHECKs.
+   * Never changes `status`, `pay_rate_pence`, `charge_rate_pence`, the venue or the job role: the pay rate snapshotted at
+   * creation is kept (PHASE5_TWENTY_PLAN D2, flagged assumption — an edit never reprices the draft). Audited
+   * `shift.draft_updated` with the changed field NAMES only.
+   */
+  async updateDraftTx(manager: EntityManager, ctx: AuthContext, id: string, dto: UpdateDraftShiftDto): Promise<Shift> {
+    await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Editing shifts is not permitted.');
+    const changed = UPDATE_DRAFT_SHIFT_FIELDS.filter((key) => dto?.[key] !== undefined);
+    if (changed.length === 0) throw new BadRequestException('Name at least one field to change.');
+    const startsAtInput = dto.startsAt !== undefined ? new Date(dto.startsAt) : undefined;
+    const endsAtInput = dto.endsAt !== undefined ? new Date(dto.endsAt) : undefined;
+    if ((startsAtInput && Number.isNaN(startsAtInput.getTime())) || (endsAtInput && Number.isNaN(endsAtInput.getTime()))) {
+      throw new BadRequestException('Start and end must be valid dates.');
+    }
+    if (dto.breakMinutes !== undefined && !(Number.isInteger(dto.breakMinutes) && dto.breakMinutes >= 0)) throw new BadRequestException('Break minutes must be a whole number of at least 0.');
+    if (dto.requiredCount !== undefined && !(Number.isInteger(dto.requiredCount) && dto.requiredCount >= 1)) throw new BadRequestException('The number of people needed must be a whole number of at least 1.');
+    if (dto.notes !== undefined && dto.notes !== null && typeof dto.notes !== 'string') throw new BadRequestException('Notes must be text.');
+
+    const shift = await this.getOwnDraftTx(manager, ctx, id);
+    const startsAt = startsAtInput ?? shift.startsAt;
+    const endsAt = endsAtInput ?? shift.endsAt;
+    if (!(endsAt.getTime() > startsAt.getTime())) throw new BadRequestException('A shift must end after it starts.');
+    const [claimed] = (await manager.query(
+      `UPDATE shift SET starts_at = $2, ends_at = $3, break_minutes = $4, required_count = $5, notes = $6, updated_at = now()
+        WHERE id = $1 AND status = $7 AND archived_at IS NULL RETURNING id`,
+      [
+        id,
+        startsAt,
+        endsAt,
+        dto.breakMinutes ?? shift.breakMinutes,
+        dto.requiredCount ?? shift.requiredCount,
+        dto.notes !== undefined ? dto.notes : (shift.notes ?? null),
+        ShiftStatus.DRAFT,
+      ],
+    )) as [Array<{ id: string }>, number];
+    if (claimed.length === 0) throw new ConflictException('This shift changed while it was being edited — please refresh.');
+    await this.auditService.record(manager, ctx, AuditAction.SHIFT_DRAFT_UPDATED, { entityType: 'shift', entityId: id, metadata: { fields: changed } });
+    return manager.findOneByOrFail(Shift, { id });
+  }
+
+  /**
+   * Named action `publishShift`. Layers: route PermissionGuard(SCHEDULE_PUBLISH) → SCHEDULE_PUBLISH re-checked here,
+   * first (403 for any id, before the row is loaded — never an existence oracle; LAYER2_HARDENING_2026-10-25 F2) →
+   * `assertShiftOwned` (404 out of scope) → `assertTransition` (409) → workspace RLS.
+   */
   async publish(ctx: AuthContext, id: string): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_PUBLISH, 'Publishing shifts is not permitted.');
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);

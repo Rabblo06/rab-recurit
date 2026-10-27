@@ -1,4 +1,5 @@
 import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignment-time';
+import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import {
   assertTransition,
@@ -29,7 +30,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
-import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
@@ -67,6 +68,28 @@ import { MISSING_CLOCK_OUT_GRACE_MINUTES } from './missing-clock-out-policy';
 import { ATTENDANCE_VERSION_SQL, ShiftReportDetail, ShiftReportService } from './shift-report.service';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
+/**
+ * The ONE manager-facing attendance read scope (extracted from `AttendanceService.list()` unchanged; AI Phase 1 reuses
+ * it): a Venue Manager reads attendance at their assigned venues (`s` = the shift), a normal Manager attendance of the
+ * Staff they created (`sp` = the staff profile).
+ */
+export function attendanceReadScopeCondition(scope: ResourceScope, ctx: Pick<AuthContext, 'userId'>, nextParam: (value: unknown) => string): string {
+  return scope.kind === 'venue' ? `s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])` : `sp.created_by = ${nextParam(ctx.userId)}`;
+}
+
+/** AI Phase 1 attendance aggregate — counts only. */
+export interface AssistantAttendanceSummary {
+  records: number;
+  byStatus: Record<AttendanceStatusType, number>;
+  lateClockIns: number;
+  lateGraceMinutes: number;
+  noShows: { confirmed: number; provisional: number };
+  /** AI Phase 3: booked assignments (confirmed / completed / no-show) STARTING in [from, to). */
+  assignmentsStarting: number;
+  /** AI Phase 3: of those, the ones with a recorded clock-in. */
+  attendedAssignments: number;
+}
+
 const ATTENDANCE_SORT_COLUMNS: Record<string, string> = {
   clockInAt: 'a.clock_in_at',
   staff: 'u.first_name',
@@ -929,11 +952,7 @@ export class AttendanceService {
       const earningsVisible = this.fieldPolicy.isVisible(fields, 'earnings');
       const workedVisible = this.fieldPolicy.isVisible(fields, 'workedTime');
 
-      if (scope.kind === 'venue') {
-        conditions.push(`s.venue_id = ANY(${nextParam(scope.venueIds)}::uuid[])`);
-      } else {
-        conditions.push(`sp.created_by = ${nextParam(ctx.userId)}`);
-      }
+      conditions.push(attendanceReadScopeCondition(scope, ctx, nextParam));
       if (dto.q) {
         const q = nextParam(toIlikePattern(dto.q));
         conditions.push(`(u.first_name ILIKE ${q} OR u.last_name ILIKE ${q} OR v.name ILIKE ${q})`);
@@ -976,6 +995,84 @@ export class AttendanceService {
         params,
       );
       return { data: rows.map((r: Record<string, unknown>) => this.fieldPolicy.omit(fields, toAttendanceSummary(r))), total: count };
+    });
+  }
+
+  /**
+   * AI Phase 1 (read-only, aggregate; docs/ai/PHASE1_PLAN.md). Operational attendance COUNTS for the caller's scope
+   * (`attendanceReadScopeCondition`, the same rule as `list()`), never a per-person breakdown, a name, a location, a
+   * time, worked minutes or earnings — the owner rule is "aggregated operational counts, no employee-performance
+   * profile, no employment judgement".
+   *  - `byStatus`: attendance records whose clock-in falls in [from, to), per REAL `AttendanceStatus`.
+   *  - `lateClockIns`: of those, clock-ins recorded more than `LATE_CLOCK_IN_GRACE_MINUTES` after the assignment's
+   *    effective start (`assignmentTimeSql`). ASSUMPTION FLAGGED FOR THE OWNER (attendance): "late" reuses the SAME grace
+   *    the Worker uses to raise the live late-clock-in alert (`isLateClockIn`); no stored "late" fact exists.
+   *  - `noShows`: assignments starting in [from, to) marked no_show — `confirmed` (a manager reviewed it) vs
+   *    `provisional` (the monitor's unreviewed mark, owner rule 2026-10-21: not a confirmed no-show).
+   * `attendance.view` re-checked here (layer 2), as on `GET /attendance`.
+   */
+  async assistantAttendanceSummary(ctx: AuthContext, range: { from: Date; to: Date }): Promise<AssistantAttendanceSummary> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // AI Phase 3 (rule 7.3): read only, 5 s per statement.
+      await beginAssistantRead(manager);
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_VIEW))) throw new ForbiddenException('Permission required.');
+      const summary: AssistantAttendanceSummary = {
+        records: 0,
+        byStatus: Object.fromEntries(Object.values(AttendanceStatus).map((st) => [st, 0])) as Record<AttendanceStatusType, number>,
+        lateClockIns: 0,
+        lateGraceMinutes: this.env.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+        noShows: { confirmed: 0, provisional: 0 },
+        assignmentsStarting: 0,
+        attendedAssignments: 0,
+      };
+      const scope = await this.resourceScope.resolveTx(manager, ctx);
+      if (scope.kind === 'venue' && scope.venueIds.length === 0) return summary;
+      const params: unknown[] = [];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const scopeSql = attendanceReadScopeCondition(scope, ctx, nextParam);
+      const from = nextParam(range.from);
+      const to = nextParam(range.to);
+      const grace = nextParam(summary.lateGraceMinutes);
+      const start = assignmentTimeSql('sa', 's').start;
+      const statusRows: Array<{ status: string; n: number; late: number }> = await manager.query(
+        `SELECT a.status, count(*)::int AS n,
+                count(*) FILTER (WHERE a.clock_in_at > ${start} + make_interval(mins => ${grace}::int))::int AS late
+           FROM attendance a
+           JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
+           JOIN shift s ON s.id = a.shift_id
+           JOIN staff_profile sp ON sp.id = a.staff_profile_id
+          WHERE ${scopeSql} AND a.clock_in_at >= ${from} AND a.clock_in_at < ${to}
+          GROUP BY a.status`,
+        params,
+      );
+      for (const r of statusRows) {
+        summary.records += Number(r.n);
+        summary.lateClockIns += Number(r.late);
+        if (r.status in summary.byStatus) summary.byStatus[r.status as AttendanceStatusType] = Number(r.n);
+      }
+      const [noShow] = await manager.query(
+        `SELECT count(*) FILTER (WHERE sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed,
+                count(*) FILTER (WHERE sa.attendance_reviewed_at IS NULL)::int AS provisional
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
+           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+          WHERE ${scopeSql} AND sa.status = 'no_show' AND ${start} >= ${from} AND ${start} < ${to}`,
+        params.slice(0, 3),
+      );
+      summary.noShows = { confirmed: Number(noShow?.confirmed ?? 0), provisional: Number(noShow?.provisional ?? 0) };
+      // AI Phase 3: booked assignments starting in the range and how many of them have a clock-in (counts only).
+      const [booked] = await manager.query(
+        `SELECT count(*)::int AS starting,
+                count(*) FILTER (WHERE EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id AND a.clock_in_at IS NOT NULL))::int AS attended
+           FROM shift_assignment sa
+           JOIN shift s ON s.id = sa.shift_id
+           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+          WHERE ${scopeSql} AND sa.status IN ('confirmed', 'completed', 'no_show') AND ${start} >= ${from} AND ${start} < ${to}`,
+        params.slice(0, 3),
+      );
+      summary.assignmentsStarting = Number(booked?.starting ?? 0);
+      summary.attendedAssignments = Number(booked?.attended ?? 0);
+      return summary;
     });
   }
 

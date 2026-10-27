@@ -4,8 +4,9 @@ import {
   IconSearch, IconChartPie, IconUsers, IconBuildingSkyscraper, IconChecklist,
   IconCalendarMonth, IconCash, IconMapPin, IconHistory, IconSettings,
   IconUserPlus, IconUserStar, IconPlus, IconTimelineEvent,
-  IconFileImport, IconFileExport, IconTrash, IconUser, IconShieldLock, IconX,
+  IconFileImport, IconFileExport, IconTrash, IconUser, IconShieldLock, IconX, IconSparkles,
 } from '@tabler/icons-react';
+import { askAiShortcutLabel } from '../features/ai/aiShortcut';
 import RightSidePanel from '../shared/components/RightSidePanel';
 import { EmptyState } from '../shared/components/LoadingState';
 
@@ -18,11 +19,13 @@ type Command = {
   run: () => void;
 };
 
-export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTimeline }: {
+export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTimeline, onAskAi }: {
   open: boolean;
   onClose: () => void;
   onOpenSearch: (query?: string) => void;
   onOpenTimeline: () => void;
+  /** U2: present only for a user the server confirms as AI-eligible (no Ask AI command otherwise). */
+  onAskAi?: () => void;
 }) {
   const nav = useNavigate();
   const [query, setQuery] = useState('');
@@ -42,6 +45,8 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
   };
 
   const commands = useMemo<Command[]>(() => [
+    // Ask AI (U2): only when the server confirmed AI eligibility (the shell passes onAskAi then).
+    ...(onAskAi ? [{ id: 'ask-ai', label: 'Ask AI', section: 'Navigation', Icon: IconSparkles, hint: askAiShortcutLabel(), run: () => { onClose(); onAskAi(); } }] : []),
     // Navigation
     { id: 'nav-dashboard',  label: 'Go to Dashboard',  section: 'Navigation', Icon: IconChartPie,            run: () => go('/') },
     { id: 'nav-users',      label: 'Go to Users',       section: 'Navigation', Icon: IconUsers,               run: () => go('/users') },
@@ -84,7 +89,7 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
     { id: 'set-general',   label: 'Go to General Settings',   section: 'Admin', Icon: IconSettings,       run: () => go('/settings#general') },
     { id: 'set-roles',     label: 'Go to Role/Permission Settings', section: 'Admin', Icon: IconShieldLock, run: () => go('/settings#roles') },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [onClose, onOpenSearch, onOpenTimeline]);
+  ], [onClose, onOpenSearch, onOpenTimeline, onAskAi]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();

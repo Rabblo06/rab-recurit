@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { Injectable, Optional } from '@nestjs/common';
 import { classifyWorkspaceHost, parseHostAuthority } from '@rab/shared';
 
+import { LegacyAiEnvFacts, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { EnvironmentVariables } from './environment-variables';
 import { WorkspaceOriginTrustRegistry } from './workspace-origin-trust.registry';
 
@@ -20,6 +21,15 @@ export class EnvironmentService {
 
   get<T extends keyof EnvironmentVariables>(key: T): EnvironmentVariables[T] {
     return this.configService.get(key, { infer: true });
+  }
+
+  /**
+   * AI Phase 1 "real models only" (§5): the RETIRED AI names (AI_PROVIDER, AI_MODEL, AI_PROVIDER_API_KEY) are no longer
+   * schema properties, so they are read from the raw configuration — and only the verdicts leave (set / mock stand-in /
+   * alias present). Never a value.
+   */
+  legacyAiEnv(): LegacyAiEnvFacts {
+    return legacyAiEnvFacts((name) => this.configService.get(name as never));
   }
 
   get isProduction(): boolean {

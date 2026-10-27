@@ -71,8 +71,10 @@ struct HTTPResult: @unchecked Sendable {
 ///
 /// - Base URL includes `/rest/v1`; paths add `/auth/me`, `/offers`, ...
 /// - Every request carries `X-Client-Platform: mobile` (the server then
-///   returns the refresh token in the JSON body instead of a web cookie)
-///   and `Authorization: Bearer <access>` when a token is stored.
+///   returns the refresh token in the JSON body instead of a web cookie),
+///   `X-Client-Capabilities: mfa-verify` (this build can finish a 2FA
+///   sign-in challenge) and `Authorization: Bearer <access>` when a token is
+///   stored.
 /// - 401 on a non-auth path (or `/auth/me`, `/auth/logout`) triggers ONE
 ///   shared refresh, then ONE retry under the same identity generation.
 ///   A request dispatched before a logout/account switch is never replayed
@@ -87,6 +89,14 @@ public final class APIClient: @unchecked Sendable {
     public static let refreshTimeout: TimeInterval = 20
     public static let platformHeaderName = "X-Client-Platform"
     public static let platformHeaderValue = "mobile"
+    /// Account security step 1 (P3): the sign-in steps this build can finish.
+    /// `mfa-verify` = it shows the second-factor code screen and completes a
+    /// `verify` challenge. Without it the server answers an enrolled account
+    /// with 409 CLIENT_UPDATE_REQUIRED instead of a challenge. Client-asserted
+    /// and never a credential: it can only ENABLE the challenge path, never
+    /// skip a check. Same value as the Flutter app's header.
+    public static let capabilitiesHeaderName = "X-Client-Capabilities"
+    public static let capabilitiesHeaderValue = "mfa-verify"
 
     public let baseURL: URL
     private let baseString: String
@@ -222,6 +232,7 @@ public final class APIClient: @unchecked Sendable {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.httpMethod = "GET"
         request.setValue(Self.platformHeaderValue, forHTTPHeaderField: Self.platformHeaderName)
+        request.setValue(Self.capabilitiesHeaderValue, forHTTPHeaderField: Self.capabilitiesHeaderName)
         guard let result = try? await transport(request, timeout: 10) else { return false }
         return (200..<300).contains(result.response.statusCode)
     }
@@ -268,7 +279,22 @@ public final class APIClient: @unchecked Sendable {
 
     static func refreshEligible(_ path: String) -> Bool {
         let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-        return !bare.hasPrefix("/auth/") || bare == "/auth/me" || bare == "/auth/logout"
+        if !bare.hasPrefix("/auth/") || bare == "/auth/me" || bare == "/auth/logout" { return true }
+        // The signed-in account's own 2FA settings (`GET/POST /auth/mfa*`) sit
+        // behind JwtAuthGuard like any other route, so an expired access token
+        // refreshes once. The pre-session challenge routes
+        // (`/auth/mfa/challenge/*`) are like /auth/login: never a refresh.
+        if bare == "/auth/mfa" { return true }
+        return bare.hasPrefix("/auth/mfa/") && !bare.hasPrefix("/auth/mfa/challenge/")
+    }
+
+    /// A 401 answered by a route HANDLER (a wrong 2FA code, a lapsed
+    /// challenge) rather than by the auth guard: the session is fine, so it
+    /// must never trigger a refresh, and the request is never replayed (the
+    /// handler already ran and counted the attempt).
+    static func isHandlerUnauthorized(_ data: Data) -> Bool {
+        guard let code = ServerErrorPayload.parse(data).code else { return false }
+        return APIError.handlerUnauthorizedCodes.contains(code)
     }
 
     /// Applies the per-call retry policy around `execute`. Only
@@ -311,7 +337,7 @@ public final class APIClient: @unchecked Sendable {
         let elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
         Log.network.debug("\(method.rawValue, privacy: .public) \(path, privacy: .private) -> \(status, privacy: .public) in \(elapsedMs, privacy: .public)ms")
 
-        if status == 401, !retried, Self.refreshEligible(path) {
+        if status == 401, !retried, Self.refreshEligible(path), !Self.isHandlerUnauthorized(result.data) {
             // CF-36: sent under an identity that has since been signed out.
             // Its 401 says nothing about the CURRENT session: never refresh
             // (rotate) the current account's token for it, never clear it.
@@ -457,6 +483,7 @@ public final class APIClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(Self.platformHeaderValue, forHTTPHeaderField: Self.platformHeaderName)
+        request.setValue(Self.capabilitiesHeaderValue, forHTTPHeaderField: Self.capabilitiesHeaderName)
         if let bearer {
             request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         }

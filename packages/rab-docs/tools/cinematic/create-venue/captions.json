@@ -1,0 +1,57 @@
+[
+  {
+    "start": 2.2,
+    "end": 6.979,
+    "text": "Every shift belongs to a venue. This\ntutorial shows how to add one, using"
+  },
+  {
+    "start": 6.979,
+    "end": 8.877,
+    "text": "fictional demonstration data."
+  },
+  {
+    "start": 9.4,
+    "end": 11.445,
+    "text": "On Venues, select New venue."
+  },
+  {
+    "start": 11.967,
+    "end": 14.966,
+    "text": "Enter the venue name, the client and the\nvenue type."
+  },
+  {
+    "start": 18.133,
+    "end": 19.373,
+    "text": "Add the address."
+  },
+  {
+    "start": 23.5,
+    "end": 29.033,
+    "text": "Set the location and the geofence radius.\nStaff must be inside this area to clock in"
+  },
+  {
+    "start": 29.033,
+    "end": 31.009,
+    "text": "when the geofence is enforced."
+  },
+  {
+    "start": 31.533,
+    "end": 33.588,
+    "text": "Set the default break in minutes."
+  },
+  {
+    "start": 34.1,
+    "end": 38.255,
+    "text": "Select Create venue. The drawer stays open\nso you can add pay rates."
+  },
+  {
+    "start": 38.767,
+    "end": 42.948,
+    "text": "Add an hourly rate for a role at this\nvenue, then select Save changes."
+  },
+  {
+    "start": 46,
+    "end": 48.121,
+    "text": "The new venue appears in the list."
+  }
+]

@@ -1,0 +1,5 @@
+renders/
+.hyperframes/
+assets/*.mp4
+assets/*.wav
+renders.log

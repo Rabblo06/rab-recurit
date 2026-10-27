@@ -1,0 +1,51 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 5.86,
+    "text": "You can add your own shortcuts to the sidebar. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\intro.wav"
+  },
+  {
+    "id": "plus",
+    "start": 6.367,
+    "seconds": 3.819,
+    "text": "Select the plus beside Operations to open Add menu item.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\plus.wav"
+  },
+  {
+    "id": "kinds",
+    "start": 10.7,
+    "seconds": 5.995,
+    "text": "A shortcut can be an Object, which is a Crewflow page, a filtered View, a Record, a Folder, or a Link.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\kinds.wav"
+  },
+  {
+    "id": "choose",
+    "start": 17.2,
+    "seconds": 2.31,
+    "text": "Choose View, and pick a filtered list.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\choose.wav"
+  },
+  {
+    "id": "confirm",
+    "start": 20.6,
+    "seconds": 3.157,
+    "text": "Give the shortcut a name and an icon, then select Add.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\confirm.wav"
+  },
+  {
+    "id": "result",
+    "start": 24.867,
+    "seconds": 7.103,
+    "text": "The shortcut appears under Operations. Opening it goes through the normal page, so your usual access still applies.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\result.wav"
+  },
+  {
+    "id": "manage",
+    "start": 32.5,
+    "seconds": 8.04,
+    "text": "Use the options button on a shortcut to rename or remove it. Shortcuts are saved on this device, for your account and workspace.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\sidebar-shortcuts\\manage.wav"
+  }
+]

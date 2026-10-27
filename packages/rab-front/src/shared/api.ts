@@ -2,6 +2,10 @@ import axios from 'axios';
 import { applyIdentityFromServer, applyRefreshedToken, getAccessToken, getIdentitySnapshot, getSessionId, getUserId, markUnauthenticated, type IdentitySnapshot } from './lib/auth-session';
 import { shouldAcceptResponse, shouldAdoptBroadcastIdentity, shouldFallBackToLegacyAuth, shouldReplayAfterRefresh } from './lib/identity-guard';
 import { BACKGROUND_REQUEST_HEADER, installUserActivityTracking, isBackgroundRequest } from './lib/user-activity';
+import { installStepUpRetry } from './lib/step-up-retry';
+
+// Lane D (M10-2): `registerStepUpHandler` lives in lib/step-up-retry (re-exported here for features).
+export { registerStepUpHandler } from './lib/step-up-retry';
 
 installUserActivityTracking();
 
@@ -56,7 +60,7 @@ api.interceptors.request.use((config) => {
 // Query error) instead of a redirect to /login.
 // Wave 4 lane MFA: the second-factor challenge and the login-handoff exchange are pre-session steps too (a 401 there means
 // "that code/link didn't work", never "refresh the session").
-const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/mfa/challenge', '/auth/login-handoff/exchange', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept', '/email-change/confirm'];
+const UNAUTHENTICATED_AUTH_ROUTES = ['/auth/login', '/auth/mfa/challenge', '/auth/login-handoff/exchange', '/auth/login-handoff/peek', '/auth/refresh', '/auth/forgot-password', '/auth/reset-password', '/auth/activate-account', '/invitations/resolve', '/invitations/accept', '/email-change/confirm'];
 function isUnauthenticatedAuthRoute(url: string | undefined): boolean {
   return !!url && UNAUTHENTICATED_AUTH_ROUTES.some((route) => url.includes(route));
 }
@@ -395,6 +399,9 @@ export async function bootstrapSession(): Promise<boolean> {
   });
   return refreshInFlight;
 }
+
+// Lane D (M10-2): 403 STEP_UP_REQUIRED → one "Confirm it's you" prompt → replay once (see lib/step-up-retry.ts).
+installStepUpRetry(api);
 
 api.interceptors.response.use(
   (response) => {

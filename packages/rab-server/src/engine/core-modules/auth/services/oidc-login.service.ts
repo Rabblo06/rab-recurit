@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 
 import { EnvironmentService } from '../../environment/environment.service';
-import { ConsumedOAuthTransaction, OAuthIntent, OAuthTransactionStateService, OAuthProvider } from './oauth-transaction-state.service';
+import { ConsumedOAuthTransaction, OAuthIntent, OAuthReauthBinding, OAuthTransactionStateService, OAuthProvider } from './oauth-transaction-state.service';
 import { OidcClientFactoryService, OidcProvider } from './oidc-client-factory.service';
 
 export interface ProviderIdentity {
@@ -51,20 +51,33 @@ export class OidcLoginService {
   /** Returns the provider URL plus the raw browser-binding secret the caller must set as `crewflow_oauth_tx`. */
   async buildAuthorizationUrl(
     provider: OAuthProvider,
-    options: { returnToPath?: string; intent?: OAuthIntent; invitationTokenHash?: string } = {},
+    options: { returnToPath?: string; intent?: OAuthIntent; invitationTokenHash?: string; reauth?: OAuthReauthBinding } = {},
   ): Promise<{ url: string; browserSecret: string }> {
     const client = await this.clients.getClient(provider);
     const tx = await this.state.create(provider, options);
+    const reauthenticate = options.intent === 'reauthenticate';
     const url = client.authorizationUrl({
       scope: SCOPES[provider],
       state: tx.id,
       nonce: tx.nonce,
       code_challenge: tx.codeChallenge,
       code_challenge_method: 'S256',
-      // Forces the account chooser every time — never a silent re-auth of whichever account
-      // happens to have an active provider session in the browser (same hardening Twenty's own
-      // Google/Microsoft guards apply, confirmed in the P1C.1A audit).
-      prompt: 'select_account',
+      ...(reauthenticate
+        ? {
+            // Account security step 1 (P6): FORCE a fresh credential entry. Microsoft identity platform documents
+            // `prompt=login` ("forces the user to enter their credentials on that request, which negates single sign-on").
+            // `max_age=0` is the OpenID Connect Core equivalent and makes `auth_time` REQUIRED in the ID token; the
+            // callback refuses a missing or stale `auth_time` regardless (OidcReauthService), so a provider that ignores
+            // either parameter fails closed instead of granting a step-up for an old login.
+            prompt: 'login',
+            max_age: 0,
+          }
+        : {
+            // Forces the account chooser every time — never a silent re-auth of whichever account
+            // happens to have an active provider session in the browser (same hardening Twenty's own
+            // Google/Microsoft guards apply, confirmed in the P1C.1A audit).
+            prompt: 'select_account',
+          }),
     });
     return { url, browserSecret: tx.browserSecret };
   }
@@ -73,7 +86,7 @@ export class OidcLoginService {
     provider: OAuthProvider,
     callbackParams: Record<string, string | string[] | undefined>,
     browserSecret: string | undefined,
-  ): Promise<{ identity: ProviderIdentity; returnToPath: string; transaction: ConsumedOAuthTransaction }> {
+  ): Promise<{ identity: ProviderIdentity; returnToPath: string; transaction: ConsumedOAuthTransaction; authTime: number | null }> {
     const stateId = callbackParams.state;
     if (typeof stateId !== 'string' || !stateId) {
       throw new UnauthorizedException('We could not sign you in. Try again or use another sign-in method.');
@@ -100,6 +113,8 @@ export class OidcLoginService {
 
     const claims = tokenSet.claims();
     const returnToPath = consumed.returnToPath ?? '/';
+    // Validated, signed ID-token claim (seconds since epoch) — only the re-authentication flow relies on it.
+    const authTime = typeof claims.auth_time === 'number' && Number.isFinite(claims.auth_time) ? claims.auth_time : null;
     const names = { givenName: typeof claims.given_name === 'string' ? claims.given_name : null, familyName: typeof claims.family_name === 'string' ? claims.family_name : null };
 
     if (provider === 'google') {
@@ -108,7 +123,7 @@ export class OidcLoginService {
       if (!claims.email || claims.email_verified !== true) {
         throw new UnauthorizedException('We could not sign you in. Try again or use another sign-in method.');
       }
-      return { identity: { subject: claims.sub, email: claims.email, emailVerified: true, ...names }, returnToPath, transaction: consumed };
+      return { identity: { subject: claims.sub, email: claims.email, emailVerified: true, ...names }, returnToPath, transaction: consumed, authTime };
     }
 
     // Microsoft: durable identity is <tenantId>:<objectId> (`tid`:`oid`), never the bare `sub`
@@ -131,6 +146,6 @@ export class OidcLoginService {
     }
     // F1 (nOAuth): the email is only treated as proven when Microsoft says the domain owner verified it.
     const emailVerified = microsoftClaims.xms_edov === true || microsoftClaims.xms_edov === 'true' || microsoftClaims.xms_edov === 1;
-    return { identity: { subject: `${microsoftClaims.tid}:${microsoftClaims.oid}`, email, emailVerified, ...names }, returnToPath, transaction: consumed };
+    return { identity: { subject: `${microsoftClaims.tid}:${microsoftClaims.oid}`, email, emailVerified, ...names }, returnToPath, transaction: consumed, authTime };
   }
 }

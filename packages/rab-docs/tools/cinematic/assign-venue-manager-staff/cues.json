@@ -1,0 +1,58 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 9.019,
+    "text": "A venue manager can only see and select the staff you assign to them. This tutorial shows how to assign a team, using fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 9.533,
+    "seconds": 3.2,
+    "text": "Open Users, then select the Venue managers tab.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\open.wav"
+  },
+  {
+    "id": "view",
+    "start": 13.267,
+    "seconds": 3.413,
+    "text": "Select View on a venue manager to open their details.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\view.wav"
+  },
+  {
+    "id": "tab",
+    "start": 17.2,
+    "seconds": 3.773,
+    "text": "Open the More menu beside the tabs, and choose Assigned staff.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\tab.wav"
+  },
+  {
+    "id": "list",
+    "start": 21.5,
+    "seconds": 4.672,
+    "text": "This list is everyone the venue manager can currently see and select in their app.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\list.wav"
+  },
+  {
+    "id": "add",
+    "start": 26.7,
+    "seconds": 7.498,
+    "text": "Select Add Staff. The Select Staff page lists the staff in your workspace, and anyone already assigned is marked Assigned.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\add.wav"
+  },
+  {
+    "id": "pick",
+    "start": 34.7,
+    "seconds": 3.073,
+    "text": "Tick the people you want to add, then select Confirm.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\pick.wav"
+  },
+  {
+    "id": "done",
+    "start": 39.733,
+    "seconds": 9.041,
+    "text": "They now appear in the assigned list. To remove someone, select the cross beside their name and confirm. Their account and work history are not deleted.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\assign-venue-manager-staff\\done.wav"
+  }
+]

@@ -7,6 +7,9 @@ import {
   IconClock, IconBan, IconCheck, IconX, IconUsers,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { toast } from '../../shared/lib/toast';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { confirmAllSummary } from './confirm-all-summary';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -179,16 +182,40 @@ export default function Offers() {
     [offers],
   );
 
+  // One confirm-all per batch, in sequence. Every batch is attempted even if an earlier one fails, and the user is told
+  // exactly how many offers were confirmed and how many batches failed: a partial result is never reported as success.
   async function handleConfirmAllAccepted() {
+    if (confirmingAllBatches) return;
     setConfirmingAllBatches(true);
+    const outcomes: Array<{ ok: boolean }> = [];
+    let failedBatches = 0;
+    let firstError: unknown = null;
     try {
       for (const batchId of acceptedBatchIds) {
-        await confirmAllBatch.mutateAsync(batchId);
+        try {
+          const res = await confirmAllBatch.mutateAsync(batchId);
+          outcomes.push(...(((res as { data?: { results?: Array<{ ok: boolean }> } })?.data?.results) ?? []));
+        } catch (error) {
+          failedBatches += 1;
+          firstError ??= error;
+        }
       }
-      invalidate();
     } finally {
+      invalidate();
       setConfirmingAllBatches(false);
     }
+    const summary = confirmAllSummary(outcomes);
+    if (failedBatches === 0) {
+      if (summary.partial) toast.warning(summary.text, { persistent: true });
+      else toast.success(summary.text);
+      return;
+    }
+    const confirmed = outcomes.filter((o) => o.ok).length;
+    const reason = getApiErrorMessage(firstError, 'Please try again.');
+    toast.error(
+      `${confirmed} offer${confirmed === 1 ? '' : 's'} confirmed, but ${failedBatches} of ${acceptedBatchIds.length} batch${acceptedBatchIds.length === 1 ? '' : 'es'} could not be confirmed. ${reason}`,
+      { persistent: true },
+    );
   }
 
   const isVisible = columnVisibility.isVisible;

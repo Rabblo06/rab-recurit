@@ -1,0 +1,72 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 5.376,
+    "text": "This is a short tour of the Crewflow web console, using fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\intro.wav"
+  },
+  {
+    "id": "dashboard",
+    "start": 5.9,
+    "seconds": 6.74,
+    "text": "The Dashboard summarises your staff, offers, shifts and attendance. Every card links to the page behind it.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\dashboard.wav"
+  },
+  {
+    "id": "sidebar",
+    "start": 13.167,
+    "seconds": 10.368,
+    "text": "The sidebar is grouped. The main pages are at the top, Operations holds Calendar, Venues and Venue Offers, and Workspace holds the Audit Log, Help Center and Support.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\sidebar.wav"
+  },
+  {
+    "id": "users",
+    "start": 24.067,
+    "seconds": 4.139,
+    "text": "Users lists your staff, and the venue managers who work at your venues.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\users.wav"
+  },
+  {
+    "id": "shifts",
+    "start": 28.733,
+    "seconds": 3.968,
+    "text": "Shifts shows every shift, how many places are filled, and its status.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\shifts.wav"
+  },
+  {
+    "id": "offers",
+    "start": 33.233,
+    "seconds": 4.023,
+    "text": "Offers tracks each offer you have sent, and how staff have responded.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\offers.wav"
+  },
+  {
+    "id": "venue-offers",
+    "start": 37.767,
+    "seconds": 4.818,
+    "text": "Venue Offers lists staffing requests and shifts, each with its own staffing board.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\venue-offers.wav"
+  },
+  {
+    "id": "calendar",
+    "start": 43.1,
+    "seconds": 4.115,
+    "text": "The calendar shows the month ahead. Select a day to see its shifts.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\calendar.wav"
+  },
+  {
+    "id": "search",
+    "start": 47.733,
+    "seconds": 4.587,
+    "text": "Press the forward slash key at any time to search people, venues, shifts and offers.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\search.wav"
+  },
+  {
+    "id": "help",
+    "start": 52.833,
+    "seconds": 3.115,
+    "text": "And Help Center has short guides to everyday tasks.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\overview-tour\\help.wav"
+  }
+]

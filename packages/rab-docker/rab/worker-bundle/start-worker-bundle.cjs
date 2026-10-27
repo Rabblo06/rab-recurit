@@ -77,6 +77,20 @@ const JOBS_ENV_KEYS = Object.freeze([
   'OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE', 'OUTBOX_RETENTION_INTERVAL_MINUTES',
   // Wave 4/5 (MFA-lane request): login-handoff cleanup job (on by default)
   'LOGIN_HANDOFF_CLEANUP_ENABLED', 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES',
+  // Lane A (BullMQ worker migration): scheduler mode, scan-queue prefix and reconcile period (validated by the shared
+  // EnvironmentVariables class: an invalid mode/prefix refuses to boot; interval is the default).
+  'WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS',
+  // AI Phase 1 (docs/ai/PHASE1_PLAN.md, PHASE1_TWENTY_PLAN.md): the rab-ai consumer + ai-retention scan. Provider keys are
+  // jobs-only, never the provisioner. The retired AI_PROVIDER / AI_MODEL / AI_PROVIDER_API_KEY are NOT forwarded.
+  'AI_ENABLED', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'MISTRAL_API_KEY', 'XAI_API_KEY', 'AI_DEV_ALLOW_REAL_PROVIDERS', 'AI_DAILY_BUDGET_USD', 'AI_MODELS_DEFAULT_FAST', 'AI_MODELS_DEFAULT_SMART', 'AI_MODELS_DEFAULT_DISABLED', 'AI_MAX_OUTPUT_TOKENS', 'AI_MAX_STEPS', 'AI_MAX_INPUT_CHARS', 'AI_ORG_DAILY_TOKEN_BUDGET', 'AI_USER_RATE_PER_MIN', 'AI_ORG_MAX_ACTIVE_TURNS', 'AI_TURN_TIMEOUT_SECONDS', 'AI_RETENTION_DAYS', 'AI_RETENTION_MODE', 'AI_RETENTION_INTERVAL_MINUTES',
+  // AI Phase 2 (PHASE2_TWENTY_PLAN §2.5): the thread-title switch, read by the rab-ai consumer's title service.
+  'AI_TITLE_GENERATION',
+  // AI Phase 6a (PHASE6_TWENTY_PLAN §4): the agents platform switch (default false; storage only until EX-3). Forwarded so
+  // the jobs child never silently takes a different value from the API when 6b adds the agent scan.
+  'AI_AGENTS_ENABLED',
+  // AI Phase 7b (PHASE7_TWENTY_PLAN, owner decision 2026-10-25): the per-user cost ceiling and the rate limits. The Worker
+  // reads AI_USER_DAILY_BUDGET_USD for every step reservation; the rate names keep the jobs child on the API's values.
+  'AI_USER_DAILY_BUDGET_USD', 'AI_ORG_RATE_PER_MIN', 'AI_USER_TURNS_PER_DAY',
   // Sign-in provider configuration: the validator refuses to boot when no provider is enabled, and requires an enabled
   // provider's client id/secret/callback — so a deployment that disables password sign-in needs these here too.
   'AUTH_PASSWORD_ENABLED', 'AUTH_GOOGLE_ENABLED', 'AUTH_GOOGLE_CLIENT_ID', 'AUTH_GOOGLE_CLIENT_SECRET', 'AUTH_GOOGLE_CALLBACK_URL',

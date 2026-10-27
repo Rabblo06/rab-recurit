@@ -130,7 +130,8 @@ describeIfDb('P1F authorization cache boundary (integration)', () => {
       expect(before!.accountStatus).toBe('active');
 
       const ctx = { organisationId: organisation.id, workspaceId: null, userId: identity.userId, role: '' };
-      await managerService.setActive(ctx, identity.profileId!, false);
+      // Lane D (M10-2): deactivation needs a recent step-up of the caller's REAL session (a fresh sign-in provides it).
+      await managerService.setActive({ ...ctx, sessionId: (await factory.signedInContext(identity)).sessionId }, identity.profileId!, false);
 
       // ManagerService.setActive(false) revokes every session for this user as part of suspension
       // — the same real-service call path a Manager Settings "Deactivate" button triggers, not a

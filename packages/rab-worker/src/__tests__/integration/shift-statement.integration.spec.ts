@@ -98,9 +98,26 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
       attendanceQr.sign(await m.findOneByOrFail(Shift, { id: shiftId })));
   }
 
-  /** Full flow to an approved payroll record for staff[i]; returns the record id (and its attendance id). */
+  /** Inside the 12 Oct – 25 Oct 2026 period (payday 4 Nov 2026): Tuesday 20 October, 10:00 BST. */
+  const IN_OCTOBER_PERIOD = '2026-10-20T09:00:00Z';
+
+  /**
+   * Pins a shift's SCHEDULED time (shift + its assignments) to start at `instant`, keeping its length. The shift is worked
+   * through the real flow first (Check In / Clock In need it to be happening now); the period and payday are read from
+   * the scheduled start, and worked minutes / pay from the attendance record, which this never touches. Same fixture as
+   * payroll-runs and manual-attendance in rab-server, so the result does not depend on the machine date.
+   */
+  async function scheduleAt(shiftId: string, instant: string): Promise<void> {
+    await adminDataSource.query(`UPDATE core.shift SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
+    await adminDataSource.query(
+      `UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
+      [shiftId, instant],
+    );
+  }
+
+  /** Full flow to an approved payroll record for staff[i] scheduled at `scheduledAt`; returns the record id (and its attendance id). */
   const attendanceOf: Record<string, string> = {};
-  async function approvedRecordFor(i: number, approve = true): Promise<string> {
+  async function approvedRecordFor(i: number, approve = true, scheduledAt: string = IN_OCTOBER_PERIOD): Promise<string> {
     const s = staff[i]!;
     const shift = await http().post('/rest/v1/shifts').set(auth(tokens.a)).send({
       venueId, jobRoleId, startsAt: new Date(Date.now() - 5 * 60_000).toISOString(), endsAt: new Date(Date.now() + 8 * 3600_000).toISOString(), requiredCount: 1,
@@ -120,6 +137,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
       .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Pay statement test worked time' })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokens.a))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokens.a))).status).toBe(200);
+    await scheduleAt(shiftId, scheduledAt);
     const [rec] = await adminDataSource.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
     attendanceOf[rec.id] = out.body.id;
     if (!approve) return rec.id as string;
@@ -268,6 +286,26 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect(lastHtml).toContain('12 Oct 2026 – 25 Oct 2026');
     expect(lastHtml).toContain('Wed, 4 Nov 2026');
     expect(lastHtml).not.toContain(TO_BE_CONFIRMED);
+  });
+
+  it('the printed period and payday follow the London date either side of the boundary on the day clocks go back', async () => {
+    // Two staff members: the shifts are ~8 hours long, so one person on both would be a double booking (refused by the DB).
+    const statementFor = async (i: number, scheduledAt: string) => {
+      const id = await approvedRecordFor(i, true, scheduledAt);
+      await dispatch();
+      expect(jobs.at(-1)!.payrollRecordId).toBe(id);
+      expect(await processShiftStatementJob(jobs.at(-1)!, deps())).toBe('generated');
+      return lastHtml;
+    };
+    // 23:30 GMT on Sunday 25 Oct (clocks went back at 01:00 UTC that day): still the period ending 25 Oct.
+    const before = await statementFor(2, '2026-10-25T23:30:00Z');
+    expect(before).toContain('12 Oct 2026 – 25 Oct 2026');
+    expect(before).toContain('Wed, 4 Nov 2026');
+    // 00:30 GMT on Monday 26 Oct: the next period.
+    const after = await statementFor(3, '2026-10-26T00:30:00Z');
+    expect(after).toContain('26 Oct 2026 – 08 Nov 2026'); // periodLabel prints two-digit days
+    expect(after).toContain('Wed, 18 Nov 2026');
+    expect(after).not.toContain('12 Oct 2026 – 25 Oct 2026');
   });
 
   it('period attention: an ended period with records awaiting approval notifies the workspace owner once, and never prepares a run', async () => {

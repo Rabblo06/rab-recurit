@@ -5,13 +5,14 @@ import { spring, usePrefersReducedMotion } from '../../../shared/motion';
 import { useLeadershipCapabilities } from '../members/leadershipCapabilities';
 import {
   IconUserCircle, IconAdjustmentsHorizontal, IconKey,
-  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconLogout,
+  IconBuilding, IconWorld, IconUsersGroup, IconShieldLock, IconShieldCheck, IconLogout, IconSparkles,
 } from '@tabler/icons-react';
 
 const userNav = [
   { to: '/settings/profile', label: 'Profile', Icon: IconUserCircle },
   { to: '/settings/experience', label: 'Experience', Icon: IconAdjustmentsHorizontal },
   { to: '/settings/account', label: 'Account', Icon: IconKey },
+  { to: '/settings/security', label: 'Security', Icon: IconShieldCheck },
 ];
 
 const workspaceNav = [
@@ -48,6 +49,7 @@ export default function SettingsSidebar({
   isPlatformAdminOnly,
   onLogoutClick,
   compact = false,
+  showAi = false,
 }: {
   isPlatformAdmin: boolean;
   /** A platform admin with no operational org role owns no workspace at all (General/Domains/
@@ -55,6 +57,8 @@ export default function SettingsSidebar({
   isPlatformAdminOnly: boolean;
   onLogoutClick: () => void;
   compact?: boolean;
+  /** Settings → AI: the organisation's CEO only, and only while the server says the AI chrome may show (the caller decides). */
+  showAi?: boolean;
 }) {
   const { canAdd } = useLeadershipCapabilities(isPlatformAdminOnly);
   return (
@@ -75,6 +79,7 @@ export default function SettingsSidebar({
               // `end` on General: /settings/my-workspace must not also light up on /settings/my-workspace/domains.
               <SettingsLink key={to} to={isPlatformAdminOnly ? `${to}?tab=add` : to} label={label} Icon={Icon} end={to === '/settings/my-workspace'} />
             ))}
+            {showAi && !isPlatformAdminOnly && <SettingsLink to="/settings/ai" label="AI" Icon={IconSparkles} />}
           </nav>
         </div>
       )}

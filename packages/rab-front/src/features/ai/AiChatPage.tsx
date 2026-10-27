@@ -1,7 +1,6 @@
-import ChatBody from './ChatBody';
-import { useAiChat } from './AiChatProvider';
+import AiChatPanel from './AiChatPanel';
 
+/** `/chat` — the full-page AI chat. Its history list is in the shell sidebar (`AiChatNavigation`). */
 export default function AiChatPage() {
-  const chat = useAiChat();
-  return <ChatBody surface="page" value={chat.current.text} onChange={chat.setDraft} unavailable />;
+  return <AiChatPanel surface="page" />;
 }

@@ -1,0 +1,22 @@
+{
+  "slug": "dashboard-cinematic",
+  "project": "dashboard-tour",
+  "title": "The Dashboard",
+  "subtitle": "Your workforce, offers and shifts at a glance",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "shots": [
+    { "id": "wide", "at": { "cue": "intro", "offset": -0.05 }, "rect": "full" },
+    { "id": "strip", "at": { "cue": "strip", "offset": 0.15 }, "duration": 0.8, "focus": ["mark:strip"], "chapter": "Offer progress" },
+    { "id": "counts", "at": { "cue": "counts", "offset": 0.1 }, "duration": 0.7, "focus": ["mark:counts"], "chapter": "Totals" },
+    { "id": "hours", "at": { "cue": "hours", "offset": 0.1 }, "duration": 0.9, "focus": ["mark:hours-card", "mark:tooltip"], "chapter": "Hours worked" },
+    { "id": "venues", "at": { "cue": "venues", "offset": 0.1 }, "duration": 0.7, "focus": ["mark:venues-card"], "chapter": "Shifts by venue" },
+    { "id": "context", "at": { "cue": "readiness", "offset": 0.05 }, "duration": 0.9, "rect": "full" },
+    { "id": "readiness", "at": { "cue": "readiness", "offset": 1.55 }, "duration": 0.85, "focus": ["mark:readiness-head", "mark:readiness-stages"], "chapter": "Shift readiness" },
+    { "id": "checklist", "at": { "cue": "checklist", "offset": 0.1 }, "duration": 0.8, "focus": ["mark:checklist"], "chapter": "Shift checklist" },
+    { "id": "week", "at": { "cue": "week", "offset": 0.1 }, "duration": 0.9, "focus": ["mark:week-nav", "mark:week-grid"], "chapter": "This week" },
+    { "id": "close", "at": { "cue": "close", "offset": 0.2 }, "duration": 1.0, "rect": "full" }
+  ]
+}

@@ -185,7 +185,8 @@ describeIfDb('CF-02 Admin Inspect read-only, current authority and expiry (integ
     const sessionId = await startInspect(secondToken, target.userId);
     expect((await profileAs(secondToken, sessionId)).body.id).toBe(target.userId);
 
-    await platformAdmin.revoke({ userId: admin.userId, organisationId: admin.organisationId }, second.userId, admin.password);
+    // Admin panel follow-up (B3): revoke takes a reason and a fresh step-up of the actor's session (no inline password).
+    await platformAdmin.revoke(await factory.signedInContext(admin), second.userId, { reason: 'cf02 demotion test' });
 
     const after = await profileAs(secondToken, sessionId);
     expect(after.status).toBe(200);

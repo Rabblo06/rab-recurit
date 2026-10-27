@@ -1,0 +1,52 @@
+[
+  {
+    "start": 2.2,
+    "end": 7.306,
+    "text": "This tutorial shows how to create a shift\nand offer it to staff in one step, using"
+  },
+  {
+    "start": 7.306,
+    "end": 9.112,
+    "text": "fictional demonstration data."
+  },
+  {
+    "start": 9.633,
+    "end": 11.61,
+    "text": "On Shifts, select New shift."
+  },
+  {
+    "start": 12.133,
+    "end": 15.943,
+    "text": "Choose the venue and the role. The address\nfills in from the venue."
+  },
+  {
+    "start": 17.133,
+    "end": 20.147,
+    "text": "Set the date, the start and end times, and\nthe break."
+  },
+  {
+    "start": 22.467,
+    "end": 27.377,
+    "text": "Select staff to open the Select Staff\npage. Tick the people to offer the shift"
+  },
+  {
+    "start": 27.377,
+    "end": 28.888,
+    "text": "to, then select Confirm."
+  },
+  {
+    "start": 29.667,
+    "end": 34.649,
+    "text": "Select Send Offer. Crewflow creates the\nshift and sends an offer to each person."
+  },
+  {
+    "start": 35.167,
+    "end": 39.35,
+    "text": "The result lists every offer that was\nsent, and explains any person who could"
+  },
+  {
+    "start": 39.35,
+    "end": 40.708,
+    "text": "not be offered the shift."
+  }
+]

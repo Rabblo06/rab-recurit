@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"showCaptions","type":"boolean","label":"Burn in captions","default":false},{"id":"showChapters","type":"boolean","label":"Chapter labels","default":true}]'>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=1920, height=1080" />
+<title>Crewflow — Adding a staff member</title>
+<script src="assets/vendor/gsap.min.js"></script>
+<style>
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Inter"; src: url("assets/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  body { margin: 0; background: #f5f5f4; font-family: "Inter", sans-serif; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: #f5f5f4; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  /* The footage keeps its native 3200×1800 pixels; the camera wrapper scales it to the 1920×1080 canvas. */
+  #camera { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; transform-origin: 0 0; }
+  #footage { position: absolute; left: 0; top: 0; width: 3200px; height: 1800px; }
+  .chapter { position: absolute; left: 40px; bottom: 36px; padding: 9px 16px; border-radius: 999px; background: rgba(28, 25, 23, 0.86); color: #fff; font-weight: 600; font-size: 22px; letter-spacing: 0.01em; opacity: 0; }
+  .chapter::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #f97316; margin-right: 10px; vertical-align: 2px; }
+  #captions { position: absolute; left: 0; right: 0; bottom: 48px; height: 120px; }
+  .cap { position: absolute; left: 0; right: 0; bottom: 0; width: fit-content; margin: 0 auto; max-width: 1180px; padding: 12px 24px; border-radius: 14px; background: rgba(28, 25, 23, 0.84); color: #fff; font-weight: 500; font-size: 32px; line-height: 1.32; text-align: center; white-space: pre-line; }
+  #title-card { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 0 140px; background: #fafaf9; }
+  #title-card .eyebrow { font-weight: 600; font-size: 24px; letter-spacing: 0.12em; text-transform: uppercase; color: #ea580c; }
+  #title-card h1 { margin: 18px 0 0; font-weight: 700; font-size: 84px; letter-spacing: -0.02em; color: #1c1917; }
+  #title-card p { margin: 22px 0 0; font-weight: 500; font-size: 30px; color: #57534e; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="add-staff" data-start="0" data-width="1920" data-height="1080" data-duration="61.333">
+  <div id="stage">
+    <div id="camera" data-layout-allow-overflow>
+      <video id="footage" class="clip" data-start="2.2" data-track-index="0" muted playsinline src="assets/footage.mp4"></video>
+    </div>
+  </div>
+  <section id="title-card" class="clip" data-start="0" data-duration="2.70" data-track-index="1">
+    <div id="title-inner"><div class="eyebrow">Crewflow tutorial</div><h1>Adding a staff member</h1><p>The four-step staff form and invitation</p></div>
+  </section>
+  <div id="chapter-0" class="chapter clip" data-start="14.833" data-duration="9.134" data-track-index="2">Step 1 · Details</div>
+  <div id="chapter-1" class="chapter clip" data-start="23.967" data-duration="8.466" data-track-index="2">Step 2 · Contact</div>
+  <div id="chapter-2" class="chapter clip" data-start="32.433" data-duration="7.734" data-track-index="2">Step 3 · Emergency contact</div>
+  <div id="chapter-3" class="chapter clip" data-start="40.167" data-duration="12.266" data-track-index="2">Step 4 · Availability</div>
+  <div id="chapter-4" class="chapter clip" data-start="52.433" data-duration="8.900" data-track-index="2">Invitation sent</div>
+  <div id="captions">
+    <p id="cap-0" class="cap clip" data-start="2.2" data-duration="5.000" data-track-index="3">This tutorial shows how to add a staff
+member. Everything you see uses fictional</p>
+    <p id="cap-1" class="cap clip" data-start="7.2" data-duration="1.187" data-track-index="3">demonstration data.</p>
+    <p id="cap-2" class="cap clip" data-start="8.9" data-duration="4.619" data-track-index="3">On the Users page, select New staff. You
+can also choose Add Staff from your</p>
+    <p id="cap-3" class="cap clip" data-start="13.519" data-duration="0.790" data-track-index="3">account menu.</p>
+    <p id="cap-4" class="cap clip" data-start="14.833" data-duration="5.130" data-track-index="3">Step one covers personal and employment
+details: the name, job role, employment</p>
+    <p id="cap-5" class="cap clip" data-start="19.963" data-duration="1.883" data-track-index="3">type and default hourly rate.</p>
+    <p id="cap-6" class="cap clip" data-start="23.967" data-duration="5.355" data-track-index="3">Step two holds the contact details. The
+invitation is sent to this email address.</p>
+    <p id="cap-7" class="cap clip" data-start="32.433" data-duration="2.788" data-track-index="3">Step three records an emergency contact.</p>
+    <p id="cap-8" class="cap clip" data-start="40.167" data-duration="4.989" data-track-index="3">Step four sets availability: working days,
+preferred shift times, and the maximum</p>
+    <p id="cap-9" class="cap clip" data-start="45.156" data-duration="0.924" data-track-index="3">hours per week.</p>
+    <p id="cap-10" class="cap clip" data-start="46.767" data-duration="5.141" data-track-index="3">Select Create. Crewflow creates the staff
+record and queues an invitation email.</p>
+    <p id="cap-11" class="cap clip" data-start="52.433" data-duration="5.155" data-track-index="3">The new staff member's details open. Their
+status shows the invitation until they</p>
+    <p id="cap-12" class="cap clip" data-start="57.588" data-duration="2.546" data-track-index="3">accept it and sign in to the mobile app.</p>
+  </div>
+  <audio id="narration" class="clip" data-start="0" data-track-index="4" data-volume="1" src="assets/narration.wav"></audio>
+</div>
+<script>
+  // Camera: a pure function of composition time, driven by ONE seek-safe tween (no clocks, no randomness).
+  const KEYS = [{"t":2.2,"d":0,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":8.9,"d":0.8,"r":{"x":261,"y":0,"w":2939,"h":1653}},{"t":10.767,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":14.833,"d":0.8,"r":{"x":1261,"y":37,"w":1939,"h":1091}},{"t":17.9,"d":0.8,"r":{"x":1261,"y":664,"w":1939,"h":1091}},{"t":23.967,"d":0.8,"r":{"x":1261,"y":35,"w":1939,"h":1091}},{"t":32.433,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}},{"t":40.167,"d":0.8,"r":{"x":1261,"y":85,"w":1939,"h":1091}},{"t":46.767,"d":0.9,"r":{"x":0,"y":0,"w":3200,"h":1800}},{"t":52.433,"d":0.8,"r":{"x":1261,"y":0,"w":1939,"h":1091}}];
+  const OUT_W = 1920;
+  const ease = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2); // ease-in-out, no overshoot
+  function lerp(a, b, t0, d, t) {
+    const e = ease(d > 0 ? Math.min(1, Math.max(0, (t - t0) / d)) : 1);
+    const w = Math.exp(Math.log(a.w) + (Math.log(b.w) - Math.log(a.w)) * e); // zoom interpolates perceptually (log)
+    const cx = a.x + a.w / 2 + (b.x + b.w / 2 - a.x - a.w / 2) * e, cy = a.y + a.h / 2 + (b.y + b.h / 2 - a.y - a.h / 2) * e;
+    return { x: cx - w / 2, y: cy - (w * 9 / 16) / 2, w, h: w * 9 / 16 };
+  }
+  // Each move starts from wherever the camera actually is, so a move that begins before the last one finished
+  // continues smoothly instead of jumping.
+  function rectAt(t) {
+    let seg = null;
+    for (let i = 1; i < KEYS.length; i++) {
+      const k = KEYS[i];
+      if (t < k.t) break;
+      const from = seg ? lerp(seg.a, seg.b, seg.t0, seg.d, k.t) : KEYS[0].r;
+      seg = { a: from, b: k.r, t0: k.t, d: k.d };
+    }
+    return seg ? lerp(seg.a, seg.b, seg.t0, seg.d, t) : KEYS[0].r;
+  }
+  const cam = document.getElementById("camera");
+  function apply(t) { const r = rectAt(t); const s = OUT_W / r.w; gsap.set(cam, { x: -r.x * s, y: -r.y * s, scale: s, transformOrigin: "0 0" }); }
+  const vars = (window.__hyperframes && window.__hyperframes.getVariables) ? window.__hyperframes.getVariables() : {};
+  if (vars.showCaptions === false || (vars.showCaptions === undefined && true)) document.getElementById("captions").style.display = "none";
+  if (vars.showChapters === false) document.querySelectorAll(".chapter").forEach((e) => (e.style.display = "none"));
+  const tl = gsap.timeline({ paused: true });
+  const clock = { t: 0 };
+  apply(0);
+  tl.to(clock, { t: 61.333, duration: 61.333, ease: "none", onUpdate: () => apply(clock.t) }, 0);
+  tl.fromTo("#chapter-0", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 15.313);
+  tl.to("#chapter-0", { opacity: 0, duration: 0.3, ease: "power2.in" }, 23.617);
+  tl.fromTo("#chapter-1", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 24.447);
+  tl.to("#chapter-1", { opacity: 0, duration: 0.3, ease: "power2.in" }, 32.083);
+  tl.fromTo("#chapter-2", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 32.913);
+  tl.to("#chapter-2", { opacity: 0, duration: 0.3, ease: "power2.in" }, 39.817);
+  tl.fromTo("#chapter-3", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 40.647);
+  tl.to("#chapter-3", { opacity: 0, duration: 0.3, ease: "power2.in" }, 52.083);
+  tl.fromTo("#chapter-4", { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out" }, 52.913);
+  tl.to("#chapter-4", { opacity: 0, duration: 0.3, ease: "power2.in" }, 60.983);
+  tl.fromTo("#title-inner", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.6, ease: "power2.out" }, 0.15);
+  tl.to("#title-card", { opacity: 0, duration: 0.5, ease: "power2.inOut" }, 2.10);
+  window.__timelines["add-staff"] = tl;
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { SearchableSelect } from '../../shared/components/SearchableSelect';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
+import { getApiErrorMessage } from '../../shared/lib/apiError';
 
 interface Venue { id: string; name: string; defaultBreakMinutes: number | null; breakPaid: boolean }
 interface JobRole { id: string; name: string }
@@ -194,7 +195,7 @@ export default function ShiftRequestDrawer() {
             <label>Note</label>
             <textarea value={form.note} onChange={f('note') as any} rows={3} placeholder="Anything the approving manager or staff should know" />
           </div>
-          {submit.isError && !readAvailabilityConflict(submit.error) && <p className="error" role="alert">Could not submit this request. Please check the details and try again.</p>}
+          {submit.isError && !readAvailabilityConflict(submit.error) && <p className="error" role="alert">{getApiErrorMessage(submit.error, 'Could not submit this request. Please check the details and try again.')}</p>}
           {availabilityGate.dialog}
         </>
       )}

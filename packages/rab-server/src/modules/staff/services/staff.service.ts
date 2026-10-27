@@ -39,7 +39,7 @@ import { StoredFile } from '../../../engine/core-modules/storage/entities/stored
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { BulkEmailDto } from '../dto/bulk-email.dto';
-import { AddNoteDto } from '../../identity/dto/add-note.dto';
+import { AddNoteDto, NOTE_BODY_MAX_LENGTH } from '../../identity/dto/add-note.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { UserNoteItem, UserNoteService } from '../../identity/services/user-note.service';
 import { AuditLogListItem } from '../../../engine/core-modules/audit/audit.service';
@@ -932,7 +932,8 @@ export class StaffService {
     });
   }
 
-  deactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+  async deactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.deactivate');
     return this.setEmploymentStatus(ctx, id, EmploymentStatus.INACTIVE, async (manager, profile) => {
       const organisation = await manager.findOneByOrFail(Organisation, { id: ctx.organisationId! });
       await this.accountLifecycle.sendSuspensionNotice(manager, ctx, {
@@ -944,7 +945,8 @@ export class StaffService {
     });
   }
 
-  reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+  async reactivate(ctx: AuthContext, id: string): Promise<StaffSummary> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.reactivate');
     return this.setEmploymentStatus(ctx, id, EmploymentStatus.ACTIVE);
   }
 
@@ -1015,6 +1017,7 @@ export class StaffService {
    * `AccountLifecycleService.adminResetPassword`.
    */
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
@@ -1062,6 +1065,7 @@ export class StaffService {
 
   /** Corrects a wrong pending email before activation — see `ManagerService.changePendingEmail`'s own doc comment for the count-reset trade-off (identical decision, mirrored here). */
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -1150,6 +1154,7 @@ export class StaffService {
    * the admin's own next action, not indefinite.
    */
   async changeEmail(ctx: AuthContext, id: string, dto: ChangeEmailDto): Promise<{ email: string } | EmailChangeRequestResult> {
+    await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
@@ -1201,13 +1206,49 @@ export class StaffService {
     });
   }
 
+  /**
+   * Layers (LAYER2_HARDENING_2026-10-25 F3): route PermissionGuard(STAFF_EDIT) → STAFF_EDIT re-checked here, first, in
+   * the same tenant transaction (403 like the guard, for any id — jobs / other services never pass the guard) → body
+   * length re-validated (400; `AddNoteDto` caps it too, but a direct caller never passes the ValidationPipe) →
+   * `assertOwned` (404 out of scope) → organisation RLS. The note and its `staff.note_added` audit row commit or roll
+   * back together; the audit metadata carries the note id and length, never the text.
+   */
   async addNote(ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      const profile = await manager.findOne(StaffProfile, { where: { id } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
-      this.assertOwned(ctx, profile);
-      return this.userNote.add(manager, ctx, profile.userId, dto.body);
+    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.addNoteTx(manager, ctx, id, dto));
+  }
+
+  /**
+   * `addNote` inside the CALLER's transaction (PHASE5_TWENTY_PLAN C6): the AI proposal executor runs it in the same
+   * transaction as its compare-and-set. Identical layers, in the same order: STAFF_EDIT first (403 for any id), then the
+   * body checks (400), then `getOwnedProfileTx` (404), then the write and its `staff.note_added` audit row.
+   */
+  async addNoteTx(manager: EntityManager, ctx: AuthContext, id: string, dto: AddNoteDto): Promise<UserNoteItem> {
+    if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT))) {
+      throw new ForbiddenException('Editing staff is not permitted.');
+    }
+    const body = dto?.body;
+    if (typeof body !== 'string' || body.length === 0) throw new BadRequestException('A note cannot be empty.');
+    if (body.length > NOTE_BODY_MAX_LENGTH) throw new BadRequestException(`A note can be at most ${NOTE_BODY_MAX_LENGTH} characters.`);
+    const profile = await this.getOwnedProfileTx(manager, ctx, id);
+    const note = await this.userNote.add(manager, ctx, profile.userId, body);
+    await this.auditService.record(manager, ctx, AuditAction.STAFF_NOTE_ADDED, {
+      targetUserId: profile.userId,
+      entityType: 'staff_profile',
+      entityId: profile.id,
+      metadata: { noteId: note.id, length: body.length },
     });
+    return note;
+  }
+
+  /**
+   * Read-only: a staff profile in the caller's strict owner scope (`created_by = ctx.userId`), else 404 — the same scope
+   * `addNote` writes in. Used by `addNoteTx` and the AI `add_staff_note` proposal's `prepare()`.
+   */
+  async getOwnedProfileTx(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
+    const profile = await manager.findOne(StaffProfile, { where: { id } });
+    if (!profile) throw new NotFoundException('Staff member not found.');
+    this.assertOwned(ctx, profile);
+    return profile;
   }
 
   /**

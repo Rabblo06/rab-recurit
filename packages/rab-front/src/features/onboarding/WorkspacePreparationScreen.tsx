@@ -130,8 +130,15 @@ export default function WorkspacePreparationScreen() {
     if (showWelcome) clearPendingManagerWelcome();
   }, [showWelcome]);
 
+  const [checkingAgain, setCheckingAgain] = useState(false);
   async function checkAgain() {
-    await refetch();
+    if (checkingAgain) return;
+    setCheckingAgain(true);
+    try {
+      await refetch();
+    } finally {
+      setCheckingAgain(false);
+    }
   }
 
   async function tryAgain() {
@@ -206,7 +213,7 @@ export default function WorkspacePreparationScreen() {
         {!isLoading && (!workspace || status === null) ? <>
           <h1 style={s.title}>Workspace status unavailable</h1>
           <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>We couldn’t confirm that your workspace is ready. Check again to continue safely.</p>
-          <button style={s.submitBtn} onClick={checkAgain}>Check again</button>
+          <button style={s.submitBtn} onClick={checkAgain} disabled={checkingAgain} aria-busy={checkingAgain || undefined}>{checkingAgain ? 'Checking…' : 'Check again'}</button>
           <button style={s.backBtn} onClick={signOut}>Sign out</button>
         </> : superseded ? (
           <>
@@ -220,6 +227,9 @@ export default function WorkspacePreparationScreen() {
           <>
             <p style={s.title}>We hit a snag preparing your workspace</p>
             <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Your workspace could not be prepared. Nothing was left half-built — you can try again, or sign out and try again later.</p>
+            {resumeFailed && !resuming ? (
+              <p role="alert" style={{ ...s.subtitle, ...s.errorText }}>Trying again didn’t reach the server. Check your connection, then try again.</p>
+            ) : null}
             <SetupStageList stages={stages} reduceMotion={reduceMotion} />
             <button style={s.submitBtn} onClick={tryAgain} disabled={resuming}>{resuming ? 'Trying again…' : 'Try again'}</button>
             <button style={s.backBtn} onClick={signOut}>Sign out</button>

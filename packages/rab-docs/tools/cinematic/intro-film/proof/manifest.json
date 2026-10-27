@@ -1,0 +1,110 @@
+{
+  "total": 31.6,
+  "times": {
+    "c1": 0.9,
+    "card": 7.6,
+    "req": 8.6,
+    "c4send": 8.8,
+    "hand": 14.45,
+    "web": 14.5,
+    "c4appr": 14.8,
+    "split": 22.6,
+    "c5acc": 23.4,
+    "total": 31.6
+  },
+  "camera": [
+    {
+      "t": 14.5,
+      "d": 0,
+      "r": {
+        "x": 215,
+        "y": 0,
+        "w": 2925,
+        "h": 1645
+      }
+    },
+    {
+      "t": 15.967,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    },
+    {
+      "t": 17.833,
+      "d": 0.9,
+      "r": {
+        "x": 1261,
+        "y": 172,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 19.633,
+      "d": 0.8,
+      "r": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      }
+    },
+    {
+      "t": 21.383,
+      "d": 0.9,
+      "r": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      }
+    }
+  ],
+  "land": {
+    "x": 288.9955555555556,
+    "y": 189.56444444444443,
+    "w": 853.3333333333334,
+    "h": 45.51111111111111
+  },
+  "taps": {
+    "submit": 8.933,
+    "accept": 25.628,
+    "approveClick": 21.033
+  },
+  "captions": [
+    {
+      "start": 0.9,
+      "end": 6.169,
+      "text": "Crewflow connects that whole journey, from\nthe first request to the final timesheet."
+    },
+    {
+      "start": 8.8,
+      "end": 13.648,
+      "text": "The request goes to the manager for\napproval. Nothing reaches the staff yet."
+    },
+    {
+      "start": 14.8,
+      "end": 20.15,
+      "text": "In Venue Offers, the manager checks the\nrequest, adds or removes people if needed,"
+    },
+    {
+      "start": 20.15,
+      "end": 21.194,
+      "text": "and approves it."
+    },
+    {
+      "start": 23.4,
+      "end": 28.682,
+      "text": "Priya opens hers and accepts. Because this\nshift came from an approved request, she's"
+    },
+    {
+      "start": 28.682,
+      "end": 29.987,
+      "text": "booked straight away."
+    }
+  ]
+}

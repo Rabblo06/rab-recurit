@@ -1,0 +1,7 @@
+# Regenerable or bulky outputs (see ../README.md). The published master lives in packages/rab-docs/videos/.
+renders/
+review/
+.hyperframes/
+assets/footage.mp4
+assets/narration.wav
+renders.log

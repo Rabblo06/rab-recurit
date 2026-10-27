@@ -288,7 +288,7 @@ describeIfDb('initial manager replacement (integration)', () => {
       // Suspension stays a platform-level action (unchanged) — performed by a platform admin of another organisation.
       const admin = await seedPlatformAdmin();
       const adminToken = await factory.loginByEmail(admin.email);
-      const suspended = await http().post(`/rest/v1/admin/organisations/${target.id}/suspend`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'test', confirmSlug: target.slug, currentPassword: factory.testPassword });
+      const suspended = await http().post(`/rest/v1/admin/organisations/${target.id}/suspend`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'test', confirmSlug: target.slug });
       expect(suspended.status).toBeLessThan(300);
 
       const res = await http()

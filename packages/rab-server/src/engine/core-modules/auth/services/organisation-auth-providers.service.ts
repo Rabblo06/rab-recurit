@@ -9,6 +9,7 @@ import { AuthContext } from '../../tenant/auth-context.interface';
 import { TenantContextService } from '../../tenant/tenant-context.service';
 import { PasswordSessionRevocationService } from './password-session-revocation.service';
 import { SecurityVersionService } from './security-version.service';
+import { StepUpReauthService } from './step-up-reauth.service';
 
 export type AuthProviderKey = 'password' | 'google' | 'microsoft';
 
@@ -63,6 +64,7 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
     private readonly securityVersion: SecurityVersionService,
     private readonly passwordSessions: PasswordSessionRevocationService,
     private readonly platformAdmin: PlatformAdminService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   systemEnabled(): EffectiveAuthProviders {
@@ -130,11 +132,18 @@ export class OrganisationAuthProvidersService implements OnApplicationBootstrap 
    * revocation and both audit entries land in that organisation, attributed to the administrator.
    */
   async update(
-    actor: Pick<AuthContext, 'userId' | 'inspectedBy'>,
+    actor: Pick<AuthContext, 'userId' | 'inspectedBy' | 'organisationId' | 'workspaceId' | 'sessionId'>,
     targetOrganisationId: string,
     patch: Partial<OrganisationAuthProviderFlags>,
   ): Promise<OrganisationAuthProviderFlags> {
     if (actor.inspectedBy) throw new ForbiddenException('This action is unavailable while inspecting another user.');
+    // Lane D (M10-2, closes W6X trade-off 2): changing an organisation's sign-in methods (incl. turning password sign-in
+    // off, which logs people out) needs a recent step-up of the administrator's OWN session — password + current code
+    // when enrolled. Checked against the actor's own organisation, before the target is read.
+    await this.stepUp.assertRecentStepUp(
+      { organisationId: actor.organisationId, workspaceId: actor.workspaceId ?? null, userId: actor.userId, sessionId: actor.sessionId },
+      'organisation.auth_providers.update',
+    );
     const ctx = { organisationId: targetOrganisationId, workspaceId: null, userId: actor.userId, role: '', inspectedBy: undefined };
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       if (!(await this.platformAdmin.isPlatformAdminTx(manager, actor))) {

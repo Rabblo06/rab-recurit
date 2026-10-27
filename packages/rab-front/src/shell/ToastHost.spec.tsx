@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import ToastHost from './ToastHost';
-import { toast, TOAST_DURATION_MS, TOAST_MAX_VISIBLE } from '../shared/lib/toast';
+import { defaultToastDuration, toast, TOAST_DURATION_MS, TOAST_MAX_VISIBLE } from '../shared/lib/toast';
 
 // Framer's exit animation runs on its own frame loop, which fake timers stall; render plain elements instead (same
 // approach as WelcomeOverlay.spec). The host's timer, queue and dedupe logic is what these tests cover.
@@ -241,5 +241,51 @@ describe('layout and motion', () => {
     expect(container.querySelector('.toast-progress')).toHaveClass('toast-progress-static');
     advance(TOAST_DURATION_MS.success + 10);
     await waitFor(() => expect(screen.queryByText('Picture updated.')).toBeNull());
+  });
+});
+
+describe('next-step actions, persistence and reading time (feedback pass 2026-10-25)', () => {
+  it('an action button runs its callback and dismisses the toast', async () => {
+    const onClick = jest.fn();
+    render(<ToastHost />);
+    act(() => void toast.error('Could not save your profile. Please try again.', { action: { label: 'Try again', onClick } }));
+    const card = screen.getByRole('alert');
+    fireEvent.click(within(card).getByRole('button', { name: 'Try again' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('a persistent error has no countdown: it is still there a minute later and leaves only when dismissed', async () => {
+    const { container } = render(<ToastHost />);
+    act(() => void toast.error('Your session has expired. Please sign in again.', { persistent: true }));
+    expect(screen.getByRole('alert')).toHaveAttribute('data-persistent', 'true');
+    expect(container.querySelector('.toast-progress')).toHaveClass('toast-progress-static');
+    advance(60_000);
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss notification' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('success auto-dismisses at 4 s while a long error stays long enough to read (longer than 7 s, capped at 15 s)', async () => {
+    const long = 'Venue saved, but the photo could not be uploaded. Your photo could not be saved. Please choose a PNG, JPG or WebP image smaller than 5 MB and try again.';
+    const { container } = render(<ToastHost />);
+    act(() => {
+      toast.success('Profile updated.');
+      toast.error(long);
+    });
+    const errorMs = parseInt(container.querySelector<HTMLElement>('.toast-error .toast-progress')!.style.animationDuration, 10);
+    expect(errorMs).toBe(defaultToastDuration('error', long));
+    expect(errorMs).toBeGreaterThan(TOAST_DURATION_MS.error);
+    expect(errorMs).toBeLessThanOrEqual(15_000);
+    advance(TOAST_DURATION_MS.success + 50);
+    await waitFor(() => expect(screen.queryByText('Profile updated.')).toBeNull());
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    advance(errorMs);
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
+  it('short messages keep the existing defaults (backwards compatible)', () => {
+    expect(defaultToastDuration('error', 'Could not save.')).toBe(TOAST_DURATION_MS.error);
+    expect(defaultToastDuration('success', 'x'.repeat(200))).toBe(TOAST_DURATION_MS.success);
   });
 });

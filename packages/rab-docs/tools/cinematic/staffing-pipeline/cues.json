@@ -1,0 +1,58 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 6.805,
+    "text": "The staffing board follows one shift from offers to clock-out. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 7.333,
+    "seconds": 3.456,
+    "text": "Open Venue Offers in the sidebar, and select a shift.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\open.wav"
+  },
+  {
+    "id": "summary",
+    "start": 11.3,
+    "seconds": 6.507,
+    "text": "Along the top, Required, Filled and Open count the places on the shift, followed by a count for every lane.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\summary.wav"
+  },
+  {
+    "id": "lanes",
+    "start": 18.333,
+    "seconds": 13.504,
+    "text": "The board has twelve lanes. People move from Offered and Waiting, through Staff Accepted and Confirmed, to Clocked in, Pending Review and Clocked out. Anyone who drops out moves to No Show, Rejected, Cancelled or Deleted.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\lanes.wav"
+  },
+  {
+    "id": "card",
+    "start": 32.367,
+    "seconds": 4.523,
+    "text": "Each card shows the person and their latest state, such as when they clocked in.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\card.wav"
+  },
+  {
+    "id": "back",
+    "start": 37.4,
+    "seconds": 4.117,
+    "text": "Go back to Venue Offers, and open a shift where everyone has clocked out.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\back.wav"
+  },
+  {
+    "id": "report",
+    "start": 42.033,
+    "seconds": 3.435,
+    "text": "Select Timesheet report to view or download the timesheet.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\report.wav"
+  },
+  {
+    "id": "drawer",
+    "start": 46,
+    "seconds": 12.479,
+    "text": "The original timesheet is available as soon as everyone has clocked out. The venue signed version appears after the venue manager reviews each person's hours and finalises the report in the mobile app.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staffing-pipeline\\drawer.wav"
+  }
+]

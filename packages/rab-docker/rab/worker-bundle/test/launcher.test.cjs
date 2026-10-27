@@ -188,9 +188,23 @@ test('14 the allowlist covers every variable the environment validator declares 
   const validator = path.resolve(__dirname, '../../../../rab-server/src/engine/core-modules/environment/environment-variables.ts');
   if (!fs.existsSync(validator)) return;
   const declared = [...fs.readFileSync(validator, 'utf8').matchAll(/^\s{2}([A-Z][A-Z0-9_]+)[!?]?:/gm)].map((m) => m[1]);
-  const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL']);
+  // API-only: never read by the worker or provisioner (APP_GIT_COMMIT is the Admin Panel's build commit).
+  const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL', 'APP_GIT_COMMIT']);
   const missing = declared.filter((k) => !excluded.has(k) && !JOBS_ENV_KEYS.includes(k));
   assert.deepEqual(missing, []);
+  // AI Part A + Phase 1 real models: the five provider keys, the model defaults and the real-provider/budget switches reach
+  // the jobs child (the rab-ai consumer) and NEVER the provisioner child.
+  for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'MISTRAL_API_KEY', 'XAI_API_KEY', 'AI_DEV_ALLOW_REAL_PROVIDERS', 'AI_DAILY_BUDGET_USD', 'AI_MODELS_DEFAULT_FAST', 'AI_MODELS_DEFAULT_SMART', 'AI_MODELS_DEFAULT_DISABLED']) {
+    assert.ok(declared.includes(key), `${key} is declared by the validator`);
+    assert.ok(JOBS_ENV_KEYS.includes(key), `${key} is forwarded to the jobs child`);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} never reaches the provisioner child`);
+  }
+  // The retired names are neither declared nor forwarded anywhere (PHASE1_TWENTY_PLAN §5).
+  for (const key of ['AI_PROVIDER', 'AI_MODEL', 'AI_PROVIDER_API_KEY']) {
+    assert.ok(!declared.includes(key), `${key} is no longer declared`);
+    assert.ok(!JOBS_ENV_KEYS.includes(key), `${key} is not forwarded to the jobs child`);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} is not forwarded to the provisioner child`);
+  }
 });
 
 // ---------------------------------------------------------------- integrated launcher: supervision (real processes)
@@ -538,6 +552,52 @@ test('29 instance heartbeat writer (compiled rab-worker dist in the image) write
   }
 });
 
+// ---------------------------------------------------------------- BullMQ migration (Lane A)
+
+const bullmqBeat = (pid, extra = {}) =>
+  goodBeat('jobs', pid, { mode: 'bullmq', consumersReadyAt: NOW - 5_000, reconcileOkAt: NOW - 30_000, ...extra });
+
+test('30 health (bullmq mode): an IDLE replica that won no scan job for an hour is healthy — no restart loop', () => {
+  // Never ran a cycle since start (lastCycle* null), started an hour ago: interval-mode rules would call this
+  // "no cycle finished for 3600s" and the platform would restart it forever.
+  const idle = bullmqBeat(100, { startedAt: NOW - 3_600_000, lastCycleSettledAt: null, lastCycleSucceededAt: null });
+  const r = evalWith({ [J]: idle, [P]: goodBeat('provisioner', 200) });
+  assert.equal(r.healthy, true, JSON.stringify(r));
+  // Same file WITHOUT the bullmq marker (interval mode) is still unhealthy, exactly as before.
+  const { mode, consumersReadyAt, reconcileOkAt, ...intervalShape } = idle;
+  const r2 = evalWith({ [J]: intervalShape, [P]: goodBeat('provisioner', 200) });
+  assert.equal(r2.healthy, false);
+  assert.match(r2.roles[0].problems.join('; '), /no cycle finished/);
+});
+
+test('31 health (bullmq mode): consumers stopped, reconcile failing, local cycles all failing, hang → unhealthy', () => {
+  const cases = [
+    ['consumers not running', bullmqBeat(100, { consumersReadyAt: NOW - 120_000 }), /BullMQ consumers not confirmed running/],
+    ['consumers never confirmed', bullmqBeat(100, { consumersReadyAt: null }), /BullMQ consumers not confirmed running/],
+    ['reconcile failing (Redis/scheduler)', bullmqBeat(100, { reconcileOkAt: NOW - 400_000 }), /scheduler reconcile has not succeeded/],
+    ['local cycles failing', bullmqBeat(100, { lastCycleSettledAt: NOW - 10_000, lastCycleSucceededAt: NOW - 400_000 }), /cycles on this instance are failing/],
+    ['hung scan', bullmqBeat(100, { oldestInFlight: { name: 'storage cleanup', startedAt: NOW - 31 * 60_000 } }), /"storage cleanup" in flight/],
+    ['stale event loop', bullmqBeat(100, { at: NOW - 60_000 }), /heartbeat stale/],
+  ];
+  for (const [label, beat, pattern] of cases) {
+    const r = evalWith({ [J]: beat, [P]: goodBeat('provisioner', 200) });
+    assert.equal(r.healthy, false, label);
+    assert.match(r.roles[0].problems.join('; '), pattern, label);
+  }
+});
+
+test('32 the jobs allowlist forwards the scheduler flags (otherwise WORKER_SCHEDULER would silently never reach the child)', () => {
+  for (const key of ['WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS']) {
+    assert.ok(JOBS_ENV_KEYS.includes(key), key);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} must not reach the provisioner`);
+  }
+  const [jobs, provisioner] = makePlan({ ...env(), WORKER_SCHEDULER: 'bullmq', BULLMQ_PREFIX: 'crewflow:production:bull', WORKER_SCHEDULER_RECONCILE_SECONDS: '60' });
+  assert.equal(jobs.env.WORKER_SCHEDULER, 'bullmq');
+  assert.equal(jobs.env.BULLMQ_PREFIX, 'crewflow:production:bull');
+  assert.equal(jobs.env.WORKER_SCHEDULER_RECONCILE_SECONDS, '60');
+  assert.equal(provisioner.env.WORKER_SCHEDULER, undefined);
+});
+
 // ---------------------------------------------------------------- helpers
 
 const WAIT_FIXTURE = "process.on('SIGTERM',()=>process.exit(0)); console.log('ready'); setInterval(()=>{},1000);";
@@ -572,3 +632,30 @@ async function waitFor(predicate, timeoutMs = 10_000) {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+
+test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and never to the provisioner', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('AI_TITLE_GENERATION'));
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('AI_TITLE_GENERATION'));
+  const [jobs, provisioner] = makePlan({ ...env(), AI_TITLE_GENERATION: 'false' });
+  assert.equal(jobs.env.AI_TITLE_GENERATION, 'false');
+  assert.equal(provisioner.env.AI_TITLE_GENERATION, undefined);
+});
+
+test('35 the jobs allowlist forwards the 7b budget and rate names (T7-W1) and never to the provisioner', () => {
+  for (const name of ['AI_USER_DAILY_BUDGET_USD', 'AI_ORG_RATE_PER_MIN', 'AI_USER_TURNS_PER_DAY', 'AI_USER_RATE_PER_MIN', 'AI_DAILY_BUDGET_USD']) {
+    assert.ok(JOBS_ENV_KEYS.includes(name), name);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(name), name);
+  }
+  const [jobs, provisioner] = makePlan({ ...env(), AI_USER_DAILY_BUDGET_USD: '1', AI_ORG_RATE_PER_MIN: '60', AI_USER_TURNS_PER_DAY: '100' });
+  assert.equal(jobs.env.AI_USER_DAILY_BUDGET_USD, '1');
+  assert.equal(jobs.env.AI_USER_TURNS_PER_DAY, '100');
+  assert.equal(provisioner.env.AI_USER_DAILY_BUDGET_USD, undefined);
+});
+
+test('34 the jobs allowlist forwards AI_AGENTS_ENABLED (AI Phase 6a, default false) and never to the provisioner', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('AI_AGENTS_ENABLED'));
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('AI_AGENTS_ENABLED'));
+  const [jobs, provisioner] = makePlan({ ...env(), AI_AGENTS_ENABLED: 'false' });
+  assert.equal(jobs.env.AI_AGENTS_ENABLED, 'false');
+  assert.equal(provisioner.env.AI_AGENTS_ENABLED, undefined);
+});

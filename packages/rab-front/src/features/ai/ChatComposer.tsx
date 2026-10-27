@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, type RefObject } from 'react';
+import { useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react';
 import { IconArrowUp, IconPlayerStop } from '@tabler/icons-react';
 
 export interface ChatComposerProps {
@@ -14,13 +14,34 @@ export interface ChatComposerProps {
   models?: string[];
   model?: string;
   onModelChange?: (model: string) => void;
+  /** Replaces the default hint beside the send button (e.g. the character counter). */
+  note?: ReactNode;
+  /** Shown after the status line (e.g. "Try again" / "Start a new conversation" next to an error). */
+  statusAction?: ReactNode;
+  /** A non-error status line (e.g. "Answer in progress…"); an `error` always wins. */
+  status?: string;
+  placeholder?: string;
+  /** Marks the textarea invalid (e.g. over the character limit) without changing the status line. */
+  invalid?: boolean;
+  /** Keep the status line for assistive technology only (U1: the banner above shows the same text). */
+  statusHidden?: boolean;
+  /** Controls on the left of the action row (the context/usage ring, H9). No attach and no microphone (H7, H8). */
+  leading?: ReactNode;
+  /** Controls just before the send button (the level picker, H10). */
+  trailing?: ReactNode;
+  /** U2: while an answer runs, one more question may be sent (it is queued); Stop stays beside it. */
+  queueable?: boolean;
+  /** U3: shown inside the composer above the text (the tagged skills). */
+  above?: ReactNode;
+  /** U3: "/" typed into an EMPTY composer opens the skill menu instead of inserting the character. */
+  onSlash?: () => void;
 }
 
-export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange }: ChatComposerProps) {
+export default function ChatComposer({ value, onChange, onSend, onStop, sending = false, disabled = false, unavailable = false, error, inputRef, models, model, onModelChange, note, statusAction, status, placeholder, invalid = false, leading, trailing, statusHidden = false, queueable = false, above, onSlash }: ChatComposerProps) {
   const ownRef = useRef<HTMLTextAreaElement>(null);
   const ref = inputRef ?? ownRef;
   const statusId = useId();
-  const canSend = !disabled && !unavailable && !sending && !!onSend && !!value.trim();
+  const canSend = !disabled && !unavailable && (!sending || queueable) && !!onSend && !!value.trim();
   useLayoutEffect(() => {
     const input = ref.current;
     if (!input) return;
@@ -28,23 +49,30 @@ export default function ChatComposer({ value, onChange, onSend, onStop, sending 
     input.style.height = `${Math.min(240, Math.max(72, input.scrollHeight))}px`;
   }, [value, ref]);
   return <div className="ai-composer-area">
-    <div className={`ai-composer${error ? ' has-error' : ''}`} aria-busy={sending}>
-      <textarea ref={ref} aria-label="Message Crewflow AI" aria-describedby={statusId} value={value}
-        placeholder="Ask about your team, shifts and venues…" disabled={disabled} rows={3}
+    <div className={`ai-composer${error || invalid ? ' has-error' : ''}`} aria-busy={sending}>
+      {above}
+      <textarea ref={ref} aria-label="Message Crewflow AI" aria-describedby={statusId} value={value} aria-invalid={invalid || undefined}
+        placeholder={placeholder ?? 'Ask about your team, shifts and venues…'} disabled={disabled} rows={3}
         onChange={event => onChange(event.target.value)}
         onKeyDown={event => {
+          if (event.key === '/' && onSlash && !value && !disabled) { event.preventDefault(); onSlash(); return; }
           if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
             event.preventDefault(); if (canSend) onSend?.();
           }
         }} />
       <div className="ai-composer-actions">
-        {models?.length && onModelChange ? <select aria-label="AI model" value={model} disabled={disabled || sending || unavailable} onChange={e => onModelChange(e.target.value)}>{models.map(name => <option key={name}>{name}</option>)}</select> : <span className="ai-composer-note">{unavailable ? 'AI not configured' : 'Shift + Enter for a new line'}</span>}
-        {sending && onStop ? <button className="ai-send" aria-label="Stop response" onClick={onStop}><IconPlayerStop size={16}/></button>
-          : <button className="ai-send" aria-label="Send message" disabled={!canSend} title={unavailable ? 'AI is not configured' : 'Send message'} onClick={() => { if (canSend) onSend?.(); }}><IconArrowUp size={17}/></button>}
+        <div className="ai-composer-lead">{leading}{models?.length && onModelChange ? <select aria-label="AI model" value={model} disabled={disabled || sending || unavailable} onChange={e => onModelChange(e.target.value)}>{models.map(name => <option key={name}>{name}</option>)}</select> : note ?? <span className="ai-composer-note">{unavailable ? 'AI not configured' : 'Shift + Enter for a new line'}</span>}</div>
+        <div className="ai-composer-trail">{trailing}
+        {sending && onStop && <button type="button" className="ai-stop" aria-label="Stop response" onClick={onStop}><IconPlayerStop size={14} aria-hidden="true"/><span aria-hidden="true">Stop</span></button>}
+        {(!sending || !onStop || queueable) && <button type="button" className="ai-send" aria-label={sending && queueable ? 'Send message (asks after the current answer)' : 'Send message'} disabled={!canSend} title={unavailable ? 'AI is not configured' : sending && queueable ? 'Send after the current answer' : 'Send message'} onClick={() => { if (canSend) onSend?.(); }}><IconArrowUp size={17}/></button>}
+        </div>
       </div>
     </div>
-    <p id={statusId} className={error ? 'ai-status ai-error' : 'ai-status'} role={error ? 'alert' : 'status'}>
-      {error || (unavailable ? 'AI is not configured. Your draft stays in this tab until you leave or sign out.' : '')}
-    </p>
+    <div className="ai-status-row">
+      <p id={statusId} className={`${error ? 'ai-status ai-error' : 'ai-status'}${statusHidden && !error ? ' visually-hidden' : ''}`} role={error ? 'alert' : 'status'}>
+        {error || status || (unavailable ? 'AI is not configured. Your draft stays in this tab until you leave or sign out.' : '')}
+      </p>
+      {statusAction}
+    </div>
   </div>;
 }

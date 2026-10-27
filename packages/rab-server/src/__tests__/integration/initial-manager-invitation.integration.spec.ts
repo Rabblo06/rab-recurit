@@ -428,7 +428,7 @@ describeIfDb('initial manager invitation (integration)', () => {
       const suspended = await http()
         .post(`/rest/v1/admin/organisations/${target.id}/suspend`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ reason: 'test', confirmSlug: target.slug, currentPassword: factory.testPassword });
+        .send({ reason: 'test', confirmSlug: target.slug });
       expect(suspended.status).toBeLessThan(300);
 
       // Organisation isolation: the actor is now the organisation's OWN CEO, whose sessions P2.8 suspension revokes outright —

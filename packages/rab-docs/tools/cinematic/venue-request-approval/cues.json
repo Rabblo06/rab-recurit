@@ -1,0 +1,51 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 11.883,
+    "text": "Venue managers send staffing requests from the mobile app. When you approve a request, Crewflow sends an offer to each person you selected. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 12.4,
+    "seconds": 5.193,
+    "text": "Open Venue Offers in the sidebar. Requests waiting for you show Pending approval.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\open.wav"
+  },
+  {
+    "id": "review",
+    "start": 18.1,
+    "seconds": 6.329,
+    "text": "Open the pending request. The drawer shows the venue, role, times, and the staff the venue manager chose.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\review.wav"
+  },
+  {
+    "id": "gap",
+    "start": 24.933,
+    "seconds": 3.853,
+    "text": "Here, two places are still open, so select staff to fill them.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\gap.wav"
+  },
+  {
+    "id": "pick",
+    "start": 31.1,
+    "seconds": 4.288,
+    "text": "On the Select Staff page, tick the people you want, then select Confirm.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\pick.wav"
+  },
+  {
+    "id": "approve",
+    "start": 36.2,
+    "seconds": 2.534,
+    "text": "With every place filled, select Approve.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\approve.wav"
+  },
+  {
+    "id": "board",
+    "start": 39.267,
+    "seconds": 7.049,
+    "text": "The staffing board opens, with the new offers in the Offered lane. Each staff member still needs to accept their offer.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\venue-request-approval\\board.wav"
+  }
+]

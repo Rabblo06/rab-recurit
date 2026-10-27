@@ -38,6 +38,8 @@ import { useMyWorkspace } from '../shared/hooks/useMyWorkspace';
 import { AiChatProvider, useAiChat } from '../features/ai/AiChatProvider';
 import AiChatNavigation from '../features/ai/AiChatNavigation';
 import AskAiPanel from '../features/ai/AskAiPanel';
+import { useAiAvailability } from '../features/ai/useAiAvailability';
+import { askAiShortcutLabel, isApplePlatform, isAskAiShortcut } from '../features/ai/aiShortcut';
 import SettingsSidebar from '../features/settings/layout/SettingsSidebar';
 import LogoutDialog from '../features/settings/LogoutDialog';
 import NavigationModes, { navigationMode, type NavigationMode } from './NavigationModes';
@@ -140,9 +142,9 @@ function LayoutContent() {
   const modeDirection = modeOrder[mode] >= modeOrder[previousMode.current] ? 1 : -1;
   useEffect(() => {
     if (mode === 'home') lastHome.current = location.pathname + location.search;
-    if (previousMode.current === 'ai' && mode === 'home' && chat.current.text.trim() && window.innerWidth > 1000) chat.setPanelOpen(true);
+    if (previousMode.current === 'ai' && mode === 'home' && chat.draft.trim() && window.innerWidth > 1000) chat.setPanelOpen(true);
     previousMode.current = mode;
-  }, [mode, location.pathname, location.search, chat.current.text, chat.setPanelOpen]);
+  }, [mode, location.pathname, location.search, chat.draft, chat.setPanelOpen]);
   useEffect(() => {
     const resize = () => { setMobile(window.innerWidth <= 760); if (window.innerWidth <= 1000 && chat.panelOpen) { chat.setPanelOpen(false); navigate('/chat'); } };
     window.addEventListener('resize', resize);
@@ -206,6 +208,31 @@ function LayoutContent() {
   const canSeeAudit = !!me?.roles.some(role => ['manager', 'ceo'].includes(role));
   const isOrgAdmin = !!(me?.isPlatformAdmin || me?.roles.includes('ceo'));
   const shortcuts = useNavShortcuts(me?.id ?? null, workspace?.id);
+  // AI entry points (Ask AI, the AI mode) exist only for a user the server confirms as eligible right now
+  // (GET /ai/availability → available: true, or not_configured / demo_data_only, which the server answers only to an
+  // eligible user of an enabled organisation; the chat then opens with its input disabled). Loading, refused or
+  // unreachable all mean: no AI chrome at all.
+  const { eligible: aiEligible } = useAiAvailability(!!me && !isPlatformAdminOnly);
+  // U2 (owner decision 5): ⌘J on macOS / Ctrl+J elsewhere toggles Ask AI — only for an eligible user (otherwise the key
+  // is left to the browser: no hint that AI exists). On the chat page it does nothing; a modal dialog keeps the keyboard.
+  const askAiToggle = useRef<() => void>(() => undefined);
+  askAiToggle.current = () => {
+    if (mode === 'ai') return;
+    if (chat.panelOpen) chat.setPanelOpen(false);
+    else openAskAi();
+  };
+  const aiEligibleRef = useRef(aiEligible);
+  aiEligibleRef.current = aiEligible;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!aiEligibleRef.current || !isAskAiShortcut(e)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"]')) return;
+      e.preventDefault();
+      askAiToggle.current();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
   // Real COUNT(*) of active offers (the same cached query the Dashboard uses); null when the caller lacks the permission.
   const { data: navSummary } = useQuery({ queryKey: ['dashboard-summary'], enabled: !!me && !isPlatformAdminOnly, queryFn: async () => (await api.get('/dashboard/summary')).data as { activeOfferCount?: number | null }, staleTime: 60_000 });
   const activePage = [...workspaceNav, ...operationsNav, auditNav, ...helpNav, ...additionalPages].find(item => item.to === '/' ? location.pathname === '/' : location.pathname.startsWith(item.to));
@@ -322,10 +349,10 @@ function LayoutContent() {
         <button type="button" className="sidebar-search-field" aria-label="Search workspace" title="Search workspace (/)" onClick={openSearch}>
           <IconSearch size={15} stroke={1.7}/><span>Search</span><kbd>/</kbd>
         </button>
-        <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode}/>
+        <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode} showAi={aiEligible}/>
 
         <motion.div className="sidebar-mode-content" key={mode} initial={reducedMotion || previousMode.current === mode ? false : { opacity: 0, x: modeDirection * (document.documentElement.dir === 'rtl' ? -8 : 8) }} animate={{ opacity: 1, x: 0 }} transition={{ duration: reducedMotion ? 0 : .18, ease: [.2, .8, .2, 1] }}>
-        {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
+        {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} showAi={aiEligible && !!me?.roles.includes('ceo')} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
           <>
             <div className="sidebar-section sidebar-primary">
               <nav className="sidebar-nav" aria-label="Workspace">
@@ -359,7 +386,7 @@ function LayoutContent() {
           <button ref={mobileTrigger} className="btn-icon mobile-nav-toggle" aria-label="Open navigation" onClick={() => setMobileNav(true)}><IconMenu2 size={20}/></button>
           {/\/settings\/workspace\/members\/roles\//.test(location.pathname)
             ? <div className="topbar-breadcrumb role-breadcrumb-slot" data-role-breadcrumb-slot />
-            : <div className="topbar-breadcrumb">{mode === 'ai' ? <strong>New chat</strong> : <><PageIcon size={18} stroke={1.6}/><span>Workspace</span><span>/</span><strong>{activePage?.label || 'Workspace'}</strong><span ref={setBreadcrumbSuffixSlot} className="topbar-breadcrumb-suffix" data-breadcrumb-suffix-slot /></>}</div>}
+            : <div className="topbar-breadcrumb">{mode === 'ai' ? <strong>AI assistant</strong> : <><PageIcon size={18} stroke={1.6}/><span>Workspace</span><span>/</span><strong>{activePage?.label || 'Workspace'}</strong><span ref={setBreadcrumbSuffixSlot} className="topbar-breadcrumb-suffix" data-breadcrumb-suffix-slot /></>}</div>}
           {/* Page tabs / title (PageHeader). The breadcrumb before it only shows when a page has none (CSS :has). */}
           <div ref={setTabsSlot} className="topbar-tabs" data-page-tabs-slot />
           {/* Page-owned slots (filled by a page through a portal, e.g. the Venue Offers pipeline); empty everywhere else. */}
@@ -367,10 +394,10 @@ function LayoutContent() {
           <div className="topbar-spacer"/>
           <div className="topbar-actions">
             <div ref={setActionsSlot} className="topbar-page-actions" data-page-actions-slot />
-            {mode === 'ai' ? <>
+            {mode === 'ai' ? aiEligible && <>
               <button className="btn-icon" aria-label="New chat" title="New chat" onClick={chat.newChat}><IconPencilPlus size={17}/></button>
               <button className="btn-icon" aria-label="Continue chat beside workspace" title="Continue chat beside workspace" onClick={continueInPanel}><IconLayoutSidebarRightExpand size={17}/></button>
-            </> : <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" title="Ask AI" onClick={openAskAi}><IconSparkles size={17}/></button>}
+            </> : aiEligible && <button className="btn-icon ask-ai-trigger" aria-label="Ask AI" aria-keyshortcuts={isApplePlatform() ? 'Meta+J' : 'Control+J'} title={`Ask AI (${askAiShortcutLabel()})`} onClick={openAskAi}><IconSparkles size={17}/></button>}
             {isUserProfile && (
               <button className="btn btn-outline" style={{ gap: 6 }} onClick={() => document.dispatchEvent(new CustomEvent('trigger-send-email'))}>
                 <IconMail size={14}/>
@@ -403,7 +430,7 @@ function LayoutContent() {
           </div>
       </div>
 
-      {mode !== 'ai' && <AskAiPanel onExpand={openChatPage}/>}
+      {mode !== 'ai' && aiEligible && <AskAiPanel onExpand={openChatPage}/>}
       <LogoutDialog open={showLogout} onClose={() => setShowLogout(false)}/>
       <AdminDropdown open={showAdminMenu} onClose={() => setShowAdminMenu(false)} onLogout={() => setShowLogout(true)} triggerRef={accountTrigger}/>
       <GlobalSearch open={showSearch} onClose={() => setShowSearch(false)}/>
@@ -412,6 +439,7 @@ function LayoutContent() {
         onClose={() => setShowPalette(false)}
         onOpenSearch={openSearch}
         onOpenTimeline={openTimeline}
+        onAskAi={aiEligible && mode !== 'ai' ? openAskAi : undefined}
       />
       <TimelinePanel open={showTimeline} onClose={() => setShowTimeline(false)}/>
       <CreateUserModal/>

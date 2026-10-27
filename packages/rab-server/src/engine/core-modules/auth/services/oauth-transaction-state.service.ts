@@ -5,7 +5,20 @@ import { DataSource } from 'typeorm';
 import { OAUTH_HANDOFF_TTL_MS, OAUTH_TX_TTL_MS, isWellFormedOAuthSecret } from '../constants/oauth-cookies.constants';
 
 export type OAuthProvider = 'google' | 'microsoft';
-export type OAuthIntent = 'sign_in' | 'accept_invitation';
+/**
+ * `reauthenticate` (account security step 1, P6, OAuthReauthenticateIntent1786720030000): an ALREADY signed-in user proves
+ * a linked provider identity again to earn a step-up grant for their CURRENT session. It never issues a handoff, a
+ * session or a link (enforced by the callback branch and by the row's CHECK constraint).
+ */
+export type OAuthIntent = 'sign_in' | 'accept_invitation' | 'reauthenticate';
+
+/** The signed-in session a `reauthenticate` transaction is bound to (no raw session id is ever stored). */
+export interface OAuthReauthBinding {
+  userId: string;
+  organisationId: string;
+  /** SHA-256 hex of the session id. */
+  sessionIdHash: string;
+}
 
 export interface OAuthTransaction {
   id: string;
@@ -25,6 +38,10 @@ export interface ConsumedOAuthTransaction {
   returnToPath: string | null;
   intent: OAuthIntent;
   invitationTokenHash: string | null;
+  /** When the transaction was created (DB clock). The re-auth callback requires `auth_time` at or after this. */
+  createdAt: Date;
+  /** Set exactly when `intent === 'reauthenticate'`. */
+  reauth: OAuthReauthBinding | null;
 }
 
 export interface HandoffIdentity {
@@ -79,7 +96,7 @@ export class OAuthTransactionStateService {
 
   async create(
     provider: OAuthProvider,
-    options: { returnToPath?: string; intent?: OAuthIntent; invitationTokenHash?: string } = {},
+    options: { returnToPath?: string; intent?: OAuthIntent; invitationTokenHash?: string; reauth?: OAuthReauthBinding } = {},
   ): Promise<OAuthTransaction> {
     const codeVerifier = randomBytes(32).toString('base64url');
     const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
@@ -88,13 +105,28 @@ export class OAuthTransactionStateService {
     const returnToPath = this.sanitiseReturnToPath(options.returnToPath);
     const intent = options.intent ?? 'sign_in';
     const expiresAt = new Date(Date.now() + OAUTH_TX_TTL_MS);
+    const reauth = intent === 'reauthenticate' ? options.reauth : undefined;
+    if (intent === 'reauthenticate' && (!reauth || !/^[0-9a-f]{64}$/.test(reauth.sessionIdHash))) throw new UnauthorizedException(GENERIC);
 
     const [row] = await this.dataSource.query<[{ id: string }]>(
       `INSERT INTO core.oauth_transaction_state
-         (provider, pkce_code_verifier, nonce, return_to_path, expires_at, browser_binding_hash, intent, invitation_token_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (provider, pkce_code_verifier, nonce, return_to_path, expires_at, browser_binding_hash, intent, invitation_token_hash,
+          reauth_user_id, reauth_session_hash, reauth_organisation_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
-      [provider, codeVerifier, nonce, returnToPath, expiresAt, sha256(browserSecret), intent, intent === 'accept_invitation' ? options.invitationTokenHash : null],
+      [
+        provider,
+        codeVerifier,
+        nonce,
+        returnToPath,
+        expiresAt,
+        sha256(browserSecret),
+        intent,
+        intent === 'accept_invitation' ? options.invitationTokenHash : null,
+        reauth?.userId ?? null,
+        reauth?.sessionIdHash ?? null,
+        reauth?.organisationId ?? null,
+      ],
     );
 
     return { id: row!.id, provider, codeVerifier, codeChallenge, nonce, returnToPath, browserSecret };
@@ -110,12 +142,27 @@ export class OAuthTransactionStateService {
     }
     // TypeORM's raw `query()` returns a [rows, affectedCount] TUPLE for UPDATE/DELETE.
     const [rows] = await this.dataSource.query<
-      [Array<{ id: string; pkce_code_verifier: string; nonce: string; return_to_path: string | null; intent: OAuthIntent; invitation_token_hash: string | null }>, number]
+      [
+        Array<{
+          id: string;
+          pkce_code_verifier: string;
+          nonce: string;
+          return_to_path: string | null;
+          intent: OAuthIntent;
+          invitation_token_hash: string | null;
+          created_at: Date;
+          reauth_user_id: string | null;
+          reauth_session_hash: string | null;
+          reauth_organisation_id: string | null;
+        }>,
+        number,
+      ]
     >(
       `UPDATE core.oauth_transaction_state
           SET consumed_at = now()
         WHERE id = $1 AND provider = $2 AND browser_binding_hash = $3 AND consumed_at IS NULL AND expires_at > now()
-        RETURNING id, pkce_code_verifier, nonce, return_to_path, intent, invitation_token_hash`,
+        RETURNING id, pkce_code_verifier, nonce, return_to_path, intent, invitation_token_hash, created_at,
+                  reauth_user_id, reauth_session_hash, reauth_organisation_id`,
       [id, provider, sha256(browserSecret)],
     );
     const row = rows[0];
@@ -129,6 +176,11 @@ export class OAuthTransactionStateService {
       returnToPath: row.return_to_path,
       intent: row.intent,
       invitationTokenHash: row.invitation_token_hash,
+      createdAt: new Date(row.created_at),
+      reauth:
+        row.intent === 'reauthenticate' && row.reauth_user_id && row.reauth_session_hash && row.reauth_organisation_id
+          ? { userId: row.reauth_user_id, sessionIdHash: row.reauth_session_hash, organisationId: row.reauth_organisation_id }
+          : null,
     };
   }
 
@@ -140,7 +192,7 @@ export class OAuthTransactionStateService {
           SET authenticated_at = now(), handoff_token_hash = $2, handoff_expires_at = now() + ($3::text || ' milliseconds')::interval,
               provider_subject = $4, provider_email = $5, provider_given_name = $6, provider_family_name = $7, resolved_user_id = $8,
               provider_email_verified = $9
-        WHERE id = $1 AND consumed_at IS NOT NULL AND authenticated_at IS NULL
+        WHERE id = $1 AND consumed_at IS NOT NULL AND authenticated_at IS NULL AND intent <> 'reauthenticate'
         RETURNING id`,
       [
         transactionId,

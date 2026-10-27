@@ -246,6 +246,9 @@ test.describe.serial('S4 authentication', () => {
     // Sessions survive an API restart (they live in Postgres/Redis, not in process memory).
     const survives = await mB.get('/rest/v1/auth/me');
     const providers = expectStatus(await ceoB.get('/rest/v1/workspace/security'), 200, 'security get (read-only)').body;
+    // Lane D (M10-2): changing sign-in methods needs a recent step-up of the admin's session; the API restart above can
+    // outlast the sign-in grant (AUTH_STEP_UP_WINDOW_SECONDS), so re-prove the password explicitly first.
+    expectStatus(await admin.post('/rest/v1/auth/step-up', { currentPassword: SYNTHETIC_PASSWORD }), 200, 'platform admin step-up');
     const off = await admin.patch(adminPath, { passwordAuthEnabled: false, googleAuthEnabled: true });
     const bWeb = await mB.get('/rest/v1/auth/me');
     const ceoAfter = await ceoB.get('/rest/v1/auth/me');

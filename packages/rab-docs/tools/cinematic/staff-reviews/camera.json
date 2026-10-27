@@ -1,0 +1,220 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "tab",
+      "t": 13.967,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Staff reviews"
+    },
+    {
+      "id": "overall",
+      "t": 17.967,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 244,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Overall rating"
+    },
+    {
+      "id": "categories",
+      "t": 24.067,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "By category"
+    },
+    {
+      "id": "filter",
+      "t": 30.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Filters"
+    },
+    {
+      "id": "history",
+      "t": 37.6,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Review history"
+    },
+    {
+      "id": "detail",
+      "t": 42.5,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 354,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Shift review"
+    },
+    {
+      "id": "feedback",
+      "t": 45.3,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    }
+  ],
+  "qa": [
+    {
+      "shot": "tab",
+      "box": {
+        "x": 2386,
+        "y": 106,
+        "w": 812,
+        "h": 83
+      },
+      "inside": true
+    },
+    {
+      "shot": "tab",
+      "box": {
+        "x": 2386,
+        "y": 2,
+        "w": 812,
+        "h": 104
+      },
+      "inside": true
+    },
+    {
+      "shot": "overall",
+      "box": {
+        "x": 2422,
+        "y": 565.6,
+        "w": 740,
+        "h": 447
+      },
+      "inside": true
+    },
+    {
+      "shot": "categories",
+      "box": {
+        "x": 2422,
+        "y": 1036.6,
+        "w": 740,
+        "h": 449.6
+      },
+      "inside": true
+    },
+    {
+      "shot": "filter",
+      "box": {
+        "x": 2452,
+        "y": 396.6,
+        "w": 242.2,
+        "h": 39
+      },
+      "inside": true
+    },
+    {
+      "shot": "filter",
+      "box": {
+        "x": 2422,
+        "y": 485.6,
+        "w": 740,
+        "h": 56
+      },
+      "inside": true
+    },
+    {
+      "shot": "history",
+      "box": {
+        "x": 2422,
+        "y": 1522,
+        "w": 740,
+        "h": 45
+      },
+      "inside": true
+    },
+    {
+      "shot": "history",
+      "box": {
+        "x": 2959.2,
+        "y": 1633,
+        "w": 172.8,
+        "h": 36
+      },
+      "inside": true
+    },
+    {
+      "shot": "detail",
+      "box": {
+        "x": 2452,
+        "y": 878,
+        "w": 680,
+        "h": 42
+      },
+      "inside": true
+    },
+    {
+      "shot": "feedback",
+      "box": {
+        "x": 2452,
+        "y": 1434.6,
+        "w": 680,
+        "h": 42
+      },
+      "inside": true
+    }
+  ]
+}

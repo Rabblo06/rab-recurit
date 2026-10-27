@@ -1,13 +1,14 @@
 import AuthLayout from './AuthLayout';
 import AuthSuccess from './AuthSuccess';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { IconEye, IconEyeOff } from '@tabler/icons-react';
 import { motion, useReducedMotion } from 'framer-motion';
 import { checkPasswordStrength, MIN_PASSWORD_LENGTH } from '@rab/shared';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn } from './authStyles';
 import { staggerContainer, staggerContainerReduced, staggerItem, staggerItemReduced } from '../onboarding/onboardingMotion';
-import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { getApiErrorMessage, getApiErrorStatus } from '../../shared/lib/apiError';
+import { notifyApiError } from '../../shared/lib/mutationFeedback';
 
 /**
  * The forced first-login step — reached only when `/auth/login` reports
@@ -28,19 +29,28 @@ export default function SetPassword() {
 
   const strength = password ? checkPasswordStrength(password) : null;
   const mismatch = confirm.length > 0 && password !== confirm;
+  const weak = Boolean(password && strength && !strength.valid);
+  const inFlight = useRef(false);
   const canSubmit = Boolean(strength?.valid) && !mismatch;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!canSubmit) return;
+    // Synchronous guard: `loading` re-renders a tick late, so a fast double click / double Enter would send twice.
+    if (!canSubmit || inFlight.current) return;
+    inFlight.current = true;
     setError('');
     setLoading(true);
     try {
       await api.post('/auth/set-password', { newPassword: password });
       setDone(true);
     } catch (err: any) {
-      setError(getApiErrorMessage(err, 'Failed to update your password. Please try again.'));
+      const fallback = 'Failed to update your password. Please try again.';
+      // This step runs on the signed-in session: an expired one gets the persistent "Sign in again" toast (and only
+      // that, one announcement); every other failure is the inline alert, with the typed passwords kept.
+      if (getApiErrorStatus(err) === 401) notifyApiError(err, { fallback });
+      else setError(getApiErrorMessage(err, fallback));
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
   }
@@ -63,8 +73,11 @@ export default function SetPassword() {
                 placeholder="Create a password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
+                autoComplete="new-password"
                 autoFocus
                 required
+                aria-invalid={weak || undefined}
+                aria-describedby={weak ? 'setpw-strength' : undefined}
               />
               <button type="button" aria-label={showPassword ? "Hide password" : "Show password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>
                 {showPassword ? <IconEyeOff size={15} color="#aaa" /> : <IconEye size={15} color="#aaa" />}
@@ -73,7 +86,7 @@ export default function SetPassword() {
           </motion.div>
 
           {password && strength && !strength.valid && (
-            <ul style={s.strengthList}>
+            <ul id="setpw-strength" aria-label="Password requirements" style={s.strengthList}>
               {strength.reasons.map(r => <li key={r}>{r}</li>)}
             </ul>
           )}
@@ -87,11 +100,14 @@ export default function SetPassword() {
               placeholder="Repeat your password"
               value={confirm}
               onChange={e => setConfirm(e.target.value)}
+              autoComplete="new-password"
               required
+              aria-invalid={mismatch || undefined}
+              aria-describedby={mismatch ? 'setpw-mismatch' : undefined}
             /><button type="button" aria-label={showPassword ? "Hide confirmation password" : "Show confirmation password"} style={s.eyeBtn} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={15} /> : <IconEye size={15} />}</button></div>
           </motion.div>
           <p className="auth-password-hint" title={`At least ${MIN_PASSWORD_LENGTH} characters, uppercase and lowercase letters, and a number.`}>Use a long, unique password for this account.</p>
-          {mismatch && <p style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}
+          <div aria-live="polite">{mismatch && <p id="setpw-mismatch" style={{ ...s.error, marginTop: -6 }}>Passwords don't match.</p>}</div>
 
           {error && (
             <motion.p role="alert" style={s.error} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={ease}>

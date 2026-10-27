@@ -1,5 +1,5 @@
 import AuthLayout from './AuthLayout';
-import { loginError, SessionNotEstablishedError } from './authErrors';
+import { INVALID_CREDENTIALS_MESSAGE, loginError, SessionNotEstablishedError } from './authErrors';
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,6 +9,7 @@ import { api, getLastMeSnapshot, resolveIdentityViaCookie, withAuthLock } from '
 import { s, ease, fadeIn, stepVariants } from './authStyles';
 import { isSafeWorkspaceUrl, useWorkspaceHost } from '../../shared/lib/workspace-host';
 import MfaChallengeStep from './mfa/MfaChallengeStep';
+import SecurityAuthLayout from './mfa/SecurityAuthLayout';
 import { SecondFactorChallenge, secondFactorChallengeOf } from './mfa/mfaApi';
 import { continueOnWorkspaceHost } from './workspaceHandoff';
 
@@ -52,6 +53,7 @@ export default function Login() {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   const coolingDown = cooldownUntil > now;
+  const credentialsError = error === INVALID_CREDENTIALS_MESSAGE;
 
   // System-level view only (no organisation is known yet on this screen) — the server's own
   // AND-gate with the resolved organisation's flags is re-checked at the actual sign-in attempt
@@ -170,7 +172,7 @@ export default function Login() {
 
   if (challenge) {
     return (
-      <AuthLayout>
+      <SecurityAuthLayout>
         <MfaChallengeStep
           challenge={challenge}
           email={email || undefined}
@@ -184,7 +186,7 @@ export default function Login() {
             setStep(email ? 'password' : 'welcome');
           }}
         />
-      </AuthLayout>
+      </SecurityAuthLayout>
     );
   }
 
@@ -209,13 +211,15 @@ export default function Login() {
           <button type="button" style={s.backBtn} onClick={() => setStep('welcome')}>← Back to sign in</button>
         </motion.div> : <motion.div key="password" variants={stepVariants} initial="initial" animate="animate" exit="exit">
           <h1 style={s.title}>{error ? 'Try signing in again' : 'Welcome back'}</h1>
-          <p style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{error === 'Invalid email or password.' ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
+          {/* The one announcement for a failed sign-in (no toast). Both fields point at it; they are marked invalid only for
+              the uniform credentials failure, never for a rate limit or an outage (which say nothing about the input). */}
+          <p id="login-error" style={{ ...s.subtitle, ...(error ? s.errorText : {}) }} role={error ? 'alert' : undefined}>{credentialsError ? 'The email or password is incorrect. Check your details and try again.' : error || 'Enter your password to continue.'}</p>
           {signInElsewhere && <p style={s.subtitle}><a className="auth-forgot-link" href={signInElsewhere}>Go to the main sign-in page</a></p>}
           <form onSubmit={handleSignIn}>
             <label style={s.label} htmlFor="login-email">Work email</label>
-            <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required />
+            <input id="login-email" style={s.input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required aria-invalid={credentialsError || undefined} aria-describedby={error ? 'login-error' : undefined} />
             <label style={s.label} htmlFor="password">Password</label>
-            <div style={{position:'relative'}}><input id="password" style={{...s.input,paddingRight:42}} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" autoFocus required />
+            <div style={{position:'relative'}}><input id="password" style={{...s.input,paddingRight:42}} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" autoFocus required aria-invalid={credentialsError || undefined} aria-describedby={error ? 'login-error' : undefined} />
               <button type="button" style={s.eyeBtn} aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={16} /> : <IconEye size={16} />}</button>
             </div>
             <Link className="auth-forgot-link" to={`/forgot-password?email=${encodeURIComponent(email)}`}>Forgot password?</Link>

@@ -18,15 +18,34 @@ export class SessionNotEstablishedError extends Error {
   }
 }
 
+/** The one message for a wrong email AND a wrong password (server `UnauthorizedException('Invalid email or password.')`). */
+export const INVALID_CREDENTIALS_MESSAGE = 'Invalid email or password.';
+
+/**
+ * rab-server `AuthService.login` code `AMBIGUOUS_ACCOUNTS` (401): the password matched TWO accounts in different
+ * organisations. Thrown only AFTER the password was verified for both, so it never says whether an email exists: a wrong
+ * email or a wrong password still gets the uniform `INVALID_CREDENTIALS_MESSAGE`.
+ */
+export const AMBIGUOUS_ACCOUNTS = 'AMBIGUOUS_ACCOUNTS';
+export const AMBIGUOUS_ACCOUNTS_MESSAGE = 'This email address belongs to more than one Crewflow account. Ask your administrator to resolve it before signing in.';
+
+/** rab-server `AuthService.completeLogin` code `ORGANISATION_SUSPENDED` (401), also sent only AFTER the credential verified. */
+export const ORGANISATION_SUSPENDED = 'ORGANISATION_SUSPENDED';
+export const ORGANISATION_SUSPENDED_MESSAGE = 'Your organisation is suspended. Contact Crewflow support.';
+
 export function loginError(error: any): { message: string; cooldown: number; signInUrl?: string } {
   // W6-E2E-02: never "Unable to reach the server" for a server that answered. Neither case is a network failure.
   if (error instanceof SessionNotEstablishedError) return { message: SESSION_NOT_ESTABLISHED_MESSAGE, cooldown: 0 };
-  const status = error.response?.status;
+  const status = error?.response?.status;
   if (status === 404 && error.response?.data?.code === WORKSPACE_HOST_SIGN_IN_REFUSED) {
     const url = error.response.data.canonicalUrl;
     return { message: WRONG_WORKSPACE_SIGN_IN_MESSAGE, cooldown: 0, ...(typeof url === 'string' ? { signInUrl: url } : {}) };
   }
-  if (status === 401) return { message: 'Invalid email or password.', cooldown: 0 };
+  // Branch on the server's machine-readable code only (never on its message text). Every other 401 stays the uniform
+  // credentials message.
+  if (status === 401 && error.response?.data?.code === AMBIGUOUS_ACCOUNTS) return { message: AMBIGUOUS_ACCOUNTS_MESSAGE, cooldown: 0 };
+  if (status === 401 && error.response?.data?.code === ORGANISATION_SUSPENDED) return { message: ORGANISATION_SUSPENDED_MESSAGE, cooldown: 0 };
+  if (status === 401) return { message: INVALID_CREDENTIALS_MESSAGE, cooldown: 0 };
   if (status === 403) return { message: 'This account does not have access to the Manager system.', cooldown: 0 };
   if (status === 429) {
     const cooldown = retryAfterSeconds(error.response.headers?.['retry-after'] ?? error.response.data?.retryAfter);

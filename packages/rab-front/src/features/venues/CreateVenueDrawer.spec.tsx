@@ -326,7 +326,7 @@ describe('Venue profile photo', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Create venue' }));
     expect(await screen.findByText('Edit venue')).toBeTruthy();
     await waitFor(() =>
-      expect(toasts).toEqual([{ id: expect.any(Number), variant: 'error', message: 'Venue saved, but the photo could not be uploaded: please try again later.' }]),
+      expect(toasts).toEqual([{ id: expect.any(Number), variant: 'error', message: 'Venue saved, but the photo could not be uploaded: please try again later.', persistent: true, duration: undefined }]),
     );
     expect(screen.queryByText('Could not save this venue. Please try again.')).toBeNull();
     // Still staged, so saving again retries the upload.

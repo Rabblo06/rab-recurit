@@ -1,0 +1,130 @@
+---
+title: "How to add or rotate an AI provider key"
+description: "For the owner: where the AI provider key goes, how to add, check, rotate or remove it, and what the app shows when no key is set."
+icon: "key"
+---
+
+Crewflow AI only uses **real models** — there is no stand-in model in the running app. With no provider key there are no
+models, and with no models AI does not run: the chat opens with its input disabled and the message *"AI isn't set up
+yet. A platform admin needs to add a provider key"*.
+
+<Warning>
+  A provider key is a password for a paid account. **Never** paste it into a chat, an email, a ticket, a commit, a
+  document or a screenshot. It belongs only in the server's environment file (development) or the deployment platform's
+  secret store (production, later). Crewflow itself never shows it: the Admin Panel says "Configured" or "Not
+  configured", nothing more.
+</Warning>
+
+## What you need to know first
+
+- **Only Anthropic is usable today.** Crewflow knows five key names, the same ones Twenty uses: `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY` and `XAI_API_KEY`. Only the Anthropic software is installed, and
+  only one model is approved: **Claude Haiku 5.5**, for **development with synthetic data only**. The other four names
+  do nothing yet, so setting them makes no model available.
+- **A key does not approve a model.** A model is offered only when all of these are true:
+  - it is approved in code (a reviewed change, never a setting);
+  - its provider's software is in this build;
+  - its key is set;
+  - it is not listed in `AI_MODELS_DEFAULT_DISABLED`;
+  - the environment allows real models. In development that means `AI_DEV_ALLOW_REAL_PROVIDERS=true` on the local
+    development database. Tests and production never allow them in this release.
+- **Real data stays out.** Until the provider checklist is complete, a real model only ever receives data from an
+  organisation marked synthetic (the "AI Demo (synthetic)" organisation). Every other organisation sees *"AI is
+  available for demo data only until the provider checklist is complete."*
+- **Retired settings.** Do not use `AI_PROVIDER`, `AI_MODEL` or `AI_PROVIDER_API_KEY` any more:
+  - a mock value in `AI_PROVIDER` or `AI_MODEL` stops the server starting outside tests;
+  - `AI_PROVIDER_API_KEY` stops it starting in development (rename it `ANTHROPIC_API_KEY`).
+
+  The model is chosen per organisation in **Settings → AI**.
+
+## Add the key (development)
+
+<Steps>
+  <Step title="Create a key in the provider's console">
+    In the Anthropic console, create a key for development use only, with a low spending limit. Copy it to your
+    clipboard and nowhere else.
+  </Step>
+  <Step title="Put it in the server environment file">
+    Open `packages/rab-server/.env` in your editor (it is git-ignored). Make sure these lines are present, with your key
+    pasted after the first `=`:
+
+    ```bash
+    ANTHROPIC_API_KEY=
+    AI_DEV_ALLOW_REAL_PROVIDERS=true
+    ```
+
+    Delete any `AI_PROVIDER=`, `AI_MODEL=` or `AI_PROVIDER_API_KEY=` lines. Leave `AI_MODELS_DEFAULT_FAST` and
+    `AI_MODELS_DEFAULT_SMART` empty unless you want a platform-wide default. Save the file.
+  </Step>
+  <Step title="Restart the API, then the Worker">
+    The key is read when each process starts. Recreate the server first, then the worker, from `packages/rab-docker`:
+
+    ```bash
+    docker compose up -d --no-deps --force-recreate server
+    docker compose up -d --no-deps --force-recreate worker
+    ```
+
+    Wait until both are healthy (`docker ps`).
+  </Step>
+  <Step title="Check it">
+    As a platform admin, open the **Admin Panel → Config**:
+    - the environment list shows `ANTHROPIC_API_KEY` as **Set**, with no value;
+    - the AI section shows the Anthropic key as **Configured**;
+    - Claude Haiku 5.5 is **Available**.
+
+    As the AI Demo organisation's CEO, open **Settings → AI**: Haiku is offered for the fast tier. Every other model shows
+    why it cannot be chosen: "Not approved", "Not in this build" or "Key not configured".
+  </Step>
+</Steps>
+
+## Choose the model (CEO)
+
+In **Settings → AI → AI models**, pick a model per tier or leave **Choose automatically**. Saving asks you to confirm
+it's you (your password, plus your code if you use two-step verification) and for a reason. Every change is recorded in
+the audit log. Chat uses the **fast** tier.
+
+When nothing is pinned, Crewflow uses the first available model in this order:
+1. `AI_MODELS_DEFAULT_FAST` (or `_SMART`);
+2. the other tier's list;
+3. any available model.
+
+## Rotate the key
+
+<Steps>
+  <Step title="Create the new key">In the provider's console, create a new key. Do not revoke the old one yet.</Step>
+  <Step title="Replace the value">Replace the value after `ANTHROPIC_API_KEY=` in `packages/rab-server/.env` and save.</Step>
+  <Step title="Restart and check">Recreate the server, then the worker (commands above), and check the Admin Panel shows "Configured".</Step>
+  <Step title="Revoke the old key">Revoke the old key in the provider's console.</Step>
+</Steps>
+
+If a key may have leaked, **revoke it in the provider's console first**, then follow the steps above. Until a new key is
+set, AI shows the "not set up" state; nothing else in Crewflow is affected.
+
+## Remove the key
+
+Delete the `ANTHROPIC_API_KEY` line (and `AI_DEV_ALLOW_REAL_PROVIDERS`), then recreate the server and the worker.
+- Eligible users see "AI isn't set up yet…" and the AI routes answer `503 AI_NOT_CONFIGURED`.
+- No model is called and no usage is recorded.
+- Everyone else sees no AI at all.
+
+To switch AI off completely instead, set `AI_ENABLED=false`.
+
+## Check that the key never leaked
+
+Run this yourself, in your own terminal. It prints only **counts**, and every count must be `0`. The key is never shown.
+
+```bash
+K=$(grep '^ANTHROPIC_API_KEY=' packages/rab-server/.env | cut -d= -f2-)
+for c in rab-server-1 rab-worker-1 rab-front-1; do docker logs "$c" 2>&1 | grep -cF "$K"; done
+unset K
+```
+
+Do the same count over a data-only dump of the AI and audit tables, and over the JSON of `/ai/availability`,
+`/ai/settings/models`, `/admin/ai/overview` and the Admin Panel environment list. The release checklist lists the exact
+steps.
+
+## Production
+
+Not in this release. Production keeps `AI_ENABLED=false`, and no model is approved for production. A production key
+belongs in the deployment platform's secret store, and only after the provider checklist is complete: signed DPA, zero
+retention, no training on our data, a UK or EU region, sub-processors listed, a DPIA and an updated privacy notice.

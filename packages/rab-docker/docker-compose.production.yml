@@ -168,6 +168,9 @@ services:
       # Required by the runtime guard (runtime-database-guard.ts): NODE_ENV=production
       # without RAB_RUNTIME_ENV=production refuses to boot. Not a secret.
       RAB_RUNTIME_ENV: production
+      # AI stays OFF in production regardless of the code default (owner decision EX-2,
+      # 2026-10-25): change only after docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md is complete.
+      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       # OFF until gate G4 (see header). Never override in OpenShip.
       HWS_RUNTIME_ENABLED: "false"
@@ -279,6 +282,8 @@ services:
     environment:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
+      # AI OFF in production (owner decision EX-2); see the rab-api note.
+      AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
       # Forwarded to the jobs child only: HWS routing OFF until gate G4. The
       # launcher sets the provisioner child's own value (provisioning gate).
@@ -287,6 +292,10 @@ services:
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
+      # Lane A (BullMQ migration): pinned to the historical per-replica timers. Switching to `bullmq` is a reviewed
+      # change to this file (rollout stages C/D in CREWFLOW_BULLMQ_WORKER_MIGRATION_REPORT.md), after confirming the
+      # production Redis is authenticated, AOF-backed and maxmemory-policy=noeviction (the worker refuses otherwise).
+      WORKER_SCHEDULER: interval
 
     # Per-INSTANCE health of BOTH roles (fresh event-loop heartbeat, recent
     # settled + successful cycles, recent Redis write, no hung cycle) from files

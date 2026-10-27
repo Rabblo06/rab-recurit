@@ -78,8 +78,20 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
     await redis.quit();
     org = await factory.createOrganisation('inv-deliv');
     owner = await factory.createInternalManager(org, { permissions: 'production' });
-    ctx = { organisationId: org.id, workspaceId: owner.workspaceId!, userId: owner.userId, role: '' };
+    // `RoleService.create` is step-up gated (lane D, 'role.create'). A real sign-in records that session's step-up grant,
+    // so the owner acts on a freshly signed-in session — the requirement is satisfied, never bypassed.
+    ctx = { ...(await factory.signedInContext(owner)), workspaceId: owner.workspaceId!, role: '' };
     roleId = (await roles.create(ctx, staffViewerRole('Delivery member'))).id;
+  });
+
+  it('W0 (abuse): creating the invitation role WITHOUT a recent step-up is refused 403 STEP_UP_REQUIRED and creates nothing', async () => {
+    const noSession: AuthContext = { organisationId: org.id, workspaceId: owner.workspaceId!, userId: owner.userId, role: '' };
+    const name = `No step-up ${randomUUID().slice(0, 6)}`;
+    await expect(roles.create(noSession, staffViewerRole(name))).rejects.toMatchObject({ status: 403, response: { code: 'STEP_UP_REQUIRED' } });
+    // A session id with no grant behind it (a stale session) is refused the same way.
+    await expect(roles.create({ ...noSession, sessionId: randomUUID() }, staffViewerRole(name))).rejects.toMatchObject({ status: 403, response: { code: 'STEP_UP_REQUIRED' } });
+    const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM core.role WHERE organisation_id = $1 AND name = $2`, [org.id, name]);
+    expect(n).toBe(0);
   });
 
   afterAll(async () => {
@@ -175,7 +187,7 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
   it('W7: a suspended organisation receives no invitation email', async () => {
     const suspendedOrg = await factory.createOrganisation('inv-susp');
     const m = await factory.createInternalManager(suspendedOrg, { permissions: 'production' });
-    const sctx: AuthContext = { organisationId: suspendedOrg.id, workspaceId: m.workspaceId!, userId: m.userId, role: '' };
+    const sctx: AuthContext = { ...(await factory.signedInContext(m)), workspaceId: m.workspaceId!, role: '' }; // fresh session ⇒ step-up grant for role.create
     const suspendedRole = await roles.create(sctx, staffViewerRole('Suspended member'));
     const { results } = await invitations.send(sctx, [`s-${randomUUID().slice(0, 8)}@example.test`], suspendedRole.id);
     const [row] = await outboxRows(results[0]!.invitation!.id);

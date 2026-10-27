@@ -27,14 +27,21 @@ import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.
 import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
 import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
+import { StepUpReauthService } from './step-up-reauth.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
 import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
+import { CAPABILITY_MFA_VERIFY, CLIENT_UPDATE_REQUIRED_BODY, hasClientCapability } from '../constants/client-capabilities';
 
 export interface RequestMeta {
   ip?: string;
   userAgent?: string;
   /** W6-E2E-02: the request's workspace-host routing context (server-derived by WorkspaceHostMiddleware), when known. */
   workspaceHost?: WorkspaceHostContext;
+  /**
+   * Account security step 1 (P3): the parsed `X-Client-Capabilities` tokens of THIS request (client-asserted). Consulted
+   * only to decide whether a mobile client can be given a second-factor challenge; it can never skip or weaken one.
+   */
+  clientCapabilities?: readonly string[];
 }
 
 /**
@@ -126,6 +133,7 @@ export class AuthService {
     private readonly loginLimiter: LoginAttemptLimiterService,
     private readonly secondFactor: LoginSecondFactorPolicyService,
     private readonly mfaChallenges: MfaChallengeService,
+    private readonly stepUp: StepUpReauthService,
   ) {}
 
   /**
@@ -328,7 +336,9 @@ export class AuthService {
         [user.organisationId],
       );
       if (suspended) {
-        throw new UnauthorizedException('This organisation has been suspended. Contact your administrator.');
+        // Coded so clients can say so. Safe: completeLogin runs only AFTER the credential (password or IdP) verified, so
+        // the code never tells an outsider whether an email exists.
+        throw new UnauthorizedException({ code: 'ORGANISATION_SUSPENDED', message: 'This organisation has been suspended. Contact your administrator.' });
       }
     }
     const workspaceId = await this.workspaceResolver.resolveForUser(user.id);
@@ -390,6 +400,16 @@ export class AuthService {
     // except the audit row; `completeChallengedLogin` re-enters here with `secondFactorVerified` once the code is proven.
     if (!opts.secondFactorVerified) {
       const requirement = await this.secondFactor.requirementFor({ userId: user.id, organisationId: user.organisationId, workspaceId, roles, isPlatformAdmin, applicationTarget });
+      // Account security step 1 (P3): a MOBILE sign-in whose client has not declared `mfa-verify` (every build that predates
+      // the code screen — Flutter before lane D, the SwiftUI app today) can never finish a challenge. Instead of issuing one
+      // it cannot use, answer 409 CLIENT_UPDATE_REQUIRED: no challenge, no session, no login_history success row, no token.
+      // The header can only ENABLE the challenge path; omitting it never skips the factor. Web is unaffected.
+      if (requirement === 'verify' && (mobile || applicationTarget !== 'manager_web') && !hasClientCapability(meta.clientCapabilities, CAPABILITY_MFA_VERIFY)) {
+        await this.tenantContext.runInTenantContext(ctx, (manager) =>
+          this.auditService.record(manager, ctx, AuditAction.MFA_CLIENT_UPDATE_REQUIRED, { targetUserId: user.id, metadata: { requirement, authProvider, applicationTarget } }),
+        );
+        throw new ConflictException(CLIENT_UPDATE_REQUIRED_BODY);
+      }
       if (requirement !== 'none') {
         const securityVersion = await this.readUserSecurityVersion(ctx, user.id);
         const challenge = await this.mfaChallenges.create({
@@ -418,7 +438,7 @@ export class AuthService {
         });
       }
     }
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       if (opts.providerLink) await this.applyProviderLink(manager, user, opts.providerLink);
       await manager.query('INSERT INTO core.login_history (organisation_id, user_id, email, ip, user_agent, success, provider) VALUES ($1, $2, $3, $4, $5, true, $6)', [user.organisationId, user.id, user.email, meta.ip ?? null, meta.userAgent ?? null, authProvider]);
       await this.auditService.record(manager, ctx, AuditAction.USER_LOGIN, { metadata: { applicationTarget, authProvider } });
@@ -481,6 +501,10 @@ export class AuthService {
 
       return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+    // Lane D (M10-2): this sign-in just proved the credential (and the second factor whenever the account has one), so
+    // the NEW session holds a step-up grant for the usual window (OIDC max_age semantics). Never on refresh/restore.
+    await this.stepUp.recordSignInGrant(sid, user.id, opts.secondFactorVerified === true);
+    return result;
   }
 
   /**
@@ -599,7 +623,7 @@ export class AuthService {
    * compares. Returns the same shape as a sign-in.
    */
   async issueHandedOffSession(
-    handoff: { organisationId: string; userId: string; workspaceId: string; authProvider: 'password' | 'google' | 'microsoft' },
+    handoff: { organisationId: string; userId: string; workspaceId: string; authProvider: 'password' | 'google' | 'microsoft'; sourceSessionId?: string },
     meta: RequestMeta,
   ): Promise<LoginResult> {
     const isPlatformAdmin = await this.platformAdmin.isPlatformAdmin({ userId: handoff.userId });
@@ -615,7 +639,7 @@ export class AuthService {
     if (workspaceId !== handoff.workspaceId) throw new UnauthorizedException('Please sign in again.');
     const ctx: AuthContext = { organisationId: handoff.organisationId, workspaceId, userId: handoff.userId, role: '' };
     const sid = randomUUID();
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const handed = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const user = await manager.findOne(User, { where: { id: handoff.userId } });
       if (!user || user.status !== UserStatus.ACTIVE) throw new UnauthorizedException('Please sign in again.');
       const roles = await this.rolesForUserTx(manager, user.id);
@@ -642,6 +666,10 @@ export class AuthService {
       await manager.update(User, user.id, { lastLoginAt: new Date() });
       return { accessToken, refreshToken: issued.token, refreshExpiresAt: issued.expiresAt, sessionExpiresAt: issued.familyExpiresAt, mustResetPassword: user.mustResetPassword, webSessionToken: issued.webSessionToken };
     });
+    // Lane D (M10-2): a handoff is not a fresh authentication — it only carries the source session's grant (if still
+    // within its ORIGINAL window) over to the new session.
+    if (handoff.sourceSessionId) await this.stepUp.carryGrantOver(handoff.sourceSessionId, sid, handoff.userId);
+    return handed;
   }
 
   /** Writes a first-time provider link (race-safe) or touches the existing one, inside the session transaction. */

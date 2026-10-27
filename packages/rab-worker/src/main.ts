@@ -12,12 +12,10 @@ import { AuditService } from '@rab/server/engine/core-modules/audit/audit.servic
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '@rab/server/engine/core-modules/email/email-queue.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
-import { EMAIL_QUEUE_NAME } from '@rab/server/engine/core-modules/email/email-queue.constants';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
 import { PushQueueService } from '@rab/server/engine/core-modules/push/push-queue.service';
 import { PushService } from '@rab/server/engine/core-modules/push/push.service';
-import { PUSH_QUEUE_NAME } from '@rab/server/engine/core-modules/push/push-queue.constants';
 import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
 import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
@@ -29,31 +27,23 @@ import { AttendanceQrService } from '@rab/server/modules/attendance/services/att
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '@rab/server/engine/worker-shared/heartbeat.constants';
-import { runAccountInviteCleanupCycle } from './queues/rab-maintenance/account-invite-cleanup.job';
-import { runTokenCleanupCycle } from './queues/rab-maintenance/token-cleanup.job';
-import { runLoginHandoffCleanupCycle } from './queues/rab-maintenance/login-handoff-cleanup.job';
-import { runStorageCleanupCycle } from './queues/rab-maintenance/storage-cleanup.job';
-import { runEmailDispatchCycle } from './queues/rab-email/email-dispatch.job';
-import { createEmailSendProcessor } from './queues/rab-email/email-send.processor';
-import { runPushDispatchCycle } from './queues/rab-push/push-dispatch.job';
-import { createPushSendProcessor } from './queues/rab-push/push-send.processor';
-import { runAttendanceMonitorCycle } from './queues/rab-shifts/attendance-monitor.job';
-import { runLateClockInCycle } from './queues/rab-shifts/late-clock-in.job';
-import { runShiftCancellationFollowupCycle } from './queues/rab-shifts/shift-cancellation-followup.job';
-import { runShiftMonitorCycle } from './queues/rab-shifts/shift-monitor.job';
-import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from './queues/rab-offers/offer-expiry.job';
-import { runReplacementStaffCycle } from './queues/rab-offers/replacement-staff.job';
-import { runFinalTimesheetCycle } from './queues/rab-reports/final-timesheet.job';
-import { processShiftStatementJob, runShiftStatementDispatchCycle } from './queues/rab-reports/shift-statement.job';
-import { runPayrollPeriodAttentionCycle } from './queues/rab-reports/payroll-period-attention.job';
-import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
-import { runShiftReportSchedulerCycle } from './queues/rab-reports/shift-report-scheduler.job';
-import { runRealtimeOutboxPublishCycle } from './queues/rab-realtime/publish-outbox.job';
-import { runOutboxRetentionCycle } from './queues/rab-maintenance/outbox-retention.job';
+import {
+  WORKER_CYCLE_DURATIONS_KEY,
+  WORKER_HEARTBEAT_KEY,
+  WORKER_HEARTBEAT_TTL_SECONDS,
+} from '@rab/server/engine/worker-shared/heartbeat.constants';
+import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
+import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, loopOptionsOf, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
+import { resolveScanPrefix } from './core/scheduler/queue-registry';
+import { RedisPreflightError } from './core/scheduler/redis-preflight';
+import { resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { WorkerModule } from './worker.module';
+import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
+import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 
 /**
  * ONE `rab-worker` process, multiple job categories — its own deployable
@@ -108,60 +98,10 @@ import { WorkerModule } from './worker.module';
  * before it can drain, so a hard kill can never wedge a report.
  */
 const HEARTBEAT_INTERVAL_MS = 15_000;
-// 15 min — see account-invite-cleanup.job.ts's own doc comment.
-const ACCOUNT_INVITE_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
-// Short — this drives real user-facing latency (how soon after an admin
-// clicks "Create Manager" does the invite actually attempt delivery). The
-// request-time fast-path publish (EmailOutboxService.tryFastPublish) covers
-// the common case in near-real-time; this interval is the durability
-// backstop for whatever that fast path missed (a crash, a Redis blip) — see
-// queues/rab-email/email-dispatch.job.ts's own doc comment.
-const EMAIL_DISPATCH_INTERVAL_MS = 2_000;
-const EMAIL_WORKER_CONCURRENCY = 5;
-const PUSH_DISPATCH_INTERVAL_MS = 2_000;
-const PUSH_WORKER_CONCURRENCY = 10;
-// Shift/offer/attendance monitors are periodic scans, not per-row BullMQ
-// delayed jobs (see shift-monitor.job.ts's own doc comment for why) — a few
-// minutes' imprecision on "remind 24h before a shift" or "flag a missed
-// clock-out" is immaterial, so these run on a modest, DB-pool-friendly
-// cadence rather than the email dispatcher's tight 2s loop.
-const SHIFT_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
-const ATTENDANCE_MONITOR_INTERVAL_MS = 5 * 60 * 1000;
-// Offers are more time-sensitive (a stale PENDING offer blocks the shift
-// slot from being reassigned) — closer to the email dispatcher's cadence.
-const OFFER_EXPIRY_INTERVAL_MS = 60 * 1000;
-// Same cadence class as offer expiry — a stuck manager-confirmation is the
-// same kind of "blocks the slot" urgency.
-const MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_MS = 60 * 1000;
-// Late clock-in is a soft, early warning — a couple of minutes' imprecision
-// on "flag someone running late" is immaterial; same cadence class as the
-// shift/attendance monitors it's modelled on.
-const LATE_CLOCK_IN_INTERVAL_MS = 2 * 60 * 1000;
-// Cancellation follow-up should feel prompt to an affected staff member —
-// closer to the offer-expiry cadence than the 5-minute monitors.
-const SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_MS = 60 * 1000;
-// A decline/expiry is already terminal and not time-critical the way a
-// live offer is — a 2-minute cadence is plenty responsive for "prepare a
-// shortlist and notify the manager."
-const REPLACEMENT_STAFF_INTERVAL_MS = 2 * 60 * 1000;
-// Pure housekeeping, no user-facing latency depends on it — once a day is
-// plenty, matching this file's own "controlled daily scheduler" allowance
-// for genuinely global periodic sweeps.
-const TOKEN_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const STORAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-// Same cadence class as the shift/attendance monitors — PDF generation is
-// not latency-sensitive (nothing waits synchronously on it; a manager's
-// "Finalise & Send" flips state immediately regardless).
-const SHIFT_REPORT_SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
-const FINAL_TIMESHEET_INTERVAL_MS = 5 * 60 * 1000;
-/** Approved Shift Statement outbox dispatch (a manager waits on it after approving), and the BullMQ consumer's concurrency. */
-const SHIFT_STATEMENT_DISPATCH_INTERVAL_MS = 5 * 1000;
-const SHIFT_STATEMENT_WORKER_CONCURRENCY = 2;
-/** Ended payroll periods with unfinished records: notify the workspace owner once (never prepares/finalises/pays). */
-const PAYROLL_PERIOD_ATTENTION_INTERVAL_MS = 30 * 60 * 1000;
-// A pending offer/notification should reach its recipient's browser quickly — close to the
-// email dispatcher's own cadence, not the multi-minute monitor jobs.
-const REALTIME_OUTBOX_PUBLISH_INTERVAL_MS = 2_000;
+// The scan intervals (19 when they moved; AI Phase 1 later appended `ai-retention`, now 20 — and the reasoning behind each
+// cadence: 2 s dispatchers that back the request-time fast path, 1–5 min monitors, 24 h housekeeping, env-driven cleanups)
+// and the consumer concurrencies (5 / 10 / 2 when they moved; AI Phase 1 added `rab-ai`, 4) moved VERBATIM to core/scheduler/scan-jobs.ts and core/scheduler/queue-registry.ts — the single registry both scheduler
+// modes read, so interval mode and bullmq mode can never disagree about a cadence or a stats key.
 // How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
@@ -173,7 +113,9 @@ function refuseStartup(error: unknown): never {
       ? '[runtime-db-guard] refused: '
       : error instanceof Error && error.name === 'HwsStartupError'
         ? '[hws-startup-guard] refused: '
-        : '';
+        : error instanceof ProcessorRegistrationError || error instanceof RedisPreflightError
+          ? '[worker-scheduler] refused: '
+          : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
@@ -198,6 +140,9 @@ async function bootstrap(): Promise<void> {
   // safe on any connection) — it's kept separate so this job's connection lifecycle (and any future
   // retry/backoff tuning specific to Pub/Sub) never couples to BullMQ's own connection semantics.
   const realtimePublisherRedis = redis.duplicate();
+  // ioredis reconnects on its own; without a listener every failed reconnect during a Redis outage printed
+  // "[ioredis] Unhandled error event" (found by the Lane A outage harness). A failed PUBLISH still fails its cycle.
+  realtimePublisherRedis.on('error', () => undefined);
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
@@ -229,52 +174,65 @@ async function bootstrap(): Promise<void> {
   await directDataSource.initialize();
   await assertRuntimeDbRole(directDataSource, 'worker-direct');
 
-  const emailService = appContext.get(EmailService);
-  const tenantContext = appContext.get(TenantContextService);
-  const auditService = appContext.get(AuditService);
-  const emailQueue = appContext.get(EmailQueueService);
-  const notificationService = appContext.get(NotificationService);
-  const fileService = appContext.get(FileService);
-  const emailOutboxService = appContext.get(EmailOutboxService);
-  const attendanceQrService = appContext.get(AttendanceQrService);
-  const qrImageService = appContext.get(QrImageService);
   const environmentService = appContext.get(EnvironmentService);
-  const realtimeEventService = appContext.get(RealtimeEventService);
-  const storageReconcileCommand = appContext.get(StorageReconcileCommand);
-  const pushService = appContext.get(PushService);
-  const pushQueue = appContext.get(PushQueueService);
-  const pushDeviceService = appContext.get(PushDeviceService);
-  const secretEncryptionService = appContext.get(SecretEncryptionService);
-
-  const emailWorker = new Worker(EMAIL_QUEUE_NAME, createEmailSendProcessor({ tenantContext, emailService, auditService, fileService }), {
-    connection: redis,
-    concurrency: EMAIL_WORKER_CONCURRENCY,
-  });
-  emailWorker.on('failed', (job, err) => {
-    logger.warn(`email job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`);
-  });
-  emailWorker.on('error', (err) => {
-    logger.error('email worker error', err);
-  });
-
-  const pushWorker = new Worker(
-    PUSH_QUEUE_NAME,
-    createPushSendProcessor({ tenantContext, pushService, secretEncryption: secretEncryptionService, pushDeviceService }),
-    { connection: redis, concurrency: PUSH_WORKER_CONCURRENCY },
-  );
-  pushWorker.on('failed', (job, err) => {
-    logger.warn(`push job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`);
-  });
-  pushWorker.on('error', (err) => {
-    logger.error('push worker error', err);
+  const schedulerMode = environmentService.get('WORKER_SCHEDULER');
+  const realtimePublish = (channel: string, message: string) => realtimePublisherRedis.publish(channel, message);
+  // Approved Shift Statement producer (legacy `bull` prefix): the dispatcher adapter publishes through it.
+  const shiftStatementQueue = new Queue<ShiftStatementJobData>(SHIFT_STATEMENT_QUEUE_NAME, { connection: redis });
+  appContext.get(WorkerDependencies).provide({
+    logger,
+    runtimeDataSource,
+    directDataSource,
+    tenantContext: appContext.get(TenantContextService),
+    auditService: appContext.get(AuditService),
+    notificationService: appContext.get(NotificationService),
+    environmentService,
+    realtimeEventService: appContext.get(RealtimeEventService),
+    emailService: appContext.get(EmailService),
+    emailQueue: appContext.get(EmailQueueService),
+    emailOutboxService: appContext.get(EmailOutboxService),
+    pushService: appContext.get(PushService),
+    pushQueue: appContext.get(PushQueueService),
+    pushDeviceService: appContext.get(PushDeviceService),
+    secretEncryptionService: appContext.get(SecretEncryptionService),
+    fileService: appContext.get(FileService),
+    attendanceQrService: appContext.get(AttendanceQrService),
+    qrImageService: appContext.get(QrImageService),
+    storageReconcileCommand: appContext.get(StorageReconcileCommand),
+    realtimePublish,
+    shiftStatementQueue,
   });
 
-  const runtime = new WorkerRuntime(redis);
+  // Processor discovery (BullMQ migration M2): every scan and consumer handler is a `@Process` method on a `@Processor`
+  // provider. A duplicate handler, a scheduled job with no handler, an unknown queue or an orphan handler refuses to
+  // start here — before any consumer, scheduler or loop exists.
+  const registry = (() => {
+    try {
+      const found = appContext.get(ProcessorExplorer).explore();
+      validateHandlerRegistry(found);
+      return found;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const intervalOf = (def: (typeof SCAN_JOBS)[number]) => resolveIntervalMs(def, environmentService);
+
+  // The three existing consumers — one Worker each, both modes, legacy `bull` prefix, concurrency 5 / 10 / 2.
+  const consumers = createConsumerWorkers(registry, redis, logger);
+
+  const runtime = new WorkerRuntime(redis, {
+    // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
+    statsWrite: schedulerMode === 'bullmq' ? 'fields' : 'whole',
+    durationsKey: WORKER_CYCLE_DURATIONS_KEY,
+  });
   // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
+  let scheduler: BullmqScheduler | null = null;
 
+  // Heartbeat: unchanged in both modes (the liveness signal Admin Health and invitation sends read).
   const beat = () => {
+    if (scheduler?.consumersRunning()) runtime.markConsumersReady();
     instanceHeartbeat.beat();
     redis.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', WORKER_HEARTBEAT_TTL_SECONDS).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next Health tab read report Down/stale, which is correct.
@@ -283,314 +241,41 @@ async function bootstrap(): Promise<void> {
   beat();
   runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
 
-  runtime.every({
-    name: 'account-invite cleanup',
-    intervalMs: ACCOUNT_INVITE_CLEANUP_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastAccountInviteCleanupAt', failures: 'accountInviteCleanupFailures' },
-    run: async () => {
-      const result = await runAccountInviteCleanupCycle(runtimeDataSource);
-      if (result.expired || result.deleted || result.retained) {
-        logger.log(`account-invite cleanup: expired=${result.expired} deleted=${result.deleted} retained=${result.retained}`);
-      }
-    },
-  });
-
-  runtime.every({
-    name: 'email dispatch',
-    intervalMs: EMAIL_DISPATCH_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastEmailDispatchAt', failures: 'emailDispatchFailures' },
-    run: async () => {
-      const result = await runEmailDispatchCycle(
-        runtimeDataSource,
-        tenantContext,
-        (id, orgId) => emailQueue.publish(id, orgId),
-        (id, orgId, generation) => emailQueue.republish(id, orgId, generation),
-        emailService.ambiguousDeliverySafeToRetry,
-      );
-      if (result.claimed) logger.log(`email dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain}`);
-      return Boolean(result.claimed); // only stamps lastEmailDispatchAt when it actually claimed rows
-    },
-  });
-
-  runtime.every({
-    name: 'push dispatch',
-    intervalMs: PUSH_DISPATCH_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastPushDispatchAt', failures: 'pushDispatchFailures' },
-    run: async () => {
-      const result = await runPushDispatchCycle(
-        runtimeDataSource,
-        tenantContext,
-        (id, orgId) => pushQueue.publish(id, orgId),
-        (id, orgId, generation) => pushQueue.republish(id, orgId, generation),
-        pushService.ambiguousDeliverySafeToRetry,
-      );
-      if (result.claimed) logger.log(`push dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain}`);
-      return Boolean(result.claimed);
-    },
-  });
-
-  runtime.every({
-    name: 'shift monitor',
-    intervalMs: SHIFT_MONITOR_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastShiftMonitorAt', failures: 'shiftMonitorFailures' },
-    run: async () => {
-      const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('CLOCK_IN_EARLY_MINUTES'));
-      if (result.remindersSent || result.noShowsFlagged) {
-        logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
-      }
-    },
-  });
-
-  runtime.every({
-    name: 'attendance monitor',
-    intervalMs: ATTENDANCE_MONITOR_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastAttendanceMonitorAt', failures: 'attendanceMonitorFailures' },
-    run: async () => {
-      const result = await runAttendanceMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService);
-      if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
-    },
-  });
-
-  runtime.every({
-    name: 'late clock-in',
-    intervalMs: LATE_CLOCK_IN_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastLateClockInAt', failures: 'lateClockInFailures' },
-    run: async () => {
-      const result = await runLateClockInCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'));
-      if (result.flagged) logger.log(`late clock-in: flagged=${result.flagged}`);
-    },
-  });
-
-  runtime.every({
-    name: 'shift cancellation follow-up',
-    intervalMs: SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastShiftCancellationFollowupAt', failures: 'shiftCancellationFollowupFailures' },
-    run: async () => {
-      const result = await runShiftCancellationFollowupCycle(runtimeDataSource, tenantContext, notificationService, auditService);
-      if (result.assignmentsClosed || result.replacementRequestsCancelled) {
-        logger.log(`shift cancellation follow-up: assignments=${result.assignmentsClosed} offers=${result.offersClosed} replacementRequests=${result.replacementRequestsCancelled}`);
-      }
-    },
-  });
-
-  runtime.every({
-    name: 'offer expiry',
-    intervalMs: OFFER_EXPIRY_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastOfferExpiryAt', failures: 'offerExpiryFailures' },
-    run: async () => {
-      const result = await runOfferExpiryCycle(runtimeDataSource, tenantContext, notificationService, auditService);
-      if (result.expired) logger.log(`offer expiry: expired=${result.expired}`);
-    },
-  });
-
-  runtime.every({
-    name: 'manager confirmation timeout',
-    intervalMs: MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastManagerConfirmationTimeoutAt', failures: 'managerConfirmationTimeoutFailures' },
-    run: async () => {
-      const result = await runManagerConfirmationTimeoutCycle(
-        runtimeDataSource,
-        tenantContext,
-        notificationService,
-        auditService,
-        realtimeEventService,
-        environmentService.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES'),
-      );
-      if (result.confirmed) logger.log(`manager confirmation timeout: confirmed=${result.confirmed}`);
-    },
-  });
-
-  runtime.every({
-    name: 'replacement staff',
-    intervalMs: REPLACEMENT_STAFF_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastReplacementStaffAt', failures: 'replacementStaffFailures' },
-    run: async () => {
-      const result = await runReplacementStaffCycle(runtimeDataSource, tenantContext, notificationService, auditService);
-      if (result.created) logger.log(`replacement staff: created=${result.created} noCandidates=${result.noCandidates}`);
-    },
-  });
-
-  runtime.every({
-    name: 'token cleanup',
-    intervalMs: TOKEN_CLEANUP_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastTokenCleanupAt', failures: 'tokenCleanupFailures' },
-    run: async () => {
-      const result = await runTokenCleanupCycle(runtimeDataSource);
-      if (result.refreshTokensDeleted || result.passwordResetTokensDeleted || result.oauthTransactionsDeleted) {
-        logger.log(
-          `token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted} oauthTransactions=${result.oauthTransactionsDeleted}`,
-        );
-      }
-    },
-  });
-
-  // Wave 4/5 (DB5 contract §2, MFA-lane request): single-use cross-host login handoffs, purged 1 h past expiry/consumption
-  // through DB5's core.login_handoff_cleanup. ON by default (security tokens, not records); own loop + stat keys, session
-  // advisory lock (one replica per cycle), interval LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES. See login-handoff-cleanup.job.ts.
-  const loginHandoffCleanupEnabled = environmentService.get('LOGIN_HANDOFF_CLEANUP_ENABLED');
-  runtime.every({
-    name: 'login handoff cleanup',
-    intervalMs: environmentService.get('LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES') * 60 * 1000,
-    statKeys: { lastRunAt: 'lastLoginHandoffCleanupAt', failures: 'loginHandoffCleanupFailures' },
-    run: async () => {
-      const result = await runLoginHandoffCleanupCycle(runtimeDataSource, directDataSource, { enabled: loginHandoffCleanupEnabled });
-      if (result.ran && result.rowsDeleted) logger.log(`login handoff cleanup: deleted=${result.rowsDeleted} batches=${result.batches}`);
-      return result.ran;
-    },
-  });
-
-  runtime.every({
-    name: 'storage cleanup',
-    intervalMs: STORAGE_CLEANUP_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastStorageCleanupAt', failures: 'storageCleanupFailures' },
-    run: async () => {
-      const result = await runStorageCleanupCycle(storageReconcileCommand, environmentService.get('STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS'));
-      logger.log(`storage cleanup: checked=${result.checkedRows} integrityProblems=${result.integrityProblems} orphans=${result.orphans} actions=${result.actionsTaken}`);
-    },
-  });
-
-  runtime.every({
-    name: 'shift report scheduler',
-    intervalMs: SHIFT_REPORT_SCHEDULER_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastShiftReportSchedulerAt', failures: 'shiftReportSchedulerFailures' },
-    run: async () => {
-      const result = await runShiftReportSchedulerCycle(
-        directDataSource,
-        tenantContext,
-        attendanceQrService,
-        qrImageService,
-        emailOutboxService,
-        fileService,
-        environmentService.get('REPORT_AVAILABLE_BEFORE_MINUTES'),
-        { audit: auditService },
-      );
-      if (result.generated || result.failed) {
-        logger.log(`shift report scheduler: generated=${result.generated} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
-      }
-    },
-  });
-
-  // Worker credential isolation checkpoint: workspace provisioning no longer runs in this process
-  // at all — it required the one genuinely privileged, DDL-performing connection
-  // (`DATABASE_URL_UNPOOLED`), which this process never holds. See `workspace-provisioner.main.ts`,
-  // a separate entrypoint/deployable, for the HWS_RUNTIME_ENABLED-gated provisioning cycle this
-  // used to run here.
-
-  runtime.every({
-    name: 'final timesheet',
-    intervalMs: FINAL_TIMESHEET_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastFinalTimesheetAt', failures: 'finalTimesheetFailures' },
-    run: async () => {
-      const result = await runFinalTimesheetCycle(directDataSource, tenantContext, emailOutboxService, fileService, { audit: auditService });
-      if (result.sent || result.failed) {
-        logger.log(`final timesheet: sent=${result.sent} failed=${result.failed} skippedLocked=${result.skippedLocked}`);
-      }
-    },
-  });
-
-  // Approved Shift Statement: outbox (payroll_record.statement_status, committed with the approval) → dispatcher →
-  // BullMQ → consumer. jobId carries the dispatch generation, so a re-queue after a lost job is a NEW job and an old one
-  // is ignored by the consumer's generation check. BullMQ attempts = 1: retries are the dispatcher's, counted on the row.
-  const shiftStatementQueue = new Queue<ShiftStatementJobData>(SHIFT_STATEMENT_QUEUE_NAME, { connection: redis });
-  const shiftStatementWorker = new Worker<ShiftStatementJobData>(
-    SHIFT_STATEMENT_QUEUE_NAME,
-    async (job) => processShiftStatementJob(job.data, { tenantContext, files: fileService, notifications: notificationService, audit: auditService }),
-    { connection: redis, concurrency: SHIFT_STATEMENT_WORKER_CONCURRENCY },
-  );
-  shiftStatementWorker.on('error', (err) => logger.error('shift statement worker error', err));
-  runtime.every({
-    name: 'shift statement dispatch',
-    intervalMs: SHIFT_STATEMENT_DISPATCH_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastShiftStatementDispatchAt', failures: 'shiftStatementDispatchFailures' },
-    run: async () => {
-      const result = await runShiftStatementDispatchCycle(runtimeDataSource, tenantContext, async (data) => {
-        await shiftStatementQueue.add(SHIFT_STATEMENT_JOB_NAME, data, {
-          jobId: `shift-statement.${data.payrollRecordId}.gen.${data.generation}`, attempts: 1,
-          removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 },
-        });
-      });
-      if (result.claimed) {
-        logger.log(`shift statement dispatch: claimed=${result.claimed} published=${result.published} reconciledMissing=${result.reconciledMissing} requeued=${result.requeued} publishFailed=${result.publishFailed}`);
-      }
-      return Boolean(result.claimed);
-    },
-  });
-
-  runtime.every({
-    name: 'payroll period attention',
-    intervalMs: PAYROLL_PERIOD_ATTENTION_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastPayrollPeriodAttentionAt', failures: 'payrollPeriodAttentionFailures' },
-    run: async () => {
-      const result = await runPayrollPeriodAttentionCycle(runtimeDataSource, tenantContext, notificationService);
-      if (result.notified) logger.log(`payroll period attention: notified=${result.notified}`);
-    },
-  });
-
-  // Stage 2 — Redis Pub/Sub distribution for Stage 1's durable outbox (`core.realtime_event`).
-  // `runtimeDataSource` only (crewflow_app, same restricted role every other job here uses) —
-  // never `directDataSource`/`DATABASE_URL_UNPOOLED`. See `publish-outbox.job.ts`'s own doc
-  // comment for the claim/validate/publish/complete sequence and its at-least-once contract.
-  const realtimeEnv = environmentService.get('NODE_ENV');
-  runtime.every({
-    name: 'realtime outbox publish',
-    intervalMs: REALTIME_OUTBOX_PUBLISH_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastRealtimeOutboxPublishAt', failures: 'realtimeOutboxPublishFailures' },
-    run: async () => {
-      const result = await runRealtimeOutboxPublishCycle(
-        runtimeDataSource,
-        tenantContext,
-        (channel, message) => realtimePublisherRedis.publish(channel, message),
-        realtimeEnv,
-      );
-      if (result.claimed) {
-        logger.log(`realtime outbox publish: claimed=${result.claimed} published=${result.published} invalid=${result.invalid} retried=${result.retried} failed=${result.failed}`);
-      }
-      return Boolean(result.claimed);
-    },
-  });
-
-  // Wave 5 lane OPS (G6): terminal outbox/event retention. OUTBOX_RETENTION_ENABLED=false (default) → the cycle is a no-op
-  // (no query, no delete); enabled starts in OUTBOX_RETENTION_MODE=report (counts only). Deletes go only through DB5's
-  // core.purge_terminal_* functions under each tenant scope; one replica at a time (session advisory lock on the direct
-  // connection). See queues/rab-maintenance/outbox-retention.job.ts.
-  const outboxRetentionConfig = {
-    enabled: environmentService.get('OUTBOX_RETENTION_ENABLED'),
-    mode: environmentService.get('OUTBOX_RETENTION_MODE'),
-    days: {
-      email_outbox: environmentService.get('OUTBOX_RETENTION_EMAIL_DAYS'),
-      push_delivery: environmentService.get('OUTBOX_RETENTION_PUSH_DAYS'),
-      realtime_event: environmentService.get('OUTBOX_RETENTION_REALTIME_DAYS'),
-      worker_event: environmentService.get('OUTBOX_RETENTION_WORKER_EVENT_DAYS'),
-    },
-    batchSize: environmentService.get('OUTBOX_RETENTION_BATCH_SIZE'),
-    maxBatchesPerScope: environmentService.get('OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE'),
-  };
-  runtime.every({
-    name: 'outbox retention',
-    intervalMs: environmentService.get('OUTBOX_RETENTION_INTERVAL_MINUTES') * 60 * 1000,
-    statKeys: { lastRunAt: 'lastOutboxRetentionAt', failures: 'outboxRetentionFailures' },
-    run: async () => {
-      const result = await runOutboxRetentionCycle(runtimeDataSource, directDataSource, tenantContext, outboxRetentionConfig);
-      if (!result.ran) return false;
-      const r = result.rows;
-      logger.log(
-        `outbox retention (${result.mode}${result.mode === 'report' ? ', counts only' : ''}): email=${r.email_outbox} push=${r.push_delivery} ` +
-          `realtime=${r.realtime_event} workerEvent=${r.worker_event} scopes=${result.scopes} truncated=${result.truncated}`,
-      );
-      runtime.stats.lastOutboxRetentionMode = String(result.mode);
-      runtime.stats.lastOutboxRetentionRows = r.email_outbox + r.push_delivery + r.realtime_event + r.worker_event;
-      return true;
-    },
-  });
+  if (schedulerMode === 'bullmq') {
+    // ONE cluster-wide job scheduler per scan; this replica consumes whichever ticks it wins. Redis preflight
+    // (noeviction, API support) and the dedicated scan-lock connection come first — any failure refuses to start.
+    const prefix = resolveScanPrefix(environmentService.get('NODE_ENV'), environmentService.get('BULLMQ_PREFIX'));
+    scheduler = await startBullmqScheduler({
+      redis,
+      redisUrl,
+      lockUrl: (process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL)!,
+      prefix,
+      reconcileMs: environmentService.get('WORKER_SCHEDULER_RECONCILE_SECONDS') * 1000,
+      runtime,
+      registry,
+      jobs: SCAN_JOBS,
+      intervalOf,
+      logger,
+    }).catch(refuseStartup);
+    beat();
+  } else {
+    // interval (default): the historical behaviour — every loop on this process's own timer, in the original order.
+    for (const def of SCAN_JOBS) runtime.every(loopOptionsOf(def, registry.scan(def), intervalOf(def)));
+  }
 
   // eslint-disable-next-line no-console
-  console.log('rab-worker ready');
+  console.log(`rab-worker ready${schedulerMode === 'bullmq' ? ' (scheduler=bullmq)' : ''}`);
 
+  // Every consumer Worker (email, push, shift statements and — AI Phase 1 — rab-ai), from the one registry.
+  const consumerWorkers: Worker[] = [...consumers.values()];
+  const aiTurns = appContext.get(AiTurnRunnerService);
+  const aiTitles = appContext.get(AiTitleService);
   let shutdownStarted = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (shutdownStarted) return;
     shutdownStarted = true;
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    const startedAt = Date.now();
     // eslint-disable-next-line no-console
     console.log(`Worker received ${signal}, shutting down (waiting up to ${timeoutMs}ms for in-flight work)`);
     // Hard stop: never hang a deploy on a stuck cycle. Advisory locks are session-scoped, so exiting releases them.
@@ -601,13 +286,37 @@ async function bootstrap(): Promise<void> {
     }, timeoutMs + 10_000);
     hardExit.unref();
     try {
-      runtime.beginShutdown(); // 1. no new cycle can start
-      await emailWorker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
-      await pushWorker.close();
-      await shiftStatementWorker.close();
+      runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      // AI Phase 1: in-flight AI turns stop calling the model now and finalise as AI_WORKER_INTERRUPTED (no partial re-run).
+      const abortedTurns = aiTurns.abortAll();
+      if (abortedTurns) logger.log(`aborting ${abortedTurns} in-flight AI turn(s) for shutdown`);
+      // AI Phase 2: in-flight title calls stop too (the fallback title stays; no retry).
+      const abortedTitles = aiTitles.abortAll();
+      if (abortedTitles) logger.log(`aborting ${abortedTitles} in-flight AI title call(s) for shutdown`);
+      if (scheduler) {
+        // 2. bullmq: stop the periodic reconcile (schedulers are NEVER removed on shutdown — the next replica keeps them),
+        // then every Worker (scan + consumer) stops fetching and finishes its active job, in parallel, inside the drain
+        // budget; a Worker still busy at the deadline is force-closed and its job is left in Redis for stalled recovery.
+        scheduler.manager.stop();
+        const { timedOut } = await closeWorkersBounded([...scheduler.scanWorkers, ...consumerWorkers], timeoutMs, logger);
+        if (timedOut) {
+          // Budget spent with jobs still running: exit now (well inside the hard-exit deadline). Session advisory locks
+          // die with the connections; the active BullMQ jobs stay in Redis and are recovered by another replica.
+          await runtime.flushMetrics();
+          process.exit(1);
+        }
+      } else {
+        for (const worker of consumerWorkers) await worker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
+      }
       await shiftStatementQueue.close();
-      const { drained, pending } = await runtime.drain(timeoutMs); // 3. in-flight cycles (a PDF render, an email claim)
+      const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;
+      const { drained, pending } = await runtime.drain(remaining); // 3. in-flight cycles (a PDF render, an email claim)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
+      await runtime.flushMetrics();
+      if (scheduler) {
+        await scheduler.manager.close();
+        await scheduler.scanLock.close(); // releases every scan lock this replica held (session-scoped)
+      }
       await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
       await directDataSource.destroy();
       await realtimePublisherRedis.quit();

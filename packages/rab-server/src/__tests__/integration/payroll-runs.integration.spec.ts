@@ -22,8 +22,13 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Agency payment calendar, allocation, payroll runs and official payslips (PayrollCalendarRunsPayslips1786719200000).
- * Real HTTP + PostgreSQL with RLS (crewflow_app), no mocks. Scenarios share one world and run in order; "today" is the
- * machine date (2026-10-21 when written: calendar period 12 Oct – 25 Oct 2026, payday 4 Nov 2026).
+ * Real HTTP + PostgreSQL with RLS (crewflow_app), no mocks. Scenarios share one world and run in order.
+ *
+ * Dates: a shift is worked through the real flow (Check In and Clock In need it to be happening now), then its SCHEDULED
+ * time is pinned to a fixed instant (`scheduleAt`), the way manual-attendance.integration.spec.ts does. Allocation reads
+ * the scheduled start live; worked minutes and pay come from the attendance record and are not touched. So every record
+ * lands in a known period of the official 2026 calendar whatever the machine date (default: Tue 20 Oct 2026 10:00 BST,
+ * period 12 Oct – 25 Oct 2026, payday 4 Nov 2026).
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -94,8 +99,20 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
       attendanceQr.sign(await m.findOneByOrFail(Shift, { id: shiftId })));
   }
 
-  /** Work → finalise → (optionally) approve a shift for staff[i]; returns the payroll record id. */
-  async function recordFor(i: number, approve = true): Promise<string> {
+  /** Inside the 12 Oct – 25 Oct 2026 period (payday 4 Nov 2026): Tuesday 20 October, 10:00 BST. */
+  const IN_OCTOBER_PERIOD = '2026-10-20T09:00:00Z';
+
+  /** Pins a shift's scheduled time (shift + its assignments) to start at `instant`, keeping its scheduled length. */
+  async function scheduleAt(shiftId: string, instant: string): Promise<void> {
+    await adminDataSource.query(`UPDATE core.shift SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
+    await adminDataSource.query(
+      `UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
+      [shiftId, instant],
+    );
+  }
+
+  /** Work → finalise → pin the scheduled start → (optionally) approve a shift for staff[i]; returns the payroll record id. */
+  async function recordFor(i: number, approve = true, scheduledAt: string = IN_OCTOBER_PERIOD): Promise<string> {
     const s = staff[i]!;
     const shift = await http().post('/rest/v1/shifts').set(auth(tokenA)).send({
       venueId, jobRoleId, startsAt: new Date(Date.now() - 5 * 60_000).toISOString(), endsAt: new Date(Date.now() + 8 * 3600_000).toISOString(), requiredCount: 1 });
@@ -113,6 +130,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
       .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 300 * 60_000).toISOString(), reason: 'Runs test worked time' })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
+    await scheduleAt(shiftId, scheduledAt);
     const [row] = await adminDataSource.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
     if (approve) expect((await http().post(`/rest/v1/payroll/records/${row.id}/approve`).set(auth(tokenA))).status).toBe(200);
     rec[`s${i}`] = { recordId: row.id, attendanceId: out.body.id };
@@ -186,6 +204,15 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect(await payday('2026-02-17T12:00:00Z')).toBe('2026-03-11');
     expect(await payday('2026-10-11T23:30:00Z')).toBe('2026-11-04'); // 00:30 BST on 12 Oct
     expect(await payday('2026-10-25T23:30:00Z')).toBe('2026-11-04'); // 23:30 GMT on 25 Oct (after the clock change)
+    // Period boundaries on both 2026 clock changes (each falls on a period's last day), in London time.
+    expect(await payday('2026-10-11T22:59:59Z')).toBe('2026-10-21'); // 23:59:59 BST on 11 Oct: still the earlier period
+    expect(await payday('2026-10-25T00:30:00Z')).toBe('2026-11-04'); // 01:30 BST on 25 Oct, before clocks go back at 01:00 UTC
+    expect(await payday('2026-10-25T23:59:59Z')).toBe('2026-11-04'); // 23:59:59 GMT on 25 Oct: last second of the period
+    expect(await payday('2026-10-26T00:00:00Z')).toBe('2026-11-18'); // 00:00 GMT on 26 Oct: first instant of the next
+    expect(await payday('2026-03-15T23:30:00Z')).toBe('2026-03-25'); // 23:30 GMT on 15 Mar: London = UTC before BST
+    expect(await payday('2026-03-29T00:30:00Z')).toBe('2026-04-08'); // 00:30 GMT on 29 Mar, before clocks go forward
+    expect(await payday('2026-03-29T22:59:59Z')).toBe('2026-04-08'); // 23:59:59 BST on 29 Mar: last second of the period
+    expect(await payday('2026-03-29T23:00:00Z')).toBe('2026-04-22'); // 00:00 BST on 30 Mar: first instant of the next
     expect(await payday('2027-02-01T12:00:00Z')).toBeNull();
     expect(await payday('2025-12-01T12:00:00Z')).toBeNull();
     // The earlier unallocated record now has a period (allocation is evaluated against the active calendar).
@@ -384,5 +411,27 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payroll_run_line SET amount_pence = 1 WHERE run_id = $1`, [runId]))).rejects.toMatchObject({ code: '42501' });
     await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payslip_document SET version = 9`))).rejects.toMatchObject({ code: '42501' });
     await expect(tenantContext.runInTenantContext(ctxOf(a), (m) => m.query(`DELETE FROM core.payroll_calendar_period`))).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('real records either side of a period boundary and both clock changes are allocated by their London scheduled date; pay is unchanged', async () => {
+    const statementOf = async (i: number) => (await http().get('/rest/v1/payroll/me/statements').set(auth(staffTokens[i]!))).body.data[0];
+    // Spring: the 16 Mar – 29 Mar period ends on the day clocks go forward (01:00 UTC); no run exists for either period.
+    const lastOfPeriod = await recordFor(3, true, '2026-03-29T22:30:00Z'); // 23:30 BST on Sunday 29 Mar
+    expect(await statementOf(3)).toMatchObject({ allocationStatus: 'allocated', payday: '2026-04-08', payrollPeriod: { start: '2026-03-16', end: '2026-03-29' } });
+    const firstOfNext = await recordFor(4, true, '2026-03-29T23:30:00Z'); // 00:30 BST on Monday 30 Mar
+    expect(await statementOf(4)).toMatchObject({ allocationStatus: 'allocated', payday: '2026-04-22', payrollPeriod: { start: '2026-03-30', end: '2026-04-12' } });
+    // Autumn: the 12 Oct – 25 Oct period ends on the day clocks go back; 00:30 GMT on 26 Oct is already the next period.
+    const afterAutumn = await recordFor(3, true, '2026-10-26T00:30:00Z');
+    expect(await statementOf(3)).toMatchObject({ payday: '2026-11-18', payrollPeriod: { start: '2026-10-26', end: '2026-11-08' } });
+
+    // Pinning the scheduled date never touches the pay calculation: same worked minutes, rate and amount as a record
+    // made by the same flow in the default period.
+    const pay = await adminDataSource.query(
+      `SELECT id, worked_minutes, pay_rate_pence::text AS rate, amount_pence::text AS amount FROM core.payroll_record WHERE id = ANY($1::uuid[])`,
+      [[rec.s1!.recordId, lastOfPeriod, firstOfNext, afterAutumn]],
+    );
+    const reference = pay.find((p: { id: string }) => p.id === rec.s1!.recordId);
+    expect(reference.worked_minutes).toBeGreaterThan(0);
+    for (const p of pay) expect({ worked_minutes: p.worked_minutes, rate: p.rate, amount: p.amount }).toEqual({ worked_minutes: reference.worked_minutes, rate: reference.rate, amount: reference.amount });
   });
 });

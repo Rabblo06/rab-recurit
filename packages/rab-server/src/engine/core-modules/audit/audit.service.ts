@@ -64,6 +64,15 @@ export const AuditAction = {
   ADMIN_INSPECT_STARTED: 'admin.inspect_started',
   ADMIN_INSPECT_ENDED: 'admin.inspect_ended',
   ADMIN_INSPECT_MUTATION_REFUSED: 'admin.inspect_mutation_refused',
+  /** Platform Admin Panel operations (`platform-admin/admin-panel-audit-actions.ts`); values are filtered on by `core.admin_list_audit_events`. */
+  ADMIN_SESSIONS_REVOKED: 'admin.sessions_revoked',
+  ADMIN_QUEUE_JOBS_RETRIED: 'admin.queue_jobs_retried',
+  ADMIN_QUEUE_JOBS_DELETED: 'admin.queue_jobs_deleted',
+  ADMIN_USER_SEARCHED: 'admin.user_searched',
+  ADMIN_USER_VIEWED: 'admin.user_viewed',
+  ADMIN_ORGANISATION_SEARCHED: 'admin.organisation_searched',
+  ADMIN_TEST_EMAIL_SENT: 'admin.test_email_sent',
+  ADMIN_EMAIL_REPLAY_REASON: 'admin.email_replay_reason',
   PASSWORD_SIGN_IN_PROVIDER_DISABLED: 'auth.password_sign_in_provider_disabled',
   EMAIL_CHANGE_REQUESTED: 'user.email_change_requested',
   EMAIL_CHANGE_CONFIRMED: 'user.email_change_confirmed',
@@ -115,6 +124,11 @@ export const AuditAction = {
   JOB_ROLE_RESTORED: 'job_role.restored',
   STAFF_ARCHIVED: 'staff.archived',
   STAFF_RESTORED: 'staff.restored',
+  /**
+   * A manager added a note to a staff member's record (`StaffService.addNote`). Metadata: `noteId` and `length` only —
+   * never the note text (it can carry personal detail, and audit rows are kept, insert-only).
+   */
+  STAFF_NOTE_ADDED: 'staff.note_added',
   MANAGER_ARCHIVED: 'manager.archived',
   MANAGER_RESTORED: 'manager.restored',
   SHIFT_ARCHIVED: 'shift.archived',
@@ -224,11 +238,108 @@ export const AuditAction = {
   MFA_RESET_BY_ADMIN: 'user.mfa_reset_by_admin',
   MFA_RECOVERY_CODES_REGENERATED: 'user.mfa_recovery_codes_regenerated',
   MFA_RECOVERY_CODE_USED: 'user.mfa_recovery_code_used',
+  /** Account security step 1 (P3): a mobile sign-in needed the factor but its client cannot enter it — refused, nothing issued. */
+  MFA_CLIENT_UPDATE_REQUIRED: 'user.mfa_client_update_required',
+  /** Step 1 (P4): an admin reset of another account's factor was refused (metadata.reason; e.g. the target is a platform admin). */
+  MFA_RESET_REFUSED: 'user.mfa_reset_refused',
+  /** Step 1 (P6): a provider re-authentication (step-up for SSO accounts) was refused (metadata.reason, provider). */
+  SSO_REAUTH_FAILED: 'auth.sso_reauth_failed',
   STEP_UP_SUCCEEDED: 'auth.step_up_succeeded',
   STEP_UP_FAILED: 'auth.step_up_failed',
   /** Cross-host login handoff created on the source host / exchanged for a host-only session on the workspace host. */
   LOGIN_HANDOFF_CREATED: 'auth.login_handoff_created',
   LOGIN_HANDOFF_EXCHANGED: 'auth.login_handoff_exchanged',
+  // AI Phase 1 (docs/ai/PHASE1_PLAN.md, modules/ai). METADATA ONLY: ids, tool names, outcomes, counts, token totals and
+  // error codes. Never a prompt, a reply, a tool argument or result, a record value or a provider key.
+  AI_CONVERSATION_CREATED: 'ai.conversation_created',
+  AI_CONVERSATION_DELETED: 'ai.conversation_deleted',
+  AI_TURN_STARTED: 'ai.turn_started',
+  AI_TURN_COMPLETED: 'ai.turn_completed',
+  AI_TURN_FAILED: 'ai.turn_failed',
+  AI_TURN_CANCELLED: 'ai.turn_cancelled',
+  /** A submitted question refused before queueing or at Worker start (metadata.reason: access / rate / budget / busy …). */
+  AI_TURN_REFUSED: 'ai.turn_refused',
+  AI_TOOL_CALLED: 'ai.tool_called',
+  /** The model asked for a tool the user may not use, or with invalid input (never executed). */
+  AI_TOOL_DENIED: 'ai.tool_denied',
+  /** A platform administrator turned an organisation's AI switch on or off (row in the TARGET organisation). */
+  AI_ORGANISATION_SETTING_CHANGED: 'ai.organisation_setting_changed',
+  AI_RETENTION_PURGED: 'ai.retention_purged',
+  /** Development only: `seed-ai-demo` marked a fully synthetic organisation (`synthetic_data`) for the real-provider gate. */
+  AI_SYNTHETIC_DATA_MARKED: 'ai.synthetic_data_marked',
+  /**
+   * The organisation's CEO pinned (or cleared — "Choose automatically") the model of one tier in Settings → AI
+   * (security 12.2, PHASE1_TWENTY_PLAN D7). Metadata: tier, from, to (catalogue ids or null), reason.
+   */
+  AI_DEFAULT_CHANGED: 'ai.default_changed',
+  /** C1 / CD-1 / CD-2: the CEO changed the model policy (chat / agent level, allowed levels, residency). Metadata: old and new enum values, reason. */
+  AI_MODEL_POLICY_CHANGED: 'ai.model_policy_changed',
+  /** C1 / CD-3: the CEO changed or reset the assistant name / avatar. Metadata: changed field NAMES and enum values; never the name text. */
+  AI_ASSISTANT_PROFILE_CHANGED: 'ai.assistant_profile_changed',
+  /**
+   * AI Phase 7 (PHASE7_TWENTY_PLAN §2.1, D7-6): an organisation's day first reached 80 % of its estimated-cost budget
+   * (`kind: 'cost'`) or its daily token budget (`kind: 'tokens'`). Once per organisation, day and kind; actor-less;
+   * metadata `{kind, pct, day}` only.
+   */
+  AI_BUDGET_THRESHOLD: 'ai.budget_threshold',
+  /**
+   * AI Phase 7 (D7-8): the CEO read Settings → AI → Usage (per-person usage metadata). Metadata `{period, from, to}`;
+   * never another person's figures and never content.
+   */
+  AI_USAGE_VIEWED: 'ai.usage_viewed',
+  // AI Phase 5a (PHASE5_TWENTY_PLAN §2.4, security rule 6.6): the write-proposal lifecycle. METADATA ONLY: conversation,
+  // turn, proposal and target ids, tool, impact, affected count, edited field NAMES, the decider's reason and fixed
+  // failure codes. Never a tool argument, a note body or any other record value.
+  AI_PROPOSAL_CREATED: 'ai.proposal_created',
+  AI_PROPOSAL_APPROVED: 'ai.proposal_approved',
+  AI_PROPOSAL_REJECTED: 'ai.proposal_rejected',
+  AI_PROPOSAL_EXECUTED: 'ai.proposal_executed',
+  AI_PROPOSAL_FAILED: 'ai.proposal_failed',
+  AI_PROPOSAL_EXPIRED: 'ai.proposal_expired',
+  /** LAYER2_HARDENING follow-up: a note on a Manager / Venue Manager profile. Metadata `{ noteId, length }`, never the text. */
+  MANAGER_NOTE_ADDED: 'manager.note_added',
+  /** Named action `updateDraftShift` (console or an approved AI proposal). Metadata: the changed field NAMES only. */
+  SHIFT_DRAFT_UPDATED: 'shift.draft_updated',
+  /** AI Phase 2 (P2-C9): the Worker wrote a model-generated thread title (billed call). Metadata: { model, tokens } only. */
+  AI_TITLE_GENERATED: 'ai.title_generated',
+  /**
+   * AI Phase 4 (docs/ai/PHASE4_TWENTY_PLAN.md §2.6): the organisation's CEO created, edited, deleted, switched on or
+   * switched off a skill (built-in toggles included). Metadata: skillId, name, isSystem, contentLength, contentSha256,
+   * reason (+ changed / previousContentSha256 / from / to). NEVER the skill text.
+   */
+  AI_SKILL_CREATED: 'ai.skill_created',
+  AI_SKILL_UPDATED: 'ai.skill_updated',
+  AI_SKILL_DELETED: 'ai.skill_deleted',
+  AI_SKILL_ACTIVATED: 'ai.skill_activated',
+  AI_SKILL_DEACTIVATED: 'ai.skill_deactivated',
+  /**
+   * C1 / CD-4 (p4 merge): the CEO set, replaced or cleared the workspace instructions. Metadata: contentLength,
+   * contentSha256, previousContentSha256, cleared, reason. NEVER the instruction text.
+   */
+  AI_INSTRUCTIONS_UPDATED: 'ai.instructions_updated',
+  /** The CEO opened Settings → AI → Prompt (Phase 8, D8-3). Metadata only: prompt version, tool count, token estimate. */
+  AI_PROMPT_PREVIEWED: 'ai.prompt_previewed',
+  /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md, storage only until EX-3): the organisation's CEO created, edited or
+   * (soft-)deleted an agent, created / edited / deleted / disabled one of its triggers, or changed its role's flags.
+   * Metadata: ids, enums, flag keys, changed field NAMES, text LENGTHS and SHA-256 hashes, the reason. NEVER the agent's
+   * instruction text, label or description. `ai.agent_trigger_enabled` / `_paused` and the run actions are Phase 6b.
+   */
+  AI_AGENT_CREATED: 'ai.agent_created',
+  AI_AGENT_UPDATED: 'ai.agent_updated',
+  AI_AGENT_DELETED: 'ai.agent_deleted',
+  AI_AGENT_TRIGGER_CREATED: 'ai.agent_trigger_created',
+  AI_AGENT_TRIGGER_UPDATED: 'ai.agent_trigger_updated',
+  AI_AGENT_TRIGGER_DELETED: 'ai.agent_trigger_deleted',
+  AI_AGENT_TRIGGER_DISABLED: 'ai.agent_trigger_disabled',
+  AI_AGENT_ROLE_UPDATED: 'ai.agent_role_updated',
+  /**
+   * AI Phase 5c (Batch 3 S7): the assistant asked the user a question / for a form, and the user answered it (registry
+   * names). Metadata: conversation, turn and request ids, the kind, counts (options / fields / answered field KEYS). NEVER
+   * the question text, a label or any answer value.
+   */
+  AI_INPUT_REQUESTED: 'ai.input_requested',
+  AI_INPUT_ANSWERED: 'ai.input_answered',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

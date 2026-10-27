@@ -1,0 +1,622 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 7.433,
+      "type": "mark",
+      "id": "new.0",
+      "selector": "button:has-text(\"New shift\")",
+      "bbox": {
+        "x": 1349.5,
+        "y": 11.5,
+        "w": 108.5,
+        "h": 32
+      },
+      "label": "New shift"
+    },
+    {
+      "t": 7.433,
+      "type": "mark",
+      "id": "new.1",
+      "selector": "region",
+      "bbox": {
+        "x": 248,
+        "y": 0,
+        "w": 980,
+        "h": 430
+      },
+      "label": "region"
+    },
+    {
+      "t": 7.433,
+      "type": "camera",
+      "id": "new",
+      "marks": [
+        "new.0",
+        "new.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 7.933,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 8.567,
+      "type": "move",
+      "x": 1404,
+      "y": 28,
+      "selector": "button:has-text(\"New shift\")",
+      "bbox": {
+        "x": 1349.5,
+        "y": 11.5,
+        "w": 108.5,
+        "h": 32
+      },
+      "label": "New shift"
+    },
+    {
+      "t": 8.867,
+      "type": "click",
+      "x": 1404,
+      "y": 28,
+      "selector": "button:has-text(\"New shift\")"
+    },
+    {
+      "t": 9.933,
+      "type": "mark",
+      "id": "venue.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue\"))",
+      "bbox": {
+        "x": 977,
+        "y": 69,
+        "w": 296,
+        "h": 54
+      },
+      "label": "Venue Search venues…"
+    },
+    {
+      "t": 9.933,
+      "type": "mark",
+      "id": "venue.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\"))",
+      "bbox": {
+        "x": 1287,
+        "y": 69,
+        "w": 296,
+        "h": 54
+      },
+      "label": "Role Search roles…"
+    },
+    {
+      "t": 9.933,
+      "type": "camera",
+      "id": "venue",
+      "marks": [
+        "venue.0",
+        "venue.1"
+      ],
+      "chapter": "Venue and role",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 9.933,
+      "type": "move-start",
+      "x": 1404,
+      "y": 28
+    },
+    {
+      "t": 10.367,
+      "type": "move",
+      "x": 1125,
+      "y": 107,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue\")) button",
+      "bbox": {
+        "x": 977,
+        "y": 91,
+        "w": 296,
+        "h": 32
+      },
+      "label": "Search venues…"
+    },
+    {
+      "t": 10.667,
+      "type": "click",
+      "x": 1125,
+      "y": 107,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Venue\")) button"
+    },
+    {
+      "t": 12.5,
+      "type": "move-start",
+      "x": 1125,
+      "y": 107
+    },
+    {
+      "t": 12.933,
+      "type": "move",
+      "x": 1435,
+      "y": 107,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\")) button",
+      "bbox": {
+        "x": 1287,
+        "y": 91,
+        "w": 296,
+        "h": 32
+      },
+      "label": "Search roles…"
+    },
+    {
+      "t": 13.233,
+      "type": "click",
+      "x": 1435,
+      "y": 107,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Role\")) button"
+    },
+    {
+      "t": 14.933,
+      "type": "mark",
+      "id": "time.0",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Date\")) input",
+      "bbox": {
+        "x": 977,
+        "y": 227,
+        "w": 192.7,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 14.933,
+      "type": "mark",
+      "id": "time.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"End time\")) input",
+      "bbox": {
+        "x": 1390.3,
+        "y": 227,
+        "w": 192.7,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 14.933,
+      "type": "mark",
+      "id": "time.2",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Break (minutes)\")) input",
+      "bbox": {
+        "x": 977,
+        "y": 297,
+        "w": 296,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 14.933,
+      "type": "camera",
+      "id": "time",
+      "marks": [
+        "time.0",
+        "time.1",
+        "time.2"
+      ],
+      "chapter": "Date and time",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 14.933,
+      "type": "move-start",
+      "x": 1435,
+      "y": 107
+    },
+    {
+      "t": 15.4,
+      "type": "move",
+      "x": 1073,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Date\")) input",
+      "bbox": {
+        "x": 977,
+        "y": 227,
+        "w": 192.7,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 15.5,
+      "type": "click",
+      "x": 1073,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Date\")) input"
+    },
+    {
+      "t": 16.3,
+      "type": "move-start",
+      "x": 1073,
+      "y": 245
+    },
+    {
+      "t": 16.667,
+      "type": "move",
+      "x": 1280,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Start time\")) input",
+      "bbox": {
+        "x": 1183.7,
+        "y": 227,
+        "w": 192.7,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 16.767,
+      "type": "click",
+      "x": 1280,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Start time\")) input"
+    },
+    {
+      "t": 17.567,
+      "type": "move-start",
+      "x": 1280,
+      "y": 245
+    },
+    {
+      "t": 17.933,
+      "type": "move",
+      "x": 1487,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"End time\")) input",
+      "bbox": {
+        "x": 1390.3,
+        "y": 227,
+        "w": 192.7,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 18.033,
+      "type": "click",
+      "x": 1487,
+      "y": 245,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"End time\")) input"
+    },
+    {
+      "t": 18.833,
+      "type": "move-start",
+      "x": 1487,
+      "y": 245
+    },
+    {
+      "t": 19.3,
+      "type": "move",
+      "x": 1125,
+      "y": 315,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Break (minutes)\")) input",
+      "bbox": {
+        "x": 977,
+        "y": 297,
+        "w": 296,
+        "h": 36
+      },
+      "label": "input"
+    },
+    {
+      "t": 19.4,
+      "type": "click",
+      "x": 1125,
+      "y": 315,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) .field:has(> label:text-is(\"Break (minutes)\")) input"
+    },
+    {
+      "t": 20.267,
+      "type": "camera",
+      "id": "staff",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 20.267,
+      "type": "move-start",
+      "x": 1125,
+      "y": 315
+    },
+    {
+      "t": 20.633,
+      "type": "move",
+      "x": 1037,
+      "y": 480,
+      "selector": "getByRole('button', { name: 'Select staff' })",
+      "bbox": {
+        "x": 977,
+        "y": 463.5,
+        "w": 119.6,
+        "h": 32
+      },
+      "label": "Select staff"
+    },
+    {
+      "t": 20.933,
+      "type": "click",
+      "x": 1037,
+      "y": 480,
+      "selector": "getByRole('button', { name: 'Select staff' })"
+    },
+    {
+      "t": 21.367,
+      "type": "mark",
+      "id": "pick.0",
+      "selector": "getByLabel('Select Alex Morgan', { exact: true })",
+      "bbox": {
+        "x": 265,
+        "y": 811.1,
+        "w": 16,
+        "h": 16
+      },
+      "label": "Select Alex Morgan"
+    },
+    {
+      "t": 21.367,
+      "type": "mark",
+      "id": "pick.1",
+      "selector": "getByLabel('Select Sam Reed', { exact: true })",
+      "bbox": {
+        "x": 265,
+        "y": 688.1,
+        "w": 16,
+        "h": 16
+      },
+      "label": "Select Sam Reed"
+    },
+    {
+      "t": 21.367,
+      "type": "mark",
+      "id": "pick.2",
+      "selector": "tr:has-text(\"Sam Reed\") td:nth-child(4)",
+      "bbox": {
+        "x": 647.7,
+        "y": 675.6,
+        "w": 320.3,
+        "h": 41
+      },
+      "label": "sam.reed@example.test"
+    },
+    {
+      "t": 21.367,
+      "type": "camera",
+      "id": "pick",
+      "marks": [
+        "pick.0",
+        "pick.1",
+        "pick.2"
+      ],
+      "chapter": "Select Staff",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 21.367,
+      "type": "move-start",
+      "x": 1037,
+      "y": 480
+    },
+    {
+      "t": 22.133,
+      "type": "move",
+      "x": 273,
+      "y": 819,
+      "selector": "getByLabel('Select Alex Morgan', { exact: true })",
+      "bbox": {
+        "x": 265,
+        "y": 811.1,
+        "w": 16,
+        "h": 16
+      },
+      "label": "Select Alex Morgan"
+    },
+    {
+      "t": 22.433,
+      "type": "click",
+      "x": 273,
+      "y": 819,
+      "selector": "getByLabel('Select Alex Morgan', { exact: true })"
+    },
+    {
+      "t": 22.867,
+      "type": "move-start",
+      "x": 273,
+      "y": 819
+    },
+    {
+      "t": 23.233,
+      "type": "move",
+      "x": 273,
+      "y": 778,
+      "selector": "getByLabel('Select Priya Shah', { exact: true })",
+      "bbox": {
+        "x": 265,
+        "y": 770.1,
+        "w": 16,
+        "h": 16
+      },
+      "label": "Select Priya Shah"
+    },
+    {
+      "t": 23.533,
+      "type": "click",
+      "x": 273,
+      "y": 778,
+      "selector": "getByLabel('Select Priya Shah', { exact: true })"
+    },
+    {
+      "t": 23.967,
+      "type": "move-start",
+      "x": 273,
+      "y": 778
+    },
+    {
+      "t": 24.333,
+      "type": "move",
+      "x": 273,
+      "y": 696,
+      "selector": "getByLabel('Select Sam Reed', { exact: true })",
+      "bbox": {
+        "x": 265,
+        "y": 688.1,
+        "w": 16,
+        "h": 16
+      },
+      "label": "Select Sam Reed"
+    },
+    {
+      "t": 24.633,
+      "type": "click",
+      "x": 273,
+      "y": 696,
+      "selector": "getByLabel('Select Sam Reed', { exact: true })"
+    },
+    {
+      "t": 25.467,
+      "type": "camera",
+      "id": "confirm",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 25.967,
+      "type": "move-start",
+      "x": 273,
+      "y": 696
+    },
+    {
+      "t": 26.733,
+      "type": "move",
+      "x": 1536,
+      "y": 24,
+      "selector": "getByRole('button', { name: 'Confirm', exact: true })",
+      "bbox": {
+        "x": 1495.8,
+        "y": 8,
+        "w": 80.2,
+        "h": 32
+      },
+      "label": "Confirm"
+    },
+    {
+      "t": 27.033,
+      "type": "click",
+      "x": 1536,
+      "y": 24,
+      "selector": "getByRole('button', { name: 'Confirm', exact: true })"
+    },
+    {
+      "t": 27.967,
+      "type": "move-start",
+      "x": 1536,
+      "y": 24
+    },
+    {
+      "t": 28.733,
+      "type": "move",
+      "x": 1512,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Send Offer\")",
+      "bbox": {
+        "x": 1442.8,
+        "y": 855,
+        "w": 138.2,
+        "h": 32
+      },
+      "label": "Send Offer (3)"
+    },
+    {
+      "t": 29.033,
+      "type": "click",
+      "x": 1512,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Send Offer\")"
+    },
+    {
+      "t": 32.967,
+      "type": "mark",
+      "id": "result.0",
+      "selector": "getByText(/Shift created ✓/)",
+      "bbox": {
+        "x": 977,
+        "y": 686.5,
+        "w": 606,
+        "h": 19.5
+      },
+      "label": "Shift created ✓ — 2 of 3 offers sent"
+    },
+    {
+      "t": 32.967,
+      "type": "mark",
+      "id": "result.1",
+      "selector": ".side-panel-dock:not(.ai-panel-dock) p:has-text(\"Sam Reed\")",
+      "bbox": {
+        "x": 977,
+        "y": 757,
+        "w": 606,
+        "h": 19.5
+      },
+      "label": "✗ Sam Reed — This staff member already has a confirmed shift"
+    },
+    {
+      "t": 32.967,
+      "type": "camera",
+      "id": "result",
+      "marks": [
+        "result.0",
+        "result.1"
+      ],
+      "chapter": "Offers sent",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 32.967,
+      "type": "move-start",
+      "x": 1512,
+      "y": 871
+    },
+    {
+      "t": 33.367,
+      "type": "move",
+      "x": 1280,
+      "y": 767,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) p:has-text(\"Sam Reed\")",
+      "bbox": {
+        "x": 977,
+        "y": 757,
+        "w": 606,
+        "h": 19.5
+      },
+      "label": "✗ Sam Reed — This staff member already has a confirmed shift"
+    }
+  ]
+}

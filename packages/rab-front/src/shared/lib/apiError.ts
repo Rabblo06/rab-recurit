@@ -59,6 +59,11 @@ export interface ApiErrorOptions {
   fallback?: string;
   /** Per-kind replacements, e.g. `{ payload_too_large: 'Photos must be 5 MB or smaller.' }`. */
   messages?: Partial<Record<ApiErrorKind, string>>;
+  /**
+   * Per server `code` replacements, e.g. `{ EMAIL_UNAVAILABLE: 'That email is already in use.' }`. Takes priority over
+   * `messages`, so a known domain code always gets its own copy whatever its HTTP status.
+   */
+  codes?: Record<string, string>;
 }
 
 /** Nest/Express/Multer defaults and other framework text: correct but useless (or revealing) to a user. */
@@ -178,7 +183,8 @@ export function normalizeApiError(error: unknown, options: ApiErrorOptions | str
   const serverMessage = PREFER_SERVER.has(kind) ? pickServerMessage(response.data) : null;
   const code = pickCode(response.data);
   const retryable = kind === 'rate_limited' || kind === 'server' || kind === 'timeout';
-  const message = opts.messages?.[kind] ?? serverMessage ?? text(kind, kind === 'validation' || kind === 'unknown');
+  const byCode = code && opts.codes && Object.prototype.hasOwnProperty.call(opts.codes, code) ? opts.codes[code] : undefined;
+  const message = byCode ?? opts.messages?.[kind] ?? serverMessage ?? text(kind, kind === 'validation' || kind === 'unknown');
   return { kind, status, code, message, serverMessage, retryable };
 }
 
@@ -196,4 +202,34 @@ export function getApiErrorCode(error: unknown): string | null {
 export function getApiErrorStatus(error: unknown): number | null {
   const status = asHttpError(error)?.response?.status;
   return typeof status === 'number' ? status : null;
+}
+
+/**
+ * Field-level errors from a server validation failure (400/422), for showing under the matching inputs.
+ *
+ * The server's global `ValidationPipe` answers with class-validator's default messages (`["firstName must be longer than
+ * or equal to 1 characters", "property organisationId should not exist"]`). Those are never shown as-is (they name
+ * internal properties); instead each message is matched on its leading property name against `fields`, and the
+ * CALLER's own human text for that field is returned. Properties the caller did not list are ignored, so nothing the
+ * server says is echoed. A body may also carry `{ code, field }` (a domain error about one input): when `field` is a
+ * listed key it maps the same way. Returns `{}` for every other error.
+ *
+ *   getApiFieldErrors(err, { firstName: 'Enter your first name.', lastName: 'Enter your last name.' })
+ */
+export function getApiFieldErrors<K extends string>(error: unknown, fields: Record<K, string>): Partial<Record<K, string>> {
+  const response = asHttpError(error)?.response;
+  const status = response?.status;
+  if (!response || (status !== 400 && status !== 422)) return {};
+  const data = response.data as { message?: unknown; field?: unknown } | undefined;
+  const out: Partial<Record<K, string>> = {};
+  const known = (name: unknown): name is K => typeof name === 'string' && Object.prototype.hasOwnProperty.call(fields, name);
+  if (known(data?.field)) out[data.field] = fields[data.field];
+  const raw = data?.message;
+  for (const entry of Array.isArray(raw) ? raw : [raw]) {
+    if (typeof entry !== 'string') continue;
+    // "firstName must …", "property firstName should not exist", "items.0.name must …" (first segment only).
+    const match = /^(?:property\s+)?([A-Za-z_][\w]*)(?:[.\w]*)?\s/.exec(entry.trim());
+    if (match && known(match[1])) out[match[1]] = fields[match[1]];
+  }
+  return out;
 }

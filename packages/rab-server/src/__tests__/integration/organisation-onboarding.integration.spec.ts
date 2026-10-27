@@ -251,9 +251,15 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
       ]);
       await markLatestOutboxSent(created.body.id, ceoUserForResend.id);
 
-      const resend = await http()
+      // Admin panel follow-up (T1): the resend requires a reason (400 without one, below).
+      const noReason = await http()
         .post(`/rest/v1/admin/organisations/${created.body.id}/ceo-invite/resend`)
         .set('Authorization', `Bearer ${adminToken}`);
+      expect(noReason.status).toBe(400);
+      const resend = await http()
+        .post(`/rest/v1/admin/organisations/${created.body.id}/ceo-invite/resend`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'CEO asked for a new link' });
       expect(resend.status).toBe(201);
       expect(resend.body.sendNumber).toBe(2);
 
@@ -285,7 +291,8 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
 
       const resend = await http()
         .post(`/rest/v1/admin/organisations/${created.body.id}/ceo-invite/resend`)
-        .set('Authorization', `Bearer ${outsiderToken}`);
+        .set('Authorization', `Bearer ${outsiderToken}`)
+        .send({ reason: 'outsider attempt' });
       expect(resend.status).toBe(403);
     });
   });
@@ -300,11 +307,12 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
       await http()
         .post(`/rest/v1/admin/organisations/${created.body.id}/suspend`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ reason: 'test suspension', confirmSlug: created.body.slug, currentPassword: factory.testPassword });
+        .send({ reason: 'test suspension', confirmSlug: created.body.slug });
 
       const resend = await http()
         .post(`/rest/v1/admin/organisations/${created.body.id}/ceo-invite/resend`)
-        .set('Authorization', `Bearer ${adminToken}`);
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'resend while suspended' });
       expect(resend.status).toBe(403);
     });
   });

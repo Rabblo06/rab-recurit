@@ -24,6 +24,7 @@ import { OutboxOperationsService } from '../engine/core-modules/platform-admin/o
 import { ThrottlerRedisClientModule } from '../engine/core-modules/throttler/throttler-redis-client.module';
 import { SeedCommand } from './seed.command';
 import { SeedQaCommand } from './seed-qa.command';
+import { SeedAiDemoCommand } from './seed-ai-demo.command';
 import { StorageMigrateLocalCommand } from './storage-migrate-local.command';
 import { StorageReconcileCommand } from './storage-reconcile.command';
 import { UserSessionBackfillCommand } from './user-session-backfill.command';
@@ -63,6 +64,8 @@ import { ResourceScopeModule } from '../engine/core-modules/resource-scope/resou
     PayrollCalendarService,
     SeedCommand,
     SeedQaCommand,
+    // AI Part A (development only): the synthetic organisation for the real-model dev run.
+    SeedAiDemoCommand,
     GrantPlatformAdminCommand,
     BootstrapAdminCommand,
     StorageReconcileCommand,

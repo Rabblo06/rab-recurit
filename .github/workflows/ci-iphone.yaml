@@ -42,12 +42,25 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
-      - name: Pick a simulator
+      # Pinned sizes for screenshot comparison with the design: a 390x844 phone
+      # (iPhone 16e / 14 / 13) and a 375x667 iPhone SE. Falls back to the first
+      # available iPhone if none of the pinned types exist on this runner.
+      - name: Pick simulators
         run: |
-          UDID=$(xcrun simctl list devices available -j \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for r,v in sorted(d.items(), reverse=True) if "iOS" in r for x in v if x["name"].startswith("iPhone")))')
-          echo "Simulator: $UDID"
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin)["runtimes"] if x["platform"]=="iOS" and x["isAvailable"]]; print(sorted(r,key=lambda x:x["version"])[-1]["identifier"])')
+          UDID=""
+          for TYPE in iPhone-16e iPhone-14 iPhone-13; do
+            if UDID=$(xcrun simctl create "CF 390x844" "com.apple.CoreSimulator.SimDeviceType.$TYPE" "$RUNTIME" 2>/dev/null); then break; fi
+            UDID=""
+          done
+          if [ -z "$UDID" ]; then
+            UDID=$(xcrun simctl list devices available -j \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin)["devices"]; print(next(x["udid"] for r,v in sorted(d.items(), reverse=True) if "iOS" in r for x in v if x["name"].startswith("iPhone")))')
+          fi
+          SE=$(xcrun simctl create "CF 375x667" "com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation" "$RUNTIME" 2>/dev/null || true)
+          echo "Simulator: $UDID  SE: ${SE:-none}"
           echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "SIM_SE_UDID=$SE" >> "$GITHUB_ENV"
 
       - name: Build (Debug, unsigned)
         id: build
@@ -82,6 +95,47 @@ jobs:
             -destination "id=$SIM_UDID" -derivedDataPath build/DerivedData \
             -only-testing:CrewflowUITests -resultBundlePath build/ui-tests.xcresult \
             CODE_SIGNING_ALLOWED=NO
+
+      - name: Account-security UI tests (375x667)
+        if: always() && steps.build.outcome == 'success' && env.SIM_SE_UDID != ''
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Crewflow.xcodeproj -scheme Crewflow -configuration Debug \
+            -destination "id=$SIM_SE_UDID" -derivedDataPath build/DerivedData \
+            -only-testing:CrewflowUITests/TwoFactorUITests -resultBundlePath build/ui-tests-se.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      # PNG attachments from the UI tests (one per account-security design
+      # state), renamed from their human-readable names when the manifest has them.
+      - name: Export account-security screenshots
+        if: always()
+        run: |
+          for R in build/ui-tests.xcresult build/ui-tests-se.xcresult; do
+            [ -d "$R" ] || continue
+            OUT="build/screens/$(basename "$R" .xcresult)"; mkdir -p "$OUT"
+            xcrun xcresulttool export attachments --path "$R" --output-path "$OUT" || continue
+            python3 - "$OUT" <<'PY'
+          import json, os, sys
+          d = sys.argv[1]
+          p = os.path.join(d, "manifest.json")
+          if os.path.exists(p):
+              for test in json.load(open(p)):
+                  for a in test.get("attachments", []):
+                      n = a.get("suggestedHumanReadableName", ""); f = a.get("exportedFileName")
+                      if n.startswith("ios-") and f and os.path.exists(os.path.join(d, f)):
+                          os.replace(os.path.join(d, f), os.path.join(d, n.split("_0_")[0] + ".png"))
+          PY
+          done
+
+      - name: Upload account-security screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: iphone-account-security-screens
+          path: packages/rab-iphone/build/screens
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload logs and test results
         if: always()

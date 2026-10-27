@@ -1,0 +1,72 @@
+[
+  {
+    "id": "intro",
+    "start": 1.2,
+    "seconds": 7.189,
+    "text": "Here's your Crewflow dashboard. It brings your staff, offers and shifts together, so you can see how the week's going at a glance.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\intro.wav"
+  },
+  {
+    "id": "strip",
+    "start": 9.1,
+    "seconds": 6.713,
+    "text": "The strip along the top shows how your current offers are progressing: pending, accepted by staff, and confirmed.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\strip.wav"
+  },
+  {
+    "id": "counts",
+    "start": 16.333,
+    "seconds": 3.904,
+    "text": "Beside it are your totals for staff, venue managers and venues.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\counts.wav"
+  },
+  {
+    "id": "hours",
+    "start": 20.967,
+    "seconds": 4.109,
+    "text": "Hours worked adds up the time your team recorded over the last seven days.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\hours.wav"
+  },
+  {
+    "id": "hover",
+    "start": 25.6,
+    "seconds": 2.702,
+    "text": "Hover over a day to see its exact total.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\hover.wav"
+  },
+  {
+    "id": "venues",
+    "start": 29.133,
+    "seconds": 5.141,
+    "text": "Next to it, Shifts by venue counts the last thirty days of shifts at your busiest venues.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\venues.wav"
+  },
+  {
+    "id": "readiness",
+    "start": 35.1,
+    "seconds": 5.781,
+    "text": "Shift readiness follows your next shift, from staffing and attendance through to the finalised timesheet.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\readiness.wav"
+  },
+  {
+    "id": "checklist",
+    "start": 41.4,
+    "seconds": 3.573,
+    "text": "Its checklist shows what's done, and what still needs attention.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\checklist.wav"
+  },
+  {
+    "id": "week",
+    "start": 45.8,
+    "seconds": 5.71,
+    "text": "Further down, the week view lists your shifts day by day. Use the arrows to look ahead to next week.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\week.wav"
+  },
+  {
+    "id": "close",
+    "start": 52.333,
+    "seconds": 4.715,
+    "text": "That's the dashboard. Select the arrow on any card to open the page behind it.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\dashboard-cinematic\\close.wav"
+  }
+]

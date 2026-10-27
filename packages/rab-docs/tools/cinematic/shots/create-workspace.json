@@ -1,0 +1,11 @@
+{
+  "slug": "create-workspace",
+  "project": "create-workspace",
+  "title": "Creating your workspace",
+  "subtitle": "Workspace, profile, preparation and welcome",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

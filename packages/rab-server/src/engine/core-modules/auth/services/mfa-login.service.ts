@@ -9,6 +9,7 @@ import { base32Encode, formatManualKey, totpProvisioningUri } from '../mfa/totp'
 import { AuthService, LoginResult, RequestMeta } from './auth.service';
 import { MfaChallengeService, PendingLogin } from './mfa-challenge.service';
 import { MfaFactorService } from './mfa-factor.service';
+import { MfaSecurityNoticeService } from './mfa-security-notice.service';
 import { SecurityVersionService } from './security-version.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
 
@@ -20,8 +21,24 @@ export interface EnrolmentMaterial {
   manualKey: string;
 }
 
-const CHALLENGE_GONE = { code: 'MFA_CHALLENGE_EXPIRED', message: 'Your sign-in expired. Please sign in again.' } as const;
-const CODE_INVALID = { code: 'MFA_CODE_INVALID', message: 'That code didn’t work. Check your authenticator app and try again.' } as const;
+/**
+ * Account security step 1 — the challenge's failure answers are distinct, STABLE codes a client maps to its screens, each
+ * with a `state` the clients can switch on:
+ *   - MFA_CODE_INVALID (401, state `invalid_code`) + `attemptsRemaining`: the TRUE number of further attempts this
+ *     challenge will accept, from the atomic Redis counter (AUTH_MFA_CHALLENGE_MAX_ATTEMPTS − attempts counted so far).
+ *     0 means the next attempt is refused as exhausted — clients show "start again".
+ *   - MFA_CHALLENGE_EXPIRED (401, state `expired`): unknown, malformed, expired, already-used or other-transport token —
+ *     one identical body, so a token that never existed is indistinguishable from one that lapsed (non-enumerating).
+ *   - MFA_CHALLENGE_EXHAUSTED (401, state `locked`): this challenge was destroyed by too many wrong codes.
+ *   - MFA_RATE_LIMITED (429, state `locked`, Retry-After): the per-user attempt bucket (LoginAttemptLimiterService).
+ * None of them carries any account detail (no email, no name, no remaining recovery codes).
+ */
+const CHALLENGE_GONE = { code: 'MFA_CHALLENGE_EXPIRED', state: 'expired', message: 'Your sign-in expired. Please sign in again.' } as const;
+const CHALLENGE_EXHAUSTED = { code: 'MFA_CHALLENGE_EXHAUSTED', state: 'locked', message: 'Too many incorrect codes. Please sign in again.' } as const;
+const CODE_INVALID_MESSAGE = 'That code didn’t work. Check your authenticator app and try again.';
+const codeInvalid = (attemptsRemaining: number) => ({ code: 'MFA_CODE_INVALID', state: 'invalid_code', message: CODE_INVALID_MESSAGE, attemptsRemaining }) as const;
+/** Attempts this challenge will still accept after the one just counted (never negative). */
+const remainingAfter = (attempt: { attempt: number; maxAttempts: number }) => Math.max(0, attempt.maxAttempts - attempt.attempt);
 
 /**
  * Wave 4 lane MFA — finishing a sign-in that `AuthService.completeLogin` turned into a challenge.
@@ -51,10 +68,11 @@ export class MfaLoginService {
     private readonly env: EnvironmentService,
     private readonly refreshTokens: RefreshTokenService,
     private readonly securityVersion: SecurityVersionService,
+    private readonly notices: MfaSecurityNoticeService,
   ) {}
 
   async verifyChallenge(token: unknown, code: unknown, mobile: boolean, meta: RequestMeta): Promise<LoginResult> {
-    const login = await this.admitted(token, mobile, 'verify');
+    const { login, attempt } = await this.admitted(token, mobile, 'verify');
     await this.factors.admitAttempt(login.userId);
     const ctx = this.ctxFor(login);
     const verified = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
@@ -69,13 +87,13 @@ export class MfaLoginService {
     });
     if (!verified) {
       await this.recordFailure(ctx, login, 'code');
-      throw new UnauthorizedException(CODE_INVALID);
+      throw new UnauthorizedException(codeInvalid(remainingAfter(attempt)));
     }
     return this.finish(token as string, login, meta);
   }
 
   async startEnrolment(token: unknown, mobile: boolean): Promise<EnrolmentMaterial> {
-    const login = await this.admitted(token, mobile, 'enroll');
+    const { login } = await this.admitted(token, mobile, 'enroll');
     const ctx = this.ctxFor(login);
     const secret = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const staged = await this.factors.stageNewSecret(manager, login.userId);
@@ -88,17 +106,21 @@ export class MfaLoginService {
   }
 
   async confirmEnrolment(token: unknown, code: unknown, mobile: boolean, meta: RequestMeta): Promise<LoginResult & { recoveryCodes: string[] }> {
-    const login = await this.admitted(token, mobile, 'enroll');
+    const { login, attempt } = await this.admitted(token, mobile, 'enroll');
     await this.factors.admitAttempt(login.userId);
     const ctx = this.ctxFor(login);
-    const codes = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const enrolledOutcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const enrolled = await this.factors.confirmEnrolment(manager, login.userId, code);
-      if (enrolled) await this.audit.record(manager, ctx, AuditAction.MFA_ENABLED, { targetUserId: login.userId, metadata: { during: 'sign_in', recoveryCodes: enrolled.length } });
-      return enrolled;
+      if (!enrolled) return null;
+      await this.audit.record(manager, ctx, AuditAction.MFA_ENABLED, { targetUserId: login.userId, metadata: { during: 'sign_in', recoveryCodes: enrolled.length } });
+      // Account security step 1 (P7): the account is told its factor was turned on (no secret or code in the email).
+      return { enrolled, notice: await this.notices.enqueue(manager, login.organisationId, login.userId, 'enabled') };
     });
+    const codes = enrolledOutcome?.enrolled ?? null;
+    if (enrolledOutcome) this.notices.publish(enrolledOutcome.notice);
     if (!codes) {
       await this.recordFailure(ctx, login, 'enrolment_code');
-      throw new UnauthorizedException(CODE_INVALID);
+      throw new UnauthorizedException(codeInvalid(remainingAfter(attempt)));
     }
     // Enabling MFA is a security change: the account's security version moves, which ends every other session and
     // would also invalidate this challenge's snapshot — so the pending login is refreshed to the new version first.
@@ -121,17 +143,17 @@ export class MfaLoginService {
 
   // ------------------------------------------------------------------ internals
 
-  private async admitted(token: unknown, mobile: boolean, requirement: PendingLogin['requirement']): Promise<PendingLogin> {
+  private async admitted(token: unknown, mobile: boolean, requirement: PendingLogin['requirement']): Promise<{ login: PendingLogin; attempt: { attempt: number; maxAttempts: number } }> {
     const attempt = await this.challenges.attempt(token);
     if (!attempt.ok) {
-      throw new UnauthorizedException(attempt.reason === 'exhausted' ? { code: 'MFA_CHALLENGE_EXHAUSTED', message: 'Too many incorrect codes. Please sign in again.' } : CHALLENGE_GONE);
+      throw new UnauthorizedException(attempt.reason === 'exhausted' ? CHALLENGE_EXHAUSTED : CHALLENGE_GONE);
     }
     // Bound to the transport the sign-in started on, and to the step it is waiting for.
     if (attempt.login.mobile !== mobile) throw new UnauthorizedException(CHALLENGE_GONE);
     if (attempt.login.requirement !== requirement) {
       throw new ForbiddenException({ code: 'MFA_WRONG_STEP', message: requirement === 'enroll' ? 'This sign-in needs your existing authenticator code.' : 'This sign-in needs two-factor setup first.' });
     }
-    return attempt.login;
+    return { login: attempt.login, attempt: { attempt: attempt.attempt, maxAttempts: attempt.maxAttempts } };
   }
 
   private ctxFor(login: PendingLogin): AuthContext {

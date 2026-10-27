@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsUrl, IsString, Max, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches, Max, MaxLength, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
@@ -425,6 +425,296 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(1440)
   LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: number = 15;
+
+  /**
+   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its 20 periodic scans.
+   *  - `interval` (DEFAULT): every replica runs every loop on its own process-local timer, exactly as before.
+   *  - `bullmq`: ONE cluster-wide BullMQ job scheduler per scan (`crewflow:<queue>:<jobName>`) hands each tick to one
+   *    replica; a per-scan PostgreSQL advisory lock stops two replicas running the same scan at once. Requires a Redis whose
+   *    `maxmemory-policy` is `noeviction` (refuses to boot otherwise).
+   * Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
+   */
+  @IsOptional()
+  @IsIn(['interval', 'bullmq'])
+  WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
+
+  /**
+   * Redis key prefix for the NEW BullMQ scan queues only (`bullmq` mode). Unset → `crewflow:<NODE_ENV>:bull`. The three
+   * existing queues (`rab-email`, `rab-push`, `rab-shift-statements`) keep BullMQ's default `bull` prefix permanently —
+   * the API publishes to two of them — so `bull` itself (or anything under `bull:`) is refused here.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^(?!bull(?::|$))[A-Za-z0-9][A-Za-z0-9_-]*(?::[A-Za-z0-9_-]+)*$/, {
+    message: 'BULLMQ_PREFIX must be letters/digits/_/- segments separated by ":" and must not be (or start with) the legacy "bull" prefix',
+  })
+  @MaxLength(80)
+  BULLMQ_PREFIX?: string;
+
+  /** `bullmq` mode: how often each replica re-checks (idempotently re-upserts) the Crewflow job schedulers. 10–3600 s; default 60. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(3600)
+  WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
+
+  // ───────────────────────── AI Phase 1 + Part A (docs/ai/PHASE1_PLAN.md, docs/ai/PART_A_PLAN.md, modules/ai) ─────────
+  // Every value below is an initial DESIGN default, not a statement of provider capacity or price. The model catalogue is
+  // code (engine/core-modules/ai/models/ai-models.json + catalog.ts). Cross-field rules live in engine/core-modules/ai/ai-readiness.ts:
+  // only a mock stand-in, the retired key alias (dev/test) and the dev flag outside development refuse to boot; every
+  // other AI misconfiguration makes AI UNAVAILABLE (logged, admin-visible) without stopping the API or Worker. Keys are read by the server/Worker only
+  // (the model gateway): never logged, shown as "configured" only by the admin environment viewer, never in a prompt.
+  // Checklist before setting any of these for a real provider: docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md.
+
+  /**
+   * Platform-wide AI kill switch. Off ⇒ every AI route answers 404 and the Worker refuses every queued turn.
+   * Default ON by owner decision 2026-10-25 (deviation EX-2 from security spec rule 1.1; see
+   * docs/ai/crewflow-ai-security-prompt.md appendix). AI still does nothing until a platform admin turns an
+   * organisation's AI switch on (default OFF) and a model is ready; production sets AI_ENABLED=false explicitly in
+   * docker-compose.production.yml and refuses `mock`, and no model is approved for production.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AI_ENABLED: boolean = true;
+
+  // Retired by Phase 1 "real models only" (docs/ai/PHASE1_TWENTY_PLAN.md §5): AI_PROVIDER, AI_MODEL and the
+  // AI_PROVIDER_API_KEY alias are no longer properties. The model is chosen per organisation (Settings → AI); env.validation.ts
+  // reads the old names from the RAW configuration only to refuse (mock stand-in; the alias in dev/test) or warn.
+
+  /**
+   * Secret. The Anthropic key (Twenty-style name, owner decision 2 / TP-2 — the name is written once in code, see
+   * engine/core-modules/ai/models/provider-keys.ts). Passed explicitly to the provider SDK by the gateway only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'ANTHROPIC_API_KEY must be printable ASCII without spaces (value not shown)' })
+  ANTHROPIC_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style OpenAI key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'OPENAI_API_KEY must be printable ASCII without spaces (value not shown)' })
+  OPENAI_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style Google (Gemini API) key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'GOOGLE_API_KEY must be printable ASCII without spaces (value not shown)' })
+  GOOGLE_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style Mistral key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'MISTRAL_API_KEY must be printable ASCII without spaces (value not shown)' })
+  MISTRAL_API_KEY?: string;
+
+  /**
+   * Secret, INERT in Phase 1 (TP-8, D4/D5): the Twenty-style xAI key name. No SDK for this provider is in the build
+   * and none of its models is approved, so nothing reads it yet; the admin environment viewer shows "configured" only.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(16)
+  @MaxLength(512)
+  @Matches(/^[\x21-\x7e]+$/, { message: 'XAI_API_KEY must be printable ASCII without spaces (value not shown)' })
+  XAI_API_KEY?: string;
+
+  /**
+   * Development-only escape hatch: a real provider may run only when NODE_ENV=development AND this is true AND the runtime
+   * database is the development database AND the turn's organisation is marked `synthetic_data`. Boot refuses `true`
+   * when NODE_ENV is production or test.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AI_DEV_ALLOW_REAL_PROVIDERS: boolean = false;
+
+  /**
+   * Hard stop per organisation per UTC day on ESTIMATED provider cost (USD, catalogue prices × reported tokens). Every
+   * model step reserves its worst-case cost first (atomic Redis script); a meter failure refuses the step.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 6 }, { message: 'AI_DAILY_BUDGET_USD must be a number with at most 6 decimal places' })
+  @Min(0.000001, { message: 'AI_DAILY_BUDGET_USD must be positive' })
+  @Max(10_000)
+  AI_DAILY_BUDGET_USD: number = 2;
+
+  /** Comma-separated catalogue ids no organisation may use (Twenty's name). A hard deny; no admin can override it. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_DISABLED must be comma-separated model ids' })
+  AI_MODELS_DEFAULT_DISABLED?: string;
+
+  /**
+   * Comma-separated catalogue ids for the `fast` tier when an organisation has no pin (Twenty's name): the first AVAILABLE
+   * id wins, then AI_MODELS_DEFAULT_SMART (nearest tier), then any available model. Unknown ids are ignored with a
+   * names-only warning. Cannot make an unapproved, keyless or disabled model available.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_FAST must be comma-separated model ids' })
+  AI_MODELS_DEFAULT_FAST?: string;
+
+  /** Same as AI_MODELS_DEFAULT_FAST, for the `smart` tier. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9._,-]{0,2000}$/, { message: 'AI_MODELS_DEFAULT_SMART must be comma-separated model ids' })
+  AI_MODELS_DEFAULT_SMART?: string;
+
+  /** Per model call (each step). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(64)
+  @Max(8000)
+  AI_MAX_OUTPUT_TOKENS: number = 1500;
+
+  /** Model steps (tool round trips) per turn. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(16)
+  AI_MAX_STEPS: number = 8;
+
+  /** Characters per user message. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(100)
+  @Max(8000)
+  AI_MAX_INPUT_CHARS: number = 4000;
+
+  /** Hard stop per organisation per UTC day (input + output tokens), enforced by atomic Redis reservations. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(100_000_000)
+  AI_ORG_DAILY_TOKEN_BUDGET: number = 200_000;
+
+  /**
+   * Questions per user per minute (one atomic three-bucket Redis call with AI_ORG_RATE_PER_MIN and AI_USER_TURNS_PER_DAY;
+   * Redis unavailable ⇒ refused). Owner decision 2026-10-25: 10 (AI_RATE_LIMIT_DEFAULTS.userPerMinute).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  AI_USER_RATE_PER_MIN: number = 10;
+
+  /** 7b: questions per ORGANISATION per minute (owner decision 2026-10-25: 60). A user limit above it only warns. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(600)
+  AI_ORG_RATE_PER_MIN: number = 60;
+
+  /** 7b: questions per user per UTC day (owner decision 2026-10-25: 100). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  AI_USER_TURNS_PER_DAY: number = 100;
+
+  /**
+   * 7b: the per-USER daily estimated-cost ceiling (USD); the effective ceiling is min(this, AI_DAILY_BUDGET_USD) (D7-2).
+   * PROVISIONAL default 1.00 per person per day (AI_USER_DAILY_BUDGET_USD_DEFAULT) — flagged for the owner.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false, maxDecimalPlaces: 6 }, { message: 'AI_USER_DAILY_BUDGET_USD must be a number with at most 6 decimal places' })
+  @Min(0.000001, { message: 'AI_USER_DAILY_BUDGET_USD must be positive' })
+  @Max(10_000)
+  AI_USER_DAILY_BUDGET_USD: number = 1;
+
+  /** Queued + running turns per organisation (Redis semaphore). */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  AI_ORG_MAX_ACTIVE_TURNS: number = 2;
+
+  /** Wall-clock limit of one turn in the Worker (model + tools); the turn ends AI_MODEL_TIMEOUT. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(10)
+  @Max(300)
+  AI_TURN_TIMEOUT_SECONDS: number = 90;
+
+  /**
+   * Conversation retention (days since the last message). The purge itself is governed by AI_RETENTION_MODE. Floor 30 d:
+   * the database function refuses less (AiPhase1Schema1786720220000), so a lower value would only fail every cycle.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  @Max(3650)
+  AI_RETENTION_DAYS: number = 90;
+
+  /** `off` (default): nothing runs. `report`: counts what would be purged. `purge`: deletes — the owner enables it. */
+  @IsOptional()
+  @IsIn(['off', 'report', 'purge'])
+  AI_RETENTION_MODE: 'off' | 'report' | 'purge' = 'off';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(15)
+  @Max(1440)
+  AI_RETENTION_INTERVAL_MINUTES: number = 60;
+
+  /**
+   * AI Phase 2 (PHASE2_TWENTY_PLAN §2.5, P2-D8): a conversation's first question also enqueues one thread-title call on
+   * the fast model, in the Worker, through the gateway with every EX-1 / payload / budget control. `false` ⇒ no title job
+   * is enqueued and a queued one does nothing (the first-question fallback title stays). Not a boot refusal either way.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean()
+  AI_TITLE_GENERATION: boolean = true;
+
+  /**
+   * AI Phase 6a (docs/ai/PHASE6_TWENTY_PLAN.md §4, P6-D7): the platform switch for AI agents. Default `false`; production
+   * pins it `'false'` (6b, docker-compose.production.yml). While false every `/rest/v1/ai/agents` route answers the uniform
+   * 404 AI_NOT_AVAILABLE and nothing about agents is read or written. Even when true, 6a is STORAGE ONLY: no trigger can
+   * be enabled and nothing runs until the owner approves EX-3 (`AI_AGENT_EXECUTION_APPROVED`). Only the exact string
+   * `'true'` turns it on; any other value is off (fail closed) — never a boot refusal (2026-10-22 crash-loop lesson).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  AI_AGENTS_ENABLED: boolean = false;
 
   /**
    * P1B.1 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §33.2 / docs/HANDOFF.md) — the `core.user_session`
@@ -950,6 +1240,17 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsString()
   APP_VERSION: string = 'dev';
+
+  /**
+   * Admin Panel → General "Commit". The git commit the running image was built from (short or full hex SHA), set at
+   * build/deploy time (e.g. a Docker build arg passed through to the container environment). Optional: unset → the panel
+   * shows "Unknown", never a guess. Validated as hex so nothing else can be smuggled into the page. An EMPTY value
+   * (e.g. a Docker build arg that was not passed) counts as unset rather than refusing to boot.
+   */
+  @IsOptional()
+  @ValidateIf((env: EnvironmentVariables) => env.APP_GIT_COMMIT !== '')
+  @Matches(/^[0-9a-f]{7,40}$/)
+  APP_GIT_COMMIT?: string;
 
   /**
    * Clock-in opens this many minutes before `shift.startsAt` — see

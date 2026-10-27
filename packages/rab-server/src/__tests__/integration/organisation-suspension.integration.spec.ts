@@ -2,9 +2,11 @@ import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
+import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { Organisation } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -43,13 +45,20 @@ describeIfDb('organisation suspension (integration)', () => {
     return { organisation, email: user.email, userId: user.userId };
   }
 
-  function suspendBody(organisation: Organisation, overrides: Partial<{ reason: string; confirmSlug: string; currentPassword: string }> = {}) {
+  // Admin panel follow-up (step-1 report point 4): suspension needs a fresh step-up of the admin's session instead of an
+  // inline password (the fresh sign-in each test performs counts); a body carrying `currentPassword` is a 400.
+  function suspendBody(organisation: Organisation, overrides: Partial<{ reason: string; confirmSlug: string }> = {}) {
     return {
       reason: 'Billing dispute under review',
       confirmSlug: organisation.slug,
-      currentPassword: factory.testPassword,
       ...overrides,
     };
+  }
+
+  /** The session is older than AUTH_STEP_UP_WINDOW_SECONDS: its sign-in grant has expired (= removed). */
+  async function makeStale(token: string): Promise<void> {
+    const sid = (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+    await app.get(AuthCacheRedisClientProvider).client.del(`crewflow:test:step-up:${createHash('sha256').update(sid).digest('hex')}`);
   }
 
   beforeAll(async () => {
@@ -88,17 +97,26 @@ describeIfDb('organisation suspension (integration)', () => {
       expect(row.suspended_at).toBeNull();
     });
 
-    it('a platform admin with the WRONG current password is rejected with 403 and the target stays active', async () => {
+    it('a platform admin on a STALE session (no recent step-up) or after a WRONG-password step-up is rejected with 403 and the target stays active; an inline password body is a 400', async () => {
       const admin = await seedPlatformAdmin();
       const target = await seedTargetOrg();
       const adminToken = await factory.loginByEmail(admin.email);
+      await makeStale(adminToken);
 
       const res = await http()
         .post(`/rest/v1/admin/organisations/${target.organisation.id}/suspend`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send(suspendBody(target.organisation, { currentPassword: 'definitely-the-wrong-password' }));
-
+        .send(suspendBody(target.organisation));
       expect(res.status).toBe(403);
+      expect(res.body.code).toBe('STEP_UP_REQUIRED');
+      const wrong = await http().post('/rest/v1/auth/step-up').set('Authorization', `Bearer ${adminToken}`).set('Origin', 'http://localhost:5173').send({ currentPassword: 'definitely-the-wrong-password' });
+      expect(wrong.status).toBe(403);
+      expect((await http().post(`/rest/v1/admin/organisations/${target.organisation.id}/suspend`).set('Authorization', `Bearer ${adminToken}`).send(suspendBody(target.organisation))).status).toBe(403);
+      const legacy = await http()
+        .post(`/rest/v1/admin/organisations/${target.organisation.id}/suspend`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ ...suspendBody(target.organisation), currentPassword: factory.testPassword });
+      expect(legacy.status).toBe(400);
       const [row] = await adminDataSource.manager.query(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [target.organisation.id]);
       expect(row.suspended_at).toBeNull();
     });
@@ -118,7 +136,7 @@ describeIfDb('organisation suspension (integration)', () => {
       expect(row.suspended_at).toBeNull();
     });
 
-    it('a platform admin with the correct password and confirmSlug can suspend', async () => {
+    it('a platform admin with a fresh step-up and the correct confirmSlug can suspend', async () => {
       const admin = await seedPlatformAdmin();
       const target = await seedTargetOrg();
       const adminToken = await factory.loginByEmail(admin.email);
@@ -146,6 +164,13 @@ describeIfDb('organisation suspension (integration)', () => {
 
       const loginRes = await factory.loginRaw({ kind: 'internal_manager', email: target.email, password: factory.testPassword });
       expect(loginRes.status).toBe(401);
+      expect(loginRes.body.code).toBe('ORGANISATION_SUSPENDED');
+
+      // The code only follows a VERIFIED credential: a wrong password for the same suspended user stays the uniform,
+      // code-less "invalid email or password" — the code never tells an outsider the email exists.
+      const wrong = await factory.loginRaw({ kind: 'internal_manager', email: target.email, password: 'definitely-not-the-password' });
+      expect(wrong.status).toBe(401);
+      expect(wrong.body.code).toBeUndefined();
     });
 
     it("an access token issued BEFORE suspension is rejected on the very next authenticated request after suspension", async () => {
@@ -265,7 +290,7 @@ describeIfDb('organisation suspension (integration)', () => {
       const reactivateRes = await http()
         .post(`/rest/v1/admin/organisations/${target.organisation.id}/reactivate`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'Billing dispute resolved' });
       expect(reactivateRes.status).toBe(200); // @HttpCode(200) on the reactivate route — a state transition, not a creation
       expect(reactivateRes.body.suspended).toBe(false);
       expect(reactivateRes.body.reactivatedBy).toBe(admin.userId);
@@ -288,7 +313,7 @@ describeIfDb('organisation suspension (integration)', () => {
       const res = await http()
         .post(`/rest/v1/admin/organisations/${target.organisation.id}/reactivate`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'No-op reactivation check' });
 
       expect(res.status).toBe(200);
       expect(res.body.suspended).toBe(false);

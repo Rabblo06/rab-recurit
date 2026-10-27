@@ -1,0 +1,276 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "new",
+      "t": 8.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 261,
+        "y": 0,
+        "w": 2939,
+        "h": 1653
+      },
+      "zoom": 1.089,
+      "chapter": null
+    },
+    {
+      "id": "drawer",
+      "t": 10.767,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "names",
+      "t": 14.833,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 37,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Step 1 · Details"
+    },
+    {
+      "id": "employment",
+      "t": 17.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 664,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "contact",
+      "t": 23.967,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 35,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Step 2 · Contact"
+    },
+    {
+      "id": "emergency",
+      "t": 32.433,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Step 3 · Emergency contact"
+    },
+    {
+      "id": "availability",
+      "t": 40.167,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 85,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Step 4 · Availability"
+    },
+    {
+      "id": "create",
+      "t": 46.767,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "result",
+      "t": 52.433,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Invitation sent"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "new",
+      "box": {
+        "x": 2696.6,
+        "y": 23,
+        "w": 219.4,
+        "h": 64
+      },
+      "inside": true
+    },
+    {
+      "shot": "new",
+      "box": {
+        "x": 546,
+        "y": 11,
+        "w": 120.6,
+        "h": 88
+      },
+      "inside": true
+    },
+    {
+      "shot": "names",
+      "box": {
+        "x": 2418,
+        "y": 546,
+        "w": 360,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "names",
+      "box": {
+        "x": 2806,
+        "y": 546,
+        "w": 360,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "employment",
+      "box": {
+        "x": 2418,
+        "y": 1033,
+        "w": 748,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "employment",
+      "box": {
+        "x": 2806,
+        "y": 1313,
+        "w": 360,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "contact",
+      "box": {
+        "x": 2418,
+        "y": 338,
+        "w": 748,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "contact",
+      "box": {
+        "x": 2418,
+        "y": 750,
+        "w": 748,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "emergency",
+      "box": {
+        "x": 2418,
+        "y": 338,
+        "w": 748,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "emergency",
+      "box": {
+        "x": 2899.8,
+        "y": 474,
+        "w": 244.2,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "availability",
+      "box": {
+        "x": 2418,
+        "y": 338,
+        "w": 112.8,
+        "h": 138
+      },
+      "inside": true
+    },
+    {
+      "shot": "availability",
+      "box": {
+        "x": 2418,
+        "y": 850,
+        "w": 748,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "result",
+      "box": {
+        "x": 2386,
+        "y": 2,
+        "w": 812,
+        "h": 104
+      },
+      "inside": true
+    }
+  ]
+}

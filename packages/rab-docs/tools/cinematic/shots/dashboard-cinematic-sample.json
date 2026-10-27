@@ -1,0 +1,13 @@
+{
+  "slug": "dashboard-cinematic-sample",
+  "project": "dashboard-tour",
+  "title": null,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 0.8,
+  "shots": [
+    { "id": "wide", "at": { "cue": "wide", "offset": -0.05 }, "rect": "full", "duration": 0 },
+    { "id": "hours", "at": { "cue": "hours", "offset": 0.15 }, "duration": 0.8, "focus": ["mark:hours-card", "mark:tooltip"], "chapter": "Hours worked" },
+    { "id": "back", "at": { "cue": "return", "offset": 0.4 }, "duration": 0.9, "rect": "full" }
+  ]
+}

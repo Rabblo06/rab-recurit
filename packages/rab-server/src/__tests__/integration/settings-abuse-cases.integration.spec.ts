@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -20,6 +20,7 @@ import {
   UserPreference,
   UserRole,
 } from '../../modules/identity/entities';
+import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -137,10 +138,11 @@ describeIfDb('settings abuse cases (integration)', () => {
       const before = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${targetToken}`);
       expect(before.status).toBe(403);
 
+      // Admin panel follow-up (B3): a reason, and a fresh step-up of this session (the fresh sign-in counts) — no password.
       const grantRes = await request(app.getHttpServer())
         .post(`/rest/v1/admin/platform-admins/${target.userId}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'settings abuse grant' });
       expect(grantRes.status).toBe(201);
       expect(grantRes.body.granted).toBe(true);
 
@@ -161,7 +163,7 @@ describeIfDb('settings abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post(`/rest/v1/admin/platform-admins/${target.userId}`)
         .set('Authorization', `Bearer ${nonAdminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'non-admin attempt' });
       expect(res.status).toBe(403);
 
       const targetToken = await login(target.email);
@@ -181,7 +183,7 @@ describeIfDb('settings abuse cases (integration)', () => {
       const revokeRes = await request(app.getHttpServer())
         .delete(`/rest/v1/admin/platform-admins/${secondAdminUserId}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'settings abuse revoke' });
       expect(revokeRes.status).toBe(200);
       expect(revokeRes.body.revoked).toBe(true);
 
@@ -194,12 +196,17 @@ describeIfDb('settings abuse cases (integration)', () => {
       await bootstrapAdmin(adminUserId);
       const adminToken = await login(adminEmail);
 
-      await request(app.getHttpServer()).delete(`/rest/v1/admin/platform-admins/${adminUserId}`).set('Authorization', `Bearer ${adminToken}`).send({ currentPassword: factory.testPassword });
-      // Now revoked — needs a second, still-active admin to re-grant (matches
-      // the guard: only an ACTIVE admin may grant/revoke).
+      // B3: an admin can no longer remove THEMSELVES (409); a second, still-active admin demotes the first one, then
+      // re-grants it (only an ACTIVE admin may grant/revoke).
+      const self = await request(app.getHttpServer()).delete(`/rest/v1/admin/platform-admins/${adminUserId}`).set('Authorization', `Bearer ${adminToken}`).send({ reason: 'self removal attempt' });
+      expect(self.status).toBe(409);
+      expect(self.body.code).toBe('PLATFORM_ADMIN_SELF_REMOVAL');
       const { userId: secondAdminUserId, email: secondAdminEmail } = await seedOrgWithFullyPermissionedUser();
       await bootstrapAdmin(secondAdminUserId);
       const secondAdminToken = await login(secondAdminEmail);
+      const demoted = await request(app.getHttpServer()).delete(`/rest/v1/admin/platform-admins/${adminUserId}`).set('Authorization', `Bearer ${secondAdminToken}`).send({ reason: 'demote for re-grant test' });
+      expect(demoted.status).toBe(200);
+      expect(demoted.body.revoked).toBe(true);
 
       const stillBlocked = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${adminToken}`);
       expect(stillBlocked.status).toBe(403);
@@ -207,7 +214,7 @@ describeIfDb('settings abuse cases (integration)', () => {
       const regrant = await request(app.getHttpServer())
         .post(`/rest/v1/admin/platform-admins/${adminUserId}`)
         .set('Authorization', `Bearer ${secondAdminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'settings abuse re-grant' });
       expect(regrant.status).toBe(201);
       expect(regrant.body.granted).toBe(true);
 
@@ -225,29 +232,44 @@ describeIfDb('settings abuse cases (integration)', () => {
       const res = await request(app.getHttpServer())
         .post(`/rest/v1/admin/platform-admins/${adminUserId}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: factory.testPassword });
+        .send({ reason: 'idempotent re-grant' });
       expect(res.status).toBe(201);
       expect(res.body.granted).toBe(false); // already active — no row change, not an error
     });
 
-    it('P2.8 — an active admin\'s OWN valid session with the WRONG current password cannot grant platform_admin (403, step-up reauth, target untouched)', async () => {
+    it('P2.8 / B3 — an active admin\'s OWN valid but STALE session cannot grant platform_admin, and a wrong-password step-up earns nothing (403, target untouched)', async () => {
       const { userId: adminUserId, email: adminEmail } = await seedOrgWithFullyPermissionedUser();
       await bootstrapAdmin(adminUserId);
       const adminToken = await login(adminEmail);
       const target = await seedOrgWithFullyPermissionedUser();
+      // The session is older than the step-up window: its sign-in grant has expired (= removed).
+      const sid = (JSON.parse(Buffer.from(adminToken.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
+      await app.get(AuthCacheRedisClientProvider).client.del(`crewflow:test:step-up:${createHash('sha256').update(sid).digest('hex')}`);
 
       const res = await request(app.getHttpServer())
         .post(`/rest/v1/admin/platform-admins/${target.userId}`)
         .set('Authorization', `Bearer ${adminToken}`)
-        .send({ currentPassword: 'definitely-not-the-real-password' });
+        .send({ reason: 'stale session attempt' });
       expect(res.status).toBe(403);
+      expect(res.body.code).toBe('STEP_UP_REQUIRED');
+      const wrong = await request(app.getHttpServer())
+        .post('/rest/v1/auth/step-up')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .set('Origin', 'http://localhost:5173')
+        .send({ currentPassword: 'definitely-not-the-real-password' });
+      expect(wrong.status).toBe(403);
+      const again = await request(app.getHttpServer())
+        .post(`/rest/v1/admin/platform-admins/${target.userId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'after a wrong password' });
+      expect(again.status).toBe(403);
 
       const targetToken = await login(target.email);
       const stillBlocked = await request(app.getHttpServer()).get('/rest/v1/admin/general').set('Authorization', `Bearer ${targetToken}`);
       expect(stillBlocked.status).toBe(403);
     });
 
-    it('P2.8 — missing currentPassword in the body is rejected (400) before the handler is reached', async () => {
+    it('B3 — a missing reason (or a legacy currentPassword body) is rejected (400) before the handler is reached', async () => {
       const { userId: adminUserId, email: adminEmail } = await seedOrgWithFullyPermissionedUser();
       await bootstrapAdmin(adminUserId);
       const adminToken = await login(adminEmail);
@@ -257,6 +279,11 @@ describeIfDb('settings abuse cases (integration)', () => {
         .post(`/rest/v1/admin/platform-admins/${target.userId}`)
         .set('Authorization', `Bearer ${adminToken}`);
       expect(res.status).toBe(400);
+      const legacy = await request(app.getHttpServer())
+        .post(`/rest/v1/admin/platform-admins/${target.userId}`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ currentPassword: factory.testPassword });
+      expect(legacy.status).toBe(400);
     });
   });
 

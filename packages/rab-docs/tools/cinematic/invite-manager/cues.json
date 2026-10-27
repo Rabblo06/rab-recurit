@@ -1,0 +1,58 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 6.635,
+    "text": "CEOs can add managers to their organisation. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 7.167,
+    "seconds": 2.744,
+    "text": "Open Users and select the Managers tab.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\open.wav"
+  },
+  {
+    "id": "new",
+    "start": 10.433,
+    "seconds": 4.461,
+    "text": "Select New manager. You can also choose Add manager from your account menu.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\new.wav"
+  },
+  {
+    "id": "name",
+    "start": 15.4,
+    "seconds": 2.096,
+    "text": "Enter their first and last name.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\name.wav"
+  },
+  {
+    "id": "type",
+    "start": 18.467,
+    "seconds": 4.099,
+    "text": "Keep Internal manager as the manager type, and add a job title.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\type.wav"
+  },
+  {
+    "id": "contact",
+    "start": 23.067,
+    "seconds": 5.205,
+    "text": "Add their work email and mobile number. The invitation is sent to this email address.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\contact.wav"
+  },
+  {
+    "id": "create",
+    "start": 28.8,
+    "seconds": 5.248,
+    "text": "Select Create manager. Crewflow queues the invitation and opens their details.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\create.wav"
+  },
+  {
+    "id": "status",
+    "start": 34.567,
+    "seconds": 4.373,
+    "text": "Their status shows the invitation until they set a password and sign in.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\invite-manager\\status.wav"
+  }
+]

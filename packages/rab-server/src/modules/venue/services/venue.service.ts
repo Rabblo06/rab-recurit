@@ -123,8 +123,15 @@ export class VenueService {
     return venue;
   }
 
+  /**
+   * Layers: route PermissionGuard(VENUE_VIEW) → this service re-checks VENUE_VIEW in the same tenant transaction (jobs,
+   * CLI commands and other services never pass the guard; LAYER2_HARDENING_2026-10-25 F1) → owner / assigned-venue
+   * scope → member role policy → workspace RLS. A caller without VENUE_VIEW gets the guard's own answer (403, a
+   * categorical lack — CLAUDE.md), checked before any row is read, so it is never an existence oracle.
+   */
   list(ctx: AuthContext, dto: ListVenuesDto = {}): Promise<{ data: Venue[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanViewVenueTx(manager, ctx);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -171,8 +178,10 @@ export class VenueService {
     });
   }
 
+  /** Same layers as `list()`: VENUE_VIEW re-checked first (403, for any id, before the row is loaded), then 404 out of scope. */
   async get(ctx: AuthContext, id: string): Promise<Venue> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanViewVenueTx(manager, ctx);
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueReadable(manager, ctx, venue);
@@ -354,6 +363,17 @@ export class VenueService {
     if (!policy.canRead) return false;
     const recordFilter = this.memberAccess.qbWhere(policy, 'venue');
     return manager.createQueryBuilder(Venue, 'venue').where('venue.id = :id', { id: venue.id }).andWhere(recordFilter.sql, recordFilter.named).getExists();
+  }
+
+  /**
+   * Layer 2 for venue READS (`list`, `get`): the route's PermissionGuard(VENUE_VIEW), re-checked in the caller's own
+   * tenant transaction. 403 like the guard (and like `assertCanEditVenueTx` below) — the guard runs first on HTTP, so
+   * the response there is unchanged; this only ever answers a direct service caller.
+   */
+  private async assertCanViewVenueTx(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.VENUE_VIEW))) {
+      throw new ForbiddenException('Viewing venues is not permitted.');
+    }
   }
 
   private async assertCanEditVenueTx(manager: EntityManager, ctx: AuthContext): Promise<void> {

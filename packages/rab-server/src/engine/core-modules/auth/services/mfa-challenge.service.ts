@@ -35,7 +35,15 @@ export interface PendingLogin {
 }
 
 export type ChallengeAttempt =
-  | { ok: true; login: PendingLogin; attempt: number; pendingSecret: string | null }
+  | {
+      ok: true;
+      login: PendingLogin;
+      /** 1-based number of this attempt (counted atomically BEFORE the code is checked). */
+      attempt: number;
+      /** AUTH_MFA_CHALLENGE_MAX_ATTEMPTS when this attempt was counted (the real bound, never a display guess). */
+      maxAttempts: number;
+      pendingSecret: string | null;
+    }
   | { ok: false; reason: 'unknown' | 'exhausted' };
 
 const TOKEN_PREFIX = 'mfc_';
@@ -121,8 +129,9 @@ export class MfaChallengeService {
   async attempt(token: unknown): Promise<ChallengeAttempt> {
     if (!MfaChallengeService.isWellFormedToken(token)) return { ok: false, reason: 'unknown' };
     let reply: unknown;
+    const maxAttempts = Number(this.env.get('AUTH_MFA_CHALLENGE_MAX_ATTEMPTS'));
     try {
-      reply = await this.redis.client.eval(ATTEMPT_SCRIPT, 1, this.key(token), String(this.env.get('AUTH_MFA_CHALLENGE_MAX_ATTEMPTS')));
+      reply = await this.redis.client.eval(ATTEMPT_SCRIPT, 1, this.key(token), String(maxAttempts));
     } catch (error) {
       throw this.unavailable(error);
     }
@@ -138,7 +147,7 @@ export class MfaChallengeService {
     }
     if (login?.v !== 1) return { ok: false, reason: 'unknown' };
     const secret = typeof reply[2] === 'string' && reply[2] !== '' ? reply[2] : null;
-    return { ok: true, login, attempt: first, pendingSecret: secret };
+    return { ok: true, login, attempt: first, maxAttempts, pendingSecret: secret };
   }
 
   /** Stores the (already encrypted, base64) enrolment secret on a live `enroll` challenge. */

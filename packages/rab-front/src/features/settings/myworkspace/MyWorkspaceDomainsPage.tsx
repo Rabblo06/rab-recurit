@@ -30,11 +30,14 @@ export default function MyWorkspaceDomainsPage() {
   const [subdomain, setSubdomain] = useState('');
   const [check, setCheck] = useState<SubdomainCheck | null>(null);
   const [checking, setChecking] = useState(false);
+  // The live availability check failed (network/5xx): said so, instead of leaving Save disabled with no reason.
+  const [checkFailed, setCheckFailed] = useState(false);
   const [copied, setCopied] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
     setCheck(null);
+    setCheckFailed(false);
     if (!editing || !subdomain || subdomain === workspace?.subdomain) return;
     setChecking(true);
     clearTimeout(debounceRef.current);
@@ -43,7 +46,8 @@ export default function MyWorkspaceDomainsPage() {
         const { data } = await api.post<SubdomainCheck>('/manager-workspaces/subdomain/check', { candidate: subdomain });
         setCheck(data);
       } catch {
-        // ignore — the real check runs again on save
+        // The real check runs again on save; meanwhile tell the user why there is no answer.
+        setCheckFailed(true);
       } finally {
         setChecking(false);
       }
@@ -150,6 +154,10 @@ export default function MyWorkspaceDomainsPage() {
                       </div>
                     )}
                   </div>
+                ) : checkFailed ? (
+                  <span role="alert" style={{ color: 'var(--feedback-error)' }}>
+                    Couldn&apos;t check availability. Check your connection, then edit the subdomain to try again.
+                  </span>
                 ) : null}
               </div>
             )}

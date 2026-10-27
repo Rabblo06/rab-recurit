@@ -1,0 +1,5 @@
+review/
+proof/renders/
+proof/.hyperframes/
+proof/assets/*.mp4
+proof/assets/*.wav

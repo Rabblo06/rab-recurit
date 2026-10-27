@@ -1,0 +1,266 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "tabs",
+      "t": 13.233,
+      "duration": 0.8,
+      "rect": {
+        "x": 261,
+        "y": 0,
+        "w": 2430,
+        "h": 1367
+      },
+      "zoom": 1.317,
+      "chapter": null
+    },
+    {
+      "id": "view",
+      "t": 15.467,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "tab",
+      "t": 19.4,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Assigned staff"
+    },
+    {
+      "id": "list",
+      "t": 23.7,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 81,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "add",
+      "t": 28.9,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "picker",
+      "t": 30.967,
+      "duration": 0.8,
+      "rect": {
+        "x": 187,
+        "y": 23,
+        "w": 2253,
+        "h": 1268
+      },
+      "zoom": 1.42,
+      "chapter": "Select Staff"
+    },
+    {
+      "id": "pick",
+      "t": 36.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 301,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "confirm",
+      "t": 39.933,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "done",
+      "t": 41.933,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 461,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Team updated"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "tabs",
+      "box": {
+        "x": 496,
+        "y": 0,
+        "w": 1960,
+        "h": 860
+      },
+      "inside": true
+    },
+    {
+      "shot": "tab",
+      "box": {
+        "x": 2386,
+        "y": 147,
+        "w": 812,
+        "h": 83
+      },
+      "inside": true
+    },
+    {
+      "shot": "tab",
+      "box": {
+        "x": 2386,
+        "y": 2,
+        "w": 812,
+        "h": 145
+      },
+      "inside": true
+    },
+    {
+      "shot": "list",
+      "box": {
+        "x": 2420,
+        "y": 408,
+        "w": 744,
+        "h": 109
+      },
+      "inside": true
+    },
+    {
+      "shot": "list",
+      "box": {
+        "x": 2420,
+        "y": 735,
+        "w": 744,
+        "h": 109
+      },
+      "inside": true
+    },
+    {
+      "shot": "picker",
+      "box": {
+        "x": 554,
+        "y": 146,
+        "w": 534.8,
+        "h": 64
+      },
+      "inside": true
+    },
+    {
+      "shot": "picker",
+      "box": {
+        "x": 1939.2,
+        "y": 1124.2,
+        "w": 133.4,
+        "h": 44
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 530,
+        "y": 884.2,
+        "w": 32,
+        "h": 32
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 530,
+        "y": 802.2,
+        "w": 32,
+        "h": 32
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 924.4,
+        "y": 777.2,
+        "w": 191.2,
+        "h": 82
+      },
+      "inside": true
+    },
+    {
+      "shot": "done",
+      "box": {
+        "x": 2420,
+        "y": 1062,
+        "w": 744,
+        "h": 107
+      },
+      "inside": true
+    },
+    {
+      "shot": "done",
+      "box": {
+        "x": 2420,
+        "y": 844,
+        "w": 744,
+        "h": 109
+      },
+      "inside": true
+    }
+  ]
+}

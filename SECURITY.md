@@ -29,6 +29,7 @@ There is no released/tagged version yet, so only `main` (what production deploys
 | `SENTRY_DSN` | Error reporting | Low sensitivity (write-only ingestion key); rotate via the Sentry project settings if leaked, no data-migration impact. |
 | `RESEND_API_KEY` | Production email delivery (`EMAIL_DRIVER=RESEND`) | Rotate via the Resend dashboard → API Keys (revoke the old key, issue a new one, update Render). Server-side only — never sent to the browser/mobile app, never logged, never returned from an API. |
 | S3/R2 credentials (M1+, file storage) | Document/payslip storage | Rotate via the provider console; presigned URLs already in flight (60s TTL) expire naturally, no in-place migration needed. |
+| AI provider keys: `ANTHROPIC_API_KEY`; `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY` (inert in Phase 1) | The model gateway only (`modules/ai/gateway/provider-factory.ts`), passed explicitly with a fixed endpoint; development + synthetic data only (EX-1). Read only by the API and the Worker's jobs child; "configured" only in the admin environment viewer; never logged, never in a prompt, a job, a response or a client (THREAT-MODEL AI-P3, TP-2, TP-8). `AI_PROVIDER_API_KEY` is retired. | Create the new key in the provider console, replace the value, recreate the API then the Worker, check "Configured", then revoke the old key; on a suspected leak revoke first (AI shows "not set up" until a new key is set). Owner procedure: `packages/rab-docs/developers/ai-provider-keys.mdx`. |
 
 Boot refuses the same secret in two of these roles (every environment), weak values in production, and — with `APP_KEY_SEPARATION_REQUIRED=true` — a missing dedicated JWT keyring, cache MAC key or `APP_JWT_LEGACY_VERIFY_ENABLED=false`.
 
@@ -175,6 +176,14 @@ default **off**, on in dev):
   flag combinations; reused or weak keys.
 - **Reconciled audit:** VULN-001–004 are fixed, with code and test evidence. See `SECURITY_AUDIT.md` → "Status
   reconciliation (2026-10-23)".
+- **AI questions and forms (Phase 5c, Batch 3):**
+  - Per turn, the assistant can ask the signed-in user one question or one short form.
+  - It can never ask for personal data: field keys and labels naming contact, address, birth, bank, identity or pay
+    data are refused when the request is created.
+  - The turn pauses (`waiting_for_input`) and holds no lease, slot or budget.
+  - Only the conversation owner can see or answer it (FORCE RLS owner predicate, uniform 404).
+  - The answer is validated against the stored question and stored once (trigger, column grants).
+  - It reaches the model only as a wrapped, untrusted tool result, in a new continuation turn. An answer writes no record.
 
 ## Known gaps / not enabled by default
 

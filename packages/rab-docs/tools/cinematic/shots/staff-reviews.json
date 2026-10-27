@@ -1,0 +1,11 @@
+{
+  "slug": "staff-reviews",
+  "project": "staff-reviews",
+  "title": "Reading staff reviews",
+  "subtitle": "Ratings and feedback from venue managers",
+  "titleSeconds": 2.2,
+  "maxZoom": 1.65,
+  "marginRatio": 0.12,
+  "tail": 1.2,
+  "camera": "from recording (record-cinematic.cjs focus/wide cues)"
+}

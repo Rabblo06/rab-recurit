@@ -1,0 +1,246 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "pending",
+      "t": 16.1,
+      "duration": 0.8,
+      "rect": {
+        "x": 215,
+        "y": 0,
+        "w": 2925,
+        "h": 1645
+      },
+      "zoom": 1.094,
+      "chapter": "Pending approval"
+    },
+    {
+      "id": "review",
+      "t": 20.3,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "selected",
+      "t": 22.567,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 247,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "The request"
+    },
+    {
+      "id": "select",
+      "t": 31.5,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "pick",
+      "t": 33.3,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 601,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Select Staff"
+    },
+    {
+      "id": "confirm",
+      "t": 36.4,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "approve",
+      "t": 38.4,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 709,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Approve"
+    },
+    {
+      "id": "board",
+      "t": 41.2,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "offered",
+      "t": 41.467,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": "Staffing board"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "pending",
+      "box": {
+        "x": 498,
+        "y": 284,
+        "w": 746.2,
+        "h": 80
+      },
+      "inside": true
+    },
+    {
+      "shot": "pending",
+      "box": {
+        "x": 2631.2,
+        "y": 302,
+        "w": 225.6,
+        "h": 44
+      },
+      "inside": true
+    },
+    {
+      "shot": "selected",
+      "box": {
+        "x": 2418,
+        "y": 925,
+        "w": 748,
+        "h": 33
+      },
+      "inside": true
+    },
+    {
+      "shot": "selected",
+      "box": {
+        "x": 2418,
+        "y": 627,
+        "w": 360,
+        "h": 115
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 586,
+        "y": 1187.2,
+        "w": 453.2,
+        "h": 82
+      },
+      "inside": true
+    },
+    {
+      "shot": "pick",
+      "box": {
+        "x": 586,
+        "y": 1023.2,
+        "w": 453.2,
+        "h": 82
+      },
+      "inside": true
+    },
+    {
+      "shot": "approve",
+      "box": {
+        "x": 2710.6,
+        "y": 1710,
+        "w": 270.4,
+        "h": 64
+      },
+      "inside": true
+    },
+    {
+      "shot": "approve",
+      "box": {
+        "x": 2997,
+        "y": 1710,
+        "w": 165,
+        "h": 64
+      },
+      "inside": true
+    },
+    {
+      "shot": "offered",
+      "box": {
+        "x": 542,
+        "y": 342.6,
+        "w": 472,
+        "h": 1413.6
+      },
+      "inside": true
+    },
+    {
+      "shot": "offered",
+      "box": {
+        "x": 754,
+        "y": 148,
+        "w": 2402,
+        "h": 162.6
+      },
+      "inside": true
+    }
+  ]
+}

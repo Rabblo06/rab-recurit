@@ -32,7 +32,8 @@ import { ShiftTeamService } from './services/shift-team.service';
   imports: [AuthModule, JwtModule.register({}), ThrottlerRedisClientModule, PayrollModule],
   controllers: [AttendanceController, ShiftReportController, StaffReviewsController],
   providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftReviewService, StaffReviewInsightsService, ShiftTeamService, AttendancePerUserThrottleGuard],
-  exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService],
+  // AttendanceService: AI Phase 1's read-only `get_attendance_summary` tool (modules/ai).
+  exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, AttendanceService],
 })
 export class AttendanceModule implements OnModuleInit {
   constructor(

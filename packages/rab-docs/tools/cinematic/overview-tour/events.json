@@ -1,0 +1,463 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 5.9,
+      "type": "mark",
+      "id": "dash.0",
+      "selector": ".dash-strip",
+      "bbox": {
+        "x": 277,
+        "y": 168.6,
+        "w": 947.5,
+        "h": 62
+      },
+      "label": "Offer progress"
+    },
+    {
+      "t": 5.9,
+      "type": "mark",
+      "id": "dash.1",
+      "selector": ".dash-counts",
+      "bbox": {
+        "x": 1252.5,
+        "y": 176.6,
+        "w": 319.5,
+        "h": 54
+      },
+      "label": "Staff 16 Venue managers 2 Venues 4"
+    },
+    {
+      "t": 5.9,
+      "type": "camera",
+      "id": "dash",
+      "marks": [
+        "dash.0",
+        "dash.1"
+      ],
+      "chapter": "Dashboard",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 5.9,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 6.433,
+      "type": "move",
+      "x": 1288,
+      "y": 204,
+      "selector": ".dash-counts > div:nth-child(1)",
+      "bbox": {
+        "x": 1252.5,
+        "y": 176.6,
+        "w": 72,
+        "h": 54
+      },
+      "label": "Staff 16"
+    },
+    {
+      "t": 7.533,
+      "type": "mark",
+      "id": "dash-cards.0",
+      "selector": ".dash-hours",
+      "bbox": {
+        "x": 589.2,
+        "y": 248.6,
+        "w": 311.8,
+        "h": 300
+      },
+      "label": "Hours worked 17.0 h Avg. workday last 7 days Wed Thu Fri Sat"
+    },
+    {
+      "t": 7.533,
+      "type": "mark",
+      "id": "dash-cards.1",
+      "selector": ".dash-venues",
+      "bbox": {
+        "x": 916.9,
+        "y": 248.6,
+        "w": 311.8,
+        "h": 300
+      },
+      "label": "Shifts by venue Last 30 days The Grand Hall 4 Riverside Hous"
+    },
+    {
+      "t": 7.533,
+      "type": "camera",
+      "id": "dash-cards",
+      "marks": [
+        "dash-cards.0",
+        "dash-cards.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 7.533,
+      "type": "move-start",
+      "x": 1288,
+      "y": 204
+    },
+    {
+      "t": 8.033,
+      "type": "move",
+      "x": 866,
+      "y": 284,
+      "selector": ".dash-hours .dash-card-link",
+      "bbox": {
+        "x": 851.9,
+        "y": 269.6,
+        "w": 28,
+        "h": 28
+      },
+      "label": "Open Hours worked"
+    },
+    {
+      "t": 13.167,
+      "type": "mark",
+      "id": "sidebar.0",
+      "selector": "region",
+      "bbox": {
+        "x": 0,
+        "y": 40,
+        "w": 560,
+        "h": 560
+      },
+      "label": "region"
+    },
+    {
+      "t": 13.167,
+      "type": "camera",
+      "id": "sidebar",
+      "marks": [
+        "sidebar.0"
+      ],
+      "chapter": "Sidebar",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 13.167,
+      "type": "move-start",
+      "x": 866,
+      "y": 284
+    },
+    {
+      "t": 13.867,
+      "type": "move",
+      "x": 124,
+      "y": 171,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Dashboard\"]",
+      "bbox": {
+        "x": 14,
+        "y": 155,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Dashboard"
+    },
+    {
+      "t": 15.167,
+      "type": "move-start",
+      "x": 124,
+      "y": 171
+    },
+    {
+      "t": 15.533,
+      "type": "move",
+      "x": 109,
+      "y": 354,
+      "selector": ".sidebar-group:has-text(\"Operations\") .sidebar-group-label",
+      "bbox": {
+        "x": 14,
+        "y": 341,
+        "w": 190,
+        "h": 26
+      },
+      "label": "OPERATIONS"
+    },
+    {
+      "t": 17.233,
+      "type": "move-start",
+      "x": 109,
+      "y": 354
+    },
+    {
+      "t": 17.6,
+      "type": "move",
+      "x": 124,
+      "y": 502,
+      "selector": ".sidebar-group:has-text(\"Workspace\") .sidebar-group-label",
+      "bbox": {
+        "x": 14,
+        "y": 489,
+        "w": 220,
+        "h": 26
+      },
+      "label": "WORKSPACE"
+    },
+    {
+      "t": 24.067,
+      "type": "mark",
+      "id": "pages.0",
+      "selector": "region",
+      "bbox": {
+        "x": 0,
+        "y": 0,
+        "w": 1040,
+        "h": 500
+      },
+      "label": "region"
+    },
+    {
+      "t": 24.067,
+      "type": "camera",
+      "id": "pages",
+      "marks": [
+        "pages.0"
+      ],
+      "chapter": "Main pages",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 24.067,
+      "type": "move-start",
+      "x": 124,
+      "y": 502
+    },
+    {
+      "t": 24.5,
+      "type": "move",
+      "x": 124,
+      "y": 205,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Users\"]",
+      "bbox": {
+        "x": 14,
+        "y": 189,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Users"
+    },
+    {
+      "t": 24.8,
+      "type": "click",
+      "x": 124,
+      "y": 205,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Users\"]"
+    },
+    {
+      "t": 28.733,
+      "type": "move-start",
+      "x": 124,
+      "y": 205
+    },
+    {
+      "t": 29.1,
+      "type": "move",
+      "x": 124,
+      "y": 239,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Shifts\"]",
+      "bbox": {
+        "x": 14,
+        "y": 223,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Shifts"
+    },
+    {
+      "t": 29.4,
+      "type": "click",
+      "x": 124,
+      "y": 239,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Shifts\"]"
+    },
+    {
+      "t": 33.233,
+      "type": "move-start",
+      "x": 124,
+      "y": 239
+    },
+    {
+      "t": 33.6,
+      "type": "move",
+      "x": 124,
+      "y": 307,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Offers\"]",
+      "bbox": {
+        "x": 14,
+        "y": 291,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Offers"
+    },
+    {
+      "t": 33.9,
+      "type": "click",
+      "x": 124,
+      "y": 307,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Offers\"]"
+    },
+    {
+      "t": 37.767,
+      "type": "move-start",
+      "x": 124,
+      "y": 307
+    },
+    {
+      "t": 38.133,
+      "type": "move",
+      "x": 124,
+      "y": 455,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Venue Offers\"]",
+      "bbox": {
+        "x": 14,
+        "y": 439,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Venue Offers"
+    },
+    {
+      "t": 38.433,
+      "type": "click",
+      "x": 124,
+      "y": 455,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Venue Offers\"]"
+    },
+    {
+      "t": 43.1,
+      "type": "camera",
+      "id": "calendar",
+      "rect": "full",
+      "chapter": "Calendar",
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 43.1,
+      "type": "move-start",
+      "x": 124,
+      "y": 455
+    },
+    {
+      "t": 43.467,
+      "type": "move",
+      "x": 124,
+      "y": 387,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Calendar\"]",
+      "bbox": {
+        "x": 14,
+        "y": 371,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Calendar"
+    },
+    {
+      "t": 43.767,
+      "type": "click",
+      "x": 124,
+      "y": 387,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Calendar\"]"
+    },
+    {
+      "t": 45.9,
+      "type": "move-start",
+      "x": 124,
+      "y": 387
+    },
+    {
+      "t": 46.667,
+      "type": "move",
+      "x": 1440,
+      "y": 494,
+      "selector": ".calendar-detail",
+      "bbox": {
+        "x": 1308,
+        "y": 87.5,
+        "w": 264,
+        "h": 812.5
+      },
+      "label": "Selected day"
+    },
+    {
+      "t": 48.533,
+      "type": "mark",
+      "id": "search.0",
+      "selector": ".side-panel-input",
+      "bbox": {
+        "x": 1201,
+        "y": 1,
+        "w": 398,
+        "h": 44
+      },
+      "label": ""
+    },
+    {
+      "t": 48.533,
+      "type": "camera",
+      "id": "search",
+      "marks": [
+        "search.0"
+      ],
+      "chapter": "Search",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 52.833,
+      "type": "camera",
+      "id": "help",
+      "rect": "full",
+      "chapter": "Help Center",
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 52.833,
+      "type": "move-start",
+      "x": 1440,
+      "y": 494
+    },
+    {
+      "t": 53.6,
+      "type": "move",
+      "x": 124,
+      "y": 569,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Help Center\"]",
+      "bbox": {
+        "x": 14,
+        "y": 553,
+        "w": 220,
+        "h": 32
+      },
+      "label": "Help Center"
+    },
+    {
+      "t": 53.9,
+      "type": "click",
+      "x": 124,
+      "y": 569,
+      "selector": "aside.sidebar a.nav-item[aria-label=\"Help Center\"]"
+    }
+  ]
+}

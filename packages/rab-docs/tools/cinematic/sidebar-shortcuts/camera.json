@@ -1,0 +1,154 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "ops",
+      "t": 8.567,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 267,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Add menu item"
+    },
+    {
+      "id": "menu",
+      "t": 12.9,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 460,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "views",
+      "t": 21.1,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 578,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "confirm",
+      "t": 22.8,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 524,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "result",
+      "t": 27.067,
+      "duration": 0.8,
+      "rect": {
+        "x": 0,
+        "y": 303,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Your shortcut"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "ops",
+      "box": {
+        "x": 28,
+        "y": 682,
+        "w": 440,
+        "h": 260
+      },
+      "inside": true
+    },
+    {
+      "shot": "ops",
+      "box": {
+        "x": 408,
+        "y": 684,
+        "w": 48,
+        "h": 48
+      },
+      "inside": true
+    },
+    {
+      "shot": "menu",
+      "box": {
+        "x": 410,
+        "y": 742,
+        "w": 600,
+        "h": 527
+      },
+      "inside": true
+    },
+    {
+      "shot": "views",
+      "box": {
+        "x": 410,
+        "y": 742,
+        "w": 600,
+        "h": 763
+      },
+      "inside": true
+    },
+    {
+      "shot": "confirm",
+      "box": {
+        "x": 410,
+        "y": 742,
+        "w": 600,
+        "h": 654
+      },
+      "inside": true
+    },
+    {
+      "shot": "result",
+      "box": {
+        "x": 28,
+        "y": 682,
+        "w": 440,
+        "h": 332
+      },
+      "inside": true
+    }
+  ]
+}

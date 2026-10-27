@@ -1,10 +1,11 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
+import { isUuid, refuseInspection, requireReason } from './admin-actor';
 import { AdminInspectService } from './admin-inspect.service';
 import { revokeSessionsForPrivilegedGrant } from './privileged-grant-session-reset';
 
@@ -64,42 +65,46 @@ export class PlatformAdminService {
   }
 
   /**
-   * Guarded grant/revoke — only callable by an existing active platform
-   * admin (enforced both here, service-layer, and again at the RLS
-   * `WITH CHECK` layer via `core.is_active_platform_admin()`, CLAUDE.md's
-   * "layer 2 is the one people skip" rule). The very first grant can never
-   * go through this method (there is no existing admin yet to authorize
-   * it) — that's what the `grant-platform-admin` bootstrap CLI is for,
-   * which writes directly as `rab_owner`, bypassing this table's
-   * (deliberately NOT FORCEd) RLS entirely.
+   * Guarded grant/revoke — only callable by an existing active platform admin (enforced here, service-layer, and again
+   * at the RLS `WITH CHECK` layer via `core.is_active_platform_admin()`, CLAUDE.md's "layer 2 is the one people skip").
+   * The very first grant can never go through this method (there is no existing admin yet to authorize it) — that is
+   * what the `grant-platform-admin` / `bootstrap-admin` CLIs are for.
    *
-   * Idempotent: granting an already-active admin, or revoking an already-
-   * inactive one, succeeds without changing `grantedAt`/`revokedAt` again —
-   * `ON CONFLICT ... DO UPDATE ... WHERE` and a plain conditional `UPDATE`
-   * both no-op cleanly rather than erroring.
+   * Idempotent: granting an already-active admin, or revoking an already-inactive one, changes nothing and writes no
+   * audit row (`{granted:false}` / `{revoked:false}`).
    *
-   * P2.8 — step-up reauth: the ACTOR's current password is verified before
-   * anything else, so a hijacked-but-live session alone can never mint a
-   * new platform admin. Checked before the admin-status check too — a non-
-   * admin caller learns nothing about whether their password was even
-   * reached (they already get `ConflictException` either way, and
-   * `assertCurrentPassword` is timing-uniform regardless of account state).
+   * Admin panel follow-up (B3, owner-approved 2026-10-25), in this order, each step throwing (fail closed):
+   *   1. Admin Inspect refused; 2. the actor is an ACTIVE platform admin (layer 2); 3. a reason (trimmed, 3–500) → 400;
+   *   4. revoke only: never yourself → 409 `PLATFORM_ADMIN_SELF_REMOVAL`;
+   *   5. a recent step-up of THIS session (`assertRecentStepUp`, 'platform.admin.grant' / 'platform.admin.revoke'):
+   *      a password step-up, an SSO re-authentication (so an admin WITHOUT a password can act) or a fresh sign-in, plus
+   *      the actor's own code ONLY when the actor is enrolled — there is no "actor must have MFA" rule. This replaces the
+   *      inline-password path (`assertCurrentPassword`), which an SSO-only admin could never satisfy;
+   *   6. one transaction holding `PLATFORM_ADMIN_MEMBERSHIP_LOCK` (`pg_advisory_xact_lock`): every grant/revoke is
+   *      serialised, the actor's status is re-read UNDER the lock, and a revoke that would leave no active platform admin
+   *      is refused → 409 `LAST_PLATFORM_ADMIN`. Two admins revoking each other at the same moment therefore cannot both
+   *      succeed: the second one runs after the first one's commit and is refused because it is no longer an admin (403;
+   *      `platform_admin`'s SELECT policy then shows it only its own row). With "never yourself" plus that re-check, an
+   *      active actor always remains, so `LAST_PLATFORM_ADMIN` is defence in depth for a future caller (e.g. a CLI that
+   *      acts for an actor who is not itself an admin row) rather than a path today's routes can reach.
+   * Grant ends every session and refresh token the target holds in the same transaction (CF-07,
+   * `revokeSessionsForPrivilegedGrant`); revoke ends the demoted admin's inspect sessions (CF-02). Both audit rows carry
+   * the reason.
    */
-  async grant(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ granted: boolean }> {
-    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
-    // Bound to the ACTOR's own organisation, not `null` — `platform_admin`'s
-    // own policies never reference `current_org()` so this binding doesn't
-    // affect them either way, but it's what lets the audit row below
-    // satisfy `audit_log`'s own `organisation_id NOT NULL`/FORCEd tenant
-    // policy in the same transaction (that table predates the platform-wide
-    // concept `platform_admin` itself is, and has no workspace-free storage
-    // location of its own — see `grant-platform-admin.command.ts`'s
-    // identical trade-off for the bootstrap-CLI case).
+  async grant(actorCtx: PlatformAdminActor, targetUserId: string, input: { reason?: unknown }): Promise<{ granted: boolean; revokedSessions: number }> {
+    const reason = await this.preflight(actorCtx, input);
+    if (!isUuid(targetUserId)) throw new NotFoundException('User not found.');
+    await this.stepUpReauth.assertRecentStepUp(stepUpCtxOf(actorCtx), 'platform.admin.grant');
+    // Bound to the ACTOR's own organisation: `platform_admin`'s own policies never reference `current_org()`, but the audit
+    // row must satisfy `audit_log`'s FORCEd `organisation_id = current_org()` policy in the same transaction.
     return this.tenantContext.runInTenantContext(
       { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {
-        const isAdmin = await this.isPlatformAdminTx(manager, actorCtx);
-        if (!isAdmin) throw new ConflictException('Only an existing platform administrator can grant platform admin status.');
+        await lockMembership(manager);
+        if (!(await this.isPlatformAdminTx(manager, actorCtx))) throw notAnAdmin();
+        // The target must be a real user (the DEFINER function restores the caller's binding itself).
+        const [membership] = await manager.query<Array<{ organisation_id: string }>>(`SELECT organisation_id FROM core.resolve_membership_for_user($1)`, [targetUserId]);
+        if (!membership) throw new NotFoundException('User not found.');
 
         const result = await manager.query<Array<{ user_id: string }>>(
           `INSERT INTO core.platform_admin (user_id, granted_by)
@@ -111,40 +116,84 @@ export class PlatformAdminService {
            RETURNING user_id`,
           [targetUserId, actorCtx.userId],
         );
-        const granted = result.length > 0;
-        if (granted) {
-          // CF-07: no pre-existing (longer-lived, lower-privilege) session survives the promotion.
-          const { revokedSessions } = await revokeSessionsForPrivilegedGrant(manager, targetUserId);
-          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_GRANTED, { targetUserId, metadata: { revokedSessions } });
-        }
-        return { granted };
+        if (result.length === 0) return { granted: false, revokedSessions: 0 };
+        // CF-07: no pre-existing (longer-lived, lower-privilege) session survives the promotion.
+        const { revokedSessions } = await revokeSessionsForPrivilegedGrant(manager, targetUserId);
+        await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_GRANTED, { targetUserId, metadata: { reason, revokedSessions } });
+        return { granted: true, revokedSessions };
       },
     );
   }
 
-  /** P2.8 — same step-up reauth as `grant()` above; see its doc comment. */
-  async revoke(actorCtx: Pick<AuthContext, 'userId' | 'organisationId'>, targetUserId: string, currentPassword: string): Promise<{ revoked: boolean }> {
-    await this.stepUpReauth.assertCurrentPassword({ organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId }, currentPassword);
+  /** See `grant()`: same order, plus never yourself and never the last active platform admin (race-safe). */
+  async revoke(actorCtx: PlatformAdminActor, targetUserId: string, input: { reason?: unknown }): Promise<{ revoked: boolean }> {
+    const reason = await this.preflight(actorCtx, input);
+    if (!isUuid(targetUserId)) throw new NotFoundException('User not found.');
+    if (targetUserId === actorCtx.userId) {
+      throw new ConflictException({ code: 'PLATFORM_ADMIN_SELF_REMOVAL', message: 'You can’t remove yourself as a platform admin. Ask another platform admin to do it.' });
+    }
+    await this.stepUpReauth.assertRecentStepUp(stepUpCtxOf(actorCtx), 'platform.admin.revoke');
     return this.tenantContext.runInTenantContext(
       { organisationId: actorCtx.organisationId, workspaceId: null, userId: actorCtx.userId, role: '' },
       async (manager) => {
-        const isAdmin = await this.isPlatformAdminTx(manager, actorCtx);
-        if (!isAdmin) throw new ConflictException('Only an existing platform administrator can revoke platform admin status.');
+        await lockMembership(manager);
+        // Under the lock. READ COMMITTED: each statement below sees every grant/revoke committed before we got the lock.
+        const [counts] = await manager.query<Array<{ target_active: boolean; others: number }>>(
+          `SELECT EXISTS (SELECT 1 FROM core.platform_admin WHERE user_id = $1 AND revoked_at IS NULL) AS target_active,
+                  (SELECT count(*)::int FROM core.platform_admin WHERE user_id <> $1 AND revoked_at IS NULL) AS others`,
+          [targetUserId],
+        );
+        if (counts?.target_active && Number(counts.others) === 0) {
+          throw new ConflictException({ code: 'LAST_PLATFORM_ADMIN', message: 'This is the last platform admin. Add another platform admin first.' });
+        }
+        if (!(await this.isPlatformAdminTx(manager, actorCtx))) throw notAnAdmin();
+        if (!counts?.target_active) return { revoked: false };
 
         const [, rowCount] = await manager.query<[unknown[], number]>(
           `UPDATE core.platform_admin SET revoked_at = now(), revoked_by = $2, security_version = security_version + 1
            WHERE user_id = $1 AND revoked_at IS NULL`,
           [targetUserId, actorCtx.userId],
         );
-        const revoked = rowCount > 0;
-        if (revoked) {
-          // CF-02: a demoted admin's open inspect sessions end in the same transaction (the guard's per-request
-          // current-authority check already refuses them; this removes the rows too).
-          const endedInspectSessions = await this.adminInspect.endAllForAdminTx(manager, targetUserId);
-          await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_REVOKED, { targetUserId, metadata: { endedInspectSessions } });
-        }
-        return { revoked };
+        if (rowCount === 0) return { revoked: false };
+        // CF-02: a demoted admin's open inspect sessions end in the same transaction (the guard's per-request
+        // current-authority check already refuses them; this removes the rows too).
+        const endedInspectSessions = await this.adminInspect.endAllForAdminTx(manager, targetUserId);
+        await this.auditService.record(manager, actorCtx, AuditAction.PLATFORM_ADMIN_REVOKED, { targetUserId, metadata: { reason, endedInspectSessions } });
+        return { revoked: true };
       },
     );
   }
+
+  /** Steps 1–3 of grant/revoke: inspect refused, layer-2 admin check (a check that throws denies), reason. */
+  private async preflight(actorCtx: PlatformAdminActor, input: { reason?: unknown } | undefined): Promise<string> {
+    refuseInspection(actorCtx);
+    let allowed = false;
+    try {
+      allowed = Boolean(actorCtx?.userId) && (await this.isPlatformAdmin(actorCtx));
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) throw notAnAdmin();
+    return requireReason(input?.reason);
+  }
+}
+
+export type PlatformAdminActor = Pick<AuthContext, 'userId' | 'organisationId'> & Partial<Pick<AuthContext, 'workspaceId' | 'sessionId' | 'inspectedBy'>>;
+
+/**
+ * Transaction-scoped advisory lock key serialising every platform-admin grant/revoke (B3). A constant ("crewpa01" as a
+ * 64-bit integer), so it never collides with the hash-derived keys of the worker's locks; released at COMMIT/ROLLBACK.
+ */
+export const PLATFORM_ADMIN_MEMBERSHIP_LOCK = '7165901520760811569';
+
+async function lockMembership(manager: EntityManager): Promise<void> {
+  await manager.query('SELECT pg_advisory_xact_lock($1::bigint)', [PLATFORM_ADMIN_MEMBERSHIP_LOCK]);
+}
+
+function stepUpCtxOf(actorCtx: PlatformAdminActor) {
+  return { organisationId: actorCtx.organisationId, workspaceId: actorCtx.workspaceId ?? null, userId: actorCtx.userId, sessionId: actorCtx.sessionId, inspectedBy: actorCtx.inspectedBy };
+}
+
+function notAnAdmin(): ForbiddenException {
+  return new ForbiddenException('Only an active platform administrator can change platform admins.');
 }

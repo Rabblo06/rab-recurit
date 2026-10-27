@@ -1,0 +1,443 @@
+{
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "dpr": 2,
+  "fps": 30,
+  "frameSize": {
+    "width": 3200,
+    "height": 1800
+  },
+  "coordinates": "CSS px of the viewport; frame px = CSS px × dpr",
+  "events": [
+    {
+      "t": 9.267,
+      "type": "mark",
+      "id": "view.0",
+      "selector": "button[aria-label=\"Offers view\"]",
+      "bbox": {
+        "x": 273,
+        "y": 64.5,
+        "w": 105.8,
+        "h": 28
+      },
+      "label": "Offers view"
+    },
+    {
+      "t": 9.267,
+      "type": "mark",
+      "id": "view.1",
+      "selector": "region",
+      "bbox": {
+        "x": 248,
+        "y": 0,
+        "w": 980,
+        "h": 430
+      },
+      "label": "region"
+    },
+    {
+      "t": 9.267,
+      "type": "camera",
+      "id": "view",
+      "marks": [
+        "view.0",
+        "view.1"
+      ],
+      "chapter": "Awaiting Confirmation",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 9.267,
+      "type": "move-start",
+      "x": 1180,
+      "y": 640
+    },
+    {
+      "t": 10.033,
+      "type": "move",
+      "x": 326,
+      "y": 79,
+      "selector": "button[aria-label=\"Offers view\"]",
+      "bbox": {
+        "x": 273,
+        "y": 64.5,
+        "w": 105.8,
+        "h": 28
+      },
+      "label": "Offers view"
+    },
+    {
+      "t": 10.333,
+      "type": "click",
+      "x": 326,
+      "y": 79,
+      "selector": "button[aria-label=\"Offers view\"]"
+    },
+    {
+      "t": 10.767,
+      "type": "move-start",
+      "x": 326,
+      "y": 79
+    },
+    {
+      "t": 11.133,
+      "type": "move",
+      "x": 385,
+      "y": 186,
+      "selector": "[role=option]:has-text(\"Awaiting Confirmation\")",
+      "bbox": {
+        "x": 278,
+        "y": 170,
+        "w": 214,
+        "h": 32
+      },
+      "label": "Awaiting Confirmation"
+    },
+    {
+      "t": 11.433,
+      "type": "click",
+      "x": 385,
+      "y": 186,
+      "selector": "[role=option]:has-text(\"Awaiting Confirmation\")"
+    },
+    {
+      "t": 13.6,
+      "type": "mark",
+      "id": "row.0",
+      "selector": "tr:has-text(\"Priya Shah\") td:nth-child(2)",
+      "bbox": {
+        "x": 289,
+        "y": 223,
+        "w": 201.2,
+        "h": 40.5
+      },
+      "label": "PS Priya Shah"
+    },
+    {
+      "t": 13.6,
+      "type": "mark",
+      "id": "row.1",
+      "selector": "tr:has-text(\"Priya Shah\") .muted",
+      "bbox": {
+        "x": 1268,
+        "y": 247,
+        "w": 226,
+        "h": 16.5
+      },
+      "label": "Staff accepted 42 minutes ago"
+    },
+    {
+      "t": 13.6,
+      "type": "camera",
+      "id": "row",
+      "marks": [
+        "row.0",
+        "row.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 13.6,
+      "type": "move-start",
+      "x": 385,
+      "y": 186
+    },
+    {
+      "t": 14.367,
+      "type": "move",
+      "x": 1381,
+      "y": 255,
+      "selector": "tr:has-text(\"Priya Shah\") .muted",
+      "bbox": {
+        "x": 1268,
+        "y": 247,
+        "w": 226,
+        "h": 16.5
+      },
+      "label": "Staff accepted 42 minutes ago"
+    },
+    {
+      "t": 17.867,
+      "type": "mark",
+      "id": "tick.0",
+      "selector": "tr:has-text(\"Priya Shah\") .muted",
+      "bbox": {
+        "x": 1268,
+        "y": 247,
+        "w": 226,
+        "h": 16.5
+      },
+      "label": "Staff accepted 42 minutes ago"
+    },
+    {
+      "t": 17.867,
+      "type": "mark",
+      "id": "tick.1",
+      "selector": "tr:has-text(\"Priya Shah\") button[title=\"Confirm shift\"]",
+      "bbox": {
+        "x": 1542,
+        "y": 232.3,
+        "w": 22,
+        "h": 22
+      },
+      "label": ""
+    },
+    {
+      "t": 17.867,
+      "type": "camera",
+      "id": "tick",
+      "marks": [
+        "tick.0",
+        "tick.1"
+      ],
+      "chapter": null,
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 17.867,
+      "type": "move-start",
+      "x": 1381,
+      "y": 255
+    },
+    {
+      "t": 18.233,
+      "type": "move",
+      "x": 1553,
+      "y": 243,
+      "selector": "tr:has-text(\"Priya Shah\") button[title=\"Confirm shift\"]",
+      "bbox": {
+        "x": 1542,
+        "y": 232.3,
+        "w": 22,
+        "h": 22
+      },
+      "label": ""
+    },
+    {
+      "t": 18.533,
+      "type": "click",
+      "x": 1553,
+      "y": 243,
+      "selector": "tr:has-text(\"Priya Shah\") button[title=\"Confirm shift\"]"
+    },
+    {
+      "t": 18.967,
+      "type": "camera",
+      "id": "drawer",
+      "rect": "full",
+      "chapter": null,
+      "duration": 0.9,
+      "offset": 0
+    },
+    {
+      "t": 21.267,
+      "type": "move-start",
+      "x": 1553,
+      "y": 243
+    },
+    {
+      "t": 21.9,
+      "type": "move",
+      "x": 1516,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Confirm shift\")",
+      "bbox": {
+        "x": 1450.3,
+        "y": 855,
+        "w": 130.7,
+        "h": 32
+      },
+      "label": "Confirm shift"
+    },
+    {
+      "t": 22.2,
+      "type": "click",
+      "x": 1516,
+      "y": 871,
+      "selector": ".side-panel-dock:not(.ai-panel-dock) button:has-text(\"Confirm shift\")"
+    },
+    {
+      "t": 24.3,
+      "type": "mark",
+      "id": "all.0",
+      "selector": "button:has-text(\"Confirm All Accepted\")",
+      "bbox": {
+        "x": 1091.3,
+        "y": 62.5,
+        "w": 203.5,
+        "h": 32
+      },
+      "label": "Confirm All Accepted (5)"
+    },
+    {
+      "t": 24.3,
+      "type": "mark",
+      "id": "all.1",
+      "selector": "region",
+      "bbox": {
+        "x": 248,
+        "y": 0,
+        "w": 980,
+        "h": 430
+      },
+      "label": "region"
+    },
+    {
+      "t": 24.3,
+      "type": "camera",
+      "id": "all",
+      "marks": [
+        "all.0",
+        "all.1"
+      ],
+      "chapter": "Confirm all",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 24.3,
+      "type": "move-start",
+      "x": 1516,
+      "y": 871
+    },
+    {
+      "t": 25.067,
+      "type": "move",
+      "x": 1193,
+      "y": 79,
+      "selector": "button:has-text(\"Confirm All Accepted\")",
+      "bbox": {
+        "x": 1091.3,
+        "y": 62.5,
+        "w": 203.5,
+        "h": 32
+      },
+      "label": "Confirm All Accepted (5)"
+    },
+    {
+      "t": 25.367,
+      "type": "click",
+      "x": 1193,
+      "y": 79,
+      "selector": "button:has-text(\"Confirm All Accepted\")"
+    },
+    {
+      "t": 28.9,
+      "type": "move-start",
+      "x": 1193,
+      "y": 79
+    },
+    {
+      "t": 29.633,
+      "type": "move",
+      "x": 366,
+      "y": 79,
+      "selector": "button[aria-label=\"Offers view\"]",
+      "bbox": {
+        "x": 273,
+        "y": 64.5,
+        "w": 186.5,
+        "h": 28
+      },
+      "label": "Offers view"
+    },
+    {
+      "t": 29.933,
+      "type": "click",
+      "x": 366,
+      "y": 79,
+      "selector": "button[aria-label=\"Offers view\"]"
+    },
+    {
+      "t": 30.367,
+      "type": "move-start",
+      "x": 366,
+      "y": 79
+    },
+    {
+      "t": 30.733,
+      "type": "move",
+      "x": 385,
+      "y": 220,
+      "selector": "[role=option]:has-text(\"Confirmed\")",
+      "bbox": {
+        "x": 278,
+        "y": 204,
+        "w": 214,
+        "h": 32
+      },
+      "label": "Confirmed"
+    },
+    {
+      "t": 31.033,
+      "type": "click",
+      "x": 385,
+      "y": 220,
+      "selector": "[role=option]:has-text(\"Confirmed\")"
+    },
+    {
+      "t": 32.467,
+      "type": "mark",
+      "id": "confirmed.0",
+      "selector": "tr:has-text(\"Daniel Okafor\") td:nth-child(2)",
+      "bbox": {
+        "x": 289,
+        "y": 262,
+        "w": 206.7,
+        "h": 40
+      },
+      "label": "DO Daniel Okafor"
+    },
+    {
+      "t": 32.467,
+      "type": "mark",
+      "id": "confirmed.1",
+      "selector": "tr:has-text(\"Daniel Okafor\") .badge",
+      "bbox": {
+        "x": 1356.8,
+        "y": 271,
+        "w": 125.7,
+        "h": 22
+      },
+      "label": "Manager confirmed"
+    },
+    {
+      "t": 32.467,
+      "type": "camera",
+      "id": "confirmed",
+      "marks": [
+        "confirmed.0",
+        "confirmed.1"
+      ],
+      "chapter": "Confirmed",
+      "duration": 0.8,
+      "offset": 0
+    },
+    {
+      "t": 32.467,
+      "type": "move-start",
+      "x": 385,
+      "y": 220
+    },
+    {
+      "t": 33.233,
+      "type": "move",
+      "x": 1420,
+      "y": 282,
+      "selector": "tr:has-text(\"Daniel Okafor\") .badge",
+      "bbox": {
+        "x": 1356.8,
+        "y": 271,
+        "w": 125.7,
+        "h": 22
+      },
+      "label": "Manager confirmed"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconDeviceDesktop, IconDeviceMobile, IconDeviceTablet, IconDots, IconLogout } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
-import { toast } from '../../../shared/lib/toast';
+import { useFeedbackMutation } from '../../../shared/hooks/useFeedbackMutation';
 import { timeAgo } from '../../../shared/lib/timeAgo';
 import { ListSkeleton } from '../../../shared/components/LoadingState';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
@@ -81,26 +81,30 @@ export default function DevicesList() {
     queryFn: async () => (await api.get<Session[]>('/profile/sessions')).data,
   });
 
-  const revoke = useMutation({
-    mutationFn: (familyId: string) => api.delete(`/profile/sessions/${familyId}`),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
-      toast.success('Device logged out.');
+  // DELETE /profile/sessions/:familyId → 204 once the server has revoked that session. A 404 means it had already ended
+  // (expired, or logged out elsewhere); the list is refreshed either way so it never shows a session that is gone.
+  const revoke = useFeedbackMutation<unknown, string>({
+    mutationFn: (familyId) => api.delete(`/profile/sessions/${familyId}`),
+    successMessage: 'Device logged out.',
+    errorFeedback: {
+      fallback: 'Could not log out this device. Please try again.',
+      messages: { server: 'Could not log out this device. Please try again.', not_found: 'That session had already ended.' },
     },
-    onError: () => toast.error('Failed to log out this device.'),
+    onSettled: () => void qc.invalidateQueries({ queryKey: SESSIONS_KEY }),
   });
 
-  // Keeps this device signed in — only every OTHER session is ended.
-  const revokeOthers = useMutation({
-    mutationFn: () => api.delete<{ revokedCount: number }>('/profile/sessions'),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
-      toast.success('Logged out all other devices.');
-      setConfirmOthers(false);
+  // Keeps this device signed in — only every OTHER session is ended. Answers `{ revokedCount }`.
+  const revokeOthers = useFeedbackMutation<{ revokedCount: number }>({
+    mutationFn: async () => (await api.delete<{ revokedCount: number }>('/profile/sessions')).data,
+    successMessage: (data) => {
+      const n = typeof data?.revokedCount === 'number' ? data.revokedCount : null;
+      if (n === null) return 'Logged out all other devices.';
+      return n === 1 ? 'Logged out 1 other device.' : `Logged out ${n} other devices.`;
     },
-    onError: () => {
-      toast.error('Failed to log out other devices.');
+    errorFeedback: { fallback: 'Could not log out your other devices. Please try again.', messages: { server: 'Could not log out your other devices. Please try again.' } },
+    onSettled: () => {
       setConfirmOthers(false);
+      void qc.invalidateQueries({ queryKey: SESSIONS_KEY });
     },
   });
 
@@ -145,8 +149,10 @@ export default function DevicesList() {
                 </span>
                 {s.isCurrentDevice ? (
                   <span className="device-current-badge">This device</span>
+                ) : revoke.busy && revoke.variables === s.familyId ? (
+                  <span className="device-meta" role="status">Logging out…</span>
                 ) : (
-                  <SessionMenu session={s} label={label} onLogOut={(id) => revoke.mutate(id)} busy={revoke.isPending} />
+                  <SessionMenu session={s} label={label} onLogOut={(id) => revoke.submit(id)} busy={revoke.busy} />
                 )}
               </li>
             );
@@ -166,8 +172,8 @@ export default function DevicesList() {
         description="This device stays signed in. Every other session is ended immediately."
         confirmLabel="Log out other devices"
         destructive
-        loading={revokeOthers.isPending}
-        onConfirm={() => revokeOthers.mutate()}
+        loading={revokeOthers.busy}
+        onConfirm={() => revokeOthers.submit()}
         onCancel={() => setConfirmOthers(false)}
       />
     </div>

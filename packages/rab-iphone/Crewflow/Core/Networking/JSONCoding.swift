@@ -123,6 +123,15 @@ public enum JSONValue: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// A whole JSON number that fits an `Int` (e.g. `attemptsRemaining`);
+    /// nil for fractions, non-numbers and out-of-range values.
+    public var intValue: Int? {
+        guard case .number(let value) = self, value.isFinite, value.rounded() == value,
+              abs(value) < 1e15
+        else { return nil }
+        return Int(value)
+    }
+
     /// Mirrors Dart's `toString()` of a decoded JSON scalar for message text.
     var displayText: String {
         switch self {

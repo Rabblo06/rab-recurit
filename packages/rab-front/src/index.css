@@ -3619,6 +3619,25 @@ button:hover .avatar-cam-overlay {
 .toast-close:hover { background: var(--bg-transparent-light); color: var(--font-primary); }
 .toast-close:focus-visible { outline: 2px solid var(--toast-ink); outline-offset: 1px; }
 
+/* Optional next-step action ("Try again", "Sign in again"): a compact text button in the variant's ink colour. */
+.toast-action {
+    flex-shrink: 0;
+    align-self: center;
+    margin: -4px 0;
+    padding: 4px 8px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--toast-ink);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.toast-action:hover { background: var(--toast-tint); }
+.toast-action:focus-visible { outline: 2px solid var(--toast-ink); outline-offset: 1px; }
+
 .toast.toast-error { --toast-tint: var(--feedback-error-bg); --toast-ink: var(--feedback-error); }
 .toast.toast-success { --toast-tint: var(--feedback-success-bg); --toast-ink: var(--feedback-success); }
 .toast.toast-warning { --toast-tint: var(--feedback-warning-bg); --toast-ink: var(--feedback-warning); }

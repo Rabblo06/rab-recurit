@@ -126,16 +126,15 @@ it('wave 4: a required second factor shows the real code step; the session exist
   get.mockResolvedValue({ data: signInSummary });
   post.mockRejectedValue(httpError(409, { code: 'SECOND_FACTOR_REQUIRED', requirement: 'verify', challengeToken }));
   mount('/oauth/callback-complete?handoff=1');
-  expect(await screen.findByRole('heading', { name: 'Enter your authentication code' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: 'Verify your sign-in' })).toBeInTheDocument();
   expect(resolveIdentity).not.toHaveBeenCalled();
   apiPost.mockRejectedValueOnce(httpError(401, { code: 'MFA_CODE_INVALID' }));
-  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '123456' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  fireEvent.change(screen.getByLabelText('6-digit authentication code'), { target: { value: '123456' } });
   expect(await screen.findByRole('alert')).toHaveTextContent(/didn’t work/);
   expect(resolveIdentity).not.toHaveBeenCalled();
   apiPost.mockResolvedValueOnce({ data: { mustResetPassword: false } });
-  fireEvent.change(screen.getByLabelText('Six-digit code'), { target: { value: '654321' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
+  // The sixth digit submits on its own (account-security design: one code input, auto-submit).
+  fireEvent.change(screen.getByLabelText('6-digit authentication code'), { target: { value: '654321' } });
   expect(await screen.findByText('Dashboard')).toBeInTheDocument();
   expect(apiPost).toHaveBeenLastCalledWith('/auth/mfa/challenge/verify', { challengeToken, code: '654321' });
 });
@@ -158,4 +157,53 @@ it('legacy mode with an unreachable API shows a retry, not a logout', async () =
   mount('/oauth/callback-complete?mustResetPassword=false&returnTo=%2Fshifts');
   fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
   expect(await screen.findByText('Shifts page')).toBeInTheDocument();
+});
+
+describe('feedback follow-up (FEEDBACK_REPORT §6, Auth + MFA item 9)', () => {
+  const invitationSummary = { ...signInSummary, intent: 'accept_invitation', invitation: { email: 'a@x.test', workspaceName: 'Northwind', roleLabel: 'Supervisor' } };
+
+  it('Cancel whose request fails is caught (no unhandled rejection) and still returns to sign-in', async () => {
+    const unhandled = jest.fn();
+    window.addEventListener('unhandledrejection', unhandled);
+    get.mockResolvedValue({ data: invitationSummary });
+    post.mockRejectedValueOnce(httpError(410, { message: 'Gone' }));
+    mount('/oauth/callback-complete?handoff=1');
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText('Login page')).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).not.toHaveBeenCalled();
+    window.removeEventListener('unhandledrejection', unhandled);
+  });
+
+  it('Accept / Cancel: one action at a time — a double click posts once and both buttons are disabled while it runs', async () => {
+    get.mockResolvedValue({ data: invitationSummary });
+    post.mockReturnValueOnce(new Promise(() => undefined));
+    mount('/oauth/callback-complete?handoff=1');
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    fireEvent.click(cancel);
+    fireEvent.click(cancel);
+    expect(await screen.findByRole('button', { name: 'Cancelling…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Accept invitation' })).toBeDisabled();
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Try again" after an outage is single-flight and keeps working after a second outage', async () => {
+    resolveIdentity.mockResolvedValue(false);
+    lastFailure.mockReturnValue('unavailable');
+    mount('/oauth/callback-complete?returnTo=/shifts');
+    let retryButton = await screen.findByRole('button', { name: 'Try again' });
+    let release: (v: boolean) => void = () => undefined;
+    resolveIdentity.mockReset().mockReturnValueOnce(new Promise<boolean>((resolve) => (release = resolve)));
+    fireEvent.click(retryButton);
+    fireEvent.click(retryButton);
+    expect(await screen.findByRole('button', { name: 'Trying again…' })).toBeDisabled();
+    expect(resolveIdentity).toHaveBeenCalledTimes(1);
+    release(false); // still unavailable
+    retryButton = await screen.findByRole('button', { name: 'Try again' });
+    expect(retryButton).toBeEnabled();
+    resolveIdentity.mockResolvedValueOnce(true);
+    fireEvent.click(retryButton);
+    expect(await screen.findByText('Shifts page')).toBeInTheDocument();
+    expect(resolveIdentity).toHaveBeenCalledTimes(2);
+  });
 });

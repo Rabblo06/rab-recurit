@@ -1,0 +1,58 @@
+[
+  {
+    "id": "intro",
+    "start": 0,
+    "seconds": 7.808,
+    "text": "Staff reviews collect the feedback venue managers give your staff after a shift. This tutorial uses fictional demonstration data.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\intro.wav"
+  },
+  {
+    "id": "open",
+    "start": 8.333,
+    "seconds": 2.901,
+    "text": "Open Users, and select View on a staff member.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\open.wav"
+  },
+  {
+    "id": "tab",
+    "start": 11.767,
+    "seconds": 3.499,
+    "text": "Open the More menu beside the tabs, and choose Staff reviews.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\tab.wav"
+  },
+  {
+    "id": "overall",
+    "start": 15.767,
+    "seconds": 5.587,
+    "text": "Overall rating shows the average score, and how the reviews are spread from one to five stars.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\overall.wav"
+  },
+  {
+    "id": "categories",
+    "start": 21.867,
+    "seconds": 6.315,
+    "text": "Average by category breaks the score down into grooming, attitude, skills, attendance and time keeping.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\categories.wav"
+  },
+  {
+    "id": "filter",
+    "start": 28.7,
+    "seconds": 5.685,
+    "text": "Use the venue manager and date range filters to narrow the reviews, for example to this month.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\filter.wav"
+  },
+  {
+    "id": "history",
+    "start": 34.9,
+    "seconds": 4.898,
+    "text": "Review history lists each review. Select View review to see the full shift review.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\history.wav"
+  },
+  {
+    "id": "detail",
+    "start": 40.3,
+    "seconds": 5.568,
+    "text": "The shift review shows each category score and any written feedback. Reviews are read only here.",
+    "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\staff-reviews\\detail.wav"
+  }
+]

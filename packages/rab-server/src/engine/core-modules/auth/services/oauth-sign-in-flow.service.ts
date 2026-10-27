@@ -18,6 +18,8 @@ import { AuthService, LoginResult } from './auth.service';
 import { OAuthInvitationHandlerRegistry, ProviderInvitationSummary } from './oauth-invitation-handler.registry';
 import { OAuthIntent, OAuthProvider, OAuthTransactionStateService } from './oauth-transaction-state.service';
 import { OidcLoginService } from './oidc-login.service';
+import { OidcReauthService, SsoReauthProvider } from './oidc-reauth.service';
+import { AuthContext } from '../../tenant/auth-context.interface';
 import { PROVIDER_SIGN_IN_GENERIC_MESSAGE, ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.error';
 
 export interface HandoffSummary {
@@ -69,6 +71,7 @@ export class OAuthSignInFlowService {
     private readonly invitations: OAuthInvitationHandlerRegistry,
     private readonly dataSource: DataSource,
     private readonly env: EnvironmentService,
+    private readonly reauth: OidcReauthService,
   ) {}
 
   /**
@@ -124,6 +127,24 @@ export class OAuthSignInFlowService {
     }
   }
 
+  /**
+   * Account security step 1 (P6): an authenticated, CSRF-checked (JwtAuthGuard: trusted Origin for a cookie POST) start of
+   * an SSO re-authentication for the CURRENT session. A top-level form POST, so the browser-binding cookie is set on a
+   * first-party navigation response and the provider redirect is a plain 302. Refusals are audited by OidcReauthService
+   * and land on the fixed return path with `?reauth=failed` (never a client-chosen URL).
+   */
+  async startReauthentication(ctx: AuthContext, provider: SsoReauthProvider, res: Response, returnTo: unknown): Promise<void> {
+    const returnPath = this.reauth.returnPathFor(returnTo);
+    try {
+      const { url, browserSecret } = await this.reauth.start(ctx, provider, returnTo);
+      res.cookie(authCookieName('oauthTx', this.cookieMode), browserSecret, authCookieSetOptions('oauthTx', this.cookieMode));
+      res.redirect(url);
+    } catch (error) {
+      this.logger.warn(`oauth_reauth_start_refused provider=${provider} reason=${(error as { response?: { code?: string } })?.response?.code ?? (error as Error).name}`);
+      res.redirect(`${this.appUrl}${returnPath}?reauth=failed`);
+    }
+  }
+
   // ── callback ─────────────────────────────────────────────────────────────────────────────────────────────
 
   async callback(provider: OAuthProvider, req: RequestWithCookies, res: Response): Promise<void> {
@@ -135,9 +156,17 @@ export class OAuthSignInFlowService {
     let email: string | null = null;
     try {
       if (typeof req.query.error === 'string') throw new ProviderSignInError('no_eligible_account');
-      const { identity, returnToPath, transaction } = await this.oidcLogin.handleCallback(provider, req.query as Record<string, string>, browserSecret);
+      const { identity, returnToPath, transaction, authTime } = await this.oidcLogin.handleCallback(provider, req.query as Record<string, string>, browserSecret);
       intent = transaction.intent;
       email = identity.email;
+
+      // Account security step 1 (P6): a re-authentication never reaches the sign-in path below — no handoff, no session,
+      // no provider link. OidcReauthService validates session binding, auth_time and the linked identity, records the
+      // step-up grant, audits, and returns a FIXED same-origin path.
+      if (transaction.intent === 'reauthenticate') {
+        res.redirect(`${this.appUrl}${await this.reauth.completeCallback(req, provider, identity, transaction, authTime)}`);
+        return;
+      }
 
       if (!this.handoffEnabled) {
         const result = await this.authService.signInWithProvider(provider, identity, this.meta(req));

@@ -70,6 +70,9 @@ describeIfDb('Member roles with Redis auth caches enabled (two API instances, re
 
   async function role(objects: unknown[], extra: Record<string, unknown> = {}): Promise<{ id: string; name: string }> {
     const name = `Cache role ${randomUUID().slice(0, 6)}`;
+    // Lane D (M10-2): role / member-role writes need a recent step-up of tokenA's session. This suite flushes Redis (where
+    // the grant lives) between steps, so the step-up is renewed through the REAL route before each role is written.
+    expect((await a().post('/rest/v1/auth/step-up').set(bearer(tokenA)).send({ currentPassword: managerA.password })).status).toBe(200);
     const res = await a().post('/rest/v1/roles').set(bearer(tokenA)).send(definition(name, objects, extra));
     expect(res.status).toBe(201);
     return { id: res.body.id, name };

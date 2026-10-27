@@ -43,8 +43,8 @@ it('keeps the same focused composer when the empty state becomes a conversation'
   const change = jest.fn();
   const { rerender } = render(<ChatBody surface="page" value="Retained" onChange={change}/>);
   const input = screen.getByRole('textbox');
-  fireEvent.click(screen.getByText('Find available staff'));
-  expect(change).toHaveBeenCalledWith('Find available staff');
+  fireEvent.click(screen.getByText('Which shifts this weekend are unfilled?'));
+  expect(change).toHaveBeenCalledWith('Which shifts this weekend are unfilled?');
   expect(input).toHaveFocus();
   rerender(<ChatBody surface="page" value="Retained" onChange={change} hasMessages messages={<p>Isolated response fixture</p>}/>);
   expect(screen.getByRole('textbox')).toBe(input);

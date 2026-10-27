@@ -1,7 +1,7 @@
 import { MotionConfig } from 'framer-motion';
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
+import { MutationCache, QueryClient, QueryClientProvider, useQuery, useQueryClient, type Mutation } from '@tanstack/react-query';
 import { api, broadcastLogout, withAuthLock } from './shared/api';
 import { markUnauthenticated } from './shared/lib/auth-session';
 import { useMyWorkspace } from './shared/hooks/useMyWorkspace';
@@ -16,6 +16,9 @@ import CeoRoute from './features/settings/CeoRoute';
 import AppErrorBoundary from './shared/components/AppErrorBoundary';
 import NotFound from './features/errors/NotFound';
 import WorkspaceHostGate from './features/workspace-host/WorkspaceHostGate';
+import StepUpHost from './features/auth/stepup/StepUpHost';
+import { getApiErrorCode } from './shared/lib/apiError';
+import { isSilentError, notifyApiError } from './shared/lib/mutationFeedback';
 
 // P2.0 (bundle-size finding: a single 1.3MB production chunk, `vite build`'s own warning) — every
 // route below this point is reachable only after a route change, never on first paint, so there is
@@ -55,6 +58,8 @@ const SettingsLayout = lazy(() => import('./features/settings/layout/SettingsLay
 const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage'));
 const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
 const AccountPage = lazy(() => import('./features/settings/account/AccountPage'));
+const SecurityPage = lazy(() => import('./features/settings/security/SecurityPage'));
+const AiSettingsPage = lazy(() => import('./features/settings/ai/AiSettingsPage'));
 const WorkspaceGeneralPage = lazy(() => import('./features/settings/workspace/WorkspaceGeneralPage'));
 const SecurityAuthenticationPage = lazy(() => import('./features/settings/workspace/SecurityAuthenticationPage'));
 const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
@@ -69,7 +74,56 @@ const ObjectPermissionsStep = lazy(() => import('./features/settings/roles/RoleO
 const InitialManagerPage = lazy(() => import('./features/settings/workspace/InitialManagerPage'));
 const AdminPanelPage = lazy(() => import('./features/settings/admin-panel/AdminPanelPage'));
 
+/**
+ * `meta.errorFeedback` for a mutation that shows its own failure WITHOUT a hook-level `onError` (an inline message read
+ * from `mutation.error`, or a `mutateAsync` caller's catch): the global fallback below then never adds a toast for it.
+ */
+export const MUTATION_ERROR_HANDLED = 'handled';
+
+/** What the fallback says when nothing more specific is known. `notifyApiError` still uses safe server text when present. */
+export const MUTATION_FALLBACK_MESSAGE = 'Something went wrong. Please try again.';
+
+/**
+ * The global safety net for a failed mutation that nobody can show (FEEDBACK_REPORT §6, App.tsx). It never double-
+ * announces: it stays silent when
+ *  - the mutation has a hook-level `onError` (every `useFeedbackMutation`, and every hand-written handler);
+ *  - `meta.errorFeedback === MUTATION_ERROR_HANDLED` (or `meta.silent`): the call site shows the error itself;
+ *  - the error is not a user-facing failure (`isSilentError`: cancelled request, stale-identity response) or is the
+ *    step-up refusal (`STEP_UP_REQUIRED`: the "Confirm it's you" dialog was the feedback, and cancelling it is a choice);
+ *  - a component that started the mutation is STILL MOUNTED. Many call sites render `mutation.error` inline or catch a
+ *    `mutateAsync` rejection without an `onError` (offers, scheduling, users, venues); the component owns that error and
+ *    a toast on top would be a second announcement. The fallback is for the failure no one is left to show: the
+ *    component unmounted (drawer closed, page left) before the server answered, so its per-call `onError` and its
+ *    inline error can no longer appear.
+ * Then it raises ONE red toast through the shared `notifyApiError` (safe text only; a 401 gets the persistent
+ * "Sign in again").
+ */
+export function createAppMutationCache(): MutationCache {
+  // Which observers (mounted `useMutation` hooks) each mutation currently has. Tracked from the cache's own events.
+  const observers = new WeakMap<Mutation<unknown, unknown, unknown, unknown>, Set<unknown>>();
+  const cache = new MutationCache({
+    onError: (error, _variables, _context, mutation) => {
+      if (mutation.options.onError) return;
+      const meta = mutation.meta as { errorFeedback?: unknown; silent?: unknown } | undefined;
+      if (meta?.errorFeedback === MUTATION_ERROR_HANDLED || meta?.silent === true) return;
+      if (isSilentError(error) || getApiErrorCode(error) === 'STEP_UP_REQUIRED') return;
+      if ((observers.get(mutation as Mutation<unknown, unknown, unknown, unknown>)?.size ?? 0) > 0) return;
+      notifyApiError(error, { fallback: MUTATION_FALLBACK_MESSAGE });
+    },
+  });
+  cache.subscribe((event) => {
+    if (event.type !== 'observerAdded' && event.type !== 'observerRemoved') return;
+    const mutation = event.mutation as Mutation<unknown, unknown, unknown, unknown>;
+    const set = observers.get(mutation) ?? new Set<unknown>();
+    if (event.type === 'observerAdded') set.add(event.observer);
+    else set.delete(event.observer);
+    observers.set(mutation, set);
+  });
+  return cache;
+}
+
 const qc = new QueryClient({
+  mutationCache: createAppMutationCache(),
   defaultOptions: {
     queries: {
       // Default (0) means every remount and every window-focus refetches —
@@ -354,6 +408,7 @@ export default function App() {
               <Route path="profile" element={<ProfilePage />} />
               <Route path="experience" element={<ExperiencePage />} />
               <Route path="account" element={<AccountPage />} />
+              <Route path="security" element={<SecurityPage />} />
               <Route path="my-workspace" element={<MyWorkspaceGeneralPage />} />
               <Route path="my-workspace/domains" element={<MyWorkspaceDomainsPage />} />
               <Route path="workspace" element={<WorkspaceGeneralPage />} />
@@ -368,6 +423,8 @@ export default function App() {
                 <Route path="objects/:objectKey" element={<ObjectPermissionsStep />} />
               </Route>
               <Route path="workspace/team" element={<CeoRoute><InitialManagerPage /></CeoRoute>} />
+              {/* AI Phase 1: the organisation's CEO chooses the AI model per tier (server: ai.settings + CEO + step-up). */}
+              <Route path="ai" element={<CeoRoute><AiSettingsPage /></CeoRoute>} />
               <Route path="admin" element={<PlatformAdminRoute><AdminPanelPage /></PlatformAdminRoute>} />
             </Route>
           </Route>
@@ -376,6 +433,8 @@ export default function App() {
           </Suspense>
           {/* One toast host for every route (auth, onboarding and the console), so a toast survives navigation. */}
           <ToastHost />
+          {/* Lane D (M10-2): the one "Confirm it's you" prompt for 403 STEP_UP_REQUIRED (server-enforced step-up). */}
+          <StepUpHost />
         </BrowserRouter>
         </RealtimeProvider>
         </SessionBootstrap>

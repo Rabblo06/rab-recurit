@@ -1,0 +1,47 @@
+[
+  {
+    "start": 2.2,
+    "end": 6.999,
+    "text": "When a staff member accepts an offer, it\nwaits for your confirmation before the"
+  },
+  {
+    "start": 6.999,
+    "end": 10.947,
+    "text": "shift is booked. This tutorial uses\nfictional demonstration data."
+  },
+  {
+    "start": 11.467,
+    "end": 15.286,
+    "text": "On Offers, open the view menu and choose\nAwaiting Confirmation."
+  },
+  {
+    "start": 15.8,
+    "end": 19.555,
+    "text": "Each row shows the staff member, the\nshift, and when they accepted."
+  },
+  {
+    "start": 20.067,
+    "end": 25.095,
+    "text": "To confirm one offer, select the tick on\nits row, check the details, then select"
+  },
+  {
+    "start": 25.095,
+    "end": 25.975,
+    "text": "Confirm shift."
+  },
+  {
+    "start": 26.5,
+    "end": 30.593,
+    "text": "To confirm everyone else at once, select\nConfirm All Accepted."
+  },
+  {
+    "start": 31.1,
+    "end": 35.805,
+    "text": "Switch the view to Confirmed. Accepting\nand confirming are separate steps, and"
+  },
+  {
+    "start": 35.805,
+    "end": 37.796,
+    "text": "only confirmed offers are booked."
+  }
+]

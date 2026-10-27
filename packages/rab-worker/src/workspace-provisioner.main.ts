@@ -13,6 +13,12 @@ import { Logger as NestLogger } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
+import {
+  PROVISIONER_CYCLE_DURATIONS_KEY,
+  PROVISIONER_HEARTBEAT_KEY,
+  PROVISIONER_STATS_KEY,
+  WORKER_STATS_KEY,
+} from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
 import { runWorkspaceSchemaDriftCycle } from './queues/rab-maintenance/workspace-schema-drift.job';
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
@@ -114,13 +120,22 @@ async function bootstrap(): Promise<void> {
   );
   await provisioning.acquire();
 
-  const runtime = new WorkerRuntime(redis);
+  // Own stats identity (BullMQ migration, owner-approved interval-mode fix): the provisioner's full stats — including ITS
+  // startedAt — go to rab:workspace-provisioner:stats. It used to HSET its whole object into rab:worker:stats every 5 s,
+  // overwriting the jobs process's startedAt. For existing readers (E2E 5.3, Admin queue health) it still mirrors ONLY
+  // its own loop fields (lastWorkspaceProvisioningAt, workspaceProvisioningFailures, drift) into rab:worker:stats —
+  // never startedAt — so old and new jobs/provisioner versions can run side by side.
+  const runtime = new WorkerRuntime(redis, {
+    statsKey: PROVISIONER_STATS_KEY,
+    mirrorKey: WORKER_STATS_KEY,
+    durationsKey: PROVISIONER_CYCLE_DURATIONS_KEY,
+  });
   // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
   // global Redis key below can be refreshed by another replica's provisioner; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('provisioner', runtime);
   const beat = () => {
     instanceHeartbeat.beat();
-    redis.set('rab:workspace-provisioner:heartbeat', Date.now().toString(), 'EX', 30).then(instanceHeartbeat.markRedisOk, () => {
+    redis.set(PROVISIONER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30).then(instanceHeartbeat.markRedisOk, () => {
       // Best-effort — a missed heartbeat just makes the next health check report stale.
     });
   };

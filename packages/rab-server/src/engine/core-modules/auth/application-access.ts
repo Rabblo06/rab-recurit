@@ -68,3 +68,16 @@ export function passwordExemptForMobileWorkforce(roles: readonly string[], isPla
   if (target === 'venue_manager_app') return roles.includes('venue_manager');
   return false;
 }
+
+/**
+ * Lane D (owner decision M10-1, 2026-10-24): the ONLY identities the mobile second-factor exemption applies to — an
+ * account whose server-resolved roles are exclusively `staff` and/or `venue_manager`, never a platform administrator.
+ * Any higher tier (CEO / organisation owner, Initial Manager, any manager tier, a custom role, a platform admin) is NOT
+ * workforce-only, so signing in to a mobile target never lets it skip the challenge its web sign-in would get. Decided
+ * from roles read server-side in `completeLogin`, never from a client header (a manager sending the mobile platform
+ * header, or choosing `staff_app`, gains nothing). An identity with no role at all is not exempt (fail closed).
+ */
+export function mobileWorkforceOnly(roles: readonly string[], isPlatformAdmin: boolean): boolean {
+  if (isPlatformAdmin || roles.length === 0) return false;
+  return roles.every((role) => role === 'staff' || role === 'venue_manager');
+}

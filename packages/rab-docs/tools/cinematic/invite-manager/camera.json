@@ -1,0 +1,200 @@
+{
+  "frame": {
+    "width": 3200,
+    "height": 1800
+  },
+  "output": {
+    "width": 1920,
+    "height": 1080
+  },
+  "cutIn": 0,
+  "title": 2.2,
+  "keyframes": [
+    {
+      "id": "open",
+      "t": 2.2,
+      "duration": 0,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "tabs",
+      "t": 9.367,
+      "duration": 0.8,
+      "rect": {
+        "x": 261,
+        "y": 0,
+        "w": 2430,
+        "h": 1367
+      },
+      "zoom": 1.317,
+      "chapter": null
+    },
+    {
+      "id": "new",
+      "t": 12.633,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "name",
+      "t": 17.6,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "New manager"
+    },
+    {
+      "id": "type",
+      "t": 20.667,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 49,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "contact",
+      "t": 25.267,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 397,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": null
+    },
+    {
+      "id": "create",
+      "t": 31,
+      "duration": 0.9,
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "w": 3200,
+        "h": 1800
+      },
+      "zoom": 1,
+      "chapter": null
+    },
+    {
+      "id": "status",
+      "t": 36.767,
+      "duration": 0.8,
+      "rect": {
+        "x": 1261,
+        "y": 0,
+        "w": 1939,
+        "h": 1091
+      },
+      "zoom": 1.65,
+      "chapter": "Invitation sent"
+    }
+  ],
+  "qa": [
+    {
+      "shot": "tabs",
+      "box": {
+        "x": 496,
+        "y": 0,
+        "w": 1960,
+        "h": 860
+      },
+      "inside": true
+    },
+    {
+      "shot": "name",
+      "box": {
+        "x": 2422,
+        "y": 278,
+        "w": 356,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "name",
+      "box": {
+        "x": 2806,
+        "y": 278,
+        "w": 356,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "type",
+      "box": {
+        "x": 2422,
+        "y": 488,
+        "w": 740,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "type",
+      "box": {
+        "x": 2422,
+        "y": 628,
+        "w": 740,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "contact",
+      "box": {
+        "x": 2422,
+        "y": 838,
+        "w": 740,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "contact",
+      "box": {
+        "x": 2515.8,
+        "y": 974,
+        "w": 624.2,
+        "h": 72
+      },
+      "inside": true
+    },
+    {
+      "shot": "status",
+      "box": {
+        "x": 2386,
+        "y": 2,
+        "w": 812,
+        "h": 145
+      },
+      "inside": true
+    }
+  ]
+}
