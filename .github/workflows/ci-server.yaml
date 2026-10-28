@@ -20,7 +20,7 @@ jobs:
     needs: changed
     if: needs.changed.outputs.server == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     services:
       redis:
         image: redis:7-alpine
@@ -64,7 +64,9 @@ jobs:
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
           eval "$test_env"
-          npx nx run-many -t test -p rab-server,rab-shared
+          # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
+          # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
+          npx nx run-many -t test -p rab-server,rab-shared --runInBand
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
