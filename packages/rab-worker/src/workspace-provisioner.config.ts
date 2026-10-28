@@ -4,8 +4,9 @@
  *
  * WHETHER IT PROVISIONS
  *   CREWFLOW_PROVISIONER_ENABLED  strict: "true" | "false" | unset/empty. Any other value refuses to start.
- *     "true"   provision. This is what the Worker bundle launcher sets on its provisioner child, and the launcher starts that
- *              child ONLY when the service itself sets CREWFLOW_PROVISIONER_ENABLED=true (start-worker-bundle.cjs).
+ *     "true"   provision. This is what the Worker bundle launcher sets on its provisioner child; the launcher starts that
+ *              child unless the service itself sets CREWFLOW_PROVISIONER_ENABLED=false (unset = the pre-Phase-A
+ *              behaviour, provisioner on; start-worker-bundle.cjs).
  *     "false"  never provision (an explicit opt-out wins over HWS_RUNTIME_ENABLED).
  *     unset    legacy standalone behaviour, unchanged: provision only when HWS_RUNTIME_ENABLED=true (the original gate; the
  *              nx `provision` target and the standalone integration specs rely on it).

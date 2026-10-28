@@ -40,6 +40,16 @@ The operational procedure (per-service environment variable names, migration pha
 
 Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker's jobs process need the same application settings. Only the Worker additionally takes `DATABASE_DIRECT_URL` and `CREWFLOW_PROVISIONER_DATABASE_URL`. The migrate job takes only its own one-run variables.
 
+Set `CREWFLOW_PROVISIONER_ENABLED` explicitly on the Worker:
+
+| Value | Worker runs | `CREWFLOW_PROVISIONER_DATABASE_URL` |
+| --- | --- | --- |
+| `true` | Jobs and the workspace provisioner. Production and QA need this, because the provisioner is the only path that builds new workspaces there. | Required. |
+| `false` | Jobs only. New workspaces are not built by this service. | Must be absent; the Worker refuses to start if it is set. |
+| unset | The behaviour from before the switch existed: jobs and the provisioner, every 5 seconds. The Worker logs a line asking for an explicit value. Only for environments configured before the switch; never for a new one. | Required. |
+
+Any other value refuses to start. `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` sets how often the provisioner polls, as a whole number from 5 to 120. Left unset, it is 60 with `true` and 5 when the switch is unset. Production and QA pin 5.
+
 ## CI
 
 | Workflow | Trigger | Does |

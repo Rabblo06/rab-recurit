@@ -88,6 +88,7 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | --- | --- |
 | `DATABASE_URL_UNPOOLED` | Migrations and the workspace provisioner (owner role). |
 | `DATABASE_DIRECT_URL`, `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
+| `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
 | `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` | PDF rendering. |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 
