@@ -3853,3 +3853,52 @@ credential, migration or RLS policy.
 - **Owner policy (2026-10-28):** unset is a compatibility path for deployments configured before Phase A only. Every
   deployment configuration (committed composes and any platform-managed environment) sets the switch explicitly to
   `"true"` or `"false"`; the launcher logs a start-up line asking for it whenever it runs in legacy mode.
+
+## Phase 0b — E1: crewflow → rab_secure_owner boundary (owner-approved 2026-10-28; worktree phase0b, uncommitted)
+
+- **Asset:** everything `rab_secure_owner` (NOLOGIN) owns or executes: the pre-auth tables (`user` incl. password and TOTP
+  material, `user_session`, `refresh_token`, `user_mfa_recovery_code`, `organisation`, `platform_admin`, …) and their
+  SECURITY DEFINER functions.
+- **Actor:** whoever holds the `crewflow` LOGIN credential (today the Worker's provisioner child — E6).
+- **Before:** `crewflow` owned schema `core` and the invoker helpers `core.current_org/uid/workspace/role_name()` plus four
+  trigger functions on rab_secure_owner tables. Code it controlled therefore ran as `rab_secure_owner` (channels 1 + 2),
+  and as schema owner it could drop or replace rab_secure_owner objects and create new ones in `core` (channel 4). The
+  documented invariant "crewflow can never act as rab_secure_owner" (1786682000000) did not hold. Search-path shadowing of
+  built-ins was already closed by CF-12/CF-58 (1786717900000).
+- **After (`1786721100000-SecureOwnerCoreSchemaAndHelpers`):** R1 `core` owned by `rab_secure_owner` (USAGE re-granted to
+  crewflow / crewflow_app); R5 no CREATE on `core` for crewflow; R2 nine functions owned by `rab_secure_owner` (the four
+  `current_*` helpers, the four trigger functions and `core.immutable_unaccent(text)`, which backs the generated
+  `search_vector` column of `core."user"` — independent review M1), EXECUTE preserved, trigger functions pinned to
+  `pg_catalog, pg_temp`, `current_*` left without a SET clause so RLS keeps inlining them; R6 catalog invariants
+  (`secure-owner-invariants.ts`) checked by the migration before commit and by `phase0b-secure-owner.integration.spec.ts`:
+  everything reachable from rab_secure_owner (definers; triggers, policies, defaults / generated columns, constraints,
+  index expressions and rules on its tables; transitively called core functions) is owned by it; `core` owner is NOLOGIN;
+  no runtime LOGIN role can create in `core` or in any schema on a definer search_path; crewflow / crewflow_app are never
+  members of rab_secure_owner. Later migrations hand new core objects to crewflow only inside `withCrewflowCoreCreate`
+  (grant + revoke in the same transaction, own savepoint; proven under a non-superuser migration identity).
+- **Status: PARTIALLY MITIGATED — E1 is NOT resolved.** Closed: channels 1 and 2, and the schema-owner part of channel 4
+  (crewflow can no longer create in `core` or drop / replace rab_secure_owner objects there).
+  - **R4 (open, accepted, frozen) — arbitrary reads as rab_secure_owner:** 11 crewflow-owned FORCE tables are read or
+    written by rab_secure_owner definers (`R4_CREWFLOW_TABLES_REACHED_BY_SECURE_DEFINERS`). As their owner, crewflow can
+    attach policies, triggers, RULEs, column DEFAULTs and CHECK constraints — none needs CREATE on any schema — and each
+    expression runs as rab_secure_owner when a definer touches the table, including expressions that read other tables
+    through SPI. So a holder of the crewflow credential can still read (and write) what rab_secure_owner can, e.g.
+    password and token hashes. Any change to the list fails CI. It closes when crewflow stops being a runtime login (E6 /
+    Phase B: retire the provisioner credential, then make crewflow NOLOGIN behind `crewflow_migrator`).
+  - **H2 (open, confirmed in the catalog 2026-10-28, separate remediation):** crewflow OWNS THE DATABASE (fresh install and
+    rab-devdb: `datdba = crewflow`, via the role split's REASSIGN OWNED). A database owner may set database-level
+    defaults such as `search_path` and, through `pg_database_owner`, CREATE in `public`. Migration sessions do not pin
+    their search_path, and the definers reference `public` extension types and operators.
+  - **H3 (open, confirmed in the catalog 2026-10-28, separate remediation):** crewflow OWNS the `citext`, `pgcrypto`,
+    `btree_gist` and `uuid-ossp` extension objects (relocatable, in `public`); their member functions are owned by the
+    bootstrap superuser. An extension owner may drop it (CASCADE) or move it to another schema — `citext` is on the
+    login path of the pre-auth definers, so either would at least take authentication down.
+  - **R3 (open, lower):** 29 definers keep `search_path = pg_catalog, core, pg_temp`; after R5 only the NOLOGIN owner and
+    the migration identity can create in `core`, so the residual risk is a mistaken migration, not a runtime attacker.
+- **SECURITY TRADE-OFF (vetoable):** the CREATE window for later migrations relies on every such migration using
+  `withCrewflowCoreCreate`. A forgotten use fails loudly on managed Postgres (non-superuser migrator) and is invisible on a
+  superuser-built database; the posture golden (`schema|core|crewflow|...|create=false`) and the R6 invariants catch a
+  window left open in either case.
+- **Rollback:** `down()` restores the previous owners, trigger search_path and schema USAGE/CREATE; verified to reproduce
+  the pre-0b posture snapshot byte for byte (up → down → up on a disposable database). It re-opens channels 1 and 2 and
+  the schema-owner part of channel 4.
