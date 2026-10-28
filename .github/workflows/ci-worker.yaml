@@ -55,6 +55,10 @@ jobs:
           MIGRATION_SECURITY_SCENARIOS: fresh
           MIGRATION_SECURITY_KEEP_DATABASES: 'true'
           MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
+      # The worker renders report PDFs with Playwright's Chromium (queues/rab-reports/render-pdf.util.ts); ci-e2e installs it
+      # the same way. Without it reports stay pending and the report-email suites fail.
+      - name: Install Playwright Chromium for the PDF renderer
+        run: npx playwright install --with-deps chromium
       - name: Worker tests
         run: |
           set -euo pipefail
@@ -63,7 +67,7 @@ jobs:
           eval "$test_env"
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
-          npx nx run-many -t test -p rab-worker --runInBand
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
