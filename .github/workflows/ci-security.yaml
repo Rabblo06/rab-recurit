@@ -28,10 +28,11 @@ jobs:
       - uses: ./.github/actions/yarn-install
       - name: Yarn constraints (dependency version drift)
         run: yarn constraints
-      - name: Licence allowlist
-        run: |
-          npx license-checker --production --summary \
-            --onlyAllow "MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;CC0-1.0;Unlicense;Python-2.0"
+      # The previous `license-checker --production` from the root only ever looked at the private workspace root (no runtime
+      # dependencies of its own) and failed on its UNLICENSED marker; it checked no third-party package. This walks the real
+      # production dependency closure of every shipped workspace and checks every third-party licence (PR #19).
+      - name: Licence allowlist (third-party production dependencies of every shipped workspace)
+        run: node tools/check-licences.mjs
 
   gitleaks:
     runs-on: ubuntu-latest
