@@ -42,10 +42,12 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
+      # The lint target is `tsc --noEmit`, which resolves @rab/shared and @rab/emails through their built dist: build them
+      # first (on GitHub these jobs never got past checkout before, so the missing order was never visible).
+      - name: Build the workspace libraries (lint and the migration harness import them)
+        run: npx nx run-many -t build -p rab-shared,rab-emails
       - run: npx nx run-many -t lint -p rab-worker,rab-server,rab-shared
       - uses: ./.github/actions/disposable-postgres
-      - name: Build the workspace libraries the migration harness imports
-        run: npx nx run-many -t build -p rab-shared,rab-emails
       - name: Build the test database with the restricted migrator (fresh install, with its security checks)
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
