@@ -67,7 +67,16 @@ jobs:
           eval "$test_env"
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000
+          # worker-scan-adapters runs FIRST, alone, on the still-empty database: it drives every real scan cycle UNSCOPED
+          # (all tenants, exactly as production does), so its runtime is proportional to every other suite's leftover
+          # fixtures. After the other suites, shift-report-scheduler alone renders a roster PDF for each of ~165 leftover
+          # live shifts (~170 s measured) and the suite exceeds its 180 s timeout. The other suites deliberately keep their
+          # organisations (audit_log FK), so there is no per-suite cleanup that empties the database for it. A rename that
+          # makes the first pattern match nothing fails the step ("No tests found"), never silently skips the suite. The second
+          # run excludes it with a path regex, NOT --testPathIgnorePatterns (that CLI flag replaces jest.config's list and
+          # would start running the __tests__/load suites).
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=worker-scan-adapters\.integration'
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=^(?!.*worker-scan-adapters\.integration)'
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()

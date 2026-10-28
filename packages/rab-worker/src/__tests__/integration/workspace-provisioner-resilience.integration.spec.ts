@@ -476,14 +476,24 @@ describeIfDb(
       const appA = `pa2-r3a-${randomUUID().slice(0, 8)}`;
       const a = spawnProvisioner(appA);
       await a.waitFor(STARTED);
-      // Wait until A's backend is blocked on the heavyweight lock (i.e. inside the apply transaction).
+      // Wait until A's PROVISIONING backend is blocked on the blocker's table lock (i.e. inside the apply transaction).
+      // Identified by the lock it waits for, not as "any backend of A in a Lock wait": process A also opens its own
+      // workspace-schema-drift connection at start-up (same application_name), and on a database holding other workspaces
+      // (the shared CI database) that pass can still be running and park on the registry row A's apply transaction holds
+      // FOR UPDATE (core.record_workspace_schema_drift) — also a 'Lock' wait, but not the backend that holds the lock.
       const deadline = Date.now() + 60_000;
       let aPid: number | null = null;
       for (;;) {
         const rows = await backendsOf(appA);
-        const blocked = rows.find((r) => r.wait_event_type === 'Lock');
-        if (blocked) {
-          aPid = blocked.pid;
+        const blocked = await superClient.query<{ pid: number }>(
+          `SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE a.application_name = $1 AND l.locktype = 'relation' AND NOT l.granted
+              AND l.relation = 'core.stored_file'::regclass`,
+          [appA],
+        );
+        if (blocked.rows.length > 0) {
+          expect(blocked.rows).toHaveLength(1);
+          aPid = blocked.rows[0]!.pid;
           break;
         }
         if (Date.now() > deadline)
@@ -537,6 +547,13 @@ describeIfDb(
           );
         await sleep(200);
       }
+      // Every backend of the dead process ends — including its drift connection, which (on a shared database) may have been
+      // queued behind the dead holder's registry row lock and only reaches its closed socket once that lock is gone.
+      while (
+        (await backendsOf(appA)).length > 0 &&
+        Date.now() <= releaseDeadline
+      )
+        await sleep(200);
       expect((await backendsOf(appA)).length).toBe(0);
       await waitStatus(workspaceId, 'READY|READY', 60_000);
       await assertProvisionedOnce(workspaceId);
