@@ -3724,7 +3724,7 @@ still returns no content; built-ins remain toggle-only (no new write path).
   with the same 404 (layer 2). A test sends every route as a no-flag user and as a non-CEO flag holder and checks that
   the two responses have identical bodies and that nothing is written.
 
-## Phase 0 security fixes (owner-approved 2026-10-27; uncommitted, pending owner review)
+## Phase 0 security fixes (owner-approved 2026-10-27; committed 6242eeec)
 
 ### P0-sentry: no request contents, credentials or personal data in Sentry
 - **Actor → action → consequence considered:** anyone with access to the third-party Sentry project reads session
@@ -3803,7 +3803,7 @@ still returns no content; built-ins remain toggle-only (no new write path).
   while @import / link / @font-face in a footer make `printToPDF` fail.
 
 
-## Phase A — pa-provisioner: opt-in workspace provisioner in the Worker bundle (2026-10-27, uncommitted)
+## Phase A — pa-provisioner: opt-in workspace provisioner in the Worker bundle (2026-10-27; committed 7719959b, 5e6d4231)
 
 Reduces where the privileged `crewflow` provisioning credential exists; does not change any role, grant, ownership,
 credential, migration or RLS policy.
@@ -3854,7 +3854,7 @@ credential, migration or RLS policy.
   deployment configuration (committed composes and any platform-managed environment) sets the switch explicitly to
   `"true"` or `"false"`; the launcher logs a start-up line asking for it whenever it runs in legacy mode.
 
-## Phase 0b — E1: crewflow → rab_secure_owner boundary (owner-approved 2026-10-28; worktree phase0b, uncommitted)
+## Phase 0b — E1: crewflow → rab_secure_owner boundary (owner-approved 2026-10-28; committed 0d677bbf)
 
 - **Asset:** everything `rab_secure_owner` (NOLOGIN) owns or executes: the pre-auth tables (`user` incl. password and TOTP
   material, `user_session`, `refresh_token`, `user_mfa_recovery_code`, `organisation`, `platform_admin`, …) and their
@@ -3903,7 +3903,7 @@ credential, migration or RLS policy.
   the pre-0b posture snapshot byte for byte (up → down → up on a disposable database). It re-opens channels 1 and 2 and
   the schema-owner part of channel 4.
 
-## M2 — migrations under a restricted (non-superuser) migration identity (owner-approved 2026-10-28; worktree m2, uncommitted)
+## M2 — migrations under a restricted (non-superuser) migration identity (owner-approved 2026-10-28; committed f4703ad3)
 
 - **Asset:** the privilege boundary between the migration identity and the runtime logins (`crewflow`, `crewflow_app`), and
   the Phase 0b secure-owner invariants, on managed PostgreSQL where the migrator is NOT a superuser.
