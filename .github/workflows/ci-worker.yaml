@@ -20,21 +20,8 @@ jobs:
     needs: changed
     if: needs.changed.outputs.worker == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: rab
-          POSTGRES_PASSWORD: rab
-          POSTGRES_DB: rab
-        ports: ['5432:5432']
-        # Bootstraps rab_owner/rab_app (packages/rab-docker/postgres-init) so
-        # this job's DATABASE_URL matches the real role model — same as
-        # ci-server.yaml's own identical setup.
-        volumes:
-          - ${{ github.workspace }}/packages/rab-docker/postgres-init:/docker-entrypoint-initdb.d
-        options: >-
-          --health-cmd "pg_isready -U rab -d rab" --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ['6379:6379']
@@ -42,36 +29,40 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
-      # rab_app (restricted, NOBYPASSRLS) — matches what AppModule's own
-      # primary DataSource connects as (core.datasource.ts reads
-      # DATABASE_URL only), the same role the deployed worker is required
-      # to run as (assertRuntimeDbRole(..., 'worker') in
-      # packages/rab-worker/src/main.ts). See ci-server.yaml's own comment
-      # for the full reasoning — the same "app runs as owner in CI" gap this
-      # fixes there applies identically here.
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
-      # Read by createAdminDataSource() (test fixture bootstrap) AND by the
-      # worker's own cross-org maintenance jobs (email-dispatch,
-      # account-invite-cleanup, storage-cleanup) — same convention as local
-      # dev's docker-compose.yml `worker` service.
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      # Integration tests route ONLY through these (rab-server test-database-guard.ts); same local CI service, no remote DB.
-      TEST_DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
-      TEST_DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      # Required by the command/migration target guard (database-target.ts). Loopback CI service: DB_TARGET=local.
       DB_TARGET: local
       REDIS_URL: redis://localhost:6379
-      APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
       EMAIL_DRIVER: LOGGER
+      # PostgreSQL (M2 CI reliability, 2026-10-28): same change as ci-server. No service volume of postgres-init (checkout
+      # failed with EACCES) and no rab_owner migration run (refused at the role split). The database is started after
+      # checkout and built by the restricted-migrator fresh install; tests get TEST_DATABASE_URL (crewflow_app),
+      # TEST_DATABASE_URL_UNPOOLED (bootstrap superuser) and TEST_DATABASE_CREWFLOW_URL (crewflow, provisioner tests).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       - run: npx nx run-many -t lint -p rab-worker,rab-server,rab-shared
-      - run: npx nx run rab-server:migration:run
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the workspace libraries the migration harness imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: Build the test database with the restricted migrator (fresh install, with its security checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
         env:
-          DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      - run: npx nx run-many -t test -p rab-worker
+          MIGRATION_SECURITY_SCENARIOS: fresh
+          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
+          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Worker tests
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          npx nx run-many -t test -p rab-worker
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true

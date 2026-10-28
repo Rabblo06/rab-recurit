@@ -1,0 +1,105 @@
+name: ci-migration-security
+
+# M2: the core migration chain must run under a RESTRICTED migrator (NOSUPERUSER, NOBYPASSRLS, NOCREATEDB, NOCREATEROLE,
+# memberships only in rab_secure_owner + crewflow), except the 30 documented historical bootstrap migrations (PRIVILEGED_BOOTSTRAP_MIGRATIONS); and no
+# migration after Phase 0b may change the runtime logins' privileges unnoticed. See
+# packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts.
+#
+# Isolation: a throwaway PostgreSQL 16 container bound to 127.0.0.1 on the runner, started AFTER checkout with no volume
+# mount, and random per-run passwords that are masked before first use. No repository secret, no rab-devdb, no production.
+# Nothing here prints a connection string, user name or password.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/rab-server/src/database/**'
+      - 'packages/rab-server/src/__tests__/integration/migration-security.integration.spec.ts'
+      - 'packages/rab-server/src/__tests__/integration/phase0b-secure-owner.integration.spec.ts'
+      - 'packages/rab-server/src/__tests__/integration/db-security-posture.integration.spec.ts'
+      - 'packages/rab-server/src/__tests__/integration/core-object-ownership.integration.spec.ts'
+      - 'packages/rab-server/src/__tests__/integration/secure-owner-invariants-equivalence.integration.spec.ts'
+      - 'packages/rab-server/src/__tests__/integration/helpers/**'
+      - 'packages/rab-server/jest.config.ts'
+      - 'packages/rab-server/tsconfig*.json'
+      - 'packages/rab-shared/**'
+      - 'packages/rab-server/src/__tests__/integration/helpers/admin-datasource.ts'
+      - 'packages/rab-server/src/jest-global-setup.ts'
+      - 'packages/rab-server/src/jest-setup.ts'
+      - 'packages/rab-docker/postgres-init/**'
+      - 'tools/check-rls-coverage.ts'
+      - 'package.json'
+      - 'packages/rab-server/package.json'
+      - 'yarn.lock'
+      - '.github/actions/yarn-install/**'
+      - '.github/actions/disposable-postgres/**'
+      - '.github/workflows/ci-migration-security.yaml'
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-migration-security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  restricted-migrator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NODE_ENV: test
+      NX_DAEMON: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+
+      - name: Build the workspace libraries the server imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+
+      - uses: ./.github/actions/disposable-postgres
+
+      - name: Restricted-migrator harness (fresh + upgrade, CF-41 refusals, per-migration drift, lifecycle, posture, RLS)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
+        env:
+          # Pinned: this job must run BOTH scenarios (the other workflows build their test database with `fresh` only).
+          MIGRATION_SECURITY_SCENARIOS: fresh,upgrade
+          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
+          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/m2-databases.env
+
+      # The production entrypoint (setup-db.ts: target guard, production approval, CF-41 identity) on the harness database:
+      # it must start, pass its guards and report nothing pending.
+      - name: Production entrypoint setup-db.ts reports nothing pending on the harness database
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/m2-databases.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          out="$(DB_TARGET=test DATABASE_URL="$TEST_DATABASE_URL_UNPOOLED" DATABASE_URL_UNPOOLED="$TEST_DATABASE_URL_UNPOOLED"             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/setup-db.ts 2>&1)" || { echo "$out" | tail -20; exit 1; }
+          grep -v '^\[db-target\]' <<< "$out" | tail -3
+          grep -q 'Migrations applied: none pending' <<< "$out"
+
+      # Builds the TEST_* pair for one harness database in memory, masks it, and runs the given Jest specs on it. The source
+      # scan is a unit spec, but the Jest global setup validates a test database pair for every run, so it runs here too.
+      - name: Source scan, fixture migrations, Phase 0b, ownership and golden posture on the FRESH database
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/m2-databases.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          npx jest -c packages/rab-server/jest.config.ts --runInBand             packages/rab-server/src/database/typeorm/core/migration-source-rules.spec.ts             packages/rab-server/src/__tests__/integration/migration-security.integration.spec.ts             packages/rab-server/src/__tests__/integration/phase0b-secure-owner.integration.spec.ts             packages/rab-server/src/__tests__/integration/core-object-ownership.integration.spec.ts             packages/rab-server/src/__tests__/integration/db-security-posture.integration.spec.ts
+
+      - name: Fixture migrations, Phase 0b, ownership and golden posture on the UPGRADE database
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/m2-databases.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$UPGRADE_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          npx jest -c packages/rab-server/jest.config.ts --runInBand             packages/rab-server/src/__tests__/integration/migration-security.integration.spec.ts             packages/rab-server/src/__tests__/integration/phase0b-secure-owner.integration.spec.ts             packages/rab-server/src/__tests__/integration/core-object-ownership.integration.spec.ts             packages/rab-server/src/__tests__/integration/db-security-posture.integration.spec.ts
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true

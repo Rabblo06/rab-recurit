@@ -20,21 +20,8 @@ jobs:
     needs: changed
     if: needs.changed.outputs.server == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: rab
-          POSTGRES_PASSWORD: rab
-          POSTGRES_DB: rab
-        ports: ['5432:5432']
-        # Bootstraps rab_owner/rab_app (packages/rab-docker/postgres-init) so
-        # this job's DATABASE_URL matches the real role model — integration
-        # tests exercise RLS for real, not against the plain superuser.
-        volumes:
-          - ${{ github.workspace }}/packages/rab-docker/postgres-init:/docker-entrypoint-initdb.d
-        options: >-
-          --health-cmd "pg_isready -U rab -d rab" --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ['6379:6379']
@@ -42,48 +29,43 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
-      # rab_app (restricted, NOBYPASSRLS) — this is what AppModule's own
-      # primary DataSource (core.datasource.ts reads DATABASE_URL only,
-      # never DATABASE_URL_UNPOOLED) and therefore every integration test's
-      # `TenantContextService`-mediated HTTP request actually connects as.
-      # Previously this job set DATABASE_URL to rab_owner for its ENTIRE
-      # duration — since Jest boots AppModule directly via
-      # Test.createTestingModule(), never through main.ts's own
-      # assertRuntimeDbRole() guard, that meant every integration test's
-      # real HTTP-driven business logic ran as the table OWNER, silently
-      # bypassing RLS for the whole test suite on every NOT-FORCE'd table
-      # (user, staff_profile, manager_profile, account_invite,
-      # manager_workspace, ...) with nothing catching it. Fixed by giving
-      # the app its correct restricted role here, and scoping the owner
-      # role to only the one step that legitimately needs it (migrations)
-      # plus DATABASE_URL_UNPOOLED (below) for test fixtures' own
-      # createAdminDataSource() helper.
-      DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
-      # Read by createAdminDataSource() (test fixture bootstrap: seeding an
-      # Organisation before any tenant context exists) — same convention as
-      # local dev's docker-compose.yml.
-      DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      # Integration tests route ONLY through these (test-database-guard.ts): the global setup refuses to run unless both are
-      # set and resolve to the same database. Values match the local CI service above; no remote database is used.
-      TEST_DATABASE_URL: postgres://rab_app:rab_app_dev_only@localhost:5432/rab
-      TEST_DATABASE_URL_UNPOOLED: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      # Required by the command/migration target guard (database-target.ts). This CI service is loopback: DB_TARGET=local.
+      # Required by the command/migration target guard (database-target.ts). The test cluster is loopback: DB_TARGET=local.
       DB_TARGET: local
       REDIS_URL: redis://localhost:6379
-      APP_SECRET: ci-test-secret-please-do-not-use-in-prod-000000
+      # PostgreSQL (M2 CI reliability, 2026-10-28): no longer a service. A service starts BEFORE checkout, so mounting
+      # packages/rab-docker/postgres-init from the workspace made Docker create that directory as root and checkout failed
+      # (EACCES). And migrating the whole chain as the rab_owner login can no longer pass the role split (CF-41), while
+      # rab_app is NOLOGIN since then. The database is now started after checkout (.github/actions/disposable-postgres)
+      # and built by the restricted-migrator path of the M2 harness, so the suite runs on a database a NON-superuser
+      # migrator built. The application connects as crewflow_app (TEST_DATABASE_URL, restricted, NOBYPASSRLS); fixtures as
+      # the disposable cluster's bootstrap superuser (TEST_DATABASE_URL_UNPOOLED). Every value is random and masked.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       - run: npx nx run-many -t lint -p rab-server,rab-shared
-      # setup-db.ts (invoked by this Nx target) reads DATABASE_URL directly,
-      # not DATABASE_URL_UNPOOLED — override it to the owner role for just
-      # this one step, matching start.sh's identical MIGRATION_DATABASE_URL
-      # substitution for the real boot path.
-      - run: npx nx run rab-server:migration:run
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the workspace libraries the migration harness imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: Build the test database with the restricted migrator (fresh install, with its security checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
         env:
-          DATABASE_URL: postgres://rab_owner:rab_owner_dev_only@localhost:5432/rab
-      - run: npx nx run-many -t test -p rab-server,rab-shared
+          MIGRATION_SECURITY_SCENARIOS: fresh
+          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
+          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Unit and integration tests
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          npx nx run-many -t test -p rab-server,rab-shared
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true

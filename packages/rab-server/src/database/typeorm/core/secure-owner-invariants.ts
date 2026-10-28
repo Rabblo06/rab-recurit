@@ -58,24 +58,38 @@ const fnLabel = (p: string) =>
         FROM unnest(${p}.proargtypes::pg_catalog.oid[]) WITH ORDINALITY a(typ, ord)
         JOIN pg_catalog.pg_type t ON t.oid = a.typ JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace))`;
 
-/** Functions a secure table depends on, through any object attached to it (pg_depend `classid` of that object). */
+/**
+ * Functions a secure table depends on, through any object attached to it (pg_depend `classid` of that object). M2-F4:
+ * each attachment kind is joined FROM the secure tables (column defaults / generated columns, constraints, rules, the
+ * table itself, its indexes), instead of scanning every function dependency in the database and looking each one up.
+ * Same five kinds, same dependency direction, same output; proven equal to the Phase 0b form by
+ * secure-owner-invariants-equivalence.integration.spec.ts.
+ */
 const attachedToSecureTable = `
-  SELECT d.refobjid FROM pg_catalog.pg_depend d
-   WHERE d.refclassid = 'pg_catalog.pg_proc'::regclass
-     AND (   (d.classid = 'pg_catalog.pg_attrdef'::regclass
-              AND (SELECT ad.adrelid FROM pg_catalog.pg_attrdef ad WHERE ad.oid = d.objid) IN (SELECT oid FROM secure_tables))
-          OR (d.classid = 'pg_catalog.pg_constraint'::regclass
-              AND (SELECT co.conrelid FROM pg_catalog.pg_constraint co WHERE co.oid = d.objid) IN (SELECT oid FROM secure_tables))
-          OR (d.classid = 'pg_catalog.pg_rewrite'::regclass
-              AND (SELECT rw.ev_class FROM pg_catalog.pg_rewrite rw WHERE rw.oid = d.objid) IN (SELECT oid FROM secure_tables))
-          OR (d.classid = 'pg_catalog.pg_class'::regclass
-              AND (d.objid IN (SELECT oid FROM secure_tables)
-                   OR (SELECT ix.indrelid FROM pg_catalog.pg_index ix WHERE ix.indexrelid = d.objid) IN (SELECT oid FROM secure_tables))))`;
+  SELECT d.refobjid FROM pg_catalog.pg_attrdef ad JOIN secure_tables s ON s.oid = ad.adrelid
+    JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_attrdef'::regclass AND d.objid = ad.oid
+                               AND d.refclassid = 'pg_catalog.pg_proc'::regclass
+  UNION
+  SELECT d.refobjid FROM pg_catalog.pg_constraint co JOIN secure_tables s ON s.oid = co.conrelid
+    JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_constraint'::regclass AND d.objid = co.oid
+                               AND d.refclassid = 'pg_catalog.pg_proc'::regclass
+  UNION
+  SELECT d.refobjid FROM pg_catalog.pg_rewrite rw JOIN secure_tables s ON s.oid = rw.ev_class
+    JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND d.objid = rw.oid
+                               AND d.refclassid = 'pg_catalog.pg_proc'::regclass
+  UNION
+  SELECT d.refobjid FROM secure_tables s
+    JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = s.oid
+                               AND d.refclassid = 'pg_catalog.pg_proc'::regclass
+  UNION
+  SELECT d.refobjid FROM pg_catalog.pg_index ix JOIN secure_tables s ON s.oid = ix.indrelid
+    JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = ix.indexrelid
+                               AND d.refclassid = 'pg_catalog.pg_proc'::regclass`;
 
 /** One violation per row: `kind|object|detail`. Zero rows = every reachability / ownership / search_path invariant holds. */
 export const SECURE_OWNER_INVARIANT_VIOLATIONS_SQL = `
 WITH RECURSIVE
-core_fn AS (
+core_fn AS MATERIALIZED (
   SELECT p.oid, p.proname FROM pg_catalog.pg_proc p WHERE p.pronamespace = 'core'::regnamespace
 ),
 secure_tables AS (
@@ -95,15 +109,22 @@ seed AS (
   ${attachedToSecureTable}
 ),
 reach(oid) AS (
+  -- M2-F4: driven from the worktable through LATERAL, so only REACHED callers are examined. The Phase 0b form joined every
+  -- pg_proc row to every core function under the regex first, and the planner flipped to that plan (~30 s) on any
+  -- database with a few workspace schemas. Same two edge kinds (name( in the body, or a proc -> proc pg_depend edge), same
+  -- self-exclusion.
   SELECT oid FROM seed
   UNION
   SELECT callee.oid
     FROM reach r JOIN pg_catalog.pg_proc caller ON caller.oid = r.oid
-    JOIN core_fn callee ON callee.oid <> caller.oid
-     AND (caller.prosrc ~ ('\\m' || callee.proname || '\\s*\\(')
-          OR EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
-                      WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = caller.oid
-                        AND d.refclassid = 'pg_catalog.pg_proc'::regclass AND d.refobjid = callee.oid))
+    CROSS JOIN LATERAL (
+      SELECT cf.oid FROM core_fn cf
+       WHERE cf.oid <> caller.oid AND caller.prosrc ~ ('\\m' || cf.proname || '\\s*\\(')
+      UNION
+      SELECT d.refobjid FROM pg_catalog.pg_depend d JOIN core_fn cf ON cf.oid = d.refobjid
+       WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = caller.oid
+         AND d.refclassid = 'pg_catalog.pg_proc'::regclass AND d.refobjid <> caller.oid
+    ) callee
 ),
 violations AS (
   -- 1. Reachability: every reached core function is owned by rab_secure_owner.

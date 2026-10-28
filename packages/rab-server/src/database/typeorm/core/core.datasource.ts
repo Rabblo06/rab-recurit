@@ -169,6 +169,15 @@ export class GuardedMigrationDataSource extends DataSource {
     return super.runMigrations(options);
   }
 
+  /**
+   * M2: TypeORM's showMigrations() CREATES core.migrations when it is missing, as whoever is connected. Called before the
+   * identity check (by setup-db.ts, and by that check itself), a refused identity on an empty database left a ledger it
+   * owned behind, and the correct phase-A identity then failed on it. Read-only here: same answer, no side effect.
+   */
+  override async showMigrations(): Promise<boolean> {
+    return (await this.pendingMigrationNames()).length > 0;
+  }
+
   /** Loaded migrations not yet recorded in core.migrations (all of them when the ledger does not exist yet). */
   private async pendingMigrationNames(): Promise<string[]> {
     const [ledger] = (await this.query(`SELECT to_regclass('core.migrations') IS NOT NULL AS "hasLedger"`)) as Array<{ hasLedger: boolean }>;

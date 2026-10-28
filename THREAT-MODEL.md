@@ -3902,3 +3902,81 @@ credential, migration or RLS policy.
 - **Rollback:** `down()` restores the previous owners, trigger search_path and schema USAGE/CREATE; verified to reproduce
   the pre-0b posture snapshot byte for byte (up → down → up on a disposable database). It re-opens channels 1 and 2 and
   the schema-owner part of channel 4.
+
+## M2 — migrations under a restricted (non-superuser) migration identity (owner-approved 2026-10-28; worktree m2, uncommitted)
+
+- **Asset:** the privilege boundary between the migration identity and the runtime logins (`crewflow`, `crewflow_app`), and
+  the Phase 0b secure-owner invariants, on managed PostgreSQL where the migrator is NOT a superuser.
+- **Risk before:** every migration test ran as a superuser, which bypasses ownership and CREATE checks. A migration that only
+  works as superuser, or that silently leaves objects owned by the migration login, passed locally and would fail (or
+  half-apply) on managed PostgreSQL. Nothing compared the runtime logins' privileges before and after each migration.
+- **Control:** `scripts/migration-security-check.ts` (CI job `ci-migration-security`) builds two disposable databases:
+  fresh (phase A as `rab_owner` through the migrator's SET-only membership; everything else as the restricted migrator
+  `rab_ci_migrator`: LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE, members of `rab_secure_owner` + `crewflow`
+  only) and upgrade (history to just before Phase 0b by the bootstrap identity; Phase 0b down/up/re-run by the restricted
+  migrator). Each migration after Phase 0b runs alone with a catalog drift check (`migration-privilege-drift.ts`: CREATE on
+  core/public, database CREATE/TEMP, role attributes, memberships, core/database owner, objects owned by `crewflow_app`)
+  plus the R6 invariants; then: nothing left depending on the migrator (`pg_shdepend`), posture vs golden, RLS coverage as
+  `crewflow_app`. `migration-source-rules.ts` is an early-warning source scan only (it can be evaded by run-time SQL;
+  `migration-security.integration.spec.ts` proves the catalog check catches exactly that case).
+- **Measured (2026-10-28, 240 migrations):** 128 phase-A as `rab_owner`; 82 as the restricted migrator; **30 historical
+  migrations need more** and are listed exactly in `PRIVILEGED_BOOTSTRAP_MIGRATIONS` (list exact in both directions):
+  4 role bootstrap (create roles / set passwords / guards need SUPERUSER or CREATEROLE); 23 hand a new core object to
+  `rab_secure_owner` before Phase 0b (the new owner needs CREATE on `core`; only a superuser bypasses that — resolved for
+  later migrations by Phase 0b itself); 3 copy/backfill rows under FORCE RLS (need SUPERUSER or BYPASSRLS — recurs for
+  any future cross-tenant backfill, which therefore needs its own reviewed bootstrap step). None modified or weakened.
+- **Fixed in M2 (M2-F1, Low):** `GuardedMigrationDataSource.showMigrations()` used TypeORM's version, which CREATES
+  `core.migrations` as the connecting role. `setup-db.ts` (and the CF-41 check itself) call it before refusing a wrong
+  identity, so a refused superuser left a superuser-owned ledger on an empty database and the correct `rab_owner` run then
+  failed. Now read-only (same answer, no side effect); the harness asserts the refused run leaves no ledger.
+- **Open (frozen, exact; fresh non-superuser installs only — existing databases are unaffected):**
+  - **M2-F2 (Medium):** `NavigationLayout1786718600000` creates `core.navigation_layout` with no `OWNER TO`; the repair
+    `ReconcileSuperuserOwnedCoreObjects1786719600000` re-owns only SUPERUSER-owned objects, so under a non-superuser
+    migrator the table stays owned by the migration login and `crewflow` lacks D/T/R/G on it. Fix: a forward migration
+    re-owning core objects owned by any non-reserved, non-runtime login to `crewflow` (not implemented: needs approval).
+  - **M2-F3 (Low, part of H3):** `ArchiveAndSearchSchema1786719920000` creates `unaccent` and `pg_trgm`, owned by whoever
+    runs it (the superuser on existing databases, the migration login on a fresh managed install).
+- **Not covered by the per-migration drift check (by design, covered elsewhere):** table/column/function grants and
+  default privileges (golden posture, compared at the end of every scenario), policies (RLS coverage + posture),
+  ownership of new objects by `crewflow` (expected pattern via `withCrewflowCoreCreate`; posture).
+- **Independent review (2026-10-28): OK with fixes — all applied.** The pre-0b chain is frozen by name fingerprint
+  (`PRE_PHASE_0B_MIGRATIONS`: a back-dated migration would otherwise skip every post-0b check); the harness requires a
+  cluster marked `crewflow.disposable_cluster = on` and refuses a cluster where crewflow / crewflow_app exist without an
+  explicit opt-in (the role migrations reset their passwords); post-0b migrations are drift-checked under BOTH identities
+  (restricted in fresh, bootstrap superuser in upgrade); the drift snapshot also covers core policy expressions, default
+  privileges, per-role settings, membership options and ownership in any catalog (pg_shdepend); CF-41 / privileged
+  refusals must be the right error (MigrationIdentityError, SQLSTATE 42501 or the migration's own guard); discovery mode
+  fails the run and is refused under CI; no secret in URL-parse errors or the RLS child environment; CI passes the
+  superuser password as a file and masks every generated value.
+- **M2-F4 (Medium, Phase 0b rollout — open, not fixed under M2):** `SECURE_OWNER_INVARIANT_VIOLATIONS_SQL` (Phase 0b,
+  committed in 0d677bbf) grows ~2.7 s per workspace schema (measured: 1 workspace 1.7 s, 11 workspaces 29.4 s). Migration
+  1786721100000 runs it before commit, so on a database with a few hundred workspaces it approaches the 15-minute
+  migration statement_timeout (the migration would roll back, fail closed). Count workspaces read-only before applying
+  Phase 0b to rab-devdb or production, and optimise the query first if the count is large.
+- **SECURITY TRADE-OFF (vetoable):** the harness accepts the exact F2/F3 residue on the fresh restricted install
+  (`KNOWN_FRESH_MIGRATOR_LEFTOVERS`, `KNOWN_FRESH_POSTURE_DELTA`) so the job can gate everything else now; any other
+  leftover or posture line still fails. Consequence while accepted: a fresh managed-Postgres install has
+  `core.navigation_layout` owned by the migration login, and deleting a workspace, user or organisation fails there
+  (the ON DELETE CASCADE into it runs as that owner). Existing databases are unaffected (upgrade scenario: no residue).
+- **Update (owner-approved "finish M2", 2026-10-28):**
+  - **M2-F2 FIXED** by `NavigationLayoutCrewflowOwner1786721110000` (forward migration; neither historical migration edited):
+    re-owns only `core.navigation_layout` to crewflow inside `withCrewflowCoreCreate`, no-op where crewflow already owns
+    it (every existing database), refuses an unexpected owner (rab_secure_owner, a runtime login, a superuser) or an
+    identity that cannot act as the owner, and verifies owner / RLS+FORCE / crewflow_app S,I,U only / one policy before
+    commit. The fresh restricted install now matches the golden posture exactly; workspace and user deletes cascade
+    through the table; an organisation hard delete stays refused by design (user foreign key / insert-only audit_log).
+    The frozen fresh-install residue is now only F3 (unaccent / pg_trgm ownership, H3).
+  - **M2-F4 FIXED (owner-approved conditions met; the Phase 0b migration file is byte-identical, only the invariant module
+    it imports changed).** The cost was a planner cliff, not linear growth: the reachability step joined every pg_proc row
+    (~3,700) to every core function under a regex before restricting to reached functions. Phase 0b query at 1 / 5 / 11 /
+    20 / 40 workspace schemas: 1.8 / 31.5 (re-run 38.9) / 30.5 / 32.2 / 31.7 (re-run 40.0) s; optimised query (worktable-
+    driven LATERAL step; seed joins start from the secure tables): 0.50 / 0.52 (0.65) / 0.46 / 0.53 / 0.46 (0.55) s,
+    identical output every time. `secure-owner-invariants-equivalence.integration.spec.ts` keeps a frozen copy of the
+    Phase 0b query (test-only) and proves identical violations on a healthy database and 14 injected cases: every
+    attachment kind incl. a partition key, both transitive edges, a three-hop mixed chain, unpinned definer search_path,
+    runtime CREATE on core, runtime membership of rab_secure_owner. Independent review: logically equivalent in every
+    case; safe to include. Test-side only: the M2 fixture specs allow 180 s per statement on their own connection.
+  - **CI:** `ci-server` (test) and `ci-security` (rls-coverage) failed at checkout (service volume of postgres-init →
+    EACCES) and, behind that, migrated as the rab_owner login, which the role split refuses. Both now start PostgreSQL
+    after checkout (`.github/actions/disposable-postgres`) and build their database through the restricted-migrator fresh
+    install; the server suite runs as crewflow_app, the RLS gate as crewflow_app. No check removed or downgraded.
