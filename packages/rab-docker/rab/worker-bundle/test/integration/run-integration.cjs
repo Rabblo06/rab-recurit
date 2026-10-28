@@ -640,14 +640,35 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
 
   await step('31', 'Graceful stop: SIGTERM forwarded, both drains complete, exit 0 within the grace period; no orphans', async () => {
     await waitFor('worker-a healthy', () => healthOf('worker-a') === 'healthy', 180_000, 3000);
+    // Judge the whole log of THIS stop, not a fixed-size tail: case 31 runs about a second after case 30 restarts
+    // PostgreSQL, so an in-flight jobs cycle can print a multi-line connection error while draining and push the drain
+    // lines out of any short tail. The window starts 10 s early (host/daemon clock skew); worker-a was last stopped in
+    // case 28, minutes earlier, and exactly one stop must fall inside the window.
+    const since = new Date(Date.now() - 10_000).toISOString();
     const t0 = Date.now();
     compose(['stop', '-t', '55', 'worker-a']);
     const elapsed = Date.now() - t0;
     const exit = inspect('worker-a', '{{.State.ExitCode}}');
-    const tail = logsOf('worker-a').split('\n').slice(-12).join('\n');
-    write(`stop took ${elapsed}ms, exit code ${exit}\n${tail}`);
+    const stopLog = compose(['logs', '--no-color', '--since', since, 'worker-a'], { quiet: true }).out;
+    const drainLines = stopLog.split('\n').filter((l) => /\[worker-bundle\]|received SIGTERM|shut down cleanly/.test(l));
+    write(`stop took ${elapsed}ms, exit code ${exit}\n${drainLines.join('\n')}`);
     assert(exit === '0', 'non-zero exit on graceful stop');
-    assert(/received SIGTERM/.test(tail) && /Worker shut down cleanly/.test(tail) && /\[workspace-provisioner\] shut down cleanly/.test(tail), 'drain lines missing');
+    assert((stopLog.match(/\[worker-bundle\] stopping: received SIGTERM/g) || []).length === 1, 'expected exactly one bundle stop in the window');
+    const required = [
+      /\[jobs\] Worker received SIGTERM/,
+      /\[jobs\] Worker shut down cleanly/,
+      /\[workspace-provisioner\] shut down cleanly/,
+      /\[worker-bundle\] jobs: exited \(0\)/,
+      /\[worker-bundle\] provisioner: exited \(0\)/,
+      /\[worker-bundle\] exiting with code 0/,
+    ];
+    assert(required.every((re) => re.test(stopLog)), 'drain lines missing');
+    // The launcher's own lines share one stream, so their order is reliable: SIGTERM first, the bundle exit last.
+    const at = (re) => drainLines.findIndex((l) => re.test(l));
+    const sigterm = at(/\[worker-bundle\] stopping: received SIGTERM/);
+    const bundleExit = at(/\[worker-bundle\] exiting with code 0/);
+    assert(sigterm < at(/\[worker-bundle\] jobs: exited \(0\)/) && sigterm < at(/\[worker-bundle\] provisioner: exited \(0\)/), 'a child exited before SIGTERM was forwarded');
+    assert(bundleExit > at(/\[worker-bundle\] jobs: exited \(0\)/) && bundleExit > at(/\[worker-bundle\] provisioner: exited \(0\)/), 'the bundle exited before both children');
     assert(elapsed < 55_000, 'stop exceeded the grace period');
     compose(['start', 'worker-a']);
     await waitFor('worker-a healthy after restart', () => healthOf('worker-a') === 'healthy', 180_000, 3000);
