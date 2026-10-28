@@ -6,7 +6,7 @@
     "e2e": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "playwright test",
+        "command": "yarn playwright test",
         "cwd": "packages/rab-e2e-testing"
       }
     }

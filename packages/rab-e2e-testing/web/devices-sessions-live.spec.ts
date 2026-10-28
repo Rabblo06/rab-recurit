@@ -15,7 +15,14 @@ const API = 'http://127.0.0.1:3999/rest/v1';
 const ORIGIN = 'http://127.0.0.1:5174';
 const OUT = path.resolve(__dirname, '.qa-shots/devices-2026-10-19');
 const TAG = process.env.SHOT_TAG ?? 'after';
-const ids = JSON.parse(readFileSync(process.env.QA_IDENTITIES ?? '', 'utf8')) as Record<'a' | 'b', { email: string; password: string }>;
+// Loaded in beforeAll, not at module level: a module-level read of a missing file is a LOAD error, which aborts
+// the whole Playwright run (every other spec included). Missing QA_IDENTITIES now fails only this spec, immediately and by name.
+type Identities = Record<'a' | 'b', { email: string; password: string }>;
+let ids: Identities;
+test.beforeAll(() => {
+  if (!process.env.QA_IDENTITIES) throw new Error('QA_IDENTITIES is not set: this spec needs the disposable API on 127.0.0.1:3999, its seeded QA managers and the isolated Vite on :5174 (see the header).');
+  ids = JSON.parse(readFileSync(process.env.QA_IDENTITIES, 'utf8')) as Identities;
+});
 
 test.use({ viewport: { width: 1440, height: 900 } });
 test.setTimeout(8 * 60_000);

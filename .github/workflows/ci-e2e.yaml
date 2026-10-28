@@ -25,7 +25,11 @@ jobs:
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       - run: npx nx run-many -t build -p rab-shared,rab-ui
-      - run: npx playwright install --with-deps chromium
+      # `yarn playwright`, never `npx playwright`: npx resolves node_modules/.bin/playwright, which is the hoisted
+      # `playwright` that rab-server/rab-worker depend on (a different version from this package's @playwright/test).
+      # Yarn resolves the bin from this workspace's own @playwright/test, so the browser revision installed here is
+      # the one the test runner (project.json `e2e`) actually launches.
+      - run: yarn playwright install --with-deps chromium
         working-directory: packages/rab-e2e-testing
       - run: npx nx e2e rab-e2e-testing
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
