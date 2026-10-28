@@ -22,12 +22,15 @@
  *
  * HOW OFTEN
  *   WORKSPACE_PROVISIONER_INTERVAL_SECONDS  whole seconds, PROVISIONER_INTERVAL_MIN_SECONDS..PROVISIONER_INTERVAL_MAX_SECONDS,
- *   default PROVISIONER_INTERVAL_DEFAULT_SECONDS. Out of range or not a whole number refuses to start. Was a fixed 5 s.
+ *   default PROVISIONER_INTERVAL_DEFAULT_SECONDS (PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS = the old fixed 5 s when
+ *   enabled by the legacy HWS gate). Out of range or not a whole number refuses to start. Was a fixed 5 s.
  *   The launcher validates the same bounds (start-worker-bundle.cjs PROVISIONER_INTERVAL; launcher.test.cjs A7 reconciles
  *   the two). The maximum keeps a settled cycle inside the bundle health check's 5-minute provisioner window.
  */
 
 export const PROVISIONER_INTERVAL_DEFAULT_SECONDS = 60;
+/** The pre-Phase-A fixed cadence: still the default when provisioning is enabled by the legacy HWS_RUNTIME_ENABLED gate. */
+export const PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS = 5;
 export const PROVISIONER_INTERVAL_MIN_SECONDS = 5;
 export const PROVISIONER_INTERVAL_MAX_SECONDS = 120;
 
@@ -59,9 +62,9 @@ function parseSwitch(env: NodeJS.ProcessEnv): boolean | null {
   throw new ProvisionerConfigError('CREWFLOW_PROVISIONER_ENABLED must be "true" or "false" (unset or empty = follow HWS_RUNTIME_ENABLED). Refusing to start.');
 }
 
-function parseInterval(env: NodeJS.ProcessEnv): number {
+function parseInterval(env: NodeJS.ProcessEnv, defaultSeconds: number): number {
   const raw = env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS;
-  if (raw === undefined || raw.trim() === '') return PROVISIONER_INTERVAL_DEFAULT_SECONDS;
+  if (raw === undefined || raw.trim() === '') return defaultSeconds;
   const text = raw.trim();
   const n = Number(text);
   if (!/^\d+$/.test(text) || n < PROVISIONER_INTERVAL_MIN_SECONDS || n > PROVISIONER_INTERVAL_MAX_SECONDS) {
@@ -76,7 +79,10 @@ function parseInterval(env: NodeJS.ProcessEnv): number {
 export function resolveProvisionerConfig(env: NodeJS.ProcessEnv): ProvisionerConfig {
   const explicit = parseSwitch(env);
   const hws = env.HWS_RUNTIME_ENABLED ?? null;
-  const intervalSeconds = parseInterval(env);
+  // Integration hardening: a standalone provisioner enabled by the legacy HWS gate keeps the old 5 s cadence unless the
+  // interval is set; only the explicit switch gets the Phase A 60 s default.
+  const legacyGate = explicit === null && hws === 'true';
+  const intervalSeconds = parseInterval(env, legacyGate ? PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS : PROVISIONER_INTERVAL_DEFAULT_SECONDS);
   let provision: boolean;
   let enabledBy: ProvisionerConfig['enabledBy'];
   if (explicit === true) {

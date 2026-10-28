@@ -263,39 +263,33 @@ function prePhaseAProductionEnv() {
 }
 
 test(
-  'operator env WITHOUT the new switch but WITH CREWFLOW_PROVISIONER_DATABASE_URL (every pre-Phase-A deployment) → makePlan REFUSES',
+  'operator env WITHOUT the new switch but WITH CREWFLOW_PROVISIONER_DATABASE_URL (every pre-Phase-A deployment) → provisioner ON at the old 5 s, exactly as before Phase A',
   { skip },
   () => {
     const result = resolve(prePhaseAProductionEnv());
-    assert.match(
-      result.refused ?? '',
-      /CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/,
-    );
-    assert.ok(!/dummy/.test(result.refused), 'refusal never echoes a value');
+    assert.equal(result.refused, null);
+    assert.deepEqual(result.children, ['jobs', 'provisioner']);
+    assert.equal(result.interval, 5);
   },
 );
 
 test(
-  'operator env WITHOUT the switch → main() exits 1 (the container stops — it does not silently skip provisioning)',
+  'operator env with NEITHER the switch NOR the provisioner URL → main() exits 1 "Missing CREWFLOW_PROVISIONER_DATABASE_URL", as the base launcher did (never a silent jobs-only start)',
   { skip },
   async () => {
+    const e = prePhaseAProductionEnv();
+    delete e.CREWFLOW_PROVISIONER_DATABASE_URL;
     const lines = [];
     const original = console.error;
     console.error = (...args) => lines.push(args.join(' '));
     let code;
     try {
-      code = await launcher.main({
-        ...prePhaseAProductionEnv(),
-        CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0',
-      });
+      code = await launcher.main({ ...e, CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' });
     } finally {
       console.error = original;
     }
     assert.equal(code, 1);
-    assert.match(
-      lines.join('\n'),
-      /\[worker-bundle\] refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/,
-    );
+    assert.match(lines.join('\n'), /\[worker-bundle\] refused: Missing CREWFLOW_PROVISIONER_DATABASE_URL/);
   },
 );
 
@@ -329,10 +323,10 @@ test(
 );
 
 test(
-  'env with NEITHER the switch NOR the provisioner URL → jobs only, provisioning silently absent (base 6242eeec refused this env: "Missing CREWFLOW_PROVISIONER_DATABASE_URL")',
+  'jobs-only needs the explicit opt-out: CREWFLOW_PROVISIONER_ENABLED=false with no provisioner URL → jobs only',
   { skip },
   () => {
-    const e = prePhaseAProductionEnv();
+    const e = { ...prePhaseAProductionEnv(), CREWFLOW_PROVISIONER_ENABLED: 'false' };
     delete e.CREWFLOW_PROVISIONER_DATABASE_URL;
     const result = resolve(e);
     assert.equal(result.refused, null);

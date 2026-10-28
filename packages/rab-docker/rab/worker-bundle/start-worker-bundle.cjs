@@ -5,14 +5,20 @@
  *   jobs         packages/rab-worker/dist/main.js                    uid/gid 1000  (restricted crewflow_app only)
  *   provisioner  packages/rab-worker/dist/workspace-provisioner.main.js  uid/gid 10001 (privileged crewflow, direct)
  *
- * Phase A (pa-provisioner): the provisioner child is OPT-IN. It is started only when CREWFLOW_PROVISIONER_ENABLED=true;
- * otherwise the bundle runs the jobs child alone and REFUSES to start if CREWFLOW_PROVISIONER_DATABASE_URL is present
- * (the privileged URL must not sit in a container that does not use it). The flag is strict: unset, empty or "false"
- * means disabled, "true" means enabled, anything else refuses to start. HWS_RUNTIME_ENABLED is passed through to both
- * children unchanged (it is no longer forced to "true" for the provisioner child); the provisioner child is told it was
- * explicitly enabled through CREWFLOW_PROVISIONER_ENABLED=true, which is what makes it provision — see
+ * Phase A (pa-provisioner): CREWFLOW_PROVISIONER_ENABLED switches the provisioner child. Strict values:
+ *   "true"        explicit opt-in: jobs + provisioner (CREWFLOW_PROVISIONER_DATABASE_URL required), default interval 60 s.
+ *   "false"       explicit opt-out: the jobs child alone, and the launcher REFUSES to start if
+ *                 CREWFLOW_PROVISIONER_DATABASE_URL is present (the privileged URL must not sit in a container that does
+ *                 not use it).
+ *   unset / empty LEGACY (integration hardening): every environment configured before Phase A keeps exactly its old
+ *                 behaviour — jobs + provisioner, the URL required ("Missing CREWFLOW_PROVISIONER_DATABASE_URL"
+ *                 otherwise, as before), default interval 5 s — so an existing deployment can neither lose provisioning
+ *                 nor stop starting because it lacks the new switch.
+ *   anything else refuses to start.
+ * HWS_RUNTIME_ENABLED is passed through to both children unchanged (it is no longer forced to "true" for the provisioner
+ * child); the provisioner child is always told CREWFLOW_PROVISIONER_ENABLED=true, which is what makes it provision — see
  * workspace-provisioner.config.ts for the enabled-but-HWS-off rule. WORKSPACE_PROVISIONER_INTERVAL_SECONDS (integer
- * 5..120, default 60) is validated here and forwarded to the provisioner child only.
+ * 5..120) is validated here and forwarded to the provisioner child only.
  *
  * This file is the only thing that runs as root in the container, and only to start each child under its own
  * non-root UID/GID (libuv drops supplementary groups with setgroups(0) before setgid/setuid) and to signal them.
@@ -152,7 +158,7 @@ const JOBS_ENV_KEYS = Object.freeze([
  * (runtime guard), REDIS_URL (its own heartbeat/stats only), SENTRY_DSN (instrument.ts), HWS_RUNTIME_ENABLED (passed
  * through unchanged, Phase A — no longer forced), and — set by the launcher, never forwarded — DATABASE_URL /
  * DATABASE_URL_UNPOOLED, CREWFLOW_PROVISIONER_ENABLED ("true") and WORKSPACE_PROVISIONER_INTERVAL_SECONDS (the validated
- * effective value). The provisioner child exists in the plan only when CREWFLOW_PROVISIONER_ENABLED=true.
+ * effective value). The provisioner child is left out of the plan only when CREWFLOW_PROVISIONER_ENABLED=false.
  */
 const PROVISIONER_ENV_KEYS = Object.freeze(['NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ', 'REDIS_URL', 'SENTRY_DSN', 'HWS_RUNTIME_ENABLED']);
 
@@ -160,9 +166,10 @@ const PROVISIONER_ENV_KEYS = Object.freeze(['NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ',
  * Phase A (pa-provisioner): provisioner polling interval bounds, in seconds. MUST equal the constants in
  * packages/rab-worker/src/workspace-provisioner.config.ts (launcher.test.cjs reconciles the two from a repo checkout).
  * The upper bound keeps a settled cycle inside the bundle health check's 5-minute provisioner window
- * (worker-bundle-health.cjs ROLES.provisioner.settledMaxAgeMs) with room for a slow batch.
+ * (worker-bundle-health.cjs ROLES.provisioner.settledMaxAgeMs) with room for a slow batch. legacyDefaultSeconds is the
+ * pre-Phase-A fixed cadence, kept for a switch-unset (legacy) environment.
  */
-const PROVISIONER_INTERVAL = Object.freeze({ defaultSeconds: 60, minSeconds: 5, maxSeconds: 120 });
+const PROVISIONER_INTERVAL = Object.freeze({ defaultSeconds: 60, legacyDefaultSeconds: 5, minSeconds: 5, maxSeconds: 120 });
 
 /** Present on the Worker service at all (non-empty) → refuse: this service never holds migration or bootstrap authority. */
 const FORBIDDEN_SERVICE_KEYS = Object.freeze([
@@ -227,19 +234,27 @@ function pgUrl(value, label) {
 const isPoolerHost = (host) => /-pooler\./.test(host);
 
 /**
- * Phase A (pa-provisioner): strict opt-in switch. Returns true / false, or throws BundleConfigError (name only) for any
- * other value, so a typo such as "ture" or "1" refuses to start instead of silently choosing a mode.
+ * Phase A (pa-provisioner): strict switch. Returns 'on' / 'off' / 'legacy' (unset or empty), or throws
+ * BundleConfigError (name only) for any other value, so a typo such as "ture" or "1" refuses to start instead of
+ * silently choosing a mode.
  */
-function provisionerEnabled(env) {
-  const parsed = health.parseProvisionerEnabled(env);
-  if (parsed === null) throw new BundleConfigError('CREWFLOW_PROVISIONER_ENABLED must be "true" or "false" (unset or empty = disabled)');
-  return parsed;
+function provisionerMode(env) {
+  const mode = health.provisionerMode(env);
+  if (mode === null) {
+    throw new BundleConfigError('CREWFLOW_PROVISIONER_ENABLED must be "true" or "false" (unset or empty = the pre-Phase-A behaviour: provisioner on)');
+  }
+  return mode;
 }
 
-/** Phase A: validates WORKSPACE_PROVISIONER_INTERVAL_SECONDS (unset/empty = the default). Errors name the variable only. */
-function provisionerIntervalSeconds(env) {
+/**
+ * Phase A: validates WORKSPACE_PROVISIONER_INTERVAL_SECONDS. Unset/empty = 60 s for an explicit opt-in, the old fixed
+ * 5 s for a legacy (switch-unset) environment. Errors name the variable only.
+ */
+function provisionerIntervalSeconds(env, mode) {
   const raw = env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS;
-  if (raw === undefined || String(raw).trim() === '') return PROVISIONER_INTERVAL.defaultSeconds;
+  if (raw === undefined || String(raw).trim() === '') {
+    return mode === 'legacy' ? PROVISIONER_INTERVAL.legacyDefaultSeconds : PROVISIONER_INTERVAL.defaultSeconds;
+  }
   const text = String(raw).trim();
   const n = Number(text);
   if (!/^\d+$/.test(text) || n < PROVISIONER_INTERVAL.minSeconds || n > PROVISIONER_INTERVAL.maxSeconds) {
@@ -253,8 +268,8 @@ function provisionerIntervalSeconds(env) {
 const nonEmpty = (env, key) => typeof env[key] === 'string' && env[key].trim() !== '';
 
 /**
- * Pure: validates the service environment and builds the child specs — [jobs] when the provisioner is disabled (the
- * default), [jobs, provisioner] when CREWFLOW_PROVISIONER_ENABLED=true. Throws BundleConfigError (names only).
+ * Pure: validates the service environment and builds the child specs — [jobs] when CREWFLOW_PROVISIONER_ENABLED=false,
+ * [jobs, provisioner] when it is "true" or unset (legacy). Throws BundleConfigError (names only).
  */
 function makePlan(env, layout = DEFAULT_LAYOUT) {
   for (const key of FORBIDDEN_SERVICE_KEYS) {
@@ -262,10 +277,11 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
       throw new BundleConfigError(`${key} must not be configured on the Worker service (no migration or bootstrap authority here)`);
     }
   }
-  const withProvisioner = provisionerEnabled(env);
+  const mode = provisionerMode(env);
+  const withProvisioner = mode !== 'off';
   if (!withProvisioner && nonEmpty(env, 'CREWFLOW_PROVISIONER_DATABASE_URL')) {
     // Fail closed: a privileged credential the service does not use must not sit in its environment (the root launcher
-    // would hold it for nothing). Remove it, or opt in explicitly.
+    // would hold it for nothing). Remove it, or opt in explicitly. Only an explicit "false" gets here.
     throw new BundleConfigError(
       'CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled: remove it from the Worker service, or set CREWFLOW_PROVISIONER_ENABLED=true',
     );
@@ -291,7 +307,7 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   if (isPoolerHost(direct.host)) throw new BundleConfigError('DATABASE_DIRECT_URL is a pooled (-pooler) host; use the direct host');
   if (provisioner && isPoolerHost(provisioner.host)) throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL is a pooled (-pooler) host; use the direct host');
   // Validated only where it is used; a disabled provisioner ignores it (it is never forwarded to the jobs child).
-  const intervalSeconds = withProvisioner ? provisionerIntervalSeconds(env) : null;
+  const intervalSeconds = withProvisioner ? provisionerIntervalSeconds(env, mode) : null;
   if (env.NODE_ENV === 'production' || env.RAB_RUNTIME_ENV === 'production') {
     if (env.NODE_ENV !== 'production' || env.RAB_RUNTIME_ENV !== 'production') {
       throw new BundleConfigError('NODE_ENV=production and RAB_RUNTIME_ENV=production must be set together');
@@ -669,11 +685,15 @@ async function main(env = process.env) {
   const graceMs = boundedInt(env.CREWFLOW_BUNDLE_SHUTDOWN_GRACE_MS, workerDrainMs + 12_000, 5_000, 900_000);
   if (plan.some((s) => s.name === 'provisioner')) {
     const interval = plan.find((s) => s.name === 'provisioner').env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS;
-    console.error(`[worker-bundle] starting jobs + provisioner (CREWFLOW_PROVISIONER_ENABLED=true, interval ${interval}s; shutdown grace ${graceMs}ms)`);
+    if (health.provisionerMode(env) === 'legacy') {
+      console.error(`[worker-bundle] starting jobs + provisioner (CREWFLOW_PROVISIONER_ENABLED unset: pre-Phase-A behaviour, interval ${interval}s; set it to "true" or "false" explicitly; shutdown grace ${graceMs}ms)`);
+    } else {
+      console.error(`[worker-bundle] starting jobs + provisioner (CREWFLOW_PROVISIONER_ENABLED=true, interval ${interval}s; shutdown grace ${graceMs}ms)`);
+    }
   } else {
     // Phase A: no privileged child, no privileged credential in this container. New workspaces are built only where the
     // API's server-path provisioning (core.provision_workspace) exists; elsewhere they stay CREATING.
-    console.error(`[worker-bundle] starting jobs only — workspace provisioner disabled (CREWFLOW_PROVISIONER_ENABLED is not "true"); shutdown grace ${graceMs}ms`);
+    console.error(`[worker-bundle] starting jobs only — workspace provisioner disabled (CREWFLOW_PROVISIONER_ENABLED=false); shutdown grace ${graceMs}ms`);
   }
   const code = await supervise(plan, { graceMs });
   if (code !== 0 && Date.now() - startedAt < 60_000) {

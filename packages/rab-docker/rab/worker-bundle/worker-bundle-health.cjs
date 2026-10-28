@@ -137,17 +137,28 @@ function evaluate({ now = Date.now(), roles = ROLES, read = readHeartbeat, uidOf
 }
 
 /**
- * Phase A (pa-provisioner): the provisioner child is opt-in. Shared by the launcher (which refuses an invalid value) and
- * this health check (which reads the same container environment). Strict: unset, empty or "false" → false; "true" → true;
- * anything else → null (invalid — the caller fails closed).
+ * Phase A (pa-provisioner): the provisioner switch. Shared by the launcher (which refuses an invalid value) and this
+ * health check (which reads the same container environment). Strict:
+ *   "true"        → 'on'      explicit opt-in.
+ *   "false"       → 'off'     explicit opt-out: jobs child only.
+ *   unset / empty → 'legacy'  every environment configured before Phase A: the provisioner runs exactly as it did then
+ *                             (its URL is required, 5 s cadence), so an existing deployment never loses provisioning.
+ *   anything else → null      invalid — the caller fails closed.
  */
-function parseProvisionerEnabled(env) {
+function provisionerMode(env) {
   const raw = env.CREWFLOW_PROVISIONER_ENABLED;
-  if (raw === undefined || raw === null) return false;
+  if (raw === undefined || raw === null) return 'legacy';
   const value = String(raw).trim();
-  if (value === '' || value === 'false') return false;
-  if (value === 'true') return true;
+  if (value === '') return 'legacy';
+  if (value === 'true') return 'on';
+  if (value === 'false') return 'off';
   return null;
+}
+
+/** True when the provisioner child runs ('on' or 'legacy'), false for 'off', null when the switch is invalid. */
+function parseProvisionerEnabled(env) {
+  const mode = provisionerMode(env);
+  return mode === null ? null : mode !== 'off';
 }
 
 /** The roles this container is expected to run: both when the provisioner is enabled, jobs only otherwise; null = invalid. */
@@ -174,5 +185,5 @@ if (require.main === module) {
 
 module.exports = {
   ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, BULLMQ_CONSUMERS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate,
-  parseProvisionerEnabled, rolesFor,
+  provisionerMode, parseProvisionerEnabled, rolesFor,
 };

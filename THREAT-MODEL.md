@@ -3835,3 +3835,21 @@ credential, migration or RLS policy.
 - **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
   `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
   real entrypoint).
+- **Integration hardening (2026-10-27, on top of `7719959b`):** the switch is now three-state. `"true"` = on
+  (60 s default), `"false"` = jobs only (and still REFUSED while `CREWFLOW_PROVISIONER_DATABASE_URL` is set), unset or
+  empty = **legacy**: exactly the pre-Phase-A behaviour — provisioner on, URL required ("Missing
+  CREWFLOW_PROVISIONER_DATABASE_URL" otherwise, as the base launcher said), 5 s default. The health check expects the
+  provisioner in legacy mode too. A standalone provisioner enabled by the legacy HWS gate also keeps the 5 s default.
+  Why: under the first Phase A design an environment configured before Phase A (URL set, switch absent) made the whole
+  Worker — jobs child included — refuse to start and restart-loop, and "neither key set" silently ran with no
+  provisioner. Only the committed composes set the switch, so any operator-managed environment was exposed.
+- **SECURITY TRADE-OFF (owner-approved 2026-10-28):** an unset switch with the URL present runs the privileged provisioner instead of
+  refusing. Stricter alternative: the first Phase A design (refuse until the switch is set). Rejected for integration
+  because it can take the whole Worker down on deploy, and the relaxed path grants nothing new: it is byte-for-byte the
+  credential exposure and behaviour production has today (base 6242eeec always ran the provisioner with this URL). The
+  explicit opt-out still fails closed, and jobs-only now needs an explicit `"false"` rather than an absent key.
+  Regression tests: launcher.test.cjs A1, A1b, A2, A8, A10; deployment-provisioner.test.cjs (pre-Phase-A env → on at
+  5 s; neither key → refused; jobs-only needs `"false"`); `workspace-provisioner.config.spec.ts` (legacy 5 s).
+- **Owner policy (2026-10-28):** unset is a compatibility path for deployments configured before Phase A only. Every
+  deployment configuration (committed composes and any platform-managed environment) sets the switch explicitly to
+  `"true"` or `"false"`; the launcher logs a start-up line asking for it whenever it runs in legacy mode.

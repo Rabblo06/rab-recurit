@@ -671,32 +671,54 @@ test('34 the jobs allowlist forwards AI_AGENTS_ENABLED (AI Phase 6a, default fal
   assert.equal(provisioner.env.AI_AGENTS_ENABLED, undefined);
 });
 
-// ---------------------------------------------------------------- Phase A (pa-provisioner): opt-in provisioner
+// ---------------------------------------------------------------- Phase A (pa-provisioner): provisioner switch
 
+// Explicit opt-out: the only way to run the jobs child alone (unset = legacy = provisioner on, see A1b).
 const disabledEnv = (overrides = {}) => {
-  const e = { ...env(), ...overrides };
-  delete e.CREWFLOW_PROVISIONER_ENABLED;
+  const e = { ...env(), ...overrides, CREWFLOW_PROVISIONER_ENABLED: 'false' };
   delete e.CREWFLOW_PROVISIONER_DATABASE_URL;
   return e;
 };
 const PROVISIONER_ONLY_KEYS = ['CREWFLOW_PROVISIONER_DATABASE_URL', 'CREWFLOW_PROVISIONER_ENABLED', 'DATABASE_URL_UNPOOLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS'];
 
-test('A1 disabled (unset / empty / "false") → ONE child (jobs); the provisioner is never planned', () => {
-  for (const flag of [undefined, '', ' ', 'false']) {
-    const e = disabledEnv();
-    if (flag !== undefined) e.CREWFLOW_PROVISIONER_ENABLED = flag;
-    const plan = makePlan(e);
+test('A1 explicitly disabled ("false") → ONE child (jobs); the provisioner is never planned', () => {
+  for (const flag of ['false', ' false ']) {
+    const plan = makePlan({ ...disabledEnv(), CREWFLOW_PROVISIONER_ENABLED: flag });
     assert.equal(plan.length, 1, String(flag));
     assert.equal(plan[0].name, 'jobs');
     assert.ok(!plan.some((s) => /workspace-provisioner/.test(s.entry)));
   }
 });
 
-test('A2 disabled + CREWFLOW_PROVISIONER_DATABASE_URL present → refused (fail closed), by name only', () => {
-  for (const flag of [undefined, '', 'false']) {
+test('A1b switch unset or empty (every pre-Phase-A environment) → the pre-Phase-A behaviour: provisioner ON at 5 s, URL required', () => {
+  for (const flag of [undefined, '', ' ']) {
     const e = { ...env() };
     if (flag === undefined) delete e.CREWFLOW_PROVISIONER_ENABLED;
     else e.CREWFLOW_PROVISIONER_ENABLED = flag;
+    const plan = makePlan(e);
+    assert.deepEqual(plan.map((s) => s.name), ['jobs', 'provisioner'], String(flag));
+    assert.equal(plan[1].env.CREWFLOW_PROVISIONER_ENABLED, 'true');
+    assert.equal(plan[1].env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, String(PROVISIONER_INTERVAL.legacyDefaultSeconds));
+    assert.equal(PROVISIONER_INTERVAL.legacyDefaultSeconds, 5);
+    // An explicit interval still wins.
+    assert.equal(makePlan({ ...e, WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '30' })[1].env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, '30');
+    // Without the URL it refuses exactly as the base launcher did — never a silent jobs-only start.
+    const noUrl = { ...e };
+    delete noUrl.CREWFLOW_PROVISIONER_DATABASE_URL;
+    let refused = null;
+    try {
+      makePlan(noUrl);
+    } catch (err) {
+      refused = err;
+    }
+    assert.ok(refused instanceof launcher.BundleConfigError, String(flag));
+    assert.match(refused.message, /^Missing CREWFLOW_PROVISIONER_DATABASE_URL$/);
+  }
+});
+
+test('A2 explicitly disabled + CREWFLOW_PROVISIONER_DATABASE_URL present → refused (fail closed), by name only', () => {
+  for (const flag of ['false']) {
+    const e = { ...env(), CREWFLOW_PROVISIONER_ENABLED: flag };
     let error = null;
     try {
       makePlan(e);
@@ -772,25 +794,30 @@ test('A7 launcher interval bounds equal the provisioner entrypoint constants (re
   const text = fs.readFileSync(file, 'utf8');
   const constant = (name) => Number(new RegExp(`export const ${name} = (\\d+);`).exec(text)?.[1]);
   assert.equal(constant('PROVISIONER_INTERVAL_DEFAULT_SECONDS'), PROVISIONER_INTERVAL.defaultSeconds);
+  assert.equal(constant('PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS'), PROVISIONER_INTERVAL.legacyDefaultSeconds);
   assert.equal(constant('PROVISIONER_INTERVAL_MIN_SECONDS'), PROVISIONER_INTERVAL.minSeconds);
   assert.equal(constant('PROVISIONER_INTERVAL_MAX_SECONDS'), PROVISIONER_INTERVAL.maxSeconds);
   // The longest interval plus a slow cycle must still settle inside the health window.
   assert.ok(PROVISIONER_INTERVAL.maxSeconds * 1000 * 2 <= health.ROLES.provisioner.settledMaxAgeMs);
 });
 
-test('A8 health: a disabled provisioner is not expected; an enabled one still is; an invalid flag is null (fail closed)', () => {
-  assert.deepEqual(Object.keys(health.rolesFor({})), ['jobs']);
+test('A8 health: a disabled provisioner is not expected; an enabled or legacy one still is; an invalid flag is null (fail closed)', () => {
+  // Unset/empty = legacy = the provisioner runs, so the health check must still expect it.
+  assert.deepEqual(Object.keys(health.rolesFor({})).sort(), ['jobs', 'provisioner']);
+  assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: '' })).sort(), ['jobs', 'provisioner']);
   assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'false' })), ['jobs']);
   assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'true' })).sort(), ['jobs', 'provisioner']);
   assert.equal(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'yes' }), null);
+  assert.deepEqual(['true', 'false', '', undefined, 'yes'].map((v) => health.provisionerMode(v === undefined ? {} : { CREWFLOW_PROVISIONER_ENABLED: v })), ['on', 'off', 'legacy', 'legacy', null]);
   const jobsOnly = { [J]: goodBeat('jobs', 100) };
-  const disabled = health.evaluate({ now: NOW, roles: health.rolesFor({}), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({ 100: 1000 }) });
+  const off = { CREWFLOW_PROVISIONER_ENABLED: 'false' };
+  const disabled = health.evaluate({ now: NOW, roles: health.rolesFor(off), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({ 100: 1000 }) });
   assert.equal(disabled.healthy, true, JSON.stringify(disabled));
   const enabled = health.evaluate({ now: NOW, roles: health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'true' }), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({ 100: 1000 }) });
   assert.equal(enabled.healthy, false);
   assert.match(enabled.roles.find((r) => r.role === 'provisioner').problems.join('; '), /no heartbeat file/);
   // A dead jobs child is still unhealthy when the provisioner is disabled.
-  const dead = health.evaluate({ now: NOW, roles: health.rolesFor({}), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({}) });
+  const dead = health.evaluate({ now: NOW, roles: health.rolesFor(off), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({}) });
   assert.equal(dead.healthy, false);
 });
 
@@ -802,13 +829,12 @@ test('A9 health CLI: exits 1 on an invalid flag without echoing it', () => {
   assert.ok(!r.stdout.includes('maybe'));
 });
 
-test('A10 main() refuses disabled + provisioner URL with exit 1, naming the variable only', async () => {
+test('A10 main() refuses explicitly disabled + provisioner URL with exit 1, naming the variable only', async () => {
   const captured = [];
   const original = console.error;
   console.error = (...a) => captured.push(a.join(' '));
   try {
-    const e = { ...env(), CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' };
-    delete e.CREWFLOW_PROVISIONER_ENABLED;
+    const e = { ...env(), CREWFLOW_PROVISIONER_ENABLED: 'false', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' };
     assert.equal(await launcher.main(e), 1);
   } finally {
     console.error = original;

@@ -254,7 +254,7 @@ services:
   # HWS_RUNTIME_ENABLED "false" (provisioning is enabled by the committed
   # CREWFLOW_PROVISIONER_ENABLED "true"; HWS on the jobs child would switch
   # runtime routing — a separate, unapproved cutover), any override of the
-  # committed CREWFLOW_PROVISIONER_ENABLED "true" (without it the launcher starts
+  # committed CREWFLOW_PROVISIONER_ENABLED "true" (an override to "false" starts
   # no provisioner and REFUSES to start while CREWFLOW_PROVISIONER_DATABASE_URL is
   # set — production has no other path that builds workspaces), NODE_OPTIONS (never forwarded anyway), DB_TARGET, BOOTSTRAP_ADMIN_*,
   # TEST_*, AUTH_*_ISSUER_URL, and any override of the committed keys below.
@@ -292,11 +292,12 @@ services:
       # HWS routing OFF until gate G4. Forwarded unchanged to both children
       # (Phase A: no longer forced to "true" for the provisioner child).
       HWS_RUNTIME_ENABLED: "false"
-      # Phase A (pa-provisioner) DEPLOY PREREQUISITE: the provisioner child is
-      # opt-in. Production needs it (the privileged reconciler is the only path
-      # that builds new workspaces here — see WORKSPACE PROVISIONING PATH above),
-      # so it is enabled explicitly. Removing this line stops workspace
-      # provisioning AND makes the launcher refuse to start while
+      # Phase A (pa-provisioner): the provisioner switch. Production needs the
+      # provisioner (the privileged reconciler is the only path that builds new
+      # workspaces here — see WORKSPACE PROVISIONING PATH above), so it is
+      # enabled explicitly. Without this line the launcher keeps the
+      # pre-Phase-A behaviour (provisioner on, 5 s); "false" would stop
+      # workspace provisioning AND make the launcher refuse to start while
       # CREWFLOW_PROVISIONER_DATABASE_URL is entered.
       CREWFLOW_PROVISIONER_ENABLED: "true"
       # Polling interval (5..120 s; the code default became 60 s in Phase A).

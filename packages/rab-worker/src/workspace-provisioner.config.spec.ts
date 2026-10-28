@@ -1,5 +1,6 @@
 import {
   PROVISIONER_INTERVAL_DEFAULT_SECONDS,
+  PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS,
   PROVISIONER_INTERVAL_MAX_SECONDS,
   PROVISIONER_INTERVAL_MIN_SECONDS,
   ProvisionerConfigError,
@@ -64,6 +65,14 @@ describe('resolveProvisionerConfig (Phase A)', () => {
         /^WORKSPACE_PROVISIONER_INTERVAL_SECONDS must be a whole number of seconds from 5 to 120/,
       );
     }
+  });
+
+  it('legacy HWS gate (switch unset) keeps the pre-Phase-A 5 s cadence unless the interval is set; the explicit switch gets 60 s', () => {
+    expect(PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS).toBe(5);
+    expect(resolveProvisionerConfig({ HWS_RUNTIME_ENABLED: 'true' })).toMatchObject({ provision: true, intervalSeconds: 5, intervalMs: 5_000 });
+    expect(resolveProvisionerConfig({ CREWFLOW_PROVISIONER_ENABLED: '', HWS_RUNTIME_ENABLED: 'true' }).intervalSeconds).toBe(5);
+    expect(resolveProvisionerConfig({ HWS_RUNTIME_ENABLED: 'true', WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '30' }).intervalSeconds).toBe(30);
+    expect(resolveProvisionerConfig({ CREWFLOW_PROVISIONER_ENABLED: 'true', HWS_RUNTIME_ENABLED: 'true' }).intervalSeconds).toBe(60);
   });
 
   it('validates the interval even when not provisioning, so a bad value is reported rather than silently ignored', () => {
