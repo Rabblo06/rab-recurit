@@ -26,30 +26,32 @@ import path from 'node:path';
  */
 test.skip(process.env.RUN_PERF_BASELINE !== 'true', 'gated — perf baseline capture, not a correctness test');
 
-const BASE_URL = 'http://127.0.0.1:5173';
-const EMAIL = 'manager.a.e2e@example.test';
-const PASSWORD = 'ChangeMe123!';
+const BASE_URL = process.env.E2E_WEB_ORIGIN ?? 'http://127.0.0.1:5173';
+const EMAIL = process.env.E2E_MANAGER_A_EMAIL ?? 'manager.a.e2e@example.test';
+const PASSWORD = process.env.E2E_MANAGER_PASSWORD ?? 'ChangeMe123!';
 
 test('P1A frontend baseline: cold shell-ready, cold authorized-data-ready, request count, warm navigation', async ({ page }) => {
   const requestsDuringLogin: string[] = [];
 
   // ---- cold shell-ready: the /login page itself ----
   const coldLoginNav = await page.goto(`${BASE_URL}/login`);
-  await page.getByLabel('Email').waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: 'Continue with email' }).waitFor({ state: 'visible' });
   const loginPaintTiming = await page.evaluate(() => {
     const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
     const paint = performance.getEntriesByType('paint').find((e) => e.name === 'first-contentful-paint');
     return { domContentLoadedMs: nav ? Math.round(nav.domContentLoadedEventEnd) : null, firstContentfulPaintMs: paint ? Math.round(paint.startTime) : null };
   });
 
+  await page.getByRole('button', { name: 'Continue with email' }).click();
+
   await page.getByLabel('Email').fill(EMAIL);
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
 
   page.on('request', (req) => requestsDuringLogin.push(req.url()));
 
   const loginStart = Date.now();
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   // "authorized-data-ready" = the post-login shell's own nav is actually visible, not merely URL==/.
   await page.locator('.sidebar-nav', { hasText: 'Dashboard' }).waitFor({ state: 'visible', timeout: 15_000 });
   const coldAuthorizedDataReadyMs = Date.now() - loginStart;
@@ -58,7 +60,7 @@ test('P1A frontend baseline: cold shell-ready, cold authorized-data-ready, reque
 
   // ---- warm navigation: an already-bundled in-app route ----
   const warmStart = Date.now();
-  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Navigation modes' }).getByRole('button', { name: 'Settings', exact: true }).click();
   await page.waitForURL(/\/settings/);
   const warmNavigationMs = Date.now() - warmStart;
 

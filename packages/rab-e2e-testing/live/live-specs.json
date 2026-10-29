@@ -1,0 +1,5 @@
+{
+  "//": "The ONE list of live-backend web specs (file names under web/ without .spec.ts), per stack. Read by playwright.live.config.ts (testMatch, projects), live/run-live.sh (what it runs) and therefore check-spec-coverage.mjs (web-live).",
+  "console": ["smoke", "qa_shift_workflow", "table-toolbar-users", "table-toolbar-remaining-pages", "session-race", "cookie-race", "performance-baseline"],
+  "qa": ["devices-sessions-live", "ui-corrections-live"]
+}

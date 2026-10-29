@@ -3,13 +3,15 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 /**
- * UI corrections against a REAL API + REAL PostgreSQL/Redis — the DISPOSABLE ones only (API from source on 127.0.0.1:3999
- * against crewflow-test-db / crewflow-test-redis; console on the isolated Vite :5174). A throwaway workspace seeded via
- * TestIdentityFactory: one owner Manager, two Venue Managers (one active, one invite-expired) and three Staff.
+ * UI corrections against a REAL API + REAL PostgreSQL/Redis — the DISPOSABLE ones only (API on 127.0.0.1:3999 against a
+ * disposable test database and Redis; console on the Vite :5174), run by `live/run-live.sh` (CI job web-live). A throwaway
+ * workspace seeded via TestIdentityFactory (live/seed-live-e2e.ts): one owner Manager, two Venue Managers (one active, one
+ * invite-expired) and three Staff.
  * Required env: QA_UI (JSON written by the seed). Mutations (deactivate/activate/delete) touch only these records.
  */
-const API = 'http://127.0.0.1:3999/rest/v1';
-const ORIGIN = 'http://127.0.0.1:5174';
+// CI: the live job's qa stack (live/run-live.sh seeds QA_UI; playwright.live.config.ts project `qa`). Overridable for local runs.
+const API = `${process.env.E2E_QA_API_ORIGIN ?? 'http://127.0.0.1:3999'}/rest/v1`;
+const ORIGIN = process.env.E2E_QA_WEB_ORIGIN ?? 'http://127.0.0.1:5174';
 const OUT = path.resolve(__dirname, '.qa-shots/ui-corrections-2026-10-20/live');
 // Loaded in beforeAll, not at module level: a module-level read of a missing file is a LOAD error, which aborts
 // the whole Playwright run (every other spec included). Missing QA_UI now fails only this spec, immediately and by name.

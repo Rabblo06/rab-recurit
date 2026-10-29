@@ -9,6 +9,27 @@
         "command": "yarn playwright test",
         "cwd": "packages/rab-e2e-testing"
       }
+    },
+    "e2e-isolated": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "yarn playwright test -c playwright.isolated.config.ts",
+        "cwd": "packages/rab-e2e-testing"
+      }
+    },
+    "e2e-live": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "bash live/run-live.sh",
+        "cwd": "packages/rab-e2e-testing"
+      }
+    },
+    "e2e-coverage": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node check-spec-coverage.mjs",
+        "cwd": "packages/rab-e2e-testing"
+      }
     }
   },
   "tags": []

@@ -4204,7 +4204,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@playwright/test@npm:^1.63.0":
+"@playwright/test@npm:1.64.1":
   version: 1.64.1
   resolution: "@playwright/test@npm:1.64.1"
   dependencies:
@@ -4295,7 +4295,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@rab/e2e-testing@workspace:packages/rab-e2e-testing"
   dependencies:
-    "@playwright/test": "npm:^1.63.0"
+    "@playwright/test": "npm:1.64.1"
   languageName: unknown
   linkType: soft
 
