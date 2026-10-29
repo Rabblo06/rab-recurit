@@ -17,6 +17,7 @@ import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
 import { shiftTeamPolicy } from './v1/shift-team-policy';
 import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
 import { venuePhotoSql } from './v1/venue-photo';
+import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
 import { WORKSPACE_SCHEMA_V1_TEMPLATE } from './v1/workspace-schema-v1.template';
 
 /**
@@ -75,6 +76,7 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
   },
   { id: 'v1.016-archive-columns', version: 16, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: archiveColumnsSql },
   { id: 'v1.017-search-vectors', version: 17, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: searchVectorsSql },
+  { id: 'v1.018-venue-team-org-admin', version: 18, introducedBy: 'VenueTeamOrgAdmin1786721090000', sql: venueTeamOrgAdminSql },
 ];
 
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */

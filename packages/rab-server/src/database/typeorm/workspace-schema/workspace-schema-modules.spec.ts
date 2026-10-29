@@ -11,6 +11,8 @@ import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { composeServerPathTemplateV1ArchiveSearch } from './v1/server-path-template-archive-search';
 import { composeServerPathTemplateV1AttendanceMoney } from './v1/server-path-template-attendance-money';
 import { composeServerPathTemplateV1PayrollRestrict } from './v1/server-path-template-payroll-restrict';
+import { composeServerPathTemplateV1VenueTeamAdmin, expectedWorkspacePolicyCount } from './v1/server-path-template-venue-team-admin';
+import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
 import { errorClassOf, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 import {
   composeModulesForSentinel,
@@ -45,6 +47,7 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   ['v1.015-attendance-money-checks', 'ebaa9a29420c311e80e79601367f2866becb87eaf21fb508956225f9cbb01534'],
   ['v1.016-archive-columns', '45853be54b724a4d7d292a8d39a1998e22f9cf9f0c19e87e74489065357954aa'],
   ['v1.017-search-vectors', 'c8dcf4c8247323c4dbd5346e57cb69ea29c05aa16801af913c2e7b5663631d2a'],
+  ['v1.018-venue-team-org-admin', 'de2c5d96ac0d0637e8a2e876bf22c522c2847fa97c9c07b93dca43abdde24498'],
 ];
 
 describe('workspace schema modules (B3 single source of truth)', () => {
@@ -63,6 +66,27 @@ describe('workspace schema modules (B3 single source of truth)', () => {
 
   it('modules 1..17 compose exactly the frozen 1786719920000 server-path template (waves 4+5 lane DB5)', () => {
     expect(composeModulesForSentinel(17)).toBe(composeServerPathTemplateV1ArchiveSearch());
+  });
+
+  it('modules 1..18 compose exactly the frozen 1786721090000 server-path template (org-admin Assigned Staff)', () => {
+    expect(composeModulesForSentinel(18)).toBe(composeServerPathTemplateV1VenueTeamAdmin());
+  });
+
+  it('module 18 only adds the two org-admin policies on the existing tables, gated on scope and the effective permission', () => {
+    const sql = venueTeamOrgAdminSql(SERVER_PATH_SENTINEL_SCHEMA);
+    const created = sql.match(/CREATE POLICY (\w+) ON "[^"]+"\.(\w+)/g);
+    expect(created).toEqual([
+      `CREATE POLICY venue_manager_staff_org_admin ON "${SERVER_PATH_SENTINEL_SCHEMA}".venue_manager_staff`,
+      `CREATE POLICY staff_profile_org_admin_picker ON "${SERVER_PATH_SENTINEL_SCHEMA}".staff_profile`,
+    ]);
+    // SQL keywords only (case-sensitive): the predicate legitimately contains the override values 'grant' / 'revoke'.
+    expect(sql).not.toMatch(/\b(ALTER TABLE|DISABLE ROW|NO FORCE|GRANT [A-Z]|REVOKE [A-Z]|CREATE TABLE|DROP TABLE|BYPASSRLS)\b/);
+    // Both policies: bound org + workspace, the admin scope flag, revoke override denies, grant override or role allows.
+    expect(sql.match(/current_setting\('rab\.admin_scope'::text, true\) = 'venue_team'::text/g)).toHaveLength(3);
+    expect(sql.match(/upo\.effect = 'revoke'::text/g)).toHaveLength(3);
+    expect(sql.match(/upo\.effect = 'grant'::text/g)).toHaveLength(3);
+    expect(expectedWorkspacePolicyCount(17)).toBe(39);
+    expect(expectedWorkspacePolicyCount(18)).toBe(41);
   });
 
   it('the TypeScript provisioner applies exactly the module list (the two provisioning paths cannot drift)', () => {

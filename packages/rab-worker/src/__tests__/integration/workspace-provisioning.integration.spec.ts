@@ -32,6 +32,8 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -223,7 +225,8 @@ describeIfDb('workspace provisioning job (integration)', () => {
     expect(recorded.module_version).toBe(LATEST_WORKSPACE_MODULE_VERSION);
 
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
-    expect(policyCount[0]!.n).toBe(V1_EXPECTED.policies);
+    // A new workspace is provisioned at the latest module (v18 adds the 2 Assigned Staff policies: 39 → 41).
+    expect(policyCount[0]!.n).toBe(expectedWorkspacePolicyCount(LATEST_WORKSPACE_MODULE_VERSION));
 
     const fkCount: Array<{ n: number }> = await adminDataSource.query(
       `SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.contype = 'f'`,

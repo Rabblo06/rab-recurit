@@ -3854,6 +3854,52 @@ credential, migration or RLS policy.
   deployment configuration (committed composes and any platform-managed environment) sets the switch explicitly to
   `"true"` or `"false"`; the launcher logs a start-up line asking for it whenever it runs in legacy mode.
 
+## Assigned Staff for organisation administrators (owner decision 2026-10-28; committed on branch feat/assigned-staff-org-admin, for PR to main)
+
+- **Asset:** which Staff a Venue Manager can see and select (`venue_manager_staff`), and the names, refs, emails and
+  statuses of a workspace's Staff shown while choosing them.
+- **Before:** only the workspace owner (any owner, including the current Initial Manager) could view, add or remove a
+  Venue Manager's Assigned Staff — route `PermissionGuard(VENUE_MANAGER_CREATE)` + `RequireWorkspaceGuard`, service
+  `assertOwnWorkspaceVenueManager` + `assertWorkspaceOwner`, RLS `venue_manager_staff_owner`.
+- **After:** the SAME feature (same table, same `VenueManagerService` implementation, same audit actions, same UI
+  components) is also reachable by an organisation administrator — effective `manager.manage` in the caller's own
+  organisation: the CEO by default; a platform admin only through their own role or grant there. Workspace owners and
+  the Initial Manager are unchanged. Five layers:
+  1. route `rest/v1/org-admin/venue-managers/:id/{staff,assignable-staff}` — `JwtAuthGuard` + `PermissionGuard(MANAGER_MANAGE)`;
+  2. service `orgAdminTeamScope` re-checks `manager.manage` through `PermissionsService` (grant/revoke overrides
+     honoured), then DERIVES the workspace from the Venue Manager record of the caller's organisation and confirms it is
+     an active workspace of that organisation (`core.admin_workspace_in_org`); anything else is 404;
+  3. the shared implementation runs in `runInWorkspaceContext` bound to that workspace and binds
+     `rab.admin_scope = 'venue_team'` (reset by `TenantContextService.bindGucs` at the start of every transaction);
+  4. RLS (module v1.018, `core` and every workspace schema): `venue_manager_staff_org_admin` (ALL) and
+     `staff_profile_org_admin_picker` (SELECT) require the bound organisation and workspace, the scope flag, and the
+     effective permission computed exactly like `userHasPermissionTx` (no revoke override, and a grant override or a
+     role carrying `manager.manage`), pinned to the bound organisation; FORCE RLS unchanged;
+  5. the existing composite FKs pin team rows to one organisation + workspace on both sides.
+  Hardening (security review 2026-10-29): the assign WRITE re-checks its target in the same statement as the insert —
+  the Venue Manager must still be a `venue` profile of that organisation and workspace and, on the org-admin path
+  (whose workspace was resolved in an earlier transaction), still active or invited and its workspace still active — so
+  a suspended / moved Venue Manager or a workspace archived between the check and the write gets no row (404). Assign
+  eligibility now also requires `staff_profile.archived_at IS NULL` on both paths, the rule the picker already applied.
+- **Abuse cases (all refused, nothing written):** another organisation's CEO or platform admin → 404; a Venue Manager of
+  another organisation, an Internal Manager or an unknown id → 404; a Staff id of another workspace or an ineligible
+  status, or an archived Staff member → 404 for the whole request; removing a Staff id not on that team → 404; `organisationId` / `workspaceId` in the body or query → 400; a Manager without
+  `manager.manage` (including the owner) → 403; a revoke override → 403 at the route, refused in the service, and
+  denied by RLS even with the scope flag bound; Admin Inspect writes → 403 `INSPECT_READ_ONLY` (CF-02 unchanged).
+  `venue-team-org-admin.integration.spec.ts`; owner-path regression `venue-manager-venue-assignment.integration.spec.ts`.
+- **Audit:** the existing `venue_team.staff_assigned` / `venue_team.staff_unassigned` actions with the administrator as
+  actor and `metadata.flow = 'org_admin'`; owner-path rows are byte-for-byte unchanged.
+- **SECURITY TRADE-OFF (owner-approved 2026-10-28, "picker only"):** an administrator can read a workspace's Staff (name,
+  ref, email, phone, status) while choosing them, which Stage 2A had otherwise removed for org-wide administrators. The
+  widening is limited to the org-admin Assigned Staff methods by `rab.admin_scope`. That flag is set by the runtime
+  connection itself, so it stops accidental reach through other code paths but is NOT a boundary against a compromised
+  `crewflow_app` connection (the same trust level as `rab.actor_type` / `rab.team_shift_id`). Stricter alternative: a
+  narrow `rab_secure_owner` SECURITY DEFINER function for the picker list — rejected for now because Phase 0b is reducing,
+  not adding, definer functions.
+- **Known pre-existing gap (unchanged):** `manager_profile_tenant`'s org-wide branch (OrganisationIsolationHardening
+  1786717300000) checks roles only, so a user granted `manager.manage` purely by override cannot load the Managers
+  roster that opens these records. It fails closed; not widened here.
+
 ## Phase 0b — E1: crewflow → rab_secure_owner boundary (owner-approved 2026-10-28; committed 0d677bbf)
 
 - **Asset:** everything `rab_secure_owner` (NOLOGIN) owns or executes: the pre-auth tables (`user` incl. password and TOTP

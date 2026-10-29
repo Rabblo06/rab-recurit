@@ -62,9 +62,13 @@ describeIfDb('AI prompt-injection resistance (integration)', () => {
 
   it('an obedient model reading injected records tries forbidden tools and arguments: nothing is executed, everything is refused and audited, no data changes', async () => {
     const before = { own: await snapshot(org.orgId), victim: await snapshot(victim.orgId) };
+    // The seeded shifts are dated from now (the injected one at now + 58 h, ai-fixtures.ts): a fixed calendar month
+    // dropped it near month end. Read today .. today + 6 days (Europe/London), as the find_shifts check below does.
+    const londonDay = (offsetDays: number) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(Date.now() + offsetDays * 86_400_000));
     // 3w: data tools are reached ONLY through execute_tool; a direct domain name was never offered.
     const scripted = scriptedModel([
-      toolCallParts('execute_tool', { name: 'list_unfilled_shifts', args: { from: '2026-10-01', to: '2026-10-31' } }, undefined, 'c0'),
+      toolCallParts('execute_tool', { name: 'list_unfilled_shifts', args: { from: londonDay(0), to: londonDay(6) } }, undefined, 'c0'),
       // "send offers to everyone" — a tool that does not exist, called directly and through execute_tool:
       toolCallParts('send_offers', { shiftId: 'all', staffIds: ['*'] }, undefined, 'c1'),
       toolCallParts('execute_tool', { name: 'send_offers', args: { shiftId: 'all' } }, undefined, 'c1b'),

@@ -10,7 +10,7 @@ describe('TenantContextService', () => {
   // transaction, so a capability can never outlive the call that set it. Both resets are literal '' — never a
   // client-supplied parameter.
   const BIND_GUCS_SQL =
-    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true)`;
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true)`;
 
   function buildManager() {
     return { query: jest.fn().mockResolvedValue(undefined) } as unknown as EntityManager;

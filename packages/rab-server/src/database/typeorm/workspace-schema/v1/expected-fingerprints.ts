@@ -16,4 +16,8 @@ export const EXPECTED_WORKSPACE_FINGERPRINTS: Readonly<Record<number, string>> =
   // Waves 4+5 lane DB5 (ArchiveAndSearchSchema1786719920000): generated on the disposable crewflow-lane-db5 database.
   16: '3295a8a39f96b887edae863d67cef4441be6e58e3356ab781833264d28d3c394',
   17: '6a8c1dcc77c0f40819a6de484142b36fa2ec29e5aa96e4c61fa7398ea8723fb7',
+  // VenueTeamOrgAdmin1786721090000: generated on the disposable rab_p7 database (crewflow-test-db, PostgreSQL 16) from a
+  // workspace built by the TypeScript provisioner at module 18; equality with the server path and with a v17 workspace
+  // migrated forward is asserted by workspace-schema-migrator.integration.spec.ts.
+  18: '8b0e4b7f320928f92f212212a9d793fa77cc526f7d2690e0282fc7ad8c9021be',
 };

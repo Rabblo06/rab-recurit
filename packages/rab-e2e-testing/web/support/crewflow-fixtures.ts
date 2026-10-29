@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { setFixedDate } from './virtual-time';
 
 /** Deterministic API fixtures for the Crewflow new-UI screenshots (obviously-test data, no live API). */
 export const NOW = new Date('2026-10-19T09:30:00Z');
@@ -85,7 +86,7 @@ export async function fixtures(page: Page, opts: FixtureOptions = {}): Promise<F
   };
   const populatedAttendance = [0, 1, 2, 3, 4].map((i) => ({ id: `att-p${i}`, status: 'completed', clockInAt: day(-i - 1, 9), clockOutAt: day(-i - 1, 16), workedMinutes: 396, earnedPence: 9000, shiftId: `shift-${i + 1}`,
     startsAt: day(-i - 1, 9), endsAt: day(-i - 1, 16), venueName: VENUES[i % 3], roleName: 'Test Role', staffProfileId: `p-${i + 1}`, staffName: NAMES[i] }));
-  await page.clock.setFixedTime(NOW);
+  await setFixedDate(page, NOW);
   await page.route('**/rest/v1/**', async (route) => {
     const url = new URL(route.request().url());
     const p = url.pathname.replace('/rest/v1', '');

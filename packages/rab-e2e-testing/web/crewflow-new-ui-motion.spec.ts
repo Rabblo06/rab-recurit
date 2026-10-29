@@ -1,12 +1,15 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
 import { fixtures } from './support/crewflow-fixtures';
+import { advance, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Crewflow new-UI motion (2026-10-19): samples REAL rendered values every animation frame in the running app and
  * records a video per scenario, so the timings below are measured, not assumed. No reference video exists; the
  * expectations come from the written motion spec (tab 250ms, bulk bar slide-up, sidebar pill, calendar period,
  * chart tooltip, reduced motion = no movement).
+ * Timings run on the virtual clock (support/virtual-time.ts): each measurement freezes time, triggers, waits for the
+ * trigger to commit, then advances time by the window, so every frame is sampled at its exact time on any machine.
  */
 const OUT = path.resolve(__dirname, '.qa-shots/new-ui-2026-10-19/motion');
 test.use({ viewport: { width: 1440, height: 900 }, video: { mode: 'on', size: { width: 1440, height: 900 } } });
@@ -30,16 +33,19 @@ const distinct = (s: Array<[number, number | null]>) => new Set(s.map(([, v]) =>
 async function settle(page: Page, ms: number) { await page.waitForTimeout(ms); }
 
 test('tab indicator slides between page tabs (~250ms) and lands under the active tab', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/shifts');
   await expect(page.locator('.topbar-tabs .tab-link.active')).toHaveText(/All shifts/);
   await settle(page, 600);
-  await sample(page, '.tab-strip-indicator', 'new DOMMatrix(getComputedStyle(el).transform).m41', 1600);
+  await freezeTime(page);
+  await sample(page, '.tab-strip-indicator', 'new DOMMatrix(getComputedStyle(el).transform).m41', 600);
   await page.locator('.topbar-tabs .tab-link', { hasText: 'Upcoming' }).click();
-  // On a cold first load the route update can land a few hundred ms after the click; measure from when it does.
+  // The route update commits while time is frozen (however long it takes on a cold load); the slide starts after it.
   await expect(page.locator('.topbar-tabs .tab-link.active')).toHaveText(/Upcoming/);
-  await settle(page, 1650);
+  await advance(page, 650);
   const s = await samples(page);
+  await releaseTime(page);
   const target = await page.locator('.topbar-tabs .tab-link.active').evaluate((el) => (el as HTMLElement).offsetLeft);
   expect(distinct(s)).toBeGreaterThan(4); // moved through intermediate frames
   expect(Math.abs((s.at(-1)?.[1] ?? 0) - target)).toBeLessThan(1);
@@ -49,13 +55,16 @@ test('tab indicator slides between page tabs (~250ms) and lands under the active
 });
 
 test('floating bulk bar slides up on selection, count updates, clears on ×', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/shifts');
   await expect(page.locator('.table tbody tr').first()).toBeVisible();
+  await freezeTime(page);
   await sample(page, '.bulk-action-dock', 'new DOMMatrix(getComputedStyle(el).transform).m42', 500);
   await page.locator('.table tbody input[type=checkbox]').first().check();
-  await settle(page, 550);
+  await advance(page, 550);
   const s = (await samples(page)).filter(([, v]) => v != null);
+  await releaseTime(page);
   expect(s.length).toBeGreaterThan(3);
   expect(s[0][1]!).toBeGreaterThan(s.at(-1)![1]!); // started lower, rose into place
   await expect(page.locator('.bulk-action-bar')).toContainText('Selected: 1');
@@ -79,6 +88,7 @@ test('Users bulk bar offers the permitted Users actions', async ({ page }) => {
 });
 
 test('sidebar active pill slides to the new item while navigation is immediate', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   // Payroll is a lazy route: React Router keeps the old location (and pill) rendered until its code has loaded, and the
   // dev server compiles it on first request. Load it once first so the samples time the pill, not that compile.
@@ -87,28 +97,36 @@ test('sidebar active pill slides to the new item while navigation is immediate',
   await page.goto('/');
   await expect(page.locator('.nav-item.active')).toHaveText(/Dashboard/);
   await settle(page, 500);
-  // The window starts before the click; as in the tab-indicator test above, a slower runner can land the route update a
-  // few hundred ms after it, so sample long enough to see the whole spring settle (the assertions are unchanged).
-  await sample(page, '.nav-active-pill', 'el.getBoundingClientRect().top', 1600);
+  await freezeTime(page);
+  await sample(page, '.nav-active-pill', 'el.getBoundingClientRect().top', 900);
   await page.locator('.nav-item', { hasText: 'Payroll' }).click();
   await expect(page).toHaveURL(/\/payroll$/); // route changes at once
-  await settle(page, 1650);
+  // The new active item commits while time is frozen; the spring then runs on the virtual clock.
+  await expect(page.locator('.nav-item.active')).toHaveText(/Payroll/);
+  await advance(page, 950);
   const s = (await samples(page)).filter(([, v]) => v != null);
+  await releaseTime(page);
   expect(distinct(s)).toBeGreaterThan(3);
   const final = await page.locator('.nav-item.active').evaluate((el) => el.getBoundingClientRect().top);
   expect(Math.abs(s.at(-1)![1]! - final)).toBeLessThan(1);
 });
 
 test('dashboard: week navigation transitions in the right direction; hours tooltip fades in on hover', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/');
   await expect(page.locator('.dash-week-card .dash-card-title')).toBeVisible();
   const before = await page.locator('.dash-week-card .dash-card-title').textContent();
-  await sample(page, '.dash-week-card', 'Math.max(...[...el.querySelectorAll(".dash-week-grid")].map((g) => new DOMMatrix(getComputedStyle(g).transform).m41))', 1500);
+  await settle(page, 700);
+  // The new week's grid mounts on the click (the previous week's data stays as placeholder while it loads) and its first
+  // render costs no virtual time, so the slide is sampled frame by frame even on a cold week view.
+  await freezeTime(page);
+  await sample(page, '.dash-week-card', 'Math.max(...[...el.querySelectorAll(".dash-week-grid")].map((g) => new DOMMatrix(getComputedStyle(g).transform).m41))', 600);
   await page.getByRole('button', { name: 'Next week' }).click();
   await expect(page.locator('.dash-week-card .dash-card-title')).not.toHaveText(before ?? '');
-  await settle(page, 1550);
+  await advance(page, 650);
   const s = (await samples(page)).filter(([, v]) => v != null);
+  await releaseTime(page);
   expect(s.some(([, v]) => v! > 1)).toBe(true); // new week entered from the right
   await expect(page.locator('.dash-week-card .dash-card-title')).not.toHaveText(before ?? '');
   await page.locator('.dash-bar-col').nth(4).hover();
@@ -118,13 +136,18 @@ test('dashboard: week navigation transitions in the right direction; hours toolt
 
 test('reduced motion: tab indicator and bulk bar change state without movement', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/shifts');
   await settle(page, 400);
+  await freezeTime(page);
   await sample(page, '.tab-strip-indicator', 'new DOMMatrix(getComputedStyle(el).transform).m41', 400);
   await page.locator('.topbar-tabs .tab-link', { hasText: 'Completed' }).click();
-  await settle(page, 450);
-  expect(distinct(await samples(page))).toBeLessThanOrEqual(3); // before → after (+ at most one 1ms frame)
+  await expect(page.locator('.topbar-tabs .tab-link.active')).toHaveText(/Completed/);
+  await advance(page, 450);
+  const reduced = await samples(page);
+  await releaseTime(page);
+  expect(distinct(reduced)).toBeLessThanOrEqual(3); // before → after (+ at most one 1ms frame)
   await page.locator('.table tbody input[type=checkbox]').first().check();
   await expect(page.locator('.bulk-action-bar')).toContainText('Selected: 1');
 });

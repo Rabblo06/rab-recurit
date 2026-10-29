@@ -476,6 +476,17 @@ export default function UserDetailPanel() {
   });
   // A workspace Venue Manager opened by their own Manager (reference layout: More tabs, Assigned staff tab, photo tile).
   const vmScope = userType === 'manager' && scope === 'workspace' && record?.type === 'venue';
+  // Same cache entry as the Users page. `manager.manage` is the caller's effective permission (overrides honoured).
+  const { data: capabilities } = useQuery({
+    queryKey: ['auth', 'capabilities'],
+    queryFn: async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,
+    enabled: open && userType === 'manager' && scope === 'org',
+    staleTime: 300_000,
+  });
+  // A Venue Manager opened from the organisation Managers list by an organisation administrator (CEO, or a platform admin
+  // in their own organisation): the same Assigned staff tab and picker, served by the org-admin routes.
+  const orgAdminTeam = userType === 'manager' && scope === 'org' && record?.type === 'venue' && capabilities?.['manager.manage'] === true;
+  const teamApiBase = vmScope ? '/venue-managers' : orgAdminTeam ? '/org-admin/venue-managers' : null;
 
   const { data: timeline, isLoading: timelineLoading } = useQuery({
     queryKey: [endpoint, id, 'timeline'],
@@ -763,7 +774,7 @@ export default function UserDetailPanel() {
             ]}
             overflow={[
               { id: 'note', label: 'Notes', icon: <IconNotes size={14} /> },
-              ...(vmScope ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
+              ...(teamApiBase ? [{ id: 'staff' as const, label: 'Assigned staff', icon: <IconUsersGroup size={14} /> }] : []),
               ...(userType === 'staff' ? [{ id: 'reviews' as const, label: 'Staff reviews', icon: <IconStar size={14} /> }] : []),
             ]}
             value={tab}
@@ -966,8 +977,8 @@ export default function UserDetailPanel() {
             )}
 
             {tab === 'reviews' && userType === 'staff' && id && <StaffReviewsTab staffId={id} staffName={name} />}
-            {tab === 'staff' && vmScope && id && (
-              <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
+            {tab === 'staff' && teamApiBase && id && (
+              <VenueManagerTeamSection venueManagerId={id} venueManagerName={name} apiBase={teamApiBase} pickerOpen={teamPickerOpen} onPickerClose={() => setTeamPickerOpen(false)} />
             )}
 
             {tab === 'timeline' && (
@@ -1109,7 +1120,7 @@ export default function UserDetailPanel() {
           </motion.div>
           </AnimatePresence>
 
-          {(tab === 'home' || (tab === 'staff' && vmScope)) && (
+          {(tab === 'home' || (tab === 'staff' && teamApiBase)) && (
             <div className="detail-bottom-bar">
               <div className="detail-more-menu" ref={menuRef}>
                 <button type="button" className="btn-icon" title="More actions" aria-label="More actions" onClick={() => setMenuOpen((o) => !o)}>
@@ -1169,7 +1180,7 @@ export default function UserDetailPanel() {
                   </div>
                 )}
               </div>
-              {tab === 'staff' && vmScope ? (
+              {tab === 'staff' && teamApiBase ? (
                 <button type="button" className="btn btn-outline" style={{ gap: 6 }} onClick={() => setTeamPickerOpen(true)}>
                   <IconPlus size={14} />
                   Add Staff

@@ -2,6 +2,7 @@ import { Client } from 'pg';
 
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './workspace-schema-modules';
 import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
+import { expectedWorkspacePolicyCount, KNOWN_WORKSPACE_POLICY_COUNTS } from './v1/server-path-template-venue-team-admin';
 import { pgClientRunner, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 
 /**
@@ -47,6 +48,7 @@ export const V1_EXPECTED = {
   // vm_update and owner (1786718200000) + shift_staff_review_scope (1786718300000) + shift_staff_review_worker_scan
   // (1786718400000) + payroll_record_select / _insert / _update (1786718800000) + payroll_record_worker_select / _update
   // (1786719000000) + 10 run/payslip policies (1786719200000; payroll_record_update re-created).
+  // Module 18 (1786721090000) adds 2 more: verifyStructure uses expectedWorkspacePolicyCount(version), not this base count.
   policies: 39,
 } as const;
 
@@ -140,10 +142,11 @@ export async function provisionWorkspaceSchema(
     const statusBefore = reg.rows[0]!.status;
 
     if (statusBefore === 'READY') {
-      // Waves 4+5 lane DB5: an existing READY schema is verified against the index count of ITS recorded module version
-      // (a v15 schema awaiting the migrator must not be declared broken — and FAILED — by a newer image).
+      // Waves 4+5 lane DB5: an existing READY schema is verified against the index (and, from module 18, policy) count of
+      // ITS recorded module version (a v15 schema awaiting the migrator must not be declared broken — and FAILED — by a
+      // newer image).
       const recorded = Number(reg.rows[0]!.module_version ?? 0);
-      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? expectedWorkspaceIndexCount(recorded) : undefined);
+      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? recorded : undefined);
       await client.query('COMMIT');
       return { workspaceId, schemaName, outcome: 'ALREADY_READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
     }
@@ -161,7 +164,7 @@ export async function provisionWorkspaceSchema(
     await applyTemplate(client, schemaName);
     await bindWorkspace(client, schemaName, workspaceId);
     if (options.afterApply) await options.afterApply(schemaName);
-    await verifyStructure(client, schemaName, workspaceId, expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
+    await verifyStructure(client, schemaName, workspaceId, LATEST_WORKSPACE_MODULE_VERSION);
 
     // One call moves the registry and manager_workspace to READY together.
     await client.query('SELECT core.mark_workspace_schema_ready($1, $2)', [workspaceId, WORKSPACE_SCHEMA_VERSION]);
@@ -212,11 +215,14 @@ async function bindWorkspace(client: Client, schemaName: string, workspaceId: st
 }
 
 /**
- * `expectedIndexes`: the index count of the module version being verified (Waves 4+5 lane DB5: modules 16/17 add indexes,
- * see v1/server-path-template-archive-search.ts). Undefined (a READY schema with no recorded version yet) = any known
- * count; the ledger/fingerprint step then proves the exact structure.
+ * `moduleVersion`: the module version being verified. The index count depends on it (Waves 4+5 lane DB5: modules 16/17 add
+ * indexes, see v1/server-path-template-archive-search.ts) and so does the policy count (module 18 adds 2 policies, see
+ * v1/server-path-template-venue-team-admin.ts). Undefined (a READY schema with no recorded version yet) = any known count;
+ * the ledger/fingerprint step then proves the exact structure.
  */
-async function verifyStructure(client: Client, schemaName: string, workspaceId: string, expectedIndexes?: number): Promise<void> {
+async function verifyStructure(client: Client, schemaName: string, workspaceId: string, moduleVersion?: number): Promise<void> {
+  const expectedIndexes = moduleVersion === undefined ? undefined : expectedWorkspaceIndexCount(moduleVersion);
+  const expectedPolicies = moduleVersion === undefined ? undefined : expectedWorkspacePolicyCount(moduleVersion);
   const count = async (sql: string): Promise<number> => (await client.query<{ n: number }>(sql, [schemaName])).rows[0]!.n;
   const fail = (what: string): never => {
     throw new WorkspaceSchemaProvisioningError(`verification failed: ${what}`, 'verify');
@@ -233,7 +239,10 @@ async function verifyStructure(client: Client, schemaName: string, workspaceId: 
   if (expectedIndexes === undefined ? !(KNOWN_WORKSPACE_INDEX_COUNTS as readonly number[]).includes(indexes) : indexes !== expectedIndexes) {
     fail('index count');
   }
-  if (await count(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`) !== V1_EXPECTED.policies) fail('policy count');
+  const policies = await count(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`);
+  if (expectedPolicies === undefined ? !(KNOWN_WORKSPACE_POLICY_COUNTS as readonly number[]).includes(policies) : policies !== expectedPolicies) {
+    fail('policy count');
+  }
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace
                     WHERE ns.nspname = $1 AND k.contype = 'f'`) !== V1_EXPECTED.foreignKeys) fail('foreign key count');
   if (await count(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace

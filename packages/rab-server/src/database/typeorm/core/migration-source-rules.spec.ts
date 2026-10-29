@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   migrationSourceViolations,
   PHASE_0B_MIGRATION_TIMESTAMP,
+  PRE_PHASE_0B_HELD_TO_POST_0B_RULES,
   PRE_PHASE_0B_MIGRATIONS,
   prePhase0bMigrationFingerprint,
 } from './migration-source-rules';
@@ -11,8 +12,16 @@ import {
 /** M2 early-warning scan. The catalog drift check in the restricted-migrator CI job is the authoritative gate. */
 describe('core migrations after Phase 0b follow the scoped-CREATE and runtime-privilege rules (source scan)', () => {
   const dir = join(__dirname, 'migrations');
-  const later = readdirSync(dir)
-    .filter((f) => /^\d{13}-.*\.ts$/.test(f) && Number(f.slice(0, 13)) > PHASE_0B_MIGRATION_TIMESTAMP);
+  const later = readdirSync(dir).filter(
+    (f) =>
+      /^\d{13}-.*\.ts$/.test(f) &&
+      (Number(f.slice(0, 13)) > PHASE_0B_MIGRATION_TIMESTAMP || PRE_PHASE_0B_HELD_TO_POST_0B_RULES.has(f.replace(/\.ts$/, ''))),
+  );
+
+  it('every pre-0b migration held to the post-0b rules exists (a typo would silently exempt it)', () => {
+    const files = new Set(readdirSync(dir).map((f) => f.replace(/\.ts$/, '')));
+    expect([...PRE_PHASE_0B_HELD_TO_POST_0B_RULES].filter((n) => !files.has(n))).toEqual([]);
+  });
 
   it('the chain up to Phase 0b is frozen: no new migration is back-dated before it (it would skip every post-0b check)', () => {
     const names = readdirSync(dir).filter((f) => /^\d{13}-[^.]+\.ts$/.test(f)).map((f) => f.replace(/\.ts$/, ''));

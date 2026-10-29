@@ -1,12 +1,16 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
 import { fixtures, type FixtureOptions } from './support/crewflow-fixtures';
+import { advance, advanceUntil, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Dashboard number & chart animation (2026-10-20) — FIXTURE-based browser proof on the real Dashboard route (isolated
  * Vite :5174, deterministic API fixtures; nothing touches the development API or database). The page's own painted
  * values are sampled every animation frame (requestAnimationFrame), from the moment each element first appears, so the
- * evidence is what the user sees — no animation is disabled or fast-forwarded. Videos are recorded at normal speed.
+ * evidence is what the user sees — no animation is disabled or skipped.
+ * Timings run on the virtual clock (support/virtual-time.ts): the dashboard loads with time frozen, its data arrives over
+ * the network in real time, and each window is advanced frame by frame from the moment that data is painted — so the
+ * measured durations are the animation's own, not the machine's. Videos therefore show the animation at stepping pace.
  */
 const OUT = path.resolve(__dirname, '.qa-shots/dashboard-numbers-2026-10-20');
 test.use({ viewport: { width: 1440, height: 900 }, video: { mode: 'on', size: { width: 1440, height: 900 } } });
@@ -81,50 +85,53 @@ function expectGrows(samples: Array<[number, string]>, final: number) {
   expect(Math.abs(v.at(-1)! - final)).toBeLessThan(0.005);
 }
 async function load(page: Page, opts: FixtureOptions) {
+  await useVirtualTime(page);
   await installRecorder(page);
   const state = await fixtures(page, opts);
-  // Warm the app's code into this browser context first (the unbundled dev server otherwise parses hundreds of modules
-  // while the dashboard animates, which skips frames). Data is not touched: Help makes no dashboard requests.
+  // Warm the app's code into this browser context first, so the dashboard's own load is short (its frames are timed on the
+  // virtual clock, so module parsing can no longer skip them). Data is not touched: Help makes no dashboard requests.
   await page.goto('/help');
   await page.getByRole('heading', { name: 'How can we help?' }).waitFor();
   await page.waitForTimeout(300);
   await page.evaluate(() => (window as unknown as { __recReset: () => void }).__recReset());
   return state;
 }
+/** Opens the dashboard with time frozen (the page and its data load in real time; animations wait for `advance`). */
+async function openDashboard(page: Page) {
+  await freezeTime(page);
+  await page.goto('/');
+  await freezeTime(page); // hold CSS animations in the new document too
+}
+/** True once the target shows a value (not the loading "–"); bar targets count once they exist. */
+const painted = (page: Page, ...names: string[]) => page.evaluate((sels) => sels.every((sel) => {
+  const el = document.querySelector(sel);
+  return !!el && el.textContent?.trim() !== '–';
+}), names.map((n) => TARGETS[n]![0]));
+/** The value a counter is heading for (`data-value`), read without waiting for its animation. */
+const target = (page: Page, name: string) => page.evaluate((sel) => document.querySelector(sel)?.closest('[data-value]')?.getAttribute('data-value')
+  ?? document.querySelector(sel)?.querySelector('[data-value]')?.getAttribute('data-value') ?? null, TARGETS[name]![0]);
 /**
- * Frame evidence without disturbing the animation: Chrome's screencast streams painted frames with wall-clock
- * timestamps (a page.screenshot during the animation stalls rendering). Returns a saver that writes the frames nearest
- * to the requested offsets from `t0` (ms since epoch).
+ * Frame evidence at exact offsets (ms of virtual time from now), then advances to `totalMs`. Time is frozen between
+ * steps, so a screenshot can no longer stall the animation it records.
  */
-async function screencast(page: Page) {
-  const cdp = await page.context().newCDPSession(page);
-  const frames: Array<{ at: number; data: string }> = [];
-  cdp.on('Page.screencastFrame', (f: { data: string; sessionId: number; metadata: { timestamp?: number } }) => {
-    frames.push({ at: (f.metadata.timestamp ?? Date.now() / 1000) * 1000, data: f.data });
-    void cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId });
-  });
-  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 });
-  return async (name: string, t0: number, offsets: number[]) => {
-    await cdp.send('Page.stopScreencast');
-    const fs = await import('node:fs');
-    fs.mkdirSync(OUT, { recursive: true });
-    return offsets.map((ms) => {
-      const best = frames.reduce((p, f) => (Math.abs(f.at - (t0 + ms)) < Math.abs(p.at - (t0 + ms)) ? f : p), frames[0]!);
-      fs.writeFileSync(path.join(OUT, `${name}-${String(ms).padStart(4, '0')}ms.jpg`), Buffer.from(best.data, 'base64'));
-      return `${ms}ms→${Math.round(best.at - t0)}ms`;
-    });
-  };
+async function shotsAt(page: Page, name: string, offsets: number[], totalMs: number) {
+  let at = 0;
+  for (const ms of offsets) {
+    await advance(page, ms - at);
+    at = ms;
+    await page.screenshot({ path: path.join(OUT, `${name}-${String(ms).padStart(4, '0')}ms.jpg`) });
+  }
+  await advance(page, totalMs - at);
+  return offsets.map((ms) => `${ms}ms`);
 }
 
 test('MILESTONE: the real Staff counter visibly counts up to its value (cold load, delayed data) — plus intermediate frames', async ({ page }) => {
   await load(page, { populated: true, summaryDelayMs: 800 });
-  const save = await screencast(page);
-  await page.goto('/');
+  await openDashboard(page);
   // t0 = the first painted NUMBER (the counter shows "–" while its delayed data is in flight).
-  await page.waitForFunction((sel) => { const t = document.querySelector(sel)?.textContent?.trim(); return !!t && t !== '–'; }, TARGETS.staff[0], { polling: 'raf' });
-  const t0 = Date.now();
-  await page.waitForTimeout(2000);
-  const shots = await save('cold', t0, [0, 300, 700, 1500]);
+  await advanceUntil(page, () => painted(page, 'staff'));
+  const shots = await shotsAt(page, 'cold', [0, 300, 700, 1500], 2000);
+  await releaseTime(page);
   const staff = await rec(page, 'staff');
   const r = expectCountUp(staff, '64');
   console.log(`staff: ${staff.length} frames, intermediates ${JSON.stringify(r.intermediates.slice(0, 12))}…, settled at ${r.settledAt}ms; shots ${shots.join(', ')}`);
@@ -133,8 +140,10 @@ test('MILESTONE: the real Staff counter visibly counts up to its value (cold loa
 
 test('populated widgets: hours decimals, strip % + fill, bars and venue bars grow, readiness and pipeline count', async ({ page }) => {
   await load(page, { populated: true });
-  await page.goto('/');
-  await page.waitForTimeout(2500);
+  await openDashboard(page);
+  await advanceUntil(page, () => painted(page, ...Object.keys(TARGETS)));
+  await advance(page, 2500);
+  await releaseTime(page);
   const hours = expectCountUp(await rec(page, 'hours'), '6.6');
   expect((await rec(page, 'hours')).every(([, v]) => /^\d+\.\d$/.test(v))).toBe(true);
   expectCountUp(await rec(page, 'accepted'), '33%');
@@ -149,12 +158,10 @@ test('populated widgets: hours decimals, strip % + fill, bars and venue bars gro
 
 test('real-data shape: Staff 5 counts up; unavailable stays –; 0.0 h and no shift stay honest; 100% confirmed fills', async ({ page }) => {
   await load(page, { realShape: true });
-  await page.goto('/');
-  const save = await screencast(page);
-  await page.locator(TARGETS.staff[0]).waitFor();
-  const t0 = Date.now();
-  await page.waitForTimeout(1900);
-  console.log(`real-shape frames ${(await save('real-shape', t0, [0, 300, 700, 1500])).join(', ')}`);
+  await openDashboard(page);
+  await advanceUntil(page, () => painted(page, 'staff'));
+  console.log(`real-shape frames ${(await shotsAt(page, 'real-shape', [0, 300, 700, 1500], 1900)).join(', ')}`);
+  await releaseTime(page);
   const staff = await rec(page, 'staff');
   const nums = staff.map(([, v]) => num(v));
   expect(nums[0]).toBe(0);
@@ -173,38 +180,50 @@ test('deliberate cached return (Users → Dashboard, Offers → Dashboard) repla
   await page.goto('/');
   await page.waitForTimeout(2000);
   for (const from of ['Users', 'Offers']) {
+    // On the virtual clock from here, so the sidebar pill has settled on `from` (not frozen mid-slide over the Dashboard
+    // link) before the return click.
+    await freezeTime(page);
     await page.getByRole('link', { name: from, exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/${from.toLowerCase()}$`));
+    await expect(page.locator('.nav-item.active')).toHaveText(new RegExp(from));
+    await advance(page, 1000);
     // The router keeps the old page painted until the new one commits — reset only once the old dashboard is gone.
     await expect(page.locator('.dash-counts')).toHaveCount(0);
     await page.evaluate(() => (window as unknown as { __recReset: () => void }).__recReset());
     await page.getByRole('link', { name: 'Dashboard', exact: true }).click();
-    await page.waitForTimeout(1900);
+    await expect(page.locator('.dash-counts')).toHaveCount(1); // the cached dashboard commits; its reveal waits for time
+    await advance(page, 1900);
     const staff = await rec(page, 'staff');
+    const venueBar = await rec(page, 'venueBar');
+    await releaseTime(page);
     console.log(`return from ${from}: first frames ${JSON.stringify(staff.slice(0, 6))}`);
     const r = expectCountUp(staff, '64');
-    expectGrows(await rec(page, 'venueBar'), 1);
+    expectGrows(venueBar, 1);
     console.log(`return from ${from}: staff settled at ${r.settledAt}ms, summary calls so far ${state.summaryCalls}`);
   }
 });
 
 test('unchanged polling does not replay; a genuine increase and decrease morph from the shown value; mid-flight retarget', async ({ page }) => {
   const state = await load(page, { populated: true, realtime: true });
-  await page.goto('/');
-  await page.waitForTimeout(2000);
+  // The whole test runs on the virtual clock: the first reveal has fully finished before the first push.
+  await openDashboard(page);
+  await advanceUntil(page, () => painted(page, 'staff'));
+  await advance(page, 2000);
   const refetch = async () => state.push('offer.sent');
   const calls = state.summaryCalls;
   console.log(`realtime requests before push: ${state.realtimeRequests}`);
+  // Each change is timed from the moment the refetched value reaches the counter.
   await page.evaluate(() => (window as unknown as { __recReset: () => void }).__recReset());
   await refetch();
-  await expect.poll(() => state.summaryCalls).toBeGreaterThan(calls);
-  await page.waitForTimeout(900);
+  await advanceUntil(page, () => state.summaryCalls > calls);
+  await advance(page, 900);
   expect(new Set((await rec(page, 'staff')).map(([, v]) => v))).toEqual(new Set(['64'])); // unchanged → no frames but 64
 
   state.summary = { ...state.summary, staffCount: 70 };
   await page.evaluate(() => (window as unknown as { __recReset: () => void }).__recReset());
   await refetch();
-  await page.waitForTimeout(1000);
+  await advanceUntil(page, async () => (await target(page, 'staff')) === '70');
+  await advance(page, 1000);
   const up = (await rec(page, 'staff')).map(([, v]) => num(v));
   expect(Math.min(...up)).toBeGreaterThanOrEqual(64);
   expect(new Set(up.filter((n) => n > 64 && n < 70)).size).toBeGreaterThanOrEqual(2);
@@ -213,8 +232,10 @@ test('unchanged polling does not replay; a genuine increase and decrease morph f
   state.summary = { ...state.summary, staffCount: 50 };
   await page.evaluate(() => (window as unknown as { __recReset: () => void }).__recReset());
   await refetch();
-  await page.waitForTimeout(1000);
+  await advanceUntil(page, async () => (await target(page, 'staff')) === '50');
+  await advance(page, 1000);
   const down = (await rec(page, 'staff')).map(([, v]) => num(v));
+  await releaseTime(page);
   expect(Math.max(...down)).toBeLessThanOrEqual(70);
   expect(Math.min(...down)).toBeGreaterThanOrEqual(50);
   expect(down.every((n, i) => i === 0 || n <= down[i - 1]!)).toBe(true);
@@ -223,13 +244,15 @@ test('unchanged polling does not replay; a genuine increase and decrease morph f
 
 test('a new target arriving halfway through the reveal continues from the painted value', async ({ page }) => {
   const state = await load(page, { populated: true, summaryDelayMs: 300, realtime: true });
-  await page.goto('/');
-  await page.waitForFunction(() => !!document.querySelector('.dash-counts > div:nth-child(1) dd [data-animating]'));
-  await page.waitForTimeout(350); // roughly a third of the way through the reveal
+  await openDashboard(page);
+  await advanceUntil(page, () => page.evaluate(() => !!document.querySelector('.dash-counts > div:nth-child(1) dd [data-animating]')));
+  await advance(page, 350); // roughly a third of the way through the reveal
   state.summary = { ...state.summary, staffCount: 30 };
   state.push('offer.confirmed');
-  await page.waitForTimeout(2200);
+  await advanceUntil(page, async () => (await target(page, 'staff')) === '30');
+  await advance(page, 2200);
   const seq = (await rec(page, 'staff')).map(([, v]) => num(v));
+  await releaseTime(page);
   const peak = Math.max(...seq);
   const afterPeak = seq.slice(seq.indexOf(peak));
   expect(peak).toBeGreaterThan(30); // it was on its way to 64 …
@@ -248,8 +271,10 @@ test('error and permission-restricted metrics are never animated or shown as 0',
 test('reduced motion: real values immediately, no count-up frames, everything works', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await load(page, { populated: true, summaryDelayMs: 300 });
-  await page.goto('/');
-  await page.waitForTimeout(1500);
+  await openDashboard(page);
+  await advanceUntil(page, () => painted(page, 'staff', 'hours', 'venueBar'));
+  await advance(page, 1500); // long enough for any count-up to have shown its frames
+  await releaseTime(page);
   const real = (vals: Array<[number, string]>) => new Set(vals.map(([, v]) => v).filter((v) => v !== '–'));
   expect(real(await rec(page, 'staff'))).toEqual(new Set(['64'])); // only the loading dash, then the real value
   expect(real(await rec(page, 'hours'))).toEqual(new Set(['6.6']));
@@ -267,11 +292,16 @@ test('rapid route changes settle on exact values; stable card sizes and header d
     await page.getByRole('link', { name: to, exact: true }).click();
     await page.waitForTimeout(120);
   }
-  await page.waitForTimeout(400);
+  // The size check runs on the virtual clock, from the moment the final dashboard has painted its numbers.
+  await freezeTime(page);
+  await advanceUntil(page, () => painted(page, 'staff', 'hours'));
+  await advance(page, 400);
   const sizes = () => page.evaluate(() => [...document.querySelectorAll('.dash-card, .topbar')].map((e) => { const r = e.getBoundingClientRect(); return `${Math.round(r.width)}x${Math.round(r.height)}`; }).join(','));
   const early = await sizes();
-  await page.waitForTimeout(1500);
-  expect(await sizes()).toBe(early); // numbers counting and bars growing never resize a card or the header
+  await advance(page, 1500);
+  const late = await sizes();
+  await releaseTime(page);
+  expect(late).toBe(early); // numbers counting and bars growing never resize a card or the header
   await expect(page.locator(TARGETS.staff[0])).toHaveText('64');
   await expect(page.locator('.dash-hours .dash-big > span[data-value]')).toHaveText('6.6');
   expect(errors).toEqual([]);

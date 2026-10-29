@@ -18,14 +18,17 @@ const ASSIGNABLE_EMPLOYMENT = new Set(['active', 'pending_compliance']);
 const ASSIGNABLE_ACCOUNT = new Set(['active', 'invited']);
 
 /**
- * Full-page "Select Staff" for a Venue Manager's team (same pattern as the shift staff picker). Lists the caller's own
- * workspace staff (GET /staff); people already on the team are shown checked and locked. Confirm assigns only the newly
- * ticked staff (POST /venue-managers/:id/staff, owner-only and re-validated on the server). Cancel changes nothing.
+ * Full-page "Select Staff" for a Venue Manager's team (same pattern as the shift staff picker). The workspace owner sees
+ * their own workspace staff (GET /staff); an organisation administrator sees the assignable staff of the Venue Manager's
+ * workspace (GET /org-admin/venue-managers/:id/assignable-staff, same row shape). People already on the team are shown
+ * checked and locked. Confirm assigns only the newly ticked staff (POST `${apiBase}/:id/staff`, re-validated on the
+ * server). Cancel changes nothing.
  */
-export default function VenueManagerStaffPicker({ venueManagerId, venueManagerName, assignedIds, onCancel, onConfirmed }: {
-  venueManagerId: string; venueManagerName: string; assignedIds: Set<string>;
+export default function VenueManagerStaffPicker({ venueManagerId, venueManagerName, apiBase = '/venue-managers', assignedIds, onCancel, onConfirmed }: {
+  venueManagerId: string; venueManagerName: string; apiBase?: string; assignedIds: Set<string>;
   onCancel: () => void; onConfirmed: (added: number) => void;
 }) {
+  const ownerFlow = apiBase === '/venue-managers';
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -46,13 +49,16 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
   }, [search]);
 
   const staff = useQuery({
-    queryKey: ['staff', 'vm-team-picker', query, page],
-    queryFn: async () => (await api.get<{ data: StaffRow[]; total: number }>('/staff', { params: { q: query || undefined, page, limit: PAGE_SIZE } })).data,
+    queryKey: ['staff', 'vm-team-picker', ownerFlow ? 'own' : venueManagerId, query, page],
+    queryFn: async () => (await api.get<{ data: StaffRow[]; total: number }>(
+      ownerFlow ? '/staff' : `${apiBase}/${venueManagerId}/assignable-staff`,
+      { params: { q: query || undefined, page, limit: PAGE_SIZE } },
+    )).data,
   });
   const rows = (staff.data?.data ?? []).filter((s) => ASSIGNABLE_EMPLOYMENT.has(s.employmentStatus) && ASSIGNABLE_ACCOUNT.has(s.accountStatus));
   const total = staff.data?.total ?? 0;
   const assign = useMutation({
-    mutationFn: async () => (await api.post<{ added: string[] }>(`/venue-managers/${venueManagerId}/staff`, { staffProfileIds: [...selected] })).data,
+    mutationFn: async () => (await api.post<{ added: string[] }>(`${apiBase}/${venueManagerId}/staff`, { staffProfileIds: [...selected] })).data,
     onSuccess: (r) => onConfirmed(r.added.length),
     // Was silent: a refused or failed assignment now says so, and the selection stays for another try.
     onError: (e) => { notifyApiError(e, { fallback: 'Could not add these staff members. Please try again.' }); },
@@ -76,7 +82,7 @@ export default function VenueManagerStaffPicker({ venueManagerId, venueManagerNa
       <div ref={title} tabIndex={-1}>
         <PageHeader inline title="Select Staff" subtitle={<><span>Choose the staff {venueManagerName} can see and select</span><span className="vm-staff-picker-count" role="status">{selected.size} selected · {assignedIds.size} already assigned</span></>} />
       </div>
-      <div className="vm-staff-picker-tab">Staff <span>Your workspace</span></div>
+      <div className="vm-staff-picker-tab">Staff <span>{ownerFlow ? 'Your workspace' : `${venueManagerName}’s workspace`}</span></div>
       <div className="list-toolbar vm-staff-picker-toolbar">
         <div className="toolbar-search"><IconSearch size={14} /><input aria-label="Search staff" placeholder="Search staff..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={assign.isPending} /></div>
       </div>

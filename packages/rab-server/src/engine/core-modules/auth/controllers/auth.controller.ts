@@ -149,7 +149,10 @@ export class AuthController {
       PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_DEACTIVATE,
       // Display hints for the web Payroll page (Approve / Reject / bulk approve). The payroll routes keep their own
       // PermissionGuard and PayrollService re-checks.
-      PermissionFlag.PAYROLL_VIEW, PermissionFlag.PAYROLL_APPROVE, PermissionFlag.PAYROLL_CALCULATE, PermissionFlag.PAYROLL_MARK_PAID];
+      PermissionFlag.PAYROLL_VIEW, PermissionFlag.PAYROLL_APPROVE, PermissionFlag.PAYROLL_CALCULATE, PermissionFlag.PAYROLL_MARK_PAID,
+      // Display hint for a Venue Manager's "Assigned staff" tab in the organisation Managers list (overrides honoured). The
+      // org-admin Assigned Staff routes keep their own PermissionGuard and VenueManagerService re-check.
+      PermissionFlag.MANAGER_MANAGE];
     const entries = await Promise.all(flags.map(async (flag) =>
       [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
     return Object.fromEntries(entries);
