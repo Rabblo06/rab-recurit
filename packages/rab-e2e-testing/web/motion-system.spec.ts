@@ -90,6 +90,10 @@ function settleTime(samples: Array<[number, number | null]>, eps = 0.5) {
 
 test('sidebar: the selected highlight slides from Dashboard to Users while the route changes immediately', async ({ page }) => {
   await fixtures(page);
+  // Users is a lazy route: React Router keeps the old location (and highlight) rendered until its code has loaded, and
+  // the dev server compiles it on first request. Load it once first so the samples time the highlight, not that compile.
+  await page.goto('/users');
+  await page.waitForLoadState('networkidle');
   await page.goto('/');
   await page.waitForLoadState('networkidle');
   const pill = '.nav-active-pill';
@@ -186,15 +190,24 @@ test('pipeline: a real stage change moves the card (never two copies); header an
   await page.goto('/venue-offers/shift-1');
   const button = page.getByRole('button', { name: 'Timesheet report' });
   await expect(button).toBeVisible();
-  await expect(page.locator('.pipeline-column[data-stage="CONFIRMED"] .pipeline-card')).toHaveCount(6);
+  // Since b57c5180 the board is tabbed (Staffing | Attendance | Closed) and lanes carry the normalised stage key
+  // ('CLOCKED IN' -> clocked_in). Before the shift starts it opens on Staffing.
+  const tabs = page.getByRole('tablist', { name: 'Pipeline stages' });
+  await expect(tabs.getByRole('tab', { name: /^Staffing/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.pipeline-column[data-stage="confirmed"] .pipeline-card')).toHaveCount(6);
   const headerBefore = await button.boundingBox();
   state.pipeline = board((i) => (i <= 2 ? 'CLOCKED IN' : 'CONFIRMED'));
-  await expect(page.locator('.pipeline-column[data-stage="CLOCKED IN"] .pipeline-card')).toHaveCount(2, { timeout: 12_000 });
+  // The poll moves the two cards out of Confirmed (and out of the Staffing tab) — they are not left behind.
+  await expect(page.locator('.pipeline-column[data-stage="confirmed"] .pipeline-card')).toHaveCount(4, { timeout: 12_000 });
+  await expect(page.locator('.pipeline-column[data-stage="confirmed"] h2 .pipeline-count')).toHaveText('4');
+  for (const id of ['offer-1', 'offer-2']) await expect(page.locator(`[data-offer-id="${id}"]`)).toHaveCount(0);
+  await expect(tabs.getByRole('tab', { name: /^Attendance/ }).locator('.pipeline-count')).toHaveText('2');
+  await tabs.getByRole('tab', { name: /^Attendance/ }).click();
+  await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(2);
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(OUT, 'pipeline-after-stage-change.png') });
   for (const id of ['offer-1', 'offer-2']) await expect(page.locator(`[data-offer-id="${id}"]`)).toHaveCount(1);
-  await expect(page.locator('.pipeline-column[data-stage="CONFIRMED"] .pipeline-card')).toHaveCount(4);
-  await expect(page.locator('.pipeline-column[data-stage="CLOCKED IN"] h2 .pipeline-count')).toHaveText('2');
+  await expect(page.locator('.pipeline-column[data-stage="clocked_in"] h2 .pipeline-count')).toHaveText('2');
   expect(await button.boundingBox()).toEqual(headerBefore);
 });
 
@@ -237,8 +250,10 @@ test.describe('reduced motion', () => {
     // Toast: dismissed by its (held) progress timer, not instantly.
     await page.goto('/venue-offers/shift-1');
     await page.getByRole('button', { name: 'Timesheet report' }).click();
-    await expect(page.getByRole('alert').filter({ hasText: 'Timesheet is not ready yet' })).toBeVisible();
+    // Owner-approved readiness copy since ca44a0f1 (TIMESHEET_NOT_READY in VenueOfferPipeline.tsx).
+    const notReady = page.getByRole('alert').filter({ hasText: "Timesheet isn't ready yet. Wait until all required staff have clocked out." });
+    await expect(notReady).toBeVisible();
     await page.waitForTimeout(1500);
-    await expect(page.getByRole('alert').filter({ hasText: 'Timesheet is not ready yet' })).toBeVisible();
+    await expect(notReady).toBeVisible();
   });
 });

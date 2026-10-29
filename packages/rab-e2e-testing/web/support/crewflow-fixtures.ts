@@ -52,7 +52,11 @@ const PIPELINE_STAFF = ['OFFERED', 'STAFF ACCEPTED', 'CONFIRMED', 'CONFIRMED', '
 
 export interface FixtureOptions {
   sparse?: boolean;
-  /** Test-only populated dashboard (nonzero counts, 6.6 h average, several venues) for motion proof. */
+  /**
+   * Test-only populated dashboard (nonzero counts, 6.6 h average, several venues) for motion proof. Its shifts are venue
+   * requests this manager created, so the readiness card loads the detailed checklist (dcddb901 serves the pipeline only
+   * for the caller's own venue-requested shift; any other shift gets the basic, percentage-free view).
+   */
   populated?: boolean;
   /** The shape of the owner's real dashboard: Staff 5, Venue managers unavailable, 0 h, no upcoming shift, 100% confirmed. */
   realShape?: boolean;
@@ -125,7 +129,7 @@ export async function fixtures(page: Page, opts: FixtureOptions = {}): Promise<F
     if (p === '/managers') return list([1, 2, 3, 4].map(manager));
     if (p === '/job-roles') return send([{ id: 'jr-1', name: 'Test Role', defaultRatePence: 1450 }]);
     if (p === '/venues') return list(venues);
-    if (p === '/shifts') return list(shifts);
+    if (p === '/shifts') return list(opts.populated ? shifts.map((s) => ({ ...s, createdBy: identity.id, requestedBy: 'vm-1' })) : shifts);
     if (p === '/shifts/requests') return list(venueOffers);
     if (p === '/offers') return list(offers);
     if (p === '/attendance') return list(attendance);

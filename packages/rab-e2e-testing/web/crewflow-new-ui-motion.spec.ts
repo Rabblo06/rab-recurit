@@ -80,6 +80,10 @@ test('Users bulk bar offers the permitted Users actions', async ({ page }) => {
 
 test('sidebar active pill slides to the new item while navigation is immediate', async ({ page }) => {
   await fixtures(page);
+  // Payroll is a lazy route: React Router keeps the old location (and pill) rendered until its code has loaded, and the
+  // dev server compiles it on first request. Load it once first so the samples time the pill, not that compile.
+  await page.goto('/payroll');
+  await page.waitForLoadState('networkidle');
   await page.goto('/');
   await expect(page.locator('.nav-item.active')).toHaveText(/Dashboard/);
   await settle(page, 500);

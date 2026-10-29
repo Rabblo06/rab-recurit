@@ -108,7 +108,8 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 1366, height: 90
       await expect(page.getByRole('row').filter({ hasText: 'Example Member' })).toHaveCount(1);
       await noOverflow(page);
       await page.screenshot({ path: info.outputPath('team.png'), fullPage: true });
-      await tab(page, 'Invite').click();
+      // 2ddda9fa (owner correction 2026-10-23): the Members tabs are Team | Add | Roles — the former Invite tab is Add.
+      await tab(page, 'Add').click();
       await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
       await expect(page.getByRole('heading', { name: 'Pending invitations' })).toBeVisible();
       await expect(page.getByLabel('Email address')).toBeVisible();
@@ -117,7 +118,9 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 1366, height: 90
       if (viewport.width === 390) expect((await page.getByLabel('Email address').boundingBox())!.x).toBeGreaterThanOrEqual(20);
       await page.screenshot({ path: info.outputPath('invite.png'), fullPage: true });
       await page.getByLabel('Invite or add').selectOption('add');
-      await expect(page.getByLabel('Leadership role')).toHaveValue('initial-manager');
+      // A CEO's single permitted leadership choice is shown fixed (read-only), not as a selector (2ddda9fa).
+      await expect(page.getByLabel('Leadership role')).toHaveValue('Initial Manager');
+      await expect(page.getByLabel('Leadership role')).toHaveAttribute('readonly', '');
       await expect(page.getByLabel('Email', { exact: true })).toBeVisible();
       await noOverflow(page);
       await page.screenshot({ path: info.outputPath('add-own-initial-manager.png'), fullPage: true });
@@ -148,13 +151,19 @@ for (const viewport of [{ width: 1920, height: 1080 }, { width: 1366, height: 90
     });
 
     test('Platform Add uses compact CEO and own-organisation Initial Manager forms (no organisation picker)', async ({ page }, info) => {
-      await fixtures(page, 'platform');
+      const state = await fixtures(page, 'platform');
       await page.goto(`${base}?tab=add`);
-      await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
-      await page.getByLabel('Invite or add').selectOption('add');
+      // A platform administrator with no workspace role has one permitted action, Add, so there is no Invite | Add
+      // selector (2ddda9fa); Add opens on the email-only CEO invitation (owner correction, no organisation name field).
+      await expect(page.getByLabel('Invite or add')).toHaveCount(0);
       await expect(page.getByLabel('Leadership role').locator('option')).toHaveText(['CEO (Organisation)', 'Initial Manager']);
-      await expect(page.getByLabel('Organisation name', { exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: 'Create Organisation & Invite CEO' })).toBeDisabled();
+      await expect(page.getByLabel('Leadership role')).toHaveValue('ceo');
+      await expect(page.getByLabel('CEO email', { exact: true })).toBeVisible();
+      await expect(page.getByLabel('Organisation name', { exact: true })).toHaveCount(0);
+      // An empty CEO invitation cannot be sent.
+      await page.getByRole('button', { name: 'Send invitation', exact: true }).click();
+      await expect(page.getByRole('alert')).toHaveText('Enter the CEO’s email address.');
+      expect(state.calls.some((call) => call.path === '/admin/organisation-invitations' && call.method === 'POST')).toBe(false);
       await noOverflow(page);
       await page.screenshot({ path: info.outputPath('add-ceo.png'), fullPage: true });
       await page.getByLabel('Leadership role').selectOption('initial-manager');
@@ -189,7 +198,7 @@ test('save confirms first, refreshes list and cached assignable roles, and survi
   await expect(tab(page, 'Roles')).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('.toast-success')).toBeVisible();
   await page.screenshot({ path: info.outputPath('saved-role.png'), fullPage: true });
-  await tab(page, 'Invite').click();
+  await tab(page, 'Add').click();
   await expect(page.getByLabel('Workspace role')).toContainText('Shift coordinator');
   await page.goBack();
   await expect(page).toHaveURL(`${base}?tab=roles`);
@@ -249,7 +258,10 @@ test('Invite resets after tabs; explicit mode follows Back/Forward and reload; C
   await fixtures(page);
   await page.goto(`${base}?tab=add`);
   await page.getByLabel('Invite or add').selectOption('add');
-  await expect(page.getByLabel('Leadership role').locator('option')).toHaveText(['Initial Manager']);
+  // CEO scope is own only: Initial Manager is the single choice, shown fixed rather than as a selector (2ddda9fa).
+  await expect(page.getByLabel('Leadership role')).toHaveValue('Initial Manager');
+  await expect(page.getByLabel('Leadership role')).toHaveAttribute('readonly', '');
+  await expect(page.getByLabel('Leadership role').locator('option')).toHaveCount(0);
   await expect(page.getByLabel('Organisation', { exact: true })).toHaveCount(0);
   await page.goBack();
   await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
@@ -258,7 +270,7 @@ test('Invite resets after tabs; explicit mode follows Back/Forward and reload; C
   await page.reload();
   await expect(page.getByLabel('Invite or add')).toHaveValue('add');
   await tab(page, 'Team').click();
-  await tab(page, 'Invite').click();
+  await tab(page, 'Add').click();
   await expect(page.getByLabel('Invite or add')).toHaveValue('invite');
   await expect(page).toHaveURL(`${base}?tab=add`);
 });
@@ -269,12 +281,21 @@ test('custom role invitation, resend and revoke stay connected to the existing A
   await expect(page.getByLabel('Workspace role').locator('option')).toHaveText(['Supervisor']);
   await page.getByLabel('Email address').fill('invitee@example.test');
   await page.getByRole('button', { name: 'Send invitation', exact: true }).click();
-  await expect(page.locator('.member-notice')).toHaveCSS('color', 'rgb(24, 113, 59)');
+  // ca44a0f1 (unified toasts) replaced the inline .member-notice with a success toast; its icon carries the green ink.
+  await expect(page.locator('.toast-success .toast-text')).toHaveText('1 invitation queued for delivery.');
+  await expect(page.locator('.toast-success')).toHaveAttribute('role', 'status');
+  await expect(page.locator('.toast-success .toast-icon')).toHaveCSS('color', 'rgb(24, 113, 59)');
   await expect(page.getByRole('row').filter({ hasText: 'invitee@example.test' })).toHaveCount(1);
   expect(state.calls.find((call) => call.path === '/member-invitations' && call.method === 'POST')?.body).toEqual({ emails: ['invitee@example.test'], roleId: 'role-1' });
   await page.screenshot({ path: info.outputPath('invitation-queued.png'), fullPage: true });
+  // Toasts pause while hovered and can sit over the row actions; dismiss each outcome once it has been read.
+  await page.locator('.toast-success').getByRole('button', { name: 'Dismiss notification' }).click();
+  await expect(page.locator('.toast-success')).toHaveCount(0);
   await page.getByRole('button', { name: 'Resend invitation to invitee@example.test' }).click();
   await expect.poll(() => state.calls.some((call) => call.path === '/member-invitations/inv-0/resend')).toBe(true);
+  await expect(page.locator('.toast-success .toast-text')).toHaveText('A new invitation link is queued for delivery. The previous link no longer works.');
+  await page.locator('.toast-success').getByRole('button', { name: 'Dismiss notification' }).click();
+  await expect(page.locator('.toast-success')).toHaveCount(0);
   await page.getByRole('button', { name: 'Revoke invitation to invitee@example.test' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: /Revoke/ }).click();
   await expect(page.getByText('No invitations pending. Your next teammate is one invite away.')).toBeVisible();
