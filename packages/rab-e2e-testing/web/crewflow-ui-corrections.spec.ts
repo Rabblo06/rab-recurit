@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
 import { fixtures } from './support/crewflow-fixtures';
+import { advance, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Crewflow UI corrections (2026-10-20) — FIXTURE evidence (mocked API on the isolated Vite :5174): selection colours,
@@ -13,16 +14,23 @@ test.use({ viewport: { width: 1440, height: 900 }, video: { mode: 'on', size: { 
 const rgb = (page: Page, sel: string, prop: string) => page.locator(sel).first().evaluate((el, p) => getComputedStyle(el).getPropertyValue(p), prop);
 
 test('Staff: white selected rows, charcoal checked + indeterminate boxes, reference bulk dock', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/users');
   const boxes = page.locator('.table tbody input[type=checkbox]');
+  await expect(boxes.first()).toBeVisible();
+  // Checkboxes ease their colour over --motion-hover (shared/motion.css), so the settled colours are read once that
+  // transition has run its full length on the virtual clock (support/virtual-time.ts), not mid-transition.
+  await freezeTime(page);
   await boxes.nth(0).check();
   await boxes.nth(1).check();
+  await advance(page, 500);
   const header = page.getByRole('checkbox', { name: 'Select all staff on this page' });
   expect(await header.evaluate((el) => (el as HTMLInputElement).indeterminate)).toBe(true);
   expect(await rgb(page, '.table tbody tr.row-selected td', 'background-color')).toBe('rgb(255, 255, 255)');
   expect(await rgb(page, '.table tbody input[type=checkbox]:checked', 'background-color')).toBe('rgb(36, 37, 43)');
   expect(await rgb(page, '.table tbody tr:not(.row-selected) td', 'background-color')).toBe('rgba(0, 0, 0, 0)'); // the soft canvas shows through
+  await releaseTime(page);
   const bar = page.getByRole('toolbar', { name: 'Bulk actions for selected records' });
   await expect(bar).toContainText('Selected: 2');
   await expect(bar.getByRole('button')).toHaveText(['Activate', 'Deactivate', 'Send Email', 'Delete']);
@@ -162,6 +170,7 @@ test('Help Center (search) and Support (honest unconfigured state)', async ({ pa
 });
 
 test('Dashboard: orange/charcoal palette, Venue managers = 2, no brown; the reveal replays on a deliberate return', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/');
   await expect(page.locator('.dash-counts')).toContainText('Venue managers');
@@ -181,8 +190,13 @@ test('Dashboard: orange/charcoal palette, Venue managers = 2, no brown; the reve
   await page.screenshot({ path: path.join(OUT, '7-dashboard.png'), fullPage: true });
 
   // Return visit (owner decision 2026-10-20): a deliberate return REPLAYS the number reveal from cached data.
+  // Sampled on the virtual clock (support/virtual-time.ts); the way out to Users runs on it too, so the sidebar pill has
+  // settled on Users (not frozen mid-slide over the Dashboard link) before the return click.
+  await freezeTime(page);
   await page.getByRole('link', { name: 'Users' }).click();
   await expect(page).toHaveURL(/\/users$/);
+  await expect(page.locator('.nav-item.active')).toHaveText(/Users/);
+  await advance(page, 1000);
   await expect(page.locator('.dash-counts')).toHaveCount(0);
   await page.evaluate(() => {
     const w = window as unknown as { __txt: string[] }; w.__txt = [];
@@ -191,8 +205,10 @@ test('Dashboard: orange/charcoal palette, Venue managers = 2, no brown; the reve
     requestAnimationFrame(tick);
   });
   await page.getByRole('link', { name: 'Dashboard' }).click();
-  await page.waitForTimeout(1900);
+  await expect(page.locator('.dash-counts')).toHaveCount(1);
+  await advance(page, 1900);
   const txt = await page.evaluate(() => (window as unknown as { __txt: string[] }).__txt);
+  await releaseTime(page);
   expect(txt[0]).toBe('0');
   expect(txt.at(-1)).toBe('5');
 });
@@ -216,9 +232,12 @@ test('Settings active selection uses the same white highlight', async ({ page })
 });
 
 test('motion: bulk dock enters ~220ms rising 10px and does not re-enter on count change', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/users');
-  await page.waitForTimeout(300);
+  await expect(page.locator('.table tbody input[type=checkbox]').first()).toBeVisible();
+  // Timed on the virtual clock (support/virtual-time.ts): every frame of the entrance is sampled at its exact time.
+  await freezeTime(page);
   await page.evaluate(() => {
     const w = window as unknown as { __s: Array<[number, number, number]> }; w.__s = [];
     const t0 = performance.now();
@@ -230,10 +249,11 @@ test('motion: bulk dock enters ~220ms rising 10px and does not re-enter on count
     requestAnimationFrame(tick);
   });
   await page.locator('.table tbody input[type=checkbox]').nth(0).check();
-  await page.waitForTimeout(400);
+  await advance(page, 400);
   await page.locator('.table tbody input[type=checkbox]').nth(1).check();
-  await page.waitForTimeout(500);
+  await advance(page, 500);
   const s = await page.evaluate(() => (window as unknown as { __s: Array<[number, number, number]> }).__s);
+  await releaseTime(page);
   const first = s[0]!, settled = s.find(([, y, o]) => Math.abs(y) < 0.2 && o > 0.99)!;
   console.log(`dock: starts y=${first[1].toFixed(1)} op=${first[2].toFixed(2)}, settled after ${(settled[0] - first[0]).toFixed(0)}ms`);
   expect(first[1]).toBeGreaterThan(5);

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
 import { fixtures } from './support/crewflow-fixtures';
+import { advance, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Settings sidebar active-page highlight (2026-10-19): the current Settings destination carries the same white rounded
@@ -48,10 +49,12 @@ for (const [label, url] of ROUTES) {
 
 test('clicking moves the highlight (animated), Back/Forward follow the route', async ({ page }) => {
   test.skip(TAG === 'before');
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/settings/profile');
   await expectSelected(page, 'Profile');
   await page.waitForTimeout(400);
+  await freezeTime(page); // the slide is sampled on the virtual clock (support/virtual-time.ts)
   await page.evaluate(() => {
     const w = window as unknown as { __s: number[] }; w.__s = [];
     const t0 = performance.now();
@@ -60,8 +63,10 @@ test('clicking moves the highlight (animated), Back/Forward follow the route', a
   });
   await nav(page).getByRole('link', { name: 'Account' }).click();
   await expect(page).toHaveURL(/\/settings\/account$/); // navigation is not delayed by the animation
-  await page.waitForTimeout(650);
+  await expect(nav(page).locator('[aria-current="page"]')).toHaveAttribute('aria-label', 'Account'); // committed, frozen
+  await advance(page, 650);
   const tops = await page.evaluate(() => (window as unknown as { __s: number[] }).__s);
+  await releaseTime(page);
   expect(new Set(tops).size).toBeGreaterThan(3); // slid through intermediate positions
   await expectSelected(page, 'Account');
   await nav(page).getByRole('link', { name: 'Domains' }).click();

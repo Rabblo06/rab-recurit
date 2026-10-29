@@ -1,10 +1,13 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
+import { advance, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Crewflow motion system (2026-10-18): measures real animations in the real app (Chromium, isolated Vite :5174,
  * deterministic API fixtures — no live data). Each scenario samples the rendered value every animation frame, so
  * timings are measured, not assumed, and records a video for inspection. Run with playwright.isolated.config.ts.
+ * Timings run on the virtual clock (support/virtual-time.ts): a measurement freezes time, triggers, then advances it by
+ * the window, so every frame is sampled at its exact time however loaded the machine is.
  */
 const OUT = path.resolve(__dirname, '.qa-shots/motion-2026-10-18');
 test.use({ viewport: { width: 1440, height: 900 }, video: { mode: 'on', size: { width: 1440, height: 900 } } });
@@ -97,6 +100,7 @@ function settleTime(samples: Array<[number, number | null]>, eps = 0.5) {
 }
 
 test('sidebar: the selected highlight slides from Dashboard to Users while the route changes immediately', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   // Users is a lazy route: React Router keeps the old location (and highlight) rendered until its code has loaded, and
   // the dev server compiles it on first request. Load it once first so the samples time the highlight, not that compile.
@@ -107,11 +111,14 @@ test('sidebar: the selected highlight slides from Dashboard to Users while the r
   const pill = '.nav-active-pill';
   await expect(page.locator(pill)).toHaveCount(1);
   const before = await page.locator(pill).boundingBox();
+  await freezeTime(page);
   await startSampling(page, pill, 'el.getBoundingClientRect().top', 900);
   await page.getByRole('link', { name: 'Users' }).click();
-  await expect(page).toHaveURL(/\/users$/, { timeout: 300 }); // navigation is not delayed by the animation
-  await page.waitForTimeout(950);
+  await expect(page).toHaveURL(/\/users$/, { timeout: 300 }); // navigation is not delayed by the animation (no virtual time has passed)
+  await expect(page.locator('.nav-item.active')).toHaveText(/Users/); // committed while frozen; the slide starts next frame
+  await advance(page, 950);
   const t = settleTime(await readSamples(page));
+  await releaseTime(page);
   const after = await page.locator(pill).boundingBox();
   console.log('sidebar pill', JSON.stringify({ from: before?.y, to: after?.y, ...t }));
   expect(after!.y).toBeGreaterThan(before!.y); // moved down to Users
@@ -122,17 +129,20 @@ test('sidebar: the selected highlight slides from Dashboard to Users while the r
 });
 
 test('dashboard: cards enter with a short stagger; widgets follow; nothing replays on re-render', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/users');
   await page.waitForLoadState('networkidle');
+  await freezeTime(page);
   await startSampling(page, '.dash-grid > .dash-card:nth-child(4)', 'Number(getComputedStyle(el).opacity)', 900);
-  const t0 = Date.now();
   await page.getByRole('link', { name: 'Dashboard' }).click();
-  await page.waitForTimeout(950);
+  await expect(page.locator('.dash-grid > .dash-card:nth-child(4)')).toHaveCount(1); // mounted; its entrance starts on the next frame
+  await advance(page, 950);
   const s = (await readSamples(page)).filter((x) => x[1] != null) as Array<[number, number]>;
+  await releaseTime(page);
   const firstVisible = s.find((x) => x[1] > 0.05)?.[0];
   const full = s.find((x) => x[1] > 0.99)?.[0];
-  console.log('card #4 opacity', JSON.stringify({ firstVisible, full, sinceClick: Date.now() - t0 }));
+  console.log('card #4 opacity', JSON.stringify({ firstVisible, full }));
   expect(full! - firstVisible!).toBeGreaterThan(150); // a real fade, not a pop
   expect(full!).toBeLessThan(900);
   await expect(page.locator('.dash-counts')).toContainText('5'); // staffCount from /dashboard/summary (real fixture value)
@@ -140,13 +150,17 @@ test('dashboard: cards enter with a short stagger; widgets follow; nothing repla
 });
 
 test('drawer: opens ~300ms, switching staff keeps it open and cross-fades the content, closes ~220ms', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/');
   await page.waitForLoadState('networkidle');
+  await freezeTime(page);
   await startSampling(page, '.side-panel-dock', 'el.getBoundingClientRect().width', 900);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: 'staff-1', type: 'staff' } })));
-  await page.waitForTimeout(950);
+  await expect(page.locator('.side-panel-dock')).toHaveCount(1); // mounted at width 0; it opens from the next frame
+  await advance(page, 950);
   const open = settleTime(await readSamples(page));
+  await releaseTime(page);
   console.log('drawer open', JSON.stringify(open));
   expect(open.final).toBeGreaterThan(400);
   expect(open.end! - 0).toBeGreaterThan(220);
@@ -155,38 +169,46 @@ test('drawer: opens ~300ms, switching staff keeps it open and cross-fades the co
   await page.screenshot({ path: path.join(OUT, 'drawer-open.png') });
 
   // Another staff member while open: the dock never closes (width stays put), the record changes.
+  await freezeTime(page);
   await startSampling(page, '.side-panel-dock', 'el.getBoundingClientRect().width', 600);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: 'staff-2', type: 'staff' } })));
-  await page.waitForTimeout(650);
+  await advance(page, 650);
   const widths = (await readSamples(page)).map((s) => s[1]).filter((v): v is number => v != null);
+  await releaseTime(page);
   console.log('drawer switch width range', Math.min(...widths), Math.max(...widths));
   expect(Math.max(...widths) - Math.min(...widths)).toBeLessThan(1);
   await expect(page.locator('.drawer-title')).toHaveText('Staff Test 2');
 
   // Tabs: the underline travels between tabs.
+  await freezeTime(page);
   await startSampling(page, '.detail-tabs-compact .tab-underline', 'el.getBoundingClientRect().left', 700);
   await page.getByRole('tab', { name: /Email/ }).click();
-  await page.waitForTimeout(750);
+  await advance(page, 750);
   const tab = settleTime(await readSamples(page));
+  await releaseTime(page);
   console.log('tab underline', JSON.stringify(tab));
   expect(tab.distinct).toBeGreaterThan(4);
   expect(tab.duration).toBeLessThan(600);
 
   // "+2 More" menu: fades in from its trigger.
+  await freezeTime(page);
   await page.getByRole('button', { name: /2 More/ }).click();
   await startSampling(page, '.detail-tab-more-menu', 'Number(getComputedStyle(el).opacity)', 400);
-  await page.waitForTimeout(450);
+  await advance(page, 450);
   const menu = (await readSamples(page)).filter((x) => x[1] != null) as Array<[number, number]>;
+  await releaseTime(page);
   console.log('menu opacity first/last', menu[0]?.[1], menu[menu.length - 1]?.[1]);
   expect(menu[menu.length - 1][1]).toBeGreaterThan(0.99);
   await page.screenshot({ path: path.join(OUT, 'drawer-more-menu.png') });
   await page.keyboard.press('Escape');
 
   // Close.
+  await freezeTime(page);
   await startSampling(page, '.side-panel-dock', 'el.getBoundingClientRect().width', 700);
   await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await page.waitForTimeout(750);
+  await advance(page, 750);
   const close = (await readSamples(page)) as Array<[number, number | null]>;
+  await releaseTime(page);
   const gone = close.find((s) => s[1] == null || s[1] < 2)?.[0];
   console.log('drawer close ms', gone);
   expect(gone!).toBeGreaterThan(120);
@@ -220,17 +242,20 @@ test('pipeline: a real stage change moves the card (never two copies); header an
 });
 
 test('calendar: next month slides in from the right, previous from the left', async ({ page }) => {
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/calendar');
   await page.locator('.calendar-grid').waitFor();
+  await freezeTime(page);
   await startSampling(page, '.calendar-grid', 'new DOMMatrixReadOnly(getComputedStyle(el).transform).m41', 700);
   await page.getByRole('button', { name: 'Next month' }).click();
-  await page.waitForTimeout(750);
+  await advance(page, 750);
   const next = (await readSamples(page)).map((s) => s[1]).filter((v): v is number => v != null);
   await startSampling(page, '.calendar-grid', 'new DOMMatrixReadOnly(getComputedStyle(el).transform).m41', 700);
   await page.getByRole('button', { name: 'Previous month' }).click();
-  await page.waitForTimeout(750);
+  await advance(page, 750);
   const prev = (await readSamples(page)).map((s) => s[1]).filter((v): v is number => v != null);
+  await releaseTime(page);
   console.log('calendar x next max/min', Math.max(...next), Math.min(...next), 'prev', Math.max(...prev), Math.min(...prev));
   expect(Math.max(...next)).toBeGreaterThan(4); // new month entered from +x
   expect(Math.min(...prev)).toBeLessThan(-4); // previous month entered from -x
@@ -240,15 +265,18 @@ test('calendar: next month slides in from the right, previous from the left', as
 test.describe('reduced motion', () => {
   test('drawer opens without sliding, tabs/menus work, and toasts stay for their full time', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' }); // the OS "reduce motion" setting
+    await useVirtualTime(page);
     await fixtures(page);
     await page.goto('/');
     await page.waitForLoadState('networkidle');
     console.log('reduced matchMedia =', await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), 'docks =', await page.locator('.side-panel-dock').count());
+    await freezeTime(page);
     await startSampling(page, '.side-panel-dock', 'el.getBoundingClientRect().width', 500);
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('open-user-detail', { detail: { id: 'staff-1', type: 'staff' } })));
-    await page.waitForTimeout(550);
+    await advance(page, 550);
     const widths = (await readSamples(page)).map((s) => s[1]).filter((v): v is number => v != null);
     console.log('reduced drawer distinct widths', new Set(widths.map(Math.round)).size, JSON.stringify((await readSamples(page)).slice(0, 14).map((s) => [Math.round(s[0]), s[1] == null ? null : Math.round(s[1])])));
+    await releaseTime(page);
     expect(new Set(widths.map(Math.round)).size).toBeLessThanOrEqual(2); // appears at full width, no slide
     await page.getByRole('tab', { name: /Timeline/ }).click();
     await expect(page.getByRole('tab', { name: /Timeline/ })).toHaveAttribute('aria-selected', 'true');
