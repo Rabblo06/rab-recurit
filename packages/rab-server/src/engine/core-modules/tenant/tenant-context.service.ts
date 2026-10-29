@@ -135,9 +135,10 @@ export class TenantContextService {
   }
 
   private async bindGucs(manager: EntityManager, ctx: AuthContext): Promise<void> {
-    // Reset the optional read-only roster capability on every transaction.
+    // Reset the optional read-only roster capability and the org-admin Assigned Staff scope (VenueManagerService) on every
+    // transaction; only the service method that needs one binds it, after this.
     await manager.query(
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true)`,
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true)`,
       [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''],
     );
   }

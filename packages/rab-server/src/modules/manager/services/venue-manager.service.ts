@@ -16,6 +16,7 @@ import { ChangeEmailDto } from '../../identity/dto/change-email.dto';
 import { ChangePendingEmailDto } from '../../identity/dto/change-pending-email.dto';
 import { BulkEmailDto } from '../../staff/dto/bulk-email.dto';
 import { AssignVenueTeamStaffDto } from '../dto/assign-venue-team-staff.dto';
+import { ListVenueTeamCandidatesDto } from '../dto/list-venue-team-candidates.dto';
 import { ManagerProfile } from '../entities/manager-profile.entity';
 import { Venue } from '../../venue/entities/venue.entity';
 import { ManagerService } from './manager.service';
@@ -155,7 +156,16 @@ export class VenueManagerService {
     return this.managerService.deleteUser(ctx, id, currentPassword);
   }
 
-  // ------------------------------------------------------------------ Venue Manager teams (owner-assigned Staff)
+  // ------------------------------------------------------------------ Venue Manager teams (Assigned Staff)
+  //
+  // ONE implementation (`*Within` below) serves two authorised entry points, so the team SQL, the all-or-nothing
+  // eligibility rules and the audit rows are written once:
+  //   - workspace owner (Initial Manager or any other owner): `listTeam` / `assignTeamStaff` / `removeTeamStaff`, scoped
+  //     to the caller's own workspace, exactly as before;
+  //   - organisation administrator (owner decision 2026-10-28; effective `manager.manage`, overrides honoured — the CEO
+  //     by default, a platform admin only in their own organisation): `*AsOrgAdmin`, scoped to the Venue Manager's own
+  //     workspace, derived server-side from the Venue Manager record. Admin Inspect stays read-only (CF-02).
+  // Each entry point returns the AuthContext the shared implementation runs under; the client never names a workspace.
 
   /**
    * Layer 2 for team changes: on top of `assertOwnWorkspaceVenueManager`, only the OWNER of the caller's workspace may
@@ -172,11 +182,60 @@ export class VenueManagerService {
     if (!rows.length) throw new ForbiddenException('Only the workspace owner can change a Venue Manager\'s staff.');
   }
 
-  /** The Staff a Venue Manager of the caller's workspace can currently see and select. */
-  async listTeam(ctx: AuthContext, venueManagerId: string) {
+  /** Workspace-owner entry point: the caller's own workspace, unchanged rules. */
+  private async ownerTeamScope(ctx: AuthContext, venueManagerId: string): Promise<TeamScope> {
     await this.assertOwnWorkspaceVenueManager(ctx, venueManagerId);
     await this.assertWorkspaceOwner(ctx);
-    return this.tenantContext.runInWorkspaceContext(ctx, (manager) =>
+    return { ctx, flow: 'workspace_owner' };
+  }
+
+  /**
+   * Organisation-administrator entry point (layer 2; the route's PermissionGuard is layer 1). Re-checks `manager.manage`
+   * through PermissionsService, which honours per-user grant and revoke overrides, then derives the workspace from the
+   * Venue Manager record of the caller's own organisation and confirms it is an active workspace of that organisation.
+   * A Venue Manager outside the organisation, or with no workspace, reads as not found (404, no existence oracle).
+   */
+  private async orgAdminTeamScope(ctx: AuthContext, venueManagerId: string): Promise<TeamScope> {
+    if (!ctx.organisationId) throw new NotFoundException('Venue Manager not found.');
+    if (!(await this.permissions.userHasPermission(ctx, PermissionFlag.MANAGER_MANAGE))) {
+      throw new ForbiddenException('Managing Manager accounts is not permitted.');
+    }
+    const profile = await this.tenantContext.runInTenantContext(ctx, (manager) =>
+      manager.findOne(ManagerProfile, { where: { id: venueManagerId, organisationId: ctx.organisationId!, type: ManagerType.VENUE } }),
+    );
+    if (!profile?.workspaceId) throw new NotFoundException('Venue Manager not found.');
+    const [{ ok }] = await this.dataSource.query<Array<{ ok: boolean }>>('SELECT core.admin_workspace_in_org($1, $2) AS ok', [
+      profile.workspaceId,
+      ctx.organisationId,
+    ]);
+    if (!ok) throw new NotFoundException('Venue Manager not found.');
+    return { ctx: { ...ctx, workspaceId: profile.workspaceId }, flow: 'org_admin' };
+  }
+
+  /**
+   * Opens the workspace transaction for a resolved scope. The org-admin flow binds `rab.admin_scope = 'venue_team'`, which
+   * the module-18 policies (venue_manager_staff_org_admin, staff_profile_org_admin_picker) require; the owner flow binds
+   * nothing new and keeps exactly its previous database visibility.
+   */
+  private runInTeamScope<T>(scope: TeamScope, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return this.tenantContext.runInWorkspaceContext(scope.ctx, async (manager) => {
+      if (scope.flow === 'org_admin') await manager.query(`SELECT set_config('rab.admin_scope', 'venue_team', true)`);
+      return fn(manager);
+    });
+  }
+
+  /** The Staff a Venue Manager of the caller's workspace can currently see and select. */
+  async listTeam(ctx: AuthContext, venueManagerId: string) {
+    return this.listTeamWithin(await this.ownerTeamScope(ctx, venueManagerId), venueManagerId);
+  }
+
+  async listTeamAsOrgAdmin(ctx: AuthContext, venueManagerId: string) {
+    return this.listTeamWithin(await this.orgAdminTeamScope(ctx, venueManagerId), venueManagerId);
+  }
+
+  private async listTeamWithin(scope: TeamScope, venueManagerId: string) {
+    const ctx = scope.ctx;
+    return this.runInTeamScope(scope, (manager) =>
       manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", u.email, u.status AS "accountStatus",
             sp.employment_status AS "employmentStatus", jr.name AS "jobRoleName", t.created_at AS "assignedAt"
@@ -193,35 +252,59 @@ export class VenueManagerService {
 
   /**
    * Adds existing Staff of the caller's own workspace to one of their Venue Managers' team. All-or-nothing: an id that is
-   * not an assignable Staff member of this workspace (unknown, another workspace's, suspended/deactivated/inactive) fails the whole
-   * request with 404 and nothing is written. Already-assigned ids are reported, never duplicated. Creates no account,
-   * offer, shift, attendance or venue assignment.
+   * not an assignable Staff member of this workspace (unknown, another workspace's, archived, suspended/deactivated/inactive)
+   * fails the whole request with 404 and nothing is written. Already-assigned ids are reported, never duplicated. Creates
+   * no account, offer, shift, attendance or venue assignment.
    */
   async assignTeamStaff(ctx: AuthContext, venueManagerId: string, dto: AssignVenueTeamStaffDto) {
-    await this.assertOwnWorkspaceVenueManager(ctx, venueManagerId);
-    await this.assertWorkspaceOwner(ctx);
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    return this.assignTeamStaffWithin(await this.ownerTeamScope(ctx, venueManagerId), venueManagerId, dto);
+  }
+
+  async assignTeamStaffAsOrgAdmin(ctx: AuthContext, venueManagerId: string, dto: AssignVenueTeamStaffDto) {
+    return this.assignTeamStaffWithin(await this.orgAdminTeamScope(ctx, venueManagerId), venueManagerId, dto);
+  }
+
+  private async assignTeamStaffWithin(scope: TeamScope, venueManagerId: string, dto: AssignVenueTeamStaffDto) {
+    const ctx = scope.ctx;
+    return this.runInTeamScope(scope, async (manager) => {
+      // `sp.archived_at IS NULL` (2026-10-29, security review): the same rule as the org-admin picker
+      // (listAssignableStaffAsOrgAdmin). It applies to the workspace-owner path too: an archived Staff member, previously
+      // assignable there by a direct POST, is now 404 like any other ineligible id.
       const eligible: Array<{ id: string }> = await manager.query(
         `SELECT sp.id FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
-         WHERE sp.id = ANY($1::uuid[]) AND sp.organisation_id = $2 AND sp.workspace_id = $3
+         WHERE sp.id = ANY($1::uuid[]) AND sp.organisation_id = $2 AND sp.workspace_id = $3 AND sp.archived_at IS NULL
            AND sp.employment_status IN ('active', 'pending_compliance') AND u.status IN ('active', 'invited')`,
         [dto.staffProfileIds, ctx.organisationId, ctx.workspaceId],
       );
       if (eligible.length !== dto.staffProfileIds.length) throw new NotFoundException('Staff member not found.');
-      const inserted: Array<{ staff_profile_id: string }> = await manager.query(
-        `INSERT INTO venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
-         SELECT $1, $2, $3, unnest($4::uuid[])
-         ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING
-         RETURNING staff_profile_id`,
-        [ctx.organisationId, ctx.workspaceId, venueManagerId, dto.staffProfileIds],
+      // The target is re-checked in the WRITE statement itself (one snapshot with the insert): the Venue Manager must still
+      // be a `venue` profile of this organisation and workspace (a moved one gets no row). The org-admin flow resolved its
+      // workspace in an earlier transaction, so it also requires, at write time, that the Venue Manager is still active or
+      // invited (not suspended / deactivated / invite-expired) and the workspace still active (core.admin_workspace_in_org,
+      // the same lookup orgAdminTeamScope used). The owner flow keeps its previous rules (owner decision: no change).
+      // No live target = nothing written, 404 as for any target outside scope.
+      const [result]: Array<{ live: boolean; added: string[] }> = await manager.query(
+        `WITH target AS (
+           SELECT mp.id FROM core.manager_profile mp JOIN core."user" mu ON mu.id = mp.user_id
+            WHERE mp.id = $3 AND mp.organisation_id = $1 AND mp.workspace_id = $2 AND mp.type = 'venue'
+              AND (NOT $5::boolean OR (mu.status IN ('active', 'invited') AND core.admin_workspace_in_org($2, $1)))
+         ), inserted AS (
+           INSERT INTO venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
+           SELECT $1, $2, target.id, s.id FROM target CROSS JOIN unnest($4::uuid[]) AS s(id)
+           ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING
+           RETURNING staff_profile_id
+         )
+         SELECT EXISTS (SELECT 1 FROM target) AS live, ARRAY(SELECT staff_profile_id::text FROM inserted) AS added`,
+        [ctx.organisationId, ctx.workspaceId, venueManagerId, dto.staffProfileIds, scope.flow === 'org_admin'],
       );
-      const added = inserted.map((r) => r.staff_profile_id);
+      if (!result?.live) throw new NotFoundException('Venue Manager not found.');
+      const added = result.added;
       const alreadyAssigned = dto.staffProfileIds.filter((id) => !added.includes(id));
       if (added.length) {
         await this.auditService.record(manager, ctx, AuditAction.VENUE_TEAM_STAFF_ASSIGNED, {
           entityType: 'manager',
           entityId: venueManagerId,
-          metadata: { staffProfileIds: added, workspaceId: ctx.workspaceId },
+          metadata: { staffProfileIds: added, workspaceId: ctx.workspaceId, ...flowMetadata(scope) },
         });
       }
       return { added, alreadyAssigned };
@@ -233,9 +316,44 @@ export class VenueManagerService {
    * read is a live query, nothing cached). Never deletes the Staff account; existing offers/shifts/attendance are kept.
    */
   async removeTeamStaff(ctx: AuthContext, venueManagerId: string, staffProfileId: string): Promise<void> {
-    await this.assertOwnWorkspaceVenueManager(ctx, venueManagerId);
-    await this.assertWorkspaceOwner(ctx);
-    await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    await this.removeTeamStaffWithin(await this.ownerTeamScope(ctx, venueManagerId), venueManagerId, staffProfileId);
+  }
+
+  async removeTeamStaffAsOrgAdmin(ctx: AuthContext, venueManagerId: string, staffProfileId: string): Promise<void> {
+    await this.removeTeamStaffWithin(await this.orgAdminTeamScope(ctx, venueManagerId), venueManagerId, staffProfileId);
+  }
+
+  /**
+   * Org-admin "Select Staff" list ("picker only"): the assignable Staff of the Venue Manager's own workspace, in the row
+   * shape the existing VenueManagerStaffPicker already reads from GET /staff. The workspace owner's picker keeps using
+   * GET /staff (their own creator-scoped list), which an organisation administrator cannot use for another workspace by
+   * design. Same eligibility as assignTeamStaffWithin, so nothing listed here is refused on Confirm for status reasons.
+   */
+  async listAssignableStaffAsOrgAdmin(ctx: AuthContext, venueManagerId: string, dto: ListVenueTeamCandidatesDto) {
+    const scope = await this.orgAdminTeamScope(ctx, venueManagerId);
+    const page = dto.page ?? 1;
+    const limit = dto.limit ?? 25;
+    const q = dto.q?.trim() ? `%${dto.q.trim().replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
+    return this.runInTeamScope(scope, async (manager) => {
+      const rows: Array<{ total: number } & Record<string, unknown>> = await manager.query(
+        `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", sp.staff_ref AS "staffRef", u.email, u.phone,
+                sp.employment_status AS "employmentStatus", u.status AS "accountStatus", sp.created_at AS "createdAt",
+                count(*) OVER ()::int AS total
+           FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+          WHERE sp.organisation_id = $1 AND sp.workspace_id = $2 AND sp.archived_at IS NULL
+            AND sp.employment_status IN ('active', 'pending_compliance') AND u.status IN ('active', 'invited')
+            AND ($3::text IS NULL OR u.first_name ILIKE $3 OR u.last_name ILIKE $3 OR sp.staff_ref ILIKE $3)
+          ORDER BY u.first_name, u.last_name, sp.id
+          LIMIT $4 OFFSET $5`,
+        [scope.ctx.organisationId, scope.ctx.workspaceId, q, limit, (page - 1) * limit],
+      );
+      return { data: rows.map(({ total: _total, ...row }) => row), total: rows[0]?.total ?? 0 };
+    });
+  }
+
+  private async removeTeamStaffWithin(scope: TeamScope, venueManagerId: string, staffProfileId: string): Promise<void> {
+    const ctx = scope.ctx;
+    await this.runInTeamScope(scope, async (manager) => {
       const deleted: Array<{ staff_profile_id: string }> = await manager.query(
         `DELETE FROM venue_manager_staff
          WHERE manager_profile_id = $1 AND staff_profile_id = $2 AND organisation_id = $3 AND workspace_id = $4
@@ -247,7 +365,7 @@ export class VenueManagerService {
       await this.auditService.record(manager, ctx, AuditAction.VENUE_TEAM_STAFF_UNASSIGNED, {
         entityType: 'manager',
         entityId: venueManagerId,
-        metadata: { staffProfileId, workspaceId: ctx.workspaceId },
+        metadata: { staffProfileId, workspaceId: ctx.workspaceId, ...flowMetadata(scope) },
       });
     });
   }
@@ -395,4 +513,15 @@ export class VenueManagerService {
       return created;
     });
   }
+}
+
+/** An authorised Assigned Staff scope: the context the shared implementation runs under, and which entry point produced it. */
+interface TeamScope {
+  ctx: AuthContext;
+  flow: 'workspace_owner' | 'org_admin';
+}
+
+/** Audit metadata for the entry point: owner rows stay exactly as before; org-admin rows say so. */
+function flowMetadata(scope: TeamScope): { flow?: 'org_admin' } {
+  return scope.flow === 'org_admin' ? { flow: 'org_admin' } : {};
 }

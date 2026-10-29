@@ -15,14 +15,18 @@ interface TeamMember {
 
 const label = (s: string) => s.replace(/_/g, ' ');
 
+/** The workspace owner's routes; organisation administrators use '/org-admin/venue-managers' (same shapes). */
+export const OWNER_TEAM_API_BASE = '/venue-managers';
+
 /**
- * "Assigned staff" tab of a Venue Manager: which of the workspace owner's Staff this Venue Manager can see and select
- * (GET/POST/DELETE /venue-managers/:id/staff, owner-only on the server and in RLS). The panel footer's "Add Staff" opens
- * the full-page picker (`pickerOpen`). Assigning creates no account, offer or shift; removing never deletes the Staff
- * account or their history.
+ * "Assigned staff" tab of a Venue Manager: which of the workspace's Staff this Venue Manager can see and select
+ * (GET/POST/DELETE `${apiBase}/:id/staff`): the workspace owner through /venue-managers, an organisation administrator
+ * through /org-admin/venue-managers; both enforced on the server and in RLS. The panel footer's "Add Staff" opens the
+ * full-page picker (`pickerOpen`). Assigning creates no account, offer or shift; removing never deletes the Staff account
+ * or their history.
  */
-export default function VenueManagerTeamSection({ venueManagerId, venueManagerName, pickerOpen, onPickerClose }: {
-  venueManagerId: string; venueManagerName: string; pickerOpen: boolean; onPickerClose: () => void;
+export default function VenueManagerTeamSection({ venueManagerId, venueManagerName, apiBase = OWNER_TEAM_API_BASE, pickerOpen, onPickerClose }: {
+  venueManagerId: string; venueManagerName: string; apiBase?: string; pickerOpen: boolean; onPickerClose: () => void;
 }) {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
@@ -30,10 +34,10 @@ export default function VenueManagerTeamSection({ venueManagerId, venueManagerNa
   const key = ['venue-managers', venueManagerId, 'staff'];
   const team = useQuery({
     queryKey: key,
-    queryFn: async () => (await api.get<TeamMember[]>(`/venue-managers/${venueManagerId}/staff`)).data,
+    queryFn: async () => (await api.get<TeamMember[]>(`${apiBase}/${venueManagerId}/staff`)).data,
   });
   const remove = useMutation({
-    mutationFn: (staffId: string) => api.delete(`/venue-managers/${venueManagerId}/staff/${staffId}`),
+    mutationFn: (staffId: string) => api.delete(`${apiBase}/${venueManagerId}/staff/${staffId}`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: key }); toast.success('Staff member removed from this venue manager.'); setRemoving(null); },
     onError: (e) => { notifyApiError(e, { fallback: 'Could not remove this staff member. Try again.' }); },
   });
@@ -50,7 +54,9 @@ export default function VenueManagerTeamSection({ venueManagerId, venueManagerNa
         <p className="vm-team-muted">Loading assigned staff…</p>
       ) : team.isError ? (
         <div className="vm-team-error" role="alert">
-          <span>{status === 403 ? 'Only the workspace owner can manage this venue manager’s staff.' : 'Could not load assigned staff.'}</span>
+          <span>{status === 403
+            ? (apiBase === OWNER_TEAM_API_BASE ? 'Only the workspace owner can manage this venue manager’s staff.' : 'You no longer have permission to manage this venue manager’s staff.')
+            : 'Could not load assigned staff.'}</span>
           {status !== 403 && <button type="button" className="btn-link-muted" onClick={() => team.refetch()}>Retry</button>}
         </div>
       ) : (
@@ -88,6 +94,7 @@ export default function VenueManagerTeamSection({ venueManagerId, venueManagerNa
         <VenueManagerStaffPicker
           venueManagerId={venueManagerId}
           venueManagerName={venueManagerName}
+          apiBase={apiBase}
           assignedIds={new Set(rows.map((r) => r.id))}
           onCancel={onPickerClose}
           onConfirmed={(n) => { qc.invalidateQueries({ queryKey: key }); onPickerClose(); toast.success(`${n} staff member${n === 1 ? '' : 's'} assigned.`); }}
