@@ -13,6 +13,8 @@ import { V1_EXPECTED, WORKSPACE_TABLES, workspaceSchemaName } from '@rab/server/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 
 /**
  * Worker credential isolation checkpoint, item 1 of the "finish" mandate: the existing
@@ -278,7 +280,8 @@ describeIfDb('workspace-provisioner.main.ts — standalone process (integration)
     );
     expect(tableNames.map((t) => t.relname).sort()).toEqual([...WORKSPACE_TABLES].sort());
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
-    expect(policyCount[0]!.n).toBe(V1_EXPECTED.policies);
+    // A new workspace is provisioned at the latest module (v18 adds the 2 Assigned Staff policies: 39 → 41).
+    expect(policyCount[0]!.n).toBe(expectedWorkspacePolicyCount(LATEST_WORKSPACE_MODULE_VERSION));
     const grantCount: Array<{ n: number }> = await adminDataSource.query(
       `SELECT count(*)::int AS n FROM information_schema.table_privileges WHERE table_schema = $1 AND grantee = 'crewflow_app'`,
       [expectedSchemaName],
