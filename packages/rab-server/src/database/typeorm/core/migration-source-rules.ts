@@ -21,11 +21,28 @@ export const PHASE_0B_MIGRATION_TIMESTAMP = 1786721100000;
  * "After Phase 0b" is decided by timestamp, so a NEW migration back-dated to sort before 1786721100000 would skip every
  * post-0b check, yet TypeORM still applies it on databases past 0b (it runs whatever the ledger lacks). Adding one changes
  * this fingerprint and fails CI: re-date it after Phase 0b, or update the fingerprint in a reviewed change that says why.
+ *
+ * 240 → 241 (2026-10-29): + 1786721090000-VenueTeamOrgAdmin (Assigned Staff for organisation administrators). It was
+ * written and applied to the development database before Phase 0b existed and was coordinated with it (both orders,
+ * Assigned Staff → 0b and 0b → Assigned Staff, verified with zero posture drift), so it keeps its number: re-dating it
+ * would leave its applied ledger row orphaned and re-run it on every database that already has it. It does not skip the
+ * post-0b source rules: it is named in PRE_PHASE_0B_HELD_TO_POST_0B_RULES below. Previous value: 240,
+ * 57b7e8e8a5aa83ec1695da295e66e80a60da7483fdc6b1f6c9b7606e5fde4f36 (the same set without it).
  */
 export const PRE_PHASE_0B_MIGRATIONS = {
-  count: 240,
-  sha256: '57b7e8e8a5aa83ec1695da295e66e80a60da7483fdc6b1f6c9b7606e5fde4f36',
+  count: 241,
+  sha256: '2edbcade95459a78e9e4ee398a4d6411ffe8f73a63bc029fbfb86b09d43e600b',
 } as const;
+
+/**
+ * Pre-0b migrations admitted to the frozen set after Phase 0b was written. The set feeds two checks:
+ *   - the source-text scan (migration-source-rules.spec.ts), which holds them to the post-0b rules like any later file;
+ *   - the restricted-migrator harness (scripts/migration-security-check.ts), UPGRADE scenario: they are held back from
+ *     the pre-0b base and applied after Phase 0b, one at a time with the catalog privilege-drift check
+ *     (postMigrationPrivilegeProblems) — the order every database already at main applies them in. The FRESH scenario
+ *     keeps timestamp order (them, then Phase 0b), so CI runs both orders.
+ */
+export const PRE_PHASE_0B_HELD_TO_POST_0B_RULES: ReadonlySet<string> = new Set(['1786721090000-VenueTeamOrgAdmin']);
 
 /** Count and fingerprint of the migration names (no extension) with timestamp <= Phase 0b. */
 export function prePhase0bMigrationFingerprint(names: readonly string[]): { count: number; sha256: string } {

@@ -23,7 +23,11 @@
  *            without memberships, crewflow and crewflow_app after the split.
  *   upgrade  the chain before Phase 0b by the historical bootstrap identity (the state existing databases are in), then
  *            Phase 0b by the restricted migrator (down, up again, re-run) and every later migration by the bootstrap superuser.
- * Every migration after Phase 0b runs one at a time with a catalog drift check (migration-privilege-drift.ts). At the end
+ *            The pre-0b migrations held to the post-0b rules (PRE_PHASE_0B_HELD_TO_POST_0B_RULES) are held back from the
+ *            pre-0b base and run right after Phase 0b, the order every database already at main applies them in; the
+ *            fresh scenario keeps strict timestamp order, so both orders run.
+ * Every migration after Phase 0b (and, in the upgrade scenario, every held one) runs one at a time with a catalog drift
+ * check (migration-privilege-drift.ts). At the end
  * of each scenario: secure-owner invariants, the migrator left nothing behind, the security posture matches the golden
  * snapshot, and the RLS coverage gate passes as crewflow_app.
  *
@@ -42,7 +46,12 @@ import { DataSourceOptions } from 'typeorm';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
-import { PHASE_0B_MIGRATION_TIMESTAMP, PRE_PHASE_0B_MIGRATIONS, prePhase0bMigrationFingerprint } from '../core/migration-source-rules';
+import {
+  PHASE_0B_MIGRATION_TIMESTAMP,
+  PRE_PHASE_0B_HELD_TO_POST_0B_RULES,
+  PRE_PHASE_0B_MIGRATIONS,
+  prePhase0bMigrationFingerprint,
+} from '../core/migration-source-rules';
 import { compareWithGolden } from '../core/security-posture';
 
 export const MIGRATOR = 'rab_ci_migrator';
@@ -113,6 +122,23 @@ export const PHASE_0B_EXPECTED_DRIFT = [
   '+ schema-create|core|crewflow|false',
 ];
 
+/**
+ * Reviewed, intentional runtime-privilege changes of individual migrations checked one by one after Phase 0b, by migration
+ * file name. Such a migration passes the drift check only when everything it reports (privilege drift, secure-owner
+ * invariants, crewflow CREATE on core) is EXACTLY these lines, whitespace collapsed (policy expressions are pretty-printed
+ * over several lines, as in security-posture.ts) — any other drift, a missing line or a changed expression fails. Core
+ * policies are not in the golden posture snapshot (it pins only the `ws|` copies), so these lines are what pins them.
+ *   1786721090000-VenueTeamOrgAdmin (owner decision 2026-10-28, THREAT-MODEL "Assigned Staff for organisation
+ *   administrators"): the two module-18 core policies, added only. Run before Phase 0b (fresh scenario) it is not
+ *   drift-checked; run after it (upgrade scenario: every database already at main) it is, and this is its exact change.
+ */
+export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]>> = {
+  '1786721090000-VenueTeamOrgAdmin': [
+    "+ policy|staff_profile|staff_profile_org_admin_picker|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.admin_scope'::text, true) = 'venue_team'::text) AND (NOT (EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'revoke'::text))))) AND ((EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'grant'::text)))) OR (EXISTS ( SELECT 1 FROM (((core.user_role ur JOIN core.role r ON ((r.id = ur.role_id))) JOIN core.role_permission rp ON ((rp.role_id = ur.role_id))) JOIN core.permission p ON ((p.id = rp.permission_id))) WHERE ((ur.user_id = core.current_uid()) AND (ur.organisation_id = core.current_org()) AND (p.key = 'manager.manage'::text))))))|check=",
+    "+ policy|venue_manager_staff|venue_manager_staff_org_admin|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.admin_scope'::text, true) = 'venue_team'::text) AND (NOT (EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'revoke'::text))))) AND ((EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'grant'::text)))) OR (EXISTS ( SELECT 1 FROM (((core.user_role ur JOIN core.role r ON ((r.id = ur.role_id))) JOIN core.role_permission rp ON ((rp.role_id = ur.role_id))) JOIN core.permission p ON ((p.id = rp.permission_id))) WHERE ((ur.user_id = core.current_uid()) AND (ur.organisation_id = core.current_org()) AND (p.key = 'manager.manage'::text))))))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.admin_scope'::text, true) = 'venue_team'::text) AND (NOT (EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'revoke'::text))))) AND ((EXISTS ( SELECT 1 FROM (core.user_permission_override upo JOIN core.permission op ON ((op.id = upo.permission_id))) WHERE ((upo.user_id = core.current_uid()) AND (upo.organisation_id = core.current_org()) AND (op.key = 'manager.manage'::text) AND (upo.effect = 'grant'::text)))) OR (EXISTS ( SELECT 1 FROM (((core.user_role ur JOIN core.role r ON ((r.id = ur.role_id))) JOIN core.role_permission rp ON ((rp.role_id = ur.role_id))) JOIN core.permission p ON ((p.id = rp.permission_id))) WHERE ((ur.user_id = core.current_uid()) AND (ur.organisation_id = core.current_org()) AND (p.key = 'manager.manage'::text))))) AND (EXISTS ( SELECT 1 FROM core.manager_profile tp WHERE ((tp.id = venue_manager_staff.manager_profile_id) AND (tp.type = 'venue'::text) AND (tp.organisation_id = core.current_org()) AND (tp.workspace_id = core.current_workspace())))))",
+  ],
+};
+
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app';
 
 interface MigrationFile {
@@ -126,6 +152,9 @@ const MIGRATIONS: MigrationFile[] = readdirSync(MIGRATIONS_DIR)
   .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f))
   .sort()
   .map((f) => ({ ts: Number(f.slice(0, 13)), name: f.replace(/\.(ts|js)$/, ''), path: join(MIGRATIONS_DIR, f).replace(/\\/g, '/') }));
+/** Pre-0b migrations admitted to the frozen set after Phase 0b was written, in timestamp order (see upgradeScenario). */
+const HELD = MIGRATIONS.filter((m) => PRE_PHASE_0B_HELD_TO_POST_0B_RULES.has(m.name));
+const NONE_HELD: ReadonlySet<string> = new Set();
 const GOLDEN = readFileSync(join(__dirname, '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
 
 /** Never echo a connection string, whatever a driver or a migration put in an error message. */
@@ -285,8 +314,11 @@ async function appliedCount(db: string): Promise<number> {
   });
 }
 
-/** Runs every pending migration with timestamp <= upTo, through the real guarded runner, as `identity`. */
-async function migrate(db: string, identity: Identity, upTo: number): Promise<string[]> {
+/**
+ * Runs every pending migration with timestamp <= upTo, through the real guarded runner, as `identity`. Migrations named in
+ * `held` are not loaded at all, so they stay pending (the upgrade scenario's pre-0b base and its Phase 0b steps).
+ */
+async function migrate(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<string[]> {
   const connection = url(db, identity);
   process.env.DB_TARGET = 'test';
   process.env.DATABASE_URL = connection;
@@ -295,7 +327,7 @@ async function migrate(db: string, identity: Identity, upTo: number): Promise<st
     ...coreMigrationDataSourceOptions,
     url: connection,
     name: `m2-${db}-${identity}`,
-    migrations: MIGRATIONS.filter((m) => m.ts <= upTo).map((m) => m.path),
+    migrations: MIGRATIONS.filter((m) => m.ts <= upTo && !held.has(m.name)).map((m) => m.path),
     logging: false,
   } as DataSourceOptions);
   await ds.initialize();
@@ -309,7 +341,7 @@ async function migrate(db: string, identity: Identity, upTo: number): Promise<st
 }
 
 /** Phase 0b revert through the real guarded runner (undoLastMigration requires the bootstrap-capable identity). */
-async function revertLast(db: string, identity: Identity, upTo: number): Promise<void> {
+async function revertLast(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<void> {
   const connection = url(db, identity);
   process.env.DB_TARGET = 'test';
   process.env.DATABASE_URL = connection;
@@ -318,7 +350,7 @@ async function revertLast(db: string, identity: Identity, upTo: number): Promise
     ...coreMigrationDataSourceOptions,
     url: connection,
     name: `m2-${db}-${identity}-revert`,
-    migrations: MIGRATIONS.filter((m) => m.ts <= upTo).map((m) => m.path),
+    migrations: MIGRATIONS.filter((m) => m.ts <= upTo && !held.has(m.name)).map((m) => m.path),
     logging: false,
   } as DataSourceOptions);
   await ds.initialize();
@@ -356,15 +388,27 @@ async function expectRefused(db: string, identity: Identity, upTo: number, label
 /**
  * Every migration after Phase 0b, one at a time, each followed by the drift check. The fresh scenario runs them as the
  * restricted migrator and the upgrade scenario as the bootstrap superuser, so a migration that branches on the identity
- * (`IF rolsuper THEN ...`) is measured under both.
+ * (`IF rolsuper THEN ...`) is measured under both. The upgrade scenario passes the HELD pre-0b migrations first: they are
+ * still pending there after Phase 0b, so each applies alone (everything before it is in the ledger) and is checked too.
  */
-async function laterMigrationsWithDriftCheck(db: string, identity: 'restricted' | 'bootstrap'): Promise<number> {
-  const later = MIGRATIONS.filter((m) => m.ts > PHASE_0B_MIGRATION_TIMESTAMP);
+async function laterMigrationsWithDriftCheck(
+  db: string,
+  identity: 'restricted' | 'bootstrap',
+  heldFirst: readonly MigrationFile[] = [],
+): Promise<number> {
+  const later = [...heldFirst, ...MIGRATIONS.filter((m) => m.ts > PHASE_0B_MIGRATION_TIMESTAMP)];
   for (const m of later) {
     const before = await privilegeDriftSnapshot(rowsOf(db));
     const ran = await migrate(db, identity, m.ts);
     const problems = await postMigrationPrivilegeProblems(rowsOf(db), before);
-    check(problems.length === 0, `${db}: ${m.name} (${ran.length} applied as ${identity}) changes no runtime privilege`, problems);
+    const reviewed = REVIEWED_MIGRATION_DRIFT[m.name];
+    if (reviewed) {
+      const collapse = (lines: readonly string[]) => lines.map((l) => l.replace(/\s+/g, ' ').trim()).sort();
+      const exact = JSON.stringify(collapse(problems)) === JSON.stringify(collapse(reviewed.map((l) => `privilege-drift ${l}`)));
+      check(exact, `${db}: ${m.name} (${ran.length} applied as ${identity}) changes exactly its ${reviewed.length} reviewed privilege line(s) and nothing else`, problems);
+    } else {
+      check(problems.length === 0, `${db}: ${m.name} (${ran.length} applied as ${identity}) changes no runtime privilege`, problems);
+    }
   }
   return later.length;
 }
@@ -511,6 +555,15 @@ function staticChecks(): void {
   const inRange = new Set(MIGRATIONS.filter((m) => m.ts >= ROLE_SPLIT_TIMESTAMP && m.ts < PHASE_0B_MIGRATION_TIMESTAMP).map((m) => m.ts));
   const stray = Object.keys(PRIVILEGED_BOOTSTRAP_MIGRATIONS).filter((k) => !inRange.has(Number(k)));
   check(stray.length === 0, `every PRIVILEGED_BOOTSTRAP_MIGRATIONS key names a migration between the role split and Phase 0b`, stray);
+  // The upgrade scenario holds these back from its pre-0b base: a name that matches no file would silently hold nothing.
+  const heldOk =
+    HELD.length === PRE_PHASE_0B_HELD_TO_POST_0B_RULES.size &&
+    HELD.every((m) => m.ts > ROLE_SPLIT_TIMESTAMP && m.ts < PHASE_0B_MIGRATION_TIMESTAMP);
+  check(
+    heldOk,
+    `every PRE_PHASE_0B_HELD_TO_POST_0B_RULES name is an existing migration between the role split and Phase 0b (${HELD.map((m) => m.name).join(', ')})`,
+    [...PRE_PHASE_0B_HELD_TO_POST_0B_RULES],
+  );
 }
 
 /** A refusal counts only as a privilege refusal (SQLSTATE 42501) or a migration's own bootstrap guard, not any error. */
@@ -587,29 +640,41 @@ async function upgradeScenario(db: string): Promise<void> {
   const lastPhaseA = Math.max(...MIGRATIONS.filter((m) => m.ts < ROLE_SPLIT_TIMESTAMP).map((m) => m.ts));
   await setMigratorMemberships('phaseA');
   await migrate(db, 'phaseA', lastPhaseA);
-  // The state of every existing database: the chain before Phase 0b, run by the historical bootstrap identity.
-  const beforePhase0b = await migrate(db, 'bootstrap', PHASE_0B_MIGRATION_TIMESTAMP - 1);
-  log(`${db}: ${beforePhase0b.length} migration(s) up to before Phase 0b ran as the historical bootstrap identity`);
+  // The state of every existing database: the chain before Phase 0b, run by the historical bootstrap identity. The HELD
+  // migrations are not part of it: they were written after Phase 0b, so every database already at main applies Phase 0b
+  // first and them afterwards (TypeORM runs whatever the ledger lacks). The base is therefore exactly the frozen pre-0b
+  // set minus Phase 0b minus the held ones, checked below rather than assumed. The fresh scenario keeps running them in
+  // timestamp order before Phase 0b, so both orders stay covered.
+  const beforePhase0b = await migrate(db, 'bootstrap', PHASE_0B_MIGRATION_TIMESTAMP - 1, PRE_PHASE_0B_HELD_TO_POST_0B_RULES);
+  log(`${db}: ${beforePhase0b.length} migration(s) up to before Phase 0b ran as the historical bootstrap identity (held back: ${HELD.map((m) => m.name).join(', ') || 'none'})`);
+  const baseLedger = new Set((await rowsOf(db)('SELECT name FROM core.migrations')).map((r) => String(r.name)));
+  // Ledger names are the class names (`VenueTeamOrgAdmin1786721090000`), file names `1786721090000-VenueTeamOrgAdmin`.
+  const heldApplied = HELD.filter((m) => baseLedger.has(`${m.name.slice(14)}${m.ts}`));
+  check(
+    baseLedger.size === PRE_PHASE_0B_MIGRATIONS.count - 1 - HELD.length && heldApplied.length === 0,
+    `${db}: the upgrade base is the frozen pre-0b set minus Phase 0b minus the ${HELD.length} held migration(s) (${baseLedger.size} applied)`,
+    [`expected ${PRE_PHASE_0B_MIGRATIONS.count - 1 - HELD.length}`, ...heldApplied.map((m) => `${m.name} is already applied`)],
+  );
 
   await setMigratorMemberships('restricted');
   const s0 = await privilegeDriftSnapshot(rowsOf(db));
-  const up = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP);
+  const up = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP, PRE_PHASE_0B_HELD_TO_POST_0B_RULES);
   const s1 = await privilegeDriftSnapshot(rowsOf(db));
   check(up.length === 1, `${db}: Phase 0b applied by the restricted migrator`);
   check(JSON.stringify(privilegeDrift(s0, s1)) === JSON.stringify(PHASE_0B_EXPECTED_DRIFT), `${db}: Phase 0b changes exactly the four expected privilege lines`, privilegeDrift(s0, s1));
 
-  await revertLast(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP);
+  await revertLast(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP, PRE_PHASE_0B_HELD_TO_POST_0B_RULES);
   const s2 = await privilegeDriftSnapshot(rowsOf(db));
   check(privilegeDrift(s0, s2).length === 0, `${db}: Phase 0b down() by the restricted migrator restores the prior privileges exactly`, privilegeDrift(s0, s2));
 
-  const again = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP);
+  const again = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP, PRE_PHASE_0B_HELD_TO_POST_0B_RULES);
   const s3 = await privilegeDriftSnapshot(rowsOf(db));
   check(again.length === 1 && privilegeDrift(s1, s3).length === 0, `${db}: Phase 0b up() again gives the same privileges`, privilegeDrift(s1, s3));
-  const rerun = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP);
+  const rerun = await migrate(db, 'restricted', PHASE_0B_MIGRATION_TIMESTAMP, PRE_PHASE_0B_HELD_TO_POST_0B_RULES);
   check(rerun.length === 0 && privilegeDrift(s1, await privilegeDriftSnapshot(rowsOf(db))).length === 0, `${db}: a re-run applies nothing and changes nothing`);
 
-  const later = await laterMigrationsWithDriftCheck(db, 'bootstrap');
-  log(`${db}: ${later} migration(s) after Phase 0b checked one by one as the bootstrap superuser`);
+  const later = await laterMigrationsWithDriftCheck(db, 'bootstrap', HELD);
+  log(`${db}: ${later} migration(s) after Phase 0b (the ${HELD.length} held pre-0b one(s) first) checked one by one as the bootstrap superuser`);
   check((await appliedCount(db)) === MIGRATIONS.length, `${db}: all ${MIGRATIONS.length} migrations applied`);
   await finalChecks(db, 'upgrade');
 }
