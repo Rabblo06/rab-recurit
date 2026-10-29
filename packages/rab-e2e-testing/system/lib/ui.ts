@@ -96,8 +96,9 @@ export async function confirmHandoff(page: Page, email: string): Promise<void> {
   await page.waitForURL((u) => u.pathname.startsWith('/auth/handoff'), { timeout: 60_000 });
   const masked = page.getByTestId('handoff-masked-email');
   await expect(masked).toBeVisible({ timeout: 30_000 });
+  // Exactly the server's mask (core.login_handoff peek: first character + '***@' + domain), compared as a plain string.
   const [local, domain] = email.split('@');
-  await expect(masked).toHaveText(new RegExp(`^${local[0]}\\*+@${domain.replace(/\./g, '\\.')}$`, 'i'));
+  await expect(masked).toHaveText(`${local[0]}***@${domain}`);
   await page.getByRole('button', { name: /^Continue as / }).click();
   await page.waitForURL((u) => !u.pathname.startsWith('/auth/handoff'), { timeout: 60_000 });
 }
