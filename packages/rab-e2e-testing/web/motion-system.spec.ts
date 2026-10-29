@@ -56,6 +56,14 @@ async function fixtures(page: Page) {
     if (p === '/dashboard/summary') return send({ staffCount: 5, managerCount: 2, activeOfferCount: 3, venueCount: 1 });
     if (p === '/staff') return send({ data: [1, 2, 3, 4, 5].map(staff), total: 5 });
     if (/^\/staff\/staff-\d+$/.test(p)) return send(staff(Number(p.split('-').pop())));
+    // The Staff reviews tab's summary, in the real response shape (no reviews yet). Without it the catch-all list body
+    // reached the tab as "loaded" data and the panel crashed whenever it arrived before the tab assertion ran.
+    if (/^\/staff\/staff-\d+\/reviews$/.test(p)) {
+      const n = Number(p.split('/')[2].split('-').pop());
+      return send({ staff: { id: `staff-${n}`, name: `Staff Test ${n}`, roleName: null }, reviewers: [], total: 0, reviewerCount: 0, average: null,
+        distribution: [5, 4, 3, 2, 1].map((stars) => ({ stars, count: 0, percent: 0 })),
+        categories: { grooming: null, attitude: null, skills: null, attendance: null, timeKeeping: null }, history: [] });
+    }
     if (p === '/job-roles') return send([{ id: 'jr-1', name: 'Waiter', defaultRatePence: 1250 }]);
     if (p === '/shifts/shift-1/pipeline') { state.calls++; return send(state.pipeline); }
     return send({ data: [], total: 0 });
@@ -247,6 +255,8 @@ test.describe('reduced motion', () => {
     await page.getByRole('button', { name: /2 More/ }).click();
     await page.getByRole('menuitem', { name: /Staff reviews/ }).click();
     await expect(page.getByRole('tab', { name: /Staff reviews/ })).toHaveAttribute('aria-selected', 'true');
+    // The tab's content really rendered (its loaded empty state), not just the tab button.
+    await expect(page.getByText('No reviews yet. Reviews appear here after a venue manager reviews a shift.')).toBeVisible();
     // Toast: dismissed by its (held) progress timer, not instantly.
     await page.goto('/venue-offers/shift-1');
     await page.getByRole('button', { name: 'Timesheet report' }).click();

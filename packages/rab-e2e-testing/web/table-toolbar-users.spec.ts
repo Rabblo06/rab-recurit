@@ -70,12 +70,14 @@ test('Users: Filter, Sort, Options, and Clear all work against real server-backe
   });
 
   await test.step('Filter: Status = Active — every returned row actually has employmentStatus active', async () => {
+    // Listen before choosing the filter: a fast server can answer before a listener added afterwards exists.
+    const filtered = page.waitForResponse((r) => r.url().includes('/rest/v1/staff') && r.url().includes('status=active'));
     await page.getByRole('button', { name: FILTER_BUTTON }).click();
     await page.getByLabel('Add filter').selectOption('status');
     await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption('active');
     await expect(page.getByRole('button', { name: /Filter\s*\d/ })).toBeVisible();
 
-    const response = await page.waitForResponse((r) => r.url().includes('/rest/v1/staff') && r.url().includes('status=active'));
+    const response = await filtered;
     // Verify against the actual response body, not DOM text — `employmentStatus`
     // (what's filtered) and `accountStatus` (what the Status *column* often
     // displays instead, e.g. "Invitation queued" for a still-pending invite)
@@ -90,12 +92,13 @@ test('Users: Filter, Sort, Options, and Clear all work against real server-backe
   });
 
   await test.step('Filter + Filter compose: a second filter narrows further, does not replace the first', async () => {
+    const responseP = page.waitForResponse(
+      (r) => r.url().includes('/rest/v1/staff') && r.url().includes('employmentType=Full-time') && r.url().includes('status=active'),
+    ); // listen before the action that triggers it
     await page.getByRole('button', { name: FILTER_BUTTON }).click();
     await page.getByLabel('Add filter').selectOption('employmentType');
     await page.getByRole('combobox', { name: 'Employment type', exact: true }).selectOption('Full-time');
-    const response = await page.waitForResponse(
-      (r) => r.url().includes('/rest/v1/staff') && r.url().includes('employmentType=Full-time') && r.url().includes('status=active'),
-    );
+    const response = await responseP;
     await page.keyboard.press('Escape');
 
     const body = await response.json();
@@ -114,12 +117,13 @@ test('Users: Filter, Sort, Options, and Clear all work against real server-backe
     await expect.poll(() => listTotal(page)).toBe(allStaff); // the page's own unfiltered dataset again (support/live-list.ts)
     await page.keyboard.press('Escape');
 
+    const oldestResP = page.waitForResponse(
+      (r) => r.url().includes('/rest/v1/staff') && r.url().includes('sort=createdAt') && r.url().includes('direction=asc'),
+    ); // listen before the action that triggers it
     await page.getByRole('button', { name: 'Sort' }).click();
     await page.getByRole('button', { name: 'Date added', exact: true }).click();
     await page.getByRole('button', { name: 'Oldest first' }).click();
-    const oldestRes = await page.waitForResponse(
-      (r) => r.url().includes('/rest/v1/staff') && r.url().includes('sort=createdAt') && r.url().includes('direction=asc'),
-    );
+    const oldestRes = await oldestResP;
     await page.keyboard.press('Escape');
     const oldestBody = (await oldestRes.json()) as { data: StaffRow[] };
     await expectRenderedOrder(oldestBody.data);

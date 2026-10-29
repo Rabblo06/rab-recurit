@@ -44,10 +44,11 @@ test('Shifts, Offers, Venues, Payroll, Audit Log: Filter/Sort/Options all work a
     await expect.poll(() => listTotal(page)).toBeGreaterThan(0);
     const allShifts = await listTotal(page);
 
+    const filterRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/shifts') && r.url().includes('status=draft')); // listen before the action that triggers it
     await page.getByRole('button', { name: FILTER_BUTTON }).click();
     await page.getByLabel('Add filter').selectOption('status');
     await page.getByRole('combobox', { name: 'Status', exact: true }).selectOption('draft');
-    const filterResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/shifts') && r.url().includes('status=draft'));
+    const filterResp = await filterRespP;
     const filterBody = await filterResp.json();
     expect(filterBody.data.length).toBeGreaterThan(0);
     for (const row of filterBody.data) expect(row.status).toBe('draft');
@@ -55,9 +56,10 @@ test('Shifts, Offers, Venues, Payroll, Audit Log: Filter/Sort/Options all work a
     await expect.poll(() => listTotal(page)).toBe(allShifts); // the full server-backed dataset again (support/live-list.ts)
     await page.keyboard.press('Escape');
 
+    const sortRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/shifts') && r.url().includes('sort=venue')); // listen before the action that triggers it
     await page.getByRole('button', { name: 'Sort' }).click();
     await page.getByRole('button', { name: 'Venue', exact: true }).click();
-    const sortResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/shifts') && r.url().includes('sort=venue'));
+    const sortResp = await sortRespP;
     expect(sortResp.status()).toBe(200);
     await page.keyboard.press('Escape');
 
@@ -99,9 +101,10 @@ test('Shifts, Offers, Venues, Payroll, Audit Log: Filter/Sort/Options all work a
     await page.getByRole('option', { name: 'All offers', exact: true }).click();
     await expect.poll(() => listTotal(page)).toBe(allOffers);
 
+    const sortRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/offers') && r.url().includes('sort=staff')); // listen before the action that triggers it
     await page.getByRole('button', { name: 'Sort' }).click();
     await page.getByRole('button', { name: 'Staff', exact: true }).click();
-    const sortResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/offers') && r.url().includes('sort=staff'));
+    const sortResp = await sortRespP;
     expect(sortResp.status()).toBe(200);
     await page.keyboard.press('Escape');
 
@@ -130,18 +133,20 @@ test('Shifts, Offers, Venues, Payroll, Audit Log: Filter/Sort/Options all work a
     for (const row of defaultVenues.data) expect(row.status).toBe('active');
     await expect(page.getByRole('combobox', { name: 'Venues view' })).toContainText('Active');
 
+    const filterRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/venues') && r.url().includes('type=restaurant')); // listen before the action that triggers it
     await page.getByRole('button', { name: FILTER_BUTTON }).click();
     await page.getByLabel('Add filter').selectOption('type');
     await page.getByRole('combobox', { name: 'Type', exact: true }).selectOption('restaurant');
-    const filterResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/venues') && r.url().includes('type=restaurant'));
+    const filterResp = await filterRespP;
     const filterBody = await filterResp.json();
     for (const row of filterBody.data) expect(row.type).toBe('restaurant');
     await page.keyboard.press('Escape');
 
+    const sortRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/venues') && r.url().includes('direction=desc')); // listen before the action that triggers it
     await page.getByRole('button', { name: /^Sort/ }).click();
     await page.getByRole('button', { name: 'Name', exact: true }).click();
     await page.getByRole('button', { name: 'Z–A' }).click();
-    const sortResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/venues') && r.url().includes('direction=desc'));
+    const sortResp = await sortRespP;
     expect(sortResp.status()).toBe(200);
     await page.keyboard.press('Escape');
 
@@ -228,10 +233,11 @@ test('Audit Log: Action filter, date sort actually reorders, Options', async ({ 
   await expect(page.locator('.page-header-title')).toContainText('Audit Log');
   const allEntries = ((await (await auditLoaded).json()) as { total: number }).total;
 
+  const filterRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/audit-logs') && r.url().includes('action=user.created')); // listen before the action that triggers it
   await page.getByRole('button', { name: FILTER_BUTTON }).click();
   await page.getByLabel('Add filter').selectOption('action');
   await page.getByRole('combobox', { name: 'Action', exact: true }).selectOption('user.created');
-  const filterResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/audit-logs') && r.url().includes('action=user.created'));
+  const filterResp = await filterRespP;
   const filterBody = await filterResp.json();
   expect(filterBody.items.length).toBeGreaterThan(0);
   for (const item of filterBody.items) expect(item.action).toBe('user.created');
@@ -239,10 +245,11 @@ test('Audit Log: Action filter, date sort actually reorders, Options', async ({ 
   await expect.poll(() => listTotal(page)).toBe(allEntries); // the full server-backed log again (support/live-list.ts)
   await page.keyboard.press('Escape');
 
+  const sortRespP = page.waitForResponse((r) => r.url().includes('/rest/v1/audit-logs') && r.url().includes('direction=asc')); // listen before the action that triggers it
   await page.getByRole('button', { name: 'Sort' }).click();
   await page.getByRole('button', { name: 'Date', exact: true }).click();
   await page.getByRole('button', { name: 'Oldest first' }).click();
-  const sortResp = await page.waitForResponse((r) => r.url().includes('/rest/v1/audit-logs') && r.url().includes('direction=asc'));
+  const sortResp = await sortRespP;
   const sortBody = await sortResp.json();
   const timestamps = sortBody.items.map((i: { createdAt: string }) => new Date(i.createdAt).getTime());
   expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => a - b));
