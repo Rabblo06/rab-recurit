@@ -12,7 +12,9 @@ import { dropdown } from '../motion';
  * / `overflow-y:auto`, e.g. a table's scroll container or a Drawer), computed
  * from the anchor's own `getBoundingClientRect()` as `position: fixed`,
  * flips above when there isn't room below, clamps horizontally to the
- * viewport, and recomputes on scroll/resize while open.
+ * viewport, and recomputes on scroll/resize while open — and whenever the
+ * anchor itself moves (e.g. a chip row added above it in a vertically
+ * centred composer), which no scroll/resize event reports.
  */
 export default function Popover({
   open,
@@ -104,11 +106,27 @@ export default function Popover({
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClose(); }
     };
+    // A layout shift elsewhere on the page can move the anchor without any scroll/resize event and without resizing
+    // the popover, leaving it stuck at the old position (over its own trigger). Compare the anchor's rect once per frame
+    // while open; updatePosition runs only when it moved, and its own guard skips the render when the result is equal.
+    let lastAnchorRect = '';
+    let frame = 0;
+    const trackAnchor = () => {
+      const r = anchorRef.current?.getBoundingClientRect();
+      const key = r ? `${r.top},${r.left},${r.width},${r.height}` : '';
+      if (key !== lastAnchorRect) {
+        lastAnchorRect = key;
+        updatePosition();
+      }
+      frame = requestAnimationFrame(trackAnchor);
+    };
+    frame = requestAnimationFrame(trackAnchor);
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', updatePosition, true);
     window.addEventListener('resize', updatePosition);
     return () => {
+      cancelAnimationFrame(frame);
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('scroll', updatePosition, true);
