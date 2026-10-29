@@ -12,30 +12,181 @@ concurrency:
 permissions:
   contents: read
 
+# Every web spec runs in exactly ONE of the four Playwright jobs below, each with the infrastructure it needs.
+# `spec-coverage` fails the workflow when a spec under packages/rab-e2e-testing/web is in no job or in two
+# (packages/rab-e2e-testing/check-spec-coverage.mjs).
+#
+#   web-mocked     playwright.config.ts           every API call answered by page.route fixtures; Vite via the config's webServer
+#   web-isolated   playwright.isolated.config.ts  mocked API on an isolated Vite (127.0.0.1:5174, dead API URL) from its webServer
+#   web-ai-visual  web/ai/run-ai-visual.sh        AI visual / a11y suites, each against its own Vite with the rab-docs fixtures
+#   web-live       playwright.live.config.ts      a REAL API (built server) + PostgreSQL + Redis, seeded, via live/run-live.sh
+#
+# `yarn playwright`, never `npx playwright`: npx resolves node_modules/.bin/playwright, which is the hoisted `playwright` that
+# rab-server/rab-worker depend on (a different version from this package's @playwright/test). Yarn resolves the bin from this
+# workspace's own @playwright/test, so the browser revision installed is the one the test runner actually launches.
+
 jobs:
   changed:
     uses: ./.github/workflows/changed-files.yaml
 
-  web:
+  spec-coverage:
     needs: changed
-    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true'
+    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true' || needs.changed.outputs.e2e == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: Build the workspace libraries the specs import
+        run: npx nx run-many -t build -p rab-shared,rab-ui
+      - name: Every web spec runs in exactly one CI job
+        run: node packages/rab-e2e-testing/check-spec-coverage.mjs
+
+  web-mocked:
+    needs: changed
+    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true' || needs.changed.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       - run: npx nx run-many -t build -p rab-shared,rab-ui
-      - run: npx playwright install --with-deps chromium
+      - run: yarn playwright install --with-deps chromium
         working-directory: packages/rab-e2e-testing
-      - run: npx nx e2e rab-e2e-testing
+      - name: Mocked web specs (default config)
+        run: npx nx e2e rab-e2e-testing
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: playwright-report
+          name: playwright-report-mocked
           path: playwright-report/
           retention-days: 14
       - uses: ./.github/actions/save-cache
         if: always()
+
+  web-isolated:
+    needs: changed
+    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true' || needs.changed.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - run: npx nx run-many -t build -p rab-shared,rab-ui
+      - run: yarn playwright install --with-deps chromium
+        working-directory: packages/rab-e2e-testing
+      - name: Isolated web specs (isolated Vite on 127.0.0.1:5174, dead API URL)
+        run: yarn playwright test -c playwright.isolated.config.ts
+        working-directory: packages/rab-e2e-testing
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: playwright-results-isolated
+          path: packages/rab-e2e-testing/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  web-ai-visual:
+    needs: changed
+    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true' || needs.changed.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The AI visual baselines (web/ai/__screenshots__/*/linux) were captured in this exact image: same fonts, same Chromium
+    # (1248, what @playwright/test 1.64.1 launches; PLAYWRIGHT_BROWSERS_PATH=/ms-playwright is preset), so no browser
+    # install step. Pinned by digest.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - run: npx nx run-many -t build -p rab-shared,rab-ui
+      - name: AI visual and accessibility suites
+        run: bash packages/rab-e2e-testing/web/ai/run-ai-visual.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: playwright-results-ai-visual
+          path: packages/rab-e2e-testing/test-results/ai-*/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  web-live:
+    needs: changed
+    if: needs.changed.outputs.front == 'true' || needs.changed.outputs.server == 'true' || needs.changed.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Redis: a service container on loopback (no volume mount, so nothing to collide with checkout). PostgreSQL: started
+    # after checkout by the disposable-postgres action (random, masked credentials) and built by the M2 harness's
+    # restricted-migrator fresh install, exactly as ci-server/ci-security do. The API processes connect as crewflow_app
+    # (restricted, NOBYPASSRLS) and never receive a privileged URL; only the seed uses the cluster's bootstrap superuser.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['127.0.0.1:6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Required by the command/migration target guard (database-target.ts). The test cluster is loopback: DB_TARGET=local.
+      DB_TARGET: local
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries
+        run: npx nx run-many -t build -p rab-shared,rab-emails,rab-ui
+      - name: Build the API (the live stack runs dist/main.js, as deployed)
+        run: npx nx build rab-server
+      - run: yarn playwright install --with-deps chromium
+        working-directory: packages/rab-e2e-testing
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the database with the restricted migrator (fresh install, with its security checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
+        env:
+          NODE_ENV: test
+          MIGRATION_SECURITY_SCENARIOS: fresh
+          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
+          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/e2e-live-database.env
+      - name: Live web specs (seed, API :3000 and :3999, Vite :5173 and :5174, real throttles)
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/e2e-live-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          eval "$test_env"
+          # devices-sessions-live reads session counts read-only from the same database, inside the disposable container.
+          export E2E_DB_CONTAINER=disposable-postgres E2E_DB_USER=ci_bootstrap E2E_DB_NAME="$FRESH_DB"
+          export E2E_LIVE_WORK="${RUNNER_TEMP}/e2e-live"
+          bash packages/rab-e2e-testing/live/run-live.sh
+      - name: Collect the live stack logs (never the seeded identities file)
+        if: always()
+        run: |
+          mkdir -p test-results/e2e-live/logs
+          cp "${RUNNER_TEMP}"/e2e-live/*.log test-results/e2e-live/logs/ 2> /dev/null || true
+          cp -r .audit/p1a-baseline test-results/e2e-live/perf-baseline 2> /dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: playwright-results-live
+          path: test-results/e2e-live/
+          retention-days: 14
+          if-no-files-found: ignore
+      - uses: ./.github/actions/save-cache
+        if: always()
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
 
   # Mobile E2E (Maestro) needs a device/simulator farm — not wired into CI
   # until the mobile app has real screens to exercise (M3+).

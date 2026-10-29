@@ -69,8 +69,10 @@
 # narrower). TRUSTED_PROXY_CIDRS is NEW since the last healthy deploy.
 #
 # HWS RUNTIME ROUTING: OFF. HWS_RUNTIME_ENABLED is committed "false" on rab-api and
-# rab-worker; the jobs child gets "false" and the provisioner child is switched on
-# by the launcher for provisioning only. Turning routing on is the separate HWS
+# rab-worker; both children get "false" (Phase A: the launcher no longer forces it
+# for the provisioner child). The provisioner child provisions because rab-worker
+# commits CREWFLOW_PROVISIONER_ENABLED "true" (the explicit opt-in), not because of
+# HWS. Turning routing on is the separate HWS
 # production cutover (gate G4: production rehearsal + hws:backfill + owner
 # approval). Never override it in OpenShip.
 #
@@ -249,10 +251,12 @@ services:
   # CREWFLOW_MIGRATION_DATABASE_URL, CREWFLOW_MIGRATION_PHASE,
   # CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD,
   # ALLOW_PRODUCTION_DB_COMMANDS. Also never: any override of the committed
-  # HWS_RUNTIME_ENABLED "false" (the
-  # launcher enables provisioning for the provisioner child itself; on the jobs
-  # child that flag would switch runtime routing — a separate, unapproved
-  # cutover), NODE_OPTIONS (never forwarded anyway), DB_TARGET, BOOTSTRAP_ADMIN_*,
+  # HWS_RUNTIME_ENABLED "false" (provisioning is enabled by the committed
+  # CREWFLOW_PROVISIONER_ENABLED "true"; HWS on the jobs child would switch
+  # runtime routing — a separate, unapproved cutover), any override of the
+  # committed CREWFLOW_PROVISIONER_ENABLED "true" (an override to "false" starts
+  # no provisioner and REFUSES to start while CREWFLOW_PROVISIONER_DATABASE_URL is
+  # set — production has no other path that builds workspaces), NODE_OPTIONS (never forwarded anyway), DB_TARGET, BOOTSTRAP_ADMIN_*,
   # TEST_*, AUTH_*_ISSUER_URL, and any override of the committed keys below.
   # ---------------------------------------------------------------------------
   rab-worker:
@@ -285,9 +289,24 @@ services:
       # AI OFF in production (owner decision EX-2); see the rab-api note.
       AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
-      # Forwarded to the jobs child only: HWS routing OFF until gate G4. The
-      # launcher sets the provisioner child's own value (provisioning gate).
+      # HWS routing OFF until gate G4. Forwarded unchanged to both children
+      # (Phase A: no longer forced to "true" for the provisioner child).
       HWS_RUNTIME_ENABLED: "false"
+      # Phase A (pa-provisioner): the provisioner switch. Production needs the
+      # provisioner (the privileged reconciler is the only path that builds new
+      # workspaces here — see WORKSPACE PROVISIONING PATH above), so it is
+      # enabled explicitly. Without this line the launcher keeps the
+      # pre-Phase-A behaviour (provisioner on, 5 s); "false" would stop
+      # workspace provisioning AND make the launcher refuse to start while
+      # CREWFLOW_PROVISIONER_DATABASE_URL is entered.
+      CREWFLOW_PROVISIONER_ENABLED: "true"
+      # Polling interval (5..120 s; the code default became 60 s in Phase A).
+      # Pinned to the pre-Phase-A 5 s here because this reconciler IS the
+      # self-service onboarding path in production (WorkspacePreparationScreen
+      # waits on it; owner "feel instant" requirement, see
+      # workspace-provisioner.main.ts). OWNER DECISION to relax it (e.g. remove
+      # this line → 60 s worst-case wait for a new workspace).
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: "5"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"

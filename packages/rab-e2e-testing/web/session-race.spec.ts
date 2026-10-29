@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
+import { observeAuthCalls, paceAuth, paceSignedOutPageLoad, paceSignIn } from './support/live-pacing';
+
 /**
  * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B, item 3 — dedicated session-race proof).
  *
@@ -35,10 +37,11 @@ import { expect, test, type Page, type Route } from '@playwright/test';
  * full `.goto()` specifically to avoid spending throttle budget on a refresh call the SPA's own
  * client-side router doesn't need.
  */
-const BASE_URL = 'http://127.0.0.1:5173';
-const MANAGER_A_EMAIL = 'manager.a.e2e@example.test';
-const MANAGER_C_EMAIL = 'manager.c.e2e@example.test';
-const PASSWORD = 'ChangeMe123!';
+// Live job: playwright.live.config.ts / live/run-live.sh seeds both managers (random password per run). Overridable for local runs.
+const BASE_URL = process.env.E2E_WEB_ORIGIN ?? 'http://127.0.0.1:5173';
+const MANAGER_A_EMAIL = process.env.E2E_MANAGER_A_EMAIL ?? 'manager.a.e2e@example.test';
+const MANAGER_C_EMAIL = process.env.E2E_MANAGER_C_EMAIL ?? 'manager.c.e2e@example.test';
+const PASSWORD = process.env.E2E_MANAGER_PASSWORD ?? 'ChangeMe123!';
 
 // P1B.2: observed this file's own 4-test combined run intermittently tripping the real server's
 // 5/60s throttle (AUTH_THROTTLE, auth.controller.ts) despite the 4-call client-side budget below —
@@ -65,14 +68,18 @@ async function paceAuthCall(): Promise<void> {
 /** A full navigation — always paced, since it re-triggers bootstrapSession()'s /auth/refresh call. */
 async function pacedGoto(page: Page, url: string): Promise<void> {
   await paceAuthCall();
+  // Plus the calls the browser REALLY made (support/live-pacing.ts): the development build's StrictMode bootstraps a
+  // signed-out page load through /auth/refresh twice, which this file's own one-slot-per-navigation budget cannot see.
+  await paceSignedOutPageLoad();
   await page.goto(url);
 }
 
 async function login(page: Page, email: string, password: string): Promise<void> {
   await pacedGoto(page, `${BASE_URL}/login`);
+  await page.getByRole('button', { name: 'Continue with email' }).click();
   await page.getByLabel('Email').fill(email);
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByLabel('Password', { exact: true }).fill(password);
   // P1C.1B: `pacedGoto`'s own call above only paces the implicit `/auth/refresh`
   // `SessionBootstrap` fires on the page load it causes (mounted alongside
   // `<BrowserRouter>`, so it runs on every navigation including `/login` —
@@ -86,20 +93,22 @@ async function login(page: Page, email: string, password: string): Promise<void>
   // stale-request rule — matching the exact class of fix P1B.2 already
   // applied once to this same file.
   await paceAuthCall();
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await paceSignIn();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/`);
 }
 
 /** In-app (SPA) navigation to Settings → Profile — no full reload, no extra /auth/refresh call. Only valid when `page` is already loaded and authenticated. */
 async function openSettingsProfileInApp(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Navigation modes' }).getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/settings/profile`);
 }
 
 async function logoutViaUi(page: Page): Promise<void> {
   await pacedGoto(page, `${BASE_URL}/settings/profile`);
-  await page.getByRole('button', { name: /Logout/i }).click();
-  await page.getByRole('button', { name: 'Log out' }).click();
+  // Settings navigation → "Log out" → the "Log out?" confirmation (features/settings/layout/SettingsSidebar.tsx, LogoutDialog.tsx).
+  await page.getByRole('complementary', { name: 'Settings navigation' }).getByRole('button', { name: 'Log out' }).click();
+  await page.getByRole('alertdialog', { name: 'Log out?' }).getByRole('button', { name: 'Log out', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/login`);
 }
 
@@ -121,6 +130,7 @@ test.setTimeout(300_000);
 
 test('multi-tab race 1: a delayed GET from Tab A (Manager A), released after Tab B logs A out and logs in as Manager C, never populates Cs UI and is never replayed', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -145,7 +155,7 @@ test('multi-tab race 1: a delayed GET from Tab A (Manager A), released after Tab
   // then logs in as Manager C.
   await logoutViaUi(tabB);
   await login(tabB, MANAGER_C_EMAIL, PASSWORD);
-  await expect(tabB.getByRole('link', { name: 'Settings' })).toBeVisible();
+  await expect(tabB.getByRole('group', { name: 'Navigation modes' }).getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
 
   // Release A's delayed request NOW — after the cookie (and A's server-side session) has moved to C.
   gate.release();
@@ -178,6 +188,7 @@ test('multi-tab race 1: a delayed GET from Tab A (Manager A), released after Tab
 
 test('multi-tab race 2: a delayed MUTATION (PATCH /profile) from Tab A, released after Tab B logs A out and logs in as C, never succeeds and never mutates Cs profile', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -222,6 +233,7 @@ test('multi-tab race 2: a delayed MUTATION (PATCH /profile) from Tab A, released
 
 test('multi-tab race 3: BroadcastChannel never silently adopts a different identity — Tab A re-identifies to exactly C, never a mixed A/C state', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -251,6 +263,7 @@ test('multi-tab race 3: BroadcastChannel never silently adopts a different ident
 
 test('multi-tab race 4: login/refresh/logout Set-Cookie-changing calls are serialized across tabs by the cross-tab Web Lock, not merely ignored afterward', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -272,21 +285,26 @@ test('multi-tab race 4: login/refresh/logout Set-Cookie-changing calls are seria
 
   await paceAuthCall();
   await paceAuthCall();
+  // Two signed-out page loads (up to two /auth/refresh each in the development build) and two sign-ins, all at once.
+  await paceAuth('refresh', 4);
+  await paceAuth('login', 2);
   // Fire both logins at genuinely the same instant.
   await Promise.all([
     (async () => {
       await tabA.goto(`${BASE_URL}/login`);
+      await tabA.getByRole('button', { name: 'Continue with email' }).click();
       await tabA.getByLabel('Email').fill(MANAGER_A_EMAIL);
-      await tabA.getByRole('button', { name: 'Continue' }).click();
-      await tabA.getByLabel('Password').fill(PASSWORD);
-      await tabA.getByRole('button', { name: 'Sign in' }).click();
+      await tabA.getByRole('button', { name: 'Continue', exact: true }).click();
+      await tabA.getByLabel('Password', { exact: true }).fill(PASSWORD);
+      await tabA.getByRole('button', { name: 'Sign in', exact: true }).click();
     })(),
     (async () => {
       await tabB.goto(`${BASE_URL}/login`);
+      await tabB.getByRole('button', { name: 'Continue with email' }).click();
       await tabB.getByLabel('Email').fill(MANAGER_C_EMAIL);
-      await tabB.getByRole('button', { name: 'Continue' }).click();
-      await tabB.getByLabel('Password').fill(PASSWORD);
-      await tabB.getByRole('button', { name: 'Sign in' }).click();
+      await tabB.getByRole('button', { name: 'Continue', exact: true }).click();
+      await tabB.getByLabel('Password', { exact: true }).fill(PASSWORD);
+      await tabB.getByRole('button', { name: 'Sign in', exact: true }).click();
     })(),
   ]);
   await expect(tabA).toHaveURL(`${BASE_URL}/`, { timeout: 15_000 });

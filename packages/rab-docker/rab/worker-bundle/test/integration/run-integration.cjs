@@ -198,7 +198,8 @@ function schemaFacts(schema) {
     write(logs.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|workspace-provisioner\] started|rab-worker ready/.test(l)).join('\n'));
     assert(/\[worker-bundle\] live identity probes agree: database=rab cluster=\d+ \(jobs=crewflow_app, provisioner=crewflow\)/.test(logs), 'no agreeing live identity line');
     assert(/\[jobs\] rab-worker ready/.test(logs), 'jobs not ready');
-    assert(/\[provisioner\] \[workspace-provisioner\] started, HWS_RUNTIME_ENABLED=true/.test(logs), 'provisioner not started');
+    // Phase A: HWS is passed through (this stack does not set it), provisioning is enabled by CREWFLOW_PROVISIONER_ENABLED.
+    assert(/\[provisioner\] \[workspace-provisioner\] started, HWS_RUNTIME_ENABLED=\S+ \(provisioning enabled by CREWFLOW_PROVISIONER_ENABLED; interval 5s\)/.test(logs), 'provisioner not started');
     const p = bundlePids('worker-a');
     write(JSON.stringify({ launcher: p.launcher, jobs: p.jobs, provisioner: p.provisioner }));
     write(p.table.map((x) => `${x.pid} uid=${x.uid} ${x.cmd}`).join('\n'));
@@ -249,7 +250,10 @@ function schemaFacts(schema) {
     const provKeys = p.out.trim().split('\n')[0].trim().split(/\s+/);
     for (const forbidden of ['DATABASE_URL_UNPOOLED', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'NODE_OPTIONS', 'DB_TARGET']) assert(!jobsKeys.includes(forbidden), `jobs has ${forbidden}`);
     assert(jobsKeys.includes('DATABASE_DIRECT_URL') && jobsKeys.includes('APP_SECRET'), 'jobs missing required keys');
-    assert(provKeys.join(' ') === 'CREWFLOW_INSTANCE_HEALTH_FILE DATABASE_URL DATABASE_URL_UNPOOLED HOME HWS_RUNTIME_ENABLED NODE_ENV PATH RAB_RUNTIME_ENV REDIS_URL TMPDIR', `provisioner keys: ${provKeys.join(' ')}`);
+    // Phase A: HWS_RUNTIME_ENABLED is passed through only when the service sets it (this stack does not); the launcher sets the
+    // explicit opt-in and the validated interval.
+    assert(provKeys.join(' ') === 'CREWFLOW_INSTANCE_HEALTH_FILE CREWFLOW_PROVISIONER_ENABLED DATABASE_URL DATABASE_URL_UNPOOLED HOME NODE_ENV PATH RAB_RUNTIME_ENV REDIS_URL TMPDIR WORKSPACE_PROVISIONER_INTERVAL_SECONDS', `provisioner keys: ${provKeys.join(' ')}`);
+    for (const key of ['CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS']) assert(!jobsKeys.includes(key), `jobs has ${key}`);
     assert(/DATABASE_URL user=crewflow host=pg:5432 db=rab/.test(p.out), 'provisioner DB identity');
   });
 
@@ -508,6 +512,10 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
       ['DATABASE_URL_UNPOOLED on the service', { DATABASE_URL_UNPOOLED: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL_UNPOOLED must not be configured/],
       ['migration approval on the service', { CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }, /refused: CREWFLOW_MIGRATION_APPROVED must not be configured/],
       ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:wrong-password@pg:5432/rab' }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the DATABASE_URL database .*driver code 28P01/],
+      // Phase A (pa-provisioner): the opt-in switch and the interval bounds.
+      ['provisioner disabled but its URL still present', { CREWFLOW_PROVISIONER_ENABLED: 'false' }, /refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/],
+      ['invalid provisioner switch', { CREWFLOW_PROVISIONER_ENABLED: 'yes' }, /refused: CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"/],
+      ['provisioner interval out of bounds', { WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '3600' }, /refused: WORKSPACE_PROVISIONER_INTERVAL_SECONDS must be a whole number of seconds from 5 to 120/],
     ];
     for (const [label, envOver, expected] of cases) {
       const args = ['run', '--rm', '--no-deps', '-e', 'CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS=0'];
@@ -524,6 +532,30 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
         const secretPart = String(v).match(/[0-9a-f]{48}/)?.[0];
         if (secretPart) assert(!r.raw.includes(secretPart), `${label}: value leaked`);
       }
+    }
+  });
+
+  await step('26b', 'Provisioner disabled (Phase A): jobs child only, no crewflow connection, jobs-only health', async () => {
+    assert(compose(['--profile', 'noprov', 'up', '-d', '--wait', '--wait-timeout', '180', 'worker-noprov']).code === 0, 'worker-noprov not healthy');
+    try {
+      const logs = logsOf('worker-noprov');
+      write(logs.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|workspace-provisioner|rab-worker ready/.test(l)).join('\n'));
+      assert(/\[worker-bundle\] starting jobs only — workspace provisioner disabled/.test(logs), 'launcher did not report jobs-only');
+      assert(!/workspace-provisioner\]/.test(logs), 'a provisioner child logged');
+      const t = procTable('worker-noprov');
+      write(t.map((x) => `${x.pid} uid=${x.uid} ${x.cmd}`).join('\n'));
+      assert(!t.some((x) => x.uid === 10001), 'a process runs as the provisioner identity');
+      assert(t.filter((x) => x.uid === 1000 && /rab-worker\/dist\/main\.js/.test(x.cmd)).length === 1, 'jobs child missing');
+      const ip = inspect('worker-noprov', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}');
+      const act = sql1(`SELECT coalesce(string_agg(usename || '=' || n, ' ' ORDER BY usename), '-') FROM (SELECT usename, count(*) n FROM pg_stat_activity WHERE datname = 'rab' AND host(client_addr) = '${ip}' AND usename IS NOT NULL GROUP BY 1) s`);
+      write(`worker-noprov connections: ${act}`);
+      assert(!/(^|\s)crewflow=/.test(act), 'disabled bundle holds a crewflow connection');
+      const hc = compose(['exec', '-T', 'worker-noprov', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs'], { quiet: true }).out;
+      write(`health: ${hc.trim()}`);
+      assert(/^jobs: healthy/m.test(hc) && !/provisioner:/.test(hc), 'health did not evaluate jobs only');
+      return `connections ${act}`;
+    } finally {
+      compose(['--profile', 'noprov', 'rm', '-sf', 'worker-noprov']);
     }
   });
 
@@ -608,14 +640,35 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
 
   await step('31', 'Graceful stop: SIGTERM forwarded, both drains complete, exit 0 within the grace period; no orphans', async () => {
     await waitFor('worker-a healthy', () => healthOf('worker-a') === 'healthy', 180_000, 3000);
+    // Judge the whole log of THIS stop, not a fixed-size tail: case 31 runs about a second after case 30 restarts
+    // PostgreSQL, so an in-flight jobs cycle can print a multi-line connection error while draining and push the drain
+    // lines out of any short tail. The window starts 10 s early (host/daemon clock skew); worker-a was last stopped in
+    // case 28, minutes earlier, and exactly one stop must fall inside the window.
+    const since = new Date(Date.now() - 10_000).toISOString();
     const t0 = Date.now();
     compose(['stop', '-t', '55', 'worker-a']);
     const elapsed = Date.now() - t0;
     const exit = inspect('worker-a', '{{.State.ExitCode}}');
-    const tail = logsOf('worker-a').split('\n').slice(-12).join('\n');
-    write(`stop took ${elapsed}ms, exit code ${exit}\n${tail}`);
+    const stopLog = compose(['logs', '--no-color', '--since', since, 'worker-a'], { quiet: true }).out;
+    const drainLines = stopLog.split('\n').filter((l) => /\[worker-bundle\]|received SIGTERM|shut down cleanly/.test(l));
+    write(`stop took ${elapsed}ms, exit code ${exit}\n${drainLines.join('\n')}`);
     assert(exit === '0', 'non-zero exit on graceful stop');
-    assert(/received SIGTERM/.test(tail) && /Worker shut down cleanly/.test(tail) && /\[workspace-provisioner\] shut down cleanly/.test(tail), 'drain lines missing');
+    assert((stopLog.match(/\[worker-bundle\] stopping: received SIGTERM/g) || []).length === 1, 'expected exactly one bundle stop in the window');
+    const required = [
+      /\[jobs\] Worker received SIGTERM/,
+      /\[jobs\] Worker shut down cleanly/,
+      /\[workspace-provisioner\] shut down cleanly/,
+      /\[worker-bundle\] jobs: exited \(0\)/,
+      /\[worker-bundle\] provisioner: exited \(0\)/,
+      /\[worker-bundle\] exiting with code 0/,
+    ];
+    assert(required.every((re) => re.test(stopLog)), 'drain lines missing');
+    // The launcher's own lines share one stream, so their order is reliable: SIGTERM first, the bundle exit last.
+    const at = (re) => drainLines.findIndex((l) => re.test(l));
+    const sigterm = at(/\[worker-bundle\] stopping: received SIGTERM/);
+    const bundleExit = at(/\[worker-bundle\] exiting with code 0/);
+    assert(sigterm < at(/\[worker-bundle\] jobs: exited \(0\)/) && sigterm < at(/\[worker-bundle\] provisioner: exited \(0\)/), 'a child exited before SIGTERM was forwarded');
+    assert(bundleExit > at(/\[worker-bundle\] jobs: exited \(0\)/) && bundleExit > at(/\[worker-bundle\] provisioner: exited \(0\)/), 'the bundle exited before both children');
     assert(elapsed < 55_000, 'stop exceeded the grace period');
     compose(['start', 'worker-a']);
     await waitFor('worker-a healthy after restart', () => healthOf('worker-a') === 'healthy', 180_000, 3000);

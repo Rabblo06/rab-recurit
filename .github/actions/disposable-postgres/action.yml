@@ -1,0 +1,47 @@
+name: Disposable PostgreSQL
+description: >-
+  Starts a throwaway PostgreSQL 16 container on 127.0.0.1:5432 AFTER checkout (no volume mount from the workspace, which
+  broke checkout with EACCES when it was a service volume), marked crewflow.disposable_cluster=on for the M2 harness.
+  Writes MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD and APP_SECRET to
+  $GITHUB_ENV, every value random per run and masked before first use. Nothing is printed.
+
+runs:
+  using: composite
+  steps:
+    - name: Start disposable PostgreSQL 16
+      shell: bash
+      run: |
+        set -euo pipefail
+        su_pass="$(openssl rand -hex 24)"
+        cf_pass="$(openssl rand -hex 24)"
+        app_pass="$(openssl rand -hex 24)"
+        app_secret="$(openssl rand -hex 32)"
+        echo "::add-mask::${su_pass}"
+        echo "::add-mask::${cf_pass}"
+        echo "::add-mask::${app_pass}"
+        echo "::add-mask::${app_secret}"
+        # Password through a file, not -e: an environment value shows in the process list and in `docker inspect`.
+        mkdir -p "${RUNNER_TEMP}/disposable-pg"
+        printf '%s' "${su_pass}" > "${RUNNER_TEMP}/disposable-pg/su_pass"
+        chmod 644 "${RUNNER_TEMP}/disposable-pg/su_pass"
+        docker run -d --name disposable-postgres -p 127.0.0.1:5432:5432 \
+          -v "${RUNNER_TEMP}/disposable-pg/su_pass:/run/disposable/su_pass:ro" \
+          -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres \
+          postgres:16-alpine -c crewflow.disposable_cluster=on > /dev/null
+        # Over TCP, not the socket: the image's temporary init server answers on the socket only, then restarts.
+        for i in $(seq 1 90); do
+          docker exec disposable-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break
+          sleep 1
+        done
+        if ! docker exec disposable-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1; then
+          echo "disposable PostgreSQL did not become ready within 90 s" >&2
+          exit 1
+        fi
+        admin_url="postgres://ci_bootstrap:${su_pass}@127.0.0.1:5432/postgres"
+        echo "::add-mask::${admin_url}"
+        {
+          echo "MIGRATION_SECURITY_ADMIN_URL=${admin_url}"
+          echo "CREWFLOW_BOOTSTRAP_PASSWORD=${cf_pass}"
+          echo "CREWFLOW_APP_BOOTSTRAP_PASSWORD=${app_pass}"
+          echo "APP_SECRET=${app_secret}"
+        } >> "$GITHUB_ENV"

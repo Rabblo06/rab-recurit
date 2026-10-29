@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Page } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 
 import { EVIDENCE_DIR } from './env';
 
@@ -85,6 +85,22 @@ export async function uiLogin(page: Page, origin: string, email: string, passwor
   }
   await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 30_000 });
   await settle(page);
+}
+
+/**
+ * The workspace-host landing of the login handoff (lane D, M10-3, 2026-10-24): it peeks the token and asks
+ * "Continue as j***@…?"; only an explicit Continue exchanges it. Asserts the masked address the user is shown, presses
+ * Continue and waits until the page has left /auth/handoff.
+ */
+export async function confirmHandoff(page: Page, email: string): Promise<void> {
+  await page.waitForURL((u) => u.pathname.startsWith('/auth/handoff'), { timeout: 60_000 });
+  const masked = page.getByTestId('handoff-masked-email');
+  await expect(masked).toBeVisible({ timeout: 30_000 });
+  // Exactly the server's mask (core.login_handoff peek: first character + '***@' + domain), compared as a plain string.
+  const [local, domain] = email.split('@');
+  await expect(masked).toHaveText(`${local[0]}***@${domain}`);
+  await page.getByRole('button', { name: /^Continue as / }).click();
+  await page.waitForURL((u) => !u.pathname.startsWith('/auth/handoff'), { timeout: 60_000 });
 }
 
 /** Lets client-side redirects (OnboardingGate, handoff) finish before the caller inspects the URL. */

@@ -1,6 +1,8 @@
 'use strict';
 /**
  * Crewflow Worker bundle — per-instance health for BOTH roles (ordinary jobs + workspace provisioner).
+ * Phase A (pa-provisioner): the provisioner role is checked only when CREWFLOW_PROVISIONER_ENABLED=true in the container
+ * environment (the same strict switch the launcher reads); otherwise only the jobs role is expected.
  *
  * Used two ways:
  *   1. As the container HEALTHCHECK command: `node /opt/crewflow-bundle/worker-bundle-health.cjs` (exit 0 healthy, 1 not).
@@ -41,7 +43,8 @@ const ROLES = Object.freeze({
     uid: 10001,
     gid: 10001,
     file: `${HEALTH_ROOT}/provisioner/heartbeat.json`,
-    // One loop, every 5 s.
+    // One loop, every WORKSPACE_PROVISIONER_INTERVAL_SECONDS (Phase A: default 60 s, at most 120 s — so a settled cycle
+    // always fits this 5-minute window, a lock-busy skip included).
     settledMaxAgeMs: 5 * 60 * 1000,
     succeededMaxAgeMs: 5 * 60 * 1000,
     // A batch is at most 10 workspaces, each a few seconds of DDL.
@@ -133,8 +136,46 @@ function evaluate({ now = Date.now(), roles = ROLES, read = readHeartbeat, uidOf
   return { healthy: results.every((r) => r.healthy), roles: results };
 }
 
+/**
+ * Phase A (pa-provisioner): the provisioner switch. Shared by the launcher (which refuses an invalid value) and this
+ * health check (which reads the same container environment). Strict:
+ *   "true"        → 'on'      explicit opt-in.
+ *   "false"       → 'off'     explicit opt-out: jobs child only.
+ *   unset / empty → 'legacy'  every environment configured before Phase A: the provisioner runs exactly as it did then
+ *                             (its URL is required, 5 s cadence), so an existing deployment never loses provisioning.
+ *   anything else → null      invalid — the caller fails closed.
+ */
+function provisionerMode(env) {
+  const raw = env.CREWFLOW_PROVISIONER_ENABLED;
+  if (raw === undefined || raw === null) return 'legacy';
+  const value = String(raw).trim();
+  if (value === '') return 'legacy';
+  if (value === 'true') return 'on';
+  if (value === 'false') return 'off';
+  return null;
+}
+
+/** True when the provisioner child runs ('on' or 'legacy'), false for 'off', null when the switch is invalid. */
+function parseProvisionerEnabled(env) {
+  const mode = provisionerMode(env);
+  return mode === null ? null : mode !== 'off';
+}
+
+/** The roles this container is expected to run: both when the provisioner is enabled, jobs only otherwise; null = invalid. */
+function rolesFor(env) {
+  const enabled = parseProvisionerEnabled(env);
+  if (enabled === null) return null;
+  return enabled ? ROLES : Object.freeze({ jobs: ROLES.jobs });
+}
+
 if (require.main === module) {
-  const result = evaluate();
+  const roles = rolesFor(process.env);
+  if (!roles) {
+    // Fail closed: the launcher refuses this value too, so a container reporting it is misconfigured.
+    console.log('configuration: UNHEALTHY - CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"');
+    process.exit(1);
+  }
+  const result = evaluate({ roles });
   for (const r of result.roles) {
     // Timestamps and loop names only — the heartbeat never carries configuration or credentials.
     console.log(`${r.role}: ${r.healthy ? 'healthy' : `UNHEALTHY - ${r.problems.join('; ')}`}`);
@@ -142,4 +183,7 @@ if (require.main === module) {
   process.exitCode = result.healthy ? 0 : 1;
 }
 
-module.exports = { ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, BULLMQ_CONSUMERS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate };
+module.exports = {
+  ROLES, HEALTH_ROOT, HEARTBEAT_MAX_AGE_MS, REDIS_MAX_AGE_MS, BULLMQ_CONSUMERS_MAX_AGE_MS, readHeartbeat, processUid, evaluateRole, evaluate,
+  provisionerMode, parseProvisionerEnabled, rolesFor,
+};

@@ -223,8 +223,14 @@ services:
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
       REDIS_URL: redis://redis:6379
       # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
-      # launcher forwards it to the jobs child and always enables it for the provisioner child itself.
+      # launcher forwards it unchanged to both children (Phase A: it is no longer forced for the provisioner child).
       HWS_RUNTIME_ENABLED: 'true'
+      # Phase A (pa-provisioner): the provisioner switch; the dev stack keeps the provisioner (owner decision 2026-10-15, see
+      # the service comment above). Unset = the pre-Phase-A behaviour (on, 5 s); "false" makes the launcher refuse to start
+      # while CREWFLOW_PROVISIONER_DATABASE_URL is set.
+      # Polling interval: WORKSPACE_PROVISIONER_INTERVAL_SECONDS (5..120, default 60 with the switch "true"; it was a fixed
+      # 5 s before Phase A).
+      CREWFLOW_PROVISIONER_ENABLED: 'true'
       # Same workspace-host pair as the server (DEVELOPMENT ONLY): the shared validator refuses origin trust without host
       # routing, and the worker builds workspace-aware invitation links from the base domain.
       WORKSPACE_BASE_DOMAIN: localhost:5173

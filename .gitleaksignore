@@ -2,3 +2,11 @@
 # Test-only fixture password in a frontend spec, not a credential. The line now carries `gitleaks:allow`;
 # this entry covers the commit that introduced it before the marker was added.
 1eeba2358b321f200c0ea943c9bfce821f6e6fac:packages/rab-front/src/features/auth/AcceptInvitation.spec.tsx:generic-api-key:33
+
+# Phase 0 Sentry-scrubbing tests (commit 6242eeec): synthetic markers the scrubber must remove, not credentials.
+# The JWT payloads decode to {"sub":"user-sentry-jwt-marker"} / {"sub":"envelope-jwt-marker"}; the quoted values are
+# 'quoted-PASS-s3cr' / 'quoted-SECRET-s3cr'. Reviewed 2026-10-28 (release PR #19).
+6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.envelope.spec.ts:jwt:21
+6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:jwt:43
+6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:generic-api-key:591
+6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:generic-api-key:594

@@ -121,6 +121,11 @@ services:
       DATABASE_DIRECT_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
       DATABASE_URL_UNPOOLED: ''
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+      # Phase A (pa-provisioner): the provisioner switch, explicitly on (worker only, never the shared app-env anchor). The 5 s
+      # interval keeps the pre-Phase-A cadence these specs time against (05-resilience expects a provisioning cycle to
+      # succeed within 30 s of a connection blip); the code default is now 60 s.
+      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
     command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
     user: '0:0'
     read_only: true

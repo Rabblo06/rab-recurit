@@ -80,13 +80,19 @@ test('Users bulk bar offers the permitted Users actions', async ({ page }) => {
 
 test('sidebar active pill slides to the new item while navigation is immediate', async ({ page }) => {
   await fixtures(page);
+  // Payroll is a lazy route: React Router keeps the old location (and pill) rendered until its code has loaded, and the
+  // dev server compiles it on first request. Load it once first so the samples time the pill, not that compile.
+  await page.goto('/payroll');
+  await page.waitForLoadState('networkidle');
   await page.goto('/');
   await expect(page.locator('.nav-item.active')).toHaveText(/Dashboard/);
   await settle(page, 500);
-  await sample(page, '.nav-active-pill', 'el.getBoundingClientRect().top', 600);
+  // The window starts before the click; as in the tab-indicator test above, a slower runner can land the route update a
+  // few hundred ms after it, so sample long enough to see the whole spring settle (the assertions are unchanged).
+  await sample(page, '.nav-active-pill', 'el.getBoundingClientRect().top', 1600);
   await page.locator('.nav-item', { hasText: 'Payroll' }).click();
   await expect(page).toHaveURL(/\/payroll$/); // route changes at once
-  await settle(page, 650);
+  await settle(page, 1650);
   const s = (await samples(page)).filter(([, v]) => v != null);
   expect(distinct(s)).toBeGreaterThan(3);
   const final = await page.locator('.nav-item.active').evaluate((el) => el.getBoundingClientRect().top);

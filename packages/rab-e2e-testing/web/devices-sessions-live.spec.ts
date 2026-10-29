@@ -4,18 +4,31 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 /**
- * Settings → Profile → Devices against a REAL API and REAL PostgreSQL/Redis — but only the disposable ones: the API runs from
- * source on 127.0.0.1:3999 against crewflow-test-db (127.0.0.1:15436, `crewflow.disposable_test_database=true`) and
- * crewflow-test-redis; the console is the isolated Vite on :5174. Never the dev stack, never a real account.
+ * Settings → Profile → Devices against a REAL API and REAL PostgreSQL/Redis — but only the disposable ones: the API on
+ * 127.0.0.1:3999 against a database marked `crewflow.disposable_test_database=true` and a disposable Redis; the console is the
+ * Vite on :5174. Never the dev stack, never a real account. Run by `live/run-live.sh` (CI job web-live), which builds that
+ * stack and seeds the two QA managers.
  *
- * Required env: QA_IDENTITIES (JSON file with two disposable QA managers). Optional SHOT_TAG=before|after.
+ * Required env: QA_IDENTITIES (JSON file with two disposable QA managers; live/seed-live-e2e.ts). Optional SHOT_TAG=before|after.
  * Auth endpoints are limited to 5/min each, so every login and every full page load (which refreshes) is paced.
  */
-const API = 'http://127.0.0.1:3999/rest/v1';
-const ORIGIN = 'http://127.0.0.1:5174';
+// CI: the live job's qa stack (live/run-live.sh, playwright.live.config.ts project `qa`). Overridable for local runs.
+const API = `${process.env.E2E_QA_API_ORIGIN ?? 'http://127.0.0.1:3999'}/rest/v1`;
+const ORIGIN = process.env.E2E_QA_WEB_ORIGIN ?? 'http://127.0.0.1:5174';
+// The disposable PostgreSQL container and database the API under test uses (CI: disposable-postgres + the harness database).
+const DB_CONTAINER = process.env.E2E_DB_CONTAINER ?? 'crewflow-test-db';
+const DB_USER = process.env.E2E_DB_USER ?? 'rab';
+const DB_NAME = process.env.E2E_DB_NAME ?? 'rab';
 const OUT = path.resolve(__dirname, '.qa-shots/devices-2026-10-19');
 const TAG = process.env.SHOT_TAG ?? 'after';
-const ids = JSON.parse(readFileSync(process.env.QA_IDENTITIES ?? '', 'utf8')) as Record<'a' | 'b', { email: string; password: string }>;
+// Loaded in beforeAll, not at module level: a module-level read of a missing file is a LOAD error, which aborts
+// the whole Playwright run (every other spec included). Missing QA_IDENTITIES now fails only this spec, immediately and by name.
+type Identities = Record<'a' | 'b', { email: string; password: string }>;
+let ids: Identities;
+test.beforeAll(() => {
+  if (!process.env.QA_IDENTITIES) throw new Error('QA_IDENTITIES is not set: this spec needs the disposable API on 127.0.0.1:3999, its seeded QA managers and the isolated Vite on :5174 (see the header).');
+  ids = JSON.parse(readFileSync(process.env.QA_IDENTITIES, 'utf8')) as Identities;
+});
 
 test.use({ viewport: { width: 1440, height: 900 } });
 test.setTimeout(8 * 60_000);
@@ -34,7 +47,7 @@ function dbUsableCount(email: string): number {
     AND us.revoked_at IS NULL AND us.absolute_expires_at > now() AND (us.idle_expires_at IS NULL OR us.idle_expires_at > now())
     AND EXISTS (SELECT 1 FROM core.refresh_token rt WHERE rt.family_id = us.id AND rt.user_id = us.user_id AND rt.organisation_id = us.organisation_id
                 AND rt.revoked_at IS NULL AND rt.family_expires_at > now()); ROLLBACK;`;
-  const out = execFileSync('docker', ['exec', 'crewflow-test-db', 'psql', '-U', 'rab', '-d', 'rab', '-XAt', '-c', sql], { encoding: 'utf8' });
+  const out = execFileSync('docker', ['exec', DB_CONTAINER, 'psql', '-U', DB_USER, '-d', DB_NAME, '-XAt', '-c', sql], { encoding: 'utf8' });
   return Number(out.split('\n').map((l) => l.trim()).find((l) => /^\d+$/.test(l)));
 }
 

@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 
+import { observeAuthCalls, paceSignedOutPageLoad, paceSignIn } from './support/live-pacing';
+
 /**
  * P1C.1C-F — ten adversarial cookie-transport race scenarios, additional to the existing P0
  * `session-race.spec.ts` (verified 4/4 in isolation this same checkpoint). Real Chromium, real
@@ -20,10 +22,12 @@ import { expect, test, type Page, type Route } from '@playwright/test';
  * Re-deriving separate tests for those four would duplicate the exact same proof, not add new
  * coverage — documented here rather than silently skipped.
  */
-const BASE_URL = 'http://127.0.0.1:5173';
-const MANAGER_A_EMAIL = 'manager.a.e2e@example.test';
-const MANAGER_C_EMAIL = 'manager.c.e2e@example.test';
-const PASSWORD = 'ChangeMe123!';
+// Live job: playwright.live.config.ts / live/run-live.sh seeds both managers (random password per run). Overridable for local runs.
+const BASE_URL = process.env.E2E_WEB_ORIGIN ?? 'http://127.0.0.1:5173';
+const API_ORIGIN = process.env.E2E_API_ORIGIN ?? 'http://127.0.0.1:3000';
+const MANAGER_A_EMAIL = process.env.E2E_MANAGER_A_EMAIL ?? 'manager.a.e2e@example.test';
+const MANAGER_C_EMAIL = process.env.E2E_MANAGER_C_EMAIL ?? 'manager.c.e2e@example.test';
+const PASSWORD = process.env.E2E_MANAGER_PASSWORD ?? 'ChangeMe123!';
 
 const AUTH_CALL_WINDOW_MS = 60_000;
 const MAX_AUTH_CALLS_PER_WINDOW = 3;
@@ -42,28 +46,34 @@ async function paceAuthCall(): Promise<void> {
 
 async function pacedGoto(page: Page, url: string): Promise<void> {
   await paceAuthCall();
+  // Plus the calls the browser REALLY made (support/live-pacing.ts): the development build's StrictMode bootstraps a
+  // signed-out page load through /auth/refresh twice, which this file's own one-slot-per-navigation budget cannot see.
+  await paceSignedOutPageLoad();
   await page.goto(url);
 }
 
 async function login(page: Page, email: string, password: string): Promise<void> {
   await pacedGoto(page, `${BASE_URL}/login`);
+  await page.getByRole('button', { name: 'Continue with email' }).click();
   await page.getByLabel('Email').fill(email);
-  await page.getByRole('button', { name: 'Continue' }).click();
-  await page.getByLabel('Password').fill(password);
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await paceAuthCall(); // the real POST /auth/login call, separately throttled from the above navigation's implicit /auth/me probe.
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await paceSignIn();
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/`);
 }
 
 async function openSettingsProfileInApp(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Navigation modes' }).getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/settings/profile`);
 }
 
 async function logoutViaUi(page: Page): Promise<void> {
   await pacedGoto(page, `${BASE_URL}/settings/profile`);
-  await page.getByRole('button', { name: /Logout/i }).click();
-  await page.getByRole('button', { name: 'Log out' }).click();
+  // Settings navigation → "Log out" → the "Log out?" confirmation (features/settings/layout/SettingsSidebar.tsx, LogoutDialog.tsx).
+  await page.getByRole('complementary', { name: 'Settings navigation' }).getByRole('button', { name: 'Log out' }).click();
+  await page.getByRole('alertdialog', { name: 'Log out?' }).getByRole('button', { name: 'Log out', exact: true }).click();
   await expect(page).toHaveURL(`${BASE_URL}/login`);
 }
 
@@ -80,6 +90,7 @@ test.setTimeout(300_000);
 // ============================================================ T1 — delayed GET, different endpoint
 test('cookie race 1: a delayed GET /staff from Tab A, released after Tab B logs in as Manager C, is rejected and never populates Cs query cache', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -93,7 +104,7 @@ test('cookie race 1: a delayed GET /staff from Tab A, released after Tab B logs 
     await route.continue();
   });
 
-  const navPromise = tabA.getByRole('link', { name: 'Users' }).click();
+  const navPromise = tabA.getByRole('link', { name: 'Users', exact: true }).click();
   await expect.poll(() => staffRequests.length, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
 
   await logoutViaUi(tabB);
@@ -118,6 +129,7 @@ test('cookie race 1: a delayed GET /staff from Tab A, released after Tab B logs 
 // ============================================================ T2 — delayed PATCH, explicit 401 on release
 test('cookie race 2: a delayed PATCH /profile from Tab A is rejected (401) once released under Cs cookie, and Cs profile is never mutated', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -180,26 +192,27 @@ test('cookie race 2: a delayed PATCH /profile from Tab A is rejected (401) once 
 // `p1c1c-cookie-authentication.integration.spec.ts` (category D).
 test('cookie race 4: a logout fired from Tab A racing Tab B logging in as Manager C never revokes Cs session', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
   await login(tabA, MANAGER_A_EMAIL, PASSWORD);
   await openSettingsProfileInApp(tabA);
-  const meA = await tabA.request.get('http://127.0.0.1:3000/rest/v1/auth/me');
+  const meA = await tabA.request.get(`${API_ORIGIN}/rest/v1/auth/me`);
   const aSessionId = (await meA.json()).sessionId as string;
 
   // Fired and left running — deliberately NOT awaited here, so it races whatever Tab B does next
   // under real, unmanipulated timing (no gate).
   const logoutPromise = tabA.evaluate(
-    (sessionId) =>
-      fetch('http://127.0.0.1:3000/rest/v1/auth/logout', {
+    ({ sessionId, apiOrigin }) =>
+      fetch(`${apiOrigin}/rest/v1/auth/logout`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'X-Crewflow-Expected-Session-Id': sessionId },
       })
         .then((r) => r.status)
         .catch(() => -1), // a cancelled/aborted fetch (e.g. from Tab As own reload reaction) resolves here, never throws uncaught.
-    aSessionId,
+    { sessionId: aSessionId, apiOrigin: API_ORIGIN },
   );
 
   await login(tabB, MANAGER_C_EMAIL, PASSWORD);
@@ -220,6 +233,7 @@ test('cookie race 4: a logout fired from Tab A racing Tab B logging in as Manage
 
 test('cookie race 5: a reload-triggered bootstrap on Tab A racing Tab B logging in as Manager C never repopulates As stale identity', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
   const tabB = await context.newPage();
 
@@ -227,6 +241,7 @@ test('cookie race 5: a reload-triggered bootstrap on Tab A racing Tab B logging 
 
   // Fired and left running, no gate — a real reload competing with real timing against Tab Bs login.
   await paceAuthCall();
+  await paceSignedOutPageLoad();
   const reloadPromise = tabA.goto(`${BASE_URL}/settings/profile`).catch(() => {});
 
   await login(tabB, MANAGER_C_EMAIL, PASSWORD);
@@ -248,6 +263,7 @@ test('cookie race 5: a reload-triggered bootstrap on Tab A racing Tab B logging 
 // ============================================================ T8 — reload restores exactly the correct session
 test('cookie race 8: a hard reload with a valid crewflow_session cookie restores exactly the correct identity, no more and no less', async ({ browser }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const page = await context.newPage();
 
   await login(page, MANAGER_C_EMAIL, PASSWORD);
@@ -258,11 +274,13 @@ test('cookie race 8: a hard reload with a valid crewflow_session cookie restores
   // (`resolveIdentityViaCookie` via `GET /auth/me`) to run from a completely cold JS state, with NO
   // access token in memory and no prior `userId` to compare against.
   await paceAuthCall();
+  await paceSignedOutPageLoad();
   await page.reload();
   await expect(page.locator('input[disabled]').first()).toHaveValue(MANAGER_C_EMAIL, { timeout: 20_000 });
 
   // A second reload, immediately after, must be stable — not flip identity, not bounce to /login.
   await paceAuthCall();
+  await paceSignedOutPageLoad();
   await page.reload();
   await expect(page).toHaveURL(`${BASE_URL}/settings/profile`);
   await expect(page.locator('input[disabled]').first()).toHaveValue(MANAGER_C_EMAIL, { timeout: 20_000 });
@@ -273,6 +291,7 @@ test('cookie race 8: a hard reload with a valid crewflow_session cookie restores
 // ============================================================ T10 — revoked cookie stays rejected across logout, account switch, and another tab's activity
 test('cookie race 10: a cookie revoked by logout stays rejected after an account switch and activity in another tab', async ({ browser, request }) => {
   const context = await browser.newContext();
+  observeAuthCalls(context);
   const tabA = await context.newPage();
 
   await login(tabA, MANAGER_A_EMAIL, PASSWORD);
@@ -290,7 +309,7 @@ test('cookie race 10: a cookie revoked by logout stays rejected after an account
 
   // The ORIGINAL revoked cookie value, replayed directly against the real backend (bypassing the
   // browser's own — by now cleared — cookie jar entirely), must still be rejected.
-  const replay = await request.get('http://127.0.0.1:3000/rest/v1/auth/me', {
+  const replay = await request.get(`${API_ORIGIN}/rest/v1/auth/me`, {
     headers: { Cookie: `crewflow_session=${revokedCookieValue}` },
   });
   expect(replay.status()).toBe(401);

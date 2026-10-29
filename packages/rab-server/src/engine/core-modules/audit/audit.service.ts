@@ -197,6 +197,14 @@ export const AuditAction = {
   // assertions) resolves through this pair; `metadata.jobType` disambiguates.
   EMAIL_SENT: 'email.sent',
   EMAIL_DELIVERY_FAILED: 'email.delivery_failed',
+  /**
+   * Phase 0 S-6 (owner decision): a report email (pre-shift roster + Shift QR, final timesheet) was NOT delivered because
+   * its recipient was not eligible — the organisation is suspended, or the recipient lost access. Recorded when a queued
+   * row is cancelled at send time (`entityType 'email_outbox'`) and when a suspended organisation's report emails are
+   * withheld at enqueue time (`entityType 'shift_report'`). Metadata is ids, `jobType` and `reasonCode` ONLY — never an
+   * address, name, subject, body, token or file content. The report and its PDF are kept; nothing is replayed later.
+   */
+  REPORT_EMAIL_CANCELLED: 'report.email_cancelled',
   SHIFT_REMINDER_SENT: 'shift.reminder_sent',
   SHIFT_ASSIGNMENT_NO_SHOW: 'shift_assignment.no_show',
   SHIFT_ASSIGNMENT_MISSING_CLOCK_OUT_FLAGGED: 'shift_assignment.missing_clock_out_flagged',

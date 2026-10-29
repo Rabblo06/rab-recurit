@@ -1,3 +1,4 @@
+import { validate } from '@rab/server/engine/core-modules/environment/env.validation';
 import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, resolveScanPrefix, SCAN_JOB_DATA, SCAN_JOB_OPTIONS, SCAN_QUEUE_NAMES } from './queue-registry';
 import { BULLMQ_DEFAULT_LOCK_DURATION_MS, lockDurationMsFor, resolveIntervalMs, SCAN_JOBS, scanJobsOn, schedulerIdOf } from './scan-jobs';
 
@@ -31,7 +32,10 @@ const PRE_MIGRATION_MAIN_TS: Array<[string, number | string, string, string]> = 
 ];
 
 describe('scan job registry (BullMQ migration M2/M4)', () => {
-  const env = { get: (k: string) => ({ LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: 15, OUTBOX_RETENTION_INTERVAL_MINUTES: 60, AI_RETENTION_INTERVAL_MINUTES: 60 })[k] as number };
+  // Phase A pa-intervals: the REAL validated environment with nothing set — every interval must resolve to exactly the
+  // pre-migration cadence below (the defaults-unchanged proof). Minimal base = the keys validate() requires.
+  const validated = validate({ DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) });
+  const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {
     expect(SCAN_JOBS).toHaveLength(20);
@@ -41,17 +45,20 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
       expect(def.statKeys.lastRunAt).toBe(lastRunAt);
       expect(def.statKeys.failures).toBe(failures);
       expect(def.statKeys.skipped).toBe(failures.replace(/Failures$/, 'Skipped'));
-      if (typeof interval === 'number') expect(def.interval).toEqual({ kind: 'constant', ms: interval });
-      else expect(def.interval).toEqual({ kind: 'env-minutes', key: interval });
+      // Phase A: the 17 former constants are now env-seconds settings whose UNSET value resolves to the same cadence.
+      if (typeof interval === 'number') {
+        expect(def.interval.kind).toBe('env-seconds');
+        expect(resolveIntervalMs(def, env)).toBe(interval);
+      } else expect(def.interval).toEqual({ kind: 'env-minutes', key: interval });
     });
     expect(resolveIntervalMs(SCAN_JOBS[11]!, env)).toBe(15 * MIN);
     expect(resolveIntervalMs(SCAN_JOBS[18]!, env)).toBe(60 * MIN);
     expect(resolveIntervalMs(SCAN_JOBS[19]!, env)).toBe(60 * MIN);
   });
 
-  it('the seven `return false` cycles are flagged (dispatchers, login-handoff cleanup, outbox and AI retention)', () => {
+  it('the eight `return false` cycles are flagged (dispatchers, login-handoff and storage cleanup, outbox and AI retention)', () => {
     expect(SCAN_JOBS.filter((d) => d.mayReturnFalse).map((d) => d.jobName)).toEqual([
-      'email-dispatch', 'push-dispatch', 'login-handoff-cleanup', 'shift-statement-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention',
+      'email-dispatch', 'push-dispatch', 'login-handoff-cleanup', 'storage-cleanup', 'shift-statement-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention',
     ]);
   });
 

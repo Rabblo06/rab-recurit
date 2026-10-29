@@ -17,6 +17,13 @@ import { StorageError, StorageErrorCode } from '@rab/server/engine/core-modules/
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { EmailQueueJobData } from '@rab/server/engine/core-modules/email/email-queue.constants';
+import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
+import {
+  checkReportRecipient,
+  REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED,
+  REPORT_RECIPIENT_INELIGIBLE,
+  ReportPermissionChecker,
+} from '../rab-reports/report-recipients';
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -159,33 +166,66 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
 
       const revalidation = await revalidate(manager, row);
       if (!revalidation.ok) {
-        await manager
-          .createQueryBuilder()
-          .update(EmailOutbox)
-          .set({ status: EmailOutboxStatus.CANCELLED, cancelledAt: () => 'now()', lastErrorMessageSanitized: revalidation.reason, ...scrubSecretBody(row) })
-          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
-          .execute();
+        await cancelClaimedRow(manager, row, processingToken, revalidation);
         return { skip: true as const };
       }
+
+      // A row with an attachment (a report PDF) is revalidated once more against its WORKSPACE's own tables before the
+      // provider-call marker is written — see the attachment step below. Every other row is unchanged: the marker is
+      // written here, in this same transaction, exactly as before.
+      if (row.attachmentFileId) return { skip: false as const, row, attachmentCheckPending: true };
 
       // Durable, committed BEFORE the provider is ever contacted — the fact
       // this write happened is itself the signal recovery needs; its own
       // fencing means it silently no-ops (not an error) if we already lost
       // the claim between the two statements above and here.
-      await manager
-        .createQueryBuilder()
-        .update(EmailOutbox)
-        .set({ providerCallStartedAt: () => 'now()' })
-        .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
-        .execute();
+      await markProviderCallStarted(manager, row, processingToken);
 
-      return { skip: false as const, row };
+      return { skip: false as const, row, attachmentCheckPending: false };
     });
 
     if (outcome.skip) return;
     const row = outcome.row!;
 
     try {
+      if (outcome.attachmentCheckPending) {
+        // Report emails (roster + Shift QR, final timesheet). Their shift, report and venue assignment live in the
+        // WORKSPACE's tables (the physical workspace schema under HWS, `core` otherwise), so they are re-read under the
+        // row's own trusted workspace via runInWorkspaceContext — which resolves and binds that schema and fails closed
+        // (throws: the attempt ends RETRY/FAILED through handleSendFailure, never a send) when it cannot. Its own short
+        // transaction, AFTER the claim committed: never a second pooled connection while the claim is still open. The row
+        // is PROCESSING under our token with no provider-call marker yet, so a crash here is a plain safe retry.
+        const verdict = await deps.tenantContext.runInWorkspaceContext(
+          { organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, userId: '', role: '' },
+          (manager) => revalidateAttachment(manager, row, new PermissionsService(deps.tenantContext)),
+        );
+        const proceed = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
+          if (!verdict.ok) {
+            const cancelled = await cancelClaimedRow(manager, row, processingToken, verdict);
+            // S-6: a report email cancelled for its recipient is AUDITED, in the same transaction as the CANCELLED write
+            // (only when this attempt still owned the row). Ids, job type and a reason code only. CANCELLED is terminal:
+            // the row is never replayed (outbox replay only ever acts on FAILED rows), and the report/PDF are untouched.
+            if (cancelled > 0 && verdict.code) {
+              await deps.auditService.record(manager, ctx, AuditAction.REPORT_EMAIL_CANCELLED, {
+                entityType: 'email_outbox',
+                entityId: row.id,
+                targetUserId: row.targetUserId ?? undefined,
+                metadata: {
+                  emailOutboxId: row.id,
+                  fileId: row.attachmentFileId ?? null,
+                  jobType: row.jobType,
+                  reasonCode: verdict.auditReasonCode ?? verdict.code,
+                },
+                actorUserId: null, // background worker, no authenticated human
+              });
+            }
+            return false;
+          }
+          // Lost the fencing token in between: another claim owns the row now, so this attempt sends nothing.
+          return (await markProviderCallStarted(manager, row, processingToken)) > 0;
+        });
+        if (!proceed) return;
+      }
       // Fail closed: never deliver an email with no body (e.g. a row whose body was already cleared). Not retryable — a
       // retry would find the same empty row — so this ends FAILED through handleSendFailure, like any permanent error.
       if (!row.renderedHtml && !row.renderedText) {
@@ -229,6 +269,39 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
       await handleSendFailure(deps, ctx, row, job, processingToken, error);
     }
   };
+}
+
+/**
+ * The existing CANCELLED write, fenced by this attempt's token. A `code` (report emails) is also logged — ids only, never
+ * the address. Returns the number of rows written (0 = this attempt no longer owns the row).
+ */
+async function cancelClaimedRow(manager: EntityManager, row: EmailOutbox, processingToken: string, verdict: { reason: string; code?: string }): Promise<number> {
+  const write = await manager
+    .createQueryBuilder()
+    .update(EmailOutbox)
+    .set({
+      status: EmailOutboxStatus.CANCELLED,
+      cancelledAt: () => 'now()',
+      lastErrorMessageSanitized: verdict.reason,
+      ...(verdict.code ? { lastErrorCode: verdict.code } : {}),
+      ...scrubSecretBody(row),
+    })
+    .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
+    .execute();
+  // eslint-disable-next-line no-console
+  if (verdict.code) console.warn(`email send: outbox row ${row.id} cancelled before delivery (${verdict.code}).`);
+  return write.affected ?? 0;
+}
+
+/** `provider_call_started_at`, fenced by this attempt's token. Returns the number of rows written (0 = token lost). */
+async function markProviderCallStarted(manager: EntityManager, row: EmailOutbox, processingToken: string): Promise<number> {
+  const write = await manager
+    .createQueryBuilder()
+    .update(EmailOutbox)
+    .set({ providerCallStartedAt: () => 'now()' })
+    .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: EmailOutboxStatus.PROCESSING, token: processingToken })
+    .execute();
+  return write.affected ?? 0;
 }
 
 /**
@@ -297,7 +370,10 @@ async function persistSent(
   throw lastError;
 }
 
-async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
+/** `code` is written to `email_outbox.last_error_code`; `auditReasonCode` (S-6) refines it in the audit row only. */
+type Revalidation = { ok: true } | { ok: false; reason: string; code?: string; auditReasonCode?: string };
+
+async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<Revalidation> {
   // The ONE job type that legitimately has no target user at enqueue time (the invitee has no account yet).
   // It is routed to its own, stricter revalidation BEFORE the missing-target-user safeguard below — that
   // safeguard is untouched and still applies to every other job type, so a deleted account's email can never
@@ -348,47 +424,54 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<{ o
     if (token.expiresAt.getTime() < Date.now()) return { ok: false, reason: 'Reset token expired before delivery.' };
   }
 
-  // PHASE 5 (§14) — the pre-shift roster+QR email is only ever correct while
-  // the shift it describes is still active; a shift cancelled in the window
-  // between `shift-report-scheduler.job.ts` enqueueing this row (itself
-  // already re-checked at enqueue time — see that job's own
-  // `reportNeedsGeneration`) and this worker actually sending it must not
-  // still go out claiming an active roster. Uses the SAME structured
-  // linkage the file itself already carries (`stored_file.resource_type =
-  // 'shift_report'`, `resource_id` = the `ShiftReport` row's own id) rather
-  // than any message-text parsing — no new column needed. Deliberately
-  // narrower than "every attachment": the final Timesheet PDF
-  // (`FileKind.FINAL_TIMESHEET_PDF`) is historical truth by the time it's
-  // ever generated (only reachable once a manager has explicitly finalised
-  // the report — see that job's own doc comment) and must keep sending
-  // regardless of the shift's later cancellation, never suppressed here.
-  //
-  // `StoredFile` is workspace-forced RLS, but this whole function runs
-  // under the OUTER `ctx` (`workspaceId: null` — see `processEmailSendJob`'s
-  // own doc comment on why: an ordinary `EmailOutbox` row isn't itself
-  // workspace-scoped). Reading a workspace-scoped row therefore needs its
-  // OWN nested context bound to `row.workspaceId`, mirroring the identical
-  // pattern the attachment-read step below already uses for the same reason
-  // — never the outer, deliberately-workspace-less ctx, which would make
-  // `StoredFile`'s RLS silently return nothing and this check a no-op.
-  if (row.attachmentFileId) {
-    // Same transaction, same connection: bind the row's workspace for this check only, then restore the outer (workspace-less) binding.
-    // A nested runInTenantContext here would acquire a SECOND pooled connection while the claim transaction still holds the first, which
-    // starves a small pool. On failure the outer transaction rolls back, so no restore is needed on that path.
-    await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [row.workspaceId ?? '']);
-    const file = await manager.findOne(StoredFile, { where: { id: row.attachmentFileId } });
-    let invalidReason: string | null = null;
-    if (file?.kind === FileKind.SHIFT_ROSTER_PDF && file.resourceType === 'shift_report') {
-      const report = await manager.findOne(ShiftReport, { where: { id: file.resourceId } });
-      const shift = report ? await manager.findOne(Shift, { where: { id: report.shiftId } }) : null;
-      if (!shift || shift.status === ShiftStatus.CANCELLED) {
-        invalidReason = 'The shift this roster is for has been cancelled since it was queued.';
-      }
-    }
-    await manager.query(`SELECT set_config('rab.workspace_id', '', true)`);
-    if (invalidReason) return { ok: false, reason: invalidReason };
-  }
+  return { ok: true };
+}
 
+/**
+ * Attachment revalidation (report PDFs), run under `runInWorkspaceContext` for the row's own workspace — so `stored_file`
+ * (core) and the workspace tables `shift_report`, `shift` and `manager_venue` are all read from the RIGHT place in both
+ * runtime modes, with the workspace bound for their RLS.
+ *
+ * PHASE 5 (§14) — the pre-shift roster+QR email is only ever correct while the shift it describes is still active; a
+ * shift cancelled between `shift-report-scheduler.job.ts` enqueueing this row and this worker sending it must not still
+ * go out claiming an active roster. Uses the structured linkage the file already carries (`stored_file.resource_type =
+ * 'shift_report'`, `resource_id` = the `ShiftReport` row id). The final Timesheet PDF is historical truth once a manager
+ * has finalised the report and is never suppressed by a later cancellation.
+ *
+ * Report recipients (roster + Shift QR, final timesheet) are re-checked immediately before sending with the SAME rule the
+ * jobs applied at enqueue time (report-recipients.ts): a manager deactivated, unassigned from the venue, deleted, stripped
+ * of `report.view`, or whose organisation was suspended after this row was queued must not receive the PDF or the QR.
+ * Only NOTIFICATION rows carrying one of the two report files; a report whose shift can no longer be resolved cannot
+ * prove its recipient, so it fails closed (cancelled).
+ */
+async function revalidateAttachment(manager: EntityManager, row: EmailOutbox, permissions: ReportPermissionChecker): Promise<Revalidation> {
+  const file = await manager.findOne(StoredFile, { where: { id: row.attachmentFileId! } });
+  const isReportFile = file?.kind === FileKind.SHIFT_ROSTER_PDF || file?.kind === FileKind.FINAL_TIMESHEET_PDF;
+  const report = isReportFile && file.resourceType === 'shift_report' ? await manager.findOne(ShiftReport, { where: { id: file.resourceId } }) : null;
+  const shift = report ? await manager.findOne(Shift, { where: { id: report.shiftId } }) : null;
+  if (file?.kind === FileKind.SHIFT_ROSTER_PDF && file.resourceType === 'shift_report') {
+    if (!shift || shift.status === ShiftStatus.CANCELLED) {
+      return { ok: false, reason: 'The shift this roster is for has been cancelled since it was queued.' };
+    }
+  }
+  if (isReportFile && row.jobType === EmailOutboxJobType.NOTIFICATION) {
+    const check = shift
+      ? await checkReportRecipient(
+          manager,
+          { organisationId: row.organisationId, workspaceId: row.workspaceId ?? null, venueId: shift.venueId },
+          permissions,
+          row.targetUserId,
+        )
+      : { eligible: false, organisationSuspended: false };
+    if (!check.eligible) {
+      return {
+        ok: false,
+        reason: 'The recipient is no longer eligible to receive this report.',
+        code: REPORT_RECIPIENT_INELIGIBLE,
+        auditReasonCode: check.organisationSuspended ? REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED : REPORT_RECIPIENT_INELIGIBLE,
+      };
+    }
+  }
   return { ok: true };
 }
 

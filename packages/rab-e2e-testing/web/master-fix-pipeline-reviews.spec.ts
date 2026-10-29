@@ -133,51 +133,94 @@ async function fixtures(page: Page, opts: { theme?: 'light' | 'dark' } = {}) {
   return state;
 }
 
+/**
+ * b57c5180 (2026-10-22) split the single 12-lane board into Staffing | Attendance | Closed tabs over the agreed stage
+ * contract (VenueOfferPipelineStages.ts): the server's stage spellings are normalised to snake_case lane keys, and the
+ * contract adds two lanes this fixture leaves empty (Checked in, Attendance missing). The "Staff by stage" lane counter
+ * strip was replaced by the tab counters; the tab strip is the sticky header row the old summary used to be.
+ */
+const LANE: Record<string, string> = {
+  OFFERED: 'offered', WAITING: 'waiting', 'STAFF ACCEPTED': 'staff_accepted', CONFIRMED: 'confirmed', 'LATE STAFF': 'late',
+  'CLOCKED IN': 'clocked_in', 'PENDING REVIEW': 'pending_review', 'CLOCKED OUT': 'clocked_out', 'NO SHOW': 'no_show',
+  REJECTED: 'rejected', CANCELLED: 'cancelled', 'DELETED OFFER': 'deleted',
+};
+const TAB_LANES: Record<'Staffing' | 'Attendance' | 'Closed', string[]> = {
+  Staffing: ['offered', 'waiting', 'staff_accepted', 'confirmed'],
+  Attendance: ['late', 'checked_in', 'clocked_in', 'pending_review', 'clocked_out', 'attendance_missing', 'no_show'],
+  Closed: ['rejected', 'cancelled', 'deleted'],
+};
+
 test.describe('Venue Offers pipeline', () => {
   for (const vp of [{ w: 1690, h: 935 }, { w: 1366, h: 768 }]) {
-    test(`twelve lanes; header + Timesheet report stay put through board, column and page scrolling and a poll (${vp.w})`, async ({ page }) => {
+    test(`twelve server stages across the Staffing/Attendance/Closed tabs; header + Timesheet report stay put through board, column and page scrolling and a poll (${vp.w})`, async ({ page }) => {
       test.setTimeout(60_000);
       await page.setViewportSize({ width: vp.w, height: vp.h });
       const state = await fixtures(page);
       await page.goto('/venue-offers/shift-1');
       const button = page.getByRole('button', { name: 'Timesheet report' });
       await expect(button).toBeVisible();
-      await expect(page.locator('.pipeline-column')).toHaveCount(12);
-      // Header lives in the shell top bar, not the page.
+      // Actions live in the shell top bar, not the page; since b57c5180 the venue name is the page's own heading and the
+      // top-bar breadcrumb suffix (the page no longer portals a title into the top bar).
       await expect(page.locator('[data-page-actions-slot]').getByRole('button', { name: 'Timesheet report' })).toBeVisible();
-      await expect(page.locator('[data-page-title-slot]')).toContainText('Venue Test 3');
+      await expect(page.locator('[data-breadcrumb-suffix-slot]')).toHaveText('/Venue Test 3');
+      await expect(page.locator('.pipeline-head h1')).toHaveText('Venue Test 3');
+      await expect(page.locator('[data-page-title-slot]')).toBeEmpty();
       await expect(page.locator('.pipeline .pipeline-inline-actions')).toHaveCount(0);
-      // Every lane counter equals its cards.
-      for (const stage of STAGES) {
-        const cards = await page.locator(`.pipeline-column[data-stage="${stage}"] .pipeline-card`).count();
-        await expect(page.locator(`.pipeline-column[data-stage="${stage}"] h2 .pipeline-count`)).toHaveText(String(cards));
+      const tabs = page.getByRole('tablist', { name: 'Pipeline stages' });
+      // The shift has started and people are on site, so the board opens on Attendance.
+      await expect(tabs.getByRole('tab', { name: /^Attendance/ })).toHaveAttribute('aria-selected', 'true');
+
+      // Every one of the twelve server stages has its lane, in its tab, and every lane and tab counter equals its cards.
+      const seen = new Set<string>();
+      for (const [label, lanes] of Object.entries(TAB_LANES)) {
+        await tabs.getByRole('tab', { name: new RegExp(`^${label}`) }).click();
+        await expect(tabs.getByRole('tab', { name: new RegExp(`^${label}`) })).toHaveAttribute('aria-selected', 'true');
+        await expect(page.locator('.pipeline-column')).toHaveCount(lanes.length);
+        expect(await page.locator('.pipeline-column').evaluateAll((els) => els.map((el) => el.getAttribute('data-stage')))).toEqual(lanes);
+        let inTab = 0;
+        for (const lane of lanes) {
+          const cards = await page.locator(`.pipeline-column[data-stage="${lane}"] .pipeline-card`).count();
+          await expect(page.locator(`.pipeline-column[data-stage="${lane}"] h2 .pipeline-count`)).toHaveText(String(cards));
+          inTab += cards;
+          seen.add(lane);
+        }
+        await expect(tabs.getByRole('tab', { name: new RegExp(`^${label}`) }).locator('.pipeline-count')).toHaveText(String(inTab));
       }
+      expect(STAGES.map((stage) => LANE[stage]).filter((lane) => !seen.has(lane))).toEqual([]);
+      await tabs.getByRole('tab', { name: /^Attendance/ }).click();
+      await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(9);
       await page.screenshot({ path: path.join(SHOTS, `pipeline-${vp.w}-initial.png`) });
       const before = await button.boundingBox();
-      const summaryBefore = await page.locator('.pipeline-summary').boundingBox();
+      const headBefore = await page.locator('.pipeline-head').boundingBox();
+      const toolbarBefore = await page.locator('.pipeline-toolbar').boundingBox();
 
       // 1. Long column scrolls internally; 2. board scrolls horizontally; 3. wheel over the page does not move the header.
-      const clockedIn = page.locator('.pipeline-column[data-stage="CLOCKED IN"] .pipeline-column-body');
+      const clockedIn = page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-column-body');
       await clockedIn.evaluate((el) => { el.scrollTop = el.scrollHeight; });
       await page.locator('.pipeline-board').evaluate((el) => { el.scrollLeft = el.scrollWidth; });
       await page.mouse.move(vp.w / 2, vp.h / 2);
       await page.mouse.wheel(0, 3000);
       // 4. A poll adds cards to the long column (5 s interval).
       state.pipeline = board(8);
-      await expect(page.locator('.pipeline-column[data-stage="CLOCKED IN"] .pipeline-card')).toHaveCount(17, { timeout: 12_000 });
+      await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(17, { timeout: 12_000 });
+      await expect(page.locator('.pipeline-column[data-stage="clocked_in"] h2 .pipeline-count')).toHaveText('17');
       await page.screenshot({ path: path.join(SHOTS, `pipeline-${vp.w}-after-scroll-and-poll.png`) });
 
       expect(await button.boundingBox()).toEqual(before);
-      expect(await page.locator('.pipeline-summary').boundingBox()).toEqual(summaryBefore);
+      expect(await page.locator('.pipeline-head').boundingBox()).toEqual(headBefore);
+      expect(await page.locator('.pipeline-toolbar').boundingBox()).toEqual(toolbarBefore);
       expect(await page.evaluate(() => ({ doc: document.scrollingElement!.scrollTop, page: document.querySelector('.pipeline')!.scrollTop }))).toEqual({ doc: 0, page: 0 });
       expect(await clockedIn.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
       expect(await page.locator('.pipeline-board').evaluate((el) => el.scrollLeft > 0)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-      // A lane counter jumps the board to its lane.
-      await page.locator('.pipeline-board').evaluate((el) => { el.scrollLeft = 0; });
-      await page.getByLabel('Staff by stage').getByRole('button', { name: /No Show/ }).click();
-      await expect.poll(() => page.locator('.pipeline-board').evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+      // A tab counter takes the board to its lanes (keyboard, like the tablist it is), without moving the header.
+      await tabs.getByRole('tab', { name: /^Attendance/ }).press('ArrowRight');
+      await expect(tabs.getByRole('tab', { name: /^Closed/ })).toBeFocused();
+      await expect(tabs.getByRole('tab', { name: /^Closed/ })).toHaveAttribute('aria-selected', 'true');
+      await expect(page).toHaveURL(/[?&]tab=closed/);
+      expect(await page.locator('.pipeline-column').evaluateAll((els) => els.map((el) => el.getAttribute('data-stage')))).toEqual(TAB_LANES.Closed);
+      expect(await button.boundingBox()).toEqual(before);
     });
   }
 });

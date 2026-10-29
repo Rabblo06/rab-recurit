@@ -20,7 +20,45 @@ export function loopOptionsOf(def: ScanJobDefinition, handler: ProcessHandler, i
     statKeys: def.statKeys,
     metricKey: def.jobName,
     run: (ctx) => handler(ctx) as Promise<boolean | void>,
+    ...(def.firstRunAfterInterval ? { firstRunAfterInterval: true } : {}),
   };
+}
+
+/** Runtimes that already had their interval-mode scans registered (Phase A: exactly once per process/runtime). */
+const intervalScansRegistered = new WeakSet<object>();
+
+/**
+ * Interval mode (`WORKER_SCHEDULER=interval`, the default): registers every ENABLED scan on this process's own timer, in
+ * registry order — exactly the historical `for (const def of SCAN_JOBS) runtime.every(...)`, plus the Phase A enable
+ * predicate (a disabled scan is simply not registered). Every interval is resolved BEFORE the first loop starts, so a bad
+ * value fails closed with nothing running. Refuses a second registration on the same runtime and a registry with a
+ * duplicate scheduler id, so no scan can ever get two timers in one process.
+ */
+export function registerIntervalScans(
+  runtime: Pick<WorkerRuntime, 'every'>,
+  registry: Pick<HandlerRegistry, 'scan'>,
+  jobs: readonly ScanJobDefinition[],
+  intervalOf: (def: ScanJobDefinition) => number,
+  isEnabled: (def: ScanJobDefinition) => boolean = () => true,
+): { registered: string[]; disabled: string[] } {
+  if (intervalScansRegistered.has(runtime)) throw new Error('interval-mode scans are already registered on this runtime');
+  const ids = jobs.map(schedulerIdOf);
+  if (new Set(ids).size !== ids.length) throw new Error('scan registry has a duplicate scheduler id');
+  const intervals = jobs.map((def) => intervalOf(def)); // all of them, enabled or not: fail closed before any timer
+  const plan: WorkerLoopOptions[] = [];
+  const registered: string[] = [];
+  const disabled: string[] = [];
+  jobs.forEach((def, i) => {
+    if (!isEnabled(def)) {
+      disabled.push(def.jobName);
+      return;
+    }
+    plan.push(loopOptionsOf(def, registry.scan(def), intervals[i]!));
+    registered.push(def.jobName);
+  });
+  intervalScansRegistered.add(runtime);
+  for (const options of plan) runtime.every(options);
+  return { registered, disabled };
 }
 
 /**
@@ -71,6 +109,8 @@ export interface BullmqSchedulerDeps {
   registry: HandlerRegistry;
   jobs: readonly ScanJobDefinition[];
   intervalOf: (def: ScanJobDefinition) => number;
+  /** Phase A enable predicate (default: all enabled). `jobs` stays the FULL list so disabled scans' schedulers get removed. */
+  isEnabled?: (def: ScanJobDefinition) => boolean;
   logger: Logger;
 }
 
@@ -108,7 +148,8 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   runtime.enableSchedulerProgress();
 
   const scanLock = await ScanLock.open(deps.lockUrl, logger);
-  const manager = new CrewflowSchedulerManager({ connection: redis, prefix: deps.prefix, jobs: deps.jobs, intervalOf: deps.intervalOf, logger });
+  const isEnabled = deps.isEnabled ?? (() => true);
+  const manager = new CrewflowSchedulerManager({ connection: redis, prefix: deps.prefix, jobs: deps.jobs, intervalOf: deps.intervalOf, isEnabled, logger });
   const instance = `${os.hostname()}:${process.pid}`;
   const writeStatus = (report: ReconcileReport) =>
     redis
@@ -124,6 +165,7 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   logger.log(
     `bullmq scheduler: ${first.upserted.length} Crewflow schedulers reconciled under prefix ${deps.prefix}` +
       (first.removedStale.length ? `, removed stale ${first.removedStale.join(', ')}` : '') +
+      (first.disabled.length ? `, ${first.disabled.length} disabled (not scheduled): ${first.disabled.join(', ')}` : '') +
       (first.foreignUntouched.length ? `, ${first.foreignUntouched.length} foreign scheduler(s) left untouched` : ''),
   );
 
@@ -137,12 +179,16 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   for (const queue of SCAN_QUEUE_NAMES) {
     const defs = byQueue.get(queue);
     if (!defs) continue;
+    // Phase A: a queue whose scans are ALL disabled gets no Worker on this replica (nothing of it may run here).
+    if (![...defs.values()].some(isEnabled)) continue;
     const worker = new Worker(
       queue,
       async (job: Job) => {
         const def = defs.get(job.name);
         // Fail closed: a job this registry does not know is never mapped to some other scan.
         if (!def) throw new UnrecoverableError('unknown scan job');
+        // Phase A: a leftover job of a scan disabled on this replica is acknowledged without running the cycle.
+        if (!isEnabled(def)) return { outcome: 'disabled' };
         const options = loopOptionsOf(def, registry.scan(def), deps.intervalOf(def));
         const outcome = await runtime.runOnce(options, (work) => scanLock.run(schedulerIdOf(def), work));
         if (outcome === 'failed') throw scanFailure(def);

@@ -14,7 +14,7 @@ export interface SmtpDriverOptions {
 }
 
 /**
- * nodemailer (9.x) has no `family`/IPv4-only transport option — its own
+ * nodemailer (9.x, still so in 10.x) has no `family`/IPv4-only transport option — its own
  * `lib/shared` resolver always looks up both A and AAAA records and picks a
  * RANDOM address from the combined list (confirmed by reading
  * node_modules/nodemailer/lib/shared/index.js: `formatDNSValue` does
@@ -43,9 +43,16 @@ function disableSmtpIpv6Resolution(logger: Logger): void {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const nodemailerShared = require('nodemailer/lib/shared') as {
       networkInterfaces?: NodeJS.Dict<NetworkInterfaceInfo[]>;
+      _readNetworkInterfaces?: () => NodeJS.Dict<NetworkInterfaceInfo[]> | undefined;
     };
-    const real = nodemailerShared.networkInterfaces;
-    if (!real) return;
+    // nodemailer 10 reads the interface table lazily, on the first send, and that read overwrites `networkInterfaces`:
+    // before it the field is undefined, so reading the field alone skipped this patch silently and the first send put
+    // IPv6 back. Force that one-time read first so the filtered table below is the one nodemailer keeps.
+    const real = nodemailerShared._readNetworkInterfaces?.() ?? nodemailerShared.networkInterfaces;
+    if (!real) {
+      logger.error('Could not disable IPv6 SMTP resolution — nodemailer exposed no network interface table; ENETUNREACH risk remains.');
+      return;
+    }
     const ipv4Only: NodeJS.Dict<NetworkInterfaceInfo[]> = {};
     for (const [name, addresses] of Object.entries(real)) {
       ipv4Only[name] = (addresses ?? []).filter((addr) => addr.family !== 'IPv6');

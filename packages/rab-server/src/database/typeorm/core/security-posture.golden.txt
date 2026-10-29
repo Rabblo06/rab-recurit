@@ -518,18 +518,18 @@ owner|function|begin_workspace_schema_attempt(uuid)|rab_secure_owner|definer=tru
 owner|function|bootstrap_first_platform_admin(citext,text,text,citext,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|count_user_session_backfill_status()|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|create_organisation(text,citext)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
-owner|function|current_org()|crewflow|definer=false
-owner|function|current_role_name()|crewflow|definer=false
-owner|function|current_uid()|crewflow|definer=false
-owner|function|current_workspace()|crewflow|definer=false
+owner|function|current_org()|rab_secure_owner|definer=false
+owner|function|current_role_name()|rab_secure_owner|definer=false
+owner|function|current_uid()|rab_secure_owner|definer=false
+owner|function|current_workspace()|rab_secure_owner|definer=false
 owner|function|email_outbox_scrub_secret_body()|crewflow|definer=false
 owner|function|email_registered_in_another_organisation(text)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|enforce_member_role_permission_allowlist()|crewflow|definer=false
-owner|function|enforce_organisation_security_version_monotonic()|crewflow|definer=false
-owner|function|enforce_platform_admin_security_version_monotonic()|crewflow|definer=false
+owner|function|enforce_organisation_security_version_monotonic()|rab_secure_owner|definer=false
+owner|function|enforce_platform_admin_security_version_monotonic()|rab_secure_owner|definer=false
 owner|function|enforce_role_permission_version_monotonic()|crewflow|definer=false
-owner|function|enforce_user_security_version_monotonic()|crewflow|definer=false
-owner|function|enforce_user_session_mutation_invariants()|crewflow|definer=false
+owner|function|enforce_user_security_version_monotonic()|rab_secure_owner|definer=false
+owner|function|enforce_user_session_mutation_invariants()|rab_secure_owner|definer=false
 owner|function|enforce_workspace_membership_security_version_monotonic()|crewflow|definer=false
 owner|function|guard_manager_profile_workspace_binding()|crewflow|definer=false
 owner|function|guard_role_agent_kind()|crewflow|definer=false
@@ -547,7 +547,7 @@ owner|function|host_label_shape_ok(text)|rab_secure_owner|definer=false
 owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
-owner|function|immutable_unaccent(text)|crewflow|definer=false
+owner|function|immutable_unaccent(text)|rab_secure_owner|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|list_organisations_for_admin()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|login_handoff_cleanup(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -612,7 +612,7 @@ owner|function|workspace_schema_migration_append_only()|crewflow|definer=false
 owner|function|workspace_schema_registry_versioning_guard()|crewflow|definer=false
 owner|function|workspace_schema_routable(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|workspace_subdomain_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
-owner|schema|core|crewflow
+owner|schema|core|rab_secure_owner
 owner|table|account_invite|rab_secure_owner
 owner|table|admin_inspect_session|crewflow
 owner|table|ai_action_proposal|crewflow
@@ -788,7 +788,7 @@ role|crewflow_app|super=false|bypassrls=false|login=true|member_of=
 role|crewflow|super=false|bypassrls=false|login=true|member_of=
 role|rab_secure_owner|super=false|bypassrls=false|login=false|member_of=
 schema|core|crewflow_app|usage=true|create=false
-schema|core|crewflow|usage=true|create=true
+schema|core|crewflow|usage=true|create=false
 table|account_invite|crewflow_app|S,I,U,D
 table|account_invite|crewflow|S,I,U,D
 table|admin_inspect_session|crewflow_app|S,I,U,D

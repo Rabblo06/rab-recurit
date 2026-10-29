@@ -8,6 +8,7 @@ import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
+import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
 import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
@@ -18,6 +19,8 @@ import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { renderHtmlToPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
+import { renderFinalTimesheetEmail } from './report-email-content';
+import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
 
 const logger = new Logger('FinalTimesheetJob');
 
@@ -130,15 +133,6 @@ async function deliverFinalTimesheet(
 
       if (report.status !== 'finalised' && !isReportReady(rows.map((r: any) => ({ assignmentStatus: r.assignment_status, clockOutAt: r.clock_out_at, attendanceStatus: r.status })))) return null;
 
-      const managerRows = await manager.query(
-        `SELECT DISTINCT u.id, u.email
-           FROM manager_venue mv
-           JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
-           JOIN core."user" u ON u.id = mp.user_id
-          WHERE mv.venue_id = $1`,
-        [shift.venueId],
-      );
-
       let finalisedByName = 'Venue Manager';
       if (report.finalisedBy) {
         const finaliser = await manager.query(`SELECT first_name, last_name FROM core."user" WHERE id = $1`, [report.finalisedBy]);
@@ -189,7 +183,7 @@ async function deliverFinalTimesheet(
         finalisedAt: report.finalisedAt ? new Date(report.finalisedAt).toISOString() : new Date().toISOString(),
       };
 
-      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), footerTemplate: documentFooterTemplate(info), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, recipients: managerRows.map((r: { id: string; email: string }) => ({ userId: r.id, email: r.email })), venueName };
+      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), footerTemplate: documentFooterTemplate(info), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, venueName };
     },
   );
 
@@ -282,7 +276,38 @@ async function deliverFinalTimesheet(
         });
       }
       await completeWorkerEvent(manager, eventId);
-      for (const recipient of prepared.recipients) {
+      // Recipients are chosen HERE, in the same transaction that claims delivery, under the shift lock — never from the
+      // earlier read — so only a recipient who is eligible right now (report-recipients.ts) receives the timesheet.
+      const selection = await selectReportRecipients(manager, {
+        organisationId: candidate.organisation_id,
+        workspaceId: candidate.workspace_id,
+        venueId: shift.venueId,
+      }, new PermissionsService(tenantContext));
+      const rendered = renderFinalTimesheetEmail(prepared.venueName);
+      if (selection.excluded > 0 || selection.organisationSuspended) {
+        // Ids and counts only — never an address.
+        logger.log(
+          `final timesheet ${candidate.report_id} (shift ${candidate.shift_id}): ${selection.recipients.length} recipient(s) queued, ` +
+            `${selection.excluded} ineligible skipped${selection.organisationSuspended ? ', organisation suspended' : ''}`,
+        );
+      }
+      if (selection.organisationSuspended && audit) {
+        // S-6: the timesheet email is withheld while the organisation is suspended — audited (ids, job type, reason code
+        // only). The PDF stays stored and `final_pdf_sent_at` is already claimed, so nothing re-sends it on reactivation.
+        await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_EMAIL_CANCELLED, {
+          entityType: 'shift_report',
+          entityId: candidate.report_id!,
+          metadata: {
+            reportId: candidate.report_id,
+            shiftId: candidate.shift_id,
+            fileId: file.id,
+            jobType: EmailOutboxJobType.NOTIFICATION,
+            reasonCode: REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED,
+          },
+          actorUserId: null,
+        });
+      }
+      for (const recipient of selection.recipients) {
         await emailOutbox.enqueue(manager, {
           organisationId: candidate.organisation_id,
           jobType: EmailOutboxJobType.NOTIFICATION,
@@ -290,11 +315,7 @@ async function deliverFinalTimesheet(
           // Required: the send processor treats a missing target as "account deleted before delivery" and CANCELS the row.
           targetUserId: recipient.userId,
           workspaceId: candidate.workspace_id ?? null,
-          rendered: {
-            subject: `Final Timesheet — ${prepared.venueName}`,
-            text: `Your finalised timesheet for ${prepared.venueName} is attached.`,
-            html: `<p>Your finalised timesheet for ${prepared.venueName} is attached.</p>`,
-          },
+          rendered,
           attachment: { fileId: file.id, filename: 'final-timesheet.pdf' },
         });
       }

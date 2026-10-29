@@ -207,8 +207,14 @@ services:
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${QA_CREWFLOW_PASSWORD:?set QA_CREWFLOW_PASSWORD (see the header of docker-compose.qa.yml)}@postgres:5432/rab_manual_qa
       REDIS_URL: redis://redis:6379
       APP_SECRET: ${QA_APP_SECRET:?set QA_APP_SECRET}
-      # Forwarded to the jobs child only. The launcher always enables provisioning for the provisioner child itself.
+      # Forwarded unchanged to both children (Phase A: the launcher no longer forces it on for the provisioner child).
       HWS_RUNTIME_ENABLED: 'false'
+      # Phase A (pa-provisioner): the provisioner switch. QA keeps the provisioner, as production does: it is the fallback
+      # and the only path for `createFor` workspaces (see the header). Unset = the pre-Phase-A behaviour (on, 5 s); "false"
+      # makes the launcher refuse to start while CREWFLOW_PROVISIONER_DATABASE_URL is set.
+      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      # Same pinned 5 s as production (pre-Phase-A cadence; the code default is now 60 s), so QA tests what production runs.
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
       # Lane A (BullMQ migration): historical per-replica timers unless a QA run deliberately sets WORKER_SCHEDULER=bullmq.
       WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
       EMAIL_DRIVER: LOGGER

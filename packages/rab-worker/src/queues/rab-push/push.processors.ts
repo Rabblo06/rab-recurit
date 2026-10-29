@@ -14,7 +14,14 @@ export class PushScanProcessor {
 
   @Process('push-dispatch')
   async pushDispatch(): Promise<boolean> {
-    const { runtimeDataSource, tenantContext, pushQueue, pushService, logger } = this.deps.get();
+    const { runtimeDataSource, tenantContext, pushQueue, pushService, environmentService, logger } = this.deps.get();
+    // Phase A gating (defence in depth — the scheduler should not register this job at all when push is off): with
+    // PUSH_ENABLED=false `PushDeliveryService` creates no `core.push_delivery` rows, so the cycle would only walk every
+    // organisation and claim nothing. Return idle BEFORE any SQL or queue call. Rows left PENDING/RETRY/PROCESSING from
+    // before a flip to off are not touched; they are dispatched (BATCH_SIZE per organisation per cycle, unchanged) once
+    // PUSH_ENABLED is true again. The `rab-push` send consumer is deliberately NOT gated: it polls nothing and only acts
+    // on jobs this dispatcher already enqueued.
+    if (!environmentService.get('PUSH_ENABLED')) return false;
     const result = await runPushDispatchCycle(
       runtimeDataSource,
       tenantContext,

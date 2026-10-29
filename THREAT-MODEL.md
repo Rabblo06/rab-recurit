@@ -3723,3 +3723,260 @@ still returns no content; built-ins remain toggle-only (no new write path).
   organisation switches), and every refusal is the same 404 `AI_NOT_AVAILABLE`. Each settings service re-runs the gate
   with the same 404 (layer 2). A test sends every route as a no-flag user and as a non-CEO flag holder and checks that
   the two responses have identical bodies and that nothing is written.
+
+## Phase 0 security fixes (owner-approved 2026-10-27; committed 6242eeec)
+
+### P0-sentry: no request contents, credentials or personal data in Sentry
+- **Actor → action → consequence considered:** anyone with access to the third-party Sentry project reads session
+  cookies, `Authorization` headers, request bodies (passwords, reset / activation tokens), query strings (OAuth `code`)
+  or email addresses from error events, transactions, spans or breadcrumbs, and can hijack sessions. A crafted
+  long URL makes the scrubber itself stall the API event loop (ReDoS).
+- **Before:** `@sentry/node` 8.55.2 defaults (`requestDataIntegration` cookies / data / headers / query_string on) and
+  a `beforeSend` that only stripped bodies on `/ai/` routes and never headers. Measured with real envelopes: JWT,
+  cookie, password, body and query tokens, OAuth code and email were all sent.
+- **Control:** `packages/rab-server/src/instrument.ts`, shared by the API, Worker, provisioner and CLI:
+  `sendDefaultPii: false`; `requestDataIntegration` with cookies, data, headers, query_string, ip and user off;
+  `beforeSend`, `beforeSendTransaction`, `beforeSendSpan` and `beforeBreadcrumb` scrub request blocks, URL queries,
+  fragments and userinfo, sensitive keys, span attributes (`db.statement` and header / body attributes dropped) and
+  free text (emails, JWTs, bearer credentials, `name=value` / `name: value` secrets). Every string is capped at
+  2048 characters before any regex and every regex is linear. Each hook fails closed (event or transaction
+  dropped, span reduced to identity and timing) — needed because Sentry re-captures a throwing hook as an internal
+  event that skips `beforeSend`. `tracesSampleRate` from `SENTRY_TRACES_SAMPLE_RATE` (strict decimal in [0, 1];
+  default 0.01 in production, 0 elsewhere; an invalid value logs one warning without the value).
+- **Tests:** `instrument.spec.ts` (71) and `instrument.envelope.spec.ts` (5, real Sentry transport to a stub ingest
+  server, including a throwing hook). Fail on the previous code; timing bounds on 100k-character adversarial input.
+- **Residual:** redaction is pattern-based; URL path segments are kept; `@sentry/node` still buffers incoming bodies
+  (≤ 1 MiB) in memory without sending them; sample-rate validation is not yet in `environment-variables.ts`.
+
+### P0-report-email: roster and timesheet emails only to eligible recipients, with escaped content
+- **Actor → action → consequence considered:**
+  - A user who can edit venues puts markup in a venue name → a genuine Crewflow roster email carries an attacker link
+    (phishing) or an extra header line.
+  - A deactivated, deleted, archived, unassigned or permission-revoked venue manager, or any manager of a suspended
+    organisation, keeps receiving roster PDFs (staff names, shift times and the signed Shift QR clock-in token) and
+    final timesheets.
+- **Control:**
+  - Content: `report-email-content.ts` — values are made single-line (control characters, CR / LF, U+2028/9 removed,
+    200-character cap) and HTML-escaped with the MAIL-01 `escapeHtml`; subject and text are single capped lines.
+  - Eligibility (one rule, `report-recipients.ts`), checked at enqueue inside the locked write transaction AND again
+    immediately before sending: active, non-deleted user; profile not archived; organisation membership not revoked;
+    exactly one active membership of the report's workspace in an active workspace
+    (`core.resolve_membership_for_user`, existing definer, settings restored); still assigned to the venue;
+    organisation not suspended; holds `report.view` (resolved server-side, so a REVOKE override wins, matching
+    `ReportFilePolicy`). Ineligible at send ⇒ the outbox row is CANCELLED with `REPORT_RECIPIENT_INELIGIBLE`, ids only
+    in logs. Applies only to NOTIFICATION rows carrying a roster or final-timesheet attachment; account notices,
+    password resets and invitations are unchanged.
+  - Workspace routing: the send-time re-check runs through `runInWorkspaceContext` for the row's own workspace, so
+    under `HWS_RUNTIME_ENABLED=true` it reads the workspace schema (not stale `core` copies); a routing failure fails
+    closed (row FAILED, provider never called).
+- **Tests:** `report-email-recipient-safety.integration.spec.ts` (22, including one predicate at a time, at enqueue
+  and after enqueue) and `report-email-recipient-safety-hws.integration.spec.ts` (4, a real provisioned workspace
+  schema). Fail on the previous code.
+- **Owner decisions (approved 2026-10-27):**
+  - (S-6) While the organisation is suspended, roster and timesheet emails are cancelled (send time) or withheld
+    (enqueue time), and every such cancellation is audited as `report.email_cancelled` — `entityType`
+    `email_outbox` / `shift_report`, metadata = ids, `jobType`, `reasonCode` (`ORGANISATION_SUSPENDED` or
+    `REPORT_RECIPIENT_INELIGIBLE`) only, never an address, name, subject, body, token or file content. Reports, PDFs
+    and stored objects are kept. Nothing is replayed after reactivation (CANCELLED is terminal; outbox replay acts
+    only on FAILED rows; the jobs' delivery markers are already set); a later delivery happens only through a fresh
+    enqueue (e.g. a regenerated roster), which re-evaluates current recipients and renders current data.
+  - (S-10) Invited-only (`invited` / `invite_expired`) users and non-members never receive these reports, re-checked
+    at delivery; ACCOUNT_INVITATION and member-invitation emails to the same people are not affected.
+  - Tests: `report-email-cancellation-audit.integration.spec.ts` (S6-1 … S6-8, S10-1 … S10-4).
+  - Residual: a roster cancelled because its SHIFT was cancelled (no reason code) is still not audited.
+
+### P0-pdf: no script, network or file access while rendering PDFs
+- **Actor → action → consequence considered:** markup reaching a PDF template (a future escaping bug) runs script,
+  fetches internal URLs from the Worker (SSRF), loads local files, or stalls rendering.
+- **Control:** `render-pdf.util.ts` renders in a fresh context with JavaScript disabled, offline, service workers
+  blocked and downloads refused; every request other than `data:` / `about:blank` is aborted (count logged, never
+  URLs); a main-frame navigation fails the render; `setContent` and `pdf` each have a 30 s bound. PDF output of every
+  real template is byte-identical apart from the two date fields.
+- **Tests:** `render-pdf-hardening.integration.spec.ts` (13; script, 12 network vectors, meta refresh and a hanging
+  resource fail on the previous code).
+- **Residual:** the container still runs Chromium with `--no-sandbox` (`CHROMIUM_NO_SANDBOX=true` in the Dockerfile);
+  the header / footer template is outside request interception (only escaped values are used there today).
+  Measured in `render-pdf-sandbox-footer.integration.spec.ts` (not fixed): only the exact value `true` disables the
+  sandbox and the in-page controls still hold with it off; footer img / CSS url / @import / link / @font-face /
+  iframe / object / script references reached a local test server zero times (also from a bare online page, i.e.
+  Chromium itself does not fetch them — on Playwright's bundled Chromium; the image's system Chromium is untested),
+  while @import / link / @font-face in a footer make `printToPDF` fail.
+
+
+## Phase A — pa-provisioner: opt-in workspace provisioner in the Worker bundle (2026-10-27; committed 7719959b, 5e6d4231)
+
+Reduces where the privileged `crewflow` provisioning credential exists; does not change any role, grant, ownership,
+credential, migration or RLS policy.
+
+- **Asset:** the `crewflow` credential (`CREWFLOW_PROVISIONER_DATABASE_URL`, handed to the provisioner child as
+  `DATABASE_URL`/`DATABASE_URL_UNPOOLED`) and the 24/7 privileged process that holds it.
+- **Before:** every Worker bundle required the URL and always started the provisioner child (forced
+  `HWS_RUNTIME_ENABLED=true` on it), so the root launcher and a privileged process held the credential in every
+  environment, including ones that never needed workspace DDL.
+- **After:** `start-worker-bundle.cjs` starts the provisioner only when `CREWFLOW_PROVISIONER_ENABLED=true` (strict:
+  `true` / `false` / unset; anything else refuses). Disabled: jobs child only, and the launcher REFUSES to start while
+  `CREWFLOW_PROVISIONER_DATABASE_URL` is non-empty (actor: operator who leaves the URL in a jobs-only service → the
+  credential would sit in a root process for nothing → refused by name, value never logged). The jobs child's
+  allowlist is unchanged and verified in both modes (no `CREWFLOW_*`, no `DATABASE_URL_UNPOOLED`, no provisioner
+  password anywhere in its environment — launcher.test.cjs A4, A12; run-integration.cjs 13, 26, 26b). The health check
+  expects the provisioner role only when the same switch is on. `HWS_RUNTIME_ENABLED` is passed through, never forced.
+  The provisioner entrypoint decides before opening any connection (exit 0 when not enabled; exit 1 on an invalid
+  switch or interval) and takes its session lock with a bounded `pg_try_advisory_lock` loop (10 s default, 60 s cap,
+  aborted on shutdown) instead of an unbounded `pg_advisory_lock` wait; the lock is released in `finally` and by the
+  server with the session.
+- **SECURITY TRADE-OFF (vetoable):** an explicitly enabled provisioner provisions even when `HWS_RUNTIME_ENABLED` is not
+  `true`. Stricter alternative: refuse (or idle) when HWS is off. Rejected because production and QA run HWS routing
+  OFF and depend on this reconciler to build every production workspace and every `createFor` workspace; refusing
+  would leave them `CREATING` forever. The provisioning authority is now the explicit, reviewed opt-in rather than a
+  routing flag the launcher silently forced.
+- **SECURITY TRADE-OFF (vetoable):** a standalone provisioner (no launcher, switch unset) keeps the legacy gate
+  `HWS_RUNTIME_ENABLED=true` → provision, so `nx run rab-worker:provision` and the standalone specs are unchanged.
+  Stricter alternative: require `CREWFLOW_PROVISIONER_ENABLED=true` in the child too. Only the bundle is deployed.
+- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
+  `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
+  real entrypoint).
+- **Integration hardening (2026-10-27, on top of `7719959b`):** the switch is now three-state. `"true"` = on
+  (60 s default), `"false"` = jobs only (and still REFUSED while `CREWFLOW_PROVISIONER_DATABASE_URL` is set), unset or
+  empty = **legacy**: exactly the pre-Phase-A behaviour — provisioner on, URL required ("Missing
+  CREWFLOW_PROVISIONER_DATABASE_URL" otherwise, as the base launcher said), 5 s default. The health check expects the
+  provisioner in legacy mode too. A standalone provisioner enabled by the legacy HWS gate also keeps the 5 s default.
+  Why: under the first Phase A design an environment configured before Phase A (URL set, switch absent) made the whole
+  Worker — jobs child included — refuse to start and restart-loop, and "neither key set" silently ran with no
+  provisioner. Only the committed composes set the switch, so any operator-managed environment was exposed.
+- **SECURITY TRADE-OFF (owner-approved 2026-10-28):** an unset switch with the URL present runs the privileged provisioner instead of
+  refusing. Stricter alternative: the first Phase A design (refuse until the switch is set). Rejected for integration
+  because it can take the whole Worker down on deploy, and the relaxed path grants nothing new: it is byte-for-byte the
+  credential exposure and behaviour production has today (base 6242eeec always ran the provisioner with this URL). The
+  explicit opt-out still fails closed, and jobs-only now needs an explicit `"false"` rather than an absent key.
+  Regression tests: launcher.test.cjs A1, A1b, A2, A8, A10; deployment-provisioner.test.cjs (pre-Phase-A env → on at
+  5 s; neither key → refused; jobs-only needs `"false"`); `workspace-provisioner.config.spec.ts` (legacy 5 s).
+- **Owner policy (2026-10-28):** unset is a compatibility path for deployments configured before Phase A only. Every
+  deployment configuration (committed composes and any platform-managed environment) sets the switch explicitly to
+  `"true"` or `"false"`; the launcher logs a start-up line asking for it whenever it runs in legacy mode.
+
+## Phase 0b — E1: crewflow → rab_secure_owner boundary (owner-approved 2026-10-28; committed 0d677bbf)
+
+- **Asset:** everything `rab_secure_owner` (NOLOGIN) owns or executes: the pre-auth tables (`user` incl. password and TOTP
+  material, `user_session`, `refresh_token`, `user_mfa_recovery_code`, `organisation`, `platform_admin`, …) and their
+  SECURITY DEFINER functions.
+- **Actor:** whoever holds the `crewflow` LOGIN credential (today the Worker's provisioner child — E6).
+- **Before:** `crewflow` owned schema `core` and the invoker helpers `core.current_org/uid/workspace/role_name()` plus four
+  trigger functions on rab_secure_owner tables. Code it controlled therefore ran as `rab_secure_owner` (channels 1 + 2),
+  and as schema owner it could drop or replace rab_secure_owner objects and create new ones in `core` (channel 4). The
+  documented invariant "crewflow can never act as rab_secure_owner" (1786682000000) did not hold. Search-path shadowing of
+  built-ins was already closed by CF-12/CF-58 (1786717900000).
+- **After (`1786721100000-SecureOwnerCoreSchemaAndHelpers`):** R1 `core` owned by `rab_secure_owner` (USAGE re-granted to
+  crewflow / crewflow_app); R5 no CREATE on `core` for crewflow; R2 nine functions owned by `rab_secure_owner` (the four
+  `current_*` helpers, the four trigger functions and `core.immutable_unaccent(text)`, which backs the generated
+  `search_vector` column of `core."user"` — independent review M1), EXECUTE preserved, trigger functions pinned to
+  `pg_catalog, pg_temp`, `current_*` left without a SET clause so RLS keeps inlining them; R6 catalog invariants
+  (`secure-owner-invariants.ts`) checked by the migration before commit and by `phase0b-secure-owner.integration.spec.ts`:
+  everything reachable from rab_secure_owner (definers; triggers, policies, defaults / generated columns, constraints,
+  index expressions and rules on its tables; transitively called core functions) is owned by it; `core` owner is NOLOGIN;
+  no runtime LOGIN role can create in `core` or in any schema on a definer search_path; crewflow / crewflow_app are never
+  members of rab_secure_owner. Later migrations hand new core objects to crewflow only inside `withCrewflowCoreCreate`
+  (grant + revoke in the same transaction, own savepoint; proven under a non-superuser migration identity).
+- **Status: PARTIALLY MITIGATED — E1 is NOT resolved.** Closed: channels 1 and 2, and the schema-owner part of channel 4
+  (crewflow can no longer create in `core` or drop / replace rab_secure_owner objects there).
+  - **R4 (open, accepted, frozen) — arbitrary reads as rab_secure_owner:** 11 crewflow-owned FORCE tables are read or
+    written by rab_secure_owner definers (`R4_CREWFLOW_TABLES_REACHED_BY_SECURE_DEFINERS`). As their owner, crewflow can
+    attach policies, triggers, RULEs, column DEFAULTs and CHECK constraints — none needs CREATE on any schema — and each
+    expression runs as rab_secure_owner when a definer touches the table, including expressions that read other tables
+    through SPI. So a holder of the crewflow credential can still read (and write) what rab_secure_owner can, e.g.
+    password and token hashes. Any change to the list fails CI. It closes when crewflow stops being a runtime login (E6 /
+    Phase B: retire the provisioner credential, then make crewflow NOLOGIN behind `crewflow_migrator`).
+  - **H2 (open, confirmed in the catalog 2026-10-28, separate remediation):** crewflow OWNS THE DATABASE (fresh install and
+    rab-devdb: `datdba = crewflow`, via the role split's REASSIGN OWNED). A database owner may set database-level
+    defaults such as `search_path` and, through `pg_database_owner`, CREATE in `public`. Migration sessions do not pin
+    their search_path, and the definers reference `public` extension types and operators.
+  - **H3 (open, confirmed in the catalog 2026-10-28, separate remediation):** crewflow OWNS the `citext`, `pgcrypto`,
+    `btree_gist` and `uuid-ossp` extension objects (relocatable, in `public`); their member functions are owned by the
+    bootstrap superuser. An extension owner may drop it (CASCADE) or move it to another schema — `citext` is on the
+    login path of the pre-auth definers, so either would at least take authentication down.
+  - **R3 (open, lower):** 29 definers keep `search_path = pg_catalog, core, pg_temp`; after R5 only the NOLOGIN owner and
+    the migration identity can create in `core`, so the residual risk is a mistaken migration, not a runtime attacker.
+- **SECURITY TRADE-OFF (vetoable):** the CREATE window for later migrations relies on every such migration using
+  `withCrewflowCoreCreate`. A forgotten use fails loudly on managed Postgres (non-superuser migrator) and is invisible on a
+  superuser-built database; the posture golden (`schema|core|crewflow|...|create=false`) and the R6 invariants catch a
+  window left open in either case.
+- **Rollback:** `down()` restores the previous owners, trigger search_path and schema USAGE/CREATE; verified to reproduce
+  the pre-0b posture snapshot byte for byte (up → down → up on a disposable database). It re-opens channels 1 and 2 and
+  the schema-owner part of channel 4.
+
+## M2 — migrations under a restricted (non-superuser) migration identity (owner-approved 2026-10-28; committed f4703ad3)
+
+- **Asset:** the privilege boundary between the migration identity and the runtime logins (`crewflow`, `crewflow_app`), and
+  the Phase 0b secure-owner invariants, on managed PostgreSQL where the migrator is NOT a superuser.
+- **Risk before:** every migration test ran as a superuser, which bypasses ownership and CREATE checks. A migration that only
+  works as superuser, or that silently leaves objects owned by the migration login, passed locally and would fail (or
+  half-apply) on managed PostgreSQL. Nothing compared the runtime logins' privileges before and after each migration.
+- **Control:** `scripts/migration-security-check.ts` (CI job `ci-migration-security`) builds two disposable databases:
+  fresh (phase A as `rab_owner` through the migrator's SET-only membership; everything else as the restricted migrator
+  `rab_ci_migrator`: LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE, members of `rab_secure_owner` + `crewflow`
+  only) and upgrade (history to just before Phase 0b by the bootstrap identity; Phase 0b down/up/re-run by the restricted
+  migrator). Each migration after Phase 0b runs alone with a catalog drift check (`migration-privilege-drift.ts`: CREATE on
+  core/public, database CREATE/TEMP, role attributes, memberships, core/database owner, objects owned by `crewflow_app`)
+  plus the R6 invariants; then: nothing left depending on the migrator (`pg_shdepend`), posture vs golden, RLS coverage as
+  `crewflow_app`. `migration-source-rules.ts` is an early-warning source scan only (it can be evaded by run-time SQL;
+  `migration-security.integration.spec.ts` proves the catalog check catches exactly that case).
+- **Measured (2026-10-28, 240 migrations):** 128 phase-A as `rab_owner`; 82 as the restricted migrator; **30 historical
+  migrations need more** and are listed exactly in `PRIVILEGED_BOOTSTRAP_MIGRATIONS` (list exact in both directions):
+  4 role bootstrap (create roles / set passwords / guards need SUPERUSER or CREATEROLE); 23 hand a new core object to
+  `rab_secure_owner` before Phase 0b (the new owner needs CREATE on `core`; only a superuser bypasses that — resolved for
+  later migrations by Phase 0b itself); 3 copy/backfill rows under FORCE RLS (need SUPERUSER or BYPASSRLS — recurs for
+  any future cross-tenant backfill, which therefore needs its own reviewed bootstrap step). None modified or weakened.
+- **Fixed in M2 (M2-F1, Low):** `GuardedMigrationDataSource.showMigrations()` used TypeORM's version, which CREATES
+  `core.migrations` as the connecting role. `setup-db.ts` (and the CF-41 check itself) call it before refusing a wrong
+  identity, so a refused superuser left a superuser-owned ledger on an empty database and the correct `rab_owner` run then
+  failed. Now read-only (same answer, no side effect); the harness asserts the refused run leaves no ledger.
+- **Open (frozen, exact; fresh non-superuser installs only — existing databases are unaffected):**
+  - **M2-F2 (Medium):** `NavigationLayout1786718600000` creates `core.navigation_layout` with no `OWNER TO`; the repair
+    `ReconcileSuperuserOwnedCoreObjects1786719600000` re-owns only SUPERUSER-owned objects, so under a non-superuser
+    migrator the table stays owned by the migration login and `crewflow` lacks D/T/R/G on it. Fix: a forward migration
+    re-owning core objects owned by any non-reserved, non-runtime login to `crewflow` (not implemented: needs approval).
+  - **M2-F3 (Low, part of H3):** `ArchiveAndSearchSchema1786719920000` creates `unaccent` and `pg_trgm`, owned by whoever
+    runs it (the superuser on existing databases, the migration login on a fresh managed install).
+- **Not covered by the per-migration drift check (by design, covered elsewhere):** table/column/function grants and
+  default privileges (golden posture, compared at the end of every scenario), policies (RLS coverage + posture),
+  ownership of new objects by `crewflow` (expected pattern via `withCrewflowCoreCreate`; posture).
+- **Independent review (2026-10-28): OK with fixes — all applied.** The pre-0b chain is frozen by name fingerprint
+  (`PRE_PHASE_0B_MIGRATIONS`: a back-dated migration would otherwise skip every post-0b check); the harness requires a
+  cluster marked `crewflow.disposable_cluster = on` and refuses a cluster where crewflow / crewflow_app exist without an
+  explicit opt-in (the role migrations reset their passwords); post-0b migrations are drift-checked under BOTH identities
+  (restricted in fresh, bootstrap superuser in upgrade); the drift snapshot also covers core policy expressions, default
+  privileges, per-role settings, membership options and ownership in any catalog (pg_shdepend); CF-41 / privileged
+  refusals must be the right error (MigrationIdentityError, SQLSTATE 42501 or the migration's own guard); discovery mode
+  fails the run and is refused under CI; no secret in URL-parse errors or the RLS child environment; CI passes the
+  superuser password as a file and masks every generated value.
+- **M2-F4 (Medium, Phase 0b rollout — open, not fixed under M2):** `SECURE_OWNER_INVARIANT_VIOLATIONS_SQL` (Phase 0b,
+  committed in 0d677bbf) grows ~2.7 s per workspace schema (measured: 1 workspace 1.7 s, 11 workspaces 29.4 s). Migration
+  1786721100000 runs it before commit, so on a database with a few hundred workspaces it approaches the 15-minute
+  migration statement_timeout (the migration would roll back, fail closed). Count workspaces read-only before applying
+  Phase 0b to rab-devdb or production, and optimise the query first if the count is large.
+- **SECURITY TRADE-OFF (vetoable):** the harness accepts the exact F2/F3 residue on the fresh restricted install
+  (`KNOWN_FRESH_MIGRATOR_LEFTOVERS`, `KNOWN_FRESH_POSTURE_DELTA`) so the job can gate everything else now; any other
+  leftover or posture line still fails. Consequence while accepted: a fresh managed-Postgres install has
+  `core.navigation_layout` owned by the migration login, and deleting a workspace, user or organisation fails there
+  (the ON DELETE CASCADE into it runs as that owner). Existing databases are unaffected (upgrade scenario: no residue).
+- **Update (owner-approved "finish M2", 2026-10-28):**
+  - **M2-F2 FIXED** by `NavigationLayoutCrewflowOwner1786721110000` (forward migration; neither historical migration edited):
+    re-owns only `core.navigation_layout` to crewflow inside `withCrewflowCoreCreate`, no-op where crewflow already owns
+    it (every existing database), refuses an unexpected owner (rab_secure_owner, a runtime login, a superuser) or an
+    identity that cannot act as the owner, and verifies owner / RLS+FORCE / crewflow_app S,I,U only / one policy before
+    commit. The fresh restricted install now matches the golden posture exactly; workspace and user deletes cascade
+    through the table; an organisation hard delete stays refused by design (user foreign key / insert-only audit_log).
+    The frozen fresh-install residue is now only F3 (unaccent / pg_trgm ownership, H3).
+  - **M2-F4 FIXED (owner-approved conditions met; the Phase 0b migration file is byte-identical, only the invariant module
+    it imports changed).** The cost was a planner cliff, not linear growth: the reachability step joined every pg_proc row
+    (~3,700) to every core function under a regex before restricting to reached functions. Phase 0b query at 1 / 5 / 11 /
+    20 / 40 workspace schemas: 1.8 / 31.5 (re-run 38.9) / 30.5 / 32.2 / 31.7 (re-run 40.0) s; optimised query (worktable-
+    driven LATERAL step; seed joins start from the secure tables): 0.50 / 0.52 (0.65) / 0.46 / 0.53 / 0.46 (0.55) s,
+    identical output every time. `secure-owner-invariants-equivalence.integration.spec.ts` keeps a frozen copy of the
+    Phase 0b query (test-only) and proves identical violations on a healthy database and 14 injected cases: every
+    attachment kind incl. a partition key, both transitive edges, a three-hop mixed chain, unpinned definer search_path,
+    runtime CREATE on core, runtime membership of rab_secure_owner. Independent review: logically equivalent in every
+    case; safe to include. Test-side only: the M2 fixture specs allow 180 s per statement on their own connection.
+  - **CI:** `ci-server` (test) and `ci-security` (rls-coverage) failed at checkout (service volume of postgres-init →
+    EACCES) and, behind that, migrated as the rab_owner login, which the role split refuses. Both now start PostgreSQL
+    after checkout (`.github/actions/disposable-postgres`) and build their database through the restricted-migrator fresh
+    install; the server suite runs as crewflow_app, the RLS gate as crewflow_app. No check removed or downgraded.

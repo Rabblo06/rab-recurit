@@ -1,3 +1,7 @@
+import {
+  WORKER_SCAN_INTERVAL_SETTINGS,
+  WorkerScanIntervalKey,
+} from '@rab/server/engine/core-modules/environment/worker-scan-intervals';
 import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
 
 /**
@@ -6,14 +10,24 @@ import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
  * calls (verified line by line against main.ts @ a743806f): interval mode registers them in this order, with these
  * names/keys, so its behaviour is unchanged; bullmq mode creates one job scheduler per entry.
  *
- * Interval sources: 17 constants (copied, not re-derived) and 3 environment-driven values
- * (LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES, OUTBOX_RETENTION_INTERVAL_MINUTES, AI_RETENTION_INTERVAL_MINUTES). Enable switches
- * stay INSIDE the cycle (login handoff cleanup, outbox retention, AI retention): a disabled job still fires on schedule and returns `ran: false`, which is
- * never stamped as a successful run — the same contract as interval mode, and no flapping if replicas disagree.
+ * Interval sources (Phase A pa-intervals): every scan's cadence is an environment setting. 17 scans read a
+ * `WORKER_<JOB>_INTERVAL_SECONDS` key (engine/core-modules/environment/worker-scan-intervals.ts — defaults EXACTLY the
+ * constants this file used to hold, bounded, out-of-range refuses to boot); 3 keep their pre-existing minutes keys
+ * (LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES, OUTBOX_RETENTION_INTERVAL_MINUTES, AI_RETENTION_INTERVAL_MINUTES).
+ *
+ * Enable switches: the login handoff cleanup / outbox retention / AI retention switches stay INSIDE the cycle (a disabled
+ * job still fires on schedule and returns `ran: false`, never stamped as a successful run). Phase A adds a REGISTRATION
+ * predicate for two scans only (`enabledBy`): `push-dispatch` runs only when PUSH_ENABLED=true and
+ * `realtime-outbox-publish` only when REALTIME_ENABLED=true. A disabled scan is not registered in interval mode, and in
+ * bullmq mode its Crewflow scheduler is removed on reconcile (re-added when re-enabled).
  */
 export type IntervalSource =
   | { kind: 'constant'; ms: number }
+  | { kind: 'env-seconds'; key: WorkerScanIntervalKey }
   | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' };
+
+/** Boolean env switches a scan's registration may depend on (Phase A contract with the realtime/push gating lane). */
+export type ScanEnableKey = 'REALTIME_ENABLED' | 'PUSH_ENABLED';
 
 export interface ScanJobDefinition {
   queue: ScanQueueName;
@@ -28,10 +42,21 @@ export interface ScanJobDefinition {
    * test anchor only: the processor's own return value is what the runtime honours.
    */
   mayReturnFalse: boolean;
+  /**
+   * Phase A: registration predicate. Absent ⇒ always registered. Present ⇒ registered only while that env switch is
+   * exactly `true` (anything else — false, missing, malformed — means NOT registered: fail closed).
+   */
+  enabledBy?: ScanEnableKey;
+  /**
+   * Phase A generic scheduler hook (default OFF for every scan): when true, a newly registered scan first runs ONE
+   * INTERVAL after registration instead of immediately (interval mode: no tick at process start; bullmq mode: a new
+   * scheduler's first job is delayed by one interval). Exists for scans whose immediate start-up run is undesirable
+   * (e.g. a 24 h sweep on every deploy); enabling it for a scan is a coordinator/owner decision, not set here.
+   */
+  firstRunAfterInterval?: boolean;
 }
 
 const MINUTE = 60 * 1000;
-const HOUR = 60 * MINUTE;
 
 const job = (
   queue: ScanQueueName,
@@ -41,6 +66,7 @@ const job = (
   lastRunAt: string,
   failures: string,
   mayReturnFalse = false,
+  extra: Pick<ScanJobDefinition, 'enabledBy' | 'firstRunAfterInterval'> = {},
 ): ScanJobDefinition => ({
   queue,
   jobName,
@@ -49,22 +75,23 @@ const job = (
   // `<loop>Skipped` — new field (bullmq mode only), derived from the existing failures key.
   statKeys: { lastRunAt, failures, skipped: failures.replace(/Failures$/, 'Skipped') },
   mayReturnFalse,
+  ...extra,
 });
 
-const constant = (ms: number): IntervalSource => ({ kind: 'constant', ms });
+const envSeconds = (key: WorkerScanIntervalKey): IntervalSource => ({ kind: 'env-seconds', key });
 
 export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
-  job(SCAN_QUEUES.maintenance, 'account-invite-cleanup', 'account-invite cleanup', constant(15 * MINUTE), 'lastAccountInviteCleanupAt', 'accountInviteCleanupFailures'),
-  job(SCAN_QUEUES.email, 'email-dispatch', 'email dispatch', constant(2_000), 'lastEmailDispatchAt', 'emailDispatchFailures', true),
-  job(SCAN_QUEUES.push, 'push-dispatch', 'push dispatch', constant(2_000), 'lastPushDispatchAt', 'pushDispatchFailures', true),
-  job(SCAN_QUEUES.shifts, 'shift-monitor', 'shift monitor', constant(5 * MINUTE), 'lastShiftMonitorAt', 'shiftMonitorFailures'),
-  job(SCAN_QUEUES.shifts, 'attendance-monitor', 'attendance monitor', constant(5 * MINUTE), 'lastAttendanceMonitorAt', 'attendanceMonitorFailures'),
-  job(SCAN_QUEUES.shifts, 'late-clock-in', 'late clock-in', constant(2 * MINUTE), 'lastLateClockInAt', 'lateClockInFailures'),
-  job(SCAN_QUEUES.shifts, 'shift-cancellation-followup', 'shift cancellation follow-up', constant(MINUTE), 'lastShiftCancellationFollowupAt', 'shiftCancellationFollowupFailures'),
-  job(SCAN_QUEUES.offers, 'offer-expiry', 'offer expiry', constant(MINUTE), 'lastOfferExpiryAt', 'offerExpiryFailures'),
-  job(SCAN_QUEUES.offers, 'manager-confirmation-timeout', 'manager confirmation timeout', constant(MINUTE), 'lastManagerConfirmationTimeoutAt', 'managerConfirmationTimeoutFailures'),
-  job(SCAN_QUEUES.offers, 'replacement-staff', 'replacement staff', constant(2 * MINUTE), 'lastReplacementStaffAt', 'replacementStaffFailures'),
-  job(SCAN_QUEUES.maintenance, 'token-cleanup', 'token cleanup', constant(24 * HOUR), 'lastTokenCleanupAt', 'tokenCleanupFailures'),
+  job(SCAN_QUEUES.maintenance, 'account-invite-cleanup', 'account-invite cleanup', envSeconds('WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS'), 'lastAccountInviteCleanupAt', 'accountInviteCleanupFailures'),
+  job(SCAN_QUEUES.email, 'email-dispatch', 'email dispatch', envSeconds('WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS'), 'lastEmailDispatchAt', 'emailDispatchFailures', true),
+  job(SCAN_QUEUES.push, 'push-dispatch', 'push dispatch', envSeconds('WORKER_PUSH_DISPATCH_INTERVAL_SECONDS'), 'lastPushDispatchAt', 'pushDispatchFailures', true, { enabledBy: 'PUSH_ENABLED' }),
+  job(SCAN_QUEUES.shifts, 'shift-monitor', 'shift monitor', envSeconds('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS'), 'lastShiftMonitorAt', 'shiftMonitorFailures'),
+  job(SCAN_QUEUES.shifts, 'attendance-monitor', 'attendance monitor', envSeconds('WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS'), 'lastAttendanceMonitorAt', 'attendanceMonitorFailures'),
+  job(SCAN_QUEUES.shifts, 'late-clock-in', 'late clock-in', envSeconds('WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS'), 'lastLateClockInAt', 'lateClockInFailures'),
+  job(SCAN_QUEUES.shifts, 'shift-cancellation-followup', 'shift cancellation follow-up', envSeconds('WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS'), 'lastShiftCancellationFollowupAt', 'shiftCancellationFollowupFailures'),
+  job(SCAN_QUEUES.offers, 'offer-expiry', 'offer expiry', envSeconds('WORKER_OFFER_EXPIRY_INTERVAL_SECONDS'), 'lastOfferExpiryAt', 'offerExpiryFailures'),
+  job(SCAN_QUEUES.offers, 'manager-confirmation-timeout', 'manager confirmation timeout', envSeconds('WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS'), 'lastManagerConfirmationTimeoutAt', 'managerConfirmationTimeoutFailures'),
+  job(SCAN_QUEUES.offers, 'replacement-staff', 'replacement staff', envSeconds('WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS'), 'lastReplacementStaffAt', 'replacementStaffFailures'),
+  job(SCAN_QUEUES.maintenance, 'token-cleanup', 'token cleanup', envSeconds('WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS'), 'lastTokenCleanupAt', 'tokenCleanupFailures'),
   job(
     SCAN_QUEUES.maintenance,
     'login-handoff-cleanup',
@@ -74,12 +101,13 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'loginHandoffCleanupFailures',
     true,
   ),
-  job(SCAN_QUEUES.maintenance, 'storage-cleanup', 'storage cleanup', constant(24 * HOUR), 'lastStorageCleanupAt', 'storageCleanupFailures'),
-  job(SCAN_QUEUES.reports, 'shift-report-scheduler', 'shift report scheduler', constant(5 * MINUTE), 'lastShiftReportSchedulerAt', 'shiftReportSchedulerFailures'),
-  job(SCAN_QUEUES.reports, 'final-timesheet', 'final timesheet', constant(5 * MINUTE), 'lastFinalTimesheetAt', 'finalTimesheetFailures'),
-  job(SCAN_QUEUES.reports, 'shift-statement-dispatch', 'shift statement dispatch', constant(5_000), 'lastShiftStatementDispatchAt', 'shiftStatementDispatchFailures', true),
-  job(SCAN_QUEUES.reports, 'payroll-period-attention', 'payroll period attention', constant(30 * MINUTE), 'lastPayrollPeriodAttentionAt', 'payrollPeriodAttentionFailures'),
-  job(SCAN_QUEUES.realtime, 'realtime-outbox-publish', 'realtime outbox publish', constant(2_000), 'lastRealtimeOutboxPublishAt', 'realtimeOutboxPublishFailures', true),
+  // Phase A pa-storage: returns false when it skips (recent run cluster-wide, or another replica holds the reconcile lock).
+  job(SCAN_QUEUES.maintenance, 'storage-cleanup', 'storage cleanup', envSeconds('WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS'), 'lastStorageCleanupAt', 'storageCleanupFailures', true),
+  job(SCAN_QUEUES.reports, 'shift-report-scheduler', 'shift report scheduler', envSeconds('WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS'), 'lastShiftReportSchedulerAt', 'shiftReportSchedulerFailures'),
+  job(SCAN_QUEUES.reports, 'final-timesheet', 'final timesheet', envSeconds('WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS'), 'lastFinalTimesheetAt', 'finalTimesheetFailures'),
+  job(SCAN_QUEUES.reports, 'shift-statement-dispatch', 'shift statement dispatch', envSeconds('WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'), 'lastShiftStatementDispatchAt', 'shiftStatementDispatchFailures', true),
+  job(SCAN_QUEUES.reports, 'payroll-period-attention', 'payroll period attention', envSeconds('WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS'), 'lastPayrollPeriodAttentionAt', 'payrollPeriodAttentionFailures'),
+  job(SCAN_QUEUES.realtime, 'realtime-outbox-publish', 'realtime outbox publish', envSeconds('WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS'), 'lastRealtimeOutboxPublishAt', 'realtimeOutboxPublishFailures', true, { enabledBy: 'REALTIME_ENABLED' }),
   job(
     SCAN_QUEUES.maintenance,
     'outbox-retention',
@@ -106,12 +134,35 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
 export const schedulerIdOf = (def: Pick<ScanJobDefinition, 'queue' | 'jobName'>): string => `crewflow:${def.queue}:${def.jobName}`;
 export const crewflowSchedulerPrefixOf = (queue: string): string => `crewflow:${queue}:`;
 
+/**
+ * The scan's interval in ms. Fail closed: a non-integer, non-positive or (for the Phase A seconds keys) out-of-bounds
+ * value throws — EnvironmentService has already refused to boot on such a value, so this is defence in depth for any
+ * caller that passes another source (tests, tools).
+ */
 export function resolveIntervalMs(def: ScanJobDefinition, env: { get(key: IntervalSourceEnvKey): number }): number {
-  const ms = def.interval.kind === 'constant' ? def.interval.ms : env.get(def.interval.key) * MINUTE;
+  const source = def.interval;
+  let ms: number;
+  if (source.kind === 'constant') {
+    ms = source.ms;
+  } else if (source.kind === 'env-seconds') {
+    const seconds = env.get(source.key);
+    const bounds = WORKER_SCAN_INTERVAL_SETTINGS[source.key];
+    if (!Number.isInteger(seconds) || seconds < bounds.minSeconds || seconds > bounds.maxSeconds) {
+      throw new Error(`${def.name}: invalid interval (${source.key} must be an integer ${bounds.minSeconds}–${bounds.maxSeconds})`);
+    }
+    ms = seconds * 1000;
+  } else {
+    ms = env.get(source.key) * MINUTE;
+  }
   if (!Number.isInteger(ms) || ms <= 0) throw new Error(`${def.name}: invalid interval`);
   return ms;
 }
-type IntervalSourceEnvKey = Extract<IntervalSource, { kind: 'env-minutes' }>['key'];
+export type IntervalSourceEnvKey = Exclude<IntervalSource, { kind: 'constant' }>['key'];
+
+/** Phase A registration predicate: true unless the scan names a switch that is not exactly `true` (fail closed). */
+export function isScanJobEnabled(def: Pick<ScanJobDefinition, 'enabledBy'>, env: { get(key: ScanEnableKey): boolean }): boolean {
+  return def.enabledBy === undefined || env.get(def.enabledBy) === true;
+}
 
 /**
  * BullMQ lock duration per scan queue (bullmq mode). Rule (owner brief): p99 cycle duration × 3, measured with the M1

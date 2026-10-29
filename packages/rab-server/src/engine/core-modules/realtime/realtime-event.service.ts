@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { EnvironmentService } from '../environment/environment.service';
+
 /**
  * Stage 1 wired exactly one real event type (`OFFER_SENT`, from
  * `OfferService.sendOne()`). Stage 4 adds `OFFER_ACCEPTED`, from
@@ -41,15 +43,30 @@ export type RealtimeEventTypeValue = (typeof RealtimeEventType)[keyof typeof Rea
  */
 @Injectable()
 export class RealtimeEventService {
+  constructor(private readonly env: EnvironmentService) {}
+
   /**
    * Returns the new event's id, or `null` if `params.eventKey` was already
    * claimed (another call with the same key — a normal, expected dedup
-   * outcome, never an error; same idiom as `claimWorkerEvent`).
+   * outcome, never an error; same idiom as `claimWorkerEvent`), or `null`
+   * when `REALTIME_ENABLED` is false (nothing written — see below).
+   *
+   * Phase A gating: with `REALTIME_ENABLED=false` the SSE gateway refuses
+   * every stream (`RealtimeGatewayController`), so a `core.realtime_event`
+   * row could only ever be claimed, published to a channel nobody can be
+   * subscribed to, and completed — pure write/claim/complete churn on the
+   * request path and the Worker. Nothing else reads this table as data
+   * (no client catch-up/replay; the platform-admin outbox view lists only
+   * FAILED rows; retention deletes terminal rows). So the row is simply
+   * not written — same rule `PushDeliveryService` already applies to
+   * `push_delivery` under `PUSH_ENABLED`. The event-type check still runs
+   * FIRST either way, so an unknown type fails closed whatever the flag.
    */
   async record(manager: EntityManager, params: RealtimeEventRecordParams): Promise<string | null> {
     if (!Object.values(RealtimeEventType).includes(params.eventType as RealtimeEventTypeValue)) {
       throw new BadRequestException(`Unknown realtime event type: ${params.eventType}`);
     }
+    if (!this.env.get('REALTIME_ENABLED')) return null;
     const rows = await manager.query<Array<{ id: string }>>(
       `INSERT INTO core.realtime_event
          (organisation_id, workspace_id, target_user_id, event_key, event_type, entity_type, entity_id, payload)

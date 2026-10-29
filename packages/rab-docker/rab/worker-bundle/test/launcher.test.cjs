@@ -20,7 +20,7 @@ const path = require('node:path');
 const launcher = require('../start-worker-bundle.cjs');
 const health = require('../worker-bundle-health.cjs');
 
-const { makePlan, supervise, preflight, JOBS_ENV_KEYS, PROVISIONER_ENV_KEYS, FORBIDDEN_SERVICE_KEYS } = launcher;
+const { makePlan, supervise, preflight, JOBS_ENV_KEYS, PROVISIONER_ENV_KEYS, FORBIDDEN_SERVICE_KEYS, PROVISIONER_INTERVAL } = launcher;
 const linuxRoot = process.platform === 'linux' && process.getuid?.() === 0;
 const SECRET_MARKERS = ['dummy-app-pw', 'dummy-direct-pw', 'dummy-prov-pw', 'fake-test-only', 'fake-email-secret', 'fake-s3-secret'];
 
@@ -30,6 +30,9 @@ const env = () => ({
   DATABASE_URL: 'postgres://crewflow_app:dummy-app-pw@db-pooler.example:5432/testdb',
   DATABASE_DIRECT_URL: 'postgres://crewflow_app:dummy-direct-pw@db.example:5432/testdb',
   CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:dummy-prov-pw@db.example:5432/testdb',
+  // Phase A: the provisioner child is opt-in. The reference cases below run the ENABLED topology (what every committed
+  // compose file sets); the "Phase A" cases further down cover the disabled default.
+  CREWFLOW_PROVISIONER_ENABLED: 'true',
   REDIS_URL: 'redis://redis:6379',
   TRUSTED_PROXY_CIDRS: '127.0.0.1/32',
   APP_SECRET: 'fake-test-only',
@@ -72,10 +75,14 @@ test('2 provisioner gets only its DB mapping and minimal infrastructure environm
   const [, p] = makePlan(env());
   assert.equal(p.env.DATABASE_URL, env().CREWFLOW_PROVISIONER_DATABASE_URL);
   assert.equal(p.env.DATABASE_URL, p.env.DATABASE_URL_UNPOOLED);
-  assert.equal(p.env.HWS_RUNTIME_ENABLED, 'true');
+  // Phase A: HWS_RUNTIME_ENABLED is no longer forced (env() does not set it, so the child does not get it); the explicit
+  // opt-in and the validated interval are set by the launcher.
+  assert.equal(p.env.HWS_RUNTIME_ENABLED, undefined);
+  assert.equal(p.env.CREWFLOW_PROVISIONER_ENABLED, 'true');
+  assert.equal(p.env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, '60');
   assert.deepEqual(
     Object.keys(p.env).sort(),
-    ['CREWFLOW_INSTANCE_HEALTH_FILE', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'HOME', 'HWS_RUNTIME_ENABLED', 'NODE_ENV', 'PATH', 'RAB_RUNTIME_ENV', 'REDIS_URL', 'TMPDIR'].sort(),
+    ['CREWFLOW_INSTANCE_HEALTH_FILE', 'CREWFLOW_PROVISIONER_ENABLED', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'HOME', 'NODE_ENV', 'PATH', 'RAB_RUNTIME_ENV', 'REDIS_URL', 'TMPDIR', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS'].sort(),
   );
   for (const key of ['APP_SECRET', 'EMAIL_SMTP_PASSWORD', 'S3_SECRET_ACCESS_KEY', 'APNS_AUTH_KEY_P8', 'DATABASE_DIRECT_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL']) {
     assert.equal(p.env[key], undefined, key);
@@ -116,15 +123,19 @@ test('7 rejects different database name', () => {
   assert.match(refusal({ CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:x@db/other' }).message, /different databases/);
 });
 
-test('8 (adapted) provisioning is always enabled for the provisioner child; the jobs child keeps the service value', () => {
-  // Reference refused HWS_RUNTIME_ENABLED!=true globally. Integrated: that flag also switches the API/jobs runtime to
-  // physical workspace-schema routing (a separate, unapproved cutover), so it is NOT forced on the jobs child.
+test('8 (Phase A) HWS_RUNTIME_ENABLED is passed through unchanged to BOTH children — never forced', () => {
+  // Before Phase A the launcher forced "true" on the provisioner child. Now provisioning is enabled by the explicit opt-in
+  // (CREWFLOW_PROVISIONER_ENABLED=true, set on the child by the launcher) and HWS keeps the service's own value everywhere.
   const [w1, p1] = makePlan(env());
   assert.equal(w1.env.HWS_RUNTIME_ENABLED, undefined);
-  assert.equal(p1.env.HWS_RUNTIME_ENABLED, 'true');
+  assert.equal(p1.env.HWS_RUNTIME_ENABLED, undefined);
   const [w2, p2] = makePlan({ ...env(), HWS_RUNTIME_ENABLED: 'false' });
   assert.equal(w2.env.HWS_RUNTIME_ENABLED, 'false');
-  assert.equal(p2.env.HWS_RUNTIME_ENABLED, 'true');
+  assert.equal(p2.env.HWS_RUNTIME_ENABLED, 'false');
+  assert.equal(p2.env.CREWFLOW_PROVISIONER_ENABLED, 'true');
+  const [w3, p3] = makePlan({ ...env(), HWS_RUNTIME_ENABLED: 'true' });
+  assert.equal(w3.env.HWS_RUNTIME_ENABLED, 'true');
+  assert.equal(p3.env.HWS_RUNTIME_ENABLED, 'true');
 });
 
 test('9 rejects missing production proxy trust declaration and half-declared production', () => {
@@ -658,4 +669,228 @@ test('34 the jobs allowlist forwards AI_AGENTS_ENABLED (AI Phase 6a, default fal
   const [jobs, provisioner] = makePlan({ ...env(), AI_AGENTS_ENABLED: 'false' });
   assert.equal(jobs.env.AI_AGENTS_ENABLED, 'false');
   assert.equal(provisioner.env.AI_AGENTS_ENABLED, undefined);
+});
+
+// ---------------------------------------------------------------- Phase A (pa-provisioner): provisioner switch
+
+// Explicit opt-out: the only way to run the jobs child alone (unset = legacy = provisioner on, see A1b).
+const disabledEnv = (overrides = {}) => {
+  const e = { ...env(), ...overrides, CREWFLOW_PROVISIONER_ENABLED: 'false' };
+  delete e.CREWFLOW_PROVISIONER_DATABASE_URL;
+  return e;
+};
+const PROVISIONER_ONLY_KEYS = ['CREWFLOW_PROVISIONER_DATABASE_URL', 'CREWFLOW_PROVISIONER_ENABLED', 'DATABASE_URL_UNPOOLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS'];
+
+test('A1 explicitly disabled ("false") → ONE child (jobs); the provisioner is never planned', () => {
+  for (const flag of ['false', ' false ']) {
+    const plan = makePlan({ ...disabledEnv(), CREWFLOW_PROVISIONER_ENABLED: flag });
+    assert.equal(plan.length, 1, String(flag));
+    assert.equal(plan[0].name, 'jobs');
+    assert.ok(!plan.some((s) => /workspace-provisioner/.test(s.entry)));
+  }
+});
+
+test('A1b switch unset or empty (every pre-Phase-A environment) → the pre-Phase-A behaviour: provisioner ON at 5 s, URL required', () => {
+  for (const flag of [undefined, '', ' ']) {
+    const e = { ...env() };
+    if (flag === undefined) delete e.CREWFLOW_PROVISIONER_ENABLED;
+    else e.CREWFLOW_PROVISIONER_ENABLED = flag;
+    const plan = makePlan(e);
+    assert.deepEqual(plan.map((s) => s.name), ['jobs', 'provisioner'], String(flag));
+    assert.equal(plan[1].env.CREWFLOW_PROVISIONER_ENABLED, 'true');
+    assert.equal(plan[1].env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, String(PROVISIONER_INTERVAL.legacyDefaultSeconds));
+    assert.equal(PROVISIONER_INTERVAL.legacyDefaultSeconds, 5);
+    // An explicit interval still wins.
+    assert.equal(makePlan({ ...e, WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '30' })[1].env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, '30');
+    // Without the URL it refuses exactly as the base launcher did — never a silent jobs-only start.
+    const noUrl = { ...e };
+    delete noUrl.CREWFLOW_PROVISIONER_DATABASE_URL;
+    let refused = null;
+    try {
+      makePlan(noUrl);
+    } catch (err) {
+      refused = err;
+    }
+    assert.ok(refused instanceof launcher.BundleConfigError, String(flag));
+    assert.match(refused.message, /^Missing CREWFLOW_PROVISIONER_DATABASE_URL$/);
+  }
+});
+
+test('A2 explicitly disabled + CREWFLOW_PROVISIONER_DATABASE_URL present → refused (fail closed), by name only', () => {
+  for (const flag of ['false']) {
+    const e = { ...env(), CREWFLOW_PROVISIONER_ENABLED: flag };
+    let error = null;
+    try {
+      makePlan(e);
+    } catch (err) {
+      error = err;
+    }
+    assert.ok(error instanceof launcher.BundleConfigError, String(flag));
+    assert.match(error.message, /^CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/);
+    for (const marker of SECRET_MARKERS) assert.ok(!error.message.includes(marker));
+  }
+  // An empty value is tolerated (a compose file may blank it) and still never forwarded.
+  const [jobs, ...rest] = makePlan(disabledEnv({ CREWFLOW_PROVISIONER_DATABASE_URL: '' }));
+  assert.deepEqual(rest, []);
+  assert.equal(jobs.env.CREWFLOW_PROVISIONER_DATABASE_URL, undefined);
+});
+
+test('A3 an invalid CREWFLOW_PROVISIONER_ENABLED refuses to start (no silent mode choice), value not echoed', () => {
+  for (const flag of ['TRUE', 'True', '1', 'yes', 'on', 'ture', 'enabled']) {
+    const e = refusal({ CREWFLOW_PROVISIONER_ENABLED: flag });
+    assert.ok(e, flag);
+    assert.match(e.message, /^CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"/, flag);
+    assert.ok(!e.message.includes(`"${flag}"`) || flag === 'true', 'value not echoed');
+  }
+  // Surrounding whitespace is trimmed: ' true ' is a valid "true".
+  assert.equal(makePlan({ ...env(), CREWFLOW_PROVISIONER_ENABLED: ' true ' }).length, 2);
+});
+
+test('A4 the jobs child never receives provisioner keys or the privileged credential — in BOTH modes', () => {
+  const plans = [
+    ['enabled', makePlan({ ...env(), WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '30', HWS_RUNTIME_ENABLED: 'true' })],
+    ['disabled', makePlan(disabledEnv({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '30', HWS_RUNTIME_ENABLED: 'true' }))],
+  ];
+  for (const [mode, [jobs]] of plans) {
+    for (const key of PROVISIONER_ONLY_KEYS) assert.equal(jobs.env[key], undefined, `${mode}: ${key}`);
+    assert.ok(!Object.values(jobs.env).some((v) => String(v).includes('dummy-prov-pw')), `${mode}: provisioner password reached the jobs child`);
+    assert.ok(!Object.keys(jobs.env).some((k) => k.startsWith('CREWFLOW_') && k !== 'CREWFLOW_INSTANCE_HEALTH_FILE'), `${mode}: CREWFLOW_* reached the jobs child`);
+    assert.match(jobs.env.DATABASE_URL, /^postgres:\/\/crewflow_app:/);
+    assert.equal(jobs.env.HWS_RUNTIME_ENABLED, 'true', `${mode}: HWS passed through to jobs`);
+  }
+  for (const key of PROVISIONER_ONLY_KEYS) assert.ok(!JOBS_ENV_KEYS.includes(key), key);
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('CREWFLOW_PROVISIONER_DATABASE_URL'));
+});
+
+test('A5 enabled → TWO children; HWS passed through; validated interval forwarded to the provisioner only', () => {
+  const plan = makePlan({ ...env(), HWS_RUNTIME_ENABLED: 'false' });
+  assert.deepEqual(plan.map((s) => s.name), ['jobs', 'provisioner']);
+  const [jobs, prov] = plan;
+  assert.equal(prov.env.HWS_RUNTIME_ENABLED, 'false');
+  assert.equal(prov.env.CREWFLOW_PROVISIONER_ENABLED, 'true');
+  assert.equal(prov.env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, String(PROVISIONER_INTERVAL.defaultSeconds));
+  assert.equal(PROVISIONER_INTERVAL.defaultSeconds, 60);
+  assert.equal(jobs.env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, undefined);
+  assert.equal(makePlan({ ...env(), WORKSPACE_PROVISIONER_INTERVAL_SECONDS: ' 30 ' })[1].env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, '30');
+});
+
+test('A6 interval bounds: whole seconds from 5 to 120 accepted; anything else refused when the provisioner is enabled', () => {
+  for (const ok of ['5', '6', '60', '119', '120', '']) {
+    const [, prov] = makePlan({ ...env(), WORKSPACE_PROVISIONER_INTERVAL_SECONDS: ok });
+    assert.equal(prov.env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, ok === '' ? '60' : ok, ok);
+  }
+  for (const bad of ['0', '4', '121', '3600', '-5', '5.5', '1e2', '60s', 'sixty', '0x10']) {
+    const e = refusal({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: bad });
+    assert.ok(e, bad);
+    assert.match(e.message, /^WORKSPACE_PROVISIONER_INTERVAL_SECONDS must be a whole number of seconds from 5 to 120$/, bad);
+  }
+  // A disabled provisioner ignores it (never forwarded, nothing to validate).
+  assert.equal(makePlan(disabledEnv({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: 'garbage' })).length, 1);
+});
+
+test('A7 launcher interval bounds equal the provisioner entrypoint constants (repo checkout only)', () => {
+  const file = path.resolve(__dirname, '../../../../rab-worker/src/workspace-provisioner.config.ts');
+  if (!fs.existsSync(file)) return;
+  const text = fs.readFileSync(file, 'utf8');
+  const constant = (name) => Number(new RegExp(`export const ${name} = (\\d+);`).exec(text)?.[1]);
+  assert.equal(constant('PROVISIONER_INTERVAL_DEFAULT_SECONDS'), PROVISIONER_INTERVAL.defaultSeconds);
+  assert.equal(constant('PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS'), PROVISIONER_INTERVAL.legacyDefaultSeconds);
+  assert.equal(constant('PROVISIONER_INTERVAL_MIN_SECONDS'), PROVISIONER_INTERVAL.minSeconds);
+  assert.equal(constant('PROVISIONER_INTERVAL_MAX_SECONDS'), PROVISIONER_INTERVAL.maxSeconds);
+  // The longest interval plus a slow cycle must still settle inside the health window.
+  assert.ok(PROVISIONER_INTERVAL.maxSeconds * 1000 * 2 <= health.ROLES.provisioner.settledMaxAgeMs);
+});
+
+test('A8 health: a disabled provisioner is not expected; an enabled or legacy one still is; an invalid flag is null (fail closed)', () => {
+  // Unset/empty = legacy = the provisioner runs, so the health check must still expect it.
+  assert.deepEqual(Object.keys(health.rolesFor({})).sort(), ['jobs', 'provisioner']);
+  assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: '' })).sort(), ['jobs', 'provisioner']);
+  assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'false' })), ['jobs']);
+  assert.deepEqual(Object.keys(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'true' })).sort(), ['jobs', 'provisioner']);
+  assert.equal(health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'yes' }), null);
+  assert.deepEqual(['true', 'false', '', undefined, 'yes'].map((v) => health.provisionerMode(v === undefined ? {} : { CREWFLOW_PROVISIONER_ENABLED: v })), ['on', 'off', 'legacy', 'legacy', null]);
+  const jobsOnly = { [J]: goodBeat('jobs', 100) };
+  const off = { CREWFLOW_PROVISIONER_ENABLED: 'false' };
+  const disabled = health.evaluate({ now: NOW, roles: health.rolesFor(off), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({ 100: 1000 }) });
+  assert.equal(disabled.healthy, true, JSON.stringify(disabled));
+  const enabled = health.evaluate({ now: NOW, roles: health.rolesFor({ CREWFLOW_PROVISIONER_ENABLED: 'true' }), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({ 100: 1000 }) });
+  assert.equal(enabled.healthy, false);
+  assert.match(enabled.roles.find((r) => r.role === 'provisioner').problems.join('; '), /no heartbeat file/);
+  // A dead jobs child is still unhealthy when the provisioner is disabled.
+  const dead = health.evaluate({ now: NOW, roles: health.rolesFor(off), read: (f) => jobsOnly[f] ?? null, uidOf: uidOf({}) });
+  assert.equal(dead.healthy, false);
+});
+
+test('A9 health CLI: exits 1 on an invalid flag without echoing it', () => {
+  const { spawnSync } = require('node:child_process');
+  const r = spawnSync(process.execPath, [path.join(__dirname, '../worker-bundle-health.cjs')], { env: { PATH: process.env.PATH, CREWFLOW_PROVISIONER_ENABLED: 'maybe' }, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"/);
+  assert.ok(!r.stdout.includes('maybe'));
+});
+
+test('A10 main() refuses explicitly disabled + provisioner URL with exit 1, naming the variable only', async () => {
+  const captured = [];
+  const original = console.error;
+  console.error = (...a) => captured.push(a.join(' '));
+  try {
+    const e = { ...env(), CREWFLOW_PROVISIONER_ENABLED: 'false', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' };
+    assert.equal(await launcher.main(e), 1);
+  } finally {
+    console.error = original;
+  }
+  assert.ok(captured.some((l) => /refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/.test(l)), captured.join('\n'));
+  for (const marker of SECRET_MARKERS) assert.ok(!captured.join('\n').includes(marker));
+});
+
+test('A11 preflight (disabled): no provisioner entrypoint/temp/health directory required; code still not writable by either identity', { skip: !linuxRoot && 'needs root on Linux' }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-pre-a-'));
+  try {
+    const layout = {
+      root,
+      jobs: { uid: 1000, gid: 1000, home: path.join(root, 'tmp-jobs'), healthFile: path.join(root, 'health/jobs/heartbeat.json') },
+      provisioner: { uid: 10001, gid: 10001, home: path.join(root, 'tmp-prov'), healthFile: path.join(root, 'health/provisioner/heartbeat.json') },
+    };
+    const dist = path.join(root, 'packages/rab-worker/dist');
+    fs.mkdirSync(dist, { recursive: true, mode: 0o755 });
+    fs.mkdirSync(path.join(root, 'node_modules'), { mode: 0o755 });
+    fs.chmodSync(root, 0o755);
+    fs.writeFileSync(path.join(dist, 'main.js'), '', { mode: 0o444 }); // no provisioner entrypoint at all
+    for (const [d, uid, mode] of [[layout.jobs.home, 1000, 0o700], [path.dirname(layout.jobs.healthFile), 1000, 0o755]]) {
+      fs.mkdirSync(d, { recursive: true });
+      fs.chownSync(d, uid, uid);
+      fs.chmodSync(d, mode);
+    }
+    const plan = makePlan(disabledEnv(), layout);
+    preflight(plan, layout); // passes without the provisioner's entrypoint, temp dir or health dir
+    fs.chownSync(path.join(dist, 'main.js'), 10001, 10001);
+    assert.throws(() => preflight(plan, layout), /writable by a child identity: packages\/rab-worker\/dist\/main.js/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('A12 supervise (disabled plan): exactly one child runs, as uid 1000, with no provisioner key in its environment', { skip: !linuxRoot && 'needs root on Linux' }, async () => {
+  const fx = fixtures({
+    'introspect.cjs': "console.log(JSON.stringify({keys:Object.keys(process.env).sort(),uid:process.getuid()})); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);",
+  });
+  const signals = new EventEmitter();
+  try {
+    const plan = makePlan(disabledEnv({ NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development' }));
+    assert.equal(plan.length, 1);
+    const reports = [];
+    const logs = [];
+    const specs = plan.map((p) => Object.assign(spec(fx, p.name, 'introspect.cjs', p.uid, p.gid), { env: { ...p.env } }));
+    const pending = supervise(specs, quiet({ graceMs: 3000, signals, log: (s) => logs.push(s), out: (n, l) => { try { reports.push({ n, r: JSON.parse(l) }); } catch { /* not ours */ } } }));
+    await waitFor(() => reports.length === 1);
+    assert.equal(launcher.processesOwnedBy(new Set([10001])).length, 0, 'no process runs as the provisioner identity');
+    signals.emit('SIGTERM');
+    assert.equal(await pending, 0);
+    assert.equal(reports[0].n, 'jobs');
+    assert.equal(reports[0].r.uid, 1000);
+    for (const key of PROVISIONER_ONLY_KEYS) assert.ok(!reports[0].r.keys.includes(key), key);
+    assert.equal(logs.filter((l) => /started pid=/.test(l)).length, 1, logs.join('\n'));
+  } finally {
+    fx.cleanup();
+  }
 });

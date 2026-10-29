@@ -17,6 +17,8 @@ on:
         value: ${{ jobs.filter.outputs.ui }}
       docker:
         value: ${{ jobs.filter.outputs.docker }}
+      e2e:
+        value: ${{ jobs.filter.outputs.e2e }}
 
 permissions:
   contents: read
@@ -32,6 +34,7 @@ jobs:
       shared: ${{ steps.filter.outputs.shared }}
       ui: ${{ steps.filter.outputs.ui }}
       docker: ${{ steps.filter.outputs.docker }}
+      e2e: ${{ steps.filter.outputs.e2e }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6 # v3
@@ -63,3 +66,13 @@ jobs:
               - 'packages/rab-worker/**'
               - 'packages/rab-shared/**'
               - 'packages/rab-ui/**'
+            # The e2e package itself, the fixtures its AI visual suites load, and the CI wiring that runs it: a change
+            # to any of these must run ci-e2e even when no application package changed.
+            e2e:
+              - 'packages/rab-e2e-testing/**'
+              - 'packages/rab-docs/tools/web/**'
+              - '.github/workflows/ci-e2e.yaml'
+              - '.github/workflows/changed-files.yaml'
+              - '.github/actions/**'
+              - 'package.json'
+              - 'yarn.lock'

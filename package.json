@@ -22,8 +22,8 @@
     ]
   },
   "devDependencies": {
-    "@nx/jest": "22.7.8",
-    "@nx/js": "22.7.8",
+    "@nx/jest": "22.7.12",
+    "@nx/js": "22.7.12",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
@@ -31,7 +31,7 @@
     "concurrently": "^8.2.2",
     "jest": "^29.7.0",
     "jest-environment-node": "^29.7.0",
-    "nx": "22.7.8",
+    "nx": "22.7.12",
     "pg": "^8.13.1",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
@@ -47,7 +47,11 @@
     "metro-resolver": "0.81.5",
     "metro-transform-worker": "0.81.5",
     "@react-native/community-cli-plugin": "0.76.5",
-    "multer": "2.4.0"
+    "multer": "2.5.0",
+    "nx/axios": "1.21.0",
+    "nx/follow-redirects": "1.16.2",
+    "nx/smol-toml": "1.9.1",
+    "nx/brace-expansion": "5.0.12"
   },
   "scripts": {
     "start": "npx concurrently --kill-others \"npx nx run-many -t start -p rab-server rab-front\" \"npx wait-on tcp:3000 && npx nx run rab-worker:start\" \"npx wait-on tcp:3000 && npx nx run rab-worker:provision\"",

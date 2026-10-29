@@ -18,11 +18,12 @@ const identity = {
   email: 'ceo@example.test', roles: ['ceo'], isPlatformAdmin: false, mustResetPassword: false,
   applicationTarget: 'manager_web', sessionExpiresAt: '2099-01-01T00:00:00Z',
 };
+// `accountStatus` is part of the real GET /staff row: the staff picker only lists active accounts of active staff.
 const staff = [
-  { id: 's-john', firstName: 'John', lastName: 'Smith', email: 'john@example.test', employmentStatus: 'active' },
-  { id: 's-amy', firstName: 'Amy', lastName: 'Lee', email: 'amy@example.test', employmentStatus: 'active' },
-  { id: 's-bo', firstName: 'Bo', lastName: 'Chan', email: 'bo@example.test', employmentStatus: 'active' },
-  { id: 's-xan', firstName: 'Xan', lastName: 'Unknown', email: 'xan@example.test', employmentStatus: 'active' },
+  { id: 's-john', firstName: 'John', lastName: 'Smith', email: 'john@example.test', employmentStatus: 'active', accountStatus: 'active' },
+  { id: 's-amy', firstName: 'Amy', lastName: 'Lee', email: 'amy@example.test', employmentStatus: 'active', accountStatus: 'active' },
+  { id: 's-bo', firstName: 'Bo', lastName: 'Chan', email: 'bo@example.test', employmentStatus: 'active', accountStatus: 'active' },
+  { id: 's-xan', firstName: 'Xan', lastName: 'Unknown', email: 'xan@example.test', employmentStatus: 'active', accountStatus: 'active' },
 ];
 const shift = {
   id: 'shift-1', venueId: 'v-1', jobRoleId: 'jr-1', startsAt: '2026-10-19T09:00:00Z', endsAt: '2026-10-19T17:00:00Z',
@@ -77,7 +78,14 @@ async function openSendOffer(page: Page, names: string[]) {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
   await page.evaluate((s) => document.dispatchEvent(new CustomEvent('open-send-offer', { detail: { shift: s } })), shift);
-  for (const name of names) await page.getByRole('button', { name: new RegExp(name) }).first().click();
+  // Staff are chosen on the full-page picker (e31bf934, "Send offers full-page staff picker"), then sent from the drawer.
+  await page.getByRole('button', { name: 'Select staff' }).click();
+  const picker = page.getByRole('region', { name: 'Select staff for this shift' });
+  for (const name of names) await picker.getByRole('checkbox', { name: `Select ${name}` }).check();
+  await expect(picker.getByRole('status')).toHaveText(`${names.length} selected`);
+  await picker.getByRole('button', { name: 'Confirm' }).click();
+  await expect(picker).toBeHidden();
+  for (const name of names) await expect(page.getByText(name).first()).toBeVisible();
   await page.getByRole('button', { name: /^Send offer/ }).click();
 }
 
