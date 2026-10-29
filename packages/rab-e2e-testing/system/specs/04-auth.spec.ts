@@ -7,7 +7,7 @@ import { ApiClient, expectStatus } from '../lib/http';
 import { recreate } from '../lib/stack';
 import { loadState, updateState } from '../lib/state';
 import { secretFromOtpauth, totp, waitNextStep } from '../lib/totp';
-import { settle, shot, uiLogin } from '../lib/ui';
+import { confirmHandoff, settle, shot, uiLogin } from '../lib/ui';
 
 /**
  * Scenario 4 — authentication across hosts: login handoff default host → *.localhost workspace host, logout isolation
@@ -75,6 +75,7 @@ test.describe.serial('S4 authentication', () => {
     const exchange = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/auth/login-handoff/exchange', { timeout: 120_000 });
     await uiLogin(page, DEFAULT_ORIGIN, s.A.imEmail!, SYNTHETIC_PASSWORD);
     const created = await handoffCreate;
+    await confirmHandoff(page, s.A.imEmail!);
     const exchanged = await exchange;
     await settle(page);
     const landed = new URL(page.url());
@@ -152,13 +153,17 @@ test.describe.serial('S4 authentication', () => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const pw = await passwordStep(page, DEFAULT_ORIGIN, s.A.ceoEmail!);
-    await page.locator('#mfa-code').waitFor({ state: 'visible', timeout: 30_000 });
+    // The challenge code field is the shared OtpInput since 562a058e (2026-10-25), labelled, no longer #mfa-code.
+    const codeField = page.getByLabel('6-digit authentication code');
+    await codeField.waitFor({ state: 'visible', timeout: 30_000 });
     await shot(page, '04-mfa-challenge');
     const verifyP = page.waitForResponse((r) => new URL(r.url()).pathname === '/rest/v1/auth/mfa/challenge/verify', { timeout: 60_000 });
-    await page.locator('#mfa-code').fill(totp(secret));
-    await page.getByRole('button', { name: 'Verify' }).click();
+    // A complete 6-digit code submits itself (OtpInput onComplete → verify, 562a058e); there is no Verify press to make.
+    await codeField.fill(totp(secret));
     const verify = await verifyP;
     await page.waitForURL((u) => u.host === workspaceHost(ceoLabel), { timeout: 60_000 });
+    await confirmHandoff(page, s.A.ceoEmail!);
+    expect(new URL(page.url()).host).toBe(workspaceHost(ceoLabel));
     await settle(page);
     await shot(page, '04-mfa-after-challenge-workspace-host');
     await ctx.close();
@@ -182,7 +187,10 @@ test.describe.serial('S4 authentication', () => {
       viaRecovery: viaRecovery.status, challengeReuse: challengeReuse.status, recoveryReuse: recoveryReuse.status, statusAfter: status,
     };
     expect(wrongPw.status).toBe(403);
-    expect(wrongCode.status).toBe(401);
+    // 7ca15c73 (2026-10-25): a wrong enrolment code from a SIGNED-IN caller is 400 MFA_CODE_INVALID, not 401 (a 401 made
+    // web clients refresh, replay the code and sign the user out).
+    expect(wrongCode.status).toBe(400);
+    expect(wrongCode.body.code).toBe('MFA_CODE_INVALID');
     expect(pw).toBe(409);
     expect(verify.status()).toBe(200);
     expect(viaRecovery.status).toBe(200);

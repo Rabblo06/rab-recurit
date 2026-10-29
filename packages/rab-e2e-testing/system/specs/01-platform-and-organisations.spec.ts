@@ -53,17 +53,20 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
     const adminOrigin = new URL(page.url()).origin;
     updateState((st) => { st.notes.adminLandedOrigin = adminOrigin; });
 
-    // Owner correction 2026-10-23: the Admin Panel is General | Config | Health — no Organisations tab, no "+ New Organisation".
+    // Owner correction 2026-10-23: the Admin Panel has no Organisations tab and no "+ New Organisation". Its sections are
+    // ARIA tabs since (General, Health with an attention count in its name, Config, Security, Workspaces, Audit).
     await page.goto(`${adminOrigin}/settings/admin`);
-    await expect(page.getByRole('button', { name: 'General' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Config' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Health' })).toBeVisible();
+    const sections = page.getByRole('tablist', { name: 'Admin panel sections' });
+    await expect(sections.getByRole('tab', { name: 'General' })).toBeVisible();
+    await expect(sections.getByRole('tab', { name: 'Config' })).toBeVisible();
+    await expect(sections.getByRole('tab', { name: /^Health\b/ })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /organisations/i })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Organisations' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /new organisation/i })).toHaveCount(0);
     await shot(page, '01-admin-panel-without-organisations');
-    for (const tab of ['Config', 'Health']) {
-      await page.getByRole('button', { name: tab }).click();
-      await page.waitForTimeout(400);
+    for (const tab of ['Config', /^Health\b/] as const) {
+      await sections.getByRole('tab', { name: tab }).click();
+      await expect(sections.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true');
     }
 
     // Members: Team | Add | Roles. Add = the CEO email only, role fixed to CEO (Organisation).
