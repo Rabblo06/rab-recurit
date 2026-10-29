@@ -104,6 +104,13 @@ test('dashboard: week navigation transitions in the right direction; hours toolt
   await page.goto('/');
   await expect(page.locator('.dash-week-card .dash-card-title')).toBeVisible();
   const before = await page.locator('.dash-week-card .dash-card-title').textContent();
+  // Warm the week view once (its first change fetches that week and renders it for the first time). On a slow runner that
+  // work can swallow the whole short slide, so no in-between frame is sampled; the measured change below is the second.
+  await page.getByRole('button', { name: 'Next week' }).click();
+  await expect(page.locator('.dash-week-card .dash-card-title')).not.toHaveText(before ?? '');
+  await page.getByRole('button', { name: 'Previous week' }).click();
+  await expect(page.locator('.dash-week-card .dash-card-title')).toHaveText(before ?? '');
+  await settle(page, 700);
   await sample(page, '.dash-week-card', 'Math.max(...[...el.querySelectorAll(".dash-week-grid")].map((g) => new DOMMatrix(getComputedStyle(g).transform).m41))', 1500);
   await page.getByRole('button', { name: 'Next week' }).click();
   await expect(page.locator('.dash-week-card .dash-card-title')).not.toHaveText(before ?? '');
