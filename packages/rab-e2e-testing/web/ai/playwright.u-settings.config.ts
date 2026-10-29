@@ -1,5 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// Baselines are per OS. The Windows captures (Google Chrome, channel 'chrome') stay in __screenshots__/u-settings/; Linux (CI, and the
+// mcr.microsoft.com/playwright image they were generated in) uses the Chromium pinned to @playwright/test and its own
+// __screenshots__/u-settings/linux/. Run every suite with run-ai-visual.sh, which starts the Vite server and sets the fixture origin.
+const LINUX = process.platform === 'linux';
+
 /**
  * U4 / U6 / U7 visual-regression baselines (u-settings-visual.spec.ts). Expects a rab-front Vite dev server of THIS
  * worktree at U_SETTINGS_WEB (default http://localhost:5199; never the owner's ports 5173 / 5174). All API traffic is
@@ -11,12 +16,13 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: '.',
   testMatch: /u-settings-visual\.spec\.ts/,
-  snapshotPathTemplate: '{testDir}/__screenshots__/u-settings/{arg}{ext}',
+  snapshotPathTemplate: `{testDir}/__screenshots__/u-settings/${LINUX ? 'linux/' : ''}{arg}{ext}`,
+  outputDir: '../../test-results/ai-u-settings',
   fullyParallel: false,
   workers: 1,
   retries: 0,
   reporter: [['list']],
   expect: { toHaveScreenshot: { animations: 'disabled', maxDiffPixelRatio: 0.01 } },
   use: { baseURL: process.env.U_SETTINGS_WEB ?? 'http://localhost:5199', trace: 'off', screenshot: 'off' },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], channel: 'chrome' } }],
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], ...(LINUX ? {} : { channel: 'chrome' }) } }],
 });
