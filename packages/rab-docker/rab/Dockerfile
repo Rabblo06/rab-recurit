@@ -48,6 +48,12 @@ ENV NODE_ENV=production
 # but never loads it — clock-in/out never imports the renderer. Fonts:
 # without them Chromium renders blank text.
 RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
+# Dependency scan (2026-10-30): every library finding Trivy reports for the base image (undici 6.27.0, tar, brace-expansion,
+# ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
+# API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
+# it), so the final stage drops the npm CLI. The Worker bundle image is built FROM this stage and inherits it.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+  && test ! -e /usr/local/lib/node_modules/npm
 ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
 # box — reuse it rather than inventing one. --chown on every COPY avoids a
