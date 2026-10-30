@@ -10,3 +10,8 @@
 6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:jwt:43
 6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:generic-api-key:591
 6242eeecc97b9ce81ec65a070bdcf26e94bfff33:packages/rab-server/src/instrument.spec.ts:generic-api-key:594
+
+# Phase B (PR #21): compose-credential-isolation.cjs plants a synthetic sentinel password in a rendered compose file to
+# prove the migrator credential never reaches rab-api / rab-worker. Not a credential. The line now carries
+# `gitleaks:allow`; this entry covers the commit that introduced it. Reviewed 2026-10-30.
+aa855a88a82d7473a2ff52ab5e96b238ca72a566:packages/rab-docker/scripts/compose-credential-isolation.cjs:generic-api-key:37

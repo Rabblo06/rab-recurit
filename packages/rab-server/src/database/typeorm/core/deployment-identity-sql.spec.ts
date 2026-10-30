@@ -92,7 +92,7 @@ describe('DeploymentIdentity1786721230000: SQL shape, without a database', () =>
       'GRANT SELECT, INSERT ON TABLE core.deployment_identity_history TO rab_secure_owner',
       `GRANT EXECUTE ON FUNCTION ${CHECK_FUNCTION_SIGNATURE} TO crewflow_app, crewflow`,
     ]);
-    expect(all).not.toMatch(new RegExp(`GRANT[^;]*${BIND_FUNCTION_SIGNATURE.replace(/[()]/g, '\\$&')}`));
+    expect(all).not.toMatch(new RegExp(`GRANT[^;]*${BIND_FUNCTION_SIGNATURE.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
   });
 
   it('both tables: owner rab_secure_owner, ENABLE + FORCE RLS, PUBLIC/runtime revoked, history insert-only', () => {
