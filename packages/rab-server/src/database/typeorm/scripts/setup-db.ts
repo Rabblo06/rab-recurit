@@ -11,8 +11,10 @@
  * schema. Policy: docs/architecture/MIGRATION-EXECUTION-POLICY.md.
  *
  * Security review L-2: this script ships in the image, so with DB_TARGET=production it now requires the same per-release
- * approval as deploy-prepare (CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations, from the process environment, never a
- * .env file) and refuses before any connection without it. N1 (production-migration-approval.ts) is unchanged and still
+ * approval as deploy-prepare (CREWFLOW_MIGRATION_APPROVED, from the process environment, never a .env file) and refuses
+ * before any connection without it. Final review F5: the approval is the token of the exact pending set
+ * (migrate/migration-approval.ts; deploy-prepare's check run prints it), checked again on the locked session against the
+ * set pending at that moment; the retired constant `apply-pending-migrations` is refused. N1 (production-migration-approval.ts) is unchanged and still
  * limits WHAT may apply; local / test runs are unchanged. L-2 follow-up: "a .env file" means EVERY dotenv source that can
  * reach this process — the working directory's .env (dotenv/config's default), the file DOTENV_CONFIG_PATH (or a
  * `dotenv_config_path=` argument) points dotenv/config at, and packages/rab-server/.env, which Nx injects into
@@ -27,10 +29,16 @@ import * as path from 'path';
 import { parse as parseDotenv } from 'dotenv';
 
 import { readDotenvValues } from '../core/database-target';
-import { MIGRATION_APPROVAL } from './deploy-prepare';
 import { redactConnectionStrings, runLockedMigrations } from './migrate/locked-migration-runner';
+import {
+  assertMigrationApproval,
+  isMigrationApprovalToken,
+  LEGACY_MIGRATION_APPROVAL,
+  MIGRATION_APPROVAL_VAR,
+  readMigrationApproval,
+} from './migrate/migration-approval';
 
-export const MIGRATION_APPROVAL_VAR = 'CREWFLOW_MIGRATION_APPROVED';
+export { MIGRATION_APPROVAL_VAR };
 
 /**
  * The production approval gate of setup-db. Pure. `dotenvValues` is the working directory's .env as data (what
@@ -42,10 +50,21 @@ export function setupDbApprovalRefusal(env: Record<string, string | undefined>, 
   if (dotenvValues[MIGRATION_APPROVAL_VAR] !== undefined) {
     return `${MIGRATION_APPROVAL_VAR} is present in a .env file. A production approval comes only from the deployment environment of the one approved run. Nothing was run. Refusing.`;
   }
-  if (env[MIGRATION_APPROVAL_VAR] !== MIGRATION_APPROVAL) {
+  const approval = readMigrationApproval(env);
+  if (approval === null) {
     return (
-      `setup-db with DB_TARGET=production applies pending migrations only with ${MIGRATION_APPROVAL_VAR}=${MIGRATION_APPROVAL} set for this one ` +
-      'approved release (the same approval deploy-prepare requires; production deploys should run deploy-prepare / rab-migrate). Nothing was run. Refusing.'
+      `setup-db with DB_TARGET=production applies pending migrations only with ${MIGRATION_APPROVAL_VAR}=<approval token> set for this one ` +
+      "approved release: the token deploy-prepare's check run prints for the exact pending set (production deploys should run " +
+      'deploy-prepare / rab-migrate). Nothing was run. Refusing.'
+    );
+  }
+  // F5: the retired constant and anything that is not a token are refused before any connection; a well-formed token is
+  // compared with the set pending after the lock (runLockedMigrations approvePending).
+  if (approval === LEGACY_MIGRATION_APPROVAL || !isMigrationApprovalToken(approval)) {
+    const legacy = approval === LEGACY_MIGRATION_APPROVAL ? ` (${LEGACY_MIGRATION_APPROVAL} is no longer accepted: final review F5)` : '';
+    return (
+      `${MIGRATION_APPROVAL_VAR} is not a migration approval token${legacy}. Run deploy-prepare without an approval to list the pending ` +
+      'migrations and print the token for exactly that set. Nothing was run. Refusing.'
     );
   }
   return null;
@@ -78,7 +97,12 @@ export function readSetupDbDotenvSources(
 async function main(): Promise<void> {
   const refusal = setupDbApprovalRefusal(process.env, readSetupDbDotenvSources());
   if (refusal) throw new Error(refusal);
-  const result = await runLockedMigrations({ label: 'setup-db' });
+  const approval = process.env.DB_TARGET?.trim() === 'production' ? readMigrationApproval(process.env) : null;
+  const result = await runLockedMigrations({
+    label: 'setup-db',
+    // F5: production only (setupDbApprovalRefusal required a token); local / test runs are unchanged.
+    approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
+  });
   // eslint-disable-next-line no-console
   console.log(`Migrations applied: ${result.applied.length === 0 ? 'none pending' : result.applied.join(', ')}`);
 }

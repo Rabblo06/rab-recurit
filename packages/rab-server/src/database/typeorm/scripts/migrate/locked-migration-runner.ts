@@ -17,6 +17,9 @@
  *      interleaved with this code's migrations (not RETIRED_MIGRATIONS) refuse in both modes; a ledger AHEAD of the code
  *      (all unknown names newer: this is an older image) refuses in 'apply' mode — an older migration set never applies
  *      against a newer ledger — and is a warning in 'check' mode.
+ *   3c. Final review F5: an apply run's approval (options.approvePending, migration-approval.ts) is checked against the
+ *      pending set read in step 3 on the locked session — the last gate before step 4, so the set it approved is exactly the
+ *      set that is applied. A production apply run without the gate refuses.
  *   4. `new MigrationExecutor(dataSource, queryRunner)` applies the pending migrations ON THAT SESSION, transaction mode
  *      from core.datasource.ts ('each': each migration and its ledger row commit together). A second run that waited finds
  *      nothing pending and changes nothing.
@@ -115,6 +118,12 @@ export interface LockedMigrationOptions {
   requireMigrationIdentity?: boolean;
   /** Extra identity rule run with the other gates after the lock, before anything is applied (deploy-prepare's phase rule). */
   extraIdentityCheck?: (facts: MigrationIdentityFacts) => void;
+  /**
+   * Final review F5: the approval gate of an apply run (migration-approval.ts assertMigrationApproval). Called with the pending
+   * set read ON THE LOCKED SESSION, as the last gate before anything is applied, so the set it approves is the set that
+   * runs. A throw refuses the run with nothing applied. Required in 'apply' mode when the target is production.
+   */
+  approvePending?: (pendingNames: readonly string[]) => void;
   /** Runs while the lock is still held, after the run (post-checks, cache flush). A throw fails the run. */
   afterMigrations?: (ctx: { queryRunner: QueryRunner; dataSource: DataSource; applied: string[] }) => Promise<void>;
   /** Test seam: the target guard (default: database-target.ts assertDbTarget). Used to exercise the production approval gate. */
@@ -278,6 +287,13 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         { production: guarded.target === 'production' },
       );
       for (const warning of assertSchemaCompatible(compatibility, `migration run (${options.label})`)) log(`WARNING: ${warning}`);
+    }
+    // 3c. F5: the approval is checked against the set pending now, with the lock held (it cannot change before the apply).
+    if (mode === 'apply') {
+      if (options.approvePending) options.approvePending(pendingBefore);
+      else if (guarded.target === 'production') {
+        throw new Error(`${options.label}: a production apply run needs the per-release approval gate (CREWFLOW_MIGRATION_APPROVED). Nothing was applied. Refusing.`);
+      }
     }
     log(`gates passed after the lock: target=${guarded.target} role=${facts.currentUser} pending=${pendingBefore.length}`);
 

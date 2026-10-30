@@ -8,11 +8,21 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { assertMigrationPhase, cacheFlushRequest } from '../deploy-prepare';
+import { assertMigrationPhase, cacheFlushRequest, deployPrepare, EXIT_PENDING_NOT_APPROVED } from '../deploy-prepare';
 import { readSetupDbDotenvSources, setupDbApprovalRefusal } from '../setup-db';
 import { assertDisposableCluster, disposableAdminUrl, DISPOSABLE_MARKER_SQL, MigratorRoleSetupError, scramSha256Verifier } from '../setup/migrator-role';
 import { assertCacheEnvName, assertFlushableNamespace, entityCacheBaseOf } from './entity-cache-flush';
-import { assertIdentityCanMigrate, redactConnectionStrings, runLockedMigrations } from './locked-migration-runner';
+import { assertIdentityCanMigrate, LockedMigrationOptions, LockedMigrationResult, redactConnectionStrings, runLockedMigrations } from './locked-migration-runner';
+import {
+  assertMigrationApproval,
+  describePendingSet,
+  isMigrationApprovalToken,
+  LEGACY_MIGRATION_APPROVAL,
+  MigrationApprovalError,
+  migrationApprovalToken,
+  pendingInRunOrder,
+  readMigrationApproval,
+} from './migration-approval';
 import { PgProbeClient, PgSessionProbeError, probePgSessionAffinity } from '../../../postgres';
 import { resolveMigrationConnection, targetGuardEnv } from './migration-database-url';
 import { lockKeyParts, MAX_MIGRATION_LOCK_WAIT_SECONDS, MIGRATION_LOCK_KEY, migrationLockWaitSeconds } from './migration-lock';
@@ -257,13 +267,18 @@ describe('runLockedMigrations: live session-stability probe before any migration
 describe('setup-db production approval (security review L-2)', () => {
   it('DB_TARGET=production refuses without the per-release approval, before any connection; local/test are unchanged', () => {
     expect(setupDbApprovalRefusal({ DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' })).toMatch(
-      /setup-db with DB_TARGET=production applies pending migrations only with CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations .*Refusing\./,
+      /setup-db with DB_TARGET=production applies pending migrations only with CREWFLOW_MIGRATION_APPROVED=<approval token> .*Refusing\./,
     );
-    expect(setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'yes' })).toMatch(/Refusing/);
-    expect(setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' })).toBeNull();
+    expect(setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'yes' })).toMatch(/not a migration approval token.*Refusing/);
+    // Final review F5: the retired constant is refused before any connection (it would approve whatever is pending).
+    expect(setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' })).toMatch(
+      /apply-pending-migrations is no longer accepted: final review F5.*deploy-prepare without an approval.*Refusing/,
+    );
+    // A well-formed token proceeds; the locked runner compares it with the set pending after the lock.
+    expect(setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: TOKEN_AB })).toBeNull();
     // An approval sitting in a .env file is a standing approval: refused even when the process environment repeats it.
     expect(
-      setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }, { CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }),
+      setupDbApprovalRefusal({ DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }, { CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }),
     ).toMatch(/present in a \.env file/);
     for (const DB_TARGET of ['local', 'test', undefined]) expect(setupDbApprovalRefusal({ DB_TARGET })).toBeNull();
   });
@@ -271,13 +286,13 @@ describe('setup-db production approval (security review L-2)', () => {
   it('L-2 follow-up: an approval in ANY dotenv source that can reach setup-db is refused — cwd .env, DOTENV_CONFIG_PATH / dotenv_config_path=, packages/rab-server/.env (Nx)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'crewflow-setup-db-'));
     try {
-      const prodEnv = { DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' };
-      const approval = 'CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations\n';
+      const prodEnv = { DB_TARGET: 'production', CREWFLOW_MIGRATION_APPROVED: TOKEN_AB };
+      const approval = `CREWFLOW_MIGRATION_APPROVED=${TOKEN_AB}\n`;
       const none = () => ({});
       // Nothing anywhere: the process-environment approval proceeds.
       expect(setupDbApprovalRefusal(prodEnv, readSetupDbDotenvSources({}, [], dir, none))).toBeNull();
       // packages/rab-server/.env (what Nx injects; read as data through database-target.ts readDotenvValues).
-      expect(setupDbApprovalRefusal(prodEnv, readSetupDbDotenvSources({}, [], dir, () => ({ CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' })))).toMatch(
+      expect(setupDbApprovalRefusal(prodEnv, readSetupDbDotenvSources({}, [], dir, () => ({ CREWFLOW_MIGRATION_APPROVED: TOKEN_AB })))).toMatch(
         /present in a \.env file/,
       );
       // DOTENV_CONFIG_PATH (relative to the working directory) and the dotenv_config_path= argument.
@@ -299,6 +314,148 @@ describe('setup-db production approval (security review L-2)', () => {
   it('.env.migrate.example ships the approval commented out (no standing approval in a copied template)', () => {
     const template = readFileSync(join(__dirname, '../../../../../../rab-docker/.env.migrate.example'), 'utf8');
     expect(template).not.toMatch(/^\s*CREWFLOW_MIGRATION_APPROVED\s*=/m);
-    expect(template).toMatch(/^#\s*CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations$/m);
+    expect(template).toMatch(/^#\s*CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256>$/m);
+    // F5: the template no longer documents the retired constant as an approval to set.
+    expect(template).not.toMatch(/CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations/);
+  });
+});
+
+const PENDING_AB = ['AddThing1786000000001', 'AddOther1786000000002'];
+const TOKEN_AB = migrationApprovalToken(PENDING_AB);
+
+describe('final review F5: the migration approval names the exact pending set', () => {
+  it('the token is pending-<count>-<sha256> of the set in RUN order; any change to the set changes it, the load order does not', () => {
+    expect(TOKEN_AB).toMatch(/^pending-2-[0-9a-f]{64}$/);
+    expect(isMigrationApprovalToken(TOKEN_AB)).toBe(true);
+    expect(migrationApprovalToken([...PENDING_AB])).toBe(TOKEN_AB); // deterministic
+    // The same set loaded in another order (glob / filesystem order) is the same set, run in the same (timestamp) order.
+    expect(migrationApprovalToken([...PENDING_AB].reverse())).toBe(TOKEN_AB);
+    expect(pendingInRunOrder(['B1786000000003', 'A1786000000001', 'C1786000000001'])).toEqual(['A1786000000001', 'C1786000000001', 'B1786000000003']);
+    expect(() => migrationApprovalToken(['AddThing1786000000001', 'AddThing1786000000001'])).toThrow(/appears twice/);
+    expect(migrationApprovalToken(PENDING_AB.slice(0, 1))).not.toBe(TOKEN_AB);
+    expect(migrationApprovalToken([...PENDING_AB, 'AddMore1786000000003'])).not.toBe(TOKEN_AB);
+    expect(migrationApprovalToken([])).toMatch(/^pending-0-[0-9a-f]{64}$/);
+    expect(() => migrationApprovalToken(['Bad\nName1786000000001'])).toThrow(MigrationApprovalError);
+    for (const bad of ['apply-pending-migrations', 'yes', 'true', 'pending-2-abc', `pending-02-${'a'.repeat(64)}`, `${TOKEN_AB}x`, TOKEN_AB.toUpperCase()]) {
+      expect(isMigrationApprovalToken(bad)).toBe(false);
+    }
+    expect(readMigrationApproval({})).toBeNull();
+    expect(readMigrationApproval({ CREWFLOW_MIGRATION_APPROVED: '  ' })).toBeNull();
+    expect(readMigrationApproval({ CREWFLOW_MIGRATION_APPROVED: ` ${TOKEN_AB} ` })).toBe(TOKEN_AB);
+  });
+
+  it('the apply gate accepts only the token of the set pending NOW; stale, other-set, malformed and the retired constant are refused with the token to use', () => {
+    expect(() => assertMigrationApproval(TOKEN_AB, PENDING_AB)).not.toThrow();
+    const refusalOf = (approval: string, pending: readonly string[]): string => {
+      try {
+        assertMigrationApproval(approval, pending);
+      } catch (error) {
+        expect(error).toBeInstanceOf(MigrationApprovalError);
+        return (error as Error).message;
+      }
+      throw new Error('expected a refusal');
+    };
+    const next = [...PENDING_AB, 'AddMore1786000000003'];
+    const nextToken = migrationApprovalToken(next);
+    // A token left over from the previous release (it approved PENDING_AB) does not approve the next release's set.
+    const stale = refusalOf(TOKEN_AB, next);
+    expect(stale).toMatch(/approves a different set of migrations than the one pending now/);
+    expect(stale).toContain('3 pending: AddThing1786000000001, AddOther1786000000002, AddMore1786000000003.');
+    expect(stale).toContain(`CREWFLOW_MIGRATION_APPROVED=${nextToken} for this one run`);
+    expect(stale).toMatch(/Nothing was applied\. Refusing\.$/);
+    // A token for a subset or a superset is another set.
+    expect(refusalOf(migrationApprovalToken(PENDING_AB.slice(0, 1)), PENDING_AB)).toMatch(/approves a different set/);
+    expect(refusalOf(nextToken, PENDING_AB)).toMatch(/approves a different set/);
+    // The retired standing constant: refused whatever is pending (also when nothing is), with the token to use.
+    const legacy = refusalOf(LEGACY_MIGRATION_APPROVAL, PENDING_AB);
+    expect(legacy).toMatch(/apply-pending-migrations is no longer accepted: a standing approval approved every later release \(final review F5\)/);
+    expect(legacy).toContain(`CREWFLOW_MIGRATION_APPROVED=${TOKEN_AB} for this one run`);
+    expect(legacy).toMatch(/Nothing was applied\. Refusing\.$/);
+    expect(refusalOf(LEGACY_MIGRATION_APPROVAL, [])).toMatch(/no longer accepted.*Nothing is pending: remove CREWFLOW_MIGRATION_APPROVED\./);
+    // Malformed: refused, and the value itself is never echoed.
+    const malformed = refusalOf('approve-it-please', PENDING_AB);
+    expect(malformed).toMatch(/is not a migration approval token/);
+    expect(malformed).toContain(TOKEN_AB);
+    expect(malformed).not.toContain('approve-it-please');
+    expect(refusalOf('yes', [])).toMatch(/not a migration approval token/);
+    // Nothing pending: a well-formed token approves nothing and passes (a second run that waited behind the first).
+    expect(() => assertMigrationApproval(TOKEN_AB, [])).not.toThrow();
+  });
+
+  it('a long pending set is summarised in the refusal (the check run lists every name)', () => {
+    const many = Array.from({ length: 25 }, (_, i) => `Step${i}17860000000${String(i).padStart(2, '0')}`);
+    expect(describePendingSet(many)).toMatch(/^25 pending: Step0\d+, .*, … \(\+15 more; the check run lists them all\)$/);
+    expect(describePendingSet([])).toBe('nothing is pending');
+  });
+});
+
+/**
+ * deployPrepare's decision flow with a fake locked runner that behaves like the real one: the gates (approvePending
+ * included) run "after the lock" on the pending set it holds, and only then is anything applied (post-checks are not part of
+ * this fake; they have their own specs). The real runner's ordering (approval as the last gate before MigrationExecutor) is
+ * exercised against the disposable cluster by src/__tests__/integration/migration-approval.integration.spec.ts.
+ */
+describe('final review F5: deploy-prepare check run prints the set and its token; the apply run applies only the approved set', () => {
+  function fakeRunner(pendingNow: string[]) {
+    const applied: string[] = [];
+    const calls: LockedMigrationOptions[] = [];
+    const runner = (async (options: LockedMigrationOptions): Promise<LockedMigrationResult> => {
+      calls.push(options);
+      const pendingBefore = [...pendingNow];
+      if (options.mode === 'apply') {
+        options.approvePending?.(pendingBefore);
+        applied.push(...pendingBefore);
+      }
+      return { target: 'production', pendingBefore, applied: [...applied], waitedMs: 0, currentUser: 'crewflow_migrator' };
+    }) as typeof runLockedMigrations;
+    return { runner, applied, calls };
+  }
+  const run = (env: Record<string, string>, pendingNow: string[]) => {
+    const fake = fakeRunner(pendingNow);
+    const lines: string[] = [];
+    const result = deployPrepare({ env: { ...env }, argv: [], log: (l) => lines.push(l), runner: fake.runner, cacheFlush: async () => undefined });
+    return { result, lines, ...fake };
+  };
+
+  it('no approval: check mode, exit 3 with every pending name and the token for exactly that set; nothing applied', async () => {
+    const r = run({}, PENDING_AB);
+    await expect(r.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(r.calls[0].mode).toBe('check');
+    expect(r.calls[0].approvePending).toBeUndefined();
+    expect(r.applied).toEqual([]);
+    expect(r.lines).toEqual(
+      expect.arrayContaining([`  pending: ${PENDING_AB[0]}`, `  pending: ${PENDING_AB[1]}`, `approval token for exactly this set: ${TOKEN_AB}`]),
+    );
+    // Nothing pending: exit 0, no token.
+    const current = run({}, []);
+    await expect(current.result).resolves.toBe(0);
+    expect(current.lines.join('\n')).not.toMatch(/approval token/);
+  });
+
+  it('the token printed by the check run applies exactly that set', async () => {
+    const r = run({ CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }, PENDING_AB);
+    await expect(r.result).resolves.toBe(0);
+    expect(r.calls[0].mode).toBe('apply');
+    expect(r.applied).toEqual(PENDING_AB);
+  });
+
+  it('a stale approval (previous release), an approval for another set, a malformed value and the retired constant: refused (exit 1), nothing applied', async () => {
+    const next = [...PENDING_AB, 'AddMore1786000000003'];
+    for (const approval of [TOKEN_AB, migrationApprovalToken(['SomethingElse1786000000009']), 'yes', LEGACY_MIGRATION_APPROVAL]) {
+      const r = run({ CREWFLOW_MIGRATION_APPROVED: approval }, next);
+      await expect(r.result).rejects.toBeInstanceOf(MigrationApprovalError);
+      expect(r.applied).toEqual([]);
+    }
+    // The set changed between the check run and the apply run: refused.
+    const changed = run({ CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }, PENDING_AB.slice(1));
+    await expect(changed.result).rejects.toThrow(/approves a different set/);
+    expect(changed.applied).toEqual([]);
+  });
+
+  it('an approval with nothing pending applies nothing and warns that it must be removed; the retired constant is refused even then', async () => {
+    const r = run({ CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }, []);
+    await expect(r.result).resolves.toBe(0);
+    expect(r.lines.join('\n')).toMatch(/is set but nothing is pending, so it approved nothing\. Remove it/);
+    await expect(run({ CREWFLOW_MIGRATION_APPROVED: LEGACY_MIGRATION_APPROVAL }, []).result).rejects.toThrow(/no longer accepted/);
   });
 });

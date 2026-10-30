@@ -294,12 +294,16 @@ services:
         condition: service_healthy
 
   # Database migrations (Phase B P7): the one-off release step, `deploy-prepare.js`. Compose runs it to completion BEFORE
-  # `server` and `worker` (they depend on it with service_completed_successfully); restart 'no'. It applies migrations
-  # ONLY with CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations; otherwise it only checks: exit 0 when nothing is
-  # pending (the stack starts), exit 3 when something is (the stack does not start until an approved run), exit 1 on any
-  # refusal. The migration login comes ONLY from packages/rab-docker/.env.migrate (git-ignored; template
-  # .env.migrate.example, DB_TARGET=local values) as PG_DATABASE_URL, or for one run from the shell as
-  #   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations \
+  # `server` and `worker` (they depend on it with service_completed_successfully); restart 'no'. Without
+  # CREWFLOW_MIGRATION_APPROVED it only checks: exit 0 when nothing is pending (the stack starts), exit 3 when something
+  # is (the stack does not start until an approved run; the log lists the pending migrations and prints the approval
+  # token for exactly that set), exit 1 on any refusal. It applies ONLY with CREWFLOW_MIGRATION_APPROVED=<that token>,
+  # recomputed after the migration lock (final review F5: a stale token, one for another set, or the retired
+  # `apply-pending-migrations` is refused, nothing applied). The migration login comes ONLY from
+  # packages/rab-docker/.env.migrate (git-ignored; template .env.migrate.example, DB_TARGET=local values) as
+  # PG_DATABASE_URL, or for one run from the shell as
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate   (exit 3)
+  #   CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256> \
   #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate
   # DEV IMPACT: `docker compose up` now needs that migration login (it checks the schema before starting the API). The
   # runner enforces the identity itself (DB_TARGET guard, deployment identity marker, CF-41). Back up first, rebuild the

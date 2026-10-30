@@ -399,14 +399,19 @@ services:
   # N1 production approval (production-migration-approval.ts: any pending
   # migration not approved by name refuses the WHOLE run), CF-41 migration
   # identity, then:
-  #   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations  apply, post-checks, exit 0
   #   not approved, nothing pending                         exit 0 (release proceeds)
-  #   not approved, something pending                       exit 3 (release NOT promoted)
-  #   any refusal or failure                                exit 1 (release NOT promoted)
-  # The approval is per release (security review L-2): .env.migrate.example
-  # ships it commented out; pass it for the one approved run only (e.g.
-  # `run --rm -e CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations
-  # rab-migrate`) and never leave it in .env.migrate. Back up first (docs/runbooks/database.md), and make sure the
+  #   not approved, something pending                       exit 3 (release NOT promoted; the log lists every
+  #                                                         pending migration and prints the approval token)
+  #   CREWFLOW_MIGRATION_APPROVED=<that token>              apply, post-checks, exit 0
+  #   approval stale / for another set / malformed /
+  #     the retired apply-pending-migrations                exit 1, nothing applied (prints the token to use)
+  #   any other refusal or failure                          exit 1 (release NOT promoted)
+  # The approval is per release (security review L-2) and names the exact
+  # pending set (final review F5): run rab-migrate once without it, review
+  # the list, then `run --rm -e CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256>
+  # rab-migrate`. The token is recomputed after the migration lock, so it
+  # applies that set or nothing; a token left in .env.migrate approves
+  # nothing later. Back up first (docs/runbooks/database.md), and make sure the
   # image is the release commit (migrations ship inside the image).
   #
   # MUST NOT be in .env.migrate: DATABASE_URL, DATABASE_URL_UNPOOLED,

@@ -76,7 +76,7 @@ function render(rel) {
   fs.mkdirSync(path.join(tmp, 'rab-server'));
   fs.writeFileSync(path.join(tmp, 'rab-server', '.env'), '');
   fs.writeFileSync(path.join(project, '.env'), '');
-  fs.writeFileSync(path.join(project, '.env.migrate'), `PG_DATABASE_URL=${SENTINEL_URL}\nCREWFLOW_MIGRATION_APPROVED=apply-pending-migrations\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(project, '.env.migrate'), `PG_DATABASE_URL=${SENTINEL_URL}\nCREWFLOW_MIGRATION_APPROVED=pending-1-${'0'.repeat(64)}\n`, { mode: 0o600 });
   fs.writeFileSync(
     path.join(project, '.env.ops'),
     [

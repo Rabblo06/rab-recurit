@@ -67,7 +67,7 @@ Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (
 - Run migrations only with the migration identity, as that process's own `PG_DATABASE_URL` (the one-off `rab-migrate` step reads it from `packages/rab-docker/.env.migrate`); the runtime role cannot run DDL, and the API and the Worker never migrate.
 - `yarn check-rls` fails CI if a tenant table lacks RLS.
 
-In Docker, the one-off `rab-migrate` service (`deploy-prepare.js`) runs first; the API and the Worker start only after it exits 0. It applies pending migrations only when the release is approved (`CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations`), and otherwise refuses to promote a release whose migrations are pending. The API image's command (`api-prestart.sh`) never migrates. See the database runbook (`docs/runbooks/database.md`).
+In Docker, the one-off `rab-migrate` service (`deploy-prepare.js`) runs first; the API and the Worker start only after it exits 0. Without an approval it only checks: when migrations are pending it exits 3, lists them and prints an approval token for exactly that set (`pending-<count>-<sha256>`), so the release is not promoted. It applies them only when run again with `CREWFLOW_MIGRATION_APPROVED=<that token>`; the token is recomputed after the migration lock, so a stale token, a token for another set, or the retired value `apply-pending-migrations` is refused and nothing is applied. The API image's command (`api-prestart.sh`) never migrates. See the database runbook (`docs/runbooks/database.md`).
 
 ### Schema-version compatibility
 

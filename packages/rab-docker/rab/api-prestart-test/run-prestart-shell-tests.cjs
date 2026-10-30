@@ -89,10 +89,15 @@ const FORBIDDEN = [
   // Phase B (ops): the one-off operations container's variables.
   'CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF',
 ];
+// Final review F5: the approval is now a token naming the exact pending set (pending-<count>-<sha256>); a well-formed token
+// is refused on the API exactly like any other value (by name), and so is the retired constant.
+const APPROVAL_TOKEN = `pending-1-${'0'.repeat(64)}`;
 for (const name of FORBIDDEN) {
-  r = run(`forbidden-${name}`, { ...BASE, [name]: name === 'CREWFLOW_MIGRATION_APPROVED' ? 'apply-pending-migrations' : 'x' });
+  r = run(`forbidden-${name}`, { ...BASE, [name]: name === 'CREWFLOW_MIGRATION_APPROVED' ? APPROVAL_TOKEN : 'x' });
   check(`3 ${name} on the api service -> refused (64), nothing ran`, r.code === 64 && !line(r.out, 'check') && !line(r.out, 'main') && noMigration(r.out), r.out);
 }
+r = run('forbidden-legacy-approval', { ...BASE, CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' });
+check('3 CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations (retired) on the api service -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'check') && !line(r.out, 'main') && noMigration(r.out), r.out);
 
 // 4. The retired opt-in prestart migration (approval + one-time credential) is refused, not run.
 r = run('old-optin', { ...BASE, CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations', CREWFLOW_PRESTART_MIGRATION_DATABASE_URL: 'postgres://bootstrap@db/rab', DB_TARGET: 'production' });

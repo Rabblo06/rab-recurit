@@ -14,7 +14,8 @@ name: rab-qa
 #     no shared volume between api and worker, as in production.
 #   - Migrations ONLY through the one-off `migrate` step (deploy-prepare.js), which server and worker depend on
 #     (service_completed_successfully), as production rab-migrate. It applies only with
-#     CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations; otherwise it checks (exit 0 nothing pending, 3 pending).
+#     CREWFLOW_MIGRATION_APPROVED=<the token its check run printed for the exact pending set> (final review F5);
+#     otherwise it checks (exit 0 nothing pending, 3 pending + the list and the token).
 #   - HWS runtime routing OFF (HWS_RUNTIME_ENABLED=false on api and jobs), as in production until gate G4. The dev
 #     stack runs HWS on; QA deliberately does not, so it tests what production will run.
 #
@@ -44,13 +45,16 @@ name: rab-qa
 #   C="docker compose --env-file packages/rab-docker/.env.qa.local -f packages/rab-docker/docker-compose.qa.yml"
 #   $C up -d postgres redis minio minio-init
 #   $C build server migrate
+#   # Each phase below: run it once WITHOUT CREWFLOW_MIGRATION_APPROVED first (exit 3: it lists the pending migrations
+#   # and prints "approval token for exactly this set: pending-<count>-<sha256>"), then again with that token. The token
+#   # names one pending set, so phase B (after phase A applied part of it) needs its own check run and token.
 #   # Phase A: the pre-split owner `rab_owner` (dev-only password from postgres-init/01-roles.sql). Phase A is expected
 #   # to stop with exit 1 at CrewflowSingleCredentialRoleArchitecture1786682000000 (no bootstrap password in phase A).
-#   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations CREWFLOW_MIGRATION_PHASE=A \
+#   CREWFLOW_MIGRATION_APPROVED=<phase A token> CREWFLOW_MIGRATION_PHASE=A \
 #   CREWFLOW_MIGRATION_DATABASE_URL='postgres://rab_owner:<dev-only password>@postgres:5432/rab_manual_qa' \
 #     $C run --rm migrate
 #   # Phase B: the bootstrap superuser `rab`. This creates crewflow/crewflow_app with the QA_* passwords above.
-#   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations CREWFLOW_MIGRATION_PHASE=B \
+#   CREWFLOW_MIGRATION_APPROVED=<phase B token> CREWFLOW_MIGRATION_PHASE=B \
 #   CREWFLOW_MIGRATION_DATABASE_URL='postgres://rab:<QA_POSTGRES_SUPERUSER_PASSWORD>@postgres:5432/rab_manual_qa' \
 #     $C run --rm migrate
 #   # Every later `up` runs the migrate step first in check mode, so it needs the migration login again (shell, as above,
@@ -254,8 +258,9 @@ services:
     restart: unless-stopped
 
   # Migrations (Phase B P7): the one-off `migrate` step (deploy-prepare.js), run to completion before server and worker.
-  # It applies only with CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations; otherwise it checks: exit 0 nothing
-  # pending, exit 3 pending (the stack does not start), exit 1 refused. It is the only service that ever holds a migration
+  # It applies only with CREWFLOW_MIGRATION_APPROVED=<token of the exact pending set> (final review F5); otherwise it
+  # checks: exit 0 nothing pending, exit 3 pending (the stack does not start; the log prints the list and the token), exit
+  # 1 refused (a stale, mismatched or malformed approval, or the retired apply-pending-migrations, included). It is the only service that ever holds a migration
   # identity: PG_DATABASE_URL from packages/rab-docker/.env.migrate, or CREWFLOW_MIGRATION_DATABASE_URL from the
   # operator's shell for one run. The runner enforces the rest: DB_TARGET=local refuses a non-local host, the deployment
   # identity marker, CREWFLOW_MIGRATION_PHASE (A: the session must be rab_owner; B: never a runtime/owner login), and CF-41.

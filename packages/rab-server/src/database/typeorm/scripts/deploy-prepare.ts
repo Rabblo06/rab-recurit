@@ -4,7 +4,8 @@
  * it as a release/pre-deploy job and promote only on exit 0). The API and the Worker never migrate.
  *
  *   PG_DATABASE_URL=<migration-only login> DB_TARGET=... [ALLOW_PRODUCTION_DB_COMMANDS=true]
- *   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations      (this run may apply pending migrations)
+ *   CREWFLOW_MIGRATION_APPROVED=pending-<n>-<sha256>          (this run may apply EXACTLY the pending set the check run
+ *                                                             printed; final review F5, migrate/migration-approval.ts)
  *   [CREWFLOW_MIGRATION_PHASE=A|B]                            (historical first-build phases; see below)
  *   [CREWFLOW_DEPLOY_CACHE_FLUSH=entitycache  REDIS_URL=...]  (or --cache-flush=entitycache)
  *     node packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js
@@ -16,9 +17,12 @@
  *      be a migration identity even when nothing is pending (a runtime credential is refused, not a silent no-op), and the
  *      CREWFLOW_MIGRATION_PHASE rule when set (A: the session must be rab_owner; B: never rab_app / rab_owner / crewflow /
  *      crewflow_app — the same rule the rab-migrate compose wrapper applies to the URL, applied here to the live session);
- *   4. approval gate: only with CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations are pending migrations applied. Without
- *      it nothing is applied: exit 0 when nothing is pending, exit 3 when something is (the release must not be promoted
- *      onto a schema behind its code, and nothing is approved silently);
+ *   4. approval gate (final review F5): without CREWFLOW_MIGRATION_APPROVED this is a check run and nothing is applied: exit
+ *      0 when nothing is pending, exit 3 when something is (the release must not be promoted onto a schema behind its code),
+ *      after printing every pending name and the approval token for exactly that set. With it, the token must equal the
+ *      token of the set pending NOW, recomputed on the locked session (the set cannot change before the apply); a stale
+ *      token, a token for another set, a malformed value or the retired constant `apply-pending-migrations` is refused
+ *      (exit 1, nothing applied, the message prints the token to use);
  *   5. post-checks on the locked session (migrate/deploy-post-checks.ts): nothing pending, secure-owner invariants, RLS
  *      enabled on every core tenant table, the migration identity owns nothing;
  *   6. optional cache flush of the allow-listed `entitycache` namespace only (migrate/entity-cache-flush.ts), AFTER the
@@ -29,13 +33,19 @@
 import { assertFlushableNamespace } from './migrate/entity-cache-flush';
 import { deployPostCheckProblems } from './migrate/deploy-post-checks';
 import { Query, redactConnectionStrings, runLockedMigrations } from './migrate/locked-migration-runner';
+import {
+  assertMigrationApproval,
+  MIGRATION_APPROVAL_VAR,
+  migrationApprovalToken,
+  pendingInRunOrder,
+  readMigrationApproval,
+} from './migrate/migration-approval';
 import { MigrationIdentityError, MigrationIdentityFacts } from '../core/migration-identity';
 import { runCacheFlush } from './cache-flush';
 
-export const MIGRATION_APPROVAL = 'apply-pending-migrations';
 export const EXIT_PENDING_NOT_APPROVED = 3;
 
-const log = (message: string) => {
+const defaultLog = (message: string) => {
   // eslint-disable-next-line no-console
   console.log(`[deploy-prepare] ${message}`);
 };
@@ -63,9 +73,24 @@ export function cacheFlushRequest(argv: readonly string[], env: Record<string, s
   return assertFlushableNamespace(raw);
 }
 
-async function main(): Promise<number> {
-  const env = process.env;
-  const approved = env.CREWFLOW_MIGRATION_APPROVED === MIGRATION_APPROVAL;
+/** Test seams of deployPrepare (production: the real locked runner and cache flush, process.env, console). */
+export interface DeployPrepareDeps {
+  env?: NodeJS.ProcessEnv;
+  argv?: readonly string[];
+  log?: (message: string) => void;
+  runner?: typeof runLockedMigrations;
+  cacheFlush?: typeof runCacheFlush;
+}
+
+/** The whole command; resolves to the exit code (0, or 3 for "pending but not approved"); a refusal rejects (exit 1). */
+export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<number> {
+  const env = deps.env ?? process.env;
+  const log = deps.log ?? defaultLog;
+  const runner = deps.runner ?? runLockedMigrations;
+  const cacheFlush = deps.cacheFlush ?? runCacheFlush;
+  // F5: any non-empty value is an apply run; whether it approves anything is decided after the lock (assertMigrationApproval).
+  const approval = readMigrationApproval(env);
+  const approved = approval !== null;
   const phase = env.CREWFLOW_MIGRATION_PHASE?.trim();
   // Same as the rab-migrate wrapper: phase A never receives the bootstrap passwords, so the run stops at the role split.
   if (phase === 'A') {
@@ -73,37 +98,55 @@ async function main(): Promise<number> {
     delete env.CREWFLOW_APP_BOOTSTRAP_PASSWORD;
   }
   // Validate the optional flush up front, so a misconfigured request fails before anything is applied.
-  const flush = cacheFlushRequest(process.argv, env);
+  const flush = cacheFlushRequest(deps.argv ?? process.argv, env);
   if (flush && !env.REDIS_URL?.trim()) throw new Error(`cache flush "${flush}" requested but REDIS_URL is not set. Refusing before any migration.`);
 
-  log(approved ? 'approved run: pending migrations may be applied' : 'not approved (CREWFLOW_MIGRATION_APPROVED is not apply-pending-migrations): check only, nothing will be applied');
-  const result = await runLockedMigrations({
+  log(
+    approved
+      ? `apply run: ${MIGRATION_APPROVAL_VAR} is set; it must be the token of the set pending after the lock`
+      : `check run (${MIGRATION_APPROVAL_VAR} not set): nothing will be applied`,
+  );
+  const result = await runner({
     label: 'deploy-prepare',
     env,
     log,
     mode: approved ? 'apply' : 'check',
     requireMigrationIdentity: true,
     extraIdentityCheck: (facts) => assertMigrationPhase(phase, facts),
+    approvePending:
+      approval === null
+        ? undefined
+        : (pending) => {
+            assertMigrationApproval(approval, pending);
+            if (pending.length === 0) {
+              log(`WARNING: ${MIGRATION_APPROVAL_VAR} is set but nothing is pending, so it approved nothing. Remove it: the next release refuses it.`);
+            }
+          },
     afterMigrations: async ({ queryRunner, applied }) => {
       if (!approved) return;
       const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
       const problems = await deployPostCheckProblems(query);
       if (problems.length) throw new Error(`post-migration checks failed (${problems.length}): ${problems.slice(0, 20).join('; ')}`);
       log(`post-checks passed (${applied.length} applied, none pending)`);
-      if (flush) await runCacheFlush(flush, env);
+      if (flush) await cacheFlush(flush, env);
     },
   });
 
   if (!approved) {
     if (result.pendingBefore.length > 0) {
+      // F5: the set was read on the locked session; the approval token is for exactly this list, in this order.
+      log(`${result.pendingBefore.length} migration(s) pending, in run order:`);
+      for (const name of pendingInRunOrder(result.pendingBefore)) log(`  pending: ${name}`);
+      log(`approval token for exactly this set: ${migrationApprovalToken(result.pendingBefore)}`);
       log(
         `REFUSED: ${result.pendingBefore.length} migration(s) are pending and this run is not approved. Nothing was applied. ` +
-          `The release must not be promoted. First pending: ${result.pendingBefore[0]}`,
+          `The release must not be promoted. After reviewing the list, run again with ${MIGRATION_APPROVAL_VAR}=<the token above> ` +
+          `for that one run (it approves this set only).`,
       );
       return EXIT_PENDING_NOT_APPROVED;
     }
     log('schema is current; nothing to apply');
-    if (flush) await runCacheFlush(flush, env);
+    if (flush) await cacheFlush(flush, env);
     return 0;
   }
   log(`done: ${result.applied.length === 0 ? 'none pending' : `applied ${result.applied.join(', ')}`}`);
@@ -111,7 +154,7 @@ async function main(): Promise<number> {
 }
 
 if (require.main === module) {
-  main().then(
+  deployPrepare().then(
     (code) => process.exit(code),
     (error: unknown) => {
       const message = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
