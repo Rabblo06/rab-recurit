@@ -4297,8 +4297,53 @@ databases only.
   `DB_TARGET=test` + `ALLOW_REMOTE_TEST_DATABASE`) could bind it as development (production then refuses to boot; no
   tool path to rebind). Control required before production: apply the migration and bind production in the same
   supervised step; add an audited production rebind of a non-production marker.
-- **OPEN — F4 (Low)** single-label hosts resolved remotely (search domain / wrong k8s namespace) count as local;
-  **F5 (Medium)** a standing `CREWFLOW_MIGRATION_APPROVED` left in `.env.migrate` approves every later release (tie the
-  approval to the pending set's hash); **F6 (Low)** Nx also loads `packages/rab-server/.env.local`, `.env.<target>` and the
-  root `.env`, which the production-authority checks do not read. All three are production-deployment blockers, listed
-  with the Phase B integration report.
+- **F4 (Low, fixed; branch phase-b/sec-fixes) — single-label hosts resolved remotely counted as local.** Threat: a name
+  without a dot (meant for a compose service) resolved through a DNS search domain or another Kubernetes namespace reached
+  a database elsewhere while skipping the remote-unmarked rule, `DB_TARGET=local|test`'s remote refusal and the runtime
+  LOCAL classification. Control: the one shared rule (`deployment-identity.ts` `isRemoteDatabaseHost`, used by
+  `database-target.ts`, `runtime-database-guard.ts`, `decideDeploymentIdentity` and now `seed-ai-demo`, which had its own
+  copy) treats as local only loopback and `LOCAL_DATABASE_SERVICE_HOSTS` = `devdb` (dev compose), `postgres` (QA and e2e
+  compose), `pg` and `pg-other` (worker-bundle test compose files). Any other single-label name is remote. The list is
+  code: no environment variable widens it. F7's production-bind refusal now uses `isLoopbackHost || isSingleLabelHost`, so
+  every single-label `--confirm-host`, listed or not, stays refused for `--environment production`. Tests:
+  `deployment-identity.spec.ts` (F4: unlisted names refused unmarked, NODE_ENV=test needs the disposable-test setting; a
+  compose-file scan fails when a compose database host is not on the list), `database-target.spec.ts` 17b,
+  `runtime-database-guard.spec.ts` 11d3, `bind-deployment-identity.spec.ts` (F7 with `devdb`, `db`, `prod-db`),
+  `seed-ai-demo.spec.ts`.
+- **F5 (Medium, fixed; branch phase-b/sec-fixes) — a standing migration approval approved every later release.** Threat:
+  `CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations` left in `.env.migrate` or a pipeline variable silently approved
+  whatever was pending at the next deploy. Control (`scripts/migrate/migration-approval.ts`): the approval is
+  `pending-<count>-<sha256>` over a domain tag and the pending names in MigrationExecutor run order. deploy-prepare without
+  an approval lists every pending name and prints that token (exit 3, nothing applied). With an approval, the locked runner
+  (`LockedMigrationOptions.approvePending`) compares it with the set read on the locked session as the last gate before
+  `MigrationExecutor`; a stale token, a token for another set, a malformed value and the retired constant are refused
+  (exit 1, nothing applied) with the pending names and the token to use. A production apply run without the gate refuses.
+  `setup-db` with `DB_TARGET=production` refuses the retired constant and malformed values before connecting and checks a
+  token on the locked session. With nothing pending, a well-formed token approves nothing and passes with a warning.
+  Tests: `migration-runner.spec.ts` (token, gate, deploy-prepare with a fake runner: check run prints the set and token,
+  stale / other-set / malformed / retired refused with nothing applied; setup-db),
+  `migration-approval.integration.spec.ts` (real runner, disposable cluster: refusals after the lock, probe migration
+  never ran, no ledger row).
+- **F6 (Low, fixed; branch phase-b/sec-fixes) — Nx dotenv files not read by the production-authority checks.** Threat:
+  production authority (`DB_TARGET=production`, `ALLOW_PRODUCTION_DB_COMMANDS`, the deployment identity, the migration
+  approval, a production URL) in `packages/rab-server/.env.local`, `.env.<target>`, `packages/rab-worker/.env*` or the root
+  `.env`, which Nx 22.7 injects (`nx/dist/src/tasks-runner/task-env-paths.js` `getEnvPathsForTask`), went unseen: the
+  checks read only `packages/rab-server/.env` (commands) or the working directory's `.env` (runtimes, ops). Control:
+  `core/nx-dotenv-files.ts` lists every file Nx loads for every rab-server and rab-worker target under the repository root
+  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule), `readRuntimeDotenvValues`
+  (API / Worker / provisioner, core.datasource, check-pending-migrations) and the ops container's dotenv refusal read all
+  of them. `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals Nx's own function for
+  every target; target list pinned to both project.json files, no configurations; a production command, a production
+  runtime and the ops container refuse values in `.env.local`, `.local.env`, `.env.<target>`, `packages/rab-worker/.env.*`
+  and the root `.env`).
+- **Container-image dependencies (fixed; branch phase-b/sec-fixes) — undici, qs, deepmerge (Trivy / code scanning).**
+  qs 6.15.3 (CVE-2026-82417, CVE-2026-82562, CVE-2026-110816; MEDIUM) under express 5.2.1 and superagent 10.3.0: deduped to
+  6.17.0 (lockfile only). undici 6.27.0 (CVE-2026-19534, -87018, -109383, -109869 HIGH; four MEDIUM, one LOW): not a
+  workspace dependency (yarn.lock has 6.29.1 and 8.12.3) but the copy inside the node:24-alpine npm CLI; the runtime stage
+  of `packages/rab-docker/rab/Dockerfile` now removes the npm CLI (never run at runtime), which also removes that tree's
+  tar, brace-expansion, ip-address and postcss-selector-parser findings (a local Trivy 0.65.0 scan of the pinned base image
+  with the npm CLI removed reports 0 library findings, 26 before). **Not fixed:** deepmerge 4.3.1 (CVE-2026-93753, LOW) has
+  no fixed release (4.3.1 is the latest); it is used by html-to-text (react-email plain-text rendering, merging static
+  options) and jest-config (dev only). Local Trivy fs scan of yarn.lock: 0 HIGH / 0 CRITICAL before and after; `yarn npm
+  audit --severity high --all --recursive`: no findings.
+- F4, F5 and F6 were production-deployment blockers; F1 and F2 above remain open.
