@@ -51,11 +51,11 @@ function healthy(overrides: Partial<FakeDb> = {}, factOverrides: Record<string, 
 }
 
 /**
- * The host the gate's connection names, and where the fake markers below were bound (owner decision A). A single-label
- * docker-service name: security review H-1 refuses an ABSENT/UNBOUND marker on a dotted remote host outside tests, which
- * is covered by its own case below.
+ * The host the gate's connection names, and where the fake markers below were bound (owner decision A). A listed compose
+ * database service (final review F4: an unlisted single-label name is remote): security review H-1 refuses an ABSENT/UNBOUND
+ * marker on a remote host outside tests, which is covered by its own case below.
  */
-const GATE_HOST = 'gatedb';
+const GATE_HOST = 'devdb';
 
 function fakeQuery(db: FakeDb): Query {
   return async (sql: string) => {
@@ -171,7 +171,7 @@ describe('database boot gates (fake connection)', () => {
   it('identity: a marker bound in another database or at another host (restore / clone / fork) is refused, production or not', async () => {
     const row = { environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] };
     const tls = (r: Record<string, unknown>) => healthy({ markerPresent: true, markerRows: [r] }, { ssl: true });
-    await refusedAt(evaluateBootGates(input(tls(row), { env: PROD_ENV, connectionHost: 'restored.gate.internal' })), 'identity', /bound at host "gatedb".*db:bind-identity/);
+    await refusedAt(evaluateBootGates(input(tls(row), { env: PROD_ENV, connectionHost: 'restored.gate.internal' })), 'identity', /bound at host "devdb".*db:bind-identity/);
     await refusedAt(evaluateBootGates(input(tls({ ...row, bound_database: 'crewflow_prod' }), { env: PROD_ENV })), 'identity', /bound in database "crewflow_prod"/);
     const ci = { environment: 'ci', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] };
     await refusedAt(evaluateBootGates(input(tls(ci), { connectionHost: 'copy.gate.internal' })), 'identity', /bound at host/);

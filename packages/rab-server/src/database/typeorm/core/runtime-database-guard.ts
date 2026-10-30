@@ -261,9 +261,9 @@ export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb
 }
 
 /**
- * Loopback, or a single-label docker-service name such as `postgres`. Security review N-4: the one shared host rule
- * (deployment-identity.ts isRemoteDatabaseHost), so a dotted name AND a non-loopback IPv6 literal (`fd00::5`, which has no
- * dot) are remote. `classification: 'LOCAL'` (which the AI real-provider gate relies on) is therefore never given to one.
+ * Loopback, or a listed compose database service such as `postgres` (final review F4: any other single-label name is
+ * remote). Security review N-4: the one shared host rule (deployment-identity.ts isRemoteDatabaseHost), so a dotted name AND
+ * a non-loopback IPv6 literal (`fd00::5`, which has no dot) are remote. `classification: 'LOCAL'` (which the AI real-provider gate relies on) is therefore never given to one.
  */
 function isLocalIdentity(identity: PgTargetIdentity): boolean {
   return !isRemoteDatabaseHost(identity.host);

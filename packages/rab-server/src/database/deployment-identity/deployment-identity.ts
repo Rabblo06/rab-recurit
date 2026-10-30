@@ -192,11 +192,11 @@ export interface DeploymentIdentityDecisionInput {
    */
   locationMismatch?: 'refuse' | 'warn';
   /**
-   * Security review H-1 (option 2): outside production an ABSENT or UNBOUND marker on a remote host (dotted name or
-   * non-loopback IP) is refused unless this is true. assertDeploymentIdentity sets it only for NODE_ENV=test on a database
-   * that carries the server-side disposable-test setting (security review N-2), or for a COMMAND with DB_TARGET=test
-   * together with ALLOW_REMOTE_TEST_DATABASE=true (see remoteUnmarkedDatabaseAllowed). Loopback and single-label
-   * docker-service hosts (`postgres`, `devdb`) are unaffected.
+   * Security review H-1 (option 2): outside production an ABSENT or UNBOUND marker on a remote host (dotted name,
+   * non-loopback IP, or an unlisted single-label name — final review F4) is refused unless this is true.
+   * assertDeploymentIdentity sets it only for NODE_ENV=test on a database that carries the server-side disposable-test
+   * setting (security review N-2), or for a COMMAND with DB_TARGET=test together with ALLOW_REMOTE_TEST_DATABASE=true (see
+   * remoteUnmarkedDatabaseAllowed). Loopback and the listed compose services (LOCAL_DATABASE_SERVICE_HOSTS) are unaffected.
    */
   remoteUnmarkedAllowed?: boolean;
 }
@@ -223,15 +223,35 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 /**
+ * Final review F4: the ONLY single-label host names that count as local — the database services of this repository's own
+ * compose files and harnesses, where Docker's embedded DNS resolves the name to a container on the same compose network:
+ *   devdb     packages/rab-docker/docker-compose.yml (the development database)
+ *   postgres  packages/rab-docker/docker-compose.qa.yml, packages/rab-e2e-testing/system/docker-compose.e2e.yml
+ *   pg        packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.{bundle,bullmq}-test.yml
+ *   pg-other  docker-compose.bundle-test.yml (step 27: a second cluster the bundle must refuse as a mismatch)
+ * CI reaches its disposable cluster on 127.0.0.1 (.github/actions/disposable-postgres). Any OTHER single-label name is
+ * remote: outside a compose network it is resolved through a DNS search domain or a Kubernetes namespace and may reach a
+ * database on another network. Code, not configuration: there is deliberately no environment variable that widens it.
+ * Adding a compose database service with another name means adding the name here (deployment-identity.spec.ts F4).
+ */
+export const LOCAL_DATABASE_SERVICE_HOSTS: ReadonlySet<string> = new Set(['devdb', 'postgres', 'pg', 'pg-other']);
+
+/** A host name without a dot or a colon (not a dotted name, not an IP literal). Says nothing about where it resolves. */
+export function isSingleLabelHost(host: string): boolean {
+  const h = canonicalHost(host);
+  return h.length > 0 && !h.includes('.') && !h.includes(':');
+}
+
+/**
  * Security review H-1: a REMOTE host for the unmarked-database rule — a dotted name (`db.example.com`), a non-loopback IPv4
- * or IPv6 literal. Loopback and a single-label name (a docker-compose service such as `postgres` or `devdb`) are local. An
- * empty / unknown host counts as remote (fail closed).
+ * or IPv6 literal, and (final review F4) any single-label name that is not one of LOCAL_DATABASE_SERVICE_HOSTS. Local is
+ * loopback or a listed compose service. An empty / unknown host counts as remote (fail closed).
  */
 export function isRemoteDatabaseHost(host: string): boolean {
   const h = canonicalHost(host);
   if (!h) return true;
   if (isLoopbackHost(h)) return false;
-  return h.includes('.') || h.includes(':');
+  return !LOCAL_DATABASE_SERVICE_HOSTS.has(h);
 }
 
 export interface RemoteUnmarkedFacts {

@@ -50,7 +50,8 @@ import {
   DeploymentEnvironment,
   DeploymentMarker,
   isDeploymentEnvironment,
-  isRemoteDatabaseHost,
+  isLoopbackHost,
+  isSingleLabelHost,
   isUuid,
   readDeploymentMarker,
 } from './deployment-identity';
@@ -237,7 +238,11 @@ export function planBind(input: BindPlanInput): string {
   }
   // Final review F7: a production marker bound to a loopback or single-label host would let a tunnel on any machine pass the
   // location check. Production databases are always reached by a network name (the production compose has no database).
-  const localHost = args.environment === 'production' ? args.confirmHosts.find((h) => !isRemoteDatabaseHost(h)) : undefined;
+  // Final review F4: EVERY single-label name is refused here, listed compose service or not — the F4 list only decides what
+  // counts as local for the unmarked-database rule, and an unlisted single-label name being "remote" there is no reason to
+  // accept it as a production location.
+  const localHost =
+    args.environment === 'production' ? args.confirmHosts.find((h) => isLoopbackHost(h) || isSingleLabelHost(h)) : undefined;
   if (localHost !== undefined) {
     throw new BindIdentityError(
       `--confirm-host "${localHost}" is a loopback or single-label host; a production bind names the database's network host names only. Nothing changed.`,

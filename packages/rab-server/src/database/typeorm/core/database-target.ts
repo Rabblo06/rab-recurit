@@ -142,9 +142,9 @@ function asTargetError<T>(fn: () => T): T {
 }
 
 function isLocalHost(identity: PgTargetIdentity): boolean {
-  // Loopback, or a single-label name such as the docker-compose service `postgres`. Security review N-4: the one shared
-  // host rule (deployment-identity.ts isRemoteDatabaseHost) — a dotted name and a non-loopback IPv6 literal such as
-  // `fd00::5` (no dot) are remote.
+  // Loopback, or a listed compose database service such as `postgres` (final review F4: any other single-label name is
+  // remote). Security review N-4: the one shared host rule (deployment-identity.ts isRemoteDatabaseHost) — a dotted name
+  // and a non-loopback IPv6 literal such as `fd00::5` (no dot) are remote.
   return !isRemoteDatabaseHost(identity.host);
 }
 

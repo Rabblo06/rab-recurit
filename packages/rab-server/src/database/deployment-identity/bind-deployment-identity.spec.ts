@@ -121,7 +121,8 @@ describe('db:bind-identity plan (pure, before any write)', () => {
 
   it('a production bind refuses loopback and single-label hosts (final review F7)', () => {
     const bootstrap = { target: 'production' as const, declared: { environment: 'production' as const, deploymentId: NEW_ID }, bootstrapRequested: true };
-    for (const local of ['127.0.0.1', 'localhost', '::1', 'postgres']) {
+    // F4: an UNLISTED single-label name (remote for the unmarked rule) is still never a production location.
+    for (const local of ['127.0.0.1', 'localhost', '::1', 'postgres', 'devdb', 'db', 'prod-db']) {
       const prodArgs = parseBindArgs(['--environment', 'production', '--deployment-id', NEW_ID, ...BASE.slice(4, 10), '--confirm-host', local]);
       refused(() => planBind({ args: prodArgs, target: bootstrap, marker: { state: 'unbound' }, database: 'defaultdb', host: local }), /loopback or single-label host/);
     }

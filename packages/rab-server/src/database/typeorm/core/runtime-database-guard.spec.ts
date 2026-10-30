@@ -312,6 +312,20 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     }
   });
 
+  it('11d3. final review F4: an UNLISTED single-label host (search domain / k8s namespace) is REMOTE, never LOCAL; the compose services stay LOCAL', () => {
+    for (const processName of ['api', 'worker', 'provisioner'] as const) {
+      for (const host of ['db', 'prod-db', 'postgresql']) {
+        const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
+        expectRefused(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }, /development refuses a remote database/);
+        expect(resolve(processName, { NODE_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('NON-PRODUCTION');
+      }
+      for (const host of ['devdb', 'postgres', 'pg']) {
+        const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
+        expect(resolve(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('LOCAL');
+      }
+    }
+  });
+
   it('11e. RAB_RUNTIME_ENV=development with NODE_ENV=production is refused: production needs RAB_RUNTIME_ENV=production', () => {
     expectRefused('api', { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'development', DATABASE_URL: LOCAL }, /requires RAB_RUNTIME_ENV=production/);
   });

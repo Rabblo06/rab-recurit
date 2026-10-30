@@ -232,6 +232,19 @@ describe('database target guard (pure resolution)', () => {
     expectRefused(PROD_ENV({ app: OTHER_NEON_DIRECT }, {}), /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
   });
 
+  it('17b. final review F4: an UNLISTED single-label host is REMOTE for DB_TARGET=local|test; the compose services stay local', () => {
+    for (const DB_TARGET of ['local', 'test']) {
+      for (const host of ['db', 'prod-db', 'database']) {
+        expectRefused({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@${host}:5432/rab` }, new RegExp(`DB_TARGET=(local|test) refuses a remote host \\("${host}"\\)`));
+      }
+      for (const host of ['devdb', 'postgres', 'pg']) {
+        expect(run({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@${host}:5432/rab` }).classification).toBe('NON-PRODUCTION');
+      }
+    }
+    // Only the explicit remote-test override admits an unlisted name, exactly as for a dotted remote host.
+    expect(run({ DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@db:5432/rab` }).classification).toBe('NON-PRODUCTION');
+  });
+
   it('17. N-4: a non-loopback IPv6 literal (no dot) is REMOTE for DB_TARGET=local|test; ::1 stays local', () => {
     for (const DB_TARGET of ['local', 'test']) {
       expectRefused({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@[fd00::5]:5432/rab` }, /DB_TARGET=(local|test) refuses a remote host \("fd00::5"\)/);

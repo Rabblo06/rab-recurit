@@ -2,6 +2,7 @@ import { ManagerType, UserStatus } from '@rab/shared';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { DataSource, EntityManager } from 'typeorm';
 
+import { isRemoteDatabaseHost } from '../database/deployment-identity/deployment-identity';
 import { readPrimaryDatabaseUrl } from '../database/postgres/pg-config';
 import { describeDatabaseUrl } from '../database/typeorm/core/test-database-guard';
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
@@ -28,7 +29,8 @@ interface SeedAiDemoOptions {
  * The target rules, pure (exported for its unit test). The command runs ONLY against the development database:
  *   - NODE_ENV=development and RAB_RUNTIME_ENV=development (the same declaration the dev API/Worker carry);
  *   - DB_TARGET=local (the command bootstrap already resolved and probed it; `test`, `staging`, `production` refused);
- *   - PG_DATABASE_URL (or the deprecated DATABASE_URL) on a loopback or docker-service host.
+ *   - PG_DATABASE_URL (or the deprecated DATABASE_URL) on a loopback host or a listed compose database service
+ *     (deployment-identity.ts LOCAL_DATABASE_SERVICE_HOSTS).
  * The live checks follow in `run()`: the database must NOT carry the disposable-test marker, and the connection must be
  * the operator identity allowed to run the synthetic-marker function. Messages never contain a URL or credential.
  */
@@ -44,8 +46,8 @@ export function seedAiDemoTargetProblems(env: Record<string, string | undefined>
   } else {
     try {
       const id = describeDatabaseUrl(primary.value, primary.name);
-      const local = ['localhost', '127.0.0.1', '::1'].includes(id.host) || !id.host.includes('.');
-      if (!local) problems.push(`${primary.name} must be a loopback or docker-service database (got host "${id.host}").`);
+      // Final review F4: the one shared host rule (loopback or a listed compose database service), not its own copy.
+      if (isRemoteDatabaseHost(id.host)) problems.push(`${primary.name} must be a loopback or docker-service database (got host "${id.host}").`);
     } catch {
       problems.push(`${primary.name} is not a parseable postgres URL (value not shown).`);
     }

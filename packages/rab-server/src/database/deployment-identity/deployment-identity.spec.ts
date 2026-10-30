@@ -1,3 +1,6 @@
+import { readFileSync } from 'fs';
+import { join, resolve } from 'path';
+
 import {
   assertDeclaredIdentityForProcess,
   assertDeploymentIdentity,
@@ -7,6 +10,8 @@ import {
   DeploymentMarker,
   DISPOSABLE_TEST_DATABASE_SETTING_NAME,
   isRemoteDatabaseHost,
+  isSingleLabelHost,
+  LOCAL_DATABASE_SERVICE_HOSTS,
   MARKER_PRESENT_SQL,
   MARKER_READ_SQL,
   Query,
@@ -221,6 +226,56 @@ describe('deployment identity: the marker decision (pure)', () => {
     for (const connectionHost of ['127.0.0.1', '::1', 'localhost', 'devdb', 'postgres']) {
       await expect(assertDeploymentIdentity(fakeQuery({ present: false }), { ...opts, connectionHost })).resolves.toMatchObject({ summary: 'absent' });
     }
+  });
+
+  it('final review F4: only the listed compose database services count as local single-label hosts; any other single-label name is remote and refused unmarked', async () => {
+    // The list is exactly the repository's own compose / harness database services (no env-var widening exists).
+    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'pg-other', 'postgres']);
+    for (const host of ['devdb', 'postgres', 'pg', 'pg-other', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
+    // Resolved through a DNS search domain or a Kubernetes namespace: remote, whatever it looks like.
+    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'localhost.'];
+    for (const host of unlisted) expect(isRemoteDatabaseHost(host)).toBe(true);
+    for (const connectionHost of unlisted) {
+      for (const state of ['absent', 'unbound'] as const) {
+        refused(
+          () => decideDeploymentIdentity({ ...LOC, connectionHost, processLabel: 'api process', production: false, declared: null, marker: { state } }),
+          /remote host .*cannot be told apart from an unmarked production database/,
+        );
+      }
+    }
+    // End to end: a non-production runtime on an unlisted single-label host with no marker is refused; NODE_ENV=test needs
+    // the server-side disposable-test setting exactly as for a dotted remote host.
+    await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'development' } }),
+    ).rejects.toThrow(/remote host "db"/);
+    await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'test' } }),
+    ).rejects.toThrow(/remote host "db"/);
+    await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false, disposableTest: true }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'test' } }),
+    ).resolves.toMatchObject({ summary: 'absent' });
+    // isSingleLabelHost (the F7 production-bind rule) is shape only: listed or not.
+    for (const host of ['devdb', 'postgres', 'db']) expect(isSingleLabelHost(host)).toBe(true);
+    for (const host of ['db.example.com', '127.0.0.1', '::1', 'fd00::5', '']) expect(isSingleLabelHost(host)).toBe(false);
+  });
+
+  it('F4: every single-label database service the repository compose files and harnesses define is on the list', () => {
+    const repo = resolve(__dirname, '../../../../..');
+    const files = [
+      'packages/rab-docker/docker-compose.yml',
+      'packages/rab-docker/docker-compose.qa.yml',
+      'packages/rab-docker/docker-compose.production.yml',
+      'packages/rab-e2e-testing/system/docker-compose.e2e.yml',
+      'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bundle-test.yml',
+      'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml',
+    ];
+    const used = new Set<string>();
+    for (const file of files) {
+      const text = readFileSync(join(repo, file), 'utf8');
+      // The host of every postgres URL the file spells out (comments included: they are the operator instructions).
+      for (const m of text.matchAll(/postgres(?:ql)?:\/\/[^@\s]*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
+    }
+    expect([...used].sort()).toEqual([...LOCAL_DATABASE_SERVICE_HOSTS].sort());
   });
 
   it('N-2: the disposable-test fact is the DATABASE-level catalog setting read on the checking connection, never current_setting()', async () => {
