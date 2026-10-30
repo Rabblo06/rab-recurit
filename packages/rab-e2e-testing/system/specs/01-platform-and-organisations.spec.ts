@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 import { ApiClient, expectStatus } from '../lib/http';
-import { ADMIN_EMAIL, DEFAULT_ORIGIN, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
+import { ADMIN_EMAIL, DEFAULT_ORIGIN, HOST_ROUTING, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
 import { tokenFrom, waitForLink } from '../lib/mail';
 import { sql } from '../lib/db';
 import { loadState, updateState } from '../lib/state';
@@ -184,10 +184,13 @@ test.describe.serial('S1 platform admin, two organisations, two workspaces', () 
       st.notes.imAOnboarding = ob;
       st.notes.imARegistry = ws[0];
     });
-    await page.goto(`${workspaceOrigin(label)}/login`);
-    await expect(page.getByText(new RegExp(`Alpha Ops ${tag}`, 'i')).first()).toBeVisible();
-    await shot(page, '01-workspace-host-a-login');
-    expect(workspaceHost(label)).toContain(label);
+    // The workspace's own host only exists with host routing (devlike); production parity has one console host.
+    if (HOST_ROUTING) {
+      await page.goto(`${workspaceOrigin(label)}/login`);
+      await expect(page.getByText(new RegExp(`Alpha Ops ${tag}`, 'i')).first()).toBeVisible();
+      await shot(page, '01-workspace-host-a-login');
+      expect(workspaceHost(label)).toContain(label);
+    }
   });
 
   test('1.5 Initial Manager B over the API: suggestions, create with a subdomain, READY', async () => {

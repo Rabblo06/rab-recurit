@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-import { managerFor, staffMobile } from '../lib/actors';
+import { anonMobile, managerFor, staffMobile } from '../lib/actors';
 import { sql } from '../lib/db';
 import { RUN_ID, SYNTHETIC_PASSWORD } from '../lib/env';
+import { scope, tbl } from '../lib/tenant';
 import { ApiClient, expectStatus } from '../lib/http';
 import { readWorkerEmails, waitForLink } from '../lib/mail';
-import { docker, health, logsSinceAll, restartAsync, start, stop, waitHealthy } from '../lib/stack';
+import { container, docker, health, logsSinceAll, restartAsync, start, stop, waitHealthy } from '../lib/stack';
 import { loadState, updateState } from '../lib/state';
 
 /**
@@ -76,7 +77,7 @@ test.describe.serial('S5 resilience', () => {
     const outbox = await sql(`select recipient_email, status, dispatch_generation, infrastructure_attempt_count from core.email_outbox where recipient_email = any($1::text[])`, [emails]);
 
     // Offers: 6 burst staff activate from their links, then bulk offers go out while the worker restarts again.
-    const anonM = new ApiClient({ host: '127.0.0.1:3300', origin: null, mobile: true });
+    const anonM = anonMobile();
     const activatable = created.filter((c) => c.emailQueued).slice(0, 6);
     for (const c of activatable) {
       const { link } = await waitForLink(c.email, /activate-account\?token=/, 30_000);
@@ -96,7 +97,7 @@ test.describe.serial('S5 resilience', () => {
     await restart2;
     await waitHealthy('worker', 240_000, restart2At);
     await new Promise((r) => setTimeout(r, 15_000));
-    const offers = await sql(`select o.staff_profile_id, count(*)::int as n from ${s.A.schema}.job_offer o join ${s.A.schema}.shift_assignment sa on sa.id = o.shift_assignment_id where sa.shift_id = $1 group by 1`, [shift.id]);
+    const offers = await sql(`select o.staff_profile_id, count(*)::int as n from ${tbl(s.A, 'job_offer')} o join ${tbl(s.A, 'shift_assignment')} sa on sa.id = o.shift_assignment_id where sa.shift_id = $1 group by 1`, [shift.id]);
     results.workerRestart = {
       invitations: N, byPhase: ['before', 'during-restart', 'worker-stopped'].map((p) => ({ phase: p, created: created.filter((c) => c.phase === p).length, emailQueued: created.filter((c) => c.phase === p && c.emailQueued).length })),
       restartTotalMs, workerBackMs, stoppedForMs, workerStartMs, queuedWhileStopped, drainMs,
@@ -119,7 +120,7 @@ test.describe.serial('S5 resilience', () => {
     const s = loadState();
     const m = await managerFor('A');
     const anon = new ApiClient({ label: 'anon', honour429: false });
-    const venuesBefore = Number((await sql(`select count(*)::int as n from ${s.A.schema}.venue`))[0].n);
+    const venuesBefore = Number((await sql(`select count(*)::int as n from ${tbl(s.A, 'venue')} where ${scope(s.A)}`))[0].n);
     const name = `Redis Outage Venue ${tag} ${uniq}`;
     const staffEmail = `redis.outage.${tag}.${uniq}@alpha-e2e.test`;
     stop('redis');
@@ -134,7 +135,7 @@ test.describe.serial('S5 resilience', () => {
       createStaff: staffDuring.status,
       staffEmailQueued: staffDuring.body?.emailQueued ?? null,
     };
-    const createdDuring = Number((await sql(`select count(*)::int as n from ${s.A.schema}.venue where name = $1`, [name]))[0].n);
+    const createdDuring = Number((await sql(`select count(*)::int as n from ${tbl(s.A, 'venue')} where ${scope(s.A)} and name = $1`, [name]))[0].n);
     const workerDuring = health('worker');
     start('redis');
     await waitHealthy('redis', 60_000);
@@ -144,8 +145,8 @@ test.describe.serial('S5 resilience', () => {
       createVenue: (await m.post('/rest/v1/venues', { name: `${name} after`, type: 'hotel' })).status,
     };
     await new Promise((r) => setTimeout(r, 20_000));
-    const worker = containerState('crewflow-e2e-worker-1');
-    const venuesAfter = Number((await sql(`select count(*)::int as n from ${s.A.schema}.venue`))[0].n);
+    const worker = containerState(container('worker'));
+    const venuesAfter = Number((await sql(`select count(*)::int as n from ${tbl(s.A, 'venue')} where ${scope(s.A)}`))[0].n);
     results.redisOutage = { downForMs: Date.now() - t0, during, createdDuring, workerDuring, apiRecoveryMs, after, workerAfter: worker, venuesBefore, venuesAfter };
     // Fail closed: nothing may half-succeed. A venue created during the outage is either fully there (2xx) or absent.
     expect(during.createVenue < 300 ? createdDuring === 1 : createdDuring === 0).toBe(true);
@@ -162,10 +163,10 @@ test.describe.serial('S5 resilience', () => {
     const anon = new ApiClient({ label: 'anon' });
     // W6-E2E-05 regression: the worker container must not restart at all (same StartedAt, RestartCount 0) and the
     // provisioner must keep cycling (a provisioning cycle SUCCEEDS after the blip: rab:worker:stats advances).
-    const workerBefore = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', 'crewflow-e2e-worker-1']).trim();
+    const workerBefore = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', container('worker')]).trim();
     const t0 = Date.now();
     const since = new Date(t0 - 1000).toISOString();
-    docker(['restart', '-t', '5', 'crewflow-e2e-postgres-1']);
+    docker(['restart', '-t', '5', container('postgres')]);
     const restartMs = Date.now() - t0;
     const firstAfter = await m.get('/rest/v1/venues').catch((e) => ({ status: -1, text: String(e), ms: 0 }) as any);
     const { ms: apiRecoveryMs } = await waitFor(async () => (await m.get('/rest/v1/venues')).status === 200, 120_000, 500);
@@ -173,9 +174,9 @@ test.describe.serial('S5 resilience', () => {
     const created = await m.post('/rest/v1/venues', { name: `After DB blip ${tag} ${uniq}`, type: 'hotel' });
     // Give the worker's supervisor time to act (it delays a failure exit by 30 s), then look at the real container state.
     await new Promise((r) => setTimeout(r, 45_000));
-    const workerState = containerState('crewflow-e2e-worker-1');
-    const workerAfter = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', 'crewflow-e2e-worker-1']).trim();
-    const statAfter = Number(docker(['exec', 'crewflow-e2e-redis-1', 'redis-cli', 'hget', 'rab:worker:stats', 'lastWorkspaceProvisioningAt']).trim() || 0);
+    const workerState = containerState(container('worker'));
+    const workerAfter = docker(['inspect', '-f', '{{.State.StartedAt}}|{{.RestartCount}}', container('worker')]).trim();
+    const statAfter = Number(docker(['exec', container('redis'), 'redis-cli', 'hget', 'rab:worker:stats', 'lastWorkspaceProvisioningAt']).trim() || 0);
     const provisioningResumed = statAfter > Date.now() - 30_000 && statAfter > t0;
     const workerLogs = logsSinceAll('worker', since);
     const provisionerCrash = /Unhandled 'error' event/.test(workerLogs) && /provisioner exited unexpectedly/.test(workerLogs);
@@ -198,7 +199,7 @@ test.describe.serial('S5 resilience', () => {
       probeInvite: { status: probe.status, emailQueued: probe.body?.emailQueued, delivered },
     };
     // Cleanup so later phases have a worker, whatever happened above (recorded, not hidden).
-    if (containerState('crewflow-e2e-worker-1').status !== 'running') {
+    if (containerState(container('worker')).status !== 'running') {
       const at = Date.now();
       start('worker');
       (results.dbBlip as any).manualWorkerStartNeeded = true;

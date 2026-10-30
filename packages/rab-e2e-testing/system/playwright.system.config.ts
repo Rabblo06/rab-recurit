@@ -1,7 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
+import { DEFAULT_ORIGIN } from './lib/env';
+
 /**
- * Wave 6 lane E2E — whole-system run against the DISPOSABLE stack (system/docker-compose.e2e.yml + the host Vite on 5300).
+ * Wave 6 lane E2E — whole-system run against the DISPOSABLE stack (system/docker-compose.e2e.yml, plus
+ * docker-compose.parity.yml in the default parity mode, and the host Vite on 5400 / 5300; see lib/env.ts).
  * Serial on purpose: the specs are one agency's story in order (platform admin → two organisations → business flow →
  * isolation → auth → resilience), sharing ids through E2E_STATE_FILE. Never points at the dev stack.
  *
@@ -17,7 +20,7 @@ export default defineConfig({
   reporter: [['list'], ['json', { outputFile: process.env.E2E_JSON_REPORT ?? '../test-results/system-report.json' }]],
   outputDir: '../test-results/system',
   use: {
-    baseURL: 'http://127.0.0.1:5300',
+    baseURL: DEFAULT_ORIGIN,
     trace: 'retain-on-failure',
     actionTimeout: 30_000,
     navigationTimeout: 45_000,

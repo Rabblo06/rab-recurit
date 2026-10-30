@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 import { managerFor, staffMobile } from '../lib/actors';
 import { sql } from '../lib/db';
-import { ADMIN_EMAIL, DEFAULT_HOST, DEFAULT_ORIGIN, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
+import { ADMIN_EMAIL, DEFAULT_HOST, DEFAULT_ORIGIN, HOST_ROUTING, RUN_ID, SYNTHETIC_PASSWORD, managerHost, managerOrigin, workspaceHost, workspaceOrigin } from '../lib/env';
 import { ApiClient, expectStatus } from '../lib/http';
 import { recreate } from '../lib/stack';
 import { loadState, updateState } from '../lib/state';
@@ -52,8 +52,33 @@ test.describe.serial('S4 authentication', () => {
     });
   });
 
-  test('4.1 login handoff: sign in on the default host → session moves to the workspace host (*.localhost)', async ({ browser }) => {
+  test('4.1 login handoff: sign in on the default host → session moves to the workspace host (*.localhost); parity: no handoff', async ({ browser }) => {
     const s = loadState();
+    if (!HOST_ROUTING) {
+      // Production parity: no workspace hosts and no handoff. Sign-in on the console host stays there, with a host-only
+      // httpOnly session cookie, and never calls the handoff endpoints.
+      const ctx = await browser.newContext();
+      const page = await ctx.newPage();
+      const urls: string[] = [];
+      const handoffCalls: string[] = [];
+      page.on('framenavigated', (f) => { if (f === page.mainFrame()) urls.push(f.url().replace(/#.*$/, '#<fragment>')); });
+      page.on('request', (r) => { if (new URL(r.url()).pathname.startsWith('/rest/v1/auth/login-handoff')) handoffCalls.push(r.url()); });
+      await uiLogin(page, DEFAULT_ORIGIN, s.A.imEmail!, SYNTHETIC_PASSWORD);
+      const landed = new URL(page.url());
+      await shot(page, '04-parity-signed-in-console-host');
+      const cookies = await ctx.cookies();
+      const me = await cookieClient(DEFAULT_HOST, DEFAULT_ORIGIN, cookies, '127.0.0.1').get('/rest/v1/auth/me');
+      results.handoff = { mode: 'parity (no handoff)', landedHost: landed.host, urls, handoffCalls, cookies: cookies.map((c) => ({ name: c.name, domain: c.domain, httpOnly: c.httpOnly })), me: me.status };
+      expect(landed.host).toBe(DEFAULT_HOST);
+      expect(urls.some((u) => u.includes('/auth/handoff'))).toBe(false);
+      expect(handoffCalls).toEqual([]);
+      expect(me.status).toBe(200);
+      const session = cookies.filter((c) => /crewflow_session|rab_rt/.test(c.name));
+      expect(session.length).toBeGreaterThan(0);
+      expect(session.every((c) => c.domain === '127.0.0.1' && c.httpOnly)).toBe(true);
+      await ctx.close();
+      return;
+    }
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     const urls: string[] = [];
@@ -105,7 +130,7 @@ test.describe.serial('S4 authentication', () => {
 
   test('4.2 logout in one browser context does not sign out another', async ({ browser }) => {
     const s = loadState();
-    const origin = workspaceOrigin(s.A.label!);
+    const origin = managerOrigin(s.A.label!);
     const c1 = await browser.newContext();
     const c2 = await browser.newContext();
     const p1 = await c1.newPage();
@@ -128,10 +153,10 @@ test.describe.serial('S4 authentication', () => {
     await c2.close();
   });
 
-  test('4.3 MFA: enrol (password + TOTP) → logout → challenge in the UI → handoff; recovery code works once', async ({ browser }) => {
+  test('4.3 MFA: enrol (password + TOTP) → logout → challenge in the UI → handoff (host routing); recovery code works once', async ({ browser }) => {
     const s = loadState();
     const ceoLabel = `alpha-hq-${tag}`;
-    const ceo = new ApiClient({ host: workspaceHost(ceoLabel), origin: workspaceOrigin(ceoLabel), label: 'ceoA' });
+    const ceo = new ApiClient({ host: managerHost(ceoLabel), origin: managerOrigin(ceoLabel), label: 'ceoA' });
     expectStatus(await ceo.login(s.A.ceoEmail!, SYNTHETIC_PASSWORD), 200, 'CEO A login');
     const before = expectStatus(await ceo.get('/rest/v1/auth/mfa'), 200, 'mfa status').body;
     const wrongPw = await ceo.post('/rest/v1/auth/mfa/enrolment', { currentPassword: 'definitely-wrong-password' });
@@ -161,9 +186,14 @@ test.describe.serial('S4 authentication', () => {
     // A complete 6-digit code submits itself (OtpInput onComplete → verify, 562a058e); there is no Verify press to make.
     await codeField.fill(totp(secret));
     const verify = await verifyP;
-    await page.waitForURL((u) => u.host === workspaceHost(ceoLabel), { timeout: 60_000 });
-    await confirmHandoff(page, s.A.ceoEmail!);
-    expect(new URL(page.url()).host).toBe(workspaceHost(ceoLabel));
+    if (HOST_ROUTING) {
+      await page.waitForURL((u) => u.host === workspaceHost(ceoLabel), { timeout: 60_000 });
+      await confirmHandoff(page, s.A.ceoEmail!);
+      expect(new URL(page.url()).host).toBe(workspaceHost(ceoLabel));
+    } else {
+      await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 60_000 });
+      expect(new URL(page.url()).host).toBe(DEFAULT_HOST);
+    }
     await settle(page);
     await shot(page, '04-mfa-after-challenge-workspace-host');
     await ctx.close();
@@ -217,7 +247,7 @@ test.describe.serial('S4 authentication', () => {
       await new Promise((res) => setTimeout(res, 13_000)); // stay under the per-IP 5/min route throttle
     }
     const s = loadState();
-    const real = new ApiClient({ host: workspaceHost(s.A.label!), origin: workspaceOrigin(s.A.label!) });
+    const real = new ApiClient({ host: managerHost(s.A.label!), origin: managerOrigin(s.A.label!) });
     const ok = await real.login(s.A.imEmail!, SYNTHETIC_PASSWORD);
     results.limiter = { seq, realAccountAfter: ok.status };
     const answers = seq.filter((x) => x.kind === 'answer');
@@ -263,8 +293,8 @@ test.describe.serial('S4 authentication', () => {
     const bStaff = await staffB.get('/rest/v1/offers/mine');
     const aWeb = await mA.get('/rest/v1/auth/me');
     const adminAfter = await admin.get('/rest/v1/auth/me');
-    const bLogin = await new ApiClient({ host: workspaceHost(s.B.label!), origin: workspaceOrigin(s.B.label!) }).login(s.B.imEmail!, SYNTHETIC_PASSWORD);
-    const aLogin = await new ApiClient({ host: workspaceHost(s.A.label!), origin: workspaceOrigin(s.A.label!) }).login(s.A.imEmail!, SYNTHETIC_PASSWORD);
+    const bLogin = await new ApiClient({ host: managerHost(s.B.label!), origin: managerOrigin(s.B.label!) }).login(s.B.imEmail!, SYNTHETIC_PASSWORD);
+    const aLogin = await new ApiClient({ host: managerHost(s.A.label!), origin: managerOrigin(s.A.label!) }).login(s.A.imEmail!, SYNTHETIC_PASSWORD);
     const audit = await sql(`select actor_user_id, metadata from core.audit_log where organisation_id = $1 and action like '%auth_providers%' order by created_at desc limit 1`, [s.B.orgId]);
     const adminId = (await sql(`select id from core."user" where email = $1`, [ADMIN_EMAIL]))[0].id;
     results.passwordOff = {
@@ -287,7 +317,7 @@ test.describe.serial('S4 authentication', () => {
     // Restore through the product (the platform admin), no SQL fixture any more.
     const restore = await admin.patch(adminPath, { passwordAuthEnabled: true });
     expect(restore.status).toBe(200);
-    mB = new ApiClient({ host: workspaceHost(s.B.label!), origin: workspaceOrigin(s.B.label!) });
+    mB = new ApiClient({ host: managerHost(s.B.label!), origin: managerOrigin(s.B.label!) });
     const back = await mB.login(s.B.imEmail!, SYNTHETIC_PASSWORD);
     (results.passwordOff as any).bLoginAfterRestore = back.status;
     expect(back.status).toBe(200);

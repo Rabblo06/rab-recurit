@@ -1,0 +1,50 @@
+# PRODUCTION-PARITY layer over docker-compose.e2e.yml — the DEFAULT mode of the system run (E2E_MODE=parity).
+#
+#   docker compose -p crewflow-parity --env-file <e2e.env> -f docker-compose.e2e.yml -f docker-compose.parity.yml ...
+#
+# Its own compose project (`crewflow-parity`), containers, volumes and loopback ports (API 3400, console 5400, Postgres
+# 15480, Redis 16480), so it runs beside the dev-like `crewflow-e2e` project and never shares data with it or the dev stack.
+#
+# The runtime flags are production's committed ones (packages/rab-docker/docker-compose.production.yml):
+#   HWS_RUNTIME_ENABLED "false" (business rows in the shared `core` tables), AI_ENABLED "false", the provisioner explicitly
+#   on at a 5 s interval, API pool 9 / Worker pool 12; and what production does NOT set stays unset here:
+#   WORKSPACE_BASE_DOMAIN, workspace host routing, subdomain origin trust and the login handoff (one console host).
+# Not production: NODE_ENV/RAB_RUNTIME_ENV development (production authority needs TLS verify-full, a bound deployment
+# identity and https origins), LOGGER email sink, LOCAL storage, the `rab` superuser as the migration login.
+
+x-parity-env: &parity-env
+  HWS_RUNTIME_ENABLED: 'false'
+  AI_ENABLED: 'false'
+  WORKSPACE_BASE_DOMAIN: !reset null
+  WORKSPACE_HOST_ROUTING_ENABLED: !reset null
+  WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: !reset null
+  AUTH_LOGIN_HANDOFF_ENABLED: !reset null
+  CORS_ORIGINS: http://127.0.0.1:5400
+  APP_URL: http://127.0.0.1:5400
+  ACCOUNTS_URL: http://127.0.0.1:5400
+  AUTH_GOOGLE_CALLBACK_URL: http://127.0.0.1:5400/rest/v1/auth/google/callback
+  STORAGE_KEY_PREFIX: parity
+
+services:
+  postgres:
+    ports: !override
+      - '127.0.0.1:15480:5432'
+
+  redis:
+    ports: !override
+      - '127.0.0.1:16480:6379'
+
+  server:
+    environment:
+      <<: *parity-env
+      PG_POOL_MAX_CONNECTIONS: '9'
+    ports: !override
+      - '127.0.0.1:3400:3000'
+
+  worker:
+    environment:
+      <<: *parity-env
+
+  bootstrap:
+    environment:
+      <<: *parity-env

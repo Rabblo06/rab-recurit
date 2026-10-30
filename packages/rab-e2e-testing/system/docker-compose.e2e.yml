@@ -9,7 +9,7 @@ name: crewflow-e2e
 # http://<label>.localhost:5300 is a workspace host.
 #
 # Images are REUSED, never built here: rab-server:latest and rab-worker:latest (built from the branch head by the dev
-# rollout). Secrets come from an operator env file outside the repo (letters/digits only):
+# rollout), or the exact images named by E2E_SERVER_IMAGE / E2E_WORKER_IMAGE (e.g. a release candidate's tags). Secrets come from an operator env file outside the repo (letters/digits only):
 #   E2E_PG_SUPERUSER_PASSWORD  the `rab` superuser (initdb; phase-B migration identity only)
 #   E2E_CREWFLOW_PASSWORD      becomes `crewflow` (migration 1786682000000): provisioner child, bootstrap-admin
 #   E2E_CREWFLOW_APP_PASSWORD  becomes `crewflow_app` (migration 1786687000000): api + jobs child
@@ -91,7 +91,7 @@ services:
       retries: 10
 
   server:
-    image: rab-server:latest
+    image: ${E2E_SERVER_IMAGE:-rab-server:latest}
     environment:
       <<: *app-env
       # Phase B: one PG_DATABASE_URL per process (the restricted runtime login here).
@@ -115,7 +115,7 @@ services:
       start_period: 20s
 
   worker:
-    image: rab-worker:latest
+    image: ${E2E_WORKER_IMAGE:-rab-worker:latest}
     environment:
       <<: *app-env
       # Phase B: PG_DATABASE_URL is also the jobs child's session-lock connection (direct); the launcher hands the
@@ -163,7 +163,7 @@ services:
   # Phase B P7: the migration login reaches the locked runner only as its own PG_DATABASE_URL.
   migrate:
     profiles: ['ops']
-    image: rab-server:latest
+    image: ${E2E_SERVER_IMAGE:-rab-server:latest}
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
@@ -190,7 +190,7 @@ services:
 
   bootstrap:
     profiles: ['ops']
-    image: rab-server:latest
+    image: ${E2E_SERVER_IMAGE:-rab-server:latest}
     environment:
       <<: *app-env
       DB_TARGET: local
