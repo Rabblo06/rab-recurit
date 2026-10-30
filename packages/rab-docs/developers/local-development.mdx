@@ -36,7 +36,7 @@ The database container creates its roles on first start (`packages/rab-docker/po
 cp packages/rab-server/.env.example packages/rab-server/.env
 ```
 
-The template documents every variable. At minimum the API needs `DATABASE_URL`, `REDIS_URL` and `APP_SECRET`; it refuses to boot if required configuration is missing. See [Environment configuration](/developers/environment-configuration).
+The template documents every variable. At minimum the API needs `PG_DATABASE_URL` (the `crewflow_app` login), `REDIS_URL` and `APP_SECRET`; it refuses to boot if required configuration is missing. See [Environment configuration](/developers/environment-configuration).
 
 <Warning>
   Never commit a real `.env`. `.env*` files are ignored by Git.
@@ -91,4 +91,6 @@ flutter run --dart-define=API_URL=http://10.0.2.2:3000/rest/v1   # Android emula
 | `yarn check-rls` | Fail if any tenant table lacks Row-Level Security |
 | `npx nx run rab-server:command -- <name>` | Run a CLI command (see below) |
 
-CLI commands include `bootstrap-admin`, `grant-platform-admin`, `secret:rotate`, `storage:migrate-local`, `storage:reconcile`, `seed` and `user-session:backfill`.
+CLI commands include `bootstrap-admin`, `grant-platform-admin`, `secret:rotate`, `storage:migrate-local`, `storage:reconcile` and `seed`.
+
+The three owner operations `containment:suspend-test-accounts`, `hws:backfill` and `user-session:backfill` run only in the one-off operations container (`CREWFLOW_OPS_RUN=one-off`, `PG_OPS_APP_DATABASE_URL` for `crewflow_app`, the migration identity as `PG_DATABASE_URL` only for the modes that need it, and the operator label `CREWFLOW_OPS_ACTOR_SOURCE` / `CREWFLOW_OPS_ACTOR_ID` / `CREWFLOW_OPS_CHANGE_REF`); they refuse anywhere else. See `docs/runbooks/database.md` section 15.

@@ -106,22 +106,24 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # NO MIGRATIONS AT STARTUP (2026-10-15). This service runs `main.js` directly, never the image's default
-      # `start.sh` (which migrates and bootstraps before every boot and remains the production entrypoint). Schema
-      # changes go through the separately invoked, explicitly authorised `migrate` service below.
+      # THE API NEVER MIGRATES (Phase B P7). This service runs `main.js` directly; schema changes go only through the
+      # `migrate` service below, which compose runs to completion first (depends_on: service_completed_successfully).
       #
-      # Runtime credential only: DATABASE_URL is the restricted runtime role `crewflow_app` (no ownership, no DDL;
+      # Runtime credential only: PG_DATABASE_URL is the restricted runtime role `crewflow_app` (no ownership, no DDL;
       # assert-runtime-db-role.ts refuses anything else), supplied by the operator as
       #   DEVDB_URL=postgres://crewflow_app:<password>@devdb:5432/rab
-      # Unset → empty → the API refuses to boot (fail closed); ../rab-server/.env's own URL is never used here.
-      # DATABASE_URL_UNPOOLED is deliberately empty: runtime processes hold no migration/owner connection.
-      # Required by the command/migration target guard (rab-server database-target.ts). The `devdb` service is a local
-      # docker-network hostname, so this is DB_TARGET=local. Production sets its own explicit target (see the incident report).
+      # Unset → empty → the API refuses to boot (fail closed). The deprecated names are blanked so ../rab-server/.env's own
+      # URLs never reach this process (PG_DATABASE_URL next to a DATABASE_URL naming another target refuses to start).
+      # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only). The API refuses to start
+      # with it (security review L-4, never-in-runtime-env.ts), so it is blanked here in case ../rab-server/.env sets it;
+      # run a CLI command in this container with `-e DB_TARGET=local` (the `devdb` service is a local docker hostname).
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      DB_TARGET: local
-      DATABASE_URL: ${DEVDB_URL:-}
+      DB_TARGET: ''
+      PG_DATABASE_URL: ${DEVDB_URL:-}
+      DATABASE_URL: ''
       DATABASE_URL_UNPOOLED: ''
+      DATABASE_DIRECT_URL: ''
       REDIS_URL: redis://redis:6379
       # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22, rab-devdb TEST database): workspace-scoped
       # requests resolve to the caller's physical workspace schema. Replaces the temporary scratchpad override
@@ -144,7 +146,7 @@ services:
       # enabled), L1 metadata cache OFF, login-handoff cleanup ON. Production, QA and render.yaml keep the handoff OFF.
       # Rollback: set 'false' here (server AND worker) and recreate both containers.
       AUTH_LOGIN_HANDOFF_ENABLED: 'true'
-      # Same reasoning as DATABASE_URL above: ../rab-server/.env may carry a
+      # Same reasoning as PG_DATABASE_URL above: ../rab-server/.env may carry a
       # real SMTP driver setting for occasional non-Docker use (confirmed:
       # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
       # ambiguous state, not a confirmed-safe one). The local stack forces
@@ -183,6 +185,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Phase B P7: never started onto a schema the migration step did not check (exit 0) — see `migrate` below.
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
       interval: 5s
@@ -198,7 +203,9 @@ services:
   #   provisioner packages/rab-worker/dist/workspace-provisioner.main.js uid/gid 10001  crewflow, direct
   # each with an explicit allowlisted environment. ../rab-server/.env reaches ONLY the launcher: the jobs child receives the
   # allowlisted application keys from it (APP_SECRET etc., the same values the server uses), the provisioner child none.
-  # Neither child ever runs core migrations; DATABASE_URL_UNPOOLED stays blank (the launcher refuses a non-empty one).
+  # Neither child ever runs core migrations; DATABASE_URL_UNPOOLED stays blank (the launcher refuses a non-empty one). The
+  # jobs child's one connection is PG_DATABASE_URL (crewflow_app, direct: it is also the session-lock connection); the
+  # provisioner child receives CREWFLOW_PROVISIONER_DATABASE_URL as its own PG_DATABASE_URL.
   # CUTOVER from the old layout (separate `provisioner` service): editing this file does not remove the old container.
   # Remove it deliberately — `docker compose up -d --remove-orphans`, or `docker rm -f rab-provisioner-1` — then rebuild
   # and recreate `worker`. Two provisioners at once would still be safe (session advisory lock), just unaccounted for.
@@ -215,11 +222,16 @@ services:
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      # Explicitly overridden so ../rab-server/.env's own URL (possibly a real remote database) can never leak through.
-      DATABASE_URL: ${DEVDB_URL:-}
-      DATABASE_DIRECT_URL: ${DEVDB_URL:-}
+      # Explicitly overridden so ../rab-server/.env's own URLs (possibly a real remote database) can never leak through.
+      PG_DATABASE_URL: ${DEVDB_URL:-}
+      # Command authority: the Worker bundle launcher refuses it (security review L-4); blanked in case ../rab-server/.env sets it.
+      DB_TARGET: ''
+      # Phase B (B5): the Worker runtime pool size (connection-budget.ts DEFAULT_WORKER_POOL_MAX).
+      PG_POOL_MAX_CONNECTIONS: '12'
+      DATABASE_URL: ''
+      DATABASE_DIRECT_URL: ''
       DATABASE_URL_UNPOOLED: ''
-      # The provisioner child's privileged connection (the former `provisioner` service's DATABASE_URL_UNPOOLED).
+      # The provisioner child's privileged connection (handed to that child alone as its PG_DATABASE_URL; stays until G2).
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
       REDIS_URL: redis://redis:6379
       # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
@@ -276,33 +288,39 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       server:
         condition: service_healthy
 
-  # Database migrations — NEVER automatic. Behind the `migrate` profile, so `docker compose up` / `start` / `restart`
-  # never run it, and no service depends on it. It refuses to run unless the operator explicitly authorises this run AND
-  # supplies the privileged migration connection; neither has a default, and ../rab-server/.env's URLs are blanked:
-  #   CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations \
-  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab \
-  #   docker compose --profile migrate run --rm migrate
-  # The runner then enforces the identity itself (core.datasource.ts GuardedMigrationDataSource → migration-identity.ts:
-  # DB_TARGET guard, phase A refuses a superuser, phase B requires the bootstrap identity). Back up first, rebuild the
+  # Database migrations (Phase B P7): the one-off release step, `deploy-prepare.js`. Compose runs it to completion BEFORE
+  # `server` and `worker` (they depend on it with service_completed_successfully); restart 'no'. Without
+  # CREWFLOW_MIGRATION_APPROVED it only checks: exit 0 when nothing is pending (the stack starts), exit 3 when something
+  # is (the stack does not start until an approved run; the log lists the pending migrations and prints the approval
+  # token for exactly that set), exit 1 on any refusal. It applies ONLY with CREWFLOW_MIGRATION_APPROVED=<that token>,
+  # recomputed after the migration lock (final review F5: a stale token, one for another set, or the retired
+  # `apply-pending-migrations` is refused, nothing applied). The migration login comes ONLY from
+  # packages/rab-docker/.env.migrate (git-ignored; template .env.migrate.example, DB_TARGET=local values) as
+  # PG_DATABASE_URL, or for one run from the shell as
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate   (exit 3)
+  #   CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256> \
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate
+  # DEV IMPACT: `docker compose up` now needs that migration login (it checks the schema before starting the API). The
+  # runner enforces the identity itself (DB_TARGET guard, deployment identity marker, CF-41). Back up first, rebuild the
   # image first if migrations changed, and never pass the migration URL to `server` or `worker`.
   migrate:
-    profiles: ['migrate']
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
     image: rab-server
+    # Only this service reads it; `required: false` so a checkout without it still renders (the step then refuses).
     env_file:
-      - ../rab-server/.env
+      - path: .env.migrate
+        required: false
     environment:
       NODE_ENV: development
-      RAB_RUNTIME_ENV: development
       DB_TARGET: local
-      DATABASE_URL: ''
-      DATABASE_URL_UNPOOLED: ''
       CREWFLOW_MIGRATION_APPROVED: ${CREWFLOW_MIGRATION_APPROVED:-}
       CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
       # Read only by the two role-creating migrations (1786682000000 `crewflow`, 1786687000000 `crewflow_app`) on a fresh
@@ -317,13 +335,16 @@ services:
       - sh
       - -c
       - |
-        if [ "$${CREWFLOW_MIGRATION_APPROVED:-}" != "apply-pending-migrations" ]; then
-          echo "migrate: REFUSED - not authorised. Set CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations for this run." >&2; exit 64
+        set -eu
+        # Phase B P7: the migration login reaches deploy-prepare ONLY as its PG_DATABASE_URL: from .env.migrate, or (legacy
+        # operator habit) from CREWFLOW_MIGRATION_DATABASE_URL in the shell. The legacy name is removed before exec.
+        url="$${PG_DATABASE_URL:-$${CREWFLOW_MIGRATION_DATABASE_URL:-}}"
+        unset CREWFLOW_MIGRATION_DATABASE_URL || true
+        if [ -z "$$url" ]; then
+          echo "migrate: REFUSED - no migration connection. Put PG_DATABASE_URL in packages/rab-docker/.env.migrate (see .env.migrate.example) or set CREWFLOW_MIGRATION_DATABASE_URL for this run." >&2; exit 64
         fi
-        if [ -z "$${CREWFLOW_MIGRATION_DATABASE_URL:-}" ]; then
-          echo "migrate: REFUSED - CREWFLOW_MIGRATION_DATABASE_URL (the privileged migration connection) is not set." >&2; exit 64
-        fi
-        exec env DATABASE_URL="$$CREWFLOW_MIGRATION_DATABASE_URL" DATABASE_URL_UNPOOLED="$$CREWFLOW_MIGRATION_DATABASE_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
+        if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD || true; fi
+        exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js
 
   # Dev-only convenience service — no custom Dockerfile, unlike server/worker's
   # production rab-target image. Bind-mounts the repo for Vite hot reload;

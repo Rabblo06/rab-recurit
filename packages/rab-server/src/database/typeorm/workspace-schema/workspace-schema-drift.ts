@@ -21,10 +21,12 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from './workspace-schema-modules';
  *  - MISSING   — the registry says READY but the schema does not exist;
  *  - UNVERIFIED — READY with no recorded fingerprint (created by an older image, not yet baselined by the migrator);
  *  - BEHIND    — module_version < the newest module this code knows (not drift; the migrator has not run yet).
+ *  - AHEAD     — module_version > the newest module this code knows (Phase B: an image rollback after a module migration;
+ *                this code has no expected fingerprint for it and must not count it OK).
  */
 export interface WorkspaceDriftFinding {
   workspaceId: string;
-  status: 'DRIFTED' | 'MISSING' | 'UNVERIFIED' | 'BEHIND' | 'ERROR';
+  status: 'DRIFTED' | 'MISSING' | 'UNVERIFIED' | 'BEHIND' | 'AHEAD' | 'ERROR';
   moduleVersion: number | null;
   detail: string;
 }
@@ -81,6 +83,10 @@ async function checkOne(client: Client, workspaceId: string, organisationId: str
       return;
     }
     const version = Number(row.r_module_version);
+    if (row.r_status === 'OK' && version > LATEST_WORKSPACE_MODULE_VERSION) {
+      result.findings.push({ workspaceId, status: 'AHEAD', moduleVersion: version, detail: `module ${version} is above this code's ${LATEST_WORKSPACE_MODULE_VERSION}` });
+      return;
+    }
     const expected = EXPECTED_WORKSPACE_FINGERPRINTS[version];
     if (row.r_status === 'OK' && expected !== undefined && row.r_fingerprint !== expected) {
       result.findings.push({

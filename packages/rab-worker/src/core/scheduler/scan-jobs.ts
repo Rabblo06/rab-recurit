@@ -5,7 +5,8 @@ import {
 import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
 
 /**
- * The 20 periodic scans of the jobs process (the 19 pre-migration loops + AI Phase 1's `ai-retention`, appended last) — the single source of truth for BOTH scheduler modes (BullMQ migration,
+ * The 21 periodic scans of the jobs process (the 19 pre-migration loops + AI Phase 1's `ai-retention` + Phase B P8's
+ * `workspace-provisioning-health`, appended last) — the single source of truth for BOTH scheduler modes (BullMQ migration,
  * Lane A M2/M4). Order, human names, intervals and stats keys are exactly the pre-migration `main.ts` `runtime.every()`
  * calls (verified line by line against main.ts @ a743806f): interval mode registers them in this order, with these
  * names/keys, so its behaviour is unchanged; bullmq mode creates one job scheduler per entry.
@@ -127,6 +128,17 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'lastAiRetentionAt',
     'aiRetentionFailures',
     true,
+  ),
+  // Phase B P8 (E6 gates 10/14, owner decision C): READ-ONLY daily stuck-workspace alert on the runtime connection — counts
+  // only through core.worker_workspace_provisioning_health() (ProvisioningHealth1786721220000); Sentry warning + warn line
+  // when either count is above zero. Never retries or provisions. queues/rab-maintenance/workspace-provisioning-health.job.ts.
+  job(
+    SCAN_QUEUES.maintenance,
+    'workspace-provisioning-health',
+    'workspace provisioning health',
+    { kind: 'constant', ms: 24 * 60 * MINUTE },
+    'lastWorkspaceProvisioningHealthAt',
+    'workspaceProvisioningHealthFailures',
   ),
 ]);
 

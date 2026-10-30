@@ -337,7 +337,7 @@ export class OfferService {
       const skipIdx = nextParam(skip);
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
       return { data: rows.map(toOfferSummary), total: count };
-    });
+    }, { useReplica: true });
   }
 
   /**

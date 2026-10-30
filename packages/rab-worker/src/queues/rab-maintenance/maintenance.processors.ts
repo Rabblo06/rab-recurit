@@ -13,6 +13,7 @@ import { runLoginHandoffCleanupCycle } from './login-handoff-cleanup.job';
 import { runOutboxRetentionCycle } from './outbox-retention.job';
 import { checkRecentStorageCleanup, runStorageCleanupCycle } from './storage-cleanup.job';
 import { runTokenCleanupCycle } from './token-cleanup.job';
+import { defaultProvisioningHealthSinks, runWorkspaceProvisioningHealthCycle } from './workspace-provisioning-health.job';
 
 /**
  * Thin adapters — the pre-migration main.ts loop bodies, verbatim (see rab-email/email.processors.ts). The two enable
@@ -119,5 +120,14 @@ export class MaintenanceScanProcessor {
     ctx.setStat('lastOutboxRetentionMode', String(result.mode));
     ctx.setStat('lastOutboxRetentionRows', r.email_outbox + r.push_delivery + r.realtime_event + r.worker_event);
     return true;
+  }
+
+  // Phase B P8 (E6, owner decision C): read-only daily stuck-workspace alert. Counts only; Sentry warning (when SENTRY_DSN is
+  // set) + warn line when either count is above zero. Throws (failure counter) if the counts-only definer is missing.
+  @Process('workspace-provisioning-health')
+  async workspaceProvisioningHealth(): Promise<void> {
+    const { runtimeDataSource, logger } = this.deps.get();
+    const result = await runWorkspaceProvisioningHealthCycle(runtimeDataSource, defaultProvisioningHealthSinks(logger));
+    if (!result.alerted) logger.log('workspace provisioning health: no workspace CREATING for more than 10 minutes, none FAILED');
   }
 }

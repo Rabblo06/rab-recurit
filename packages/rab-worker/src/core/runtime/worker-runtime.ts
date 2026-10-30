@@ -78,6 +78,52 @@ export interface WorkerRuntimeOptions {
   metricsLogMs?: number;
   /** TTL of `durationsKey` (refreshed on each write). Default 7 days. */
   durationsTtlSeconds?: number;
+  /**
+   * Phase B (P6): at most this many periodic cycles RUN at once in this process (default WORKER_SCAN_CONCURRENCY = 4). A
+   * cycle that finds every slot taken waits, first come first served — it is never dropped and never stacks on itself
+   * (the per-name non-overlap rule still applies first). In BullMQ mode the slot is taken BEFORE the cross-replica scan
+   * lock, so a waiting job holds no lock another replica could use. Bounds the scans' share of the runtime pool.
+   */
+  maxConcurrentCycles?: number;
+}
+
+/** Phase B (P6, owner-approved): the scan-concurrency cap of the Worker jobs process. */
+export const WORKER_SCAN_CONCURRENCY = 4;
+
+/** FIFO counting semaphore (process-local). */
+export class CycleSlots {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(readonly limit: number) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error('maxConcurrentCycles must be a positive integer');
+  }
+
+  get running(): number {
+    return this.active;
+  }
+
+  get waiting(): number {
+    return this.waiters.length;
+  }
+
+  /** Takes a free slot synchronously (true), or returns false when all are taken. */
+  tryAcquire(): boolean {
+    if (this.active >= this.limit) return false;
+    this.active += 1;
+    return true;
+  }
+
+  /** Resolves when a slot has been handed over (FIFO). Call only after tryAcquire() returned false. */
+  wait(): Promise<void> {
+    return new Promise((resolve) => this.waiters.push(() => resolve()));
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) next(); // the slot passes straight to the next waiter: `active` is unchanged
+    else this.active = Math.max(0, this.active - 1);
+  }
 }
 
 const SKIPPED: ReadonlySet<CycleOutcome> = new Set(['skipped-running', 'skipped-locked', 'skipped-shutdown']);
@@ -120,6 +166,7 @@ export class WorkerRuntime {
   private readonly statsKey: string;
   private readonly statsWrite: 'whole' | 'fields';
   private readonly instance = `${os.hostname()}:${process.pid}`;
+  private readonly slots: CycleSlots;
 
   constructor(
     private readonly redis: Redis,
@@ -127,6 +174,7 @@ export class WorkerRuntime {
   ) {
     this.statsKey = options.statsKey ?? WORKER_STATS_KEY;
     this.statsWrite = options.statsWrite ?? 'whole';
+    this.slots = new CycleSlots(options.maxConcurrentCycles ?? WORKER_SCAN_CONCURRENCY);
     const flushMs = options.metricsFlushMs ?? 60_000;
     if (options.durationsKey && flushMs > 0) this.untracked(() => this.flushMetrics(), flushMs);
     const logMs = options.metricsLogMs ?? 15 * 60_000;
@@ -139,6 +187,11 @@ export class WorkerRuntime {
 
   get inFlightCount(): number {
     return this.inFlight.size;
+  }
+
+  /** Cycles currently running / waiting for a slot (P6 scan cap). */
+  get cycleSlots(): { limit: number; running: number; waiting: number } {
+    return { limit: this.slots.limit, running: this.slots.running, waiting: this.slots.waiting };
   }
 
   /** BullMQ mode: switches the progress snapshot to the scheduler-aware health contract (see WorkerRuntimeProgress). */
@@ -204,6 +257,7 @@ export class WorkerRuntime {
     const key = options.metricKey ?? options.name;
     this.running.add(options.name);
     const startedAt = Date.now();
+    let runStartedAt = startedAt;
     const extra: Record<string, string | number> = {};
     const ctx: CycleContext = {
       setStat: (field, value) => {
@@ -212,13 +266,25 @@ export class WorkerRuntime {
       },
     };
     const work = async (): Promise<CycleOutcome> => {
-      if (!lock) return (await options.run(ctx)) === false ? 'idle' : 'succeeded';
-      const locked = await lock(() => options.run(ctx));
-      if (!locked.acquired) return 'skipped-locked';
-      return locked.value === false ? 'idle' : 'succeeded';
+      // P6 scan cap: wait for a slot first (before the BullMQ scan lock); a cycle released after shutdown began never runs.
+      if (!this.slots.tryAcquire()) await this.slots.wait();
+      try {
+        if (this.shuttingDown) return 'skipped-shutdown';
+        runStartedAt = Date.now();
+        if (!lock) return (await options.run(ctx)) === false ? 'idle' : 'succeeded';
+        const locked = await lock(() => options.run(ctx));
+        if (!locked.acquired) return 'skipped-locked';
+        return locked.value === false ? 'idle' : 'succeeded';
+      } finally {
+        this.slots.release();
+      }
     };
     const cycle: Promise<CycleOutcome> = work()
       .then((outcome) => {
+        if (outcome === 'skipped-shutdown') {
+          this.metrics.record(key, outcome);
+          return outcome;
+        }
         if (outcome === 'skipped-locked') {
           if (options.statKeys.skipped) {
             this.stats[options.statKeys.skipped] = Number(this.stats[options.statKeys.skipped] ?? 0) + 1;
@@ -234,14 +300,14 @@ export class WorkerRuntime {
         }
         this.lastCycleSucceededAt = Date.now();
         this.writeChanged(set);
-        this.metrics.record(key, outcome, Date.now() - startedAt);
+        this.metrics.record(key, outcome, Date.now() - runStartedAt);
         return outcome;
       })
       .catch((error): CycleOutcome => {
         this.stats[options.statKeys.failures] = Number(this.stats[options.statKeys.failures] ?? 0) + 1;
         this.writeChanged({ ...extra }, options.statKeys.failures);
         this.logger.error(`${options.name} cycle failed`, error as Error);
-        this.metrics.record(key, 'failed', Date.now() - startedAt);
+        this.metrics.record(key, 'failed', Date.now() - runStartedAt);
         return 'failed';
       })
       .finally(() => {

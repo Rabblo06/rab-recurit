@@ -384,7 +384,7 @@ export class StaffService {
         .offset(skip).limit(take).getRawMany();
       const { data: withAvailability } = await this.withAvailability(manager, data, dto);
       return { data: withAvailability, total };
-    });
+    }, { useReplica: true });
   }
 
   /**
@@ -414,7 +414,7 @@ export class StaffService {
       const { otherSkills, ...rest } = row as { otherSkills: string | null } & Record<string, unknown>;
       const skills = (otherSkills ?? '').split(/[,\n;]/).map((s) => s.trim()).filter(Boolean);
       return { ...rest, skills, availableDays: (row.availableDays as string[] | null) ?? [] };
-    });
+    }, { useReplica: true });
   }
 
   /** The calling Venue Manager's own favourite / emergency-cover tags on one of their team rows. Not an assignment change. */

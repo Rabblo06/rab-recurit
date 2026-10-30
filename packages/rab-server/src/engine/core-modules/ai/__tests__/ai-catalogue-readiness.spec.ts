@@ -37,7 +37,8 @@ const ctxOf = (env: AiEnvFacts, opts: { db?: typeof DEV_DB | null; catalogue?: r
   catalogue: opts.catalogue ?? AI_MODEL_CATALOGUE,
 });
 const entry = (id: string) => catalogueEntry(id)!;
-const BASE = { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://x', APP_SECRET: 'a'.repeat(40) };
+// Phase B: the validator applies the database URL policy (pg-url-policy.ts), so the fixture URL names a user, host and database (same shape as the env.validation specs).
+const BASE = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://x', APP_SECRET: 'a'.repeat(40) };
 
 /** A pretend approved model, for resolver tests only (never part of the real catalogue). */
 const fake = (id: string, over: Partial<AiCatalogueModel> = {}): AiCatalogueModel => ({ ...entry(AI_HAIKU_MODEL_ID), id, providerModelId: id, ...over });

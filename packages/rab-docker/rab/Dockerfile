@@ -36,10 +36,27 @@ RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared,rab-ui
 RUN test -f packages/rab-worker/dist/main.js || (echo "FATAL: packages/rab-worker/dist/main.js was not produced by the build above — rab-worker build is incomplete or missing from the workspace." && exit 1)
 RUN test -f packages/rab-server/dist/main.js || (echo "FATAL: packages/rab-server/dist/main.js was not produced by the build above." && exit 1)
 
+# Runtime node_modules = the build stage's tree minus the build-only native toolchains (image scan 2026-10-30): the esbuild
+# binaries (Vite's nested 0.25 copy embeds Go stdlib 1.23.12: 1 CRITICAL + ~25 HIGH) and Vite itself. Nothing the runtime
+# starts needs them — server, Worker, shared, ui and emails dist never import esbuild, vite or tsx; only build/dev CLIs do
+# (tsx, the react-email preview, Vite), and none of those runs in this image.
+FROM build AS runtime-modules
+RUN rm -rf node_modules/esbuild node_modules/@esbuild node_modules/vite node_modules/.bin/esbuild node_modules/.bin/vite \
+      node_modules/*/node_modules/esbuild node_modules/*/node_modules/@esbuild \
+      node_modules/@*/*/node_modules/esbuild node_modules/@*/*/node_modules/@esbuild \
+  && test -z "$(find node_modules -type f -path '*esbuild*/bin/esbuild' -print -quit)"
+
 # Final stage — this is also the Dockerfile's last stage, which Render
 # builds by default (see dockerfilePath in render.yaml).
-FROM base AS rab
+# The same pinned Node image as `base`, WITHOUT base's native build toolchain (python3/make/g++/gcc): those are build-only
+# (image scan 2026-10-30: python3 3.14.8 = 4 CRITICAL) and the runtime compiles nothing. Keep the digest in step with `base`.
+FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS rab
+WORKDIR /app
 ENV NODE_ENV=production
+# Alpine security updates for the pinned base's OS packages (image scan 2026-10-30: libssl3/libcrypto3 3.5.7 -> 3.5.8), then
+# fail the build if the toolchain is somehow present.
+RUN apk upgrade --no-cache \
+  && test -z "$(apk info -e python3 make g++ gcc)"
 # System Chromium for the worker's PDF jobs (shift roster + final timesheet).
 # Playwright's own downloaded Chromium is glibc-only and does not run on
 # Alpine/musl, so the image ships Alpine's Chromium and the renderer
@@ -48,11 +65,17 @@ ENV NODE_ENV=production
 # but never loads it — clock-in/out never imports the renderer. Fonts:
 # without them Chromium renders blank text.
 RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
+# Dependency scan (2026-10-30): every library finding Trivy reports for the base image (undici 6.27.0, tar, brace-expansion,
+# ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
+# API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
+# it), so the final stage drops the npm CLI. The Worker bundle image is built FROM this stage and inherits it.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
+  && test ! -e /usr/local/lib/node_modules/npm
 ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
 # box — reuse it rather than inventing one. --chown on every COPY avoids a
 # separate `chown -R` layer (cheaper, and no root-owned intermediate layer).
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=runtime-modules --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/packages/rab-server/package.json ./packages/rab-server/package.json
 COPY --from=build --chown=node:node /app/packages/rab-server/dist ./packages/rab-server/dist
@@ -64,9 +87,11 @@ COPY --from=build --chown=node:node /app/packages/rab-ui/package.json ./packages
 COPY --from=build --chown=node:node /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
-COPY --chown=node:node packages/rab-docker/rab/start.sh ./start.sh
-COPY --chown=node:node packages/rab-docker/rab/start-worker.sh ./start-worker.sh
-RUN chmod +x ./start.sh ./start-worker.sh
+# Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
+# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either).
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh
 # STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at
 # runtime, not copied in at build time — /app itself stays root-owned (only
 # the files explicitly --chown'd above aren't), so the non-root `node` user
@@ -75,8 +100,9 @@ RUN mkdir -p /app/storage && chown node:node /app/storage
 
 USER node
 EXPOSE 3000
-# Runs migrations then execs main.js — kept as a real shell script rather
-# than a dockerCommand string in render.yaml, since Render doesn't shell-
-# parse that field the way plain `docker run` does with a CMD string
-# (quoting/chaining silently breaks there instead).
-CMD ["./start.sh"]
+# THE API NEVER MIGRATES (Phase B P7). api-prestart.sh refuses any migration/bootstrap credential in the API's
+# environment, runs a read-only "no pending migrations" check as the restricted runtime role (PG_DATABASE_URL =
+# crewflow_app), then execs main.js (which runs its own database boot gates). Migrations run only in the one-off
+# rab-migrate service (deploy-prepare.js, migration-only credential from .env.migrate), which compose starts first. A real
+# shell script rather than a command string, so platforms that do not shell-parse a command field behave the same.
+CMD ["./api-prestart.sh"]

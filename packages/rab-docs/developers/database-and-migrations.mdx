@@ -64,7 +64,24 @@ Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (
 - `synchronize: false`, always.
 - Never edit a migration after it is merged — add a new one.
 - Every new tenant table gets `organisation_id` and its RLS policy in the same migration.
-- Run migrations with the owner connection (`DATABASE_URL_UNPOOLED`); the runtime role cannot run DDL.
+- Run migrations only with the migration identity, as that process's own `PG_DATABASE_URL` (the one-off `rab-migrate` step reads it from `packages/rab-docker/.env.migrate`); the runtime role cannot run DDL, and the API and the Worker never migrate.
 - `yarn check-rls` fails CI if a tenant table lacks RLS.
 
-In Docker, `start.sh` runs migrations, then `bootstrap-admin`, then the API. Only the API container runs migrations.
+In Docker, the one-off `rab-migrate` service (`deploy-prepare.js`) runs first; the API and the Worker start only after it exits 0. Without an approval it only checks: when migrations are pending it exits 3, lists them and prints an approval token for exactly that set (`pending-<count>-<sha256>`), so the release is not promoted. It applies them only when run again with `CREWFLOW_MIGRATION_APPROVED=<that token>`; the token is recomputed after the migration lock, so a stale token, a token for another set, or the retired value `apply-pending-migrations` is refused and nothing is applied. The API image's command (`api-prestart.sh`) never migrates. See the database runbook (`docs/runbooks/database.md`).
+
+### Schema-version compatibility
+
+Every process compares the database with its own code at start-up (`src/database/boot-checks/schema-compatibility.ts`):
+
+| Database state | API / Worker | CLI | Provisioner | `rab-migrate` |
+|---|---|---|---|---|
+| Migrations pending | refuse | refuse | refuse | applies (approved) or exits 3 |
+| Ledger has newer migrations only (image rollback) | warn, run | warn, run | refuse | check: warn; apply: refuse |
+| Ledger has unknown migrations among the code's own (another branch, wrong database; not in `RETIRED_MIGRATIONS`) | refuse | refuse | refuse | refuse |
+| `core.provision_workspace` body unknown | refuse in production, else warn | — | refuse | post-check refuses |
+| …known, behind the code | refuse | — | refuse | post-check refuses |
+| …known, ahead (rollback) | warn | — | refuse | post-check refuses |
+| A READY workspace below the code's minimum module | that workspace's requests get 503 | — | — | post-check refuses any workspace not at the latest module |
+| A READY workspace above the code's module | warn once, route | — | refuse | post-check refuses |
+
+A retired migration (removed from `core/migrations/` after databases applied it) must be added to `RETIRED_MIGRATIONS`; a migration that re-creates `core.provision_workspace` must add its `app_version` literal to `PROVISION_FUNCTION_MODULE_VERSIONS`.

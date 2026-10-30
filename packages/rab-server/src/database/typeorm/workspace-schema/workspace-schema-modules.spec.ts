@@ -15,8 +15,15 @@ import { composeServerPathTemplateV1VenueTeamAdmin, expectedWorkspacePolicyCount
 import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
 import { errorClassOf, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 import {
+  GUARDS_PROVISION_APP_VERSION,
+  provisionWorkspaceGuardsDownSql,
+  provisionWorkspaceGuardsUpSql,
+} from '../core/provision-workspace-guards-sql';
+import { parseProvisionFunctionSource, PROVISION_FUNCTION_APP_VERSION_PREFIX, PROVISION_FUNCTION_MODULE_VERSIONS } from './provision-function-versions';
+import {
   composeModulesForSentinel,
   LATEST_WORKSPACE_MODULE_VERSION,
+  MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION,
   moduleChecksum,
   modulesThrough,
   WORKSPACE_SCHEMA_MODULES,
@@ -276,5 +283,42 @@ describe('waves 4+5 lane DB5 modules 16/17 and the v17 provision_workspace body'
     );
     // A workspace generated column still depends on the wrapper: it and the extensions are kept.
     expect(sql.some((q) => /DROP FUNCTION core\.immutable_unaccent|DROP EXTENSION/.test(q))).toBe(false);
+  });
+});
+
+describe('Phase B: provision_workspace body → module version map (schema-version compatibility)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('fs') as typeof import('fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('path') as typeof import('path');
+  const MIGRATIONS_DIR = path.join(__dirname, '..', 'core', 'migrations');
+
+  it('every core migration that (re)creates core.provision_workspace has its app_version literal in the frozen map', () => {
+    const creators = fs
+      .readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => /provisionWorkspaceFunctionV2Sql\(|provisionWorkspaceGuardsUpSql\b/.test(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')))
+      .map((f) => /^(\d{13})-(\w+)\.ts$/.exec(f)!)
+      .map((m) => `${m[2]}${m[1]}`);
+    expect(creators.sort()).toEqual([
+      'ArchiveAndSearchSchema1786719920000',
+      'AttendanceMoneyChecks1786719810000',
+      'ProvisionWorkspaceGuards1786721210000',
+      'VenueTeamOrgAdmin1786721090000',
+    ]);
+    for (const name of creators) expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${name}`]).toBeDefined();
+    // The NEWEST creator is the body every fully migrated database carries: it must build exactly LATEST.
+    const newest = creators.sort((a, b) => Number(a.slice(-13)) - Number(b.slice(-13)))[creators.length - 1]!;
+    expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${newest}`]).toBe(LATEST_WORKSPACE_MODULE_VERSION);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
+  });
+
+  it('the rendered bodies parse to their mapped module versions (guards v3: 18; its down(): the v18 VenueTeamOrgAdmin body)', () => {
+    expect(parseProvisionFunctionSource(provisionWorkspaceGuardsUpSql())).toEqual({ state: 'known', literal: GUARDS_PROVISION_APP_VERSION, moduleVersion: 18 });
+    expect(parseProvisionFunctionSource(provisionWorkspaceGuardsDownSql())).toEqual({
+      state: 'known',
+      literal: 'db:provision_workspace@VenueTeamOrgAdmin1786721090000',
+      moduleVersion: 18,
+    });
   });
 });

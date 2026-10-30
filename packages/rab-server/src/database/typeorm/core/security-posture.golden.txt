@@ -235,6 +235,12 @@ execute|current_uid()|crewflow_app|true
 execute|current_uid()|crewflow|true
 execute|current_workspace()|crewflow_app|true
 execute|current_workspace()|crewflow|true
+execute|deployment_identity_bind(text,uuid,text,text,uuid,text[])|PUBLIC|false
+execute|deployment_identity_bind(text,uuid,text,text,uuid,text[])|crewflow_app|false
+execute|deployment_identity_bind(text,uuid,text,text,uuid,text[])|crewflow|false
+execute|deployment_identity_check()|PUBLIC|false
+execute|deployment_identity_check()|crewflow_app|true
+execute|deployment_identity_check()|crewflow|true
 execute|email_outbox_scrub_secret_body()|crewflow_app|false
 execute|email_outbox_scrub_secret_body()|crewflow|true
 execute|email_registered_in_another_organisation(text)|PUBLIC|false
@@ -464,6 +470,9 @@ execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|crewflow|
 execute|worker_resolve_workspace_organisation(uuid)|PUBLIC|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow_app|false
 execute|worker_resolve_workspace_organisation(uuid)|crewflow|true
+execute|worker_workspace_provisioning_health()|PUBLIC|false
+execute|worker_workspace_provisioning_health()|crewflow_app|true
+execute|worker_workspace_provisioning_health()|crewflow|false
 execute|workspace_schema_fingerprint(uuid)|crewflow_app|false
 execute|workspace_schema_fingerprint(uuid)|crewflow|true
 execute|workspace_schema_fingerprint_lines(uuid)|crewflow_app|false
@@ -522,6 +531,8 @@ owner|function|current_org()|rab_secure_owner|definer=false
 owner|function|current_role_name()|rab_secure_owner|definer=false
 owner|function|current_uid()|rab_secure_owner|definer=false
 owner|function|current_workspace()|rab_secure_owner|definer=false
+owner|function|deployment_identity_bind(text,uuid,text,text,uuid,text[])|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|deployment_identity_check()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|email_outbox_scrub_secret_body()|crewflow|definer=false
 owner|function|email_registered_in_another_organisation(text)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|enforce_member_role_permission_allowlist()|crewflow|definer=false
@@ -606,6 +617,7 @@ owner|function|worker_list_pending_workspace_schemas(integer)|rab_secure_owner|d
 owner|function|worker_list_workspaces(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|worker_workspace_provisioning_health()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|workspace_schema_fingerprint(uuid)|crewflow|definer=false
 owner|function|workspace_schema_fingerprint_lines(uuid)|crewflow|definer=false
 owner|function|workspace_schema_migration_append_only()|crewflow|definer=false
@@ -628,6 +640,8 @@ owner|table|ai_usage|crewflow
 owner|table|attendance_correction|crewflow
 owner|table|attendance|crewflow
 owner|table|audit_log|crewflow
+owner|table|deployment_identity_history|rab_secure_owner
+owner|table|deployment_identity|rab_secure_owner
 owner|table|email_change_request|rab_secure_owner
 owner|table|email_outbox|crewflow
 owner|table|host_label_claim|crewflow
@@ -714,6 +728,8 @@ rls|ai_usage|enable=true|force=true
 rls|attendance_correction|enable=true|force=true
 rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
+rls|deployment_identity_history|enable=true|force=true
+rls|deployment_identity|enable=true|force=true
 rls|email_change_request|enable=true|force=false
 rls|email_outbox|enable=true|force=true
 rls|host_label_claim|enable=true|force=true
@@ -819,6 +835,10 @@ table|attendance|crewflow_app|S,I,U,D
 table|attendance|crewflow|S,I,U,D,T,R,G
 table|audit_log|crewflow_app|S,I
 table|audit_log|crewflow|S,I,R,G
+table|deployment_identity_history|crewflow_app|
+table|deployment_identity_history|crewflow|
+table|deployment_identity|crewflow_app|
+table|deployment_identity|crewflow|
 table|email_change_request|crewflow_app|S,I,U
 table|email_change_request|crewflow|S,I,U
 table|email_outbox|crewflow_app|S,I,U

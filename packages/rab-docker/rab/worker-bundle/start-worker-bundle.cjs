@@ -55,9 +55,15 @@ const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
  * Reviewed allowlist for the ordinary jobs child, reconciled 2026-10-22 against
  * packages/rab-server/src/engine/core-modules/environment/environment-variables.ts (the validator the Worker's Nest context
  * runs, including productionConfigurationProblems) plus the direct process.env reads in rab-server/rab-worker
- * (instrument.ts, core.datasource.ts DB_POOL_MAX, runtime-database-guard.ts, render-pdf.util.ts, main.ts).
+ * (instrument.ts, the connection factory src/database/postgres, runtime-database-guard.ts, render-pdf.util.ts, main.ts).
  *
- * Deliberately absent: DATABASE_URL_UNPOOLED (the jobs guard refuses it), CREWFLOW_* (provisioning/migration/bootstrap),
+ * Phase B: the database settings are the PG_* family (the connection factory, pg-config.ts) plus the deployment identity
+ * (CREWFLOW_DEPLOYMENT_ENVIRONMENT / CREWFLOW_DEPLOYMENT_ID / PG_EXPECTED_DATABASE_NAME, checked against the database's
+ * marker by every process). The legacy DATABASE_URL / DATABASE_DIRECT_URL / DB_POOL_MAX are still forwarded for
+ * non-production stacks; a production Worker service refuses them (makePlan) and so does the jobs child itself.
+ *
+ * Deliberately absent: DATABASE_URL_UNPOOLED (the jobs guard refuses it), CREWFLOW_* (provisioning/migration/bootstrap;
+ * CREWFLOW_DEPLOYMENT_ENVIRONMENT/ID are identity declarations, not authority),
  * DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS (command authority), BOOTSTRAP_ADMIN_* / SEED_*, TEST_* / RAB_TEST_*,
  * AUTH_*_ISSUER_URL (test-only, refused in production), PORT (no listener), NODE_OPTIONS (would allow --inspect/--require),
  * DOTENV_CONFIG_* (would redirect dotenv). Unknown variables are never forwarded. When the validator gains a variable
@@ -66,8 +72,19 @@ const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 const JOBS_ENV_KEYS = Object.freeze([
   // Runtime identity / process
   'NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ', 'APP_VERSION', 'SENTRY_DSN', 'WORKER_SHUTDOWN_TIMEOUT_MS',
-  // Restricted database + queue
-  'DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX', 'REDIS_URL',
+  // Restricted database (Phase B: one PG_DATABASE_URL, the restricted crewflow_app login; pool and timeout settings; TLS)
+  // + deployment identity + queue. The read-replica keys (PG_DATABASE_REPLICA_*) are API-only and never forwarded.
+  'PG_DATABASE_URL', 'PG_POOL_MAX_CONNECTIONS', 'PG_POOL_IDLE_TIMEOUT_MS', 'PG_POOL_ALLOW_EXIT_ON_IDLE',
+  'PG_DATABASE_PRIMARY_TIMEOUT_MS', 'PG_SSL_ALLOW_SELF_SIGNED',
+  'PG_SSL_CA_CERT_PATH', 'PG_DATABASE_URL_IS_DIRECT',
+  // Phase B (B5): the declared deployment shape the startup connection-budget check reads (src/database/runtime/
+  // connection-budget.ts); identical on every service of one deployment.
+  'PG_EXPECTED_API_INSTANCES', 'PG_EXPECTED_WORKER_INSTANCES', 'PG_EXPECTED_API_POOL_MAX', 'PG_EXPECTED_WORKER_POOL_MAX',
+  'PG_EXPECTED_MIGRATE_CONNECTIONS', 'PG_PROVIDER_RESERVED_CONNECTIONS',
+  'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID', 'PG_EXPECTED_DATABASE_NAME',
+  // Deprecated (non-production only; a production Worker service refuses them)
+  'DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX',
+  'REDIS_URL',
   // Encryption / signing (push credentials, QR tokens, report links)
   'APP_SECRET', 'APP_ENCRYPTION_KEYRING', 'APP_ENCRYPTION_ACTIVE_KID', 'APP_JWT_SIGNING_KEYRING', 'APP_JWT_ACTIVE_KID',
   // Wave 1 lane A: legacy APP_SECRET JWT-key cut-off (validated together with the keyring above)
@@ -156,11 +173,18 @@ const JOBS_ENV_KEYS = Object.freeze([
  * Reviewed allowlist for the provisioner child: workspace-provisioner.main.ts builds no Nest context, so it validates no
  * app configuration and needs no APP_SECRET, email, storage, push or sign-in settings. It reads NODE_ENV/RAB_RUNTIME_ENV
  * (runtime guard), REDIS_URL (its own heartbeat/stats only), SENTRY_DSN (instrument.ts), HWS_RUNTIME_ENABLED (passed
- * through unchanged, Phase A — no longer forced), and — set by the launcher, never forwarded — DATABASE_URL /
- * DATABASE_URL_UNPOOLED, CREWFLOW_PROVISIONER_ENABLED ("true") and WORKSPACE_PROVISIONER_INTERVAL_SECONDS (the validated
- * effective value). The provisioner child is left out of the plan only when CREWFLOW_PROVISIONER_ENABLED=false.
+ * through unchanged, Phase A — no longer forced), the TLS settings (PG_SSL_CA_CERT_PATH, PG_SSL_ALLOW_SELF_SIGNED) and the
+ * deployment identity its runtime guard checks against the marker (CREWFLOW_DEPLOYMENT_ENVIRONMENT, CREWFLOW_DEPLOYMENT_ID,
+ * PG_EXPECTED_DATABASE_NAME), and — set by the launcher, never forwarded — PG_DATABASE_URL (Phase B: the provisioner
+ * credential, taken from CREWFLOW_PROVISIONER_DATABASE_URL; the child never receives DATABASE_URL or DATABASE_URL_UNPOOLED),
+ * CREWFLOW_PROVISIONER_ENABLED ("true") and WORKSPACE_PROVISIONER_INTERVAL_SECONDS (the validated effective value). The
+ * provisioner child is left out of the plan only when CREWFLOW_PROVISIONER_ENABLED=false.
  */
-const PROVISIONER_ENV_KEYS = Object.freeze(['NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ', 'REDIS_URL', 'SENTRY_DSN', 'HWS_RUNTIME_ENABLED']);
+const PROVISIONER_ENV_KEYS = Object.freeze([
+  'NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ', 'REDIS_URL', 'SENTRY_DSN', 'HWS_RUNTIME_ENABLED',
+  'PG_SSL_CA_CERT_PATH', 'PG_SSL_ALLOW_SELF_SIGNED',
+  'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID', 'PG_EXPECTED_DATABASE_NAME',
+]);
 
 /**
  * Phase A (pa-provisioner): provisioner polling interval bounds, in seconds. MUST equal the constants in
@@ -171,16 +195,41 @@ const PROVISIONER_ENV_KEYS = Object.freeze(['NODE_ENV', 'RAB_RUNTIME_ENV', 'TZ',
  */
 const PROVISIONER_INTERVAL = Object.freeze({ defaultSeconds: 60, legacyDefaultSeconds: 5, minSeconds: 5, maxSeconds: 120 });
 
-/** Present on the Worker service at all (non-empty) → refuse: this service never holds migration or bootstrap authority. */
+/**
+ * Present on the Worker service at all (non-empty) → refuse: this service never holds migration, bootstrap, command or
+ * operations authority. Security review L-4: this is a literal copy of the shared list in
+ * packages/rab-server/src/database/typeorm/core/never-in-runtime-env.ts (forbiddenWorkerServiceEnvNames: every name
+ * except CREWFLOW_PROVISIONER_DATABASE_URL, which this launcher holds and hands to the provisioner child as its
+ * PG_DATABASE_URL). This file ships standalone in the Worker image, so it cannot import that module;
+ * never-in-runtime-env.spec.ts fails the server build when the two drift.
+ */
 const FORBIDDEN_SERVICE_KEYS = Object.freeze([
   'DATABASE_URL_UNPOOLED',
+  'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL',
   'CREWFLOW_MIGRATION_APPROVED',
   'CREWFLOW_MIGRATION_DATABASE_URL',
   'CREWFLOW_MIGRATION_PHASE',
+  'CREWFLOW_MIGRATOR_PASSWORD',
   'CREWFLOW_BOOTSTRAP_PASSWORD',
   'CREWFLOW_APP_BOOTSTRAP_PASSWORD',
   'ALLOW_PRODUCTION_DB_COMMANDS',
+  // Command authority (migrations and CLI commands only); the launcher never forwarded it, now it refuses it outright.
+  // Strict by name, whatever its value: the in-process guard alone tolerates DB_TARGET=local|test in a non-production
+  // runtime (local `yarn start`); this launcher only runs in the Worker image, where docker-compose.yml blanks it.
+  'DB_TARGET',
+  // Phase B / B3: the one-time bootstrap of an unbound production database is a migration-command action only.
+  'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
+  // Phase B (ops): the one-off operations container's variables (its crewflow_app URL, its marker, the operator label).
+  // They belong to `docker compose --profile ops run --rm rab-ops ...` only (pg-config.ts refuses them in every child too).
+  'CREWFLOW_OPS_RUN',
+  'PG_OPS_APP_DATABASE_URL',
+  'CREWFLOW_OPS_ACTOR_SOURCE',
+  'CREWFLOW_OPS_ACTOR_ID',
+  'CREWFLOW_OPS_CHANGE_REF',
 ]);
+
+/** Phase B: deprecated database names a PRODUCTION Worker service must not carry (production takes PG_DATABASE_URL only). */
+const LEGACY_DATABASE_KEYS = Object.freeze(['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']);
 
 /** Packaged dotenv files would undermine explicit environment construction (main.ts loads ./.env, the provisioner its own). */
 const DOTENV_PATHS = Object.freeze([
@@ -227,11 +276,24 @@ function pgUrl(value, label) {
   if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || url.pathname.length < 2) {
     throw new BundleConfigError(`Invalid ${label}: expected postgres://user:password@host[:port]/database`);
   }
-  return { user: decodeURIComponent(url.username), host: url.hostname.toLowerCase(), database: decodeURIComponent(url.pathname.slice(1)) };
+  return {
+    user: decodeURIComponent(url.username),
+    host: url.hostname.toLowerCase(),
+    port: url.port ? Number(url.port) : 5432,
+    database: decodeURIComponent(url.pathname.slice(1)),
+  };
 }
 
-/** Neon's transaction pooler cannot carry session advisory locks or the provisioner's own BEGIN/COMMIT pairs. */
-const isPoolerHost = (host) => /-pooler\./.test(host);
+/**
+ * Documented transaction-pooler shapes (the same denylist as the connection factory, pg-url-policy.ts
+ * detectTransactionPooler): a pooler cannot carry session advisory locks or the provisioner's own BEGIN/COMMIT pairs.
+ * Defence in depth only — the children refuse these too, and the jobs child runs a live session probe.
+ */
+const isPoolerHost = ({ host, port }) =>
+  /-pooler\./.test(host) ||
+  (host.endsWith('.pooler.supabase.com') && port === 6543) ||
+  (host.endsWith('.ondigitalocean.com') && port === 25061) ||
+  /\.proxy-[a-z0-9]+\.[a-z0-9-]+\.rds\.amazonaws\.com$/.test(host);
 
 /**
  * Phase A (pa-provisioner): strict switch. Returns 'on' / 'off' / 'legacy' (unset or empty), or throws
@@ -286,29 +348,46 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
       'CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled: remove it from the Worker service, or set CREWFLOW_PROVISIONER_ENABLED=true',
     );
   }
-  const appUrl = required(env, 'DATABASE_URL');
-  const directUrl = required(env, 'DATABASE_DIRECT_URL');
+  // Phase B: the jobs child's one connection is PG_DATABASE_URL (crewflow_app, direct: it is also the session-lock
+  // connection). Outside production the deprecated DATABASE_URL (+ an optional DATABASE_DIRECT_URL for the locks) is still
+  // accepted; a production service must not carry the legacy names at all.
+  const production = env.NODE_ENV === 'production' || env.RAB_RUNTIME_ENV === 'production';
+  if (production) {
+    for (const key of LEGACY_DATABASE_KEYS) {
+      if (nonEmpty(env, key)) throw new BundleConfigError(`${key} is a deprecated name a production Worker service must not carry; use PG_DATABASE_URL (and PG_POOL_MAX_CONNECTIONS)`);
+    }
+  }
+  const appName = nonEmpty(env, 'PG_DATABASE_URL') || production ? 'PG_DATABASE_URL' : 'DATABASE_URL';
+  if (appName === 'DATABASE_URL' && !nonEmpty(env, 'DATABASE_URL')) throw new BundleConfigError('Missing PG_DATABASE_URL');
+  const appUrl = required(env, appName);
+  const directName = nonEmpty(env, 'DATABASE_DIRECT_URL') ? 'DATABASE_DIRECT_URL' : null;
   const provisionerUrl = withProvisioner ? required(env, 'CREWFLOW_PROVISIONER_DATABASE_URL') : null;
   required(env, 'REDIS_URL');
-  const app = pgUrl(appUrl, 'DATABASE_URL');
-  const direct = pgUrl(directUrl, 'DATABASE_DIRECT_URL');
+  const app = pgUrl(appUrl, appName);
+  if (appName === 'PG_DATABASE_URL' && nonEmpty(env, 'DATABASE_URL')) {
+    const legacy = pgUrl(env.DATABASE_URL.trim(), 'DATABASE_URL');
+    if (legacy.user !== app.user || legacy.host !== app.host || legacy.port !== app.port || legacy.database !== app.database) {
+      throw new BundleConfigError('PG_DATABASE_URL and the deprecated DATABASE_URL name different targets; remove DATABASE_URL');
+    }
+  }
+  const direct = directName ? pgUrl(env[directName].trim(), directName) : null;
   const provisioner = provisionerUrl ? pgUrl(provisionerUrl, 'CREWFLOW_PROVISIONER_DATABASE_URL') : null;
-  if (app.user !== 'crewflow_app' || direct.user !== 'crewflow_app') {
-    throw new BundleConfigError('DATABASE_URL and DATABASE_DIRECT_URL must log in as crewflow_app (the live role guards still run too)');
+  if (app.user !== 'crewflow_app' || (direct && direct.user !== 'crewflow_app')) {
+    throw new BundleConfigError(`${appName}${direct ? ` and ${directName}` : ''} must log in as crewflow_app (the live role guards still run too)`);
   }
   if (provisioner && provisioner.user !== 'crewflow') throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL must log in as crewflow');
-  if (app.database !== direct.database || (provisioner && app.database !== provisioner.database)) {
+  if ((direct && app.database !== direct.database) || (provisioner && app.database !== provisioner.database)) {
     throw new BundleConfigError(
-      provisioner
-        ? 'DATABASE_URL, DATABASE_DIRECT_URL and CREWFLOW_PROVISIONER_DATABASE_URL name different databases'
-        : 'DATABASE_URL and DATABASE_DIRECT_URL name different databases',
+      `${[appName, direct && directName, provisioner && 'CREWFLOW_PROVISIONER_DATABASE_URL'].filter(Boolean).join(', ')} name different databases`,
     );
   }
-  if (isPoolerHost(direct.host)) throw new BundleConfigError('DATABASE_DIRECT_URL is a pooled (-pooler) host; use the direct host');
-  if (provisioner && isPoolerHost(provisioner.host)) throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL is a pooled (-pooler) host; use the direct host');
+  // The session-lock connection: the deprecated DATABASE_DIRECT_URL when set, otherwise PG_DATABASE_URL itself.
+  const lockName = direct ? directName : appName;
+  if (isPoolerHost(direct ?? app)) throw new BundleConfigError(`${lockName} is a transaction-pooler host; the Worker needs a direct (session) connection`);
+  if (provisioner && isPoolerHost(provisioner)) throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL is a pooled (-pooler) host; use the direct host');
   // Validated only where it is used; a disabled provisioner ignores it (it is never forwarded to the jobs child).
   const intervalSeconds = withProvisioner ? provisionerIntervalSeconds(env, mode) : null;
-  if (env.NODE_ENV === 'production' || env.RAB_RUNTIME_ENV === 'production') {
+  if (production) {
     if (env.NODE_ENV !== 'production' || env.RAB_RUNTIME_ENV !== 'production') {
       throw new BundleConfigError('NODE_ENV=production and RAB_RUNTIME_ENV=production must be set together');
     }
@@ -343,8 +422,9 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   const provisionerEnv = {
     // HWS_RUNTIME_ENABLED is passed through exactly as the service has it (Phase A — no longer forced to "true").
     ...own(env, PROVISIONER_ENV_KEYS),
-    DATABASE_URL: provisionerUrl,
-    DATABASE_URL_UNPOOLED: provisionerUrl,
+    // Phase B: the provisioner credential under the one variable name every process uses. Never DATABASE_URL /
+    // DATABASE_URL_UNPOOLED (production refuses the legacy names; the child's runtime guard and factory read this one).
+    PG_DATABASE_URL: provisionerUrl,
     // The explicit opt-in is what makes the child provision (workspace-provisioner.config.ts); the validated interval.
     CREWFLOW_PROVISIONER_ENABLED: 'true',
     WORKSPACE_PROVISIONER_INTERVAL_SECONDS: String(intervalSeconds),

@@ -7,6 +7,8 @@ export interface HttpResponse<T = any> {
   headers: Record<string, string | string[] | undefined>;
   body: T;
   text: string;
+  /** The body bytes as received (documents: PDFs, CSV). */
+  raw: Buffer;
   ms: number;
 }
 
@@ -97,7 +99,8 @@ export class ApiClient {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
+          const raw = Buffer.concat(chunks);
+          const text = raw.toString('utf8');
           this.absorbCookies(res.headers['set-cookie']);
           let parsed: any = text;
           if ((res.headers['content-type'] ?? '').includes('json') && text) {
@@ -107,7 +110,7 @@ export class ApiClient {
               parsed = text;
             }
           }
-          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: parsed, text, ms: performance.now() - started });
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, body: parsed, text, raw, ms: performance.now() - started });
         });
       });
       r.on('timeout', () => r.destroy(new Error(`timeout ${method} ${path}`)));

@@ -14,7 +14,8 @@
 # What this layer changes (and nothing else):
 #   - application code and dependencies under /app become root-owned and not group/other-writable, so neither child
 #     identity can rewrite code the other imports (the shared image ships them owned by node:node = the jobs UID);
-#   - start.sh / start-worker.sh are removed: start.sh MIGRATES before booting and must never run in this service;
+#   - the API entry scripts (start.sh, api-prestart.sh) and start-worker.sh are removed: they start the API (which never
+#     migrates since Phase B; migrations run only in rab-migrate) and never belong in this service;
 #   - a dedicated provisioner identity (10001:10001), separate 0700 temp/home directories, and per-child health
 #     directories (writable only by their own child) are created;
 #   - tini becomes PID 1 (reaps orphaned Chromium processes, forwards signals) and the dependency-free launcher runs as
@@ -34,7 +35,7 @@ RUN set -eux; \
     adduser -D -H -h /nonexistent -s /sbin/nologin -u 10001 -G crewflow-provisioner crewflow-provisioner; \
     test -z "$(id -G node | tr ' ' '\n' | grep -vx 1000 || true)"; \
     test -z "$(id -G crewflow-provisioner | tr ' ' '\n' | grep -vx 10001 || true)"; \
-    rm -f /app/start.sh /app/start-worker.sh; \
+    rm -f /app/start.sh /app/start-worker.sh /app/api-prestart.sh; \
     chown -R root:root /app; \
     chmod -R go-w /app; \
     mkdir -p /app/storage; chown 1000:1000 /app/storage; chmod 0750 /app/storage; \

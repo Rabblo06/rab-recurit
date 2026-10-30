@@ -510,7 +510,7 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
       ['provisioner configured with the runtime role', { CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow_app:${SECRETS.BT_APP_PASSWORD}@pg:5432/rab` }, /refused: CREWFLOW_PROVISIONER_DATABASE_URL must log in as crewflow/],
       ['jobs configured with the privileged role', { DATABASE_URL: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL and DATABASE_DIRECT_URL must log in as crewflow_app/],
       ['DATABASE_URL_UNPOOLED on the service', { DATABASE_URL_UNPOOLED: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL_UNPOOLED must not be configured/],
-      ['migration approval on the service', { CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }, /refused: CREWFLOW_MIGRATION_APPROVED must not be configured/],
+      ['migration approval on the service', { CREWFLOW_MIGRATION_APPROVED: `pending-1-${'0'.repeat(64)}` }, /refused: CREWFLOW_MIGRATION_APPROVED must not be configured/],
       ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:wrong-password@pg:5432/rab' }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the DATABASE_URL database .*driver code 28P01/],
       // Phase A (pa-provisioner): the opt-in switch and the interval bounds.
       ['provisioner disabled but its URL still present', { CREWFLOW_PROVISIONER_ENABLED: 'false' }, /refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/],

@@ -69,7 +69,14 @@ describeIfDb('hws:backfill (integration)', () => {
   let dataSource: DataSource; // rab_app — the same DataSource HwsBackfillService uses for reads
   let adminDataSource: DataSource; // rab_owner, TypeORM — fixture bootstrap
   let ownerClient: Client; // rab_owner, raw pg — provisionWorkspaceSchema
-  let backfillOwnerDataSource: DataSource; // rab_owner, TypeORM entities:[] — HwsBackfillService.ownerDataSource
+  let backfillOwnerDataSource: DataSource; // the disposable cluster's bootstrap owner, TypeORM entities:[]
+  /**
+   * Phase B ops container (owner decision): the physical copy (`HwsBackfillService.ownerDataSource`, i.e. `writePhysical`)
+   * runs as the RESTRICTED runtime login crewflow_app — the same injected DataSource as every read — so that is what this
+   * suite proves by default. HWS_BACKFILL_PROOF_WRITER=crewflow (the previous production writer) or =owner (the disposable
+   * cluster's bootstrap superuser) re-runs the identical assertions, for the side-by-side proof in the runbook's ops section.
+   */
+  let backfillWriter: DataSource;
   let passwordHashing: PasswordHashingService;
   let backfill: HwsBackfillService;
 
@@ -90,12 +97,23 @@ describeIfDb('hws:backfill (integration)', () => {
     await ownerClient.connect();
     backfillOwnerDataSource = new DataSource({ type: 'postgres', url: adminUrl, entities: [], synchronize: false, logging: false });
     await backfillOwnerDataSource.initialize();
+    const proofWriter = process.env.HWS_BACKFILL_PROOF_WRITER;
+    if (proofWriter === 'crewflow') {
+      // The previous production writer (the elevated owner connection, crewflow): FORCE RLS applies to it like any role.
+      const crewflowUrl = process.env.TEST_DATABASE_CREWFLOW_URL;
+      if (!crewflowUrl) throw new Error('HWS_BACKFILL_PROOF_WRITER=crewflow needs TEST_DATABASE_CREWFLOW_URL');
+      backfillWriter = new DataSource({ type: 'postgres', url: crewflowUrl, entities: [], synchronize: false, logging: false });
+      await backfillWriter.initialize();
+    } else {
+      backfillWriter = proofWriter === 'owner' ? backfillOwnerDataSource : dataSource;
+    }
 
     backfill = new HwsBackfillService(dataSource, app.get(SchemaResolverService));
   });
 
   afterAll(async () => {
     await ownerClient.end();
+    if (backfillWriter !== dataSource && backfillWriter !== backfillOwnerDataSource) await backfillWriter.destroy();
     await backfillOwnerDataSource.destroy();
     await adminDataSource.destroy();
     await app.close();
@@ -396,7 +414,7 @@ describeIfDb('hws:backfill (integration)', () => {
     const seeded = await seedLegacyBusinessData(a);
 
     const result = await (async () => {
-      backfill.ownerDataSource = backfillOwnerDataSource;
+      backfill.ownerDataSource = backfillWriter;
       try {
         return await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
       } finally {
@@ -457,7 +475,7 @@ describeIfDb('hws:backfill (integration)', () => {
   it('re-applying an already-complete workspace copies nothing twice — same row counts, same ids, no duplicates', async () => {
     const a = await seedReadyWorkspace('bf-idempotent');
     await seedLegacyBusinessData(a);
-    backfill.ownerDataSource = backfillOwnerDataSource;
+    backfill.ownerDataSource = backfillWriter;
     try {
       const first = await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
       expect(first.overall).toBe('completed');
@@ -483,7 +501,7 @@ describeIfDb('hws:backfill (integration)', () => {
   it('resumes correctly after a genuine mid-run interruption — a real crash scenario, continued to completion with no duplication', async () => {
     const a = await seedReadyWorkspace('bf-resume');
     await seedLegacyBusinessData(a);
-    backfill.ownerDataSource = backfillOwnerDataSource;
+    backfill.ownerDataSource = backfillWriter;
 
     try {
       // Deterministic interruption: run apply() to full completion once (real data, real checkpoints for all 15
@@ -534,7 +552,7 @@ describeIfDb('hws:backfill (integration)', () => {
     const a = await seedReadyWorkspace('bf-iso-a');
     await seedLegacyBusinessData(a);
     const b = await seedReadyWorkspace('bf-iso-b');
-    backfill.ownerDataSource = backfillOwnerDataSource;
+    backfill.ownerDataSource = backfillWriter;
     try {
       await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
       await backfill.apply({ workspaceId: b.workspaceId, organisationId: b.organisationId });
@@ -595,7 +613,7 @@ describeIfDb('hws:backfill (integration)', () => {
   it('after backfill, the real TenantContextService.runInWorkspaceContext (HWS_RUNTIME_ENABLED=true) reads the backfilled row through the exact production runtime path', async () => {
     const a = await seedReadyWorkspace('bf-runtime-path');
     const seeded = await seedLegacyBusinessData(a);
-    backfill.ownerDataSource = backfillOwnerDataSource;
+    backfill.ownerDataSource = backfillWriter;
     try {
       const result = await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
       expect(result.overall).toBe('completed');
@@ -642,10 +660,22 @@ describeIfDb('hws:backfill (integration)', () => {
       );
       return u.id as string;
     });
+    // The team link names a real VENUE manager of this workspace (Phase B ops proof: the fixture used to point at the owner's
+    // INTERNAL profile, a row `venue_manager_staff_owner`'s WITH CHECK forbids for every role but a superuser — so the copy
+    // "passed" only with the disposable cluster's superuser and failed for both crewflow and crewflow_app).
+    const venueManagerUserId = await adminDataSource.transaction(async (manager) => {
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [a.organisationId, a.workspaceId]);
+      const [u] = await manager.query(
+        `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Venue', 'Manager', 'active') RETURNING id`,
+        [a.organisationId, `venue-manager-${randomUUID()}@example.test`],
+      );
+      await manager.insert(ManagerProfile, { organisationId: a.organisationId, userId: u.id as string, type: ManagerType.VENUE, workspaceId: a.workspaceId });
+      return u.id as string;
+    });
     await adminDataSource.query(
       `INSERT INTO core.venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id, created_at)
        SELECT $1, $2, mp.id, $3, '2026-10-16 07:38:11.103037+00' FROM core.manager_profile mp WHERE mp.workspace_id = $2 AND mp.user_id = $4`,
-      [a.organisationId, a.workspaceId, seeded.staffProfileId, a.ownerUserId],
+      [a.organisationId, a.workspaceId, seeded.staffProfileId, venueManagerUserId],
     );
     await adminDataSource.query(
       `INSERT INTO core.shift_staff_review (organisation_id, workspace_id, shift_id, staff_profile_id, reviewer_user_id, grooming, attitude, skills, attendance, time_keeping, feedback, created_at, updated_at)
@@ -662,7 +692,7 @@ describeIfDb('hws:backfill (integration)', () => {
       )[0];
     const coreBefore = await coreCounts();
     const applyAll = async () => {
-      backfill.ownerDataSource = backfillOwnerDataSource;
+      backfill.ownerDataSource = backfillWriter;
       try {
         return await backfill.apply({ workspaceId: a.workspaceId, organisationId: a.organisationId });
       } finally {

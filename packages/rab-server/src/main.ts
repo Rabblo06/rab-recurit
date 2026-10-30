@@ -15,6 +15,7 @@ import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from './engine/
 import { WorkspaceHostResolverService } from './engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { assertHwsStartupInvariants, HwsStartupError } from './database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeorm/core/runtime-database-guard';
+import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates';
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
 function refuseStartup(error: unknown): never {
@@ -33,6 +34,8 @@ function refuseStartup(error: unknown): never {
 async function bootstrap(): Promise<void> {
   // RUNTIME boundary: the database identity is verified BEFORE NestFactory opens any connection or any listener.
   await assertRuntimeDatabaseIdentity('api').catch(refuseStartup);
+  // Phase B boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending migrations), before Nest.
+  await runDatabaseBootGates('api').catch(refuseStartup);
   const app = await NestFactory.create(AppModule);
   await assertRuntimeDbRole(app.get(DataSource), 'API server');
   const environmentService = app.get(EnvironmentService);

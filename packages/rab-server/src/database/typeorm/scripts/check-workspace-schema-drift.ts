@@ -8,14 +8,14 @@
  * runtime role cannot execute the recorder. Records observed fingerprints / drift status (alert-only; routing unaffected).
  * Exit 1 on any DRIFTED / MISSING / UNVERIFIED / ERROR finding (BEHIND alone exits 0 with a warning).
  */
-import { Client } from 'pg';
-
+import { createPgClientForUrl } from '../../postgres';
 import { checkWorkspaceSchemaDrift } from '../workspace-schema/workspace-schema-drift';
 
 async function main(): Promise<void> {
   const url = process.env.DRIFT_DATABASE_URL?.trim();
   if (!url) throw new Error('DRIFT_DATABASE_URL is required. There is no fallback.');
-  const client = new Client({ connectionString: url, connectionTimeoutMillis: 10_000 });
+  // Security review L-5: the connection factory (URL policy, TLS, explicit fields), never a raw connection string to pg.
+  const client = createPgClientForUrl(url, 'DRIFT_DATABASE_URL', { purpose: 'drift', sessionAffinity: true, statementTimeoutMs: 60_000 });
   await client.connect();
   try {
     const r = await checkWorkspaceSchemaDrift(client);

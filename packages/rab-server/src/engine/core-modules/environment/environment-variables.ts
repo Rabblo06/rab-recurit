@@ -3,6 +3,8 @@ import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches,
 
 // Phase A pa-intervals
 import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-intervals';
+// Phase B (B3): the deployment identity's accepted values, from their one definition.
+import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
 
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
@@ -27,9 +29,139 @@ export class EnvironmentVariables {
   @Max(65535)
   PORT: number = 3000;
 
-  @IsNotEmpty({ message: 'DATABASE_URL is required — the process must not start without it' })
+  /**
+   * Phase B (B1): the database connection. `PG_DATABASE_URL` is the one primary variable in every process; each process
+   * gets its own credential through its own environment. The full rules — legacy names accepted only outside production
+   * (with a deprecation warning), conflicts refused, URL parameter policy, TLS, strict numbers — live in
+   * src/database/postgres/pg-config.ts, which env.validation.ts runs. The declarations below only give the keys a shape.
+   */
+  @IsOptional()
   @IsString()
-  DATABASE_URL!: string;
+  PG_DATABASE_URL?: string;
+
+  /** Deprecated (non-production only; production refuses it). Superseded by PG_DATABASE_URL. */
+  @IsOptional()
+  @IsString()
+  DATABASE_URL?: string;
+
+  /** Runtime pool ceiling per process (default 10). Strictly validated in pg-config.ts (digits only, 1-100). */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d+$/, { message: 'PG_POOL_MAX_CONNECTIONS must be a whole number' })
+  PG_POOL_MAX_CONNECTIONS?: string;
+
+  /** Idle pooled connections are closed after this long (default 600000 ms; 0 = never). */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d+$/, { message: 'PG_POOL_IDLE_TIMEOUT_MS must be a whole number of milliseconds' })
+  PG_POOL_IDLE_TIMEOUT_MS?: string;
+
+  /** pg-pool allowExitOnIdle (default false). */
+  @IsOptional()
+  @Type(() => String)
+  @IsIn(['true', 'false'], { message: 'PG_POOL_ALLOW_EXIT_ON_IDLE must be exactly true or false' })
+  PG_POOL_ALLOW_EXIT_ON_IDLE?: string;
+
+  /** Client-side query timeout (pg query_timeout) for runtime connections (default 30000 ms; at least the 30 s statement timeout). */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d+$/, { message: 'PG_DATABASE_PRIMARY_TIMEOUT_MS must be a whole number of milliseconds' })
+  PG_DATABASE_PRIMARY_TIMEOUT_MS?: string;
+
+  /** Accept a self-signed server certificate (default false). Refused in production. */
+  @IsOptional()
+  @Type(() => String)
+  @IsIn(['true', 'false'], { message: 'PG_SSL_ALLOW_SELF_SIGNED must be exactly true or false' })
+  PG_SSL_ALLOW_SELF_SIGNED?: string;
+
+  /** PEM CA bundle that verifies the database server (default: the system CA store). Read at boot. */
+  @IsOptional()
+  @IsString()
+  PG_SSL_CA_CERT_PATH?: string;
+
+  /** Declares PG_DATABASE_URL a direct (non-pooled) connection. Never skips the Worker's session probe. */
+  @IsOptional()
+  @Type(() => String)
+  @IsIn(['true', 'false'], { message: 'PG_DATABASE_URL_IS_DIRECT must be exactly true or false' })
+  PG_DATABASE_URL_IS_DIRECT?: string;
+
+  /**
+   * Phase B (B4): optional read replica (a physical standby). Validated in pg-config.ts by the primary's URL policy and TLS
+   * rules (verify-full in production) and refused when it names the primary. Reads opt in explicitly (src/database/replica).
+   */
+  @IsOptional()
+  @IsString()
+  PG_DATABASE_REPLICA_URL?: string;
+
+  /** Client-side query timeout on the replica (default 30000 ms; same bounds as PG_DATABASE_PRIMARY_TIMEOUT_MS). */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d+$/, { message: 'PG_DATABASE_REPLICA_TIMEOUT_MS must be a whole number of milliseconds' })
+  PG_DATABASE_REPLICA_TIMEOUT_MS?: string;
+
+  /** Replica lag beyond which reads go back to the primary (default 5000 ms; 100..600000). */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d+$/, { message: 'PG_DATABASE_REPLICA_MAX_LAG_MS must be a whole number of milliseconds' })
+  PG_DATABASE_REPLICA_MAX_LAG_MS?: string;
+
+  /**
+   * Phase B (B5): the declared deployment shape for the startup connection-budget check
+   * (src/database/runtime/connection-budget.ts, which enforces the ranges and refuses a configured total above the
+   * server's capacity). Identical on every service of one deployment. Instance counts unset → the check warns and skips.
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_EXPECTED_API_INSTANCES must be a whole number' })
+  PG_EXPECTED_API_INSTANCES?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_EXPECTED_WORKER_INSTANCES must be a whole number' })
+  PG_EXPECTED_WORKER_INSTANCES?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_EXPECTED_API_POOL_MAX must be a whole number' })
+  PG_EXPECTED_API_POOL_MAX?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_EXPECTED_WORKER_POOL_MAX must be a whole number' })
+  PG_EXPECTED_WORKER_POOL_MAX?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_EXPECTED_MIGRATE_CONNECTIONS must be a whole number' })
+  PG_EXPECTED_MIGRATE_CONNECTIONS?: string;
+
+  @IsOptional()
+  @Type(() => String)
+  @Matches(/^\d{1,6}$/, { message: 'PG_PROVIDER_RESERVED_CONNECTIONS must be a whole number' })
+  PG_PROVIDER_RESERVED_CONNECTIONS?: string;
+
+  /**
+   * Phase B (B3, Agent A2's deployment identity): shape only here; the full rules (both-or-neither, the bound marker, the
+   * bootstrap flag honoured only by production commands) live in src/database/deployment-identity/deployment-identity.ts.
+   */
+  @IsOptional()
+  @IsIn([...DEPLOYMENT_ENVIRONMENTS], { message: `CREWFLOW_DEPLOYMENT_ENVIRONMENT must be one of: ${DEPLOYMENT_ENVIRONMENTS.join(', ')}` })
+  CREWFLOW_DEPLOYMENT_ENVIRONMENT?: string;
+
+  @IsOptional()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, { message: 'CREWFLOW_DEPLOYMENT_ID must be a uuid' })
+  CREWFLOW_DEPLOYMENT_ID?: string;
+
+  /** Option A secondary check: must equal current_database() when set. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(63, { message: 'PG_EXPECTED_DATABASE_NAME must be a PostgreSQL identifier (at most 63 characters)' })
+  PG_EXPECTED_DATABASE_NAME?: string;
+
+  /** One-time bootstrap of an unbound production database; only this exact value is meaningful. */
+  @IsOptional()
+  @IsIn([IDENTITY_BOOTSTRAP_VALUE], { message: `CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP accepts only "${IDENTITY_BOOTSTRAP_VALUE}"` })
+  CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP?: string;
 
   @IsNotEmpty({ message: 'REDIS_URL is required — the process must not start without it' })
   @IsString()

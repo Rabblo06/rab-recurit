@@ -1,12 +1,13 @@
 import { expect, test } from '@playwright/test';
 
 import { sql } from '../lib/db';
-import { RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
+import { API_DIRECT_HOST, HOST_ROUTING, RUN_ID, SYNTHETIC_PASSWORD, workspaceHost, workspaceOrigin } from '../lib/env';
 import { ApiClient, expectStatus, rows } from '../lib/http';
 import { tokenFrom, waitForLink } from '../lib/mail';
 import { loadState, updateState } from '../lib/state';
 import { shot, uiLogin } from '../lib/ui';
-import { managerFor, staffMobile } from '../lib/actors';
+import { anonMobile, managerFor, staffMobile } from '../lib/actors';
+import { scope, tbl } from '../lib/tenant';
 
 /**
  * Scenario 3 — isolation between two organisations/workspaces on one stack: Manager B and B's staff must not see or
@@ -40,7 +41,7 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     const email = `staff.b1.${tag}.${uniq}@bravo-e2e.test`;
     expectStatus(await mB.post('/rest/v1/staff', { email, firstName: 'Bea', lastName: 'Bravo', jobRoleId: role.id }), 201, 'B staff');
     const { link } = await waitForLink(email, /activate-account\?token=/);
-    const anon = new ApiClient({ host: '127.0.0.1:3300', origin: null, mobile: true });
+    const anon = anonMobile();
     expectStatus(await anon.post('/rest/v1/auth/activate-account', { token: tokenFrom(link), newPassword: SYNTHETIC_PASSWORD }), 200, 'B staff activation');
     staffB = await staffMobile(email);
     updateState((st) => {
@@ -91,15 +92,15 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     const leaks = Object.entries(got).filter(([, st]) => !NOT_FOUND.includes(st));
     expect(leaks, `non-404 answers: ${JSON.stringify(leaks)}`).toEqual([]);
     // Nothing changed in A.
-    const v = await sql(`select name, status from ${s.A.schema}.venue where id = $1`, [A.venueId]);
+    const v = await sql(`select name, status from ${tbl(s.A, 'venue')} where id = $1`, [A.venueId]);
     expect(v[0].name).not.toBe('pwned');
-    const pr = await sql(`select status from ${s.A.schema}.payroll_record where id = $1`, [A.payrollRecordId]);
+    const pr = await sql(`select status from ${tbl(s.A, 'payroll_record')} where id = $1`, [A.payrollRecordId]);
     expect(pr[0].status).toBe('processing');
   });
 
   test('3.3 lists, search and CSV never carry A rows for B; A sees its own', async () => {
     const s = loadState();
-    const venueA = (await sql(`select name from ${s.A.schema}.venue where id = $1`, [s.A.venueId]))[0].name as string;
+    const venueA = (await sql(`select name from ${tbl(s.A, 'venue')} where id = $1`, [s.A.venueId]))[0].name as string;
     const listB = {
       venues: rows((await mB.get('/rest/v1/venues?includeArchived=true')).body),
       shifts: rows((await mB.get('/rest/v1/shifts?includeArchived=true')).body),
@@ -141,8 +142,27 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     results.forgedHeaders = { byId: r1.status, list: r2.status, bodyOrgId: r3.status };
   });
 
-  test("3.5 A's host with B's session → 404 WORKSPACE_HOST_MISMATCH; CORS/CSRF from A's origin with B's session", async () => {
+  test("3.5 A's host with B's session → 404 WORKSPACE_HOST_MISMATCH (host routing); CORS/CSRF from a foreign origin with B's session (both modes)", async () => {
     const s = loadState();
+    if (!HOST_ROUTING) {
+      // Production parity: one console host, no subdomain origin trust. An origin outside CORS_ORIGINS (here the address A's
+      // workspace host would have) carrying B's session can neither write (CSRF) nor read cross-origin (no ACAO).
+      const foreign = workspaceOrigin(s.A.label!);
+      const fromForeign = mB.clone({ origin: foreign });
+      const csrfWrite = await fromForeign.post('/rest/v1/venues', { name: `csrf ${uniq}`, type: 'hotel' });
+      const crossRead = await fromForeign.get('/rest/v1/venues');
+      const preflight = await mB.req('OPTIONS', '/rest/v1/venues', undefined, { Origin: foreign, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' });
+      results.crossOrigin = {
+        csrfWriteStatus: csrfWrite.status, crossReadStatus: crossRead.status, crossReadAcao: crossRead.headers['access-control-allow-origin'] ?? null,
+        preflightStatus: preflight.status, preflightAcao: preflight.headers['access-control-allow-origin'] ?? null,
+      };
+      expect([403, 404]).toContain(csrfWrite.status);
+      expect(crossRead.headers['access-control-allow-origin']).toBeUndefined();
+      expect(preflight.headers['access-control-allow-origin']).toBeUndefined();
+      const created = await sql(`select count(*)::int as n from ${tbl(s.B, 'venue')} where ${scope(s.B)} and name = $1`, [`csrf ${uniq}`]);
+      expect(created[0].n).toBe(0);
+      return;
+    }
     const onA = mB.clone({ host: workspaceHost(s.A.label!), origin: workspaceOrigin(s.A.label!) });
     const me = await onA.get('/rest/v1/auth/me');
     const venues = await onA.get('/rest/v1/venues');
@@ -176,7 +196,7 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     expect(crossRead.headers['access-control-allow-origin']).toBeUndefined();
     expect(preflight.headers['access-control-allow-origin']).toBeUndefined();
     expect(crossRead.text).not.toContain(s.B.label!);
-    const created = await sql(`select count(*)::int as n from ${s.B.schema}.venue where name = $1`, [`csrf ${uniq}`]);
+    const created = await sql(`select count(*)::int as n from ${tbl(s.B, 'venue')} where ${scope(s.B)} and name = $1`, [`csrf ${uniq}`]);
     expect(created[0].n).toBe(0);
   });
 
@@ -225,9 +245,9 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     const vmId = vm.id ?? vm.profileId ?? vm.managerProfileId;
     expectStatus(await mA.post(`/rest/v1/venue-managers/${vmId}/venues`, { venueId: s.A.venueId }), [200, 201, 204], 'assign VM venue');
     const { link } = await waitForLink(email, /activate-account\?token=/);
-    const anon = new ApiClient({ host: '127.0.0.1:3300', origin: null, mobile: true });
+    const anon = anonMobile();
     expectStatus(await anon.post('/rest/v1/auth/activate-account', { token: tokenFrom(link), newPassword: SYNTHETIC_PASSWORD }), 200, 'VM activation');
-    const vmc = new ApiClient({ host: '127.0.0.1:3300', origin: null, mobile: true, label: 'vm' });
+    const vmc = new ApiClient({ host: API_DIRECT_HOST, origin: null, mobile: true, label: 'vm' });
     expectStatus(await vmc.login(email, SYNTHETIC_PASSWORD, { applicationTarget: 'venue_manager_app' }), 200, 'VM login');
     const caps = expectStatus(await vmc.get('/rest/v1/auth/capabilities'), 200, 'caps').body;
     const report = await vmc.get(`/rest/v1/attendance/report/shift/${s.A.shiftId}`);
@@ -248,6 +268,7 @@ test.describe.serial('S3 isolation A ↔ B', () => {
   });
 
   test("3.9 UI: B signs in on A's workspace host — refused with the wrong-workspace message, no session left behind", async ({ page }) => {
+    test.skip(!HOST_ROUTING, 'workspace hosts exist only with host routing (devlike); production parity has one console host');
     const s = loadState();
     const origin = workspaceOrigin(s.A.label!);
     await page.goto(`${origin}/login`);
@@ -289,7 +310,7 @@ test.describe.serial('S3 isolation A ↔ B', () => {
     expect(cookies).toEqual([]);
     expect(venues.status).toBe(401);
     expect(meCalls.filter((x) => x === 200)).toEqual([]);
-    const venueA = (await sql(`select name from ${s.A.schema}.venue where id = $1`, [s.A.venueId]))[0].name as string;
+    const venueA = (await sql(`select name from ${tbl(s.A, 'venue')} where id = $1`, [s.A.venueId]))[0].name as string;
     expect(await page.getByText(venueA).count()).toBe(0);
   });
 });

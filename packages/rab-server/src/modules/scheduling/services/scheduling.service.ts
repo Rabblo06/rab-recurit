@@ -213,7 +213,7 @@ export class SchedulingService {
       const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
       if (this.memberAccess.isFieldVisible(policy, 'payRate') && policy.canRead) return roles;
       return roles.map(({ defaultRatePence: _rate, ...role }) => role as JobRole);
-    });
+    }, { useReplica: true });
   }
 
   async createJobRole(ctx: AuthContext, dto: CreateJobRoleDto): Promise<JobRole> {
@@ -407,7 +407,7 @@ export class SchedulingService {
 
       const data = await qb.getMany();
       return { data: data.map((shift) => this.memberAccess.project(policy, shift)), total };
-    });
+    }, { useReplica: true });
   }
 
   /**
@@ -625,7 +625,7 @@ export class SchedulingService {
         view,
         counts: tabs,
       };
-    });
+    }, { useReplica: true });
   }
 
   async get(ctx: AuthContext, id: string): Promise<Shift> {

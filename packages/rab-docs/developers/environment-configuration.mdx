@@ -14,7 +14,7 @@ The API validates its environment when it starts (`packages/rab-server/src/engin
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection for the runtime (RLS-bound) role. |
+| `PG_DATABASE_URL` | PostgreSQL connection of this process: for the API and the Worker, the runtime (RLS-bound) role `crewflow_app` on a direct endpoint. Outside production the deprecated `DATABASE_URL` is still accepted with a warning; production refuses it. |
 | `REDIS_URL` | Redis for queues, rate limiting and caches. |
 | `APP_SECRET` | Root secret; also used to derive the shift QR signing key. |
 
@@ -86,8 +86,12 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 
 | Variable | Used by |
 | --- | --- |
-| `DATABASE_URL_UNPOOLED` | Migrations and the workspace provisioner (owner role). |
-| `DATABASE_DIRECT_URL`, `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
+| `PG_POOL_MAX_CONNECTIONS`, `PG_POOL_IDLE_TIMEOUT_MS`, `PG_POOL_ALLOW_EXIT_ON_IDLE`, `PG_DATABASE_PRIMARY_TIMEOUT_MS` | Pool size and timeouts (strictly validated). |
+| `PG_SSL_CA_CERT_PATH`, `PG_SSL_ALLOW_SELF_SIGNED`, `PG_DATABASE_URL_IS_DIRECT` | TLS (production: verify-full only) and the direct-connection declaration. |
+| `PG_DATABASE_REPLICA_URL`, `PG_DATABASE_REPLICA_TIMEOUT_MS`, `PG_DATABASE_REPLICA_MAX_LAG_MS` | Optional read replica. |
+| `CREWFLOW_DEPLOYMENT_ENVIRONMENT`, `CREWFLOW_DEPLOYMENT_ID`, `PG_EXPECTED_DATABASE_NAME` | Deployment identity, compared with the database's protected marker (required in production). |
+| `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
+| `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
 | `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
 | `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` | PDF rendering. |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |

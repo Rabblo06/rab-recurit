@@ -83,7 +83,7 @@ export class ReplacementRequestService {
         qb.where('s.createdBy = :createdBy', { createdBy: ctx.userId });
       }
       return qb.getMany();
-    });
+    }, { useReplica: true });
   }
 
   async get(ctx: AuthContext, id: string): Promise<ReplacementRequest> {

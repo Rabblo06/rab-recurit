@@ -82,6 +82,14 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */
 export const LATEST_WORKSPACE_MODULE_VERSION = WORKSPACE_SCHEMA_MODULES[WORKSPACE_SCHEMA_MODULES.length - 1]!.version;
 
+/**
+ * Phase B (schema-version compatibility): the lowest workspace module version THIS code may route requests to
+ * (SchemaResolverService refuses a READY workspace below it with WorkspaceRoutingError('incompatible-module') → 503).
+ * Default: LATEST. Lower it in a release only when the newest module(s) are additive for this code, so a workspace the
+ * migrator has not reached yet stays routable. Never above LATEST.
+ */
+export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = LATEST_WORKSPACE_MODULE_VERSION;
+
 /** Highest version the hand-looped migrations applied before the ledger existed: what a backfill may baseline. */
 export const BASELINE_WORKSPACE_MODULE_VERSION = 14;
 

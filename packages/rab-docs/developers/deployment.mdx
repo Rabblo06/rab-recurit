@@ -10,15 +10,16 @@ icon: "cloud-arrow-up"
 
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |
-| API | `node packages/rab-server/dist/main.js` | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. |
+| API | `api-prestart.sh` (then `main.js`) | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. Checks read-only that no migration is pending. |
 | Worker | `start-worker-bundle.cjs` (launcher) | jobs: `crewflow_app`; provisioner: `crewflow` | Two supervised processes with separate non-root users. Only the provisioner process receives the provisioning login. |
-| Migrate (one-off) | guarded `setup-db.js` | migration identity, entered for one run | Behind the `migrate` profile. Refuses unless the run is explicitly approved. |
+| Migrate (one-off release step) | `deploy-prepare.js` | `crewflow_migrator`, from `.env.migrate` only | Runs before the API and the Worker (they wait for it to exit 0). Applies migrations only for an approved release; exit 3 when migrations are pending but not approved. |
 
-The image's default `CMD` (`start.sh`, which migrates before booting) is **never** used. Every Compose service overrides `command:`. Migrations run only through the explicit one-off migrate job. The guarded runner checks the target, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1).
+Every process reads one database variable, `PG_DATABASE_URL`, holding its own credential; production refuses the legacy names (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX`) and requires TLS verify-full on a direct (non-pooled) endpoint. The image's default `CMD` is `api-prestart.sh`, which never migrates. Migrations run only in the one-off `rab-migrate` step, which takes the migration lock and checks the target, the deployment identity, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1). Full procedure: `docs/runbooks/database.md`.
 
 Runtime guards refuse to boot the API or Worker when:
 
-- `DATABASE_URL_UNPOOLED`, `CREWFLOW_MIGRATION_*` or a bootstrap password is present
+- `DATABASE_URL_UNPOOLED`, `CREWFLOW_MIGRATION_*`, `CREWFLOW_PROVISIONER_DATABASE_URL` or a bootstrap password is present
+- in production, a legacy database variable (`DATABASE_URL`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX`) or a libpq variable is set, TLS is weaker than verify-full, or the database's deployment identity marker does not match `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`
 - the login is anything other than `crewflow_app`
 - `NODE_ENV=production` is set without `RAB_RUNTIME_ENV=production`
 
@@ -26,7 +27,7 @@ Runtime guards refuse to boot the API or Worker when:
 
 | File | Where | Topology |
 | --- | --- | --- |
-| `packages/rab-docker/docker-compose.production.yml` | Production: OpenShip on an Oracle VPS (arm64). The database is Neon, the web console is on Vercel. | `rab-api`, `rab-worker` (bundle), `rab-redis`, plus the profile-gated `rab-migrate`. HWS runtime routing is off until the production rehearsal. |
+| `packages/rab-docker/docker-compose.production.yml` | Production: OpenShip on an Oracle VPS (arm64). The database is a managed PostgreSQL provider, the web console is on Vercel. | `rab-api`, `rab-worker` (bundle), `rab-redis`, plus the one-off `rab-migrate` release step they wait for. HWS runtime routing is off until the production rehearsal. |
 | `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Mirrors the production topology (restricted logins, Worker bundle, S3 storage through MinIO, HWS off, explicit migrations), with a local database and loopback-only ports. |
 | `packages/rab-docker/docker-compose.yml` | Local development | Same services. HWS is on, for development only. |
 
@@ -38,7 +39,7 @@ The operational procedure (per-service environment variable names, migration pha
 
 ## Environment
 
-Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker's jobs process need the same application settings. Only the Worker additionally takes `DATABASE_DIRECT_URL` and `CREWFLOW_PROVISIONER_DATABASE_URL`. The migrate job takes only its own one-run variables.
+Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker's jobs process need the same application settings, including the same `PG_DATABASE_URL` (`crewflow_app`, direct endpoint). Only the Worker additionally takes `CREWFLOW_PROVISIONER_DATABASE_URL`, which the launcher hands to the provisioner process alone as its `PG_DATABASE_URL`. The `rab-migrate` step takes only `.env.migrate` (template `packages/rab-docker/.env.migrate.example`).
 
 Set `CREWFLOW_PROVISIONER_ENABLED` explicitly on the Worker:
 

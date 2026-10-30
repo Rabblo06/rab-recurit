@@ -125,7 +125,7 @@ export class SearchService {
       const venues = canViewVenues && venuePolicy.canRead ? await this.searchVenues(manager, ctx, scope, query, limit, venuePolicy) : [];
 
       return [...staff, ...managers, ...shifts, ...offers, ...venues];
-    });
+    }, { useReplica: true });
   }
 
   private scopeVenueIds(scope: ResourceScope): string[] | null {

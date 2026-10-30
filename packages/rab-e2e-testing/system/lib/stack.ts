@@ -1,15 +1,15 @@
 import { execFileSync } from 'node:child_process';
 
-import { COMPOSE_FILE, COMPOSE_PROJECT } from './env';
+import { COMPOSE_FILES, COMPOSE_PROJECT } from './env';
 
 /**
- * Operations on the DISPOSABLE compose project only (`crewflow-e2e`). Every call names that project explicitly; nothing
- * here can address the dev stack or any other container.
+ * Operations on the DISPOSABLE compose project of the current mode only (`crewflow-parity` or `crewflow-e2e`). Every call
+ * names that project explicitly; nothing here can address the dev stack or any other container.
  */
 function compose(args: string[], env: Record<string, string> = {}): string {
   const envFile = process.env.E2E_ENV_FILE;
   if (!envFile) throw new Error('E2E_ENV_FILE is required');
-  return execFileSync('docker', ['compose', '-p', COMPOSE_PROJECT, '--env-file', envFile, '-f', COMPOSE_FILE, ...args], {
+  return execFileSync('docker', ['compose', '-p', COMPOSE_PROJECT, '--env-file', envFile, ...COMPOSE_FILES.flatMap((f) => ['-f', f]), ...args], {
     encoding: 'utf8',
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],

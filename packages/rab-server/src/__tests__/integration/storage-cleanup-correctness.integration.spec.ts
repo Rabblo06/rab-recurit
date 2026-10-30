@@ -157,7 +157,15 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
     opts: Parameters<StorageReconcileCommand['run']>[1] = {},
   ) => {
     const c = command();
-    return c.run([], opts).then(() => c.lastReport!);
+    // The CLI sets process.exitCode = 1 when the run finds integrity problems, and on the shared integration database other
+    // suites' storage rows are counted too. In band that would turn the WHOLE Jest run's exit code to 1 with every test
+    // passing; this suite asserts on the report, so the CLI's exit code is restored after each run.
+    const previousExitCode = process.exitCode;
+    return c.run([], opts).then(
+      () => c.lastReport!,
+    ).finally(() => {
+      process.exitCode = previousExitCode;
+    });
   };
 
   /** DB-authoritative "now" — every expiry boundary in this suite is expressed relative to Postgres's own clock, never Date.now(). */

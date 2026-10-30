@@ -6,6 +6,27 @@ import { normaliseKeyPrefix } from '../storage/storage-key-prefix';
 import { parseHostAuthority } from '@rab/shared';
 import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-encryption/keyring.util';
 import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
+import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
+import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
+
+/**
+ * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
+ * is left to the entrypoint (it declares its role after this runs at import time); everything else is checked here.
+ * Names only, never values.
+ */
+export function databaseConfigurationProblem(config: Record<string, unknown>): string | null {
+  const env = Object.fromEntries(Object.entries(config).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  try {
+    resolvePgEnvironmentCached(env, { enforceProcessPolicy: false });
+    // Phase B (B5): the declared deployment shape's ranges (the capacity comparison itself needs the live server and runs
+    // at boot, src/database/runtime/connection-budget.ts).
+    readDeploymentShape(env);
+    return null;
+  } catch (error) {
+    if (error instanceof PgConfigError || error instanceof ConnectionBudgetError) return error.message;
+    throw error;
+  }
+}
 
 export function validate(config: Record<string, unknown>): EnvironmentVariables {
   // `KEY=` in a .env file sets an empty string, not undefined — @IsOptional()
@@ -118,11 +139,16 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
 
   // CF-40 / CF-16 / CF-34 (October 15 audit): production must never boot on a development default. Development and test
   // are untouched, so local Docker keeps working. Every rule names the variable to fix; no value is echoed.
+  // Phase B (B1): the database rules (PG_DATABASE_URL, legacy names, URL policy, TLS, strict pool numbers). In production
+  // the problem is reported with the other production refusals.
+  const databaseProblem = databaseConfigurationProblem(normalised);
   if (validated.NODE_ENV === 'production') {
-    const problems = productionConfigurationProblems(validated);
+    const problems = [...productionConfigurationProblems(validated), ...(databaseProblem ? [databaseProblem] : [])];
     if (problems.length > 0) {
       throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
     }
+  } else if (databaseProblem) {
+    throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }
 
   return validated;

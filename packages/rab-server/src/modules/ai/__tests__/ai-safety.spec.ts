@@ -11,7 +11,8 @@ import { buildSystemPrompt, wrapToolData } from '../prompt/system-prompt';
 import { localRange, rangeInput, zonedMidnight } from '../tools/ai-date-range';
 import { AI_OUTPUT_DENYLIST_KEY, AiToolOutputRefused, guardToolOutput, maskSensitiveText } from '../tools/ai-output-guard';
 
-const BASE = { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://x', APP_SECRET: 'a'.repeat(40) };
+// Phase B: the validator applies the database URL policy (pg-url-policy.ts), so the fixture URL names a user, host and database (same shape as the env.validation specs).
+const BASE = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://x', APP_SECRET: 'a'.repeat(40) };
 
 describe('AI configuration (fail closed at boot)', () => {
   it('defaults: AI on (owner decision EX-2), but not configured until a model is available; boot never fails on it', () => {

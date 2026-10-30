@@ -28,6 +28,8 @@ import {
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { withApplicationName } from './helpers/application-name-url';
+import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 
@@ -354,7 +356,7 @@ describeIfDb(
       appName: string,
       extra: Record<string, string | undefined> = {},
     ): ProcessWatch {
-      const base: Record<string, string | undefined> = { ...process.env };
+      const base: Record<string, string | undefined> = runtimeChildBaseEnv();
       for (const k of [
         'CREWFLOW_PROVISIONER_ENABLED',
         'HWS_RUNTIME_ENABLED',
@@ -362,19 +364,20 @@ describeIfDb(
         'CREWFLOW_PROVISIONER_DATABASE_URL',
       ])
         delete base[k];
+      // Every backend of this process carries appName: the connection factory takes the URL's own application_name.
+      const url = withApplicationName(CREWFLOW_URL, appName);
       const merged: Record<string, string | undefined> = {
         ...base,
         NODE_ENV: 'development',
         RAB_RUNTIME_ENV: 'development',
-        DATABASE_URL: CREWFLOW_URL,
-        DATABASE_URL_UNPOOLED: CREWFLOW_URL,
-        DATABASE_DIRECT_URL: CREWFLOW_URL,
+        DATABASE_URL: url,
+        DATABASE_URL_UNPOOLED: url,
+        DATABASE_DIRECT_URL: url,
         REDIS_URL,
         // The committed production / QA / e2e configuration after Phase A.
         CREWFLOW_PROVISIONER_ENABLED: 'true',
         HWS_RUNTIME_ENABLED: 'false',
         WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5',
-        PGAPPNAME: appName,
         ...extra,
       };
       for (const [k, v] of Object.entries(merged))

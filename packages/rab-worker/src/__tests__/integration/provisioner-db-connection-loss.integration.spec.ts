@@ -13,6 +13,8 @@ import { workspaceSchemaName } from '@rab/server/database/typeorm/workspace-sche
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { withApplicationName } from './helpers/application-name-url';
+import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 
 /**
  * W6-E2E-05 (HIGH, availability) regression. Wave 6 lane E2E restarted Postgres under a running worker bundle: the
@@ -23,7 +25,7 @@ import { verifiedCrewflowUrl } from './helpers/verified-role-database';
  * and kills its database session server-side with `pg_terminate_backend`. That raises exactly the error a Postgres
  * restart / failover / idle-connection kill raises on the client (SQLSTATE 57P01, "terminating connection due to
  * administrator command"), without restarting the shared test database. The process is identified by a unique
- * `application_name` (PGAPPNAME), so no other backend is touched.
+ * `application_name` (set in its database URL, which the connection factory honours), so no other backend is touched.
  *
  * Asserts: the process stays alive (0 exits — the container-level "0 restarts"), it logs the loss and reconnects, and
  * provisioning RESUMES — a workspace seeded after the drop reaches READY through the reconnected client. A second test
@@ -158,21 +160,21 @@ describeIfDb('W6-E2E-05 provisioner survives a terminated database connection (i
   }
 
   function spawnProvisioner(appName: string): ProcessWatch {
+    const url = withApplicationName(CREWFLOW_URL, appName);
     const proc = spawn(process.execPath, [TS_NODE_BIN, '--transpile-only', '-P', PROVISIONER_TSCONFIG, PROVISIONER_ENTRY], {
       cwd: REPO_ROOT,
       env: {
-        ...process.env,
+        ...runtimeChildBaseEnv(),
         NODE_ENV: 'development',
         RAB_RUNTIME_ENV: 'development',
-        DATABASE_URL: CREWFLOW_URL,
-        DATABASE_URL_UNPOOLED: CREWFLOW_URL,
-        DATABASE_DIRECT_URL: CREWFLOW_URL,
+        DATABASE_URL: url,
+        DATABASE_URL_UNPOOLED: url,
+        DATABASE_DIRECT_URL: url,
         REDIS_URL,
         HWS_RUNTIME_ENABLED: 'true',
         // Phase A: the provisioning interval is configurable (default 60 s). These cases were written against the fixed
         // 5 s cadence ("longer than one provisioning interval") — pin it so they keep testing reconnection, not cadence.
         WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5',
-        PGAPPNAME: appName,
       } as Record<string, string>,
     });
     procs.push(proc);

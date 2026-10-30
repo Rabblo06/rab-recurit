@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
+import { resolvePgEnvironmentCached } from '../database/postgres';
 import {
   HwsBackfillError,
   HwsBackfillService,
@@ -10,7 +11,12 @@ import {
   WorkspaceDryRunReport,
   WorkspaceVerifyResult,
 } from '../database/typeorm/workspace-schema/backfill/hws-backfill.service';
+import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
+import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { verifyOpsAppSession } from './ops/elevated-ops-session';
+import { assertHwsApplyAllowed } from './ops/hws-cutover-policy';
+import { assertOpsRun, describeOpsLabel, opsAuditMetadata } from './ops/ops-run';
 
 interface Options {
   workspaceId?: string;
@@ -21,6 +27,7 @@ interface Options {
   verify?: boolean;
   resume?: boolean;
   reportFile?: string;
+  hwsCutover?: boolean;
 }
 
 export interface HwsBackfillReport {
@@ -28,6 +35,7 @@ export interface HwsBackfillReport {
   classification: string;
   database: string;
   workspacesSelected: number;
+  runId: string;
   dryRun?: WorkspaceDryRunReport[];
   apply?: WorkspaceApplyResult[];
   verify?: WorkspaceVerifyResult[];
@@ -39,28 +47,23 @@ export interface HwsBackfillReport {
  * (`WORKSPACE_TABLE_COPY_ORDER`, derived from the live V1 catalog — see `fk-graph.ts`). The source
  * `core` rows are never modified or deleted by this command, under any mode.
  *
- * Runs as `rab_app` (this package's `DATABASE_URL`, like every other command) — never
- * `rab_owner`. See `HwsBackfillService`'s own doc comment for why no owner connection is needed:
- * workspace discovery goes through `core.worker_list_workspaces()` (the same narrow, `rab_app`-
- * granted function the worker's own discovery already uses), and the per-workspace copy itself
- * is two ordinary tenant-bound transactions (read `core` under that workspace's own context, write
- * the physical schema under the same context) — exactly the two halves of what a normal `rab_app`
- * request already does, just driven by this tool instead of an HTTP request. RLS is never
- * disabled: reads/writes are bound to the target workspace's own tenant context like any other
- * `rab_app` work, and every table this tool touches is FORCE RLS.
+ * Phase B (ops container, owner decision): runs ONLY in the one-off operations container (command/ops/ops-run.ts) with the
+ * operator label required, and EVERY mode runs as the restricted runtime login crewflow_app (PG_OPS_APP_DATABASE_URL):
+ * discovery through `core.worker_list_workspaces()`, the tenant-bound reads, the checkpoint upserts, AND the physical-schema
+ * copy (`writePhysical`). The copy no longer uses an owner connection: every workspace table is FORCE'd (so the owner had no
+ * RLS advantage), crewflow_app holds INSERT on each of them, and the `attendance_post_shift_reset` trigger and the generated
+ * columns behave the same — proven on a disposable database (runbook ops section). PG_DATABASE_URL (the migration
+ * identity) is therefore REFUSED for this command. The six runtime-actor tables stay with the one-off privileged migration.
  *
- * `DB_TARGET` and the production-command safeguards (`database-target.ts`) already run globally in
- * `command/main.ts`'s `bootstrap()`, before this or any other command's `run()` — no separate
- * target check is added here, and none is needed.
+ * `--apply` / `--resume` while HWS runtime routing is OFF requires `--hws-cutover` (assertHwsApplyAllowed). Do not run it in
+ * production while HWS is off. Each applied workspace gets one actor-less audit row (`ops.hws_backfill_applied`, its
+ * organisation) carrying the operational label.
  *
- * Modes (mutually exclusive; `--dry-run` is the default if none is given — report-only, zero
- * writes, matching `storage:reconcile`'s own safety-first default):
+ * Modes (mutually exclusive; `--dry-run` is the default if none is given — report-only, zero writes):
  *   --dry-run   report only — workspace/registry status, row counts, conflicts, blocked rows
  *   --apply     copies rows (idempotent — a second run reports already-complete, never duplicates)
  *   --verify    validates a previously-applied (or claimed-complete) workspace, no writes
  *   --resume    identical mechanics to --apply; the distinct flag exists for operator clarity
- *               (announces which tables are being skipped as already-`completed` per the
- *               checkpoint table, rather than looking like a fresh run)
  *
  * Selection: --workspace-id <uuid> (one explicit workspace, validated against the trusted registry
  * via `core.worker_list_workspaces` — never a bare client-supplied id taken on faith), or
@@ -76,6 +79,9 @@ export class HwsBackfillCommand extends CommandRunner {
   constructor(
     private readonly backfill: HwsBackfillService,
     private readonly environment: EnvironmentService,
+    private readonly dataSource: DataSource,
+    private readonly tenantContext: TenantContextService,
+    private readonly audit: AuditService,
   ) {
     super();
   }
@@ -115,6 +121,11 @@ export class HwsBackfillCommand extends CommandRunner {
     return true;
   }
 
+  @Option({ flags: '--hws-cutover', description: 'Required for --apply/--resume while HWS runtime routing is OFF: this copy is an approved HWS cutover step' })
+  parseHwsCutover(): boolean {
+    return true;
+  }
+
   @Option({ flags: '--report-file <path>', description: 'Write the JSON report to this path' })
   parseReportFile(value: string): string {
     return value;
@@ -124,9 +135,18 @@ export class HwsBackfillCommand extends CommandRunner {
     const modesRequested = [options.dryRun, options.apply, options.verify, options.resume].filter(Boolean).length;
     if (modesRequested > 1) throw new Error('--dry-run, --apply, --verify and --resume are mutually exclusive — pass exactly one.');
     const mode: 'dry-run' | 'apply' | 'verify' = options.verify ? 'verify' : options.apply || options.resume ? 'apply' : 'dry-run';
+    const resolved = resolvePgEnvironmentCached(process.env);
+    // Layer 2: ops container, operator label, and no migration identity at all (every mode runs as crewflow_app).
+    const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, { needsElevated: false }, resolved);
+    const hwsRuntimeEnabled = this.environment.get('HWS_RUNTIME_ENABLED') === true;
+    assertHwsApplyAllowed({ mode, hwsRuntimeEnabled, hwsCutover: options.hwsCutover === true, production: process.env.DB_TARGET?.trim() === 'production' });
 
     if (!options.workspaceId && !options.all) throw new Error('One workspace selector is required: --workspace-id <uuid> or --all.');
     if (options.workspaceId && options.all) throw new Error('--workspace-id and --all are mutually exclusive.');
+
+    // eslint-disable-next-line no-console
+    console.log(describeOpsLabel(label));
+    const app = await verifyOpsAppSession(this.dataSource, resolved, process.env, label.command);
 
     const candidates = options.workspaceId
       ? await (async () => {
@@ -137,13 +157,16 @@ export class HwsBackfillCommand extends CommandRunner {
       : await this.backfill.listCandidates(options.batch && options.batch > 0 ? options.batch : 50);
 
     // eslint-disable-next-line no-console
-    console.log(`[hws:backfill] mode=${mode} hws_runtime_enabled=${this.environment.get('HWS_RUNTIME_ENABLED')} workspacesSelected=${candidates.length}`);
+    console.log(
+      `[hws:backfill] mode=${mode} run=${label.runId} hws_runtime_enabled=${hwsRuntimeEnabled} hws_cutover=${options.hwsCutover === true} app=${app.login} identity=${app.identity} workspacesSelected=${candidates.length}`,
+    );
 
     const report: HwsBackfillReport = {
       mode,
       classification: 'see runtime-database-guard / database-target logs above this command\'s own output for the resolved identity',
-      database: 'resolved by DB_TARGET — see command/main.ts bootstrap log',
+      database: app.database,
       workspacesSelected: candidates.length,
+      runId: label.runId,
     };
 
     if (mode === 'dry-run') {
@@ -164,20 +187,30 @@ export class HwsBackfillCommand extends CommandRunner {
         }
       }
     } else if (mode === 'apply') {
-      // Owner connection, opened ONLY for apply (dry-run/verify never write, never need it) and closed again
-      // right after this batch — see HwsBackfillService's own doc comment for exactly why the physical-schema
-      // write needs rab_owner, not rab_app. Never DATABASE_URL (that's rab_app); DATABASE_URL_UNPOOLED is this
-      // package's existing rab_owner convention (BootstrapAdminCommand, provisionWorkspaceSchema, ...).
-      if (!process.env.DATABASE_URL_UNPOOLED) throw new Error('DATABASE_URL_UNPOOLED is required for --apply (the rab_owner connection the physical-schema write needs).');
-      const ownerDataSource = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL_UNPOOLED, entities: [], synchronize: false, logging: false });
-      await ownerDataSource.initialize();
-      this.backfill.ownerDataSource = ownerDataSource;
+      // The physical copy runs on the injected restricted DataSource (crewflow_app), the same login as every read: no owner
+      // connection is opened at all. The service's binding (organisation, workspace, the workspace's owning manager, the
+      // resolved schema) is what the FORCE'd insert policies check.
+      this.backfill.ownerDataSource = this.dataSource;
+      const metadata = opsAuditMetadata(label, { appLogin: app.login, identity: app.identity });
       try {
         report.apply = [];
         for (const ctx of candidates) {
           try {
             const result = await this.backfill.apply(ctx);
             report.apply.push(result);
+            await this.tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: null, userId: '', role: '' }, (m) =>
+              this.audit.record(m, { organisationId: ctx.organisationId, userId: '' }, AuditAction.OPS_HWS_BACKFILL_APPLIED, {
+                actorUserId: null,
+                entityType: 'manager_workspace',
+                entityId: ctx.workspaceId,
+                metadata: {
+                  ...metadata,
+                  hwsCutover: options.hwsCutover === true,
+                  overall: result.overall,
+                  tables: result.tables.map((t) => ({ table: t.table, state: t.state, rowsCopied: t.rowsCopied })),
+                },
+              }),
+            );
             // eslint-disable-next-line no-console
             console.log(`  workspace=${ctx.workspaceId} overall=${result.overall} ` + result.tables.map((t) => `${t.table}:${t.state}(${t.rowsCopied})`).join(' '));
           } catch (error) {
@@ -190,7 +223,6 @@ export class HwsBackfillCommand extends CommandRunner {
           }
         }
       } finally {
-        await ownerDataSource.destroy();
         this.backfill.ownerDataSource = undefined;
       }
     } else {

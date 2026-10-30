@@ -24,6 +24,8 @@ export const TEST_DATABASE_URL_UNPOOLED = 'TEST_DATABASE_URL_UNPOOLED';
 export const ALLOW_REMOTE_TEST_DATABASE = 'ALLOW_REMOTE_TEST_DATABASE';
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+/** Query parameters that change WHERE pg connects (pg-connection-string maps them over the URL's own parts). */
+export const TARGET_OVERRIDE_QUERY_PARAMS: readonly string[] = ['host', 'hostaddr', 'port', 'user', 'dbname', 'database', 'service'];
 
 export class TestDatabaseConfigError extends Error {
   constructor(message: string) {
@@ -61,6 +63,17 @@ export function describeDatabaseUrl(raw: string, label: string): TestDatabaseIde
   }
   if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
     throw new TestDatabaseConfigError(`${label} must use the postgres:// scheme.`);
+  }
+  // Phase B finding F1: pg-connection-string turns every query parameter into a config key, so `?host=`, `?port=`,
+  // `?user=`, `?hostaddr=`, `?dbname=`, `?database=` or `?service=` would make pg connect somewhere other than the host,
+  // port, user or database read below. Every guard (test, command, runtime) parses here, so the override is refused here:
+  // the identity a guard checks is then the identity the driver uses.
+  for (const key of TARGET_OVERRIDE_QUERY_PARAMS) {
+    if (url.searchParams.has(key)) {
+      throw new TestDatabaseConfigError(
+        `${label} sets "${key}" as a query parameter, which would override the connection target the URL names. Put it in the URL itself. Refusing.`,
+      );
+    }
   }
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
   const port = url.port || '5432';

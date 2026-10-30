@@ -45,8 +45,12 @@ trap cleanup EXIT
 # Runtime env shared by API and Worker. No .env is read: both run with cwd = the scratch dir.
 export NODE_ENV=test
 export AI_E2E_MARK=ai-e2e-stack
-export DATABASE_URL="$TEST_DATABASE_URL"
-unset DATABASE_URL_UNPOOLED || true
+# Phase B: one PG_DATABASE_URL (the restricted runtime login); the deprecated names never reach the API or the Worker.
+export PG_DATABASE_URL="$TEST_DATABASE_URL"
+unset DATABASE_URL DATABASE_URL_UNPOOLED DATABASE_DIRECT_URL || true
+# Security review L-4: command / bootstrap authority never reaches the API or the Worker (their runtime guard refuses it;
+# never-in-runtime-env.ts). A caller's env file may carry it for the harness; drop it here.
+unset DB_TARGET ALLOW_PRODUCTION_DB_COMMANDS CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_MIGRATOR_PASSWORD || true
 export REDIS_URL="$REDIS_E2E"
 export PORT="$API_PORT" APP_URL="$WEB" CORS_ORIGINS="$WEB"
 export EMAIL_DRIVER=LOGGER EMAIL_DELIVERY_ENABLED=false STORAGE_DRIVER=LOCAL STORAGE_LOCAL_ROOT="$AI_E2E_WORK/storage"
@@ -56,7 +60,7 @@ export AI_PROVIDER= AI_MODEL= AI_PROVIDER_API_KEY=
 export SENTRY_DSN=
 
 echo "[ai-e2e] seeding synthetic organisations"
-(cd "$ROOT" && DATABASE_URL_UNPOOLED= E2E_IDENTITIES_OUT="$AI_E2E_WORK/identities.json" \
+(cd "$ROOT" && env -u PG_DATABASE_URL DATABASE_URL_UNPOOLED= E2E_IDENTITIES_OUT="$AI_E2E_WORK/identities.json" \
   node node_modules/ts-node/dist/bin.js --transpile-only -P packages/rab-server/tsconfig.spec.json packages/rab-e2e-testing/ai/seed-ai-e2e.ts) \
   > "$AI_E2E_WORK/seed.log" 2>&1 || { tail -40 "$AI_E2E_WORK/seed.log"; exit 1; }
 grep '\[ai-e2e-seed\]' "$AI_E2E_WORK/seed.log"

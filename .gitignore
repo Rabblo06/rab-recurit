@@ -104,4 +104,10 @@ packages/rab-e2e-testing/web/.qa-shots/
 
 # Local-only secrets/artifacts (never commit)
 .env.provisioner
+# Phase B: the one-off rab-migrate credential file (template: packages/rab-docker/.env.migrate.example)
+.env.migrate
+**/.env.migrate
+# Phase B (ops): the one-off rab-ops container's environment (template: packages/rab-docker/.env.ops.example)
+.env.ops
+**/.env.ops
 /activation_email.html

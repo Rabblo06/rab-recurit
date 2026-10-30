@@ -4026,3 +4026,324 @@ credential, migration or RLS policy.
     EACCES) and, behind that, migrated as the rab_owner login, which the role split refuses. Both now start PostgreSQL
     after checkout (`.github/actions/disposable-postgres`) and build their database through the restricted-migrator fresh
     install; the server suite runs as crewflow_app, the RLS gate as crewflow_app. No check removed or downgraded.
+
+## Phase B — PostgreSQL Option C: one database URL per process, TLS, deployment identity, migration isolation (branch phase-b/one-db-url, not merged)
+
+Runbook: `docs/runbooks/database.md`. Migrations 1786721210000 / 1786721220000 / 1786721230000 are in `core/migrations/` on
+this branch and NOT approved for production (`production-migration-approval.ts`). DeploymentIdentity 1786721230000 (the B3
+objects below; renumbered from the never-applied draft 1786721200000) is owner-approved for isolated testing on disposable
+databases only.
+
+### B1/B2: database URL policy and TLS
+
+- **Asset:** every PostgreSQL connection the API, the Worker children, the CLI and the migration step open, and the
+  credential each one holds.
+- **Threats:** a URL query parameter silently overriding the target the guards checked (`?host=`, `?port=`, `?user=`,
+  `?dbname=`, `?service=`: finding F1, pg merges the parsed URL last) or the TLS settings (`?sslmode=`, `?sslrootcert=`,
+  `uselibpqcompat`); libpq environment fallbacks (`PGPASSWORD`, `PGSSLMODE`, `PGOPTIONS`) changing a connection
+  invisibly; `?options=-c role=…` turning a login into another role; plaintext or unverified TLS to a managed provider;
+  a session advisory lock silently lost behind a transaction pooler; two names for one connection drifting apart; a typo
+  in a pool size silently becoming the default.
+- **Controls:** one variable, `PG_DATABASE_URL`, holding the process's own credential; production refuses the legacy names
+  and every libpq variable, and requires the variable. The factory (`src/database/postgres`) parses with the driver's own
+  parser, refuses target/TLS override parameters and any `options` except a Neon endpoint token naming the URL's own
+  endpoint (`-c role=` only for the migrate process against a local/test target, the M2 harness), and passes explicit
+  host/port/user/password/database plus an explicit `ssl` object, so neither the URL nor a libpq variable can override
+  them. Production TLS is verify-full only (system store or `PG_SSL_CA_CERT_PATH`); `disable`/`allow`/`prefer`/`no-verify`/
+  `verify-ca`/self-signed are refused; the boot gates check `pg_stat_ssl.ssl` for their own backend. Documented
+  transaction-pooler shapes (Neon `-pooler`, Supabase :6543, DigitalOcean :25061, RDS Proxy) are refused for the Worker,
+  the provisioner and the migration step (also by the Worker launcher), and the Worker runs a live two-connection
+  session probe at boot. Every number is strictly validated. A source-scan spec (`no-unapproved-db-access.spec.ts`) fails
+  on any new database-URL read or `new Pool/Client/DataSource` outside the factory; the identity guards
+  (runtime-database-guard, database-target, boot gates, `db:bind-identity`) now connect only through the factory.
+- **Residual:** the session probe is strong evidence, not proof, of session affinity; a pooler with a shape the denylist
+  does not know and that passes the probe would still lose locks under load. Outside production the deprecated names
+  remain accepted (with warnings) until removed.
+
+### B3: deployment identity (wrong database, clone, URL override, runtime forging)
+
+- **Asset:** the decision "this process is talking to the database of THIS deployment" (production above all), and the
+  record of who changed that binding.
+- **Threats:** a process pointed at the wrong database (a copy-paste URL, a stale `.env`); a clone, restore, fork or branch
+  of production used by a non-production process, or used AS production without anyone deciding so; a URL target override
+  aiming the identity probe at one database and the pool at another; a runtime login forging or rewriting the identity it
+  is checked against; an operator rebinding silently.
+- **Controls:** migration DeploymentIdentity1786721230000 — a singleton marker `core.deployment_identity` owned by the
+  NOLOGIN `rab_secure_owner`, ENABLE + FORCE RLS on it and on `core.deployment_identity_history`, owner-only permissive
+  policies that also require `CURRENT_USER = rab_secure_owner` (true only inside the definers; a member login querying
+  directly sees and writes nothing), a RESTRICTIVE deny-all for `crewflow` / `crewflow_app` on top of their holding no table
+  privilege. Reads only through the SECURITY DEFINER `core.deployment_identity_check()`; writes only through
+  `core.deployment_identity_bind()` (EXECUTE: the owner only), which re-checks the SESSION login (a member of
+  `rab_secure_owner`, never a runtime login), compare-and-swaps on the current deployment id, requires a new id on rebind,
+  and writes a history row in the same statement; no UPDATE / DELETE / TRUNCATE on the history is granted to anyone, the
+  owner included. The marker records the LOCATION: `bound_database` (current_database(), taken by the definer itself) and
+  `bound_hosts` (a set of 1–5 operator-confirmed host names — e.g. the direct host and a session-compatible proxy host;
+  transaction-pooler host names are refused by the bind; the set must contain the host the bind command itself connects
+  to). Every process (API, Worker children, CLI, migration step, `db:bind-identity`) compares the marker with its own
+  `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` AND refuses when its `current_database()` differs from
+  `bound_database` or its own connection host (the factory's canonical parse of its URL) is not in `bound_hosts` — so a
+  restore, clone, fork or branch elsewhere is refused even though it carries the original's id, until the audited rebind.
+  Host NAMES are compared, never resolved addresses (a DNS/IP change or a managed failover keeping the name passes; a
+  provider-issued new name is refused until rebind). `system_identifier` is recorded when callable and a mismatch is only a
+  warning (forks inherit it, logical restores change it) — never the sole proof. Production fails closed on absent,
+  unbound or mismatched markers; a production-bound database refuses every non-production process;
+  `PG_EXPECTED_DATABASE_NAME` is a secondary check; URL target overrides are refused (B1), so the database probed is the
+  database used. The first production bind needs an explicit one-time bootstrap flag plus the expected database name, and
+  the flag is itself a refusal once bound. The migration step's probe defers ONLY a privilege error reading the marker
+  (SQLSTATE 42501) so that CF-41 names a login without its owner-role memberships; the full marker check then runs on the
+  migration session and always refuses a login that still cannot read it (never a pass). `tools/check-rls-coverage.ts`
+  asserts ENABLE + FORCE on both tables explicitly (they have no organisation_id); the M2 harness pins the seven policies
+  (REVIEWED_MIGRATION_DRIFT) and the golden posture pins ownership, definer settings and grants.
+- **Authentication of a bind (stated precisely):** possession of the migration credential (a login that is a member of
+  `rab_secure_owner`), recorded as `session_login`; production binds also need production command authority. `--actor`
+  (`bound_by`) is self-asserted text, NOT proof of operator identity. An ops-ticket binding is a separate owner decision.
+- **Residuals:** (1) the history is NOT tamper-proof against the migration identity: as a member of `rab_secure_owner` it
+  can `SET ROLE rab_secure_owner` and write the marker directly with no history row, or ALTER / DROP the tables or re-grant
+  itself UPDATE / DELETE on the history (a superuser can too). The history is an audit aid against accidental or
+  unauthorised runtime changes and operator mistakes only; the control on the migration identity is operational
+  (credential only in `rab-migrate`, NOLOGIN between releases, provider connection logs). The integration test
+  demonstrates this boundary on purpose. (2) A hostname is the operator's statement of "this is the deployment": whoever
+  controls DNS for a bound name decides what it reaches (production TLS verify-full binds the name to the server
+  certificate), and port-only pooler shapes (Supabase `:6543`, DigitalOcean `:25061`) share the direct host name, so only
+  the URL policy (B1/B2: refused for Worker, provisioner, migrations and session-affine connections, a warning for the
+  API) keeps them out. (3) An in-place PITR on the same database and host is, by design, the same deployment. (4) The
+  migration's `down()` discards the history table, and the migration identity could drop or replace `check()` (it can run
+  DDL by design; the drift check and posture golden detect it after the fact).
+
+### B6: migration isolation (one-off `rab-migrate`, never the API or the Worker)
+
+- **Threats:** a long-running API or Worker holding a migration-capable credential (any RCE or SSRF then reaches DDL); an
+  API that migrates at start (concurrent starts racing, a bad release migrating production before review); a release
+  promoted onto a schema behind its code; the migration credential baked into an image layer or committed.
+- **Controls:** the migration login (`crewflow_migrator`, owns nothing, member of `rab_secure_owner` + `crewflow`) lives
+  only in `packages/rab-docker/.env.migrate` (chmod 600, git-ignored, excluded by `.dockerignore`), referenced by the
+  `rab-migrate` service only; `compose-credential-isolation.cjs` (CI) renders the compose files and fails if the value or
+  any migration authority reaches `rab-api` / `rab-worker`. The API image command (`api-prestart.sh`) never migrates and
+  refuses migration credentials; the runtime guard and the Worker launcher refuse them too. `rab-migrate`
+  (`deploy-prepare.js`) takes the migration advisory lock on its own session and re-checks target, deployment identity, N1
+  approval and CF-41 after the lock; it applies only for an approved release and exits 3 when migrations are pending but
+  not approved. `rab-api` and `rab-worker` start only after it exits 0 (`service_completed_successfully`), and their boot
+  gates refuse pending migrations anyway.
+- **Residuals:** the deploying host's operator account can read `.env.migrate`; it must be removed or the approval line
+  dropped after each release (procedure, not enforced). Platforms that ignore compose `depends_on` conditions must run the
+  step as a release job and promote only on exit 0.
+- **Owner decision (implemented, B7 below):** the owner CLI commands `containment`, `hws:backfill` and
+  `user-session:backfill` run only in the one-off `rab-ops` operations container, at a verified minimum role per mode.
+
+### B4: read replica — permission lag
+
+- **Asset:** tenant and scope isolation of the reads that may run on the optional streaming replica.
+- **Controls:** API-only; an explicit, source-enforced register of replica-eligible reads (`replica-read-register.ts`);
+  READ ONLY transactions with the same transaction-local tenant binding, FORCE RLS on the standby, the same restricted
+  role; boot validation refuses a writable server, another cluster, another deployment identity, a wrong role or RLS
+  drift, and keeps a standby whose ledger head lags not-validated (primary); freshness by WAL position (unknown lag = primary); fallbacks to the primary are metered.
+- **SECURITY TRADE-OFF (vetoable):** Decision: register-listed reads may run on a streaming replica; there, layer 2
+  (permissions.userHasPermissionTx, resourceScope/memberAccess/fieldPolicy.resolveTx) and layers 4–5 (RLS policies reading
+  user_role, role_permission, user_permission_override, manager_workspace, venue scope) evaluate role/permission/membership
+  rows as of the replica's replay position, up to PG_DATABASE_REPLICA_MAX_LAG_MS (5 s) behind the primary. Reason:
+  re-reading every permission row from the primary inside a replica transaction is impossible; a primary pre-check per read
+  would cancel the offload. Risk: for up to the lag bound after a revocation or scope narrowing, a user who still passes
+  the route guard can read rows of the replica-eligible lists (shifts, offers, venues, staff directory names, search hits,
+  dashboard counts, report counts) under the old scope; no write, payroll, right-to-work, audit, admin or auth data is
+  reachable this way. Mitigation: route guards and the auth security snapshot stay on the primary (full
+  revocation/suspension/session end immediate); freshness enforced by WAL position, unknown lag = primary; register
+  source-enforced; lag/fallbacks metered. Reversal: unset PG_DATABASE_REPLICA_URL, lower the max lag, or remove register
+  entries.
+
+### E6: workspace provisioning (provisioner retirement, gate G2) — drafts 1786721210000 / 1786721220000, pending approval
+
+- **Asset:** workspace schema creation and the provisioning state of every organisation.
+- **Controls:** the guarded `core.provision_workspace` keeps its refusals inside the function itself (organisation
+  suspension, account state, rate limit, one advisory-lock keyspace shared with the Worker path), so a caller that bypasses
+  the service layer is refused the same way. The two Worker definers (provisioning health and the runtime drift refresh)
+  run as the restricted login and disclose only two platform-wide integers, or refresh the alert-only drift columns of a
+  workspace in the organisation the caller bound; neither returns names, schemas or rows of another organisation. The
+  privileged provisioner stays (CREWFLOW_PROVISIONER_ENABLED "true" in production) until gate G2.
+- **Owner decisions (2026-10-30):** only an owner account with user status `active` may provision, and a suspended
+  organisation cannot initiate provisioning; there is no platform-admin exemption, at the service or in the function.
+- **Residual:** until G2 the privileged `crewflow` credential stays in the Worker launcher (root) and the provisioner child.
+
+### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill (owner decision, branch phase-b/one-db-url, not merged)
+
+- **Threats:** a migration-capable credential in a long-running container (any RCE reaches every tenant's identity rows);
+  an owner command run with more privilege than it needs (the bare migration login inherits BOTH owner roles); a code bug in
+  an elevated session running arbitrary SQL as a table owner; an ops credential or label leaking into the API, the Worker or
+  the migrate step; a production run with no accountable approval, or attributed to whoever the operator names
+  (`--actor-user-id` was a free string); an HWS copy applied in production while HWS is off (a stale snapshot treated as the
+  cutover's data).
+- **Controls:** the commands run only with `CREWFLOW_OPS_RUN=one-off` (and the ops container runs nothing else;
+  `command/ops/ops-run.ts`, checked in `main.ts` and again in every command body). The CLI primary is
+  `PG_OPS_APP_DATABASE_URL` = `crewflow_app` (boot-gated; the ordinary runtime credential). `PG_DATABASE_URL` = the migration
+  identity is accepted only by containment and `user-session:backfill --dry-run/--apply` and refused by every other mode
+  (`--verify` and every `hws:backfill` mode run as `crewflow_app`; the hws physical copy is proven equal under `crewflow_app`,
+  `crewflow` and a superuser on a disposable database). Every elevated transaction verifies, before any data statement, the
+  login (the URL's user, migration-identity shape, no SUPERUSER/BYPASSRLS/ADMIN, PG16 `SET` on the target role), then
+  `SET LOCAL ROLE rab_secure_owner` (a frozen literal), then current_user = that role with no `crewflow` privilege,
+  `transaction_read_only` as intended (READ ONLY for every read), PostgreSQL 16, the same database, and the deployment
+  identity read on that session equal to the `crewflow_app` session's. The session runs only statement NAMES from the frozen
+  plan for that access mode (`ops-statements.ts`). Every other process refuses every `CREWFLOW_OPS_*` / `PG_OPS_*` name
+  (`pg-config.ts`, `api-prestart.sh`, the Worker launcher); `compose-credential-isolation.cjs` (CI) proves the `rab-ops`
+  environment (`.env.ops`, profile `ops`, `restart: "no"`) reaches no other service; the values are refused from a `.env`
+  file. The operator label (`CREWFLOW_OPS_ACTOR_SOURCE` / `_ACTOR_ID` / `CREWFLOW_OPS_CHANGE_REF`) is required and recorded
+  verbatim on every audit row the run writes, marked "operational label, not database-verified identity", next to the
+  database-verified session facts; containment's `--actor-user-id` must be an ACTIVE platform admin
+  (`core.is_active_platform_admin`) and is recorded as a claim. `hws:backfill --apply` refuses while HWS is off unless
+  `--hws-cutover` is passed. Abuse-case tests: `ops-run.spec.ts`, `elevated-ops-session.spec.ts`, `pg-config.spec.ts`,
+  `ops-elevated-session.integration.spec.ts` (live: wrong session_user, SET FALSE membership, unnarrowed / wrong role /
+  read-write, statement outside the plan, app session not `crewflow_app`), plus the end-to-end CLI refusals in the runbook.
+- **Residuals:** `SET ROLE` is an accident boundary, not a security boundary against code in the session (`RESET ROLE`
+  undoes it); the READ ONLY transaction, the frozen statement list and the one-off lifetime of the credential are the real
+  limits. The label is whatever the container environment says: accountability comes from the deployment platform's
+  protected environment, required reviewers and approval log (runbook §15.5), not from the database. The
+  `user-session:backfill --apply` audit rows are written after the inserts on a different session (no cross-session
+  atomicity): a crash between them leaves inserted sessions without their audit row (the run's console/log and a re-run's
+  `already-present` still show them). Narrower still (needs new SQL, separate approval): `rab_secure_owner` SECURITY DEFINER
+  read/backfill functions callable by `crewflow_app` only, which would remove the migration identity from these runs entirely,
+  and an Admin-Panel-issued single-use ops ticket for database-verified attribution.
+
+### Phase B security review fixes (H-1, L-1 … L-5; 2026-10-29, branch phase-b/one-db-url, not merged)
+
+- **H-1 — today's production database has no marker yet.** Threat: a non-production API / Worker / provisioner or a
+  `DB_TARGET=local|test` command handed the current production Neon URL (INCIDENT-2026-10-05's class) runs against
+  production, because an unmarked production database looks like an unmarked dev database. Controls: (1) an INTERIM deny
+  list (`deployment-identity/unmarked-production-endpoints.ts`, endpoint key `neon:ep-round-rain-aess0njf`, any database,
+  direct or `-pooler`, any region) checked before any connection on the non-production branch of `resolveRuntimeDatabase`
+  (every endpoint: primary, lock, elevated, replica) and the local/test branch of `resolveDbTarget` (even with
+  `ALLOW_REMOTE_TEST_DATABASE=true`); removed in the release that binds production. (2) Outside `NODE_ENV=test` (since N-2: outside `NODE_ENV=test` on a
+  server-marked disposable test database), an absent or unbound marker on a remote host (dotted name or non-loopback IP literal) is refused unless `DB_TARGET=test` AND
+  `ALLOW_REMOTE_TEST_DATABASE=true` (`decideDeploymentIdentity`); loopback and single-label docker-service hosts are
+  unaffected. Tests: `runtime-database-guard.spec.ts` 10b/10c, `database-target.spec.ts` 14a/14a2,
+  `deployment-identity.spec.ts` (H-1 cases), `database-boot-gate-rules.spec.ts` (identity, H-1). Residual: a production
+  database on another provider that is neither marked nor on the deny list and is reached by a process with
+  `DB_TARGET=test ALLOW_REMOTE_TEST_DATABASE=true` (an explicit, two-variable test override) is not recognised.
+- **L-1 — migrator-role setup guard.** The admin URL goes through the factory URL policy (no `?host=`/`?port=`/`?user=`/
+  session `options`) and a factory client; the disposable marker is read from server facts (`pg_db_role_setting`,
+  `pg_file_settings`, `postmaster.opts`), never `current_setting()`. Both SQL files re-check the same facts.
+- **L-2 — standing migration approval.** `.env.migrate.example` ships `CREWFLOW_MIGRATION_APPROVED` commented out;
+  `setup-db.ts` with `DB_TARGET=production` refuses without the per-release approval from the process environment (an
+  approval in a `.env` file is refused). N1 unchanged.
+- **L-3 — session stability of the migration and provisioning locks.** The live two-connection probe
+  (`pg-session-probe.ts`) now also runs in the locked migration runner (before any migration session or lock) and in the
+  provisioner (before its first connection).
+- **L-4 — one list of names that never reach a runtime process** (`typeorm/core/never-in-runtime-env.ts`: migration and
+  bootstrap credentials, `CREWFLOW_MIGRATOR_PASSWORD`, both bootstrap passwords, `CREWFLOW_MIGRATION_PHASE`,
+  `ALLOW_PRODUCTION_DB_COMMANDS`, `DB_TARGET`, the identity bootstrap flag, the ops variables) enforced in-process by the
+  runtime guard (API, Worker, provisioner), with literal copies in `api-prestart.sh` and the Worker launcher kept equal by
+  `never-in-runtime-env.spec.ts`. `DB_TARGET` is therefore removed from every API/Worker service definition (dev compose
+  blanks it, e2e compose sets it on the CLI service only, the live e2e runner unsets it).
+- **L-5 — source scan.** `typeorm/scripts/` is no longer exempt wholesale; each script has its own baseline entry and the
+  posture, drift and migrator-role tools connect through the factory (`createPgClientForUrl`).
+
+#### Follow-up review (N-1 … N-4, L-2 / L-4 gaps; 2026-10-30, same branch, not merged)
+
+- **N-1 — deny-list bypass by host spelling or Neon password routing.** Threat: a non-production process or a
+  `DB_TARGET=local|test` command reaches the unmarked production endpoint through `…neon.tech.` (trailing dot: the
+  endpoint key fell back to `host:port`) or through Neon password routing (`endpoint=ep-round-rain-aess0njf$<pw>`) with
+  any host, IP, alias or loopback tunnel (the password was never inspected). Controls: `pg-url-policy.ts` strips ONE
+  trailing dot (a host still ending in a dot is refused) before every host rule; a password beginning `endpoint=` is
+  accepted only on a Neon host naming that host's own endpoint (exactly like the `options` token), refused otherwise
+  without echoing the password, and recorded as `routedNeonEndpoint`, which `matchUnmarkedProductionEndpoint` checks as
+  well as the host key. Tests: `pg-url-policy.spec.ts` (N-1 block), `unmarked-production-endpoints.spec.ts`,
+  `runtime-database-guard.spec.ts` 10b2, `database-target.spec.ts` 18.
+- **N-2 — `NODE_ENV=test` lifted the remote-unmarked refusal in any runtime.** `test` is a valid runtime NODE_ENV, so an
+  API / Worker / provisioner started with it accepted an unmarked remote database. Control: the exemption now also needs
+  the PROBED database to carry `crewflow.disposable_test_database = 'true'` as a database-level setting, read from
+  `pg_db_role_setting` on the checking connection (`MARKER_PRESENT_SQL`), never `current_setting()`; the
+  `DB_TARGET=test` + `ALLOW_REMOTE_TEST_DATABASE=true` allowance applies to commands only (`command: true` from
+  database-target, the CLI boot gate and the ops session), so a runtime that tolerates `DB_TARGET` (L-4 below) is granted
+  nothing by it. Loopback / single-label hosts unchanged (CI 127.0.0.1, dev `devdb`). Tests: `deployment-identity.spec.ts`
+  (H-1 / N-2 cases).
+- **N-3 — the API prestart check connected before any runtime guard.** `check-pending-migrations.ts` now runs the pure
+  `resolveRuntimeDatabase({ processName: 'api' })` first (forbidden names, runtime environment, URL policy, deny list) and
+  opens no connection when it refuses; TypeORM and the migrations load only afterwards. Tests:
+  `check-pending-migrations.spec.ts`.
+- **N-4 — "no dot" meant "local".** A non-loopback IPv6 literal (`fd00::5`) passed `RAB_RUNTIME_ENV=development` and
+  `DB_TARGET=local` and was classified `LOCAL` (which the AI real-provider gate trusts). Both guards now use
+  `isRemoteDatabaseHost` (deployment-identity.ts). Tests: `runtime-database-guard.spec.ts` 11d2,
+  `database-target.spec.ts` 17.
+- **L-2 gap — approval from a dotenv file other than the cwd `.env`.** `CREWFLOW_MIGRATION_APPROVED` joins
+  `PRODUCTION_AUTHORITY_VARS` (refused for `DB_TARGET=production` when present in `packages/rab-server/.env`, which Nx
+  injects), and `setup-db.ts` checks the cwd `.env`, the `DOTENV_CONFIG_PATH` / `dotenv_config_path=` file and
+  `packages/rab-server/.env` before connecting. Tests: `database-target.spec.ts` 19, `migration-runner.spec.ts` (L-2).
+- **L-4 regression — local `yarn start` refused to boot.** Nx injects `packages/rab-server/.env` (`DB_TARGET=local`, which
+  CLI commands need) into the API, and the local provisioner loads `.env.provisioner` with it. The in-process rule is now
+  value-aware for `DB_TARGET` only: `local` / `test` is tolerated (ignored, never read) in a non-production runtime; any
+  other value, and any value when `NODE_ENV` or `RAB_RUNTIME_ENV` is production (trimmed, case-insensitive),
+  is refused; `ALLOW_PRODUCTION_DB_COMMANDS` stays refused by name everywhere. The single list
+  (`never-in-runtime-env.ts`, `toleratedOutsideProduction`) remains the source of truth. `api-prestart.sh` and the
+  Worker launcher stay strict by name (they run only in the images; dev compose blanks `DB_TARGET`). Tests:
+  `runtime-database-guard.spec.ts` 6 / 6b / 6c, `never-in-runtime-env.spec.ts` (L-4 follow-up cases), `launcher.test.cjs` 12.
+  Residual: a developer runtime holding `DB_TARGET=local|test` keeps a value that is harmless to it (nothing in a runtime
+  reads it for target selection; N-2 removed the one runtime read).
+
+#### Final pre-push review (F1 … F7; 2026-10-30, same branch, not merged)
+
+- **Loopback tunnels (question: can `DB_TARGET=local|test` or the 127.0.0.0/8 rule bypass target verification?).**
+  `DB_TARGET` in a runtime changes no decision (every reader checked). A loopback address grants nothing a tunnel on
+  `127.0.0.1` / `localhost` did not already have. The server-side marker is the control that holds through a tunnel: a
+  BOUND production database is refused by every non-production process and command whatever host it is reached by.
+- **F3 (Low, fixed) — `127.999.999.999` / `127.0.0.09` counted as loopback.** A resolvable dotted name shaped like a
+  127.x address skipped the remote-unmarked rule. `isLoopbackHost` now accepts only `localhost`, `::1` and a real IPv4
+  literal (`net.isIPv4`) in 127.0.0.0/8. Tests: `deployment-identity.spec.ts`.
+- **F7 (Info, fixed) — a production marker could name a loopback / single-label host.** A tunnel on any machine would then
+  pass the location check. `planBind` refuses loopback and single-label `--confirm-host` values for
+  `--environment production`. Tests: `bind-deployment-identity.spec.ts` (F7).
+- **OPEN — F1 (Medium, not a regression) — today's UNMARKED production through a local TLS-re-opening proxy.** A process
+  holding the production credential reaches unmarked production via a loopback proxy that re-opens TLS with SNI; the
+  name-based deny list cannot see it, and `DB_TARGET=local` would skip N1. Same blind spot as main's endpoint pin. Closed
+  only by binding production (DeploymentIdentity + `db:bind-identity`) — a deployment blocker.
+- **OPEN — F2 (Medium) — a non-production first bind of an unbound production database.** Between applying
+  DeploymentIdentity to production and binding it, the migrator credential through a tunnel (or a remote
+  `DB_TARGET=test` + `ALLOW_REMOTE_TEST_DATABASE`) could bind it as development (production then refuses to boot; no
+  tool path to rebind). Control required before production: apply the migration and bind production in the same
+  supervised step; add an audited production rebind of a non-production marker.
+- **F4 (Low, fixed; branch phase-b/sec-fixes) — single-label hosts resolved remotely counted as local.** Threat: a name
+  without a dot (meant for a compose service) resolved through a DNS search domain or another Kubernetes namespace reached
+  a database elsewhere while skipping the remote-unmarked rule, `DB_TARGET=local|test`'s remote refusal and the runtime
+  LOCAL classification. Control: the one shared rule (`deployment-identity.ts` `isRemoteDatabaseHost`, used by
+  `database-target.ts`, `runtime-database-guard.ts`, `decideDeploymentIdentity` and now `seed-ai-demo`, which had its own
+  copy) treats as local only loopback and `LOCAL_DATABASE_SERVICE_HOSTS` = `devdb` (dev compose), `postgres` (QA and e2e
+  compose), `pg` and `pg-other` (worker-bundle test compose files). Any other single-label name is remote. The list is
+  code: no environment variable widens it. F7's production-bind refusal now uses `isLoopbackHost || isSingleLabelHost`, so
+  every single-label `--confirm-host`, listed or not, stays refused for `--environment production`. Tests:
+  `deployment-identity.spec.ts` (F4: unlisted names refused unmarked, NODE_ENV=test needs the disposable-test setting; a
+  compose-file scan fails when a compose database host is not on the list), `database-target.spec.ts` 17b,
+  `runtime-database-guard.spec.ts` 11d3, `bind-deployment-identity.spec.ts` (F7 with `devdb`, `db`, `prod-db`),
+  `seed-ai-demo.spec.ts`.
+- **F5 (Medium, fixed; branch phase-b/sec-fixes) — a standing migration approval approved every later release.** Threat:
+  `CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations` left in `.env.migrate` or a pipeline variable silently approved
+  whatever was pending at the next deploy. Control (`scripts/migrate/migration-approval.ts`): the approval is
+  `pending-<count>-<sha256>` over a domain tag and the pending names in MigrationExecutor run order. deploy-prepare without
+  an approval lists every pending name and prints that token (exit 3, nothing applied). With an approval, the locked runner
+  (`LockedMigrationOptions.approvePending`) compares it with the set read on the locked session as the last gate before
+  `MigrationExecutor`; a stale token, a token for another set, a malformed value and the retired constant are refused
+  (exit 1, nothing applied) with the pending names and the token to use. A production apply run without the gate refuses.
+  `setup-db` with `DB_TARGET=production` refuses the retired constant and malformed values before connecting and checks a
+  token on the locked session. With nothing pending, a well-formed token approves nothing and passes with a warning.
+  Tests: `migration-runner.spec.ts` (token, gate, deploy-prepare with a fake runner: check run prints the set and token,
+  stale / other-set / malformed / retired refused with nothing applied; setup-db),
+  `migration-approval.integration.spec.ts` (real runner, disposable cluster: refusals after the lock, probe migration
+  never ran, no ledger row).
+- **F6 (Low, fixed; branch phase-b/sec-fixes) — Nx dotenv files not read by the production-authority checks.** Threat:
+  production authority (`DB_TARGET=production`, `ALLOW_PRODUCTION_DB_COMMANDS`, the deployment identity, the migration
+  approval, a production URL) in `packages/rab-server/.env.local`, `.env.<target>`, `packages/rab-worker/.env*` or the root
+  `.env`, which Nx 22.7 injects (`nx/dist/src/tasks-runner/task-env-paths.js` `getEnvPathsForTask`), went unseen: the
+  checks read only `packages/rab-server/.env` (commands) or the working directory's `.env` (runtimes, ops). Control:
+  `core/nx-dotenv-files.ts` lists every file Nx loads for every rab-server and rab-worker target under the repository root
+  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule), `readRuntimeDotenvValues`
+  (API / Worker / provisioner, core.datasource, check-pending-migrations) and the ops container's dotenv refusal read all
+  of them. `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals Nx's own function for
+  every target; target list pinned to both project.json files, no configurations; a production command, a production
+  runtime and the ops container refuse values in `.env.local`, `.local.env`, `.env.<target>`, `packages/rab-worker/.env.*`
+  and the root `.env`).
+- **Container-image dependencies (fixed; branch phase-b/sec-fixes) — undici, qs, deepmerge (Trivy / code scanning).**
+  qs 6.15.3 (CVE-2026-82417, CVE-2026-82562, CVE-2026-110816; MEDIUM) under express 5.2.1 and superagent 10.3.0: deduped to
+  6.17.0 (lockfile only). undici 6.27.0 (CVE-2026-19534, -87018, -109383, -109869 HIGH; four MEDIUM, one LOW): not a
+  workspace dependency (yarn.lock has 6.29.1 and 8.12.3) but the copy inside the node:24-alpine npm CLI; the runtime stage
+  of `packages/rab-docker/rab/Dockerfile` now removes the npm CLI (never run at runtime), which also removes that tree's
+  tar, brace-expansion, ip-address and postcss-selector-parser findings (a local Trivy 0.65.0 scan of the pinned base image
+  with the npm CLI removed reports 0 library findings, 26 before). **Not fixed:** deepmerge 4.3.1 (CVE-2026-93753, LOW) has
+  no fixed release (4.3.1 is the latest); it is used by html-to-text (react-email plain-text rendering, merging static
+  options) and jest-config (dev only). Local Trivy fs scan of yarn.lock: 0 HIGH / 0 CRITICAL before and after; `yarn npm
+  audit --severity high --all --recursive`: no findings.
+- F4, F5 and F6 were production-deployment blockers; F1 and F2 above remain open.
