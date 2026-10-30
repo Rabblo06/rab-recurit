@@ -18,5 +18,8 @@ packages/rab-docs
 .env*
 **/.env
 **/.env.*
+# Final review F6: Nx also loads .local.env and .<target>[.local].env (nx-dotenv-files.ts).
+.*.env
+**/.*.env
 !**/.env.example
 .audit

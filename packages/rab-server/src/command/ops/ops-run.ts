@@ -28,8 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { parse as parseDotenv } from 'dotenv';
-
+import { nxDotenvPaths, readDotenvFilesValues, WORKSPACE_ROOT } from '../../database/typeorm/core/nx-dotenv-files';
 import {
   currentPgProcessRole,
   OPS_ACTOR_ENV_NAMES,
@@ -152,12 +151,11 @@ export function readOpsOperationalLabel(env: Record<string, string | undefined>,
 
 /**
  * The ops values must come from the one-off container's own environment, never a `.env` file (dotenv/config loads
- * `<cwd>/.env` into process.env before anything runs). A `.env` that defines any ops name or PG_DATABASE_URL refuses.
+ * `<cwd>/.env` into process.env before anything runs; final review F6: `nx run rab-server:command` injects every dotenv
+ * file of nx-dotenv-files.ts as well). Any of those files that defines an ops name or PG_DATABASE_URL refuses.
  */
 export function assertOpsValuesNotFromDotenv(cwd: string = process.cwd(), read: (path: string) => string | null = readIfExists): void {
-  const content = read(resolve(cwd, '.env'));
-  if (content === null) return;
-  const parsed = parseDotenv(content);
+  const parsed = readDotenvFilesValues([resolve(cwd, '.env'), ...nxDotenvPaths([WORKSPACE_ROOT, cwd])], read);
   const fromFile = [...OPS_ONLY_ENV_NAMES, 'PG_DATABASE_URL'].filter((name) => parsed[name] !== undefined && parsed[name].trim() !== '');
   if (fromFile.length > 0) {
     throw new OpsRunError(

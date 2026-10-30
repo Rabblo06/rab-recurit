@@ -56,7 +56,7 @@ export function resolveMigrationConnection(
   }
   if (resolved.production && pgUrl && dotenvValues.PG_DATABASE_URL !== undefined && dotenvValues.PG_DATABASE_URL.trim() === pgUrl) {
     throw new MigrationDatabaseUrlError(
-      'PG_DATABASE_URL comes from packages/rab-server/.env. Production authority must come from the deployment environment. Refusing.',
+      'PG_DATABASE_URL comes from packages/rab-server/.env or another .env file Nx loads. Production authority must come from the deployment environment. Refusing.',
     );
   }
   const endpoint = resolved.elevated ? 'elevated' : 'primary';

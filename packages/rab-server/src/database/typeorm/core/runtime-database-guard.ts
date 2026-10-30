@@ -30,8 +30,8 @@
  *     session-lock connection; both are probed. All connections must agree.
  *   - The ordinary API and Worker processes refuse to start if DATABASE_URL_UNPOOLED is present in their environment at
  *     all — a restricted process must never be ABLE to escalate, not merely choose not to.
- *   - Production values present in packages/rab-server/.env (or the working directory's .env) are refused. A developer .env is
- *     never production authority.
+ *   - Production values present in the working directory's .env or any dotenv file Nx loads for a rab-server / rab-worker
+ *     target (final review F6: nx-dotenv-files.ts) are refused. A developer .env is never production authority.
  *   - A NON-production process (any NODE_ENV other than production) must NOT run against a database bound to production
  *     (live marker check), whatever its host is called. This stops a local `.env` that still carries a production URL, or a
  *     clone of production that was never rebound, from turning a dev server into a production writer.
@@ -42,6 +42,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { parse as parseDotenv } from 'dotenv';
+
+import { nxDotenvPaths, readDotenvFilesValues } from './nx-dotenv-files';
 
 import {
   createPgClient,
@@ -331,10 +333,16 @@ export async function probeRuntimeIdentity(
   }
 }
 
-/** Reads the working directory's .env as data only. Never loaded into process.env here. */
-export function readRuntimeDotenvValues(filePath: string = path.join(process.cwd(), '.env')): Record<string, string> {
-  if (!fs.existsSync(filePath)) return {};
-  return parseDotenv(fs.readFileSync(filePath));
+/**
+ * Reads, as data only (never into process.env), the working directory's .env (dotenv/config's default) and — final review
+ * F6 — every dotenv file Nx loads for a rab-server or rab-worker target (nx-dotenv-files.ts), merged first-file-wins. Before
+ * F6 only the working directory's .env was read, so production values in packages/rab-server/.env* or
+ * packages/rab-worker/.env* (what `nx run rab-server:start` / `rab-worker:start` inject) went unseen. A `filePath` reads
+ * that one file only (tests).
+ */
+export function readRuntimeDotenvValues(filePath?: string): Record<string, string> {
+  if (filePath !== undefined) return fs.existsSync(filePath) ? parseDotenv(fs.readFileSync(filePath)) : {};
+  return readDotenvFilesValues([path.join(process.cwd(), '.env'), ...nxDotenvPaths()]);
 }
 
 /**

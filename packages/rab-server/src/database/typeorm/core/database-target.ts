@@ -3,7 +3,8 @@
  * TypeORM CLI), the nest-commander CLI (bootstrap-admin, grant-platform-admin, storage-reconcile, seed, ...) and
  * `db:bind-identity`.
  *
- * Nothing here trusts packages/rab-server/.env. Production authority is refused when it comes from that file.
+ * Nothing here trusts packages/rab-server/.env or any other dotenv file Nx loads (final review F6: nx-dotenv-files.ts).
+ * Production authority is refused when it comes from one of them.
  *
  *   DB_TARGET=local|test|staging|production   required for every guarded command, no default
  *   production additionally needs, all from the process environment:
@@ -48,6 +49,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { parse as parseDotenv } from 'dotenv';
+
+import { nxDotenvPaths, readDotenvFilesValues } from './nx-dotenv-files';
 
 import {
   createPgClient,
@@ -101,7 +104,7 @@ export function migrationConnectionHost(resolved: MigrationSessionLocation): str
 export interface DbTargetInput {
   purpose: string;
   env: Record<string, string | undefined>;
-  /** Values parsed from packages/rab-server/.env, used only to refuse production authority that came from that file. */
+  /** Values parsed from the Nx dotenv files (readDotenvValues), used only to refuse production authority that came from them. */
   dotenvValues: Record<string, string>;
   /** Factory process role. Default: `migrate` for migrations and db:bind-identity, `cli` for everything else. */
   processRole?: PgProcessRole;
@@ -149,9 +152,9 @@ function isLocalHost(identity: PgTargetIdentity): boolean {
 }
 
 /**
- * Production authority and identity variables that must never come from packages/rab-server/.env (checked for
- * DB_TARGET=production only). Security review L-2 follow-up: the per-release migration approval is authority too (Nx
- * injects packages/rab-server/.env into `nx run rab-server:migration:run`), so a standing approval in that file refuses
+ * Production authority and identity variables that must never come from packages/rab-server/.env or any other dotenv file
+ * Nx loads (final review F6; checked for DB_TARGET=production only). Security review L-2 follow-up: the per-release
+ * migration approval is authority too (Nx injects those files into `nx run rab-server:migration:run`), so a standing approval in one refuses
  * every production command, not only setup-db (setup-db.ts also checks its own dotenv sources before connecting).
  */
 export const PRODUCTION_AUTHORITY_VARS: readonly string[] = [
@@ -205,7 +208,7 @@ export function resolveDbTarget(input: DbTargetInput): ResolvedDbTarget {
         [dotenvValues.PG_DATABASE_URL, dotenvValues.DATABASE_URL].some((value) => value !== undefined && value.trim() === primaryValue));
     if (fromDotenv) {
       throw new DbTargetError(
-        'production target values are present in packages/rab-server/.env. Production authority must come from the deployment environment, not that file. Refusing.',
+        'production target values are present in packages/rab-server/.env or another .env file Nx loads (packages/rab-server, packages/rab-worker or the repository root: .env, .env.local, .local.env, .env.<target>[.local]). Production authority must come from the deployment environment, not a file. Refusing.',
       );
     }
   }
@@ -339,10 +342,16 @@ export async function assertDeferredDeploymentIdentity(
   }
 }
 
-/** Reads packages/rab-server/.env as data only. Never loads it into process.env here. */
-export function readDotenvValues(filePath: string = path.resolve(__dirname, '../../../../.env')): Record<string, string> {
-  if (!fs.existsSync(filePath)) return {};
-  return parseDotenv(fs.readFileSync(filePath));
+/**
+ * Reads, as data only (never into process.env), packages/rab-server/.env and — final review F6 — every other dotenv file Nx
+ * loads for a rab-server or rab-worker target (nx-dotenv-files.ts: .env.local, .local.env, .env.<target>[.local] of both
+ * projects, and the repository root's), merged first-file-wins. Before F6 only packages/rab-server/.env was read, so
+ * production authority in packages/rab-server/.env.local, .env.<target> or the root .env went unseen. A `filePath` reads
+ * that one file only (tests).
+ */
+export function readDotenvValues(filePath?: string): Record<string, string> {
+  if (filePath !== undefined) return fs.existsSync(filePath) ? parseDotenv(fs.readFileSync(filePath)) : {};
+  return readDotenvFilesValues(nxDotenvPaths());
 }
 
 export interface AssertDbTargetOptions {

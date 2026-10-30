@@ -17,7 +17,8 @@
  * set pending at that moment; the retired constant `apply-pending-migrations` is refused. N1 (production-migration-approval.ts) is unchanged and still
  * limits WHAT may apply; local / test runs are unchanged. L-2 follow-up: "a .env file" means EVERY dotenv source that can
  * reach this process — the working directory's .env (dotenv/config's default), the file DOTENV_CONFIG_PATH (or a
- * `dotenv_config_path=` argument) points dotenv/config at, and packages/rab-server/.env, which Nx injects into
+ * `dotenv_config_path=` argument) points dotenv/config at, and packages/rab-server/.env with every other dotenv file Nx
+ * loads (final review F6: .env.local, .env.<target>, the repository root's .env, ...; nx-dotenv-files.ts), which Nx injects into
  * `nx run rab-server:migration:run` without dotenv ever seeing it (database-target.ts PRODUCTION_AUTHORITY_VARS refuses it
  * there too).
  */
@@ -77,7 +78,8 @@ function readDotenvFile(filePath: string): Record<string, string> {
 /**
  * The dotenv files whose values can reach this process (security review L-2 follow-up), as data only: the working
  * directory's .env, the DOTENV_CONFIG_PATH / `dotenv_config_path=` file dotenv/config loads instead, and
- * packages/rab-server/.env (Nx injects it). A key present in ANY of them counts as "from a .env file". `readServerDotenv`
+ * every dotenv file Nx injects (database-target.ts readDotenvValues; final review F6). A key present in ANY of them counts as
+ * "from a .env file". `readServerDotenv`
  * is a test seam.
  */
 export function readSetupDbDotenvSources(
