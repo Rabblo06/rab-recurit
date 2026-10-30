@@ -34,6 +34,6 @@ icon: "bug"
     With `EMAIL_DRIVER=LOGGER`, emails (including activation links) are written to the API log instead of being sent.
   </Accordion>
   <Accordion title="Migration fails with “must be owner of …”">
-    Run migrations with the owner connection (`DATABASE_URL_UNPOOLED`). Some objects are owned by a separate secure owner role and need the database superuser locally.
+    Run migrations with the migration identity as that process's own `PG_DATABASE_URL` (the `rab-migrate` step, or `DB_TARGET=local PG_DATABASE_URL=<migration login> nx run rab-server:migration:run`). Some objects are owned by a separate secure owner role and need the database superuser locally.
   </Accordion>
 </AccordionGroup>

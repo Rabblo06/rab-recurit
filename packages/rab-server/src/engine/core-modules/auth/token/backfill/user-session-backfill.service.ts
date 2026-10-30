@@ -8,8 +8,18 @@ export class UserSessionBackfillError extends Error {
   }
 }
 
+/** Thrown by an executor when the run must stop (e.g. the ops elevated session failed its verification). Never swallowed. */
+export class UserSessionBackfillAbort extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UserSessionBackfillAbort';
+  }
+}
+
 export interface FamilyOutcome {
   familyId: string;
+  /** The family's organisation (set for inserted families; the ops command writes one audit row per organisation). */
+  organisationId?: string;
   outcome: 'inserted' | 'already-present' | 'skipped-inconsistent' | 'dry-run-would-insert';
   /** SAFE reason only — never raw driver/SQL error text. */
   reason?: string;
@@ -30,7 +40,7 @@ export interface BackfillVerifyResult {
   pass: boolean;
 }
 
-interface CandidateRow {
+export interface CandidateRow {
   family_id: string;
   user_count: string;
   org_count: string;
@@ -50,10 +60,76 @@ interface CandidateRow {
 }
 
 /**
+ * The frozen statements (Phase B ops container: the elevated session runs these by NAME, never SQL text —
+ * command/ops/ops-statements.ts). Unchanged SQL from before.
+ */
+export const USER_SESSION_BACKFILL_CANDIDATES_SQL = `SELECT family_id,
+              count(DISTINCT user_id) AS user_count,
+              count(DISTINCT organisation_id) AS org_count,
+              count(DISTINCT application_target) AS target_count,
+              count(DISTINCT family_expires_at) AS deadline_count,
+              -- Postgres has no built-in MIN/MAX aggregate for uuid — any element works here since
+              -- COUNT(DISTINCT ...) already guarantees every row agrees when this family is consistent.
+              (array_agg(user_id))[1] AS user_id,
+              (array_agg(organisation_id))[1] AS organisation_id,
+              min(application_target) AS application_target,
+              min(family_expires_at) AS absolute_expires_at,
+              min(created_at) AS created_at,
+              max(created_at) AS last_seen_at,
+              bool_or(revoked_at IS NULL AND family_expires_at > now()) AS is_live,
+              max(revoked_at) AS max_revoked_at,
+              (array_agg(device_id ORDER BY created_at ASC))[1] AS device_id,
+              (array_agg(user_agent ORDER BY created_at ASC))[1] AS user_agent,
+              (array_agg(ip ORDER BY created_at ASC))[1] AS ip
+         FROM core.refresh_token
+        GROUP BY family_id
+        ORDER BY family_id
+        LIMIT $1`;
+export const USER_SESSION_BACKFILL_BIND_SQL = `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`;
+export const USER_SESSION_BACKFILL_INSERT_SQL = `INSERT INTO core.user_session
+               (id, organisation_id, user_id, workspace_id, application_target, device_id, user_agent, ip_address,
+                created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason)
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::inet, $8, $9, $10, $11, $12)
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id`;
+
+/**
+ * Where the owner-level statements run. The ops container supplies one backed by its verified elevated session
+ * (`SET LOCAL ROLE rab_secure_owner`, frozen statements); tests may set `ownerDataSource` instead.
+ */
+export interface UserSessionBackfillExecutor {
+  /** The cross-organisation candidate scan (READ ONLY). */
+  findCandidates(batchSize: number): Promise<CandidateRow[]>;
+  /** One family, in its own transaction: bind its own identity, then the idempotent INSERT. Returns the inserted ids. */
+  insertFamily(binding: [organisationId: string, userId: string], values: unknown[]): Promise<Array<{ id: string }>>;
+}
+
+/** The executor over a plain DataSource (tests): the same statements. */
+export function dataSourceBackfillExecutor(owner: DataSource): UserSessionBackfillExecutor {
+  return {
+    findCandidates: (batchSize) =>
+      owner.transaction(async (manager) => {
+        await manager.query('SET TRANSACTION READ ONLY');
+        return manager.query<CandidateRow[]>(USER_SESSION_BACKFILL_CANDIDATES_SQL, [batchSize]);
+      }),
+    insertFamily: (binding, values) =>
+      owner.transaction(async (manager) => {
+        await manager.query(USER_SESSION_BACKFILL_BIND_SQL, binding);
+        return manager.query(USER_SESSION_BACKFILL_INSERT_SQL, values);
+      }),
+  };
+}
+
+/**
  * P1B — one-time backfill from existing `core.refresh_token` families to `core.user_session`
  * rows, for families that logged in before this phase shipped. See `1786678000000-UserSession.ts`
  * and `docs/architecture/FULL-ARCHITECTURE-UPGRADE-PLAN.md` for the full design; this is the
  * session log of HOW it's implemented.
+ *
+ * Phase B (ops container): the owner here is `rab_secure_owner` (owner of refresh_token and user_session, both NOT FORCE'd
+ * since the role split), reached by the migration identity through `SET LOCAL ROLE rab_secure_owner` inside the verified
+ * elevated session of the one-off ops container (command/ops/elevated-ops-session.ts); `verify()` runs as crewflow_app.
+ * The historical notes below still say `rab_owner` / FORCE'd.
  *
  * WHY an owner connection is required for BOTH halves (unlike `HwsBackfillService`, which only
  * needs one for physical-schema writes): the candidate SCAN needs to see every organisation's
@@ -87,48 +163,24 @@ interface CandidateRow {
  */
 @Injectable()
 export class UserSessionBackfillService {
-  /** Set by the CLI command before calling `run()`/`verify()` — see `user-session-backfill.command.ts`. Never the pooled `rab_app` DataSource. */
+  /** Tests: a plain owner DataSource. Never the pooled runtime DataSource. */
   ownerDataSource?: DataSource;
+  /** The ops container: the verified elevated session's executor (takes precedence over ownerDataSource). */
+  executor?: UserSessionBackfillExecutor;
 
-  private requireOwner(): DataSource {
+  private requireExecutor(): UserSessionBackfillExecutor {
+    if (this.executor) return this.executor;
     if (!this.ownerDataSource) {
-      throw new UserSessionBackfillError('An owner (rab_owner) DataSource is required for the user-session backfill — see this command\'s own doc comment.');
+      throw new UserSessionBackfillError(
+        'An owner DataSource (tests) or an owner-level executor (the ops container\'s verified elevated session) is required for the user-session backfill scan/apply — see this command\'s own doc comment.',
+      );
     }
-    return this.ownerDataSource;
-  }
-
-  private async findCandidates(batchSize: number): Promise<CandidateRow[]> {
-    const owner = this.requireOwner();
-    return owner.query<CandidateRow[]>(
-      `SELECT family_id,
-              count(DISTINCT user_id) AS user_count,
-              count(DISTINCT organisation_id) AS org_count,
-              count(DISTINCT application_target) AS target_count,
-              count(DISTINCT family_expires_at) AS deadline_count,
-              -- Postgres has no built-in MIN/MAX aggregate for uuid — any element works here since
-              -- COUNT(DISTINCT ...) already guarantees every row agrees when this family is consistent.
-              (array_agg(user_id))[1] AS user_id,
-              (array_agg(organisation_id))[1] AS organisation_id,
-              min(application_target) AS application_target,
-              min(family_expires_at) AS absolute_expires_at,
-              min(created_at) AS created_at,
-              max(created_at) AS last_seen_at,
-              bool_or(revoked_at IS NULL AND family_expires_at > now()) AS is_live,
-              max(revoked_at) AS max_revoked_at,
-              (array_agg(device_id ORDER BY created_at ASC))[1] AS device_id,
-              (array_agg(user_agent ORDER BY created_at ASC))[1] AS user_agent,
-              (array_agg(ip ORDER BY created_at ASC))[1] AS ip
-         FROM core.refresh_token
-        GROUP BY family_id
-        ORDER BY family_id
-        LIMIT $1`,
-      [batchSize],
-    );
+    return dataSourceBackfillExecutor(this.ownerDataSource);
   }
 
   async run(options: { dryRun: boolean; batchSize: number }): Promise<BackfillRunResult> {
-    const owner = this.requireOwner();
-    const candidates = await this.findCandidates(options.batchSize);
+    const owner = this.requireExecutor();
+    const candidates = await owner.findCandidates(options.batchSize);
     const families: FamilyOutcome[] = [];
     let inserted = 0;
     let alreadyPresent = 0;
@@ -173,37 +225,28 @@ export class UserSessionBackfillService {
 
       let result: Array<{ id: string }>;
       try {
-        result = await owner.transaction(async (manager) => {
-          // Bound to THIS family's own identity — satisfies user_session_self's WITH CHECK
-          // without any RLS bypass or policy change. Never a cross-row/global bind.
-          await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [
+        // Bound to THIS family's own identity — satisfies user_session_self's WITH CHECK
+        // without any RLS bypass or policy change. Never a cross-row/global bind.
+        result = await owner.insertFamily(
+          [row.organisation_id, row.user_id],
+          [
+            row.family_id,
             row.organisation_id,
             row.user_id,
-          ]);
-          return manager.query(
-            `INSERT INTO core.user_session
-               (id, organisation_id, user_id, workspace_id, application_target, device_id, user_agent, ip_address,
-                created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason)
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, $7::inet, $8, $9, $10, $11, $12)
-             ON CONFLICT (id) DO NOTHING
-             RETURNING id`,
-            [
-              row.family_id,
-              row.organisation_id,
-              row.user_id,
-              row.application_target,
-              row.device_id,
-              row.user_agent,
-              row.ip,
-              row.created_at,
-              row.last_seen_at,
-              row.absolute_expires_at,
-              revokedAt,
-              revokedReason,
-            ],
-          );
-        });
-      } catch {
+            row.application_target,
+            row.device_id,
+            row.user_agent,
+            row.ip,
+            row.created_at,
+            row.last_seen_at,
+            row.absolute_expires_at,
+            revokedAt,
+            revokedReason,
+          ],
+        );
+      } catch (error) {
+        // A refused elevated session (role / identity verification) is never "one bad row": stop the whole run.
+        if (error instanceof UserSessionBackfillAbort) throw error;
         // One malformed/unexpected row must never abort the rest of the batch (the same
         // discipline `hws:backfill`'s own command applies per-workspace) — never the raw driver
         // message, a fixed, safe reason only.
@@ -214,7 +257,7 @@ export class UserSessionBackfillService {
 
       if (result.length > 0) {
         inserted++;
-        families.push({ familyId: row.family_id, outcome: 'inserted' });
+        families.push({ familyId: row.family_id, organisationId: row.organisation_id, outcome: 'inserted' });
       } else {
         alreadyPresent++;
         families.push({ familyId: row.family_id, outcome: 'already-present' });
@@ -229,8 +272,11 @@ export class UserSessionBackfillService {
    * matching user_session row — `pass` is true only once `missing === 0` (every live-or-dead
    * historical family has been accounted for).
    */
-  async verify(): Promise<BackfillVerifyResult> {
-    const owner = this.requireOwner();
+  async verify(dataSource?: DataSource): Promise<BackfillVerifyResult> {
+    // Phase B ops container: the restricted runtime DataSource (crewflow_app holds EXECUTE on the definer function); tests
+    // may still pass nothing and use ownerDataSource.
+    const owner = dataSource ?? this.ownerDataSource;
+    if (!owner) throw new UserSessionBackfillError('verify() needs a DataSource: the restricted runtime one in the ops container, or the owner DataSource in tests.');
     // Cross-organisation aggregate — see `count_user_session_backfill_status()`'s own doc
     // comment (in the owning migration) for why a plain LEFT JOIN from any single connection,
     // owner included, can't see this (user_session is FORCE'd).

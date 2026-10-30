@@ -1,5 +1,16 @@
 import { Client } from 'pg';
 
+import { createPgClientForUrl } from '../../postgres';
+
+/**
+ * Security review L-5: the posture snapshot's read-only client comes from the connection factory (URL policy, TLS,
+ * explicit fields), not a raw connection string handed to pg. The URL is the caller's (the operator script's
+ * POSTURE_DATABASE_URL, the M2 harness's admin URL, a test's admin URL).
+ */
+function postureClient(connectionString: string): Client {
+  return createPgClientForUrl(connectionString, 'the posture database URL', { purpose: 'posture', readOnly: true, statementTimeoutMs: 120_000 });
+}
+
 /**
  * Database security posture: who owns every `core` object and what `crewflow` / `crewflow_app` may do with it.
  *
@@ -160,7 +171,7 @@ export interface SecurityPosture {
 
 /** Core + every workspace schema, read in ONE read-only transaction (a consistent snapshot). */
 export async function readFullSecurityPosture(connectionString: string): Promise<SecurityPosture> {
-  const client = new Client({ connectionString, connectionTimeoutMillis: 10_000 });
+  const client = postureClient(connectionString);
   await client.connect();
   try {
     await client.query('BEGIN READ ONLY');
@@ -242,7 +253,7 @@ export function goldenLinesFrom(posture: SecurityPosture, previousWorkspaceLines
 }
 
 export async function readSecurityPosture(connectionString: string): Promise<string[]> {
-  const client = new Client({ connectionString, connectionTimeoutMillis: 10_000 });
+  const client = postureClient(connectionString);
   await client.connect();
   try {
     await client.query('BEGIN READ ONLY');

@@ -1,4 +1,5 @@
-import { ConflictException, HttpException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -19,6 +20,40 @@ export type WorkspaceProvisioningOutcome = 'READY' | 'ALREADY_READY' | 'FAILED' 
 
 const PG_NOT_FOUND = 'P0002';
 const PG_OBJECT_NOT_IN_PREREQUISITE_STATE = '55000';
+/**
+ * Phase B P8: SQLSTATEs raised by the guarded `core.provision_workspace` (migration ProvisionWorkspaceGuards1786721210000).
+ * Mapped so the server answers identically whichever layer refuses: CWP01 organisation suspended, CWP02 caller account not
+ * active (403, same as `assertCallerMayProvision`).
+ */
+const PG_ORGANISATION_SUSPENDED = 'CWP01';
+const PG_ACCOUNT_NOT_ACTIVE = 'CWP02';
+
+const organisationSuspended = () =>
+  new ForbiddenException({ code: 'ORGANISATION_SUSPENDED', message: 'This organisation has been suspended. Contact your administrator.' });
+const accountNotActive = () => new ForbiddenException({ code: 'ACCOUNT_NOT_ACTIVE', message: 'This account is no longer active.' });
+
+/**
+ * Layer 2 of the five-layer rule for workspace creation / provisioning (CLAUDE.md; inv-security finding F3). The HTTP route
+ * is already behind `OrganisationSuspendedGuard` and `ActiveAccountGuard` (layer 1), but a job, CLI or another service that
+ * calls `ManagerWorkspaceService.create` / `provisionOwnWorkspace` directly never passes through a guard. Read inside the
+ * caller's own transaction with the verified session's organisation and user bound, so RLS (layer 4) scopes both reads to
+ * the caller's own rows. Fail closed: a row that is not visible counts as refused.
+ *
+ * Owner decision B (2026-10-29) — stricter than the guards in two ways, both confirmed: (1) only `status = 'active'` may
+ * provision (the guard refuses only suspended / deactivated), and (2) a platform administrator gets NO exemption here: the
+ * route's OrganisationSuspendedGuard lets a platform admin through (so staff can investigate), but building new tenant
+ * infrastructure for a suspended organisation is refused for everyone, at this layer and in the function itself (CWP01).
+ */
+export async function assertCallerMayProvision(manager: EntityManager, ctx: AuthContext): Promise<void> {
+  if (!ctx.organisationId) throw new NotFoundException('Workspace not found.');
+  const [row] = await manager.query<Array<{ org_active: boolean | null; account_status: string | null }>>(
+    `SELECT (SELECT o.suspended_at IS NULL FROM core.organisation o WHERE o.id = $1) AS org_active,
+            (SELECT u.status FROM core."user" u WHERE u.id = $2) AS account_status`,
+    [ctx.organisationId, ctx.userId],
+  );
+  if (row?.org_active !== true) throw organisationSuspended();
+  if (row?.account_status !== 'active') throw accountNotActive();
+}
 
 function sqlState(error: unknown): string | undefined {
   const e = error as { code?: string; driverError?: { code?: string } } | undefined;
@@ -36,7 +71,8 @@ function sqlState(error: unknown): string | undefined {
  *   1. guard — only reachable from `ManagerWorkspaceService.create()` (JwtAuthGuard + @ManagerApplication on the route);
  *      there is no separate "run provisioning" endpoint.
  *   2. service — here: the workspace must be the caller's own (`owner_user_id = ctx.userId`) in the caller's
- *      organisation, and its lifecycle must be CREATING/FAILED (READY short-circuits).
+ *      organisation, the organisation must not be suspended and the caller's account must be active
+ *      (`assertCallerMayProvision`, Phase B P8), and its lifecycle must be CREATING/FAILED (READY short-circuits).
  *   3. org-scoped query — the ownership read binds `organisationId` from the verified session (`runInTenantContext`).
  *   4. RLS — the function reads `manager_workspace` AS `crewflow` under its RLS (own workspace only) and FORCE RLS binds
  *      the registry.
@@ -69,6 +105,8 @@ export class WorkspaceProvisioningService {
           where: { id: workspaceId, ownerUserId: ctx.userId, organisationId: ctx.organisationId! },
         });
         if (!workspace) throw new NotFoundException('Workspace not found.');
+        // After the ownership check, so a foreign id is still a plain 404 (never a 403 that confirms it exists).
+        await assertCallerMayProvision(manager, provisioningCtx);
         subdomain = workspace.subdomain;
         if (workspace.schemaStatus === 'READY') return 'ALREADY_READY';
         if (workspace.schemaStatus !== 'CREATING' && workspace.schemaStatus !== 'FAILED') {
@@ -104,6 +142,8 @@ export class WorkspaceProvisioningService {
       if (error instanceof HttpException) throw error;
       const code = sqlState(error);
       if (code === PG_NOT_FOUND) throw new NotFoundException('Workspace not found.');
+      if (code === PG_ORGANISATION_SUSPENDED) throw organisationSuspended();
+      if (code === PG_ACCOUNT_NOT_ACTIVE) throw accountNotActive();
       if (code === PG_OBJECT_NOT_IN_PREREQUISITE_STATE) {
         throw new ConflictException({ code: 'WORKSPACE_NOT_PROVISIONABLE', message: 'This workspace cannot be prepared from here.' });
       }

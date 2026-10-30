@@ -28,7 +28,11 @@ describe('Phase A scan interval settings', () => {
   it('maps the 17 former constants one-to-one onto WORKER_<JOB>_INTERVAL_SECONDS keys; the 3 minutes keys are unchanged', () => {
     const secondsDefs = SCAN_JOBS.filter((d) => d.interval.kind === 'env-seconds');
     expect(secondsDefs).toHaveLength(17);
-    expect(SCAN_JOBS.filter((d) => d.interval.kind === 'constant')).toEqual([]);
+    // Phase B P8 (owner decision C): the one constant is the daily counts-only provisioning health alert. Making it an env
+    // setting needs a WORKER_*_INTERVAL_SECONDS key in the environment layer (coordinator-owned; flagged, not done here).
+    expect(SCAN_JOBS.filter((d) => d.interval.kind === 'constant').map((d) => [d.jobName, d.interval])).toEqual([
+      ['workspace-provisioning-health', { kind: 'constant', ms: 86_400_000 }],
+    ]);
     const keys = secondsDefs.map((d) => (d.interval as { key: string }).key);
     expect(new Set(keys).size).toBe(17);
     expect([...keys].sort()).toEqual([...WORKER_SCAN_INTERVAL_KEYS].sort());
@@ -48,7 +52,11 @@ describe('Phase A scan interval settings', () => {
     const env = envOf();
     for (const def of SCAN_JOBS) {
       const expected =
-        def.interval.kind === 'env-seconds' ? HISTORICAL_SECONDS[def.jobName]! * 1000 : { 'login-handoff-cleanup': 15, 'outbox-retention': 60, 'ai-retention': 60 }[def.jobName]! * 60_000;
+        def.interval.kind === 'constant'
+          ? 86_400_000
+          : def.interval.kind === 'env-seconds'
+            ? HISTORICAL_SECONDS[def.jobName]! * 1000
+            : { 'login-handoff-cleanup': 15, 'outbox-retention': 60, 'ai-retention': 60 }[def.jobName]! * 60_000;
       expect([def.jobName, resolveIntervalMs(def, env)]).toEqual([def.jobName, expected]);
     }
     // Each table default is inside its own bounds.
@@ -121,12 +129,12 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish']);
     const expected = SCAN_JOBS.filter((d) => !['push-dispatch', 'realtime-outbox-publish'].includes(d.jobName));
     expect(calls.map((c) => c.metricKey)).toEqual(expected.map((d) => d.jobName));
-    expect(new Set(calls.map((c) => c.name)).size).toBe(18);
+    expect(new Set(calls.map((c) => c.name)).size).toBe(19);
     calls.forEach((c, i) => expect(c.intervalMs).toBe(resolveIntervalMs(expected[i]!, env)));
     expect(calls.some((c) => c.firstRunAfterInterval)).toBe(false);
   });
 
-  it('re-enabled (PUSH_ENABLED / REALTIME_ENABLED true): all 20, in the historical order', () => {
+  it('re-enabled (PUSH_ENABLED / REALTIME_ENABLED true): all 21, in the historical order', () => {
     const env = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true' });
     const { calls, runtime } = fakeRuntime();
     registerIntervalScans(runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env), (d) => isScanJobEnabled(d, env));
@@ -153,7 +161,7 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     expect(bad.calls).toHaveLength(0);
     // ...and the refused runtime was not marked registered, so a corrected boot path could still register once.
     registerIntervalScans(bad.runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env));
-    expect(bad.calls).toHaveLength(20);
+    expect(bad.calls).toHaveLength(21);
   });
 
   it('loopOptionsOf carries firstRunAfterInterval only when the scan opts in (default shape unchanged)', () => {

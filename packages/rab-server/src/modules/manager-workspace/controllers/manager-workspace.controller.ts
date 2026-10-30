@@ -27,6 +27,17 @@ const SUBDOMAIN_CHECK_THROTTLE = { default: { limit: 20, ttl: 60_000 } };
 // per-workspace limit (WAVE3_LANE_H_REPORT.md, owner decisions).
 const SUBDOMAIN_RENAME_THROTTLE = { default: { limit: 5, ttl: 3_600_000 } };
 
+// Phase B P8: create is ALSO the owner's resume / retry of provisioning (WorkspacePreparationScreen re-POSTs the same body:
+// auto-resume once per mount, and "Try again" on FAILED), and every retry of a FAILED workspace re-runs the full workspace
+// DDL inside core.provision_workspace. The privileged worker provisioner is NOT retired yet: production still runs it
+// (CREWFLOW_PROVISIONER_ENABLED, the provisioner credential handed to that child alone) until gate G2, so this route is the
+// owner-facing retry path alongside the provisioner's own retries, not the only one. It gets its own cap instead of the
+// global 120/min default. Same convention as the other route throttles here: the
+// global tracker is the client IP (`resolveClientIp`), because the throttler is a global guard that runs before
+// JwtAuthGuard has verified the session, so a verified user id is not yet known. 10/min comfortably covers the screen's
+// own pattern (one auto-resume per mount + a few manual retries) for several owners behind one office IP.
+export const WORKSPACE_CREATE_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
+
 // fast-fail before the buffer is fully read; StorageService re-checks server-side
 const LOGO_UPLOAD_OPTIONS = singleImageUploadOptions(LOGO_MAX_BYTES);
 
@@ -59,6 +70,7 @@ export class ManagerWorkspaceController {
   }
 
   @Post()
+  @Throttle(WORKSPACE_CREATE_THROTTLE)
   create(@AuthUser() ctx: AuthContext, @Body() dto: CreateManagerWorkspaceDto) {
     return this.managerWorkspaceService.create(ctx, dto);
   }

@@ -64,9 +64,11 @@ COPY --from=build --chown=node:node /app/packages/rab-ui/package.json ./packages
 COPY --from=build --chown=node:node /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
-COPY --chown=node:node packages/rab-docker/rab/start.sh ./start.sh
-COPY --chown=node:node packages/rab-docker/rab/start-worker.sh ./start-worker.sh
-RUN chmod +x ./start.sh ./start-worker.sh
+# Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
+# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either).
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
+COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh
 # STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at
 # runtime, not copied in at build time — /app itself stays root-owned (only
 # the files explicitly --chown'd above aren't), so the non-root `node` user
@@ -75,8 +77,9 @@ RUN mkdir -p /app/storage && chown node:node /app/storage
 
 USER node
 EXPOSE 3000
-# Runs migrations then execs main.js — kept as a real shell script rather
-# than a dockerCommand string in render.yaml, since Render doesn't shell-
-# parse that field the way plain `docker run` does with a CMD string
-# (quoting/chaining silently breaks there instead).
-CMD ["./start.sh"]
+# THE API NEVER MIGRATES (Phase B P7). api-prestart.sh refuses any migration/bootstrap credential in the API's
+# environment, runs a read-only "no pending migrations" check as the restricted runtime role (PG_DATABASE_URL =
+# crewflow_app), then execs main.js (which runs its own database boot gates). Migrations run only in the one-off
+# rab-migrate service (deploy-prepare.js, migration-only credential from .env.migrate), which compose starts first. A real
+# shell script rather than a command string, so platforms that do not shell-parse a command field behave the same.
+CMD ["./api-prestart.sh"]

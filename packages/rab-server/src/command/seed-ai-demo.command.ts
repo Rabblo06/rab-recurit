@@ -2,6 +2,7 @@ import { ManagerType, UserStatus } from '@rab/shared';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { DataSource, EntityManager } from 'typeorm';
 
+import { readPrimaryDatabaseUrl } from '../database/postgres/pg-config';
 import { describeDatabaseUrl } from '../database/typeorm/core/test-database-guard';
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
@@ -27,7 +28,7 @@ interface SeedAiDemoOptions {
  * The target rules, pure (exported for its unit test). The command runs ONLY against the development database:
  *   - NODE_ENV=development and RAB_RUNTIME_ENV=development (the same declaration the dev API/Worker carry);
  *   - DB_TARGET=local (the command bootstrap already resolved and probed it; `test`, `staging`, `production` refused);
- *   - DATABASE_URL on a loopback or docker-service host.
+ *   - PG_DATABASE_URL (or the deprecated DATABASE_URL) on a loopback or docker-service host.
  * The live checks follow in `run()`: the database must NOT carry the disposable-test marker, and the connection must be
  * the operator identity allowed to run the synthetic-marker function. Messages never contain a URL or credential.
  */
@@ -36,16 +37,17 @@ export function seedAiDemoTargetProblems(env: Record<string, string | undefined>
   if (env.NODE_ENV !== 'development') problems.push(`NODE_ENV must be development (got ${env.NODE_ENV ?? 'unset'}).`);
   if (env.RAB_RUNTIME_ENV !== 'development') problems.push(`RAB_RUNTIME_ENV must be development (got ${env.RAB_RUNTIME_ENV ?? 'unset'}).`);
   if (env.DB_TARGET !== 'local') problems.push(`DB_TARGET must be local (got ${env.DB_TARGET ?? 'unset'}); test, staging and production databases are refused.`);
-  const url = env.DATABASE_URL?.trim();
-  if (!url) {
-    problems.push('DATABASE_URL is required.');
+  // Phase B: the process's primary URL (PG_DATABASE_URL; the deprecated DATABASE_URL outside production).
+  const primary = readPrimaryDatabaseUrl(env);
+  if (!primary) {
+    problems.push('PG_DATABASE_URL is required (or, outside production, the deprecated DATABASE_URL).');
   } else {
     try {
-      const id = describeDatabaseUrl(url, 'DATABASE_URL');
+      const id = describeDatabaseUrl(primary.value, primary.name);
       const local = ['localhost', '127.0.0.1', '::1'].includes(id.host) || !id.host.includes('.');
-      if (!local) problems.push(`DATABASE_URL must be a loopback or docker-service database (got host "${id.host}").`);
+      if (!local) problems.push(`${primary.name} must be a loopback or docker-service database (got host "${id.host}").`);
     } catch {
-      problems.push('DATABASE_URL is not a parseable postgres URL (value not shown).');
+      problems.push(`${primary.name} is not a parseable postgres URL (value not shown).`);
     }
   }
   return problems;

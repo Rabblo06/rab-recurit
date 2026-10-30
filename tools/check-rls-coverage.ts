@@ -3,13 +3,14 @@
  * `core` with an `organisation_id` column must have Row-Level Security
  * enabled AND forced, and the application role (rab_app) must not have
  * BYPASSRLS. Run with a connection that can read `pg_class`/`pg_roles` —
- * DATABASE_URL is sufficient (no elevated grants needed for these reads).
+ * PG_DATABASE_URL (or the deprecated DATABASE_URL outside production) is sufficient (no elevated grants needed).
  *
  * If the app ever connected as the table owner, RLS would be silently
  * skipped for every query it runs — this check is what makes that regressed
  * state fail CI instead of shipping quietly.
  */
-import { Client } from 'pg';
+import { createPgClient, resolvePgEnvironment } from '../packages/rab-server/src/database/postgres';
+import type { Client } from 'pg';
 
 // P2/P3 Checkpoint 2 (restricted runtime role): the application login is now `crewflow_app`, a
 // separate, ownerless role — `crewflow` (the P1C.2 single-credential identity) is demoted to
@@ -125,6 +126,16 @@ const NOT_FORCED_ALLOWLIST = new Set([
  * admin) can never satisfy for any `rab_app` session by design.
  */
 const PRE_AUTH_EXEMPT_TABLES = new Set(['organisation', 'platform_admin', ...NOT_FORCED_ALLOWLIST]);
+
+/**
+ * Phase B / B3 (DeploymentIdentity1786721230000): tables with NO `organisation_id` (not tenant data — the deployment
+ * identity marker and its insert-only history) that must nevertheless be ENABLE + FORCE. Invisible to the per-table scan
+ * above (it only finds tables with organisation_id), so asserted explicitly: a missing table, RLS disabled or FORCE dropped
+ * fails this gate. FORCE matters here because the owner rab_secure_owner is reached by SET ROLE from its members; with
+ * FORCE the owner-only policies (CURRENT_USER = rab_secure_owner) still apply to it, and the runtime logins are denied by a
+ * RESTRICTIVE policy on top of holding no privilege. They are never on NOT_FORCED_ALLOWLIST: no pre-auth lookup reads them.
+ */
+const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history'] as const;
 
 /**
  * F4 (Wave 1 lane S): every physical workspace schema (`^workspace_[0-9a-f]{32}$`, Hyper Workspace V1) is checked too —
@@ -280,12 +291,9 @@ interface DriftedExemptTable {
 }
 
 async function main(): Promise<void> {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    throw new Error('DATABASE_URL is required to run check-rls-coverage');
-  }
-
-  const client = new Client({ connectionString: databaseUrl });
+  // Phase B: the connection factory (PG_DATABASE_URL; the deprecated DATABASE_URL outside production — CI still passes
+  // DATABASE_URL="$TEST_DATABASE_URL"). Explicit TLS and target; a refused configuration names variables only.
+  const client = createPgClient(resolvePgEnvironment(process.env, { processRole: 'cli' }), { purpose: 'check-rls' });
   await client.connect();
 
   try {
@@ -331,6 +339,19 @@ async function main(): Promise<void> {
       const correct = Boolean(status?.relrowsecurity) && !status?.relforcerowsecurity;
       if (!correct) {
         drifted.push({ table, rowsecurity: Boolean(status?.relrowsecurity), forced: Boolean(status?.relforcerowsecurity) });
+      }
+    }
+
+    const forcedNonTenant: DriftedExemptTable[] = [];
+    for (const table of FORCED_NON_TENANT_TABLES) {
+      const { rows } = await client.query<{ present: boolean; relrowsecurity: boolean | null; relforcerowsecurity: boolean | null }>(
+        `SELECT pg_catalog.to_regclass($1) IS NOT NULL AS present, c.relrowsecurity, c.relforcerowsecurity
+           FROM (SELECT 1) one LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass($1)`,
+        [`core."${table}"`],
+      );
+      const status = rows[0];
+      if (!status?.present || !status.relrowsecurity || !status.relforcerowsecurity) {
+        forcedNonTenant.push({ table, rowsecurity: Boolean(status?.relrowsecurity), forced: Boolean(status?.relforcerowsecurity) });
       }
     }
 
@@ -386,6 +407,19 @@ async function main(): Promise<void> {
       console.error('');
     }
 
+    if (forcedNonTenant.length > 0) {
+      failed = true;
+      console.error(`RLS coverage FAILED — non-tenant tables that must be ENABLE + FORCE are missing or not forced:
+`);
+      for (const t of forcedNonTenant) {
+        console.error(
+          `  core.${t.table}: rowsecurity=${t.rowsecurity} forceRowSecurity=${t.forced}` +
+            ` — expected rowsecurity=true forceRowSecurity=true (DeploymentIdentity1786721230000; a missing table counts as not forced)`,
+        );
+      }
+      console.error('');
+    }
+
     if (appRoleBypassesRls === null) {
       console.warn(
         `Role "${APP_ROLE}" does not exist yet in this database — skipping the BYPASSRLS check ` +
@@ -413,6 +447,7 @@ async function main(): Promise<void> {
 
     console.log(
       `RLS coverage OK — ${tenantTables.rows.length} tenant table(s) checked, all protected; ` +
+        `${FORCED_NON_TENANT_TABLES.length} non-tenant FORCE table(s) (${FORCED_NON_TENANT_TABLES.join(', ')}) forced; ` +
         `${workspaces.schemas} workspace schema(s), ${workspaces.tables} workspace table(s) checked.`,
     );
   } finally {

@@ -20,7 +20,8 @@ describe('ManagerWorkspaceService.create: initial schema lifecycle', () => {
       // ManagerWorkspaceService.create binds rab.workspace_id via a raw `manager.query(...)` call
       // before the ManagerProfile update below (manager-workspace.service.ts:232) — added after
       // this mock was last updated, found live via a real `manager.query is not a function`.
-      query: jest.fn(async () => undefined),
+      // Phase B P8: assertCallerMayProvision (layer 2) reads organisation suspension + account status first.
+      query: jest.fn(async (sql: string) => (sql.includes('org_active') ? [{ org_active: true, account_status: 'active' }] : undefined)),
     };
     const tenantContext = { runInTenantContext: jest.fn((_ctx: unknown, fn: (m: unknown) => Promise<unknown>) => fn(manager)) };
     const subdomainService = { checkAvailability: jest.fn(async () => ({ available: true, normalized: 'acme', reserved: false })) };

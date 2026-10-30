@@ -28,7 +28,8 @@ name: crewflow-e2e
 x-app-env: &app-env
   NODE_ENV: development
   RAB_RUNTIME_ENV: development
-  DB_TARGET: local
+  # No DB_TARGET here: it is command authority, and the API, the Worker service and its children refuse to start with it
+  # (security review L-4, never-in-runtime-env.ts). The one-off CLI services below set it themselves.
   REDIS_URL: redis://redis:6379
   APP_SECRET: ${E2E_APP_SECRET:?set E2E_APP_SECRET}
   HWS_RUNTIME_ENABLED: 'true'
@@ -93,8 +94,8 @@ services:
     image: rab-server:latest
     environment:
       <<: *app-env
-      DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
-      DATABASE_URL_UNPOOLED: ''
+      # Phase B: one PG_DATABASE_URL per process (the restricted runtime login here).
+      PG_DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
     volumes:
       - e2e-local-storage:/app/storage
     command: node packages/rab-server/dist/main.js
@@ -117,9 +118,11 @@ services:
     image: rab-worker:latest
     environment:
       <<: *app-env
-      DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
-      DATABASE_DIRECT_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
-      DATABASE_URL_UNPOOLED: ''
+      # Phase B: PG_DATABASE_URL is also the jobs child's session-lock connection (direct); the launcher hands the
+      # provisioner URL below to the provisioner child alone, as its PG_DATABASE_URL.
+      PG_DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      # Phase B (B5): the Worker runtime pool size, as in production.
+      PG_POOL_MAX_CONNECTIONS: '12'
       CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
       # Phase A (pa-provisioner): the provisioner switch, explicitly on (worker only, never the shared app-env anchor). The 5 s
       # interval keeps the pre-Phase-A cadence these specs time against (05-resilience expects a provisioning cycle to
@@ -155,6 +158,9 @@ services:
       server:
         condition: service_healthy
 
+  # Disposable two-phase first build, driven explicitly by run-system.sh (phase A as rab_owner, phase B as the bootstrap
+  # superuser) BEFORE `up server worker`, so it keeps the `ops` profile here instead of the depends_on step production uses.
+  # Phase B P7: the migration login reaches the locked runner only as its own PG_DATABASE_URL.
   migrate:
     profiles: ['ops']
     image: rab-server:latest
@@ -179,15 +185,16 @@ services:
         [ -n "$$url" ] || { echo "migrate: REFUSED - no migration URL" >&2; exit 64; }
         if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD; fi
         echo "migrate: phase $${CREWFLOW_MIGRATION_PHASE:-?}"
-        exec env DATABASE_URL="$$url" DATABASE_URL_UNPOOLED="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
+        unset CREWFLOW_MIGRATION_DATABASE_URL
+        exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
   bootstrap:
     profiles: ['ops']
     image: rab-server:latest
     environment:
       <<: *app-env
-      DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
-      DATABASE_URL_UNPOOLED: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+      DB_TARGET: local
+      PG_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
       BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}

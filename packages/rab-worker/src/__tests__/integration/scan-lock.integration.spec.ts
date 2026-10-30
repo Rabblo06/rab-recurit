@@ -30,8 +30,8 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
   });
 
   it('one dedicated crewflow_app session; the second replica skips while the first holds the lock; released afterwards', async () => {
-    const a = await ScanLock.open(APP_URL!, logger);
-    const b = await ScanLock.open(APP_URL!, logger);
+    const a = await ScanLock.open({ connectionString: APP_URL! }, logger);
+    const b = await ScanLock.open({ connectionString: APP_URL! }, logger);
     let release!: () => void;
     const held = a.run(ID, () => new Promise<string>((r) => (release = () => r('done'))));
     await new Promise((r) => setTimeout(r, 100));
@@ -55,7 +55,7 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
   });
 
   it('separate key namespace: no scan-lock key equals an inner cycle lock key', async () => {
-    // By name: exactly the 20 expected scans (19 pre-migration + ai-retention) get a scan lock, one per scheduler id.
+    // By name: exactly the 21 expected scans (19 pre-migration + ai-retention + workspace-provisioning-health) get a scan lock, one per scheduler id.
     expect(SCAN_JOBS.map(schedulerIdOf)).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS]);
     const outer = SCAN_JOBS.map((d) => scanLockName(schedulerIdOf(d)));
     expect(outer).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.map(scanLockName));
@@ -68,14 +68,14 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
       [inner],
     );
     const outerKeys = new Set(rows.map((r) => r.k));
-    expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 20 distinct keys: no two scans share a lock
-    expect(outerKeys.size).toBe(20);
+    expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 21 distinct keys: no two scans share a lock
+    expect(outerKeys.size).toBe(21);
     for (const r of innerRows) expect(outerKeys.has(r.k)).toBe(false);
   });
 
   it('a killed lock session releases its locks (crash-safe); the client reconnects and the scan is lockable again', async () => {
-    const a = await ScanLock.open(APP_URL!, { log: jest.fn(), warn: jest.fn() });
-    const b = await ScanLock.open(APP_URL!, logger);
+    const a = await ScanLock.open({ connectionString: APP_URL! }, { log: jest.fn(), warn: jest.fn() });
+    const b = await ScanLock.open({ connectionString: APP_URL! }, logger);
     let release!: () => void;
     const held = a.run(ID, async () => {
       await new Promise<void>((r) => (release = r));
@@ -109,10 +109,10 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
   it('refuses a lock connection that is not crewflow_app itself (fails closed at startup)', async () => {
     if (!process.env[TEST_DATABASE_CREWFLOW_URL]) return; // the privileged test URL is optional
     const crewflowUrl = await verifiedCrewflowUrl();
-    await expect(ScanLock.open(crewflowUrl, logger)).rejects.toThrow(/Refusing to start: DATABASE_URL connects as "crewflow", not "crewflow_app"/);
+    await expect(ScanLock.open({ connectionString: crewflowUrl }, logger)).rejects.toThrow(/Refusing to start: DATABASE_URL connects as "crewflow", not "crewflow_app"/);
     // Leak check: an unreachable lock database fails without printing the URL.
     const bad = 'postgres://crewflow_app:hunter2-not-a-real-password@127.0.0.1:1/rab';
-    const error = await ScanLock.open(bad, logger).catch((e: Error) => e);
+    const error = await ScanLock.open({ connectionString: bad }, logger).catch((e: Error) => e);
     expect(error).toBeTruthy();
     expect(String((error as Error).message)).not.toContain('hunter2');
   });

@@ -15,6 +15,8 @@ import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/work
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { withApplicationName } from './helpers/application-name-url';
+import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 
 /**
  * Phase A (pa-provisioner): opt-in provisioner, HWS pass-through, bounded lock — against the disposable test database with
@@ -186,7 +188,7 @@ describeIfDb('Phase A — opt-in workspace provisioner (integration)', () => {
   }
 
   function spawnProvisioner(env: Record<string, string | undefined>): ProcessWatch {
-    const base: Record<string, string | undefined> = { ...process.env };
+    const base: Record<string, string | undefined> = runtimeChildBaseEnv();
     // Start from a clean slate for every switch this spec controls (dotenv never overrides a set variable, and this
     // worktree packages no .env.provisioner).
     for (const k of ['CREWFLOW_PROVISIONER_ENABLED', 'HWS_RUNTIME_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS', 'CREWFLOW_PROVISIONER_DATABASE_URL']) delete base[k];
@@ -236,20 +238,22 @@ describeIfDb('Phase A — opt-in workspace provisioner (integration)', () => {
 
   it('2. explicitly enabled with HWS_RUNTIME_ENABLED=false (the production configuration) → the real entrypoint provisions to READY', async () => {
     const appName = `pa-optin-${randomUUID().slice(0, 8)}`;
+    const url = withApplicationName(CREWFLOW_URL, appName);
     const w = spawnProvisioner({
-      DATABASE_URL: CREWFLOW_URL,
-      DATABASE_URL_UNPOOLED: CREWFLOW_URL,
-      DATABASE_DIRECT_URL: CREWFLOW_URL,
+      DATABASE_URL: url,
+      DATABASE_URL_UNPOOLED: url,
+      DATABASE_DIRECT_URL: url,
       REDIS_URL,
       CREWFLOW_PROVISIONER_ENABLED: 'true',
       HWS_RUNTIME_ENABLED: 'false',
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5',
-      PGAPPNAME: appName,
     });
     await w.waitFor(/\[workspace-provisioner\] started, HWS_RUNTIME_ENABLED=false \(provisioning enabled by CREWFLOW_PROVISIONER_ENABLED; interval 5s\)/);
     const workspaceId = await seedCreatingWorkspace('pa-optin');
     await waitReady(workspaceId, 60_000);
     expect(w.exit).toBeNull();
+    // Positive control for 3b: a running provisioner's backends DO carry the application_name from its URL.
+    expect(await backends(appName)).toBeGreaterThan(0);
     w.proc.kill('SIGTERM');
     const { code } = await w.waitExit(30_000);
     if (process.platform !== 'win32') expect(code).toBe(0);
@@ -270,13 +274,14 @@ describeIfDb('Phase A — opt-in workspace provisioner (integration)', () => {
 
   it('3b. explicit opt-out wins over HWS_RUNTIME_ENABLED=true → exit 0, and no backend with its application_name ever appears', async () => {
     const appName = `pa-optout-${randomUUID().slice(0, 8)}`;
+    // The connection factory takes the URL's own application_name, so any backend this process opened would carry appName.
+    const url = withApplicationName(CREWFLOW_URL, appName);
     const w = spawnProvisioner({
-      DATABASE_URL: CREWFLOW_URL,
-      DATABASE_URL_UNPOOLED: CREWFLOW_URL,
+      DATABASE_URL: url,
+      DATABASE_URL_UNPOOLED: url,
       REDIS_URL,
       CREWFLOW_PROVISIONER_ENABLED: 'false',
       HWS_RUNTIME_ENABLED: 'true',
-      PGAPPNAME: appName,
     });
     let maxBackends = 0;
     while (!w.exit) {

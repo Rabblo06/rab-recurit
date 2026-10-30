@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
+import { databaseMetrics, DbPoolName } from '../../../database/runtime/database-metrics';
+import { PgReplicaService } from '../../../database/runtime/replica/pg-replica.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { timeStage } from '../../observability/request-context';
 import { AuthContext } from './auth-context.interface';
@@ -34,20 +36,43 @@ import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.
  * run with no workspace bound). `runInWorkspaceContext` (below) is the stricter boundary for the 15 physical
  * workspace-business tables: it requires a workspace and fails closed if one isn't bound, so a workspace-domain
  * service can never silently fall through to case 3 and operate on `core` because no workspace happened to be set.
+ *
+ * Phase B (B4/P5) — `{ useReplica: true }` (both entry points). Opt-in ONLY for the reads in the replica register
+ * (src/database/runtime/replica/replica-read-register.ts; its spec fails on any other call site). Such a read:
+ *   - runs in a READ ONLY transaction (first statement `SET TRANSACTION READ ONLY`) on the replica when PgReplicaService
+ *     says it is validated and fresh, otherwise on the PRIMARY — also READ ONLY, so a hidden write in a registered read
+ *     fails with 25006 everywhere (development without a replica included), never only in production;
+ *   - binds exactly the same transaction-local GUCs (set_config(..., true)) and search_path, so RLS (FORCE) applies on
+ *     the replica exactly as on the primary; nothing session-scoped is ever set;
+ *   - with HWS_RUNTIME_ENABLED and a workspace, resolves the workspace schema on the PRIMARY first (a short read-only
+ *     transaction, finished before the replica one opens — sequential, never nested), so a replica-lagged registry row is
+ *     never what fills the workspace-metadata cache or picks the schema;
+ *   - is re-run once on the primary when the replica transaction fails with a connection, recovery-conflict or
+ *     not-yet-replayed-relation error (safe: the failed attempt was read-only).
+ * Writes, auth/session/MFA/permission resolution, payroll, audit log, admin panel and read-your-writes paths never pass
+ * the option (the register lists why).
  */
+export interface TenantContextOptions {
+  /** Route this read to the read replica when it is validated and fresh. Register-listed reads only. */
+  useReplica?: boolean;
+}
+
 @Injectable()
 export class TenantContextService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly schemaResolver: SchemaResolverService,
     private readonly environment: EnvironmentService,
+    @Optional() private readonly replica?: PgReplicaService,
   ) {}
 
   async runInTenantContext<T>(
     ctx: AuthContext,
     fn: (manager: EntityManager) => Promise<T>,
+    options?: TenantContextOptions,
   ): Promise<T> {
-    return this.dataSource.transaction(async (manager) => {
+    if (options?.useReplica) return this.runRoutedRead(ctx, (manager) => fn(manager));
+    return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
       await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
         await this.bindGucs(manager, ctx);
@@ -58,7 +83,7 @@ export class TenantContextService {
         await this.bindSearchPath(manager, schema);
       });
       return fn(manager);
-    });
+    }));
   }
 
   /**
@@ -83,9 +108,11 @@ export class TenantContextService {
   async runInWorkspaceContext<T>(
     ctx: AuthContext,
     fn: (manager: EntityManager, schema: string) => Promise<T>,
+    options?: TenantContextOptions,
   ): Promise<T> {
     if (!ctx.workspaceId) throw new WorkspaceRoutingError('missing-context');
-    return this.dataSource.transaction(async (manager) => {
+    if (options?.useReplica) return this.runRoutedRead(ctx, fn);
+    return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
       const schema = await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
         await this.bindGucs(manager, ctx);
@@ -96,7 +123,71 @@ export class TenantContextService {
         return resolved;
       });
       return fn(manager, schema);
+    }));
+  }
+
+  /**
+   * B4: the read path for `{ useReplica: true }` (see the class comment). Never nests: the optional primary schema
+   * resolution finishes before the replica transaction opens, and the primary retry starts after the replica
+   * transaction has ended.
+   */
+  private async runRoutedRead<T>(ctx: AuthContext, fn: (manager: EntityManager, schema: string) => Promise<T>): Promise<T> {
+    const route = this.replica?.routeRead() ?? ({ dataSource: null, reason: 'not-configured' } as const);
+    if (route.dataSource) {
+      const replicaDataSource = route.dataSource;
+      const hws = this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId;
+      const schema = hws ? await this.resolveSchemaOnPrimary(ctx) : 'core';
+      try {
+        const value = await this.observe('replica', () => this.readOnlyTransaction(replicaDataSource, ctx, schema, fn));
+        databaseMetrics.recordReplicaRead();
+        return value;
+      } catch (error) {
+        if (!this.replica!.shouldRetryOnPrimary(error)) throw error;
+        databaseMetrics.recordReplicaFallback('replica-error');
+      }
+    } else if (route.reason !== 'not-configured') {
+      databaseMetrics.recordReplicaFallback(route.reason);
+    }
+    return this.observe('primary', () => this.readOnlyTransaction(this.dataSource, ctx, null, fn));
+  }
+
+  /** A READ ONLY tenant transaction on `dataSource`. `schema` null = resolve inside (primary), else bind as given. */
+  private readOnlyTransaction<T>(
+    dataSource: DataSource,
+    ctx: AuthContext,
+    schema: string | null,
+    fn: (manager: EntityManager, schema: string) => Promise<T>,
+  ): Promise<T> {
+    return dataSource.transaction(async (manager) => {
+      const bound = await timeStage('tenant_context_setup', async () => {
+        await manager.query('SET TRANSACTION READ ONLY');
+        await this.bindGucs(manager, ctx);
+        const resolved =
+          schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? await this.schemaResolver.resolve(manager, ctx.workspaceId) : 'core');
+        await this.bindSearchPath(manager, resolved);
+        return resolved;
+      });
+      return fn(manager, bound);
     });
+  }
+
+  /** The trusted workspace schema, resolved on the primary in its own short read-only transaction (same RLS binding). */
+  private resolveSchemaOnPrimary(ctx: AuthContext): Promise<string> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query('SET TRANSACTION READ ONLY');
+      await this.bindGucs(manager, ctx);
+      return this.schemaResolver.resolve(manager, ctx.workspaceId);
+    });
+  }
+
+  /** Counts timeout-class failures per pool (B5 metrics); the error itself is rethrown untouched. */
+  private async observe<T>(pool: DbPoolName, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      databaseMetrics.recordQueryError(pool, error);
+      throw error;
+    }
   }
 
   /**

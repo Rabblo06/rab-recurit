@@ -46,6 +46,11 @@ import { CoreEntityCacheService } from './core-entity-cache.service';
 export interface CachedResolvedSchema {
   schemaName: string;
   schemaVersion: number;
+  /**
+   * Phase B: the registry's `module_version` at fetch time. Optional in the type because a value written by an older
+   * image lacks it; SchemaResolverService refetches from Postgres when it is missing or below its floor.
+   */
+  moduleVersion?: number;
 }
 
 @Injectable()

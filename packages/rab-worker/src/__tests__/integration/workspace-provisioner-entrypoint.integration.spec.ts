@@ -13,6 +13,7 @@ import { V1_EXPECTED, WORKSPACE_TABLES, workspaceSchemaName } from '@rab/server/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
 
@@ -48,7 +49,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
 function spawnTsNode(entry: string, tsconfig: string, env: Record<string, string | undefined>): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, [TS_NODE_BIN, '--transpile-only', '-P', tsconfig, entry], {
     cwd: REPO_ROOT,
-    env: { ...process.env, ...env } as Record<string, string>,
+    env: { ...runtimeChildBaseEnv(), ...env } as Record<string, string>,
   });
 }
 

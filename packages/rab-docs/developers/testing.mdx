@@ -34,7 +34,7 @@ flutter test
 
 ## Integration test identities
 
-Integration tests use real role keys from `src/__tests__/integration/helpers/test-identities.ts`, so permission checks run exactly as in production. Point them at a dedicated test database with `TEST_DATABASE_URL` (runtime role) and `TEST_DATABASE_URL_UNPOOLED` (owner role).
+Integration tests use real role keys from `src/__tests__/integration/helpers/test-identities.ts`, so permission checks run exactly as in production. Point them at a dedicated test database with `TEST_DATABASE_URL` (runtime role) and `TEST_DATABASE_URL_UNPOOLED` (owner role). The Jest setup maps them onto the deprecated `DATABASE_URL` / `DATABASE_URL_UNPOOLED` names for the test process only; never set `PG_DATABASE_URL` for a Jest run.
 
 <Warning>
   Never point test variables at a shared or production database. Tests create and remove data.

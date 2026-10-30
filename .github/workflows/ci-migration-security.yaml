@@ -78,7 +78,7 @@ jobs:
           set -a; source "${RUNNER_TEMP}/m2-databases.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
           eval "$test_env"
-          out="$(DB_TARGET=test DATABASE_URL="$TEST_DATABASE_URL_UNPOOLED" DATABASE_URL_UNPOOLED="$TEST_DATABASE_URL_UNPOOLED"             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/setup-db.ts 2>&1)" || { echo "$out" | tail -20; exit 1; }
+          out="$(DB_TARGET=test PG_DATABASE_URL="$TEST_DATABASE_URL_UNPOOLED"             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/setup-db.ts 2>&1)" || { echo "$out" | tail -20; exit 1; }
           grep -v '^\[db-target\]' <<< "$out" | tail -3
           grep -q 'Migrations applied: none pending' <<< "$out"
 

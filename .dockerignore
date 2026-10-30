@@ -13,7 +13,9 @@ packages/rab-mobile
 # Documentation site (Mintlify) — media-heavy and not part of the server image.
 packages/rab-docs
 
-# Never send local secrets to the build context (nested packages too).
+# Never send local secrets to the build context (nested packages too). Phase B: this includes .env.migrate (the one-off
+# rab-migrate credential) and .env.ops (the one-off rab-ops environment), which must never reach an image layer.
+.env*
 **/.env
 **/.env.*
 !**/.env.example

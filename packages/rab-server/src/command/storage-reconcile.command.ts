@@ -14,6 +14,7 @@ import {
 } from '../engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { assertRuntimeDbRole } from '../engine/utils/assert-runtime-db-role';
+import { createPgClient, detectTransactionPooler, resolvePgEnvironmentCached } from '../database/postgres';
 
 interface Options {
   checkBytes?: boolean;
@@ -31,7 +32,7 @@ interface Options {
 
 /**
  * Phase A (storage) — cluster-wide reconciliation lock. Session-level PostgreSQL advisory lock taken by the restricted
- * runtime role (`crewflow_app`) on a dedicated connection to DATABASE_DIRECT_URL (falling back to DATABASE_URL, exactly
+ * runtime role (`crewflow_app`) on a dedicated lock connection from the connection factory (PG_DATABASE_URL; exactly
  * like the Worker's own direct connection and scan lock). `pg_try_advisory_lock` needs no grant, function or migration.
  * Its own key namespace: distinct from the BullMQ per-scan lock (`crewflow:scan-lock:v1:*`) and every other inner lock.
  * Crash-safe: PostgreSQL releases a session lock when the session ends, so a killed process never wedges reconciliation.
@@ -44,19 +45,26 @@ export const RECONCILE_LOCKED_EXIT_CODE = 3;
 
 /**
  * Phase A review F1: the reconcile lock is a SESSION advisory lock, which a transaction-mode pooler (`-pooler` host,
- * e.g. rab-api's DATABASE_URL) can neither hold nor release reliably — the unlock may reach another backend (leak) or
+ * e.g. rab-api's pooled URL) can neither hold nor release reliably — the unlock may reach another backend (leak) or
  * a second client may re-enter the same backend's lock (no exclusion). Refuse such a URL before connecting; the error
- * names the variables only, never the URL. Run the CLI where DATABASE_DIRECT_URL is set (the worker container).
+ * names the variables only, never the URL. Phase B: the lock connection now comes from the connection factory, which
+ * applies the full documented-pooler denylist (pg-url-policy.ts) to every session-affine connection; this URL-level
+ * check is the same rule for callers that only hold a string.
  */
 export function assertDirectLockUrl(url: string): void {
   let host = '';
+  let port = 5432;
   try {
-    host = new URL(url).hostname;
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    port = parsed.port ? Number(parsed.port) : 5432;
   } catch {
-    throw new Error('storage reconciliation: DATABASE_DIRECT_URL / DATABASE_URL is not a valid connection URL');
+    throw new Error('storage reconciliation: PG_DATABASE_URL / DATABASE_DIRECT_URL / DATABASE_URL is not a valid connection URL');
   }
-  if (/-pooler\./.test(host)) {
-    throw new Error('storage reconciliation: the lock needs a direct (non -pooler) database host; set DATABASE_DIRECT_URL');
+  if (/-pooler\./.test(host) || detectTransactionPooler(host, port)) {
+    throw new Error(
+      'storage reconciliation: the lock needs a direct (non -pooler) database connection; point PG_DATABASE_URL (or, outside production, the deprecated DATABASE_DIRECT_URL) at a direct host',
+    );
   }
 }
 
@@ -265,15 +273,14 @@ export class StorageReconcileCommand extends CommandRunner {
    * guard as every other runtime connection. Returns the connection holding the lock, or null when the wait ran out.
    */
   private async acquireReconcileLock(waitMs: number): Promise<Client | null> {
-    const url = process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL;
-    if (!url) throw new Error('storage reconciliation: DATABASE_DIRECT_URL / DATABASE_URL is required for the reconciliation lock');
-    assertDirectLockUrl(url);
-    const client = new Client({
-      connectionString: url,
-      keepAlive: true,
-      connectionTimeoutMillis: 10_000,
-      statement_timeout: 5_000,
-      query_timeout: 5_000,
+    // Phase B: the factory's lock connection (PG_DATABASE_URL; legacy DATABASE_DIRECT_URL / DATABASE_URL outside
+    // production), with explicit TLS and the pooler denylist (session affinity). Short timeouts as before: lock calls
+    // are instantaneous.
+    const client = createPgClient(resolvePgEnvironmentCached(process.env), {
+      endpoint: 'lock',
+      purpose: 'storage-lock',
+      statementTimeoutMs: 5_000,
+      queryTimeoutMs: 5_000,
     });
     // A dropped lock connection must not crash the process: the server has released the lock with the session, and the
     // run's own protections (CAS claims, leases, fresh re-checks) keep an overlapping run correct — only wasted work.

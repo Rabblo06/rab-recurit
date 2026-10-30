@@ -58,8 +58,8 @@ export function assertMigrationIdentity(facts: MigrationIdentityFacts): void {
     throw new MigrationIdentityError(
       `Refusing to run ${facts.pendingMigrations} pending migration(s) as "${facts.currentUser}": migrations after ${ROLE_SPLIT_MIGRATION} need ` +
         `the privileged bootstrap identity (a superuser, or a role that can act as both rab_secure_owner and crewflow). The ordinary ` +
-        `crewflow credential cannot run them: they either fail or grant nothing. Point DATABASE_URL_UNPOOLED at the bootstrap ` +
-        `connection for the migration job only — never in the API or worker environment.`,
+        `crewflow credential cannot run them: they either fail or grant nothing. Point the one-off migration step's own ` +
+        `PG_DATABASE_URL (packages/rab-docker/.env.migrate) at the bootstrap connection — never the API or worker environment.`,
     );
   }
 }

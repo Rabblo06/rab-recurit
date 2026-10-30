@@ -1,4 +1,4 @@
-import type { Client } from 'pg';
+import type { Client, ClientConfig } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
@@ -14,7 +14,7 @@ import type { AdvisoryLockResult } from './advisory-lock';
  *  - SEPARATE key namespace — `hashtextextended('crewflow:scan-lock:v1:' || schedulerId, 0)` — distinct from every
  *    inner lock the cycles take themselves (`shift_report:<id>`, `final_timesheet:<id>`, `crewflow:login-handoff-cleanup:v1`,
  *    `crewflow:outbox-retention:v1`, `hashtext('rab_account_invite_cleanup')`), which all stay exactly as they are.
- *  - ONE dedicated connection per replica (`ReconnectingPgClient`, `crewflow_app`, direct URL), never a connection from
+ *  - ONE dedicated connection per replica (`ReconnectingPgClient`, `crewflow_app`, direct), never a connection from
  *    `directDataSource`'s pool: the cycles that take inner session locks borrow from that pool, so outer locks held on
  *    pool connections could starve it (20 outer holders vs 10 connections → inner acquires wait forever). A session
  *    lock needs connection affinity, which a dedicated client gives for free.
@@ -49,11 +49,18 @@ export class ScanLock {
     private readonly logger: ScanLockLogger,
   ) {}
 
-  /** Builds the dedicated lock connection (crewflow_app, direct) and verifies its identity with the shared runtime role guard. */
-  static async open(url: string, logger: ScanLockLogger): Promise<ScanLock> {
+  /**
+   * Builds the dedicated lock connection (crewflow_app, direct) and verifies its identity with the shared runtime role
+   * guard. Phase B: takes a pg ClientConfig — in production the connection factory's
+   * (`pgClientConfig(pg, { endpoint: 'lock', purpose: 'scan-lock', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 })`:
+   * explicit target and TLS object, application_name, startup options, pooler denylist), never a raw URL.
+   */
+  static async open(config: ClientConfig, logger: ScanLockLogger): Promise<ScanLock> {
     const connection = new ReconnectingPgClient(
       // Short statement/query timeouts: lock calls are instantaneous; a hung one must not queue every other scan behind it.
-      { connectionString: url, keepAlive: true, connectionTimeoutMillis: 10_000, statement_timeout: 5_000, query_timeout: 5_000 },
+      // Set here as well as by the caller: a startup statement_timeout parameter is applied after the `options` switches,
+      // so these win whatever the config's options say.
+      { ...config, keepAlive: true, connectionTimeoutMillis: config.connectionTimeoutMillis ?? 10_000, statement_timeout: 5_000, query_timeout: 5_000 },
       { label: 'scan-lock', logger, initialBackoffMs: 1_000, maxBackoffMs: 30_000 },
     );
     try {

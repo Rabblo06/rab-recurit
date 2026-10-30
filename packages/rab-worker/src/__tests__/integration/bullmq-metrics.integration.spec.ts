@@ -49,7 +49,7 @@ describeIf('BullMQ Worker metrics (integration, real Redis)', () => {
       { queue: defs[1]!.queue, jobName: defs[1]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
     ]);
     const scheduler: BullmqScheduler = await startBullmqScheduler({
-      redis: conn, redisUrl: REDIS_URL!, lockUrl: DB_URL!, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: () => 1_000, logger: quietLogger,
+      redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: () => 1_000, logger: quietLogger,
     });
     await new Promise((r) => setTimeout(r, 6_000));
     // Workers closed BEFORE the runtime's shutdown flag: a job delivered after the flag returns 'skipped-shutdown',

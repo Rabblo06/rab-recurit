@@ -175,7 +175,7 @@ export class VenueService {
 
       const [data, total] = await qb.getManyAndCount();
       return { data: data.map((venue) => this.memberAccess.project(policy, venue)), total };
-    });
+    }, { useReplica: true });
   }
 
   /** Same layers as `list()`: VENUE_VIEW re-checked first (403, for any id, before the row is loaded), then 404 out of scope. */

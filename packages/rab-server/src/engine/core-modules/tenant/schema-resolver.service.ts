@@ -1,7 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import { WorkspaceMetadataCacheService } from '../entity-cache/workspace-metadata-cache.service';
+import {
+  LATEST_WORKSPACE_MODULE_VERSION,
+  MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION,
+} from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { CachedResolvedSchema, WorkspaceMetadataCacheService } from '../entity-cache/workspace-metadata-cache.service';
 
 /**
  * The ONE canonical builder of a workspace schema name (Hyper Workspace Phase 3, steps 2 and 8).
@@ -36,16 +40,29 @@ export const SUPPORTED_WORKSPACE_SCHEMA_VERSIONS: ReadonlySet<number> = new Set(
 
 /**
  * Fail-closed routing error. The message is a fixed, non-sensitive code; no schema name, id or row content is included.
+ *
+ * 'incompatible-module' (Phase B schema compatibility): the workspace is READY but its `module_version` is below
+ * MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION — this code would query columns/tables that schema does not have. It is an
+ * availability fault, not authorisation: AllExceptionsFilter maps it to 503 (every other code stays 404).
  */
 export class WorkspaceRoutingError extends Error {
-  constructor(readonly code: 'missing-context' | 'registry-missing' | 'name-mismatch' | 'not-ready' | 'unsupported-version') {
+  constructor(readonly code: 'missing-context' | 'registry-missing' | 'name-mismatch' | 'not-ready' | 'unsupported-version' | 'incompatible-module') {
     super('Workspace routing refused.');
     this.name = 'WorkspaceRoutingError';
   }
 }
 
+/** Throws 'incompatible-module' below the floor. Pure. */
+export function assertCompatibleModuleVersion(moduleVersion: number, minimum: number = MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION): void {
+  if (!Number.isInteger(moduleVersion) || moduleVersion < minimum) throw new WorkspaceRoutingError('incompatible-module');
+}
+
 @Injectable()
 export class SchemaResolverService {
+  private readonly logger = new Logger(SchemaResolverService.name);
+  /** Workspaces already reported as ahead of this code (one warning per workspace per process, not per request). */
+  private readonly warnedAhead = new Set<string>();
+
   constructor(private readonly workspaceMetadataCache: WorkspaceMetadataCacheService) {}
 
   /** Derived name only. Kept for callers that need the pure mapping without a database round trip. */
@@ -72,9 +89,9 @@ export class SchemaResolverService {
     if (!workspaceId) throw new WorkspaceRoutingError('missing-context');
     const expected = workspaceSchemaName(workspaceId);
 
-    const resolved = await this.workspaceMetadataCache.resolveSchema(workspaceId, async () => {
-      const rows: Array<{ schema_name: string; status: string; schema_version: number }> = await manager.query(
-        `SELECT schema_name, status, schema_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+    const fetch = async (): Promise<CachedResolvedSchema> => {
+      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number }> = await manager.query(
+        `SELECT schema_name, status, schema_version, module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
         [workspaceId],
       );
       if (rows.length !== 1) throw new WorkspaceRoutingError('registry-missing');
@@ -82,8 +99,26 @@ export class SchemaResolverService {
       if (row.schema_name !== expected) throw new WorkspaceRoutingError('name-mismatch');
       if (row.status !== 'READY') throw new WorkspaceRoutingError('not-ready');
       if (!SUPPORTED_WORKSPACE_SCHEMA_VERSIONS.has(Number(row.schema_version))) throw new WorkspaceRoutingError('unsupported-version');
-      return { schemaName: row.schema_name, schemaVersion: Number(row.schema_version) };
-    });
+      const moduleVersion = Number(row.module_version);
+      // Phase B: below the floor is refused here, so it is never cached.
+      assertCompatibleModuleVersion(moduleVersion);
+      return { schemaName: row.schema_name, schemaVersion: Number(row.schema_version), moduleVersion };
+    };
+
+    let resolved = await this.workspaceMetadataCache.resolveSchema(workspaceId, fetch);
+    // A cached value written by another image (no module version, or one below THIS code's floor) is never trusted:
+    // drop it and decide from Postgres. A value this code wrote already passed the floor in `fetch`.
+    if (typeof resolved.moduleVersion !== 'number' || resolved.moduleVersion < MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION) {
+      await this.workspaceMetadataCache.invalidate(workspaceId);
+      resolved = await fetch();
+    }
+    if ((resolved.moduleVersion ?? 0) > LATEST_WORKSPACE_MODULE_VERSION && !this.warnedAhead.has(workspaceId)) {
+      // c2 (image rollback after a module migration): old code on a superset schema is allowed; report it once.
+      this.warnedAhead.add(workspaceId);
+      this.logger.warn(
+        `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module ${LATEST_WORKSPACE_MODULE_VERSION} (an image rollback); routing continues`,
+      );
+    }
     return resolved.schemaName;
   }
 }

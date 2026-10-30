@@ -4,7 +4,8 @@
  *   POSTURE_DATABASE_URL=postgres://... ts-node check-db-security-posture.ts           # exit 1 on any drift
  *   POSTURE_DATABASE_URL=postgres://... ts-node check-db-security-posture.ts --write   # regenerate the snapshot
  *
- * The URL is read ONLY from POSTURE_DATABASE_URL: never from `.env`, DATABASE_URL or a default. Any role that can read the
+ * The URL is read ONLY from POSTURE_DATABASE_URL: never from `.env`, DATABASE_URL or a default. It is connected through the
+ * connection factory (security-posture.ts postureClient: URL policy, TLS, explicit fields; security review L-5). Any role that can read the
  * catalog works (the query is read-only). Regenerate the snapshot only from a database built from migrations alone with
  * the documented identity sequence, and review the diff like code: every changed line is a privilege or ownership change.
  */

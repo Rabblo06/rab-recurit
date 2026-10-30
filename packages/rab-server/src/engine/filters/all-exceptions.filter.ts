@@ -79,6 +79,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // workspace isn't routable yet, must see the same 404 an out-of-scope record gets — never a 403 (which would
     // confirm something exists) and never an opaque 500 (which this error's own fixed, non-sensitive `message` never
     // needed in the first place — see that class's own doc comment for why it carries no schema name or row content).
+    // Phase B exception: 'incompatible-module' (a READY workspace below this code's minimum module version) is an
+    // availability fault of THIS deployment, never an authorisation answer: 503 with a fixed body, so a caller retries
+    // instead of concluding the record is gone. It is raised only after the caller's organisation is bound and the
+    // registry row is visible to it, so it discloses nothing a 404 would hide.
+    if (exception instanceof WorkspaceRoutingError && exception.code === 'incompatible-module') {
+      response.status(HttpStatus.SERVICE_UNAVAILABLE).json({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace temporarily unavailable.' });
+      return;
+    }
     if (exception instanceof WorkspaceRoutingError) {
       response.status(HttpStatus.NOT_FOUND).json({ statusCode: HttpStatus.NOT_FOUND, message: 'Not found.' });
       return;

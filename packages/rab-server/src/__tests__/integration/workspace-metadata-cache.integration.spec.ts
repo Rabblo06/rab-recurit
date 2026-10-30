@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { CoreEntityCacheService } from '../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
@@ -139,6 +140,8 @@ describeIfDb('Workspace Metadata Cache (integration)', () => {
       await manager.query(`SELECT core.register_workspace_schema($1)`, [workspace.id]);
       await manager.query(`SELECT core.provision_workspace_schema($1)`, [workspace.id]);
       await manager.query(`SELECT core.mark_workspace_schema_ready($1, 1)`, [workspace.id]);
+      // Phase B: a real provisioner records the module version it built; routing refuses a READY workspace below the floor.
+      await manager.query(`UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1`, [workspace.id, LATEST_WORKSPACE_MODULE_VERSION]);
       return workspace.id as string;
     });
     createdWorkspaceIds.push(workspaceId);

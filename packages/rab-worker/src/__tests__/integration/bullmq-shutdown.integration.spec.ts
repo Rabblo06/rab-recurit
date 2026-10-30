@@ -40,7 +40,7 @@ async function replica(prefix: string, handlerMs: number, onRun: (who: string) =
     },
   ]);
   const scheduler = await startBullmqScheduler({
-    redis: conn, redisUrl: REDIS_URL!, lockUrl: DB_URL!, prefix, reconcileMs: 60_000, runtime, registry, jobs: [def], intervalOf: () => 60 * 60 * 1000, logger: quiet,
+    redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 60_000, runtime, registry, jobs: [def], intervalOf: () => 60 * 60 * 1000, logger: quiet,
   });
   return { conn, runtime, scheduler };
 }

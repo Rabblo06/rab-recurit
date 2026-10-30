@@ -89,10 +89,30 @@ jobs:
           set -a; source "${RUNNER_TEMP}/rls-database.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
           eval "$test_env"
-          DATABASE_URL="$TEST_DATABASE_URL" yarn check-rls
+          # Phase B: the connection factory's one variable (the deprecated DATABASE_URL is no longer passed).
+          PG_DATABASE_URL="$TEST_DATABASE_URL" yarn check-rls
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
+  # never migrate, refuse migration credentials), the Worker bundle launcher (PG_* forwarding, legacy names refused in
+  # production, the provisioner child's own PG_DATABASE_URL), every committed compose definition fed to the real launcher,
+  # and the compose credential isolation (the migration login reaches rab-migrate only; rab-api / rab-worker wait for it).
+  deployment-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: API start shell tests (api-prestart.sh, start.sh)
+        run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
+      - name: Worker bundle launcher and committed deployment definitions
+        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+      - name: Compose credential isolation (docker compose config)
+        run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
 
   trivy:
     runs-on: ubuntu-latest

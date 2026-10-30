@@ -38,4 +38,10 @@ describe('AllExceptionsFilter', () => {
       expect(json).toHaveBeenCalledWith({ statusCode: HttpStatus.NOT_FOUND, message: 'Not found.' });
     },
   );
+
+  it('maps WorkspaceRoutingError(incompatible-module) to 503 with a fixed body (an availability fault, never 404/403)', () => {
+    const { status, json } = run(new WorkspaceRoutingError('incompatible-module'));
+    expect(status).toHaveBeenCalledWith(HttpStatus.SERVICE_UNAVAILABLE);
+    expect(json).toHaveBeenCalledWith({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace temporarily unavailable.' });
+  });
 });

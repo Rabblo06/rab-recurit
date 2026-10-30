@@ -123,11 +123,11 @@ function resolve(env) {
   }
 }
 
-// Production: the header says DATABASE_URL, DATABASE_DIRECT_URL, CREWFLOW_PROVISIONER_DATABASE_URL, TRUSTED_PROXY_CIDRS, APP
-// secrets etc. are entered in OpenShip's UI. Only the keys the launcher itself checks matter here.
+// Production: the header says PG_DATABASE_URL (Phase B: the one direct crewflow_app connection; the legacy DATABASE_URL /
+// DATABASE_DIRECT_URL are refused in production), CREWFLOW_PROVISIONER_DATABASE_URL, TRUSTED_PROXY_CIDRS, APP secrets etc.
+// are entered in OpenShip's UI. Only the keys the launcher itself checks matter here.
 const OPENSHIP_ENTERED = {
-  DATABASE_URL: DUMMY.APP,
-  DATABASE_DIRECT_URL: DUMMY.APP,
+  PG_DATABASE_URL: DUMMY.APP,
   CREWFLOW_PROVISIONER_DATABASE_URL: DUMMY.PROV,
   TRUSTED_PROXY_CIDRS: '10.0.0.0/16',
 };
@@ -155,7 +155,7 @@ const COMMITTED = [
     {},
     { on: true, interval: 5 },
   ],
-  // Dev stack: DATABASE_URL comes from the shell's DEVDB_URL; the interval is NOT pinned (code default 60 s) unless the
+  // Dev stack: PG_DATABASE_URL comes from the shell's DEVDB_URL; the interval is NOT pinned (code default 60 s) unless the
   // env_file (../rab-server/.env, not committed) sets it.
   [
     'packages/rab-docker/docker-compose.yml',

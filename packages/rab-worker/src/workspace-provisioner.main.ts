@@ -13,6 +13,8 @@ import { Logger as NestLogger } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
+import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import {
   PROVISIONER_CYCLE_DURATIONS_KEY,
   PROVISIONER_HEARTBEAT_KEY,
@@ -81,7 +83,14 @@ const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function refuseStartup(error: unknown): never {
   const message = error instanceof Error ? error.message : 'unknown error';
-  const prefix = error instanceof Error && error.name === 'RuntimeDbError' ? '[runtime-db-guard] refused: ' : '';
+  const prefix =
+    error instanceof Error && error.name === 'RuntimeDbError'
+      ? '[runtime-db-guard] refused: '
+      : error instanceof Error && error.name === 'DatabaseBootGateError'
+        ? '[db-boot-gates] '
+      : error instanceof Error && error.name === 'PgConfigError'
+        ? '[pg-config] refused: '
+        : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
@@ -106,6 +115,12 @@ async function bootstrap(): Promise<void> {
   }
 
   await assertRuntimeDatabaseIdentity('provisioner').catch(refuseStartup);
+  // Phase B (schema-version compatibility): the same database boot gates as the API and the jobs child, on the privileged
+  // provisioning connection and expecting `crewflow` (the provisioner identity until G2). On top of role, version,
+  // extensions, deployment identity, FORCE RLS, TLS and pending migrations, the provisioner REFUSES what the API only warns
+  // about: a ledger ahead of this code, a core.provision_workspace body that is not exactly this code's module, and any
+  // READY workspace above this code's module — it would provision a mixed fleet its verifier cannot check.
+  const gateReport = await runDatabaseBootGates('provisioner').catch(refuseStartup);
   const logger = new NestLogger('WorkspaceProvisioner');
 
   const redisUrl = process.env.REDIS_URL;
@@ -115,14 +130,31 @@ async function bootstrap(): Promise<void> {
   const redis = new Redis(redisUrl, { maxRetriesPerRequest: null });
   await redis.ping();
 
-  // Deliberately `DATABASE_URL_UNPOOLED`, never `DATABASE_URL` — see this file's own top doc
-  // comment. `provisionWorkspaceSchema` manages its own BEGIN/COMMIT/ROLLBACK pairs directly on
-  // this client, so it must be a direct (unpooled) connection, exactly as it was inside the
-  // ordinary Worker before this split.
-  const privilegedUrl = process.env.DATABASE_URL_UNPOOLED;
-  if (!privilegedUrl) {
-    throw new Error('DATABASE_URL_UNPOOLED is required — this process has no other purpose.');
-  }
+  // Phase B (B1): the privileged provisioning connection comes from the connection factory. Its source is this process's
+  // own PG_DATABASE_URL (the Worker bundle launcher hands the provisioner child the provisioner credential under that
+  // name); outside production the deprecated DATABASE_URL_UNPOOLED still wins when the launcher sets it (the historical
+  // name for this credential). A transaction-pooler URL shape is refused: `provisionWorkspaceSchema` manages its own
+  // BEGIN/COMMIT/ROLLBACK pairs on this client and holds a session advisory lock, so it must be a direct connection.
+  setPgProcessRole('provisioner');
+  const pg = (() => {
+    try {
+      return resolvePgEnvironmentCached(process.env, { processRole: 'provisioner' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const privilegedEndpoint = pg.elevated ? 'elevated' : 'primary';
+  // No statement or query timeout on the provisioning client, exactly as before (workspace DDL can run long); the drift
+  // check keeps its own 60 s statement timeout (set by the drift job, which wins over the startup option).
+  const provisioningConfig = pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'provisioning', sessionAffinity: true, statementTimeoutMs: 0, queryTimeoutMs: 0 });
+  const driftConfig = pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'drift', sessionAffinity: true, statementTimeoutMs: 60_000 });
+  // Security review L-3: the provisioning lock is a SESSION advisory lock held across the cycle's own BEGIN/COMMIT pairs,
+  // so its connection must be session-stable. Same live two-connection probe the Worker runs (pg-session-probe.ts), on the
+  // provisioning endpoint, before the first connection and cycle. The URL denylist above only knows documented shapes.
+  await probePgSessionAffinity(
+    pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'probe', sessionAffinity: true, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
+    { label: 'the provisioner session-lock connection' },
+  ).catch(refuseStartup);
   // W6-E2E-05: the connection is long-lived, so it must survive the database going away (restart, failover, an idle kill,
   // a network blip). A bare pg Client emitted an unhandled 'error' (57P01) on a Postgres restart, the process exited 1 and
   // the Worker bundle failed the whole service. ReconnectingPgClient always listens for 'error', marks the client broken
@@ -130,7 +162,7 @@ async function bootstrap(): Promise<void> {
   // drop fails as a whole; the session advisory lock is released by the server with the dead session, and the durable
   // CREATING/FAILED/READY states make the next cycle's retry safe. The first connection must still succeed at start-up.
   const provisioning = new ReconnectingPgClient(
-    { connectionString: privilegedUrl, keepAlive: true, connectionTimeoutMillis: 10_000 },
+    provisioningConfig,
     { label: 'provisioning', logger, initialBackoffMs: 1_000, maxBackoffMs: 30_000 },
   );
   await provisioning.acquire();
@@ -157,11 +189,39 @@ async function bootstrap(): Promise<void> {
   beat();
   runtime.interval(beat, 15_000);
 
+  // Phase B: a release can migrate the database while this (older) provisioner keeps running. Before every cycle the ledger
+  // and the provision function are re-assessed (two catalog reads); an incompatible database skips the cycle — nothing is
+  // provisioned by this image — and is logged once per change, never once per tick.
+  const production = isProductionProcess('provisioner', process.env);
+  let lastCompatibilityRefusal: string | null = null;
+  const compatibleForThisCycle = async (): Promise<boolean> => {
+    const client = await provisioning.acquire();
+    try {
+      await checkSchemaCompatibility(async (sql, params) => (await client.query(sql, params as unknown[])).rows, {
+        process: 'provisioner',
+        production,
+        expected: gateReport.expectedMigrations ?? [],
+        label: 'provisioner process',
+      });
+      if (lastCompatibilityRefusal !== null) logger.log('workspace provisioning: the database is compatible with this image again; provisioning resumes');
+      lastCompatibilityRefusal = null;
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SchemaCompatibilityError') {
+        if (error.message !== lastCompatibilityRefusal) logger.error(`workspace provisioning: skipped, ${error.message}`);
+        lastCompatibilityRefusal = error.message;
+        return false;
+      }
+      throw error;
+    }
+  };
+
   runtime.every({
     name: 'workspace provisioning',
     intervalMs: config.intervalMs,
     statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
     run: async () => {
+      if (!(await compatibleForThisCycle())) return false;
       // Phase A: bounded lock wait (default 10 s), abandoned at once when shutdown begins; a busy lock skips this tick.
       const result = await runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown });
       if (!result.lockAcquired) {
@@ -181,7 +241,7 @@ async function bootstrap(): Promise<void> {
     statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
     run: async () => {
       // Its own short-lived connection (never the provisioning client, whose BEGIN/COMMIT pairs must not interleave).
-      const drift = await runWorkspaceSchemaDriftCycle(privilegedUrl);
+      const drift = await runWorkspaceSchemaDriftCycle(driftConfig);
       for (const f of drift.findings) {
         logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
       }

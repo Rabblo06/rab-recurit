@@ -18,6 +18,8 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 
+import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
+
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -136,6 +138,14 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
     await owner.query(`SELECT core.mark_workspace_schema_ready($1, 1)`, [WS_A]);
     await owner.query(`SELECT core.register_workspace_schema($1)`, [WS_B]);
     await owner.query(`SELECT core.mark_workspace_schema_ready($1, 1)`, [WS_B]);
+    // Phase B: routing refuses a READY workspace below MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION (503). A real provisioner
+    // records the module version it built; this fixture records LATEST the same way (owner identity, organisation bound).
+    for (const [org, ws] of [[ORG_A, WS_A], [ORG_B, WS_B]] as const) {
+      await owner.transaction(async (m) => {
+        await m.query(`SELECT set_config('rab.organisation_id',$1,true)`, [org]);
+        await m.query(`UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1`, [ws, LATEST_WORKSPACE_MODULE_VERSION]);
+      });
+    }
     // A third, registered-but-not-provisioned workspace (PROVISIONING) for the not-ready test.
     await owner.query(`INSERT INTO core."user" (id, organisation_id, email, first_name, last_name)
       VALUES ('a7a7a7a7-0000-4000-8000-00000000000d', $1, 'owner-pending@tenant.test', 'P', 'D') ON CONFLICT DO NOTHING`, [ORG_A]);

@@ -348,6 +348,14 @@ export const AuditAction = {
    */
   AI_INPUT_REQUESTED: 'ai.input_requested',
   AI_INPUT_ANSWERED: 'ai.input_answered',
+  /**
+   * Phase B ops container (command/ops): an owner operation wrote data in this organisation. Actor-less (no authenticated
+   * human); `metadata.operationalLabel` is the CI/deployment label (source, id, change ref, run id) — an OPERATIONAL label,
+   * not a database-verified identity — and `metadata.databaseVerified` the roles the session verified before writing.
+   * Containment keeps ACCOUNT_SUSPENDED (with the same metadata) per user.
+   */
+  OPS_USER_SESSION_BACKFILL_APPLIED: 'ops.user_session_backfill_applied',
+  OPS_HWS_BACKFILL_APPLIED: 'ops.hws_backfill_applied',
 } as const;
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];
 

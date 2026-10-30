@@ -3,7 +3,8 @@
  * suite fails loudly — naming the job — when a scan or consumer is added, renamed or dropped without the suite being
  * updated on purpose. A count alone cannot tell "ai-retention added" from "ai-retention added, token-cleanup lost".
  *
- * 20 periodic scans: the 19 pre-migration jobs-process loops + `ai-retention` (AI Phase 1, 304937a4).
+ * 21 periodic scans: the 19 pre-migration jobs-process loops + `ai-retention` (AI Phase 1, 304937a4) + Phase B P8's
+ * `workspace-provisioning-health` (owner decision C; the runtime drift scan is deferred, not registered).
  * 4 consumers: email, push, shift statements + `rab-ai` (AI Phase 1, 304937a4).
  */
 export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
@@ -27,6 +28,7 @@ export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-realtime:realtime-outbox-publish',
   'crewflow:crewflow-scan-maintenance:outbox-retention',
   'crewflow:crewflow-scan-maintenance:ai-retention',
+  'crewflow:crewflow-scan-maintenance:workspace-provisioning-health',
 ]);
 
 /** `<queue>/<jobName>` of every consumer handler (legacy `bull` prefix queues). */
@@ -37,7 +39,7 @@ export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
   'rab-ai/ai-turn',
 ]);
 
-/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 20 scans + 4 consumers = 24. */
+/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 21 scans + 4 consumers = 25. */
 export const EXPECTED_HANDLERS: readonly string[] = Object.freeze([
   ...EXPECTED_SCAN_SCHEDULER_IDS.map((id) => {
     const [, queue, jobName] = id.split(':');

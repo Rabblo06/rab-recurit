@@ -1,3 +1,4 @@
+import type { ClientConfig } from 'pg';
 import { Logger } from '@nestjs/common';
 import { Job, MetricsTime, UnrecoverableError, Worker } from 'bullmq';
 import * as os from 'node:os';
@@ -101,8 +102,8 @@ export function createConsumerWorkers(registry: HandlerRegistry, connection: Red
 export interface BullmqSchedulerDeps {
   redis: Redis;
   redisUrl: string;
-  /** Direct crewflow_app URL for the dedicated scan-lock connection. */
-  lockUrl: string;
+  /** Direct crewflow_app connection (a factory pgClientConfig) for the dedicated scan-lock connection. */
+  lockConnection: ClientConfig;
   prefix: string;
   reconcileMs: number;
   runtime: WorkerRuntime;
@@ -147,7 +148,7 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   logger.log(`bullmq scheduler: Redis maxmemory-policy=${preflight.maxmemoryPolicy} version=${preflight.redisVersion ?? 'unknown'} authenticated=${preflight.authenticated}`);
   runtime.enableSchedulerProgress();
 
-  const scanLock = await ScanLock.open(deps.lockUrl, logger);
+  const scanLock = await ScanLock.open(deps.lockConnection, logger);
   const isEnabled = deps.isEnabled ?? (() => true);
   const manager = new CrewflowSchedulerManager({ connection: redis, prefix: deps.prefix, jobs: deps.jobs, intervalOf: deps.intervalOf, isEnabled, logger });
   const instance = `${os.hostname()}:${process.pid}`;

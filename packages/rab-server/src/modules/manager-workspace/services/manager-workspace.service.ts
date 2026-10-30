@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 import { ManagerType, normalizeSubdomain } from '@rab/shared';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -17,7 +18,7 @@ import { UpdateManagerWorkspaceNameDto } from '../dto/update-manager-workspace-n
 import { UpdateManagerWorkspaceSubdomainDto } from '../dto/update-manager-workspace-subdomain.dto';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { SubdomainAvailability, SubdomainService } from './subdomain.service';
-import { WorkspaceProvisioningService } from './workspace-provisioning.service';
+import { assertCallerMayProvision, WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 
@@ -47,9 +48,19 @@ export interface ManagerWorkspaceResponse {
   schemaStatus: string | null;
   onboardingCompletedAt: string | null;
   createdAt: Date;
+  /**
+   * Phase B P8 - NAVIGATION INFO ONLY, never an authorization input (every endpoint re-derives its own access server-side).
+   * True only when the HWS runtime routing applies to THIS workspace for the calling session: `HWS_RUNTIME_ENABLED` is on
+   * AND the session's server-resolved operational workspace (`ctx.workspaceId`, from `core.workspace_membership` via
+   * `resolve_membership_for_session` - exactly what `TenantContextService` routes on) is this workspace. Then every
+   * workspace-scoped request is refused until the schema is READY, so the web gate sends the owner to the preparation
+   * screen. False with HWS off (requests run against core) and for a purely additive personal workspace (a Venue Manager's,
+   * or a CEO's whose operational home is elsewhere), which no request ever routes through.
+   */
+  schemaRequired: boolean;
 }
 
-function toResponse(workspace: ManagerWorkspace): ManagerWorkspaceResponse {
+function toResponse(workspace: ManagerWorkspace, schemaRequired = false): ManagerWorkspaceResponse {
   return {
     id: workspace.id,
     name: workspace.name,
@@ -59,8 +70,18 @@ function toResponse(workspace: ManagerWorkspace): ManagerWorkspaceResponse {
     schemaStatus: workspace.schemaStatus ?? null,
     onboardingCompletedAt: workspace.onboardingCompletedAt?.toISOString() ?? null,
     createdAt: workspace.createdAt,
+    schemaRequired,
   };
 }
+
+/**
+ * Phase B P8 (inv-p8 finding 4): the caller's own `manager_workspace` row and its lifecycle are CORE-only data. Under
+ * HWS_RUNTIME_ENABLED=true a session whose membership already points at its own not-yet-READY workspace would otherwise be
+ * routed into that schema, which `SchemaResolverService` refuses (404) - so the preparation screen's poll and its resume
+ * re-POST could never succeed. Same rule `WorkspaceProvisioningService.provisionOwnWorkspace` already applies. Only the
+ * transaction's routing changes: the organisation and user stay bound from the verified session, never from the client.
+ */
+const coreOnly = (ctx: AuthContext): AuthContext => ({ ...ctx, workspaceId: null });
 
 /**
  * `ManagerWorkspace` — a private, individually-owned workspace per Manager.
@@ -79,7 +100,19 @@ export class ManagerWorkspaceService {
     private readonly entityCache: CoreEntityCacheService,
     private readonly provisioning: WorkspaceProvisioningService,
     private readonly hostResolver?: WorkspaceHostResolverService,
+    private readonly environment?: EnvironmentService,
   ) {}
+
+  /** See `ManagerWorkspaceResponse.schemaRequired`. `alsoRoutedHere`: this request itself just bound the workspace as the
+   *  caller's operational home (create), so the session's next request routes through it although `ctx` predates that. */
+  private schemaRequired(ctx: AuthContext, workspaceId: string, alsoRoutedHere = false): boolean {
+    if (this.environment?.get('HWS_RUNTIME_ENABLED') !== true) return false;
+    return ctx.workspaceId === workspaceId || alsoRoutedHere;
+  }
+
+  private withNavigation(ctx: AuthContext, response: ManagerWorkspaceResponse, alsoRoutedHere = false): ManagerWorkspaceResponse {
+    return { ...response, schemaRequired: this.schemaRequired(ctx, response.id, alsoRoutedHere) };
+  }
 
   private async ownManagerProfile(manager: EntityManager, ctx: AuthContext): Promise<ManagerProfile> {
     const profile = await manager.findOne(ManagerProfile, { where: { userId: ctx.userId } });
@@ -122,7 +155,7 @@ export class ManagerWorkspaceService {
    * under a fresh epoch — correct for every subsequent caller, not just this one.
    */
   async getMine(ctx: AuthContext, opts: { skipCache?: boolean } = {}): Promise<ManagerWorkspaceResponse> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const response = await this.tenantContext.runInTenantContext(coreOnly(ctx), async (manager): Promise<ManagerWorkspaceResponse> => {
       if (opts.skipCache) await this.entityCache.invalidate('manager_workspace_by_owner', ctx.userId);
       const cached = await this.entityCache.getManagerWorkspaceByOwner(manager, ctx.userId);
       if (cached) {
@@ -135,11 +168,14 @@ export class ManagerWorkspaceService {
           schemaStatus: cached.schemaStatus,
           onboardingCompletedAt: cached.onboardingCompletedAt,
           createdAt: new Date(cached.createdAt),
+          schemaRequired: false,
         };
       }
       const workspace = await this.ownWorkspace(manager, ctx);
       return toResponse(workspace);
     });
+    // Session-dependent, so never cached: computed per request from this session's own routing.
+    return this.withNavigation(ctx, response);
   }
 
   /**
@@ -163,7 +199,7 @@ export class ManagerWorkspaceService {
       return toResponse(updated);
     });
     await this.invalidateWorkspaceCache(result.id, ctx.userId);
-    return result;
+    return this.withNavigation(ctx, result);
   }
 
   async uploadLogo(ctx: AuthContext, buffer: Buffer): Promise<ManagerWorkspaceResponse> {
@@ -198,7 +234,7 @@ export class ManagerWorkspaceService {
       return toResponse(updated);
     });
     await this.invalidateWorkspaceCache(result.id, ctx.userId);
-    return result;
+    return this.withNavigation(ctx, result);
   }
 
   /** Best-effort, never throws — see `CoreEntityCacheService.invalidate()`'s own contract. */
@@ -228,7 +264,7 @@ export class ManagerWorkspaceService {
       return toResponse(updated);
     });
     await this.invalidateWorkspaceCache(result.id, ctx.userId);
-    return result;
+    return this.withNavigation(ctx, result);
   }
 
   /**
@@ -238,7 +274,8 @@ export class ManagerWorkspaceService {
    * never errors — a double-submit or a retried request must not fail.
    */
   async completeOnboarding(ctx: AuthContext): Promise<ManagerWorkspaceResponse> {
-    const result = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    // Core-only (see `coreOnly`): the profile step completes before the schema may be READY (a DEFERRED or FAILED create).
+    const result = await this.tenantContext.runInTenantContext(coreOnly(ctx), async (manager) => {
       const workspace = await this.ownWorkspace(manager, ctx);
       await manager.update(ManagerWorkspace, workspace.id, { onboardingCompletedAt: new Date() });
       const updated = await manager.findOneByOrFail(ManagerWorkspace, { id: workspace.id });
@@ -249,7 +286,7 @@ export class ManagerWorkspaceService {
       return toResponse(updated);
     });
     await this.invalidateWorkspaceCache(result.id, ctx.userId);
-    return result;
+    return this.withNavigation(ctx, result);
   }
 
   /**
@@ -263,19 +300,25 @@ export class ManagerWorkspaceService {
    * the (rare) case two requests for the same subdomain land concurrently.
    */
   async create(ctx: AuthContext, dto: CreateManagerWorkspaceDto): Promise<ManagerWorkspaceResponse> {
+    // Phase B P8 (inv-p8 finding 4): every step below is core-only - never routed through the caller's own not-yet-READY
+    // workspace schema, which HWS_RUNTIME_ENABLED=true would refuse (404) on the owner's resume / retry re-POST.
+    const core = coreOnly(ctx);
     // 1. Create (or recognise a replay of) the workspace row — one committed transaction, exactly as before.
     let created: ManagerWorkspaceResponse;
     try {
-      created = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-        const replay = await this.findReplay(manager, ctx, dto);
+      created = await this.tenantContext.runInTenantContext(core, async (manager) => {
+        // Layer 2 (CLAUDE.md five-layer rule, inv-security F3): a suspended organisation or an account that is not active
+        // never creates or resumes a workspace, even when this service is reached without the HTTP guard chain.
+        await assertCallerMayProvision(manager, core);
+        const replay = await this.findReplay(manager, core, dto);
         if (replay) return toResponse(replay);
-        return this.createFor(manager, ctx, { ownerUserId: ctx.userId, name: dto.name, subdomain: dto.subdomain });
+        return this.createFor(manager, core, { ownerUserId: ctx.userId, name: dto.name, subdomain: dto.subdomain });
       });
     } catch (error) {
       if (!(error instanceof ConflictException)) throw error;
       // A concurrent IDENTICAL request (double click, client retry after a lost response) committed first and this one
       // lost the owner/subdomain unique race. That is a replay, not a conflict: answer with the same workspace.
-      const replay = await this.tenantContext.runInTenantContext(ctx, (manager) => this.findReplay(manager, ctx, dto));
+      const replay = await this.tenantContext.runInTenantContext(core, (manager) => this.findReplay(manager, core, dto));
       if (!replay) throw error;
       created = toResponse(replay);
     }
@@ -285,14 +328,20 @@ export class ManagerWorkspaceService {
     //    serialises them and READY happens exactly once. Expected races and infrastructure failures never become a 500:
     //    the response reports the workspace's real lifecycle state, which the client polls.
     const outcome = await this.provisioning.provisionOwnWorkspace(ctx, created.id);
-    if (outcome === 'DEFERRED') return created;
+    let final = created;
+    let routedHere = false;
     try {
-      return await this.tenantContext.runInTenantContext(ctx, async (manager) =>
-        toResponse(await manager.findOneByOrFail(ManagerWorkspace, { id: created.id })),
-      );
+      ({ final, routedHere } = await this.tenantContext.runInTenantContext(core, async (manager) => {
+        const workspace = outcome === 'DEFERRED' ? null : await manager.findOneByOrFail(ManagerWorkspace, { id: created.id });
+        // Navigation only: the owner's profile bound to this workspace = the session's operational home from its next
+        // request on (createFor binds profile and membership together), although this request's ctx predates it.
+        const profile = await manager.findOne(ManagerProfile, { where: { userId: ctx.userId } });
+        return { final: workspace ? toResponse(workspace) : created, routedHere: profile?.workspaceId === created.id };
+      }));
     } catch {
-      return created;
+      // Best-effort re-read: the committed lifecycle is unchanged and the client polls.
     }
+    return this.withNavigation(ctx, final, routedHere);
   }
 
   /**
@@ -487,7 +536,7 @@ export class ManagerWorkspaceService {
     // this process's origin-trust snapshot, after the commit. Best-effort, never throws.
     const change = renamed as { oldSubdomain: string; newSubdomain: string } | null;
     if (change) await this.hostResolver?.invalidateLabels(change.oldSubdomain, change.newSubdomain);
-    return result;
+    return this.withNavigation(ctx, result);
   }
 
   /**

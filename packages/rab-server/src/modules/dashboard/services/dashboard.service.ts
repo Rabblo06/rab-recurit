@@ -116,7 +116,7 @@ export class DashboardService {
         venueCount,
         activeOfferCount,
       };
-    });
+    }, { useReplica: true });
   }
 
   /** Whose created_by these counters read: the caller, or — for a custom workspace-member only — their workspace owner. */

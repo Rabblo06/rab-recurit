@@ -27,7 +27,7 @@ const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 // Every scan interval at its real default: the three minutes keys (15 / 60 / 60) and, since Phase A pa-intervals, the 17
 // WORKER_<JOB>_INTERVAL_SECONDS keys (defaults = the historical constants).
 const env = defaultIntervalEnv();
-const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 20 = 19 pre-migration scans + ai-retention
+const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 21 = 19 pre-migration scans + ai-retention + workspace-provisioning-health
 const intervalOf = (def: ScanJobDefinition) => resolveIntervalMs(def, env);
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 const freshPrefix = () => `crewflow:it-${randomBytes(4).toString('hex')}:bull`;
@@ -75,7 +75,7 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
     await redis.quit();
   });
 
-  it('reconcile is idempotent: 20 schedulers, ONE pending job each, and a re-reconcile does not move the next run (no 24 h re-run)', async () => {
+  it('reconcile is idempotent: 21 schedulers, ONE pending job each, and a re-reconcile does not move the next run (no 24 h re-run)', async () => {
     const prefix = track(freshPrefix());
     const manager = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf, logger: quietLogger });
     const first = await manager.reconcile();
@@ -252,7 +252,7 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
           { queue: defs[2]!.queue, jobName: defs[2]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
         ]);
         const scheduler = await startBullmqScheduler({
-          redis: conn, redisUrl: REDIS_URL!, lockUrl: DB_URL!, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
+          redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
         });
         replicas.push({ name, redis: conn, runtime, scheduler });
       }

@@ -247,6 +247,16 @@ function OnboardingGate({ children }: { children: JSX.Element }) {
   if (workspaceLoading || workspaceErrored) return null;
   if (!workspace) return <Navigate to="/onboarding/workspace" replace />;
   if (!workspace.onboardingCompletedAt) return <Navigate to="/onboarding/profile" replace />;
+  // Phase B P8: a workspace whose schema is still being built (CREATING) or whose last attempt failed (FAILED) is resumed
+  // or retried ONLY by its owner's own request — the preparation screen auto-resumes CREATING and offers "Try again" on
+  // FAILED. Redirect there only when the server says this session actually routes through the workspace schema
+  // (`schemaRequired`: HWS runtime routing applies, so every console request would be refused until READY). Navigation
+  // only; the server enforces access on every request regardless. SUPERSEDED (owner decision: unreachable for a signed-in
+  // owner; the preparation screen still handles it with Sign out), null/missing status, READY: no redirect. No loop:
+  // `/onboarding/preparing` is outside this gate, and on READY it navigates back to '/'.
+  if (workspace.schemaRequired === true && (workspace.schemaStatus === 'CREATING' || workspace.schemaStatus === 'FAILED')) {
+    return <Navigate to="/onboarding/preparing" replace />;
+  }
   return children;
 }
 

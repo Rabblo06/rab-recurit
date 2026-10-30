@@ -51,6 +51,27 @@
         "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json ./node_modules/typeorm/cli.js migration:generate -d packages/rab-server/src/database/typeorm/core/core.datasource.ts",
         "cwd": "."
       }
+    },
+    "db:bind-identity": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/deployment-identity/bind-deployment-identity.ts",
+        "cwd": "."
+      }
+    },
+    "deploy:prepare": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/deploy-prepare.ts",
+        "cwd": "."
+      }
+    },
+    "cache:flush": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/cache-flush.ts",
+        "cwd": "."
+      }
     }
   },
   "tags": []

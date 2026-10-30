@@ -38,8 +38,8 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {
-    expect(SCAN_JOBS).toHaveLength(20);
-    SCAN_JOBS.forEach((def, i) => {
+    expect(SCAN_JOBS).toHaveLength(21);
+    SCAN_JOBS.slice(0, PRE_MIGRATION_MAIN_TS.length).forEach((def, i) => {
       const [name, interval, lastRunAt, failures] = PRE_MIGRATION_MAIN_TS[i]!;
       expect(def.name).toBe(name);
       expect(def.statKeys.lastRunAt).toBe(lastRunAt);
@@ -56,6 +56,15 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
     expect(resolveIntervalMs(SCAN_JOBS[19]!, env)).toBe(60 * MIN);
   });
 
+  it('Phase B P8 (owner decision C): ONE provisioning scan is appended last — the counts-only health alert, constant 24 h', () => {
+    expect(SCAN_JOBS.slice(20).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse])).toEqual([
+      ['workspace-provisioning-health', 'crewflow-scan-maintenance', { kind: 'constant', ms: 24 * 60 * MIN }, 'lastWorkspaceProvisioningHealthAt', 'workspaceProvisioningHealthFailures', false],
+    ]);
+    expect(resolveIntervalMs(SCAN_JOBS[20]!, env)).toBe(86_400_000);
+    // The runtime drift scan is deferred (HWS prerequisite): not registered.
+    expect(SCAN_JOBS.some((d) => /drift-runtime/.test(d.jobName))).toBe(false);
+  });
+
   it('the eight `return false` cycles are flagged (dispatchers, login-handoff and storage cleanup, outbox and AI retention)', () => {
     expect(SCAN_JOBS.filter((d) => d.mayReturnFalse).map((d) => d.jobName)).toEqual([
       'email-dispatch', 'push-dispatch', 'login-handoff-cleanup', 'storage-cleanup', 'shift-statement-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention',
@@ -64,13 +73,13 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
 
   it('scheduler ids are unique and `crewflow:<queue>:<jobName>`; job names unique per queue', () => {
     const ids = SCAN_JOBS.map(schedulerIdOf);
-    expect(new Set(ids).size).toBe(20);
+    expect(new Set(ids).size).toBe(21);
     for (const def of SCAN_JOBS) expect(schedulerIdOf(def)).toBe(`crewflow:${def.queue}:${def.jobName}`);
     expect(schedulerIdOf(SCAN_JOBS[1]!)).toBe('crewflow:crewflow-scan-email:email-dispatch');
     // Each queue's Worker concurrency = its number of distinct scans.
     expect(SCAN_QUEUE_NAMES.map((q) => [q, scanJobsOn(q).length])).toEqual([
       ['crewflow-scan-email', 1], ['crewflow-scan-push', 1], ['crewflow-scan-shifts', 4], ['crewflow-scan-offers', 3],
-      ['crewflow-scan-reports', 4], ['crewflow-scan-maintenance', 6], ['crewflow-scan-realtime', 1],
+      ['crewflow-scan-reports', 4], ['crewflow-scan-maintenance', 7], ['crewflow-scan-realtime', 1],
     ]);
   });
 

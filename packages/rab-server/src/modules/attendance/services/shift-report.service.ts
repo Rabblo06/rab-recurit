@@ -232,7 +232,7 @@ export class ShiftReportService {
         total: rows[0] ? Number(rows[0].total) : 0,
         serverNow: dbNow.toISOString(),
       };
-    });
+    }, { useReplica: true });
   }
 
   async getReport(ctx: AuthContext, shiftId: string): Promise<ShiftReportDetail> {

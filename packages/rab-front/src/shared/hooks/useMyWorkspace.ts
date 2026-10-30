@@ -25,6 +25,13 @@ export interface MyWorkspace {
   schemaStatus: ManagerWorkspaceSchemaStatus;
   onboardingCompletedAt: string | null;
   createdAt: string;
+  /**
+   * Phase B P8 — server-derived NAVIGATION info only (never authorization): true only when the HWS runtime routing applies
+   * to this workspace for the current session, i.e. the console cannot work until the schema is READY. `OnboardingGate`
+   * sends the owner to the preparation screen only when this is exactly `true` and the status is CREATING or FAILED.
+   * Optional: a response from an older server (or a cached create result) may lack it, which means "no redirect".
+   */
+  schemaRequired?: boolean;
 }
 
 /**

@@ -27,9 +27,14 @@ const SECRET_MARKERS = ['dummy-app-pw', 'dummy-direct-pw', 'dummy-prov-pw', 'fak
 const env = () => ({
   NODE_ENV: 'production',
   RAB_RUNTIME_ENV: 'production',
-  DATABASE_URL: 'postgres://crewflow_app:dummy-app-pw@db-pooler.example:5432/testdb',
-  DATABASE_DIRECT_URL: 'postgres://crewflow_app:dummy-direct-pw@db.example:5432/testdb',
-  CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:dummy-prov-pw@db.example:5432/testdb',
+  // Phase B: one PG_DATABASE_URL (crewflow_app, direct; it is also the session-lock connection). A production service
+  // refuses the legacy DATABASE_URL / DATABASE_DIRECT_URL / DB_POOL_MAX (see test B1).
+  PG_DATABASE_URL: 'postgres://crewflow_app:dummy-app-pw@db.example:5432/testdb?sslmode=verify-full',
+  PG_SSL_CA_CERT_PATH: '/run/secrets/pg-ca.pem',
+  CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production',
+  CREWFLOW_DEPLOYMENT_ID: '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f',
+  PG_EXPECTED_DATABASE_NAME: 'testdb',
+  CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:dummy-prov-pw@db.example:5432/testdb?sslmode=verify-full',
   // Phase A: the provisioner child is opt-in. The reference cases below run the ENABLED topology (what every committed
   // compose file sets); the "Phase A" cases further down cover the disabled default.
   CREWFLOW_PROVISIONER_ENABLED: 'true',
@@ -39,11 +44,37 @@ const env = () => ({
   EMAIL_SMTP_PASSWORD: 'fake-email-secret',
   S3_SECRET_ACCESS_KEY: 'fake-s3-secret',
   APNS_AUTH_KEY_P8: 'fake-apns',
-  DB_TARGET: 'production',
+  // DB_TARGET is not here any more: security review L-4 made it a refusal on the Worker service (test 12), not a dropped key.
   NODE_OPTIONS: '--inspect=0.0.0.0:9229',
   DOTENV_CONFIG_PATH: '/somewhere/.env',
   SOME_UNKNOWN_VARIABLE: 'x',
 });
+
+/** Outside production the deprecated names still work (DATABASE_URL pooled + DATABASE_DIRECT_URL for the locks). */
+const legacyEnv = (overrides = {}) => {
+  const e = {
+    ...env(),
+    NODE_ENV: 'development',
+    RAB_RUNTIME_ENV: 'development',
+    DATABASE_URL: 'postgres://crewflow_app:dummy-app-pw@db-pooler.example:5432/testdb',
+    DATABASE_DIRECT_URL: 'postgres://crewflow_app:dummy-direct-pw@db.example:5432/testdb',
+  };
+  delete e.PG_DATABASE_URL;
+  delete e.CREWFLOW_DEPLOYMENT_ENVIRONMENT;
+  delete e.CREWFLOW_DEPLOYMENT_ID;
+  Object.assign(e, overrides);
+  for (const [k, v] of Object.entries(overrides)) if (v === undefined) delete e[k];
+  return e;
+};
+
+const legacyRefusal = (overrides) => {
+  try {
+    makePlan(legacyEnv(overrides));
+  } catch (e) {
+    return e;
+  }
+  return null;
+};
 
 const refusal = (overrides) => {
   try {
@@ -61,8 +92,14 @@ test('1 jobs child does not receive provisioning, migration or command authority
   for (const key of ['DATABASE_URL_UNPOOLED', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'CREWFLOW_MIGRATION_DATABASE_URL', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'NODE_OPTIONS', 'DOTENV_CONFIG_PATH', 'SOME_UNKNOWN_VARIABLE']) {
     assert.equal(w.env[key], undefined, key);
   }
-  assert.match(w.env.DATABASE_URL, /crewflow_app/);
-  assert.match(w.env.DATABASE_DIRECT_URL, /crewflow_app/);
+  assert.match(w.env.PG_DATABASE_URL, /crewflow_app/);
+  assert.equal(w.env.DATABASE_URL, undefined);
+  assert.equal(w.env.DATABASE_DIRECT_URL, undefined);
+  // Phase B: TLS and the deployment identity reach the jobs child (its runtime guard compares them with the marker).
+  assert.equal(w.env.PG_SSL_CA_CERT_PATH, '/run/secrets/pg-ca.pem');
+  assert.equal(w.env.CREWFLOW_DEPLOYMENT_ENVIRONMENT, 'production');
+  assert.equal(w.env.CREWFLOW_DEPLOYMENT_ID, env().CREWFLOW_DEPLOYMENT_ID);
+  assert.equal(w.env.PG_EXPECTED_DATABASE_NAME, 'testdb');
   // Adapted: the reference forwarded APP_SECRET etc.; so does this one — the jobs child needs them (push/QR/email/S3).
   assert.equal(w.env.APP_SECRET, 'fake-test-only');
   assert.equal(w.env.S3_SECRET_ACCESS_KEY, 'fake-s3-secret');
@@ -73,8 +110,10 @@ test('1 jobs child does not receive provisioning, migration or command authority
 
 test('2 provisioner gets only its DB mapping and minimal infrastructure environment', () => {
   const [, p] = makePlan(env());
-  assert.equal(p.env.DATABASE_URL, env().CREWFLOW_PROVISIONER_DATABASE_URL);
-  assert.equal(p.env.DATABASE_URL, p.env.DATABASE_URL_UNPOOLED);
+  // Phase B: the provisioner credential arrives as PG_DATABASE_URL; never DATABASE_URL / DATABASE_URL_UNPOOLED.
+  assert.equal(p.env.PG_DATABASE_URL, env().CREWFLOW_PROVISIONER_DATABASE_URL);
+  assert.equal(p.env.DATABASE_URL, undefined);
+  assert.equal(p.env.DATABASE_URL_UNPOOLED, undefined);
   // Phase A: HWS_RUNTIME_ENABLED is no longer forced (env() does not set it, so the child does not get it); the explicit
   // opt-in and the validated interval are set by the launcher.
   assert.equal(p.env.HWS_RUNTIME_ENABLED, undefined);
@@ -82,9 +121,24 @@ test('2 provisioner gets only its DB mapping and minimal infrastructure environm
   assert.equal(p.env.WORKSPACE_PROVISIONER_INTERVAL_SECONDS, '60');
   assert.deepEqual(
     Object.keys(p.env).sort(),
-    ['CREWFLOW_INSTANCE_HEALTH_FILE', 'CREWFLOW_PROVISIONER_ENABLED', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'HOME', 'NODE_ENV', 'PATH', 'RAB_RUNTIME_ENV', 'REDIS_URL', 'TMPDIR', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS'].sort(),
+    [
+      'CREWFLOW_DEPLOYMENT_ENVIRONMENT',
+      'CREWFLOW_DEPLOYMENT_ID',
+      'CREWFLOW_INSTANCE_HEALTH_FILE',
+      'CREWFLOW_PROVISIONER_ENABLED',
+      'HOME',
+      'NODE_ENV',
+      'PATH',
+      'PG_DATABASE_URL',
+      'PG_EXPECTED_DATABASE_NAME',
+      'PG_SSL_CA_CERT_PATH',
+      'RAB_RUNTIME_ENV',
+      'REDIS_URL',
+      'TMPDIR',
+      'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
+    ].sort(),
   );
-  for (const key of ['APP_SECRET', 'EMAIL_SMTP_PASSWORD', 'S3_SECRET_ACCESS_KEY', 'APNS_AUTH_KEY_P8', 'DATABASE_DIRECT_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL']) {
+  for (const key of ['APP_SECRET', 'EMAIL_SMTP_PASSWORD', 'S3_SECRET_ACCESS_KEY', 'APNS_AUTH_KEY_P8', 'DATABASE_DIRECT_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'PG_DATABASE_REPLICA_URL', 'PG_POOL_MAX_CONNECTIONS']) {
     assert.equal(p.env[key], undefined, key);
   }
   assert.ok(PROVISIONER_ENV_KEYS.every((k) => !/SECRET|PASSWORD|KEY/.test(k)));
@@ -107,20 +161,31 @@ test('4 rejects globally injected privileged URL (DATABASE_URL_UNPOOLED)', () =>
 });
 
 test('5 rejects privileged worker login (pooled or direct)', () => {
-  assert.match(refusal({ DATABASE_URL: 'postgres://crewflow:x@db/testdb' }).message, /crewflow_app/);
-  assert.match(refusal({ DATABASE_DIRECT_URL: 'postgres://crewflow:x@db/testdb' }).message, /crewflow_app/);
+  assert.match(refusal({ PG_DATABASE_URL: 'postgres://crewflow:x@db/testdb' }).message, /PG_DATABASE_URL must log in as crewflow_app/);
+  assert.match(legacyRefusal({ DATABASE_URL: 'postgres://crewflow:x@db/testdb' }).message, /crewflow_app/);
+  assert.match(legacyRefusal({ DATABASE_DIRECT_URL: 'postgres://crewflow:x@db/testdb' }).message, /crewflow_app/);
   assert.match(refusal({ CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow_app:x@db/testdb' }).message, /must log in as crewflow/);
 });
 
-test('6 rejects missing direct URL / provisioner URL / Redis', () => {
-  assert.match(refusal({ DATABASE_DIRECT_URL: '' }).message, /Missing DATABASE_DIRECT_URL/);
+test('6 rejects missing database URL / provisioner URL / Redis; the direct URL is no longer needed (Phase B)', () => {
+  assert.match(refusal({ PG_DATABASE_URL: '' }).message, /^Missing PG_DATABASE_URL$/);
+  assert.match(legacyRefusal({ DATABASE_URL: undefined }).message, /^Missing PG_DATABASE_URL$/);
+  // Without DATABASE_DIRECT_URL the (deprecated) DATABASE_URL is the session-lock connection: a pooled host is refused,
+  // a direct one plans.
+  assert.match(legacyRefusal({ DATABASE_DIRECT_URL: '' }).message, /DATABASE_URL is a transaction-pooler host/);
+  const direct = 'postgres://crewflow_app:dummy-app-pw@db.example:5432/testdb';
+  assert.equal(makePlan(legacyEnv({ DATABASE_DIRECT_URL: '', DATABASE_URL: direct }))[0].env.DATABASE_URL, direct);
   assert.match(refusal({ CREWFLOW_PROVISIONER_DATABASE_URL: undefined }).message, /Missing CREWFLOW_PROVISIONER_DATABASE_URL/);
   assert.match(refusal({ REDIS_URL: ' ' }).message, /Missing REDIS_URL/);
 });
 
 test('7 rejects different database name', () => {
-  assert.match(refusal({ DATABASE_DIRECT_URL: 'postgres://crewflow_app:x@db/other' }).message, /different databases/);
+  assert.match(legacyRefusal({ DATABASE_DIRECT_URL: 'postgres://crewflow_app:x@db/other' }).message, /different databases/);
   assert.match(refusal({ CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:x@db/other' }).message, /different databases/);
+  assert.match(
+    legacyRefusal({ PG_DATABASE_URL: 'postgres://crewflow_app:x@db.example:5432/other' }).message,
+    /PG_DATABASE_URL and the deprecated DATABASE_URL name different targets/,
+  );
 });
 
 test('8 (Phase A) HWS_RUNTIME_ENABLED is passed through unchanged to BOTH children — never forced', () => {
@@ -146,10 +211,11 @@ test('9 rejects missing production proxy trust declaration and half-declared pro
 test('10 invalid URL and every refusal never leak a value', () => {
   const secret = 'not-url-password-DO-NOT-LOG';
   const cases = [
+    { PG_DATABASE_URL: secret },
     { DATABASE_URL: secret },
     { DATABASE_DIRECT_URL: `mysql://u:${secret}@h/db` },
     { CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow:${secret}@db-pooler.x/testdb` },
-    { DATABASE_URL: `postgres://crewflow:${secret}@db/testdb` },
+    { PG_DATABASE_URL: `postgres://crewflow:${secret}@db/testdb` },
     { CREWFLOW_MIGRATION_DATABASE_URL: `postgres://rab_owner:${secret}@db/testdb` },
     { CREWFLOW_BOOTSTRAP_PASSWORD: secret },
   ];
@@ -182,15 +248,42 @@ test('11 a failed mandatory process stops the surviving process and returns fail
 // ---------------------------------------------------------------- integrated launcher: configuration
 
 test('12 refuses migration/bootstrap authority on the Worker service, by name only', () => {
+  // Security review L-4: the names the review found missing from this list are refused too.
+  for (const key of ['CREWFLOW_MIGRATOR_PASSWORD', 'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL', 'DB_TARGET']) {
+    assert.ok(FORBIDDEN_SERVICE_KEYS.includes(key), key);
+  }
   for (const key of FORBIDDEN_SERVICE_KEYS) {
     const e = refusal({ [key]: 'set' });
     assert.ok(e, key);
     assert.match(e.message, new RegExp(`^${key} must not be configured`));
   }
+  // L-4 follow-up: the in-process guard tolerates DB_TARGET=local|test in a non-production runtime (local `yarn start`),
+  // but this launcher runs only in the Worker image (docker-compose.yml blanks DB_TARGET) and stays strict BY NAME:
+  // every value is refused, production or not, and the value never appears in the message.
+  for (const value of ['local', 'test', 'production']) {
+    for (const NODE_ENV of ['development', 'production']) {
+      const e = refusal({ NODE_ENV, DB_TARGET: value });
+      assert.ok(e, `DB_TARGET=${value} NODE_ENV=${NODE_ENV}`);
+      assert.match(e.message, /^DB_TARGET must not be configured/);
+    }
+  }
+  // A blank value (docker-compose.yml's `DB_TARGET: ''`) counts as absent.
+  const blank = refusal({ DB_TARGET: '' });
+  assert.ok(!blank || !/^DB_TARGET/.test(blank.message));
 });
 
-test('13 refuses Neon pooled hosts where a direct connection is required', () => {
-  assert.match(refusal({ DATABASE_DIRECT_URL: 'postgres://crewflow_app:x@ep-a-pooler.eu.aws.neon.tech/testdb' }).message, /DATABASE_DIRECT_URL is a pooled/);
+test('13 refuses transaction-pooler hosts where a direct (session) connection is required', () => {
+  assert.match(legacyRefusal({ DATABASE_DIRECT_URL: 'postgres://crewflow_app:x@ep-a-pooler.eu.aws.neon.tech/testdb' }).message, /DATABASE_DIRECT_URL is a transaction-pooler host/);
+  // Phase B: with no DATABASE_DIRECT_URL, PG_DATABASE_URL itself is the session-lock connection, so it must be direct.
+  for (const url of [
+    'postgres://crewflow_app:x@ep-a-pooler.eu.aws.neon.tech/testdb',
+    'postgres://crewflow_app:x@aws-0-eu-west-1.pooler.supabase.com:6543/testdb',
+    'postgres://crewflow_app:x@db-1.b.db.ondigitalocean.com:25061/testdb',
+    'postgres://crewflow_app:x@app.proxy-abc123.eu-west-1.rds.amazonaws.com/testdb',
+  ]) {
+    assert.match(refusal({ PG_DATABASE_URL: url }).message, /PG_DATABASE_URL is a transaction-pooler host/, url);
+  }
+  assert.equal(makePlan({ ...env(), PG_DATABASE_URL: 'postgres://crewflow_app:x@aws-0-eu-west-1.pooler.supabase.com:5432/testdb' }).length, 2);
   assert.match(refusal({ CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:x@ep-a-pooler.eu.aws.neon.tech/testdb' }).message, /CREWFLOW_PROVISIONER_DATABASE_URL is a pooled/);
 });
 
@@ -200,7 +293,36 @@ test('14 the allowlist covers every variable the environment validator declares 
   if (!fs.existsSync(validator)) return;
   const declared = [...fs.readFileSync(validator, 'utf8').matchAll(/^\s{2}([A-Z][A-Z0-9_]+)[!?]?:/gm)].map((m) => m[1]);
   // API-only: never read by the worker or provisioner (APP_GIT_COMMIT is the Admin Panel's build commit).
-  const excluded = new Set(['PORT', 'AUTH_GOOGLE_ISSUER_URL', 'AUTH_MICROSOFT_ISSUER_URL', 'APP_GIT_COMMIT']);
+  // CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP (Phase B / B3): a migration-command-only flag the runtime refuses; the launcher
+  // refuses it on the Worker service (FORBIDDEN_SERVICE_KEYS) instead of forwarding it.
+  // PG_DATABASE_REPLICA_* (Phase B / B4): the read replica is API-only (PgReplicaService is enabled in the API process only).
+  const excluded = new Set([
+    'PORT',
+    'AUTH_GOOGLE_ISSUER_URL',
+    'AUTH_MICROSOFT_ISSUER_URL',
+    'APP_GIT_COMMIT',
+    'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
+    'PG_DATABASE_REPLICA_URL',
+    'PG_DATABASE_REPLICA_TIMEOUT_MS',
+    'PG_DATABASE_REPLICA_MAX_LAG_MS',
+  ]);
+  for (const key of ['PG_DATABASE_REPLICA_URL', 'PG_DATABASE_REPLICA_TIMEOUT_MS', 'PG_DATABASE_REPLICA_MAX_LAG_MS']) {
+    assert.ok(declared.includes(key), `${key} is declared by the validator`);
+    assert.ok(!JOBS_ENV_KEYS.includes(key) && !PROVISIONER_ENV_KEYS.includes(key), `${key} is API-only`);
+  }
+  for (const key of ['PG_EXPECTED_API_INSTANCES', 'PG_EXPECTED_WORKER_INSTANCES', 'PG_EXPECTED_API_POOL_MAX', 'PG_EXPECTED_WORKER_POOL_MAX', 'PG_EXPECTED_MIGRATE_CONNECTIONS', 'PG_PROVIDER_RESERVED_CONNECTIONS']) {
+    assert.ok(declared.includes(key) && JOBS_ENV_KEYS.includes(key), `${key} is declared and reaches the jobs child (connection-budget check)`);
+  }
+  assert.ok(FORBIDDEN_SERVICE_KEYS.includes('CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP'));
+  // Phase B (ops): the one-off operations container's variables never reach the Worker service.
+  for (const key of ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF']) {
+    assert.ok(FORBIDDEN_SERVICE_KEYS.includes(key), `${key} is refused on the Worker service`);
+    assert.ok(!JOBS_ENV_KEYS.includes(key) && !PROVISIONER_ENV_KEYS.includes(key), `${key} is never forwarded to a child`);
+  }
+  // Phase B: every PG_* setting and the deployment identity reach the jobs child.
+  for (const key of declared.filter((k) => k.startsWith('PG_') || k.startsWith('CREWFLOW_DEPLOYMENT_')).filter((k) => !excluded.has(k))) {
+    assert.ok(JOBS_ENV_KEYS.includes(key), `${key} is forwarded to the jobs child`);
+  }
   const missing = declared.filter((k) => !excluded.has(k) && !JOBS_ENV_KEYS.includes(k));
   assert.deepEqual(missing, []);
   // AI Part A + Phase 1 real models: the five provider keys, the model defaults and the real-provider/budget switches reach
@@ -478,12 +600,12 @@ test('25 main() refuses a bad configuration with exit code 1 and no value in its
   const original = console.error;
   console.error = (...a) => captured.push(a.join(' '));
   try {
-    const code = await launcher.main({ ...env(), DATABASE_URL: 'postgres://crewflow:dummy-app-pw@db/testdb', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' });
+    const code = await launcher.main({ ...env(), PG_DATABASE_URL: 'postgres://crewflow:dummy-app-pw@db/testdb', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' });
     assert.equal(code, 1);
   } finally {
     console.error = original;
   }
-  assert.ok(captured.some((l) => /refused: DATABASE_URL and DATABASE_DIRECT_URL must log in as crewflow_app/.test(l)), captured.join('\n'));
+  assert.ok(captured.some((l) => /refused: PG_DATABASE_URL must log in as crewflow_app/.test(l)), captured.join('\n'));
   for (const marker of SECRET_MARKERS) assert.ok(!captured.join('\n').includes(marker));
 });
 
@@ -754,8 +876,10 @@ test('A4 the jobs child never receives provisioner keys or the privileged creden
   for (const [mode, [jobs]] of plans) {
     for (const key of PROVISIONER_ONLY_KEYS) assert.equal(jobs.env[key], undefined, `${mode}: ${key}`);
     assert.ok(!Object.values(jobs.env).some((v) => String(v).includes('dummy-prov-pw')), `${mode}: provisioner password reached the jobs child`);
-    assert.ok(!Object.keys(jobs.env).some((k) => k.startsWith('CREWFLOW_') && k !== 'CREWFLOW_INSTANCE_HEALTH_FILE'), `${mode}: CREWFLOW_* reached the jobs child`);
-    assert.match(jobs.env.DATABASE_URL, /^postgres:\/\/crewflow_app:/);
+    // CREWFLOW_DEPLOYMENT_ENVIRONMENT / _ID are identity declarations (Phase B / B3), not authority.
+    const allowedCrewflow = ['CREWFLOW_INSTANCE_HEALTH_FILE', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID'];
+    assert.ok(!Object.keys(jobs.env).some((k) => k.startsWith('CREWFLOW_') && !allowedCrewflow.includes(k)), `${mode}: CREWFLOW_* reached the jobs child`);
+    assert.match(jobs.env.PG_DATABASE_URL, /^postgres:\/\/crewflow_app:/);
     assert.equal(jobs.env.HWS_RUNTIME_ENABLED, 'true', `${mode}: HWS passed through to jobs`);
   }
   for (const key of PROVISIONER_ONLY_KEYS) assert.ok(!JOBS_ENV_KEYS.includes(key), key);
@@ -893,4 +1017,32 @@ test('A12 supervise (disabled plan): exactly one child runs, as uid 1000, with n
   } finally {
     fx.cleanup();
   }
+});
+
+// ---------------------------------------------------------------- Phase B: one PG_DATABASE_URL per process
+
+test('B1 a production Worker service refuses the legacy database names, by name only', () => {
+  for (const key of ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']) {
+    const e = refusal({ [key]: key === 'DB_POOL_MAX' ? '10' : 'postgres://crewflow_app:dummy-app-pw@db.example:5432/testdb' });
+    assert.ok(e, key);
+    assert.match(e.message, new RegExp(`^${key} is a deprecated name a production Worker service must not carry`));
+    for (const marker of SECRET_MARKERS) assert.ok(!e.message.includes(marker));
+  }
+  // Production requires PG_DATABASE_URL even when a legacy name would have been accepted outside production.
+  const e = { ...env() };
+  delete e.PG_DATABASE_URL;
+  assert.throws(() => makePlan(e), /^BundleConfigError: Missing PG_DATABASE_URL$/);
+});
+
+test('B2 outside production the deprecated names still plan (DATABASE_URL + DATABASE_DIRECT_URL forwarded to jobs only)', () => {
+  const [jobs, prov] = makePlan(legacyEnv());
+  assert.match(jobs.env.DATABASE_URL, /crewflow_app/);
+  assert.match(jobs.env.DATABASE_DIRECT_URL, /crewflow_app/);
+  assert.equal(prov.env.PG_DATABASE_URL, legacyEnv().CREWFLOW_PROVISIONER_DATABASE_URL);
+  assert.equal(prov.env.DATABASE_URL, undefined);
+  assert.equal(prov.env.DATABASE_URL_UNPOOLED, undefined);
+});
+
+test('B3 the bootstrap flag of an unbound production database is refused on the Worker service', () => {
+  assert.match(refusal({ CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' }).message, /^CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP must not be configured/);
 });

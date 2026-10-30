@@ -73,7 +73,7 @@ if [ "${E2E_LIVE_REUSE_SEED:-}" = 1 ] && [ -f "$WORK/live.env" ]; then
   echo "[e2e-live] reusing the seed already in $WORK (local re-runs only)"
 else
   echo "[e2e-live] seeding synthetic organisations"
-  (cd "$ROOT" && NODE_ENV=test REDIS_URL="$(redis_db 3)" E2E_LIVE_OUT="$WORK" DATABASE_URL='' DATABASE_URL_UNPOOLED='' \
+  (cd "$ROOT" && NODE_ENV=test REDIS_URL="$(redis_db 3)" E2E_LIVE_OUT="$WORK" PG_DATABASE_URL='' DATABASE_URL='' DATABASE_URL_UNPOOLED='' \
     node node_modules/ts-node/dist/bin.js --transpile-only -P packages/rab-server/tsconfig.spec.json packages/rab-e2e-testing/live/seed-live-e2e.ts) \
     > "$WORK/seed.log" 2>&1 || { echo "[e2e-live] seed failed"; tail -40 "$WORK/seed.log"; exit 1; }
   grep '\[e2e-live-seed\]' "$WORK/seed.log"
@@ -84,14 +84,14 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::${E2E_SEED_PASSWORD}"; e
 export QA_UI="$WORK/qa-ui.json" QA_IDENTITIES="$WORK/qa-identities.json"
 
 # The API from the BUILT server (dist/main.js), validated at boot like any deployment: development runtime on a loopback
-# database, connected as crewflow_app only (no DATABASE_URL_UNPOOLED: main.js refuses to start if a privileged URL is
-# present), email to the log driver, local file storage in the scratch dir. cwd = the scratch dir, so no .env is read.
+# database, connected as crewflow_app only through PG_DATABASE_URL (Phase B; no deprecated names, no
+# DATABASE_URL_UNPOOLED and no DB_TARGET: main.js refuses to start if a privileged URL or command authority is present), email to the log driver, local file storage in the scratch dir. cwd = the scratch dir, so no .env is read.
 start_api() { # name port web_origin redis_db
   local name="$1" port="$2" web="$3" db="$4"
   mkdir -p "$WORK/$name-storage"
-  (cd "$WORK" && exec env -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_CREWFLOW_URL -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL \
-    NODE_ENV=development RAB_RUNTIME_ENV=development DB_TARGET=local \
-    DATABASE_URL="$TEST_DATABASE_URL" REDIS_URL="$(redis_db "$db")" APP_SECRET="$APP_SECRET" PORT="$port" \
+  (cd "$WORK" && exec env -u DATABASE_URL -u DATABASE_DIRECT_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_CREWFLOW_URL -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u DB_TARGET -u ALLOW_PRODUCTION_DB_COMMANDS \
+    NODE_ENV=development RAB_RUNTIME_ENV=development \
+    PG_DATABASE_URL="$TEST_DATABASE_URL" REDIS_URL="$(redis_db "$db")" APP_SECRET="$APP_SECRET" PORT="$port" \
     APP_URL="$web" ACCOUNTS_URL="$web" CORS_ORIGINS="$web,${web/127.0.0.1/localhost}" \
     EMAIL_DRIVER=LOGGER STORAGE_DRIVER=LOCAL STORAGE_LOCAL_ROOT="$WORK/$name-storage" SENTRY_DSN= \
     node "$(win "$ROOT")/packages/rab-server/dist/main.js") > "$WORK/api-$name.log" 2>&1 &
@@ -99,7 +99,7 @@ start_api() { # name port web_origin redis_db
 }
 start_web() { # name port api_origin
   # Vite gets no database URL, bootstrap password or app secret either: only the public API origin it builds into the page.
-  (cd "$ROOT/packages/rab-front" && exec env -u DATABASE_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_CREWFLOW_URL     -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u APP_SECRET     VITE_API_URL="$3/rest/v1" node "$(win "$ROOT")/node_modules/vite/bin/vite.js" --port "$2" --strictPort --host 127.0.0.1) > "$WORK/web-$1.log" 2>&1 &
+  (cd "$ROOT/packages/rab-front" && exec env -u PG_DATABASE_URL -u DATABASE_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_CREWFLOW_URL     -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u APP_SECRET     VITE_API_URL="$3/rest/v1" node "$(win "$ROOT")/node_modules/vite/bin/vite.js" --port "$2" --strictPort --host 127.0.0.1) > "$WORK/web-$1.log" 2>&1 &
   PIDS+=($!)
 }
 wait_for() { # url name

@@ -23,6 +23,8 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
+import { runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { createPgDataSource, pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -42,6 +44,8 @@ import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { WorkerModule } from './worker.module';
+import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/connection-budget';
+import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 
@@ -104,6 +108,16 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 // modes read, so interval mode and bullmq mode can never disagree about a cadence or a stats key.
 // How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+/**
+ * Phase B (P6): explicit ceiling of `directDataSource` (it used to have none, so pg's default 10 applied, unrelated to the
+ * runtime pool's setting). Holders, from the code: the five lock-holding scans (shift-report-scheduler, final-timesheet,
+ * login-handoff-cleanup, outbox-retention, ai-retention) each pin at most ONE direct connection at a time for the length
+ * of their lock, plus the brief discovery page transaction shift-report-scheduler and final-timesheet run on it before
+ * taking a lock. 5 + 1 spare = 6. The value is the connection budget's own constant (connection-budget.ts), so the
+ * startup budget check and this pool can never disagree. The scan lock and the storage-reconcile lock use their own
+ * dedicated connections, not this pool.
+ */
+const WORKER_DIRECT_POOL_MAX = WORKER_DIRECT_POOL_MAX_BUDGET;
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any queue consumer or connection is opened. */
 function refuseStartup(error: unknown): never {
@@ -113,6 +127,8 @@ function refuseStartup(error: unknown): never {
       ? '[runtime-db-guard] refused: '
       : error instanceof Error && error.name === 'HwsStartupError'
         ? '[hws-startup-guard] refused: '
+        : error instanceof Error && (error.name === 'PgConfigError' || error.name === 'PgSessionProbeError')
+          ? '[pg-config] refused: '
         : error instanceof ProcessorRegistrationError || error instanceof RedisPreflightError
           ? '[worker-scheduler] refused: '
           : '';
@@ -122,9 +138,29 @@ function refuseStartup(error: unknown): never {
 }
 
 async function bootstrap(): Promise<void> {
+  // Phase B (B1): this is the Worker jobs process (application_name `crewflow-worker…`; a transaction-pooler URL shape is
+  // refused because it holds session advisory locks). Declared before any DataSource exists; the configuration
+  // (PG_DATABASE_URL, legacy names, URL policy, TLS) is refused here, before anything connects.
+  setPgProcessRole('worker');
+  const pg = (() => {
+    try {
+      return resolvePgEnvironmentCached(process.env, { processRole: 'worker' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
   await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
+  // ---- Phase B (A2): database boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending
+  // migrations), before any queue consumer or pool. ----
+  await runDatabaseBootGates('worker').catch(refuseStartup);
+  // ---- end Phase B (A2) ----
+  // Phase B (P4): the session-lock connection must be session-stable — a live two-connection probe (pg-session-probe.ts),
+  // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof; the URL denylist already ran above.
+  await probePgSessionAffinity(pgClientConfig(pg, { endpoint: 'lock', purpose: 'probe', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }), {
+    label: 'the Worker session-lock connection',
+  }).catch(refuseStartup);
   const logger = new NestLogger('RabWorker');
 
   const redisUrl = process.env.REDIS_URL;
@@ -150,28 +186,24 @@ async function bootstrap(): Promise<void> {
   // NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED` identity — see this file's own top doc comment.
   //   runtimeDataSource — pooled crewflow_app (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token/invite
   //                       cleanup, storage-catalogue enumeration, email.
-  //   directDataSource  — direct crewflow_app connection (DATABASE_DIRECT_URL, falling back to DATABASE_URL). Used ONLY where a
-  //                       session advisory lock needs connection affinity: final timesheet and shift-report scheduler.
+  //   directDataSource  — direct crewflow_app connection (the factory's lock endpoint: PG_DATABASE_URL; legacy
+  //                       DATABASE_DIRECT_URL / DATABASE_URL outside production). Used ONLY where a session advisory lock
+  //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');
   // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
   // run against the worker's own runtimeDataSource — it's the one whose entity metadata and migrationsTableName matter.
   await assertHwsStartupInvariants(runtimeDataSource, appContext.get(EnvironmentService).get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
-  const directDataSource = new DataSource({
-    type: 'postgres',
-    url: process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL,
-    schema: 'core',
-    entities: [],
-    synchronize: false,
-    extra: {
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-      connectionTimeoutMillis: 10_000,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10_000,
-    },
-  });
+  // Phase B: same timeouts as before (30 s statement and query, 10 s connect, keep-alive), now from the factory, with an
+  // explicit TLS object, application_name `crewflow-worker-lock`, idle-in-transaction timeout and an explicit max.
+  const directDataSource = createPgDataSource(
+    pg,
+    { endpoint: 'lock', purpose: 'lock', max: WORKER_DIRECT_POOL_MAX },
+    { schema: 'core', entities: [], synchronize: false },
+  );
   await directDataSource.initialize();
+  // Phase B (B5): pool metrics for the session-lock pool (internal metrics only; no credential, no tenant data).
+  registerDataSourcePoolMetrics('worker-direct', directDataSource);
   await assertRuntimeDbRole(directDataSource, 'worker-direct');
 
   const environmentService = appContext.get(EnvironmentService);
@@ -256,7 +288,9 @@ async function bootstrap(): Promise<void> {
     scheduler = await startBullmqScheduler({
       redis,
       redisUrl,
-      lockUrl: (process.env.DATABASE_DIRECT_URL ?? process.env.DATABASE_URL)!,
+      // Phase B: the factory's lock endpoint as an explicit pg config (target, TLS object, application_name, startup
+      // options; pooler denylist applied), with ScanLock's own 5 s timeouts.
+      lockConnection: pgClientConfig(pg, { endpoint: 'lock', purpose: 'scan-lock', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
       prefix,
       reconcileMs: environmentService.get('WORKER_SCHEDULER_RECONCILE_SECONDS') * 1000,
       runtime,

@@ -21,6 +21,9 @@ const productionEnv = {
   TRUSTED_PROXY_CIDRS: '10.0.12.7/32',
   // Wave 2 lane A2: production refuses a weak APP_SECRET (the base fixture's 'a'.repeat(32) has one distinct character).
   APP_SECRET: 'Zk3q8LmW1xT0vB7nR5cY2pH9dF4sJ6gA',
+  // Phase B (B1): production takes PG_DATABASE_URL only and refuses the legacy DATABASE_URL.
+  PG_DATABASE_URL: 'postgres://rab:rab@db.example.com:5432/rab?sslmode=verify-full',
+  DATABASE_URL: undefined,
 };
 
 describe('validate', () => {
