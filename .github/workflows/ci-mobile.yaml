@@ -19,7 +19,10 @@ jobs:
   test:
     needs: changed
     if: needs.changed.outputs.mobile == 'true'
-    runs-on: ubuntu-latest
+    # Windows: the committed goldens (test/goldens) are generated on Windows; on Linux the text rasterises differently
+    # and every golden differs by 2-4 % while all behaviour tests pass. Matching the generating platform keeps the
+    # golden comparison meaningful (and the tests' lower-case font paths work on its case-insensitive file system).
+    runs-on: windows-latest
     timeout-minutes: 30
     # packages/rab-mobile is a Flutter app, not an Nx project: the previous `nx run-many -p rab-mobile` steps ran nothing.
     # Phase C1 (D4): install the Flutter SDK and run the app's own analyzer and test suite.
@@ -38,17 +41,10 @@ jobs:
       # download those universal artifacts and `flutter test` does not fetch them. No platform engines are needed.
       # --force: the cached SDK reports the universal artifacts as up to date while material_fonts is missing.
       - run: flutter precache --force --universal --no-android --no-ios --no-web --no-linux --no-macos --no-windows
-      # The tests open the fonts by lower-case name (written on a case-insensitive file system); on Linux the artifact's
-      # names may differ in case, so add lower-case links next to them, then fail early if the font is still missing.
-      - name: Lower-case Material font names
-        run: |
-          cd "$FLUTTER_ROOT/bin/cache/artifacts/material_fonts"
-          ls -1
-          for f in *; do
-            lower="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"
-            if [ "$f" != "$lower" ] && [ ! -e "$lower" ]; then ln -s "$f" "$lower"; fi
-          done
-          test -f roboto-regular.ttf
+      # Fail early (not in 18 test setUpAll blocks) if the golden tests' font is still missing.
+      - name: Material fonts present
+        shell: pwsh
+        run: if (-not (Test-Path "$env:FLUTTER_ROOT/bin/cache/artifacts/material_fonts/roboto-regular.ttf")) { exit 1 }
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
