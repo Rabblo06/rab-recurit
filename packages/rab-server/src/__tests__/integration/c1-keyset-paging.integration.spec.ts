@@ -263,6 +263,8 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
         cursorOf({ v: 2, t: '2026-01-01T00:00:00.000000Z', i: offerId }),
         cursorOf({ v: 1, t: '2026-01-01T00:00:00.000Z', i: offerId }),
         cursorOf({ v: 1, t: '2026-02-30T00:00:00.000000Z', i: offerId }),
+        // Year 0 exists for JS Date but not for PostgreSQL: must be a 400, never a 500 from the ::timestamptz cast.
+        cursorOf({ v: 1, t: '0000-01-01T00:00:00.000000Z', i: offerId }),
         cursorOf({ v: 1, t: '2026-01-01T00:00:00.000000+01:00', i: offerId }),
         cursorOf({ v: 1, t: '2026-01-01T00:00:00.000000Z', i: 'not-a-uuid' }),
         cursorOf({ v: 1, t: '2026-01-01T00:00:00.000000Z', i: offerId, organisationId: fx.org.id }),

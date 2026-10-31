@@ -334,7 +334,8 @@ const out = { generatedAt: new Date().toISOString(), base: BASE, after: AFTER, n
 fs.writeFileSync(path.join(OUTDIR, 'comparison.json'), JSON.stringify(out, null, 2));
 
 // ---- markdown -------------------------------------------------------------------------------------------------------
-const esc = (x) => String(x ?? '').replace(/\|/g, '\\|');
+// Markdown table cell: escape backslashes first, then pipes (CodeQL js/incomplete-sanitization).
+const esc = (x) => String(x ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 const md = [];
 md.push(`# Cost comparison: baseline vs after`, '', `- baseline: \`${BASE}\``, `- after: \`${AFTER}\``, `- generated ${out.generatedAt}`, '');
 md.push('## Host conditions (comparability)', '');

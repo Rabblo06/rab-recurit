@@ -216,6 +216,7 @@ test('drawer: opens ~300ms, switching staff keeps it open and cross-fades the co
 });
 
 test('pipeline: a real stage change moves the card (never two copies); header and Timesheet button stay put', async ({ page }) => {
+  test.setTimeout(60_000); // waits for one 15 s ±20 % board poll
   const state = await fixtures(page);
   await page.goto('/venue-offers/shift-1');
   const button = page.getByRole('button', { name: 'Timesheet report' });
@@ -225,10 +226,13 @@ test('pipeline: a real stage change moves the card (never two copies); header an
   const tabs = page.getByRole('tablist', { name: 'Pipeline stages' });
   await expect(tabs.getByRole('tab', { name: /^Staffing/ })).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.pipeline-column[data-stage="confirmed"] .pipeline-card')).toHaveCount(6);
+  // Measure after the web fonts have loaded: a late font swap resizes the button between the two readings.
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
   const headerBefore = await button.boundingBox();
   state.pipeline = board((i) => (i <= 2 ? 'CLOCKED IN' : 'CONFIRMED'));
-  // The poll moves the two cards out of Confirmed (and out of the Staffing tab) — they are not left behind.
-  await expect(page.locator('.pipeline-column[data-stage="confirmed"] .pipeline-card')).toHaveCount(4, { timeout: 12_000 });
+  // The poll moves the two cards out of Confirmed (and out of the Staffing tab) — they are not left behind. Phase C1:
+  // the board polls every 15 s ±20 % (at most 18 s).
+  await expect(page.locator('.pipeline-column[data-stage="confirmed"] .pipeline-card')).toHaveCount(4, { timeout: 22_000 });
   await expect(page.locator('.pipeline-column[data-stage="confirmed"] h2 .pipeline-count')).toHaveText('4');
   for (const id of ['offer-1', 'offer-2']) await expect(page.locator(`[data-offer-id="${id}"]`)).toHaveCount(0);
   await expect(tabs.getByRole('tab', { name: /^Attendance/ }).locator('.pipeline-count')).toHaveText('2');

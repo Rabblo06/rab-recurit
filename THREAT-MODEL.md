@@ -4434,3 +4434,15 @@ production; realtime production enablement is additionally blocked on Phase D (s
   404/410 keep the last rows with a notice (own data / list endpoints; 401 signs out, 403 clears on the Venue Manager);
   the Flutter-only 120 s realtime fallback has no iOS equivalent yet (realtime is off in production); the web Health tab
   keeps its last health/queue data on any error (pre-C1 behaviour).
+
+### Independent security review of PR #22 (2026-10-31, read-only): no Critical / High / Medium
+- **F1 (Low, fixed):** a forged cursor with year `0000` passed the JS `Date` round trip but failed PostgreSQL's
+  `::timestamptz` cast → 500 instead of the promised 400. `isStrictTimestamp` now rejects year 0; unit + integration tests.
+- **F5 (Info, fixed):** the cost harness refuses an `API_BASE` that is not loopback (it only drives its own disposable
+  stack).
+- **Open (follow-ups):** F2 (Low) — the subscribe-time SSE cap 429 is unit-tested only, not on the wire (the handler-time
+  429 is integration-tested); F3 (Info) — `payroll.record_changed:<shift>:created` and `shift.updated:<id>:published`
+  keys are per-transition, so a repeat of the same transition would be deduplicated (stale UI until the next
+  poll; no confidentiality impact);
+  F4 (Info) — shift creator/sender recipients are not re-checked for current manager scope (id-only signal; the client
+  re-reads through scoped REST).

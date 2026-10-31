@@ -190,6 +190,8 @@ test.describe('Venue Offers pipeline', () => {
       await tabs.getByRole('tab', { name: /^Attendance/ }).click();
       await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(9);
       await page.screenshot({ path: path.join(SHOTS, `pipeline-${vp.w}-initial.png`) });
+      // Measure after the web fonts have loaded: a late font swap resizes the button between the two readings.
+      await page.evaluate(() => document.fonts.ready.then(() => undefined));
       const before = await button.boundingBox();
       const headBefore = await page.locator('.pipeline-head').boundingBox();
       const toolbarBefore = await page.locator('.pipeline-toolbar').boundingBox();
@@ -200,9 +202,9 @@ test.describe('Venue Offers pipeline', () => {
       await page.locator('.pipeline-board').evaluate((el) => { el.scrollLeft = el.scrollWidth; });
       await page.mouse.move(vp.w / 2, vp.h / 2);
       await page.mouse.wheel(0, 3000);
-      // 4. A poll adds cards to the long column (5 s interval).
+      // 4. A poll adds cards to the long column (Phase C1: 15 s ±20 % interval, so at most 18 s).
       state.pipeline = board(8);
-      await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(17, { timeout: 12_000 });
+      await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(17, { timeout: 22_000 });
       await expect(page.locator('.pipeline-column[data-stage="clocked_in"] h2 .pipeline-count')).toHaveText('17');
       await page.screenshot({ path: path.join(SHOTS, `pipeline-${vp.w}-after-scroll-and-poll.png`) });
 

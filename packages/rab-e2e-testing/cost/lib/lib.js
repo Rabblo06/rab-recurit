@@ -12,6 +12,10 @@ const secrets = Object.fromEntries(
   fs.readFileSync(SECRETS_FILE, 'utf8').split(/\r?\n/).filter((l) => /^[A-Z0-9_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
 );
 const BASE = process.env.API_BASE || `http://127.0.0.1:${process.env.COST_API_PORT || 23070}`;
+// The harness only ever drives its own disposable stack: refuse any API that is not on this machine's loopback.
+if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(BASE).hostname)) {
+  throw new Error(`[cost] API_BASE must be a loopback address (got host ${new URL(BASE).hostname}); the harness never targets a real environment`);
+}
 const OUT = process.env.COST_OUT || path.join(process.cwd(), 'results');
 fs.mkdirSync(OUT, { recursive: true });
 const ORIGIN = 'http://127.0.0.1:5173';

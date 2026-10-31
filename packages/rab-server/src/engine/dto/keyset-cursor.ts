@@ -37,6 +37,8 @@ function invalid(): never {
 function isStrictTimestamp(value: string): boolean {
   const m = TIMESTAMP.exec(value);
   if (!m) return false;
+  // Year 0 is valid for JS Date but not for PostgreSQL (no year zero AD): it would be a 500 at the ::timestamptz cast.
+  if (Number(m[1]) < 1) return false;
   // Re-format the millisecond prefix through Date and require an exact round trip: any out-of-range component is
   // either rejected by Date (NaN) or normalised into a different string (Feb 30 -> Mar 2).
   const millis = `${value.slice(0, 23)}Z`;

@@ -57,6 +57,7 @@ describe('keyset cursor (Phase C1, contract §3)', () => {
     ['impossible date', raw({ v: 1, t: '2026-02-30T00:00:00.000000Z', i: ID })],
     ['hour 24', raw({ v: 1, t: '2026-10-30T24:00:00.000000Z', i: ID })],
     ['leap second', raw({ v: 1, t: '2026-12-31T23:59:60.000000Z', i: ID })],
+    ['year zero (valid for JS Date, not for PostgreSQL)', raw({ v: 1, t: '0000-01-01T00:00:00.000000Z', i: ID })],
     ['SQL in the timestamp', raw({ v: 1, t: "2026-10-30T12:34:56.123456Z'; DROP TABLE x; --", i: ID })],
     ['id not a uuid', raw({ v: 1, t: T, i: 'abc' })],
     ['id with SQL', raw({ v: 1, t: T, i: `${ID}' OR '1'='1` })],

@@ -192,7 +192,8 @@ const out = {
   oldAudit: { source: 'docs/audits/COST_COMPARISON_100K_CLAUDE.md §2-§3 (commit 5fa7b323, 2026-10-26)', label: 'QUOTED', values: OLD },
 };
 fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify(out, null, 2));
-const esc = (x) => String(x ?? '').replace(/\|/g, '\\|');
+// Markdown table cell: escape backslashes first, then pipes (CodeQL js/incomplete-sanitization).
+const esc = (x) => String(x ?? '').replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 const md = ['| Group | Metric | Value | Unit | Label | Method | Old audit (5fa7b323) |', '|---|---|---|---|---|---|---|', ...metrics.map((m) => `| ${m.group} | ${esc(m.metric)} | ${esc(m.value)} | ${esc(m.unit)} | ${m.label} | ${esc(m.method)} | ${esc(m.oldAudit)} |`)].join('\n');
 fs.writeFileSync(path.join(OUT, 'results-table.md'), md + '\n');
 console.log(`metrics: ${metrics.length}; idle fit: ${JSON.stringify(fit.sqlPerMin)}`);
