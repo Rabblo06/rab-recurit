@@ -84,6 +84,8 @@ public final class AppEnvironment: ObservableObject {
     public let toastPresenter: ToastPresenter
     public let temporaryFiles: TemporaryFiles
     public let pushDevice: PushDeviceIdentity
+    /// APNs registration path (prepared, not activated: see PushRegistrar).
+    let push: PushRegistrar
 
     public init(
         configuration: AppConfiguration,
@@ -117,6 +119,14 @@ public final class AppEnvironment: ObservableObject {
         self.toastPresenter = ToastPresenter(center: toasts)
         self.temporaryFiles = temporaryFiles
         self.pushDevice = pushDevice
+        let push = PushRegistrar(
+            api: api,
+            identity: pushDevice,
+            authorizer: SystemPushAuthorizer(),
+            currentUserId: { [weak session] in session?.user?.id }
+        )
+        self.push = push
+        PushTokenRelay.registrar = push
         session.onSignedOut = { [weak toasts] in
             // Nothing from the previous identity stays on screen.
             toasts?.dismissAll()

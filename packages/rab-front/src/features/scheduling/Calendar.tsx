@@ -4,6 +4,7 @@ import { contentSwap, period } from '../../shared/motion';
 import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight, IconPlus, IconCalendar } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
 import { CalendarSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 
@@ -25,14 +26,15 @@ function ScheduledStaff({ shiftId, day }: { shiftId: string; day: string }) {
   const start = new Date(`${day}T00:00:00`);
   const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
   // The existing offer endpoint treats its upper date as inclusive (+ one UTC day).
+  // Every confirmed offer of the day, in pages of 200 (Phase C1: was one request capped at 500).
   const {data,isLoading,isError} = useQuery({
     queryKey:['offers','calendar-staff',day],
-    queryFn:async () => (await api.get<{data:ScheduledPerson[];total:number}>('/offers',{params:{status:'manager_confirmed',shiftDateFrom:start.toISOString(),shiftDateTo:new Date(end.getTime()-86_400_000).toISOString(),limit:500}})).data,
+    queryFn:() => fetchAllPages<ScheduledPerson>('/offers',{status:'manager_confirmed',shiftDateFrom:start.toISOString(),shiftDateTo:new Date(end.getTime()-86_400_000).toISOString()}),
   });
   if (isLoading) return <p>Loading scheduled staff…</p>;
   if (isError) return <p className="feedback-error" role="alert">Staff details are unavailable for this account.</p>;
-  const people = data?.data?.filter(person=>person.shiftId===shiftId) ?? [];
-  return <><ul className="calendar-staff-list">{people.map(person=><li key={person.id}>{person.staffName}</li>)}</ul>{(data?.total ?? 0)>500 && <p>Showing the first 500 confirmed offers. Open Offers for the full list.</p>}</>;
+  const people = data?.filter(person=>person.shiftId===shiftId) ?? [];
+  return <ul className="calendar-staff-list">{people.map(person=><li key={person.id}>{person.staffName}</li>)}</ul>;
 }
 
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -59,10 +61,8 @@ export default function Calendar() {
 
   const { data: shifts = [], isLoading: shiftsLoading, isPlaceholderData: switchingMonth, isError, refetch } = useQuery({
     queryKey: ['shifts', 'calendar', rangeFrom.toISOString(), rangeTo.toISOString()],
-    queryFn: async () => {
-      const { data } = await api.get<{ data: Shift[] } | Shift[]>('/shifts', { params: { from: rangeFrom.toISOString(), to: rangeTo.toISOString() } });
-      return Array.isArray(data) ? data : data.data;
-    },
+    // Every shift in the range, in pages of 200 (Phase C1: the server's default page is now 50).
+    queryFn: () => fetchAllPages<Shift>('/shifts', { from: rangeFrom.toISOString(), to: rangeTo.toISOString() }),
     // Keep the previous range on screen while the next month loads, so the grid slides instead of flashing a
     // skeleton; the detail line says "Loading schedule…" until the real data for the new range arrives.
     placeholderData: (previous) => previous,
@@ -70,7 +70,7 @@ export default function Calendar() {
   const { data: venues = [], isLoading: venuesLoading } = useQuery({
     queryKey: ['venues', 'with-archived'],
     // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues', { params: { includeArchived: true } }); return Array.isArray(data) ? data : data.data; },
+    queryFn: () => fetchAllPages<Venue>('/venues', { includeArchived: true }),
   });
   const { data: jobRoles = [], isLoading: rolesLoading } = useQuery({
     queryKey: ['job-roles'],

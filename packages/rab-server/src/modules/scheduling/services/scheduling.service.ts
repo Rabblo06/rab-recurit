@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { sentShiftPresentation } from './sent-shift-presentation';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
@@ -18,8 +19,11 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { approverAudience, shiftAudience, shiftStaffAudience } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { keysetSkipTake, PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage, keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { User } from '../../identity/entities';
@@ -90,6 +94,9 @@ export interface AssistantStaffingSnapshot {
 export class SchedulingService {
   @Inject(MemberAccessPolicyService)
   private readonly memberAccess!: MemberAccessPolicyService;
+  /** C1b realtime outbox (property-injected like `memberAccess`, so the constructor signature is unchanged). */
+  @Inject(RealtimeEventService)
+  private readonly realtimeEvents!: RealtimeEventService;
 
   constructor(
     private readonly permissions: PermissionsService,
@@ -400,7 +407,9 @@ export class SchedulingService {
       const total = await qb.getCount();
 
       const sortColumn = SHIFT_SORT_COLUMNS[dto.sort ?? 'startsAt'] ?? SHIFT_SORT_COLUMNS.startsAt;
-      qb.orderBy(sortColumn, (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC');
+      // Unique tie-breaker (Phase C1): offset pages walked by fetchAllPages must never repeat or skip rows that tie on the sort column.
+      const shiftDirection = (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC';
+      qb.orderBy(sortColumn, shiftDirection).addOrderBy('shift.id', shiftDirection);
 
       const { skip, take } = paginationSkipTake(dto);
       qb.skip(skip).take(take);
@@ -547,31 +556,20 @@ export class SchedulingService {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new ForbiddenException('Venue manager required.');
       const view = dto.view ?? 'all';
-      const { skip, take } = paginationSkipTake(dto);
+      // Phase C1: offset (`page`) or keyset (`cursor`, order `created_at DESC, id DESC`) — a cursor is only an ordering
+      // bound; every scope predicate below applies unchanged.
+      const after = decodeOptionalKeysetCursor(dto.cursor);
+      const { skip, take } = keysetSkipTake(dto);
       // One row per submitted request (shift), classified in SQL so tabs, totals and pagination agree. Offer counts use
       // each recipient's LATEST offer; assignment state is authoritative after confirmation (the offer stays historical).
-      const rowsSql = `WITH latest AS (
-          SELECT DISTINCT ON (sa.shift_id, o.staff_profile_id) sa.shift_id, o.status, sa.status AS assignment_status
-            FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id
-           WHERE sa.organisation_id = $1 AND o.organisation_id = $1
-           ORDER BY sa.shift_id, o.staff_profile_id, o.sent_at DESC, o.id DESC
-        ), counts AS (
-          SELECT shift_id,
-            count(*)::int AS sent,
-            count(*) FILTER (WHERE status = 'pending' AND assignment_status = 'offered')::int AS pending,
-            count(*) FILTER (WHERE assignment_status = 'staff_accepted')::int AS accepted,
-            count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
-            count(*) FILTER (WHERE assignment_status = 'no_show')::int AS no_show,
-            count(*) FILTER (WHERE assignment_status = 'cancelled')::int AS cancelled,
-            count(*) FILTER (WHERE status = 'declined')::int AS declined,
-            count(*) FILTER (WHERE status = 'expired')::int AS expired,
-            count(*) FILTER (WHERE status = 'withdrawn')::int AS withdrawn,
-            count(*) FILTER (WHERE status = 'manager_rejected')::int AS rejected
-          FROM latest GROUP BY shift_id
-        ), rows AS (
+      // Phase C1: the counts are computed per request (LATERAL, below) instead of in a CTE over every offer of the
+      // organisation joined back by shift id: same numbers, but bounded by the caller's own requests. Measured on synthetic
+      // volume (EXPLAIN ANALYZE, 100k offers in one organisation): the organisation-wide CTE cost ~0.2 s per call, and restricting it by
+      // a sub-select made the planner (blind to the RLS predicates' selectivity) re-aggregate it once per request (~18 s).
+      const rowsSql = `WITH rows AS (
           SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
             coalesce(s.default_starts_at, s.starts_at) AS "startsAt", coalesce(s.default_ends_at, s.ends_at) AS "endsAt",
-            s.created_at AS "submittedAt", v.name AS "venueName", jr.name AS "roleName",
+            s.created_at AS "submittedAt", ${keysetTimestampSql('s.created_at')} AS keyset_ts, v.name AS "venueName", jr.name AS "roleName",
             s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpiresAt",
             now() >= s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpired",
             coalesce(c.sent, 0) AS sent, coalesce(c.pending, 0) AS pending, coalesce(c.accepted, 0) AS accepted,
@@ -580,7 +578,24 @@ export class SchedulingService {
             coalesce(c.rejected, 0) AS rejected,
             s.status IN ('cancelled','completed','declined') AS terminal
           FROM shift s JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
-          LEFT JOIN counts c ON c.shift_id = s.id
+          LEFT JOIN LATERAL (
+            SELECT count(*)::int AS sent,
+              count(*) FILTER (WHERE status = 'pending' AND assignment_status = 'offered')::int AS pending,
+              count(*) FILTER (WHERE assignment_status = 'staff_accepted')::int AS accepted,
+              count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
+              count(*) FILTER (WHERE assignment_status = 'no_show')::int AS no_show,
+              count(*) FILTER (WHERE assignment_status = 'cancelled')::int AS cancelled,
+              count(*) FILTER (WHERE status = 'declined')::int AS declined,
+              count(*) FILTER (WHERE status = 'expired')::int AS expired,
+              count(*) FILTER (WHERE status = 'withdrawn')::int AS withdrawn,
+              count(*) FILTER (WHERE status = 'manager_rejected')::int AS rejected
+            FROM (
+              SELECT DISTINCT ON (o.staff_profile_id) o.status, sa.status AS assignment_status
+                FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id
+               WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND o.organisation_id = $1
+               ORDER BY o.staff_profile_id, o.sent_at DESC, o.id DESC
+            ) latest
+          ) c ON true
           WHERE s.organisation_id = $1 AND s.requested_by = $2 AND s.venue_id = ANY($3::uuid[]) AND ($4::uuid IS NULL OR s.id = $4)
         ), classified AS (
           SELECT r.*,
@@ -598,10 +613,14 @@ export class SchedulingService {
         expired: 'is_expired',
       };
       const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
+      const pageParams: unknown[] = [...params, take + 1, skip];
+      // The window total counts the view BEFORE the cursor bound (applied outside it), so `total` is the whole view's.
+      const bound = after ? `WHERE ${keysetBeforeSql('"submittedAt"', 'id', '$7', '$8')}` : '';
+      if (after) pageParams.push(after.t, after.i);
       const rows = await manager.query(
-        `${rowsSql} SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${id ? 'TRUE' : VIEW_SQL[view]}
+        `${rowsSql} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${id ? 'TRUE' : VIEW_SQL[view]}) v ${bound}
           ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
-        [...params, take, skip],
+        pageParams,
       );
       if (id && !rows.length) throw new NotFoundException('Shift not found.');
       // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
@@ -610,20 +629,22 @@ export class SchedulingService {
           count(*)::int AS submitted FROM classified`,
         params,
       );
-      const total = rows[0] ? Number(rows[0].view_total) : 0;
+      const total = rows[0] ? Number(rows[0].view_total) : after ? Number(tabs[view]) : 0;
+      const page = keysetPage(rows, take, (r: any) => ({ t: r.keyset_ts as string, i: r.id as string }));
       return {
-        data: rows.map((r: any) => {
+        data: page.data.map((r: any) => {
           const offerCounts: Record<string, number> = {
             sent: r.sent, pending: r.pending, accepted: r.accepted, confirmed: r.confirmed, noShow: r.no_show, cancelled: r.cancelled,
             declined: r.declined, expired: r.expired, withdrawn: r.withdrawn, rejected: r.rejected,
           };
           const { sent: _s, pending: _p, accepted: _a, confirmed: _c, no_show: _n, cancelled: _x, declined: _d, expired: _e, withdrawn: _w, rejected: _r,
-            terminal: _t, is_expired, view_total: _v, ...row } = r;
+            terminal: _t, is_expired, view_total: _v, keyset_ts: _k, ...row } = r;
           return { ...row, offerCounts, ...sentShiftPresentation(r.status, r.requiredCount, offerCounts, is_expired) };
         }),
         total,
         view,
         counts: tabs,
+        nextCursor: page.nextCursor,
       };
     }, { useReplica: true });
   }
@@ -817,6 +838,10 @@ export class SchedulingService {
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.OPEN);
       await manager.update(Shift, id, { status: ShiftStatus.OPEN, publishedAt: new Date() });
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_PUBLISHED, { entityType: 'shift', entityId: id, metadata: { previousStatus: shift.status } });
+      // C1b realtime (same transaction): shift.updated (published) → shift owner + venue managers. Ids only.
+      await this.realtimeEvents.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `shift.updated:${id}:published`, eventType: RealtimeEventType.SHIFT_UPDATED, entityType: 'shift', entityId: id,
+      }, (m) => shiftAudience(m, id));
       return manager.findOneByOrFail(Shift, { id });
     });
   }
@@ -870,6 +895,11 @@ export class SchedulingService {
         entityId: id,
         metadata: { reason: reason ?? null, previousStatus: shift.status },
       });
+      // C1b realtime (same transaction): shift.cancelled → owner, venue managers and every staff member holding a live
+      // seat on it (their offers / upcoming shifts change). Ids only — never the reason.
+      await this.realtimeEvents.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `shift.cancelled:${id}`, eventType: RealtimeEventType.SHIFT_CANCELLED, entityType: 'shift', entityId: id,
+      }, async (m) => [...(await shiftAudience(m, id)), ...(await shiftStaffAudience(m, id))]);
 
       return manager.findOneByOrFail(Shift, { id });
     });
@@ -1057,6 +1087,11 @@ export class SchedulingService {
           relatedEntityId: saved.id,
         });
       }
+      // C1b realtime (same transaction): shift_request.created → the same approvers notified above (org-wide) + the
+      // venue's managers (their Venue Offers list). Ids only.
+      await this.realtimeEvents.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `shift_request.created:${saved.id}`, eventType: RealtimeEventType.SHIFT_REQUEST_CREATED, entityType: 'shift', entityId: saved.id,
+      }, async (m) => [...(await shiftAudience(m, saved.id)), ...(await approverAudience(m, ctx.organisationId!))]);
 
       return saved;
     });
@@ -1120,7 +1155,17 @@ export class SchedulingService {
    * since their selection just changed underneath them.
    */
   async removeRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
-    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId);
+      await this.emitRequestStaffChanged(manager, ctx, shiftId);
+    });
+  }
+
+  /** C1b realtime (same transaction): a pending request's staff selection changed → shift.updated to the requester, venue managers and approvers. */
+  private async emitRequestStaffChanged(manager: EntityManager, ctx: AuthContext, shiftId: string): Promise<void> {
+    await this.realtimeEvents.recordForRecipients(manager, {
+      organisationId: ctx.organisationId!, eventKey: `shift.updated:${shiftId}:${randomUUID()}`, eventType: RealtimeEventType.SHIFT_UPDATED, entityType: 'shift', entityId: shiftId,
+    }, async (m) => [...(await shiftAudience(m, shiftId)), ...(await approverAudience(m, ctx.organisationId!))]);
   }
 
   private async removeRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
@@ -1190,7 +1235,10 @@ export class SchedulingService {
    * confined to any one Venue Manager's saved team.
    */
   async addRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
-    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId));
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId);
+      await this.emitRequestStaffChanged(manager, ctx, shiftId);
+    });
   }
 
   private async addRequestedStaffTx(manager: EntityManager, ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
@@ -1317,6 +1365,7 @@ export class SchedulingService {
       for (const id of ids) {
         if (!currentIds.has(id)) await this.addRequestedStaffTx(manager, ctx, shiftId, id);
       }
+      await this.emitRequestStaffChanged(manager, ctx, shiftId);
     });
   }
 
@@ -1339,8 +1388,11 @@ export class SchedulingService {
    * personally manage) regardless. This is NOT genuinely org-wide today.
    * Not fixed here — see the full writeup on `listPendingApprovals`.
    */
-  async listVenueOffers(ctx: AuthContext, dto: ListVenueOffersDto = {}): Promise<{ data: Record<string, unknown>[]; total: number }> {
+  async listVenueOffers(ctx: AuthContext, dto: ListVenueOffersDto = {}): Promise<{ data: Record<string, unknown>[]; total: number; nextCursor: string | null }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // Phase C1: offset (`page`) or keyset (`cursor`) over `created_at DESC, id DESC` — `id` is the tie-breaker this
+      // order lacked (two requests created in the same instant could repeat or vanish across offset pages).
+      const after = decodeOptionalKeysetCursor(dto.cursor);
       const qb = manager
         .createQueryBuilder(Shift, 'shift')
         .innerJoin(Venue, 'v', 'v.id = shift.venueId')
@@ -1370,8 +1422,10 @@ export class SchedulingService {
       }
 
       const total = await qb.getCount();
-      const { skip, take } = paginationSkipTake(dto);
-      const data = await qb
+      const { skip, take } = keysetSkipTake(dto);
+      // The cursor bound is added AFTER the count: `total` stays the whole filtered list's, as before.
+      if (after) qb.andWhere(keysetBeforeSql('shift.createdAt', 'shift.id', ':keysetT', ':keysetId'), { keysetT: after.t, keysetId: after.i });
+      const rows = await qb
         .select('shift.id', 'id')
         .addSelect('shift.status', 'status')
         .addSelect('shift.startsAt', 'startsAt')
@@ -1383,6 +1437,7 @@ export class SchedulingService {
         .addSelect('shift.payRatePence', 'payRatePence')
         .addSelect('shift.notes', 'notes')
         .addSelect('shift.createdAt', 'submittedAt')
+        .addSelect(keysetTimestampSql('shift.createdAt'), 'keysetTs')
         .addSelect('v.name', 'venueName')
         .addSelect('jr.name', 'roleName')
         .addSelect("CONCAT(vm.firstName, ' ', vm.lastName)", 'venueManagerName')
@@ -1391,10 +1446,16 @@ export class SchedulingService {
           'selectedCount',
         )
         .orderBy('shift.createdAt', 'DESC')
+        .addOrderBy('shift.id', 'DESC')
         .offset(skip)
-        .limit(take)
+        .limit(take + 1)
         .getRawMany();
-      return { data: data.map(row => ({ ...row, displayStatus: resolveVenueOfferStatus({ status: row.status, required: Number(row.requiredCount), confirmed: Number(row.confirmedCount), accepted: Number(row.acceptedCount), rejected: Number(row.rejectedCount) }) })), total };
+      const { data, nextCursor } = keysetPage(rows, take, (row) => ({ t: row.keysetTs as string, i: row.id as string }));
+      return {
+        data: data.map(({ keysetTs: _k, ...row }) => ({ ...row, displayStatus: resolveVenueOfferStatus({ status: row.status, required: Number(row.requiredCount), confirmed: Number(row.confirmedCount), accepted: Number(row.acceptedCount), rejected: Number(row.rejectedCount) }) })),
+        total,
+        nextCursor,
+      };
     });
   }
 
@@ -1494,6 +1555,10 @@ export class SchedulingService {
           relatedEntityId: id,
         });
       }
+      // C1b realtime (same transaction): shift_request.declined → requester, venue managers, approvers. Ids only (never the reason).
+      await this.realtimeEvents.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `shift_request.declined:${id}`, eventType: RealtimeEventType.SHIFT_REQUEST_DECLINED, entityType: 'shift', entityId: id,
+      }, async (m) => [...(await shiftAudience(m, id)), ...(await approverAudience(m, ctx.organisationId!))]);
 
       return manager.findOneByOrFail(Shift, { id });
     });

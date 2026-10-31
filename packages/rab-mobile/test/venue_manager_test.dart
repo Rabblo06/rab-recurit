@@ -2,6 +2,7 @@ import 'package:rab_staff/navigation/moving_tab_bar.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'package:rab_staff/features/venue_manager/send_shift_screen.dart';
+import 'package:rab_staff/features/venue_manager/sent_shifts_screen.dart';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -29,6 +30,8 @@ class VenueFixture {
   String role = 'venue_manager';
   String offerRole = 'Bartender';
   bool admin = false, fail = false, sendAllowed = false, failTags = false;
+  // A revoked permission: every capabilities read answers 403.
+  bool denied = false;
   bool completedFirst = false;
   bool reportView = true;
   String notes = 'Please use the staff entrance. Bring your staff ID.';
@@ -185,6 +188,7 @@ class VenueFixture {
           'isPlatformAdmin': admin,
         };
       } else if (path == '/auth/capabilities') {
+        if (denied) return http.Response('{"message":"Forbidden"}', 403);
         body = {
           'schedule.view': true,
           'venue.view': true,
@@ -400,6 +404,10 @@ class VenueFixture {
     }),
   );
 }
+
+/// The longest gap between two Sent Shifts polls: interval + 20 % jitter.
+final sentPollGap =
+    VenueSentShiftsScreen.pollInterval * 1.2 + const Duration(seconds: 1);
 
 void main() {
   final boundary = GlobalKey();
@@ -651,7 +659,20 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('History'));
       await tester.pumpAndSettle();
+      // Phase C1: an outage keeps the rows on screen with a non-blocking
+      // notice instead of an error page.
       f.fail = true;
+      await p.refresh();
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('report-event-card-shift-0')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('stale-refresh-notice')), findsOneWidget);
+      expect(find.text('Unable to load'), findsNothing);
+      // A revoked permission still drops every row (never kept after a scope
+      // change).
+      f.denied = true;
       await p.refresh();
       await tester.pumpAndSettle();
       expect(
@@ -1620,7 +1641,7 @@ void main() {
           'counters': {'sent': true, 'accepted': false, 'confirmed': false},
         },
       ];
-      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(sentPollGap);
       await tester.pumpAndSettle();
       expect(
         find.descendant(
@@ -1647,7 +1668,7 @@ void main() {
           'counters': {'sent': true, 'accepted': true, 'confirmed': true},
         },
       ];
-      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(sentPollGap);
       await tester.pumpAndSettle();
       expect(
         find.descendant(
@@ -1672,7 +1693,7 @@ void main() {
           'counters': {'sent': true, 'accepted': true, 'confirmed': false},
         },
       ];
-      await tester.pump(const Duration(seconds: 5));
+      await tester.pump(sentPollGap);
       await tester.pumpAndSettle();
       // Accepted but not every seat confirmed: never conflated.
       final card = find.byKey(const ValueKey('sent-shift-card-shift-0'));
@@ -1699,7 +1720,7 @@ void main() {
             'filters': [entry.value],
           },
         ];
-        await tester.pump(const Duration(seconds: 5));
+        await tester.pump(sentPollGap);
         await tester.pumpAndSettle();
         final chip = find.byKey(Key('sent-view-${entry.key}'));
         await tester.ensureVisible(chip);
@@ -1710,6 +1731,35 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets(
+    'resume after the background runs ONE full refresh; a notification '
+    'shade (inactive only) does not',
+    (tester) async {
+      final f = VenueFixture();
+      await mount(tester, f);
+      int fullRefreshes() =>
+          f.paths.where((p) => p == '/auth/capabilities').length;
+      final before = fullRefreshes();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(fullRefreshes(), before);
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+      }
+      await tester.pumpAndSettle();
+      expect(fullRefreshes(), before + 1);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   List<Map<String, dynamic>> sentRequests(
     VenueFixture f, {
     int active = 3,

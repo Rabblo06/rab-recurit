@@ -263,3 +263,39 @@ describe('UserDetailPanel — lifecycle actions match the account state machine'
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Re-enter your current password to continue.'));
   });
 });
+
+describe('UserDetailPanel — Phase C1 invitation polling (bounded backoff)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  const tick = (ms: number) => act(async () => { await jest.advanceTimersByTimeAsync(ms); });
+  const recordCalls = () => mockApi.get.mock.calls.filter(([u]: [string]) => u === '/staff/staff-1').length;
+
+  it('re-reads a queued invitation at 2 → 4 → 8 → 15 s (not every 2 s) and stops after 3 minutes', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/job-roles') return Promise.resolve({ data: [] });
+      if (url === '/staff/staff-1') return Promise.resolve({ data: staffRecord({ accountStatus: 'invited', invitationStatus: 'queued' }) });
+      return Promise.resolve({ data: [] });
+    });
+    mount();
+    openStaffDetail();
+    await tick(20);
+    expect(recordCalls()).toBe(1);
+    await tick(2_100);
+    expect(recordCalls()).toBe(2);
+    await tick(2_000); // ≈ 4.1 s: the old 2 s poll would have fetched again
+    expect(recordCalls()).toBe(2);
+    await tick(2_100); // ≈ 6.2 s
+    expect(recordCalls()).toBe(3);
+    await tick(200_000);
+    const atWindowEnd = recordCalls();
+    expect(atWindowEnd).toBeLessThanOrEqual(16); // 1 load + 2, 6, 14, then every 15 s up to the 3-minute mark
+    await tick(600_000);
+    expect(recordCalls()).toBe(atWindowEnd);
+  });
+});

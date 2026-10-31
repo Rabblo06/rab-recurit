@@ -105,7 +105,7 @@ struct StaffUpcomingScreen: View {
                 LazyVStack(spacing: 16) {
                     if let error = store.offersError {
                         MessageCard(title: "Shifts unavailable", message: error, kind: .error, actionTitle: "Retry") {
-                            Task { await store.loadOffers() }
+                            Task { await store.loadOffers(full: true) }
                         }
                     }
                     if upcoming.isEmpty, store.offersError == nil {
@@ -119,7 +119,7 @@ struct StaffUpcomingScreen: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
-            .refreshable { await store.loadOffers(silent: true) }
+            .refreshable { await store.loadOffers(silent: true, full: true) }
         }
         .background(ScheduleTokens.background.ignoresSafeArea())
         .staffPushedScreen()

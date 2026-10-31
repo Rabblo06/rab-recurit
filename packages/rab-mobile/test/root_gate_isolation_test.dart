@@ -25,6 +25,10 @@ import 'support/biometric_test_support.dart';
 /// device correct isolation — no separate cache-clearing logic exists (or
 /// is needed) because Flutter tears the whole per-session provider subtree
 /// down and rebuilds it fresh whenever the authenticated user id changes.
+/// The longest gap between two notification polls: interval + 20 % jitter.
+final maxPollGap =
+    NotificationsProvider.pollInterval * 1.2 + const Duration(seconds: 1);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -218,8 +222,9 @@ void main() {
       expect(offersA.offers.map((o) => o.id), contains('offer-A'));
       expect(notificationsA.unreadCount, 1);
 
-      // Force one extra 30s poll cycle while Staff A is still logged in.
-      await tester.pump(const Duration(seconds: 31));
+      // Force one extra poll cycle while Staff A is still logged in
+      // (NotificationsProvider: 60 s ±20 %, so at most 72 s).
+      await tester.pump(maxPollGap);
       final callsToAAfterFirstTick = unreadCallsByUser['A']!;
       expect(
         callsToAAfterFirstTick,
@@ -252,8 +257,8 @@ void main() {
       expect(notificationsB.unreadCount, 2);
 
       // Staff A's disposed NotificationsProvider must not still be polling —
-      // its Timer.periodic is cancelled in dispose() (notifications_provider.dart).
-      await tester.pump(const Duration(seconds: 31));
+      // its poll scheduler is disposed in dispose() (notifications_provider.dart).
+      await tester.pump(maxPollGap);
       expect(
         unreadCallsByUser['A'],
         callsToAAfterFirstTick,
@@ -269,5 +274,5 @@ void main() {
 String _randomFixturePassword() {
   final random = Random.secure();
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  return List.generate(28, (_) => alphabet[random.nextInt(alphabet.length)]).join() + 'Aa1!';
+  return '${List.generate(28, (_) => alphabet[random.nextInt(alphabet.length)]).join()}Aa1!';
 }

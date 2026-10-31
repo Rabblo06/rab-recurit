@@ -101,3 +101,29 @@ public struct FeaturePlaceholderView: View {
         .background(ScheduleTokens.homeBackground.ignoresSafeArea())
     }
 }
+
+/// The polling policy's non-blocking "couldn't refresh" line (Phase C1):
+/// shown above data that is still on screen after a refresh failed, instead
+/// of an error page that would hide it. The data below stays the last good
+/// server answer.
+struct StaleRefreshNotice: View {
+    private let message: String
+
+    init(_ message: String = "Couldn't refresh. Showing the last update.") {
+        self.message = message
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 14))
+                .foregroundStyle(ScheduleTokens.muted)
+                .accessibilityHidden(true)
+            Text(message).scheduleType(ScheduleType.caption)
+        }
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("refresh.stale")
+    }
+}

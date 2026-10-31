@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 
 import { api } from '../../../shared/api';
 import { TOAST_EVENT } from '../../../shared/lib/toast';
@@ -227,4 +227,39 @@ it('U7 / 7b: estimated cost (USD, integer division), cache read / write and toda
 it('U7: Config shows the per-person daily limit once the overview carries it, "—" before', async () => {
   renderWithQuery(<AiConfigSection />);
   expect((await screen.findByText('Daily limit per person')).nextElementSibling).toHaveTextContent('—');
+});
+
+describe('Phase C1: the AI overview is polled only on the Health tab', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  const tick = (ms: number) => act(async () => { await jest.advanceTimersByTimeAsync(ms); });
+  const overviewCalls = () => get.mock.calls.filter(([u]: [string]) => u === '/admin/ai/overview').length;
+
+  it('Health polls it every 15 s', async () => {
+    const { qc } = renderWithQuery(<AiHealthSection />);
+    await tick(20);
+    expect(overviewCalls()).toBe(1);
+    await tick(15_100);
+    expect(overviewCalls()).toBe(2);
+    qc.clear();
+  });
+
+  it.each([
+    ['Config', () => <AiConfigSection />],
+    ['Security', () => <AiPrivacySection />],
+    ['an organisation card (General)', () => <OrganisationAiSwitch organisationId={ORG} organisationName="Org A Ltd" />],
+  ])('%s fetches it once and never polls', async (_name, ui) => {
+    const { qc } = renderWithQuery(ui());
+    await tick(20);
+    expect(overviewCalls()).toBe(1);
+    await tick(120_000);
+    expect(overviewCalls()).toBe(1);
+    qc.clear();
+  });
 });

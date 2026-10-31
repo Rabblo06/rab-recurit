@@ -531,11 +531,15 @@ public final class SessionCoordinator: ObservableObject {
         onSignedOut?()
         // Nothing from the old identity may complete after this point.
         await api.cancelAllRequests()
-        // Push devices are NOT deactivated by /auth/logout server-side, so
-        // stop this phone receiving the old account's notifications first,
-        // while the access token is still valid. Best effort.
+        // Stop this phone receiving the old account's notifications first,
+        // while the access token is still valid: the explicit deactivate
+        // (best effort), and the device id named in /auth/logout so the
+        // server deactivates exactly this device with the session (Phase C1b)
+        // even when the deactivate call itself failed.
+        var pushDeviceId: String?
         if let pushDevice, pushDevice.registeredUserId() != nil {
             let deviceId = pushDevice.deviceId()
+            pushDeviceId = deviceId
             do {
                 try await api.post("/push/devices/\(deviceId)/deactivate", options: RequestOptions(retry: .safeToRepeat, timeout: 5))
             } catch {
@@ -547,12 +551,7 @@ public final class SessionCoordinator: ObservableObject {
             // Clearing local storage alone would leave a session that is
             // still valid everywhere else.
             do {
-                try await api.requestVoid(
-                    .post,
-                    "/auth/logout",
-                    body: RefreshTokenBody(refreshToken: refreshToken),
-                    options: RequestOptions(retry: .never, timeout: 10)
-                )
+                try await revokeSession(refreshToken: refreshToken, pushDeviceId: pushDeviceId)
             } catch {
                 Log.session.info("Logout revoke failed; local session cleared anyway")
             }
@@ -561,6 +560,21 @@ public final class SessionCoordinator: ObservableObject {
         user = nil
         biometricEnabledForCurrentUser = false
         setPhase(.unauthenticated)
+    }
+
+    /// `POST /auth/logout`, never retried automatically. A server that does
+    /// not know the optional `pushDeviceId` yet rejects the whole body with
+    /// 400 (`forbidNonWhitelisted`) BEFORE the handler runs, so nothing was
+    /// revoked: the plain body is sent once more. The explicit deactivate
+    /// call has already run either way.
+    private func revokeSession(refreshToken: String, pushDeviceId: String?) async throws {
+        let options = RequestOptions(retry: .never, timeout: 10)
+        do {
+            try await api.requestVoid(.post, "/auth/logout", body: LogoutBody(refreshToken: refreshToken, pushDeviceId: pushDeviceId), options: options)
+        } catch let error as APIError where pushDeviceId != nil && error.statusCode == 400 {
+            let current = tokens.refreshToken() ?? refreshToken
+            try await api.requestVoid(.post, "/auth/logout", body: LogoutBody(refreshToken: current, pushDeviceId: nil), options: options)
+        }
     }
 
     /// The API client wiped the session after a rejected refresh (forced

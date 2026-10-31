@@ -7,6 +7,8 @@ import 'package:provider/provider.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/api/attendance_messages.dart';
+import '../../core/polling/poll_scheduler.dart';
+import '../../core/polling/stale_refresh_notice.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_nav_header.dart';
@@ -85,13 +87,21 @@ TeamRowAction? teamRowAction(
   return null;
 }
 
-class _VenueTeamsScreenState extends State<VenueTeamsScreen>
-    with WidgetsBindingObserver {
+class _VenueTeamsScreenState extends State<VenueTeamsScreen> {
   ShiftReportDetail? _report;
   Object? _error;
   bool _loading = true;
+
+  /// A silent refresh failed while rows were on screen: they stay, with a
+  /// non-blocking notice, until the next successful read.
+  bool _stale = false;
   int _generation = 0;
-  Timer? _poll;
+
+  /// Staff check in on their own phones: the rows are re-read every
+  /// [pollInterval] ±20 % while this screen is visible and the app is in the
+  /// foreground, plus once on resume ([PollScheduler]).
+  static const pollInterval = Duration(seconds: 30);
+  late final PollScheduler _poll;
 
   /// Server clock (report `serverNow`) + time since it was read.
   DateTime? _anchor;
@@ -101,24 +111,33 @@ class _VenueTeamsScreenState extends State<VenueTeamsScreen>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _load();
-    // Staff check in on their own phones: keep the rows current while open.
-    _poll = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted && TickerMode.of(context)) _load(silent: true);
-    });
+    _poll = PollScheduler(
+      interval: pollInterval,
+      identity: () =>
+          context.read<VenueManagerProvider>().api.sessionGeneration,
+      task: (trigger) async {
+        final error = await _load(
+          silent: true,
+          background: trigger.isBackground,
+        );
+        if (error != null) throw error;
+      },
+    )..start();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _poll.setVisible(
+      TickerMode.of(context) && (ModalRoute.of(context)?.isCurrent ?? true),
+    );
   }
 
   @override
   void dispose() {
-    _poll?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
+    _poll.dispose();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _load(silent: true);
   }
 
   void _apply(ShiftReportDetail report) {
@@ -131,7 +150,8 @@ class _VenueTeamsScreenState extends State<VenueTeamsScreen>
     }
   }
 
-  Future<void> _load({bool silent = false}) async {
+  /// Returns the failure, if any (for the poller's backoff).
+  Future<Object?> _load({bool silent = false, bool background = false}) async {
     final stamp = ++_generation;
     if (!silent) {
       setState(() {
@@ -142,6 +162,7 @@ class _VenueTeamsScreenState extends State<VenueTeamsScreen>
     try {
       final report = await context.read<VenueManagerProvider>().loadReport(
         widget.event.id,
+        background: background,
       );
       if (report.shiftId != widget.event.id) {
         throw StateError('The report returned belongs to another shift.');
@@ -150,13 +171,31 @@ class _VenueTeamsScreenState extends State<VenueTeamsScreen>
         setState(() {
           _apply(report);
           _error = null;
+          _stale = false;
         });
       }
+      return null;
     } catch (e) {
-      // A silent refresh never replaces good rows with an error.
-      if (mounted && stamp == _generation && (!silent || _report == null)) {
-        setState(() => _error = e);
+      // A silent refresh never replaces good rows with an error — except a
+      // permanent refusal (401/403/404/410), which drops them: the screen never
+      // keeps showing a report the server has just refused.
+      final refused =
+          e is ApiException &&
+          const {401, 403, 404, 410}.contains(e.statusCode);
+      if (mounted && stamp == _generation) {
+        if (!silent || _report == null || refused) {
+          setState(() {
+            if (refused) {
+              _report = null;
+              _stale = false;
+            }
+            _error = e;
+          });
+        } else {
+          setState(() => _stale = true);
+        }
       }
+      return e;
     } finally {
       if (mounted && stamp == _generation) setState(() => _loading = false);
     }
@@ -324,6 +363,7 @@ class _VenueTeamsScreenState extends State<VenueTeamsScreen>
                         count: report == null ? null : rows.length,
                       ),
                       const SizedBox(height: 8),
+                      if (report != null && _stale) const StaleRefreshNotice(),
                       if (report == null && _loading)
                         const Padding(
                           padding: EdgeInsets.all(24),
@@ -572,7 +612,10 @@ class _TeamRow extends StatelessWidget {
         const Color(0xFFFFE9C7),
         const Color(0xFF8A4B00),
       ),
-      TeamChipTone.danger => (ScheduleTokens.dangerSoft, ScheduleTokens.errorText),
+      TeamChipTone.danger => (
+        ScheduleTokens.dangerSoft,
+        ScheduleTokens.errorText,
+      ),
       TeamChipTone.neutral => (const Color(0xFFEDEEF2), ScheduleTokens.ink),
     };
     final byManager = row.clockInMethod == 'manager_on_behalf'
@@ -642,10 +685,7 @@ class _TeamRow extends StatelessWidget {
           ScheduleInitialsAvatar(name: row.staffName, size: 42, color: tone),
           const SizedBox(width: 12),
           Expanded(child: details),
-          if (!narrow && button != null) ...[
-            const SizedBox(width: 10),
-            button,
-          ],
+          if (!narrow && button != null) ...[const SizedBox(width: 10), button],
         ],
       ),
     );

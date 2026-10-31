@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ListViewSelect } from './ListPresentation';
+import { ListViewSelect, RecordFooter } from './ListPresentation';
 
 const options = [{ value: '', label: 'All requests' }, { value: 'pending', label: 'Pending' }, { value: 'approved', label: 'Approved' }, { value: 'declined', label: 'Declined' }];
 function Example({ onChange = jest.fn() }: { onChange?: (value: string) => void }) {
@@ -64,4 +64,18 @@ it('Escape and outside click close without changing the selection; Tab moves on'
   expect(trigger).toHaveAttribute('aria-expanded', 'false');
   await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
   expect(onChange).not.toHaveBeenCalled();
+});
+
+describe('RecordFooter paging (Phase C1: explicit page size, never the old 500)', () => {
+  it('pages by the requested limit (50 by default) and reaches page 2', async () => {
+    const onPage = jest.fn();
+    render(<RecordFooter total={120} page={1} onPage={onPage} />);
+    expect(screen.getByText('Page 1 of 3')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(onPage).toHaveBeenCalledWith(2);
+  });
+  it('uses the page size the list was requested with', () => {
+    render(<RecordFooter total={120} page={1} onPage={jest.fn()} pageSize={100} />);
+    expect(screen.getByText('Page 1 of 2')).toBeTruthy();
+  });
 });

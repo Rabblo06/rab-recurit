@@ -10,6 +10,8 @@ import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { payrollAudience } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { NotificationService } from '../../notification/services/notification.service';
 import { FieldPolicy, FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
@@ -105,6 +107,10 @@ export function buildPayrollRunCsv(v: RunView, policy: FieldPolicy): string {
  */
 @Injectable()
 export class PayrollRunService {
+  /** C1b realtime outbox — property-injected so the constructor signature is unchanged. */
+  @Inject(RealtimeEventService)
+  private readonly realtimeEvents!: RealtimeEventService;
+
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
 
@@ -215,6 +221,10 @@ export class PayrollRunService {
           [ctx.organisationId, ctx.workspaceId, runId, staffId]);
       }
       await this.audit.record(m, ctx, AuditAction.PAYROLL_RUN_FINALISED, { entityType: 'payroll_run', entityId: runId, metadata: { records: lines.length } });
+      // C1b realtime (same transaction): records approved → processing. Payroll readers of this workspace only; ids only.
+      await this.realtimeEvents.recordForRecipients(m, {
+        organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${runId}:finalised`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType: 'payroll_run', entityId: runId,
+      }, (tx) => payrollAudience(tx, ctx.workspaceId!));
       return this.view(m, ctx, runId);
     });
   }
@@ -313,6 +323,10 @@ export class PayrollRunService {
       await m.query(`UPDATE payroll_record SET status = 'paid', updated_at = now() WHERE id = ANY($1::uuid[]) AND status = 'processing'`, [records.map((r) => r.payroll_record_id)]);
       await m.query(`UPDATE payslip SET paid_at = now(), paid_by = $2, payment_reference = $3, updated_at = now() WHERE id = $1`, [slip.id, ctx.userId, paymentReference?.trim() || null]);
       await this.audit.record(m, ctx, AuditAction.PAYSLIP_MARKED_PAID, { entityType: 'payslip', entityId: slip.id, metadata: { runId, staffProfileId, records: records.length, paymentReference: paymentReference?.trim() || null } });
+      // C1b realtime (same transaction): records processing → paid. Payroll readers of this workspace only; ids only (never the reference).
+      await this.realtimeEvents.recordForRecipients(m, {
+        organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${slip.id}:paid`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType: 'payslip', entityId: slip.id,
+      }, (tx) => payrollAudience(tx, ctx.workspaceId!));
       return this.view(m, ctx, runId);
     });
   }

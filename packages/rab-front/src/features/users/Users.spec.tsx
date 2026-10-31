@@ -352,9 +352,9 @@ describe('Users — WEB-01 render-loop regression', () => {
       await waitFor(() => expect(screen.getByText('Alice Example')).toBeInTheDocument());
       expect(document.querySelector('.table-container.table-loading')).toBeNull();
 
-      // Same query key, same params — this is exactly what the 2s
-      // `pollWhileInvitationInFlight` refetchInterval triggers; `isFetching`
-      // is true for its duration even though nothing the user asked for changed.
+      // Same query key, same params — exactly what a background re-read of the
+      // page (the bulk-invite settling poll, or the visible-tab catch-up) does;
+      // `isFetching` is true for its duration even though nothing the user asked for changed.
       act(() => { void qc.refetchQueries({ queryKey: ['staff'] }); });
       await act(async () => { await Promise.resolve(); });
       expect(staffCallCount).toBe(2);
@@ -620,5 +620,92 @@ describe('Users — Venue Managers tab selection', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Staff/ }));
     await waitFor(() => expect(screen.queryByRole('toolbar', { name: 'Bulk actions for selected records' })).toBeNull());
     document.removeEventListener('open-user-detail', opened);
+  });
+});
+
+describe('Users — Phase C1 invitation settling (pending rows only, bounded backoff)', () => {
+  beforeEach(() => {
+    mockApi.get.mockReset();
+    mockApi.post.mockReset();
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5); // jitter factor exactly 1
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  const tick = (ms: number) => act(async () => { await jest.advanceTimersByTimeAsync(ms); });
+  const calls = (url: string) => mockApi.get.mock.calls.filter(([u]: [string]) => u === url).length;
+
+  it('polls only the pending row\'s own record (2 → 4 → 8 → 15 s), never the whole page, and settles the row in place', async () => {
+    let detail = 0;
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/job-roles') return Promise.resolve({ data: [] });
+      if (url === '/staff') return Promise.resolve({ data: { data: [staffRow({ id: 's1', accountStatus: 'invited', invitationStatus: 'queued' }), staffRow({ id: 's2', firstName: 'Bea', email: 'bea@example.test' })], total: 2 } });
+      if (url === '/staff/s1') {
+        detail += 1;
+        return Promise.resolve({ data: staffRow({ id: 's1', accountStatus: 'invited', invitationStatus: detail < 4 ? 'queued' : 'pending', pendingInvite: detail < 4 ? null : { sendNumber: 1 } }) });
+      }
+      return Promise.resolve({ data: { data: [], total: 0 } });
+    });
+    const { qc } = mount();
+    await tick(20);
+    expect(screen.getByText('Invitation queued')).toBeInTheDocument();
+    const listCalls = calls('/staff');
+    await tick(1_800);
+    expect(calls('/staff/s1')).toBe(0);
+    await tick(300); // ≈ 2.1 s
+    expect(calls('/staff/s1')).toBe(1);
+    await tick(3_800); // ≈ 5.9 s
+    expect(calls('/staff/s1')).toBe(1);
+    await tick(300); // ≈ 6.2 s
+    expect(calls('/staff/s1')).toBe(2);
+    await tick(7_900); // ≈ 14.1 s
+    expect(calls('/staff/s1')).toBe(3);
+    await tick(14_800); // ≈ 28.9 s
+    expect(calls('/staff/s1')).toBe(3);
+    await tick(300); // ≈ 29.2 s: the fourth poll answers "pending"
+    expect(calls('/staff/s1')).toBe(4);
+    await tick(50); // the in-place row update is published on the next notify tick
+    expect(screen.getByText('Pending invite (1/3)')).toBeInTheDocument();
+    await tick(120_000);
+    expect(calls('/staff/s1')).toBe(4); // settled: polling stops
+    expect(calls('/staff')).toBe(listCalls); // the page itself was never re-polled
+    expect(calls('/staff/s2')).toBe(0); // a settled row is never polled
+    qc.clear();
+  });
+
+  it('stops after 3 minutes even if the invitation never settles', async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/job-roles') return Promise.resolve({ data: [] });
+      if (url === '/staff') return Promise.resolve({ data: { data: [staffRow({ id: 's1', accountStatus: 'invited', invitationStatus: 'sending' })], total: 1 } });
+      if (url === '/staff/s1') return Promise.resolve({ data: staffRow({ id: 's1', accountStatus: 'invited', invitationStatus: 'sending' }) });
+      return Promise.resolve({ data: { data: [], total: 0 } });
+    });
+    const { qc } = mount();
+    await tick(20);
+    await tick(200_000);
+    const atWindowEnd = calls('/staff/s1');
+    expect(atWindowEnd).toBeGreaterThan(3);
+    expect(atWindowEnd).toBeLessThanOrEqual(15); // 2, 6, 14, then every 15 s up to the 3-minute mark
+    await tick(600_000);
+    expect(calls('/staff/s1')).toBe(atWindowEnd);
+    qc.clear();
+  });
+
+  it('many pending rows: one page request per step instead of one request per row (bounded)', async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => staffRow({ id: `p${i}`, firstName: `P${i}`, email: `p${i}@example.test`, accountStatus: 'invited', invitationStatus: 'queued' }));
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/job-roles') return Promise.resolve({ data: [] });
+      if (url === '/staff') return Promise.resolve({ data: { data: rows, total: rows.length } });
+      return Promise.resolve({ data: staffRow() });
+    });
+    const { qc } = mount();
+    await tick(20);
+    const listCalls = calls('/staff');
+    await tick(6_200);
+    expect(calls('/staff')).toBe(listCalls + 2); // at 2 s and 6 s
+    expect(mockApi.get.mock.calls.filter(([u]: [string]) => /^\/staff\/p\d+$/.test(u))).toHaveLength(0);
+    qc.clear();
   });
 });

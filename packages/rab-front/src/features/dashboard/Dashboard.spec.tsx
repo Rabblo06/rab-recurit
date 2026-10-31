@@ -260,3 +260,42 @@ describe('Dashboard', () => {
   });
 });
 
+
+describe('Dashboard — Phase C1 paging (limit ≤ 200; nothing in range is truncated)', () => {
+  beforeEach(() => mockApi.get.mockReset());
+  /** A paged endpoint honouring `page`/`limit` like the server (`limit > 200` is a 400). */
+  function paged<T>(rows: T[]) {
+    return (params: Record<string, unknown>) => {
+      const limit = Number(params.limit ?? 50);
+      if (limit > 200) return Promise.reject({ response: { status: 400, data: { message: 'limit must not be greater than 200' } } });
+      const page = Number(params.page ?? 1);
+      return Promise.resolve({ data: { data: rows.slice((page - 1) * limit, page * limit), total: rows.length } });
+    };
+  }
+  const listCalls = (url: string) => mockApi.get.mock.calls.filter(([u]: [string]) => u === url).map(([, c]: [string, { params?: Record<string, unknown> }]) => c?.params ?? {});
+
+  it('hours worked walks every page of attendance (250 records → pages 1 and 2 of 200), counting all of them', async () => {
+    const today = new Date();
+    const rows = Array.from({ length: 250 }, (_, i) => ({ id: `a${i}`, clockInAt: today.toISOString(), workedMinutes: 60 }));
+    const attendance = paged(rows);
+    serve((url, params) => (url === '/attendance' ? attendance(params) : undefined));
+    mount();
+    const card = (await screen.findByText('Hours worked')).closest('.dash-card') as HTMLElement;
+    // 250 one-hour records all on today: 250.0 h for the one day worked — the second page is included.
+    await waitFor(() => expect(within(card).getByText('250.0')).toBeInTheDocument());
+    expect(listCalls('/attendance').map((p) => [p.page, p.limit])).toEqual([[1, 200], [2, 200]]);
+  });
+
+  it('every list request names a limit of at most 200', async () => {
+    serve();
+    mount();
+    await screen.findByText('Shifts by venue');
+    await waitFor(() => expect(listCalls('/venues').length).toBeGreaterThan(0));
+    for (const url of ['/attendance', '/shifts', '/venues', '/offers']) {
+      for (const params of listCalls(url)) {
+        expect(params.limit).toBeDefined();
+        expect(Number(params.limit)).toBeLessThanOrEqual(200);
+      }
+    }
+  });
+});

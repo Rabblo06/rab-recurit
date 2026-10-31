@@ -47,7 +47,26 @@ export const REALTIME_ENVELOPE_SCHEMA_VERSION = 1;
  * defence in depth, not trust-the-writer.
  */
 // 'navigation_layout.saved' (2026-10-20): recipient-only — tells the same user's other tabs their own layout changed.
-export const KNOWN_REALTIME_EVENT_TYPES = new Set<string>(['offer.sent', 'offer.accepted', 'offer.confirmed', 'navigation_layout.saved']);
+// Phase C1b (2026-10-31): the catalogue's remaining recipient-only types — each row addressed to one server-computed
+// recipient (`RealtimeEventService.recordForRecipients`); none is a workspace broadcast.
+export const KNOWN_REALTIME_EVENT_TYPES = new Set<string>([
+  'offer.sent',
+  'offer.accepted',
+  'offer.confirmed',
+  'navigation_layout.saved',
+  'offer.declined',
+  'offer.withdrawn',
+  'offer.expired',
+  'offer.rejected',
+  'shift.updated',
+  'shift.cancelled',
+  'shift_request.created',
+  'shift_request.approved',
+  'shift_request.declined',
+  'attendance.changed',
+  'notification.created',
+  'payroll.record_changed',
+]);
 
 /**
  * Which event types broadcast to an entire workspace versus address one

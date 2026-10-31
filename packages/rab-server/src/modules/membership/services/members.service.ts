@@ -11,6 +11,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { UserRole } from '../../identity/entities';
 import { MemberRolePolicyService } from '../../identity/services/member-role-policy.service';
+import { deactivateAllPushDevicesForUser } from '../../../engine/core-modules/push/push-device-deactivation';
 
 export type MemberStatus = 'active' | 'pending_setup' | 'suspended' | 'inactive';
 
@@ -89,6 +90,9 @@ export class MembersService {
       // authority for "may THIS caller suspend THIS person". It also bumps the membership security version.
       await this.workspaceMembership.suspendForUser(manager, userId);
       await this.securityVersion.bumpUser(manager, userId);
+      // C1b push (D5): workspace access suspended → the member's devices stop receiving pushes (they re-register on
+      // their next sign-in after reinstatement). Same transaction; organisation-scoped by RLS.
+      await deactivateAllPushDevicesForUser(manager, userId, 'workspace_access_suspended');
       await this.audit.record(manager, ctx, AuditAction.MEMBER_SUSPENDED, { entityType: 'user', entityId: userId, metadata: { workspaceId: ctx.workspaceId } });
     });
   }

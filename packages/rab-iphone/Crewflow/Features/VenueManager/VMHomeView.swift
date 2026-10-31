@@ -22,6 +22,7 @@ struct VMHomeView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 VMSpaceSelector(mySpace: $mySpace)
+                if store.refreshFailed && store.error == nil { StaleRefreshNotice() }
                 if store.loading && store.updatedAt == nil {
                     VMInlineLoading(label: "Loading your venues")
                 } else if let error = store.error {

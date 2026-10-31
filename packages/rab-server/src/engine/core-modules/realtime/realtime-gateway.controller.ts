@@ -17,6 +17,20 @@ import { MobileApplication } from '../auth/guards/mobile-application.decorator';
 const DEDUP_WINDOW_SIZE = 200;
 
 /**
+ * Phase C1b — the SSE keepalive. A `: keepalive` comment line (ignored by every SSE parser, never an event) is written
+ * at least every 25 s so idle proxies/load balancers keep the connection and the client's watchdog (2 × this) can tell
+ * a silent-but-healthy stream from a dead one. It follows `REALTIME_HEARTBEAT_INTERVAL_MS` when that is shorter, so one
+ * setting governs both; it is never longer than 25 s (the client contract, `c1-API-CONTRACT.md` §4).
+ */
+export const REALTIME_KEEPALIVE_MAX_MS = 25_000;
+export function realtimeKeepaliveMs(heartbeatMs: number): number {
+  return Math.min(heartbeatMs, REALTIME_KEEPALIVE_MAX_MS);
+}
+
+/** Seconds a client refused by the per-user cap waits before trying again (its other streams are live; no hurry). */
+export const REALTIME_CAP_RETRY_AFTER_SECONDS = 30;
+
+/**
  * Stage 3 — the authenticated real-time gateway. One HTTP GET, kept open (Server-Sent Events),
  * guarded by the EXACT SAME `JwtAuthGuard` every other route uses — zero new authentication code.
  * See `docs/architecture/REALTIME-PUBSUB-DESIGN.md` and the Stage 3 exit report for the full
@@ -36,7 +50,10 @@ const DEDUP_WINDOW_SIZE = 200;
  *     including a full `AuthSecuritySnapshot` (roles, permissions, account status) built from a
  *     REPEATABLE READ Postgres snapshot — the SAME one every other authenticated route gets.
  *  3. Authorise — `REALTIME_MAX_CONNECTIONS_PER_USER` enforced from the connection registry; a
- *     connection beyond the bound is refused outright, never queued.
+ *     connection beyond the bound is refused outright, never queued. Phase C1b: refused with
+ *     429 + `Retry-After` BEFORE the stream opens (the check and the slot reservation are one
+ *     synchronous step, re-checked when the stream is subscribed) — never a 200 stream that closes at
+ *     once, which clients read as "connected, then dropped" and reconnected in a loop.
  *  4. Subscribe — this connection's own handler attaches to `crewflow:{env}:rt:user:{userId}` on
  *     the ONE shared `RealtimeGatewaySubscriberProvider` instance (never a connection per client).
  *  5. Receive/Validate — every message off Redis is independently re-verified against THIS
@@ -66,6 +83,8 @@ const DEDUP_WINDOW_SIZE = 200;
  *          refresh rotation, so this is a SEPARATE condition from (b), not implied by it.
  *     A session revoked, idle-expired, or (for mobile) JWT-expired while this stream is open
  *     therefore stops receiving events within one heartbeat interval, never indefinitely.
+ *     Phase C1b: a `: keepalive` comment is written every `realtimeKeepaliveMs()` (≤ 25 s) on its own
+ *     timer — bytes only, no state; revalidation stays on the heartbeat above.
  *  8. Disconnect/Reconnect — client close, heartbeat failure, or an upstream error all run the SAME
  *     teardown (unsubscribe from Redis, clear the heartbeat timer, remove the registry entry).
  *     Reconnection is just a brand-new request — steps 1-4 run again from scratch, so a stale
@@ -108,6 +127,9 @@ export class RealtimeGatewayController {
 
     const ctx = request.authContext;
     const connectionId = randomUUID();
+    const maxPerUser = this.env.get('REALTIME_MAX_CONNECTIONS_PER_USER');
+    // C1b: refuse BEFORE any stream exists (an ordinary 429 through the exception filter, headers not yet sent).
+    if (this.registry.countForUser(ctx.userId) >= maxPerUser) throw this.capExceeded(request, ctx.userId, maxPerUser);
 
     // Captured once, at connect time, from the SAME request the guard already authenticated —
     // never a second trust decision, purely extracting the already-verified token's own `exp` so
@@ -134,6 +156,7 @@ export class RealtimeGatewayController {
 
     return new Observable<MessageEvent>((subscriber) => {
       let heartbeatTimer: NodeJS.Timeout | undefined;
+      let keepaliveTimer: NodeJS.Timeout | undefined;
       let channelHandler: ((envelope: RealtimeEventEnvelope) => void) | undefined;
       let closed = false;
       const seenEventIds: string[] = [];
@@ -143,6 +166,7 @@ export class RealtimeGatewayController {
         if (closed) return;
         closed = true;
         if (heartbeatTimer) clearInterval(heartbeatTimer);
+        if (keepaliveTimer) clearInterval(keepaliveTimer);
         if (channelHandler) {
           const channel = realtimeUserChannel(this.env.get('NODE_ENV'), ctx.userId);
           this.gatewaySubscriber.subscriber.unsubscribe(channel, channelHandler).catch((error) => {
@@ -152,28 +176,29 @@ export class RealtimeGatewayController {
         this.registry.unregister(connectionId);
       };
 
-      const maxPerUser = this.env.get('REALTIME_MAX_CONNECTIONS_PER_USER');
+      // Re-checked and reserved in ONE synchronous step at subscribe time: two requests that both passed the handler's
+      // check in the same tick cannot both take the last slot. Nest has not committed the SSE headers yet (it does so
+      // on the next macrotask), so this error still reaches the exception filter as a real 429.
       if (this.registry.countForUser(ctx.userId) >= maxPerUser) {
-        this.logger.warn(`connection refused for user ${ctx.userId}: already at REALTIME_MAX_CONNECTIONS_PER_USER (${maxPerUser})`);
-        subscriber.complete();
+        subscriber.error(this.capExceeded(request, ctx.userId, maxPerUser));
         return teardown;
       }
+      this.registry.register({
+        connectionId,
+        userId: ctx.userId,
+        organisationId: ctx.organisationId!,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId!,
+        transport: 'sse',
+        connectedAt: new Date(),
+        lastHeartbeatAt: new Date(),
+        securityVector: null,
+      });
 
       void (async () => {
         const initialVector = await this.readSecurityVector(ctx);
         if (closed) return; // the client disconnected while this async setup was still in flight
-
-        this.registry.register({
-          connectionId,
-          userId: ctx.userId,
-          organisationId: ctx.organisationId!,
-          workspaceId: ctx.workspaceId,
-          sessionId: ctx.sessionId!,
-          transport: 'sse',
-          connectedAt: new Date(),
-          lastHeartbeatAt: new Date(),
-          securityVector: initialVector,
-        });
+        this.registry.touchHeartbeat(connectionId, initialVector);
 
         const channel = realtimeUserChannel(this.env.get('NODE_ENV'), ctx.userId);
         channelHandler = (envelope: RealtimeEventEnvelope) => {
@@ -188,6 +213,12 @@ export class RealtimeGatewayController {
           subscriber.next({ data: envelope, id: envelope.eventId, type: envelope.type });
         };
         await this.gatewaySubscriber.subscriber.subscribe(channel, channelHandler);
+        if (closed) return;
+        // C1b: the first bytes on the wire once the subscription is live, then a keepalive comment on its own timer.
+        subscriber.next({ comment: 'connected' });
+        keepaliveTimer = setInterval(() => {
+          if (!closed) subscriber.next({ comment: 'keepalive' });
+        }, realtimeKeepaliveMs(this.env.get('REALTIME_HEARTBEAT_INTERVAL_MS')));
 
         const heartbeatMs = this.env.get('REALTIME_HEARTBEAT_INTERVAL_MS');
         heartbeatTimer = setInterval(() => {
@@ -231,6 +262,15 @@ export class RealtimeGatewayController {
 
       return teardown;
     });
+  }
+
+  private capExceeded(request: AuthenticatedRequest, userId: string, maxPerUser: number): HttpException {
+    this.logger.warn(`connection refused for user ${userId}: already at REALTIME_MAX_CONNECTIONS_PER_USER (${maxPerUser})`);
+    (request as unknown as { res?: { setHeader(name: string, value: string): void } }).res?.setHeader('Retry-After', String(REALTIME_CAP_RETRY_AFTER_SECONDS));
+    return new HttpException(
+      { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'REALTIME_CONNECTION_LIMIT', message: 'Too many live connections for this account. Close another tab or try again shortly.' },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
   }
 
   private async readSecurityVector(ctx: AuthenticatedRequest['authContext']): Promise<SecurityVersionVector> {

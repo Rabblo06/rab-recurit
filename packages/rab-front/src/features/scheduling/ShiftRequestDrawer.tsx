@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
 import Drawer from '../../shared/components/Drawer';
 import { SearchableSelect } from '../../shared/components/SearchableSelect';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
@@ -49,7 +50,7 @@ export default function ShiftRequestDrawer() {
 
   const { data: venues = [] } = useQuery({
     queryKey: ['venues', 'for-request'],
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
+    queryFn: () => fetchAllPages<Venue>('/venues'),
     enabled: open,
   });
   const { data: jobRoles = [] } = useQuery({

@@ -87,6 +87,11 @@ export class VenueOfferPipelineService {
         'SELECT v.name AS "venueName", jr.name AS "roleName" FROM venue v, job_role jr WHERE v.id=$1 AND jr.id=$2',
         [shift.venueId, shift.jobRoleId],
       );
+      // The cancellation LATERAL names `entity_type = 'offer'` (the only type `OfferService.cancelBookingWithManager`
+      // writes for this action): it can never pick up another entity's audit row that happens to share the id, and the
+      // lookup binds all three leading columns of `audit_log_timeline_idx (organisation_id, entity_type, entity_id,
+      // created_at DESC, id DESC)`. Without `entity_type` only the `organisation_id` prefix was usable, so every card walked
+      // the organisation's whole index range (measured ~15 ms per card at 500k audit rows; 0.01 ms with it — Phase C1).
       const rows = await manager.query(
         `SELECT sa.period AS "period", o.id AS "offerId", sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS name,
         u.avatar_file_id AS "avatarFileId", o.status AS "offerStatus", sa.status AS "assignmentStatus", a.status AS "attendanceStatus",
@@ -100,7 +105,7 @@ export class VenueOfferPipelineService {
         FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
         JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
         LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
-        LEFT JOIN LATERAL (SELECT metadata, created_at FROM core.audit_log al WHERE al.entity_id=o.id AND al.organisation_id=o.organisation_id AND al.action='offer.withdrawn' AND al.metadata->>'source'='manager_pipeline_cancellation' ORDER BY created_at DESC LIMIT 1) cancellation ON true
+        LEFT JOIN LATERAL (SELECT metadata, created_at FROM core.audit_log al WHERE al.organisation_id=o.organisation_id AND al.entity_type='offer' AND al.entity_id=o.id AND al.action='offer.withdrawn' AND al.metadata->>'source'='manager_pipeline_cancellation' ORDER BY al.created_at DESC, al.id DESC LIMIT 1) cancellation ON true
         WHERE sa.shift_id=$1 AND sa.organisation_id=$2 AND sa.workspace_id=$3 ORDER BY o.sent_at, o.id`,
         [id, ctx.organisationId, ctx.workspaceId],
       );

@@ -6,7 +6,7 @@ import { RequireWorkspaceGuard } from '../../../engine/core-modules/tenant/guard
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
+import { KeysetPaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { CheckInDto } from '../dto/check-in.dto';
 import { ClockInDto } from '../dto/clock-in.dto';
@@ -86,8 +86,9 @@ export class AttendanceController {
 
   @Get('me/history')
   @UseGuards(PermissionGuard(PermissionFlag.ATTENDANCE_CLOCK))
-  getHistory(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.attendanceService.getHistory(ctx, pagination);
+  getHistory(@AuthUser() ctx: AuthContext, @Query() dto: KeysetPaginationDto) {
+    // No limit/cursor = the legacy bare array installed staff apps rely on (see AttendanceService.getHistory).
+    return this.attendanceService.getHistory(ctx, dto);
   }
 
   @MobileApplication('staff_app')

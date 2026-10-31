@@ -32,8 +32,9 @@ import 'venue_manager_provider.dart';
       ReportBadgeTone.info,
     );
   }
-  if (r.noShowConfirmed)
+  if (r.noShowConfirmed) {
     return ('No-show · Confirmed', ReportBadgeTone.reviewed);
+  }
   // Missing attendance is not a confirmed no-show: the worker's provisional mark reads the same as "never clocked in".
   if (r.attendanceMissing && (ended || r.isNoShow)) {
     return ('Attendance missing · Needs review', ReportBadgeTone.needsReview);

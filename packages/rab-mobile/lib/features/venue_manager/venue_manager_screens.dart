@@ -15,6 +15,7 @@ import 'package:provider/provider.dart';
 import '../../core/auth/auth_provider.dart';
 import '../../core/api/api_client.dart';
 import '../../core/motion/shift_motion.dart';
+import '../../core/polling/stale_refresh_notice.dart';
 import '../../core/theme/schedule_tokens.dart';
 import '../../core/theme/shift_visual_style.dart';
 import '../../core/widgets/schedule_home_components.dart';
@@ -121,9 +122,18 @@ class _VenueManagerShellState extends State<VenueManagerShell>
     });
   }
 
+  /// The full refresh on resume runs only after the app was really in the
+  /// background (hidden/paused), not after a notification shade or a system
+  /// dialog (`inactive` only) — it reads every list.
+  bool _wasBackgrounded = false;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      _wasBackgrounded = true;
+    } else if (state == AppLifecycleState.resumed && _wasBackgrounded) {
+      _wasBackgrounded = false;
       context.read<VenueManagerProvider>().refresh(silent: true);
     }
   }
@@ -145,30 +155,36 @@ class _VenueManagerShellState extends State<VenueManagerShell>
           index: _tab,
           children: List.generate(
             4,
-            (i) => NavigatorPopHandler(
+            // A hidden tab keeps its state but not its tickers: TickerMode
+            // off is how a screen's poller knows it is not visible (the
+            // IndexedStack alone keeps TickerMode on for every child).
+            (i) => TickerMode(
               enabled: i == _tab,
-              onPopWithResult: (_) {
-                // A cancelled system pop notifies every registered PopScope,
-                // including handlers belonging to inactive IndexedStack tabs.
-                final navigator = _navigators[i].currentState;
-                if (i == _tab && navigator != null && navigator.canPop()) {
-                  navigator.pop();
-                }
-              },
-              child: Navigator(
-                key: _navigators[i],
-                observers: [_observers[i]],
-                onGenerateRoute: (_) => MaterialPageRoute<void>(
-                  builder: (_) => switch (i) {
-                    0 => VenueManagerHome(
-                      onProfile: () => setState(() => _tab = 3),
-                    ),
-                    1 => VenueCalendarScreen(
-                      onProfile: () => setState(() => _tab = 3),
-                    ),
-                    2 => const VenueHistoryScreen(),
-                    _ => const ProfileScreen(),
-                  },
+              child: NavigatorPopHandler(
+                enabled: i == _tab,
+                onPopWithResult: (_) {
+                  // A cancelled system pop notifies every registered PopScope,
+                  // including handlers belonging to inactive IndexedStack tabs.
+                  final navigator = _navigators[i].currentState;
+                  if (i == _tab && navigator != null && navigator.canPop()) {
+                    navigator.pop();
+                  }
+                },
+                child: Navigator(
+                  key: _navigators[i],
+                  observers: [_observers[i]],
+                  onGenerateRoute: (_) => MaterialPageRoute<void>(
+                    builder: (_) => switch (i) {
+                      0 => VenueManagerHome(
+                        onProfile: () => setState(() => _tab = 3),
+                      ),
+                      1 => VenueCalendarScreen(
+                        onProfile: () => setState(() => _tab = 3),
+                      ),
+                      2 => const VenueHistoryScreen(),
+                      _ => const ProfileScreen(),
+                    },
+                  ),
                 ),
               ),
             ),
@@ -241,10 +257,10 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
               )
             else if (p.error != null)
               VmError(message: p.error!, retry: p.refresh)
-            else if (_mySpace)
-              ..._personal(p)
-            else
-              ..._organization(p),
+            else ...[
+              if (p.refreshFailed) const StaleRefreshNotice(),
+              if (_mySpace) ..._personal(p) else ..._organization(p),
+            ],
           ],
         ),
       ),
@@ -590,7 +606,20 @@ class VmData extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
     if (p.error != null) return VmError(message: p.error!, retry: p.refresh);
-    return builder(p);
+    // Data stays on screen after a failed refresh, with a non-blocking notice.
+    // Fixed slots, so showing the notice never rebuilds the page's state.
+    return Column(
+      children: [
+        if (p.refreshFailed)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 18),
+            child: StaleRefreshNotice(),
+          )
+        else
+          const SizedBox.shrink(),
+        Expanded(child: builder(p)),
+      ],
+    );
   }
 }
 

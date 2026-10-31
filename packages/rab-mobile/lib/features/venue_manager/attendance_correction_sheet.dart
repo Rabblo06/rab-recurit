@@ -158,8 +158,9 @@ class _AttendanceEntrySheetState extends State<AttendanceEntrySheet> {
   bool _validate() {
     _errors.clear();
     final now = _now();
-    if (_in == null)
+    if (_in == null) {
       _errors['in'] = 'Select the actual clock-in date and time.';
+    }
     if (_out == null) {
       _errors['out'] = 'Select the actual clock-out date and time.';
     }

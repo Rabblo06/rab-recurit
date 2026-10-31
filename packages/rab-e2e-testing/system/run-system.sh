@@ -27,7 +27,8 @@ SYS="$ROOT/packages/rab-e2e-testing/system"
 E2E_ENV_FILE="$(win "$E2E_ENV_FILE")"; E2E_OUT="$(win "$E2E_OUT")"; export E2E_ENV_FILE E2E_OUT
 export E2E_MODE="${E2E_MODE:-parity}"
 case "$E2E_MODE" in
-  parity) PROJECT=crewflow-parity; PG_PORT=15480; API_PORT=3400; FRONT_PORT=5400; FILES=(-f "$SYS/docker-compose.e2e.yml" -f "$SYS/docker-compose.parity.yml") ;;
+  # parity ports and project can be overridden to run a second parity stack beside an existing one (same compose files).
+  parity) PROJECT=${E2E_COMPOSE_PROJECT:-crewflow-parity}; PG_PORT=${E2E_PG_PORT:-15480}; API_PORT=${E2E_API_PORT:-3400}; FRONT_PORT=${E2E_FRONT_PORT:-5400}; FILES=(-f "$SYS/docker-compose.e2e.yml" -f "$SYS/docker-compose.parity.yml") ;;
   devlike) PROJECT=crewflow-e2e; PG_PORT=15470; API_PORT=3300; FRONT_PORT=5300; FILES=(-f "$SYS/docker-compose.e2e.yml") ;;
   *) echo "E2E_MODE must be parity or devlike (got $E2E_MODE)"; exit 64 ;;
 esac

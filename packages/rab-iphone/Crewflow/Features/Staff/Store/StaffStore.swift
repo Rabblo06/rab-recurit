@@ -61,8 +61,13 @@ final class StaffStore: ObservableObject {
     @Published private(set) var busyOfferId: String?
     @Published private(set) var busyAction: StaffOfferAction?
     @Published private(set) var offersClock = StaffServerClock()
-    private var offersInFlight = false
-    private var offersReloadQueued = false
+    /// One `/offers/mine` walk at a time; a reload asked for meanwhile is
+    /// queued (never dropped), see `loadOffers`.
+    private let offersFlight = SingleFlight()
+    // Merged flags of every caller waiting for the next offers load.
+    private var pendingLoud = false
+    private var pendingForeground = false
+    private var pendingFull = false
 
     // MARK: Attendance
     @Published private(set) var active: StaffAttendanceSummary?
@@ -81,6 +86,13 @@ final class StaffStore: ObservableObject {
 
     // MARK: Notifications
     @Published private(set) var unreadCount = 0
+
+    /// The error of the last read of each kind (nil after a success), for
+    /// the poller's backoff / `Retry-After`. The data itself stays on screen.
+    private(set) var lastOffersFailure: Error?
+    private(set) var lastActiveFailure: Error?
+    private(set) var lastHistoryFailure: Error?
+    private(set) var lastUnreadFailure: Error?
 
     /// Set by the shell from the scene phase; automatic polling only runs
     /// while the app is in the foreground.
@@ -116,63 +128,139 @@ final class StaffStore: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// First load of the identity: every offer (`scope=all`, the Calendar
+    /// still shows confirmed shifts of past months), attendance, history and
+    /// the unread count.
     func start() async {
-        async let offersLoad: Void = loadOffers()
+        async let offersLoad: Void = loadOffers(full: true)
         async let activeLoad: Void = refreshActive()
         async let historyLoad: Void = loadHistory()
         async let unreadLoad: Void = refreshUnreadCount()
         _ = await (offersLoad, activeLoad, historyLoad, unreadLoad)
     }
 
-    /// Silent reconcile (Flutter `AppShell._refresh`): the 30 s timer passes
-    /// `background: true` (does not slide the idle window), app resume false.
+    /// Silent reconcile (Flutter `AppShell._reconcileOnce`): the current
+    /// offers (`scope=current`, merged) and the active attendance. The timer
+    /// passes `background: true` (does not slide the idle window), app
+    /// resume false. Joins an offers load already in flight.
     func reconcile(background: Bool) async {
-        async let offersLoad: Void = loadOffers(silent: true, background: background)
+        async let offersLoad: Void = loadOffers(silent: true, background: background, joinInFlight: true)
         async let activeLoad: Void = refreshActive(silent: true, background: background)
         _ = await (offersLoad, activeLoad)
     }
 
-    /// Pull-to-refresh on a screen that already shows data.
+    /// The 30 s reconcile poll (`PollScheduler` task): reconcile, plus the
+    /// unread count on every second run (the bell's shared 60 s policy, as on
+    /// Flutter and the web). Every store keeps its last good data; the first
+    /// failure of THIS run is rethrown so the scheduler backs off (or honours
+    /// `Retry-After`).
+    func pollReconcile(background: Bool) async throws {
+        let readsUnread = reconcilePolls % 2 == 0
+        reconcilePolls += 1
+        if readsUnread {
+            async let reconcileRun: Void = reconcile(background: background)
+            async let unreadRun: Void = refreshUnreadCount(background: background)
+            _ = await (reconcileRun, unreadRun)
+        } else {
+            await reconcile(background: background)
+        }
+        if let failure = lastOffersFailure ?? lastActiveFailure ?? (readsUnread ? lastUnreadFailure : nil) { throw failure }
+    }
+
+    /// Runs of `pollReconcile` so far (the unread count is read on the even ones).
+    private var reconcilePolls = 0
+
+    /// Pull-to-refresh on a screen that already shows data: every offer
+    /// again (`scope=all`, replacing the list), attendance and history.
     func refreshAll() async {
-        async let offersLoad: Void = loadOffers(silent: true)
+        async let offersLoad: Void = loadOffers(silent: true, full: true)
         async let activeLoad: Void = refreshActive(silent: true)
         async let historyLoad: Void = loadHistory(silent: true)
         _ = await (offersLoad, activeLoad, historyLoad)
     }
 
+    /// Realtime events (Phase C1b): re-read only what the event names.
+    /// Automatic traffic, so background-flagged; queued behind a read
+    /// already in flight (that read may predate the change).
+    func applyRealtime(_ refreshes: Set<StaffRealtimeRefresh>) async {
+        if refreshes.contains(.offers) { await loadOffers(silent: true, background: true) }
+        if refreshes.contains(.attendance) { await refreshActive(silent: true, background: true) }
+        if refreshes.contains(.history) { await loadHistory(silent: true, background: true) }
+        if refreshes.contains(.unreadCount) { await refreshUnreadCount(background: true) }
+    }
+
     // MARK: - Offers
 
-    func loadOffers(silent: Bool = false, background: Bool = false) async {
-        if offersInFlight {
-            // A later reload (e.g. after accept) must not be swallowed by a
-            // poll already on the wire with older data.
-            offersReloadQueued = true
+    /// Loads `/offers/mine` with keyset paging.
+    ///
+    /// - `full` (first load, pull-to-refresh): `scope=all`, every page,
+    ///   replacing the list.
+    /// - otherwise (poll, resume, after the person's own action, an event):
+    ///   `scope=current`, every page, merged by id into the list (older rows
+    ///   outside the current window are kept as last read).
+    ///
+    /// At most one walk at a time. A call while one is in flight is QUEUED
+    /// (one follow-up after it, shared by every caller queued meanwhile, and
+    /// awaited by all of them), never dropped, so a reload after the
+    /// person's own accept/check-in reads state from after that action.
+    /// `joinInFlight` (automatic refreshes only: timer, resume) shares the
+    /// walk in flight instead. `background` marks a timer/event read.
+    func loadOffers(silent: Bool = false, background: Bool = false, full: Bool = false, joinInFlight: Bool = false) async {
+        if joinInFlight, offersFlight.isRunning {
+            await offersFlight.join { [weak self] in
+                guard let self else { return }
+                await self.runOffersLoad()
+            }
             return
         }
-        offersInFlight = true
+        pendingLoud = pendingLoud || !silent
+        pendingForeground = pendingForeground || !background
+        pendingFull = pendingFull || full
+        await offersFlight.run { [weak self] in
+            guard let self else { return }
+            await self.runOffersLoad()
+        }
+    }
+
+    private func runOffersLoad() async {
+        let silent = !pendingLoud
+        let background = !pendingForeground
+        let full = pendingFull
+        pendingLoud = false
+        pendingForeground = false
+        pendingFull = false
         if !silent { offersLoading = true }
         let epoch = fence.epoch
         do {
-            let loaded = try await repository.myOffers(background: background)
+            let loaded = try await repository.myOffers(scope: full ? .all : .current, background: background)
             if fence.isCurrent(epoch) {
-                ShiftVisualStyle.registerGroup(loaded.map(\.shiftId))
-                offers = loaded
+                let merged = full ? loaded : Self.mergeOffers(offers, loaded)
+                ShiftVisualStyle.registerGroup(merged.map(\.shiftId))
+                offers = merged
                 if let serverNow = loaded.lazy.compactMap({ $0.presentation?.serverNow }).first {
                     offersClock.anchor(serverNow, monotonicNanos: monotonic())
                 }
                 offersError = nil
+                lastOffersFailure = nil
             }
         } catch {
             if fence.isCurrent(epoch), !Self.ignorable(error) {
                 // A failed reload keeps the last good list on screen.
                 offersError = "Could not load offers. Please try again."
+                lastOffersFailure = error
             }
         }
-        offersInFlight = false
         offersLoading = false
-        if offersReloadQueued, fence.isCurrent(epoch) {
-            offersReloadQueued = false
-            await loadOffers(silent: true)
+    }
+
+    /// Fresh rows replace the same ids; rows not in `fresh` are kept. Server
+    /// order (`sent_at DESC, id DESC`).
+    nonisolated static func mergeOffers(_ previous: [StaffOfferSummary], _ fresh: [StaffOfferSummary]) -> [StaffOfferSummary] {
+        var byId: [String: StaffOfferSummary] = [:]
+        for offer in previous { byId[offer.id] = offer }
+        for offer in fresh { byId[offer.id] = offer }
+        return byId.values.sorted { a, b in
+            a.sentAt != b.sentAt ? a.sentAt > b.sentAt : a.id > b.id
         }
     }
 
@@ -223,26 +311,32 @@ final class StaffStore: ObservableObject {
             if let limits = response.locationEvidence { locationEvidence = limits }
             attendanceClock.anchor(response.serverNow, monotonicNanos: monotonic())
             activeError = nil
+            lastActiveFailure = nil
         } catch {
             guard fence.isCurrent(epoch), !Self.ignorable(error) else { return }
             // A failed restore keeps `active` as-is (never clears a possibly
             // still valid clock-in on a transient error).
             activeError = "Could not check attendance. Please try again."
+            lastActiveFailure = error
         }
     }
 
-    func loadHistory(silent: Bool = false) async {
+    /// Every page of `/attendance/me/history` (keyset `limit` + `cursor`).
+    /// A failure keeps the rows already on screen.
+    func loadHistory(silent: Bool = false, background: Bool = false) async {
         if !silent { historyLoading = true }
         let epoch = fence.epoch
         defer { historyLoading = false }
         do {
-            let rows = try await repository.attendanceHistory()
+            let rows = try await repository.attendanceHistory(background: background)
             guard fence.isCurrent(epoch) else { return }
             history = rows
             historyError = nil
+            lastHistoryFailure = nil
         } catch {
             guard fence.isCurrent(epoch), !Self.ignorable(error) else { return }
             historyError = "Could not check completed shifts. Please try again."
+            lastHistoryFailure = error
         }
     }
 
@@ -261,8 +355,8 @@ final class StaffStore: ObservableObject {
         }
     }
 
-    func loadTeam(shiftId: String) async throws -> [StaffTeamMember] {
-        try await repository.team(shiftId: shiftId)
+    func loadTeam(shiftId: String, background: Bool = false) async throws -> [StaffTeamMember] {
+        try await repository.team(shiftId: shiftId, background: background)
     }
 
     // MARK: - Check In / Clock In / Clock Out
@@ -403,8 +497,12 @@ final class StaffStore: ObservableObject {
             let count = try await repository.unreadCount(background: background)
             guard fence.isCurrent(epoch) else { return }
             unreadCount = count
+            lastUnreadFailure = nil
         } catch {
-            // Best effort: a failed poll never disrupts the rest of the app.
+            // Best effort: a failed poll never disrupts the rest of the app
+            // (the poller still backs off on it).
+            guard fence.isCurrent(epoch), !Self.ignorable(error) else { return }
+            lastUnreadFailure = error
         }
     }
 

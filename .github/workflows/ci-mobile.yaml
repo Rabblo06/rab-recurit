@@ -19,14 +19,32 @@ jobs:
   test:
     needs: changed
     if: needs.changed.outputs.mobile == 'true'
-    runs-on: ubuntu-latest
+    # Windows: the committed goldens (test/goldens) are generated on Windows; on Linux the text rasterises differently
+    # and every golden differs by 2-4 % while all behaviour tests pass. Matching the generating platform keeps the
+    # golden comparison meaningful (and the tests' lower-case font paths work on its case-insensitive file system).
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # packages/rab-mobile is a Flutter app, not an Nx project: the previous `nx run-many -p rab-mobile` steps ran nothing.
+    # Phase C1 (D4): install the Flutter SDK and run the app's own analyzer and test suite.
+    defaults:
+      run:
+        working-directory: packages/rab-mobile
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: ./.github/actions/yarn-install
-      - uses: ./.github/actions/restore-cache
-      - run: npx nx run-many -t lint -p rab-mobile
-      - run: npx nx run-many -t test -p rab-mobile
-      # Native builds go through EAS (eas.build), not this pipeline —
-      # nothing to compile here in M0.
-      - uses: ./.github/actions/save-cache
-        if: always()
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.38.7
+          cache: true
+      - run: flutter --version
+      # The golden/visual tests load Roboto from the SDK cache (bin/cache/artifacts/material_fonts); the action does not
+      # download those universal artifacts and `flutter test` does not fetch them. No platform engines are needed.
+      # --force: the cached SDK reports the universal artifacts as up to date while material_fonts is missing.
+      - run: flutter precache --force --universal --no-android --no-ios --no-web --no-linux --no-macos --no-windows
+      # Fail early (not in 18 test setUpAll blocks) if the golden tests' font is still missing.
+      - name: Material fonts present
+        shell: pwsh
+        run: if (-not (Test-Path "$env:FLUTTER_ROOT/bin/cache/artifacts/material_fonts/roboto-regular.ttf")) { exit 1 }
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

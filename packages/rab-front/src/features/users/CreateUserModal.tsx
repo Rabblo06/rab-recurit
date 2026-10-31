@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useId, isValidElement, cloneEleme
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconCheck, IconAlertCircle } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
 import Drawer from '../../shared/components/Drawer';
 import AccordionSection from '../../shared/components/AccordionSection';
 import DateInput, { todayIso } from '../../shared/components/DateInput';
@@ -263,7 +264,7 @@ export default function CreateUserModal() {
 
   const venues = useQuery({
     queryKey: ['venues', 'for-manager-assignment'],
-    queryFn: async () => { const { data } = await api.get<{ data: { id: string; name: string }[] }>('/venues', { params: { status: 'active' } }); return data.data; },
+    queryFn: () => fetchAllPages<{ id: string; name: string }>('/venues', { status: 'active' }),
     enabled: open && role === 'manager' && form.managerType === 'venue',
   });
 

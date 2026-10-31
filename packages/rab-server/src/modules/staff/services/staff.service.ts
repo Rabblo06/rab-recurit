@@ -508,7 +508,9 @@ export class StaffService {
 
       const sortKey = (dto.sort === 'email' && !visible('email')) || (dto.sort === 'defaultPayRatePence' && !visible('payRate')) ? 'createdAt' : dto.sort;
       const sortColumn = STAFF_SORT_COLUMNS[sortKey ?? 'createdAt'] ?? STAFF_SORT_COLUMNS.createdAt;
-      qb.orderBy(sortColumn, (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC');
+      // Unique tie-breaker (Phase C1): offset pages walked by fetchAllPages must never repeat or skip rows that tie on the sort column.
+      const staffDirection = (dto.direction ?? 'desc').toUpperCase() as 'ASC' | 'DESC';
+      qb.orderBy(sortColumn, staffDirection).addOrderBy('sp.id', staffDirection);
 
       const { skip, take } = paginationSkipTake(dto);
       qb.skip(skip).take(take);

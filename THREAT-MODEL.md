@@ -4347,3 +4347,102 @@ databases only.
   options) and jest-config (dev only). Local Trivy fs scan of yarn.lock: 0 HIGH / 0 CRITICAL before and after; `yarn npm
   audit --severity high --all --recursive`: no findings.
 - F4, F5 and F6 were production-deployment blockers; F1 and F2 above remain open.
+
+## Phase C1 — smart polling, keyset paging, realtime readiness, push deactivation (branch phase-c1/polling, not merged)
+
+Owner-approved plan + D1–D5 (2026-10-31). `REALTIME_ENABLED` / `PUSH_ENABLED` stay **false** in development, CI and
+production; realtime production enablement is additionally blocked on Phase D (see "publisher cost" below).
+
+### C1a: polling, pagination, keyset cursors
+- **Polling policy (web, Flutter, iOS).** Jitter ±20 %, one request in flight, foreground + visible only, 429 waits
+  `Retry-After` (floored at 1 s on every client — review F4), exponential backoff (cap 5 min), last good data kept on a
+  transient failure. Timer/background-driven requests send `X-Crewflow-Background: 1`, which never slides the idle window
+  (`session-validity.service.ts` bump CTE). Flutter did not send it before C1 (any poll kept the 7-day window open); push
+  ARRIVALS are background, taps are user activity (review F3).
+- **SECURITY TRADE-OFF (web, vetoable):** a web poll carries the background header only after 60 s without real input
+  (`shared/lib/user-activity.ts`, CF-20 rule): TanStack cannot tell an interval tick from a manual fetch. Effect: idle can
+  extend at most 60 s past the last real input, only while the person is active; an abandoned tab never keeps a session
+  alive. Fix if vetoed: a per-request flag in `shared/api.ts` + a custom scheduler.
+- **SECURITY TRADE-OFF (Flutter/iOS, vetoable):** a failed background refresh keeps the last authorised rows (first-page
+  polling merges page 1). After a scope change expressed by fewer rows (not 403), rows below page 1 of Sent Shifts can
+  linger on that device until the next full refresh (resume, pull-to-refresh, own mutation). 403 still clears everything;
+  logout/account switch disposes state.
+- **Pagination (D1).** `PaginationDto` default 50, max 200 (above → 400). `/offers/mine` and `/attendance/me/history`
+  keep their exact legacy behaviour (bare array, 500 rows) when no `limit`/`cursor`/`scope` is sent (installed apps).
+- **Keyset cursors (D2).** Opaque base64url `{v,t,i}` (microsecond UTC timestamp + uuid), strictly decoded (length cap,
+  canonical encoding, exact keys; any failure → 400), bound as `$n::timestamptz` / `$n::uuid`. Not signed by design: a
+  cursor carries no tenant or user state; scope, RLS and the caller's own profile are re-applied on every query, so a
+  forged or foreign cursor is only an ordering bound. Tests: `keyset-cursor.spec.ts` (31), `c1-keyset-paging.integration`
+  (13: legacy shapes, malformed cursors, cross-tenant cursor returns no foreign rows, no dup/skip under concurrent inserts).
+- Pipeline audit LATERAL now requires `entity_type = 'offer'` (same rows; a non-offer audit row with the same id/action no
+  longer marks a card cancelled).
+
+### C1b: realtime events and the SSE gateway
+- **Recipients** are computed server-side at emit time (`realtime-recipients.ts`) from the existing read rules (staff
+  member, sender, shift owner, that venue's managers, visible approvers, payroll readers with `payroll.view` — never venue
+  managers or staff), never from client input; one outbox row per recipient (`target_user_id`), written in the same
+  transaction as the business write (none on rollback). Every row passes an active-user filter (suspended/deleted users
+  never get a row — review F6). Payload = ids only (no names, emails, reasons, times or amounts; tested). The gateway
+  re-checks organisation and target user per event; heartbeat revalidation (session revoked/idle/absolute, security
+  version) closes streams after revocation or permission change.
+- **SECURITY TRADE-OFF (vetoable): workspace NULL on some outbox rows** (approvers, `notification.created`, recipients
+  outside the bound workspace): the gateway skips only its workspace re-check for those rows (organisation + target user
+  still enforced). Exposure: an id-only signal to a user already computed as a recipient in the same organisation (the
+  same shift ids reach approvers through existing notifications). Stricter option: per-recipient session-workspace lookup.
+- **SECURITY TRADE-OFF (vetoable): recipients computed under the actor's RLS** — a recipient the acting transaction cannot
+  see is not told (fails closed; polling reconciles). A SECURITY DEFINER resolver was rejected (cross-tenant read).
+- **SSE gateway.** Per-user cap enforced before the stream opens → 429 + `Retry-After: 30` (was: a 200 stream that closed
+  at once — reconnect-loop risk); `: keepalive` every ≤ 25 s; SSE never slides idle; disabled → 204 (all three clients
+  stop). The cap is per API instance (in-memory registry; review F7, as before C1).
+- **Publisher cost (blocks realtime production enablement):** with `REALTIME_ENABLED=true` the outbox publisher runs ~5
+  statements per org/workspace scope every 2 s whether or not events exist (measured ~25,800 statements/min idle at 171
+  scopes). It scales with tenants, not events — Phase D global claims are the intended fix. With the flag off (production)
+  the processor returns early: no cost.
+
+### C1b: push device deactivation (D5)
+- `POST /auth/logout` accepts an optional `pushDeviceId` (UUID); the server deactivates exactly that device for
+  `ctx.userId` inside the logout transaction (no IDOR: another user's device id matches nothing; a malformed id is a 400
+  before anything is revoked). Revoke-all (user), organisation revoke, platform-admin sign-out-everywhere and member
+  suspension deactivate all affected devices; a single-session revoke deactivates the user's devices only when no live
+  session remains (live = not revoked, not idle-expired, not past its absolute deadline — review F1 interim). Registering
+  the same provider token under a new device id supersedes the user's old row. Push payload stays generic ("You have a new
+  notification", ids only).
+- **Residual (Low, needs the prepared migration `docs/plans/C1-PUSH-SESSION-LINK-MIGRATION.md`, owner approval):** no
+  session→device link, so revoking ONE other session while others stay live does not deactivate that phone (review F1);
+  a provider token reused by a DIFFERENT user under a new device id is not superseded (review F2; fix: keyed token
+  fingerprint column). Exposure: generic "you have a notification" pings, no content.
+- **SECURITY TRADE-OFF (Flutter/iOS clients, vetoable):** the clients send `pushDeviceId` on logout and, if the server
+  answers 400 (field not yet deployed), resend the logout once without it; the 400 is a validation answer before anything
+  is revoked, so nothing is revoked twice. Flutter treats a 200 `/realtime/stream` answer without `text/event-stream` as
+  "disabled" for the session (fails closed; polling keeps data correct).
+
+### Independent security review (2026-10-31, read-only): no Critical / High / Medium
+- Fixed: F1 (live-session test), F3 (push arrival background), F4 (Retry-After floor), F6 (active-user filter),
+  F8 (bulk payroll audience computed once). Open (Low/Info, recorded above): F2, F5 (accepted trade-off), F7.
+
+### Pre-commit review fixes (2026-10-31)
+- **Permanent refusal drops data (Medium, fixed):** a poll that gets 401/403/404/410 no longer keeps the last rows on
+  screen with a "couldn't refresh" note. Web `showsError()` (`shared/lib/polling.ts`) for the AI overview/usage and
+  invitation tables; Flutter and iOS staff team list and Venue Manager team report. Transient failures still keep data.
+- **Offset pages walked by `fetchAllPages` (Medium, fixed):** `/shifts`, `/offers`, `/attendance`, `/venues` and `/staff`
+  now break sort ties by `id`, so walking every page never repeats or skips a row (the web calendar, dashboard and pickers
+  walk these since the page maximum dropped to 200).
+- **Idle window (Low, fixed):** Flutter's shift-boundary reloads (clock screen, shift status) are background traffic,
+  as on iOS. iOS: a queued Venue Manager refresh stays foreground if any caller was the person; realtime events are
+  ignored when no signed-in user is known; the bell follows the 60 s policy.
+- **Residual (Low, recorded):** staff own lists (offers, attendance, notifications) and the Venue Manager providers on
+  404/410 keep the last rows with a notice (own data / list endpoints; 401 signs out, 403 clears on the Venue Manager);
+  the Flutter-only 120 s realtime fallback has no iOS equivalent yet (realtime is off in production); the web Health tab
+  keeps its last health/queue data on any error (pre-C1 behaviour).
+
+### Independent security review of PR #22 (2026-10-31, read-only): no Critical / High / Medium
+- **F1 (Low, fixed):** a forged cursor with year `0000` passed the JS `Date` round trip but failed PostgreSQL's
+  `::timestamptz` cast → 500 instead of the promised 400. `isStrictTimestamp` now rejects year 0; unit + integration tests.
+- **F5 (Info, fixed):** the cost harness refuses an `API_BASE` that is not loopback (it only drives its own disposable
+  stack).
+- **Open (follow-ups):** F2 (Low) — the subscribe-time SSE cap 429 is unit-tested only, not on the wire (the handler-time
+  429 is integration-tested); F3 (Info) — `payroll.record_changed:<shift>:created` and `shift.updated:<id>:published`
+  keys are per-transition, so a repeat of the same transition would be deduplicated (stale UI until the next
+  poll; no confidentiality impact);
+  F4 (Info) — shift creator/sender recipients are not re-checked for current manager scope (id-only signal; the client
+  re-reads through scoped REST).

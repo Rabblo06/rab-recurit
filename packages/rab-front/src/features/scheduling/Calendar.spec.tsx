@@ -37,3 +37,25 @@ it('a failed schedule query is an error rather than an empty schedule claim',asy
  mount(true);expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the schedule');
  expect(screen.getByText('Schedule unavailable')).toBeInTheDocument();
 });
+
+it('Phase C1: the month walks every page of shifts (limit 200), so a busy month is never truncated; every request names a limit ≤ 200', async () => {
+ const shiftRows = Array.from({ length: 250 }, (_, i) => ({ id: `s${i}`, venueId: 'venue', jobRoleId: 'role', startsAt: workday.toISOString(), endsAt: new Date(workday.getTime() + 8 * 3600000).toISOString(), requiredCount: 1, filledCount: 1, status: 'fully_filled' }));
+ get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+  const params = config?.params ?? {};
+  const limit = Number(params.limit ?? 50);
+  if (limit > 200) return Promise.reject({ response: { status: 400 } });
+  const page = Number(params.page ?? 1);
+  if (url === '/shifts') return Promise.resolve({ data: { data: shiftRows.slice((page - 1) * limit, page * limit), total: shiftRows.length } });
+  if (url === '/venues') return Promise.resolve({ data: { data: [{ id: 'venue', name: 'Example hall' }], total: 1 } });
+  if (url === '/job-roles') return Promise.resolve({ data: [{ id: 'role', name: 'Waiting staff' }] });
+  if (url === '/offers') return Promise.resolve({ data: { data: [], total: 0 } });
+  throw new Error(url);
+ });
+ render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Calendar /></QueryClientProvider>);
+ const label = workday.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) + ', 250 shifts';
+ fireEvent.click(await screen.findByRole('button', { name: label }));
+ const shiftPages = get.mock.calls.filter(([url]) => url === '/shifts').map(([, c]) => [c.params.page, c.params.limit]);
+ expect(shiftPages).toEqual([[1, 200], [2, 200]]);
+ await waitFor(() => expect(get.mock.calls.some(([url]) => url === '/offers')).toBe(true));
+ for (const [url, config] of get.mock.calls) if (url !== '/job-roles') expect(Number(config?.params?.limit)).toBeLessThanOrEqual(200);
+});

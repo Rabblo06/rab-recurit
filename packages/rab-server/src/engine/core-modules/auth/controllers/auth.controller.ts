@@ -29,6 +29,7 @@ import { ActivateAccountDto } from '../dto/activate-account.dto';
 import { ForgotPasswordDto } from '../dto/forgot-password.dto';
 import { LoginDto } from '../dto/login.dto';
 import { RefreshDto } from '../dto/refresh.dto';
+import { LogoutDto } from '../dto/logout.dto';
 import { ResetPasswordDto } from '../dto/reset-password.dto';
 import { SetPasswordDto } from '../dto/set-password.dto';
 import { AuthenticatedRequest, JwtAuthGuard } from '../guards/jwt-auth.guard';
@@ -400,7 +401,7 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
   async logout(
-    @Body() dto: RefreshDto,
+    @Body() dto: LogoutDto,
     @AuthUser() ctx: AuthContext,
     @Req() request: AuthenticatedRequest,
     @Res({ passthrough: true }) response: Response,
@@ -408,7 +409,8 @@ export class AuthController {
     const { token: presentedToken } = this.resolvePresentedRefreshToken(request, dto);
     // Revokes the authenticated session (ctx.sessionId) and, if presented, the refresh-token family — each revokes the
     // refresh family AND the same-row `core.user_session` (whose web-cookie hash lives on that row).
-    await this.authService.logout(ctx, presentedToken);
+    // C1b (D5): `pushDeviceId` (optional) deactivates the caller's own push installation inside the logout transaction.
+    await this.authService.logout(ctx, presentedToken, dto.pushDeviceId);
     const mode = this.cookieMode;
     response.clearCookie(authCookieName('refresh', mode), authCookieClearOptions('refresh', mode));
     // P1C.1C: cookie deletion alone is never logout (the brief's own explicit requirement) — this

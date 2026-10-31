@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
-import 'dart:async';
 import 'package:provider/provider.dart';
+import '../core/auth/auth_provider.dart';
+import '../core/polling/poll_scheduler.dart';
+import '../core/realtime/realtime_connection_service.dart';
 import '../features/offers/offers_provider.dart';
 import '../features/home/attendance_provider.dart';
 import '../core/theme/schedule_tokens.dart';
@@ -29,29 +31,51 @@ class AppShell extends StatefulWidget {
 }
 
 class AppShellState extends State<AppShell>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
-  Timer? _reconcile;
+    with SingleTickerProviderStateMixin {
+  /// Staff reconcile (offers + active attendance): every 30 s ±20 % while the
+  /// app is in the foreground, background traffic, one run at a time, 429 /
+  /// backoff, and one immediate foreground refresh on resume ([PollScheduler]).
+  static const reconcileInterval = Duration(seconds: 30);
+  PollScheduler? _reconcile;
+
+  /// While the realtime stream is live the reconcile is only a safety net
+  /// ([realtimeFallbackPollInterval]); it reverts when the stream drops.
+  RealtimeConnectionService? _realtime;
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _reconcile = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted &&
-          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
-        _refresh();
-      }
-    });
+    if (!widget.readOnly) {
+      final api = context.read<AuthProvider?>()?.api;
+      _reconcile = PollScheduler(
+        interval: reconcileInterval,
+        identity: api == null ? null : () => api.sessionGeneration,
+        task: _reconcileOnce,
+      )..start();
+      _realtime = context.read<RealtimeConnectionService?>()
+        ?..addListener(_realtimeChanged);
+      _realtimeChanged();
+    }
   }
 
-  void _refresh() {
-    if (widget.readOnly) return;
-    context.read<OffersProvider>().load(silent: true);
-    context.read<AttendanceProvider>().refreshActive(silent: true);
-  }
+  void _realtimeChanged() => _reconcile?.setInterval(
+    _realtime?.isLive == true
+        ? realtimeFallbackPollInterval
+        : reconcileInterval,
+  );
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refresh();
+  Future<void> _reconcileOnce(PollTrigger trigger) async {
+    if (!mounted) return;
+    final offers = context.read<OffersProvider>();
+    final attendance = context.read<AttendanceProvider>();
+    final background = trigger.isBackground;
+    await Future.wait([
+      offers.load(silent: true, background: background, joinInFlight: true),
+      attendance.refreshActive(silent: true, background: background),
+    ]);
+    // Both providers keep their last good state; the scheduler still needs to
+    // know a read failed so it can back off (or honour Retry-After).
+    final failure = offers.lastFailure ?? attendance.lastActiveFailure;
+    if (failure != null) throw failure;
   }
 
   int _index = 0;
@@ -73,8 +97,8 @@ class AppShellState extends State<AppShell>
 
   @override
   void dispose() {
-    _reconcile?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
+    _realtime?.removeListener(_realtimeChanged);
+    _reconcile?.dispose();
     _tabTransition.dispose();
     super.dispose();
   }

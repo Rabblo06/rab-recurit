@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 
 import { api } from '../../../shared/api';
 import AdminPanelPage, { ADMIN_TAB_STORAGE_KEY } from './AdminPanelPage';
@@ -84,4 +84,40 @@ it('owner correction 2026-10-23: no organisation creation anywhere in the panel'
   expect(screen.queryByRole('button', { name: /new organisation/i })).toBeNull();
   expect(screen.queryByLabelText('Organisation name')).toBeNull();
   expect(get.mock.calls.some(([url]) => String(url) === '/admin/organisations')).toBe(false);
+});
+
+describe('Phase C1: the health report is polled fast only on the Health tab', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5); // jitter factor exactly 1
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  const tick = (ms: number) => act(async () => { await jest.advanceTimersByTimeAsync(ms); });
+  const reportCalls = () => get.mock.calls.filter(([u]: [string]) => u === '/admin/health/report').length;
+
+  it('elsewhere (General) the attention badge refreshes every 60 s, not every 15 s', async () => {
+    const { qc } = renderWithQuery(<AdminPanelPage />);
+    await tick(20);
+    expect(reportCalls()).toBe(1);
+    await tick(45_000);
+    expect(reportCalls()).toBe(1);
+    await tick(15_100);
+    expect(reportCalls()).toBe(2);
+    qc.clear();
+  });
+
+  it('on the Health tab the report is polled every 15 s', async () => {
+    window.localStorage.setItem(ADMIN_TAB_STORAGE_KEY, 'health');
+    const { qc } = renderWithQuery(<AdminPanelPage />);
+    await tick(20);
+    const first = reportCalls();
+    await tick(15_100);
+    expect(reportCalls()).toBe(first + 1);
+    await tick(15_000);
+    expect(reportCalls()).toBe(first + 2);
+    qc.clear();
+  });
 });

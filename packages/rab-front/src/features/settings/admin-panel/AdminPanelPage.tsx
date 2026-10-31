@@ -6,12 +6,15 @@ import { adminApi, type AdminTab } from './adminPanelApi';
 import AuditTab from './AuditTab';
 import ConfigTab from './ConfigTab';
 import GeneralTab from './GeneralTab';
-import HealthTab, { HEALTH_REFETCH_MS } from './HealthTab';
+import HealthTab from './HealthTab';
+import { pollingOptions } from '../../../shared/lib/polling';
 import SecurityTab from './SecurityTab';
 import WorkspacesTab from './WorkspacesTab';
 import './admin-panel.css';
 
 export const ADMIN_TAB_STORAGE_KEY = 'cf-admin-tab';
+/** The Health badge's refresh on every other tab (Phase C1: was the Health tab's 15 s on every tab). */
+export const HEALTH_BADGE_REFETCH_MS = 60_000;
 const TABS: Array<{ id: AdminTab; label: string }> = [
   { id: 'general', label: 'General' },
   { id: 'health', label: 'Health' },
@@ -48,7 +51,9 @@ export default function AdminPanelPage() {
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: async () => (await api.get<Me>('/auth/me')).data, staleTime: 5 * 60 * 1000 });
   const config = useQuery({ queryKey: ['admin', 'config'], queryFn: adminApi.config });
-  const health = useQuery({ queryKey: ['admin', 'health'], queryFn: adminApi.health, refetchInterval: HEALTH_REFETCH_MS });
+  // Phase C1: only the attention badge needs this outside the Health tab — 60 s ±20 % there; the Health tab's own observer
+  // of the same query polls every 15 s while it is open (one request either way: same key).
+  const health = useQuery({ queryKey: ['admin', 'health'], queryFn: adminApi.health, ...pollingOptions(HEALTH_BADGE_REFETCH_MS) });
   const myOrg = useQuery({
     queryKey: ['admin', 'org-summary', me?.organisationId],
     queryFn: () => adminApi.organisationSummary(me!.organisationId),

@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
-import { act, render, waitFor } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
-import { RealtimeProvider, useRealtimeStatus } from './RealtimeProvider';
+import { EVENT_INVALIDATION_DEBOUNCE_MS, RECONCILE_DEBOUNCE_MS, REALTIME_EVENT_QUERY_KEYS, RealtimeProvider, useIsRealtimeLive, useRealtimeStatus } from './RealtimeProvider';
 import { useSessionStatus } from './SessionProvider';
 import { getIdentitySnapshot, subscribeToSession } from './auth-session';
 import { startRealtimeClient } from './realtime-client';
@@ -12,8 +12,25 @@ jest.mock('./auth-session', () => ({
   getIdentitySnapshot: jest.fn(),
   subscribeToSession: jest.fn(),
 }));
-jest.mock('./realtime-client', () => ({ startRealtimeClient: jest.fn() }));
+jest.mock('./realtime-client', () => {
+  // The real status store, with the network client itself mocked.
+  let status = 'offline';
+  const listeners = new Set<() => void>();
+  return {
+    startRealtimeClient: jest.fn(),
+    getRealtimeStatus: () => status,
+    subscribeToRealtimeStatus: (l: () => void) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+    __setStatus: (next: string) => {
+      status = next;
+      listeners.forEach((l) => l());
+    },
+  };
+});
 
+const { __setStatus } = jest.requireMock('./realtime-client') as { __setStatus: (s: string) => void };
 const mockUseSessionStatus = useSessionStatus as jest.Mock;
 const mockGetIdentitySnapshot = getIdentitySnapshot as jest.Mock;
 const mockSubscribeToSession = subscribeToSession as jest.Mock;
@@ -21,7 +38,8 @@ const mockStartRealtimeClient = startRealtimeClient as jest.Mock;
 
 function StatusProbe() {
   const status = useRealtimeStatus();
-  return <div data-testid="status">{status}</div>;
+  const live = useIsRealtimeLive();
+  return <div data-testid="status">{`${status}|${live ? 'live' : 'not-live'}`}</div>;
 }
 
 function renderProvider(children: ReactNode) {
@@ -30,11 +48,19 @@ function renderProvider(children: ReactNode) {
   return { qc, ...render(<QueryClientProvider client={qc}>{children}</QueryClientProvider>) };
 }
 
+const invalidatedKeys = (qc: QueryClient) => (qc.invalidateQueries as jest.Mock).mock.calls.map((c) => JSON.stringify(c[0].queryKey));
+
 describe('RealtimeProvider', () => {
   let capturedOpts: { onEvent: (e: unknown) => void; onStatusChange: (s: string) => void } | null;
   let stopFn: jest.Mock;
 
+  // The client publishes to the status store AND calls onStatusChange; the mock mirrors that.
+  const status = (s: string) => act(() => { __setStatus(s); capturedOpts!.onStatusChange(s); });
+  const event = (type: string, eventId: string) => act(() => { capturedOpts!.onEvent({ type, eventId, entityId: 'x' }); });
+  const advance = (ms: number) => act(() => { jest.advanceTimersByTime(ms); });
+
   beforeEach(() => {
+    jest.useFakeTimers();
     mockUseSessionStatus.mockReturnValue('authenticated');
     mockGetIdentitySnapshot.mockReturnValue({ userId: 'user-1', sessionId: 'sess-1', generation: 1 });
     mockSubscribeToSession.mockReturnValue(() => {});
@@ -44,9 +70,13 @@ describe('RealtimeProvider', () => {
       capturedOpts = opts;
       return { stop: stopFn };
     });
+    __setStatus('offline');
   });
 
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
 
   it('does not start a connection when not authenticated', () => {
     mockUseSessionStatus.mockReturnValue('loading');
@@ -54,51 +84,127 @@ describe('RealtimeProvider', () => {
     expect(mockStartRealtimeClient).not.toHaveBeenCalled();
   });
 
-  it('invalidates the mapped query keys for a known event type', async () => {
-    const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
-    expect(mockStartRealtimeClient).toHaveBeenCalledTimes(1);
+  describe('C1b — event → query-key map', () => {
+    it('covers every event type in the server catalogue (KNOWN_REALTIME_EVENT_TYPES)', () => {
+      expect(Object.keys(REALTIME_EVENT_QUERY_KEYS).sort()).toEqual([
+        'attendance.changed',
+        'notification.created',
+        'offer.accepted',
+        'offer.confirmed',
+        'offer.declined',
+        'offer.expired',
+        'offer.rejected',
+        'offer.sent',
+        'offer.withdrawn',
+        'payroll.record_changed',
+        'shift.cancelled',
+        'shift.updated',
+        'shift_request.approved',
+        'shift_request.created',
+        'shift_request.declined',
+      ]);
+    });
 
-    act(() => { capturedOpts!.onEvent({ type: 'offer.accepted', eventId: 'e1' }); });
+    it('an offer event refreshes the offer screens, the venue pipeline/offers, shifts and both dashboard families', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      event('offer.declined', 'e1');
+      expect(qc.invalidateQueries).not.toHaveBeenCalled(); // coalesced, not immediate
+      advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+      expect(invalidatedKeys(qc).sort()).toEqual(
+        ['["dashboard"]', '["dashboard-summary"]', '["offer-batch"]', '["offers"]', '["shift"]', '["shifts"]', '["venue-offers"]', '["venue-pipeline"]'].sort(),
+      );
+    });
 
-    await waitFor(() => {
-      expect(qc.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['offers'] });
-      expect(qc.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['dashboard-summary'] });
+    it('notification.created refreshes only the notification bell/list', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      event('notification.created', 'n1');
+      advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+      expect(invalidatedKeys(qc)).toEqual(['["notifications"]']);
+    });
+
+    it('payroll.record_changed refreshes only payroll', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      event('payroll.record_changed', 'p1');
+      advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+      expect(invalidatedKeys(qc)).toEqual(['["payroll"]']);
+    });
+
+    it('attendance.changed refreshes attendance, the shift detail/timeline, shifts, the pipeline and the dashboard', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      event('attendance.changed', 'a1');
+      advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+      expect(invalidatedKeys(qc).sort()).toEqual(['["attendance"]', '["dashboard"]', '["shift"]', '["shifts"]', '["timeline"]', '["venue-pipeline"]'].sort());
+    });
+
+    it('a burst of events invalidates each key once (no refetch storm)', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      for (let i = 0; i < 20; i++) event('offer.sent', `s${i}`);
+      for (let i = 0; i < 20; i++) event('notification.created', `n${i}`);
+      advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+      const keys = invalidatedKeys(qc);
+      expect(keys.filter((k) => k === '["offers"]')).toHaveLength(1);
+      expect(keys.filter((k) => k === '["notifications"]')).toHaveLength(1);
+    });
+
+    it('ignores an event type outside the known backend catalogue rather than crashing', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      expect(() => event('something.invented', 'e2')).not.toThrow();
+      advance(5_000);
+      expect(qc.invalidateQueries).not.toHaveBeenCalled();
     });
   });
 
-  it('ignores an event type outside the known backend catalogue rather than crashing', async () => {
-    const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
-    (qc.invalidateQueries as jest.Mock).mockClear();
+  describe('C1b — debounced reconcile after a reconnect', () => {
+    it('does NOT reconcile on the very first-ever connect (nothing could have been missed yet)', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      status('connecting');
+      status('connected');
+      advance(RECONCILE_DEBOUNCE_MS * 2);
+      expect(qc.invalidateQueries).not.toHaveBeenCalled();
+    });
 
-    expect(() => act(() => { capturedOpts!.onEvent({ type: 'something.invented', eventId: 'e2' }); })).not.toThrow();
-    expect(qc.invalidateQueries).not.toHaveBeenCalled();
-  });
+    it('a reconnect reconciles every mapped key once, after the debounce — flapping reconnects collapse into one', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      status('connected');
+      status('reconnecting');
+      status('connected');
+      status('reconnecting');
+      status('connected');
+      advance(RECONCILE_DEBOUNCE_MS - 50);
+      expect(qc.invalidateQueries).not.toHaveBeenCalled();
+      advance(100);
+      const keys = invalidatedKeys(qc);
+      for (const k of ['["offers"]', '["notifications"]', '["payroll"]', '["venue-pipeline"]', '["venue-offers"]', '["shifts"]', '["dashboard"]', '["attendance"]']) {
+        expect(keys.filter((x) => x === k)).toHaveLength(1);
+      }
+    });
 
-  it('does NOT reconcile on the very first-ever connect (nothing could have been missed yet)', async () => {
-    const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
-    act(() => { capturedOpts!.onStatusChange('connected'); });
-    await waitFor(() => expect(qc.getQueryData(['probe'])).toBeUndefined());
-    expect(qc.invalidateQueries).not.toHaveBeenCalled();
-  });
+    it('coming back from a hidden-tab release (paused → connected) reconciles', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      status('connected');
+      status('paused');
+      status('connected');
+      advance(RECONCILE_DEBOUNCE_MS);
+      expect(invalidatedKeys(qc)).toContain('["offers"]');
+    });
 
-  it('reconciles (invalidates every real-time-relevant query) on a RECONNECT after a drop', async () => {
-    const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
-    act(() => { capturedOpts!.onStatusChange('connected'); }); // first connect — baseline
-    act(() => { capturedOpts!.onStatusChange('reconnecting'); }); // dropped
-    (qc.invalidateQueries as jest.Mock).mockClear();
-
-    act(() => { capturedOpts!.onStatusChange('connected'); }); // back — may have missed events while down
-
-    await waitFor(() => {
-      expect(qc.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['offers'] });
-      expect(qc.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['dashboard-summary'] });
+    it('a pending reconcile is dropped if the stream drops again before it fires (the next connect reconciles instead)', () => {
+      const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+      status('connected');
+      status('reconnecting');
+      status('connected');
+      status('reconnecting');
+      advance(RECONCILE_DEBOUNCE_MS * 2);
+      expect(qc.invalidateQueries).not.toHaveBeenCalled();
     });
   });
 
-  it('exposes connection status via useRealtimeStatus()', async () => {
+  it('exposes connection status and liveness via useRealtimeStatus() / useIsRealtimeLive()', async () => {
     const { findByTestId } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
-    act(() => { capturedOpts!.onStatusChange('connected'); });
-    expect((await findByTestId('status')).textContent).toBe('connected');
+    status('connected');
+    expect((await findByTestId('status')).textContent).toBe('connected|live');
+    status('limited');
+    expect((await findByTestId('status')).textContent).toBe('limited|not-live');
   });
 
   it('tears down the old connection and starts a fresh one on an identity-generation change', () => {
@@ -117,13 +223,26 @@ describe('RealtimeProvider', () => {
     expect(mockStartRealtimeClient).toHaveBeenCalledTimes(2); // fresh one opened under the new identity
   });
 
+  it('pending invalidations from the old identity never fire after an identity change', () => {
+    let sessionListener: () => void = () => {};
+    mockSubscribeToSession.mockImplementation((listener: () => void) => {
+      sessionListener = listener;
+      return () => {};
+    });
+    const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
+    event('offer.sent', 'old-1');
+    mockGetIdentitySnapshot.mockReturnValue({ userId: 'user-2', sessionId: 'sess-2', generation: 2 });
+    act(() => { sessionListener(); });
+    advance(EVENT_INVALIDATION_DEBOUNCE_MS * 4);
+    expect(qc.invalidateQueries).not.toHaveBeenCalled();
+  });
+
   it('stops the connection when the session transitions away from authenticated', () => {
-    const { rerender, container } = render(
+    const { rerender } = render(
       <QueryClientProvider client={new QueryClient()}>
         <RealtimeProvider><StatusProbe/></RealtimeProvider>
       </QueryClientProvider>,
     );
-    void container;
     expect(mockStartRealtimeClient).toHaveBeenCalledTimes(1);
 
     mockUseSessionStatus.mockReturnValue('unauthenticated');
@@ -135,30 +254,22 @@ describe('RealtimeProvider', () => {
     expect(stopFn).toHaveBeenCalledTimes(1);
   });
 
-  // ---------------------------------------------------------------------------------------- Stage
-  // 4 exit gate: "out-of-order events cannot restore stale business state" / "duplicate events do
-  // not create duplicate UI data". Both are structural, not behavioural, in this design: `onEvent`
-  // and the reconciliation path call ONLY `invalidateQueries` — never `setQueryData` with any part
-  // of the envelope's own payload. A query marked stale is always refetched from the live,
-  // authoritative API, so there is no cached "event-shaped" data for a late or repeated event to
-  // overwrite or duplicate in the first place. This test locks that invariant down: if a future
-  // change ever starts writing envelope data into the cache directly, this fails immediately.
-  it('never writes cache data directly from an event — out-of-order and duplicate delivery are structurally inert', async () => {
+  // Stage 4 exit gate: "out-of-order events cannot restore stale business state" / "duplicate events do not create
+  // duplicate UI data". Structural: `onEvent` and the reconciliation path call ONLY `invalidateQueries` — never
+  // `setQueryData` with any part of the envelope. If a future change starts writing envelope data into the cache
+  // directly, this fails immediately.
+  it('never writes cache data directly from an event — out-of-order and duplicate delivery are structurally inert', () => {
     const { qc } = renderProvider(<RealtimeProvider><StatusProbe/></RealtimeProvider>);
     const setQueryDataSpy = jest.spyOn(qc, 'setQueryData');
-
-    // "Out of order": a later-numbered business event followed by an earlier one.
-    act(() => { capturedOpts!.onEvent({ type: 'offer.accepted', eventId: 'evt-2', occurredAt: '2026-01-01T00:00:02.000Z' }); });
-    act(() => { capturedOpts!.onEvent({ type: 'offer.accepted', eventId: 'evt-1', occurredAt: '2026-01-01T00:00:01.000Z' }); });
-    // "Duplicate": the same eventId delivered twice (e.g. across a reconnect's fresh dedup window).
-    act(() => { capturedOpts!.onEvent({ type: 'offer.accepted', eventId: 'evt-1', occurredAt: '2026-01-01T00:00:01.000Z' }); });
-
-    await waitFor(() => expect(qc.invalidateQueries).toHaveBeenCalled());
+    event('offer.accepted', 'evt-2');
+    event('offer.accepted', 'evt-1');
+    event('offer.accepted', 'evt-1');
+    advance(EVENT_INVALIDATION_DEBOUNCE_MS);
+    expect(qc.invalidateQueries).toHaveBeenCalled();
     expect(setQueryDataSpy).not.toHaveBeenCalled();
   });
 
-  // ---------------------------------------------------------------------------------------- Stage
-  // 4 exit gate: "React remounts do not accumulate SSE connections or event listeners."
+  // Stage 4 exit gate: "React remounts do not accumulate SSE connections or event listeners."
   it('tears down its connection and session subscription on unmount — no leak across repeated mounts', () => {
     const unsubscribeFns: jest.Mock[] = [];
     mockSubscribeToSession.mockImplementation(() => {
@@ -177,8 +288,6 @@ describe('RealtimeProvider', () => {
       unmount();
     }
 
-    // Exactly one start per mount, each immediately paired with its own stop on unmount — never an
-    // accumulating set of live connections left behind by a prior mount.
     expect(mockStartRealtimeClient).toHaveBeenCalledTimes(3);
     expect(stopFn).toHaveBeenCalledTimes(3);
     expect(unsubscribeFns).toHaveLength(3);

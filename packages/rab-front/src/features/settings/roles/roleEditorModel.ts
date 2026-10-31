@@ -1,5 +1,6 @@
 import { api } from '../../../shared/api';
 import { getApiErrorMessage } from '../../../shared/lib/apiError';
+import { fetchAllPages } from '../../../shared/table-toolbar/pagination';
 
 /**
  * Types and API calls for the full-page role editor (Settings → Members → Roles → [Role]). The server owns every
@@ -188,6 +189,7 @@ export const roleApi = {
   remove: async (id: string) => {
     await api.delete(`/roles/${id}`);
   },
-  venues: async () => (await api.get<{ data: Array<{ id: string; name: string }> }>('/venues?limit=1000')).data.data,
+  // Every venue, in pages of 200 (Phase C1: the server's largest page is 200; `?limit=1000` is now a 400).
+  venues: () => fetchAllPages<{ id: string; name: string }>('/venues'),
   jobRoles: async () => (await api.get<Array<{ id: string; name: string }>>('/job-roles')).data,
 };

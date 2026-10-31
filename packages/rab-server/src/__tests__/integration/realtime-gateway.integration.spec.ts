@@ -34,14 +34,21 @@ import { EnvironmentService } from '../../engine/core-modules/environment/enviro
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { RealtimeConnectionRegistryService } from '../../engine/core-modules/realtime/realtime-connection-registry.service';
 import { RealtimeSubscriber } from '../../engine/core-modules/realtime/realtime-subscriber';
-import { realtimeUserChannel, REALTIME_ENVELOPE_SCHEMA_VERSION } from '../../engine/core-modules/realtime/realtime-envelope';
+import { realtimeUserChannel, REALTIME_ENVELOPE_SCHEMA_VERSION, validateAndBuildEnvelope } from '../../engine/core-modules/realtime/realtime-envelope';
+import { EmploymentStatus } from '@rab/shared';
+import { OfferService } from '../../modules/offer/services/offer.service';
+import { Shift } from '../../modules/scheduling/entities/shift.entity';
+import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
+import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
+import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
-jest.setTimeout(30_000);
+// 120 s: the hooks' budget too — booting AppModule cold (first suite of a run, ts-jest compile) can exceed 30 s.
+jest.setTimeout(120_000);
 
 interface SseEvent {
   event?: string;
@@ -51,7 +58,10 @@ interface SseEvent {
 
 interface SseConnection {
   events: SseEvent[];
+  /** C1b: `: connected` / `: keepalive` comment frames — bytes on the wire, never events. */
+  comments: string[];
   statusCode: () => number | undefined;
+  header: (name: string) => string | undefined;
   isClosed: () => boolean;
   waitForEvent: (timeoutMs?: number) => Promise<SseEvent>;
   waitForClose: (timeoutMs?: number) => Promise<void>;
@@ -60,7 +70,9 @@ interface SseConnection {
 
 function connectSse(baseUrl: string, headers: Record<string, string>): SseConnection {
   const events: SseEvent[] = [];
+  const comments: string[] = [];
   let statusCode: number | undefined;
+  let responseHeaders: http.IncomingHttpHeaders = {};
   let closed = false;
   let pendingResolve: ((e: SseEvent) => void) | null = null;
   let pendingCloseResolve: (() => void) | null = null;
@@ -69,12 +81,19 @@ function connectSse(baseUrl: string, headers: Record<string, string>): SseConnec
   const url = new URL('/rest/v1/realtime/stream', baseUrl);
   const req = http.request(url, { method: 'GET', headers }, (res) => {
     statusCode = res.statusCode;
+    responseHeaders = res.headers;
     res.on('data', (chunk: Buffer) => {
       buffer += chunk.toString('utf8');
       let idx: number;
       while ((idx = buffer.indexOf('\n\n')) !== -1) {
         const raw = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
+        const lines = raw.split('\n').filter((l) => l.length > 0);
+        if (lines.length === 0) continue;
+        if (lines.every((l) => l.startsWith(':'))) {
+          comments.push(...lines.map((l) => l.slice(1).trim()));
+          continue;
+        }
         const evt: SseEvent = { data: '' };
         for (const line of raw.split('\n')) {
           if (line.startsWith('data:')) evt.data += line.slice(5).trim();
@@ -105,7 +124,12 @@ function connectSse(baseUrl: string, headers: Record<string, string>): SseConnec
 
   return {
     events,
+    comments,
     statusCode: () => statusCode,
+    header: (name: string) => {
+      const v = responseHeaders[name.toLowerCase()];
+      return Array.isArray(v) ? v[0] : v;
+    },
     isClosed: () => closed,
     waitForEvent: (timeoutMs = 3000) =>
       new Promise((resolve, reject) => {
@@ -295,7 +319,7 @@ describeIfDb('realtime gateway — authenticated SSE stream (integration)', () =
     expect(JSON.parse(received.data).eventId).toBe(real.eventId);
   });
 
-  it('7. REALTIME_MAX_CONNECTIONS_PER_USER is enforced — a connection beyond the bound is refused, not queued', async () => {
+  it('7. REALTIME_MAX_CONNECTIONS_PER_USER is enforced — a connection beyond the bound is refused with 429 + Retry-After BEFORE any stream opens (C1b), not queued', async () => {
     const org = await factory.createOrganisation();
     const manager = await factory.createInternalManager(org, { label: 'rtg7' });
     const token = await factory.login(manager);
@@ -310,6 +334,54 @@ describeIfDb('realtime gateway — authenticated SSE stream (integration)', () =
     openConnections.push(conn3);
     await conn3.waitForClose();
     expect(conn3.events).toHaveLength(0);
+    // C1b: a real 429 with Retry-After — never a 200 stream that closes at once (which clients read as a drop and
+    // reconnected in a loop). No SSE content type, no comment bytes: the stream never opened.
+    expect(conn3.statusCode()).toBe(429);
+    expect(Number(conn3.header('retry-after'))).toBeGreaterThan(0);
+    expect(conn3.header('content-type') ?? '').not.toContain('text/event-stream');
+    expect(conn3.comments).toHaveLength(0);
+    // The two live streams are untouched.
+    expect(conn1.isClosed()).toBe(false);
+    expect(conn2.isClosed()).toBe(false);
+  });
+
+  it('C1b — keepalive: a `: connected` comment at once, then `: keepalive` comments on the wire while nothing happens (heartbeat 5 s here)', async () => {
+    const org = await factory.createOrganisation();
+    const manager = await factory.createInternalManager(org, { label: 'rtg-keepalive' });
+    const token = await factory.login(manager);
+    const conn = connectSse(baseUrl, { Authorization: `Bearer ${token}` });
+    openConnections.push(conn);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(conn.statusCode()).toBe(200);
+    expect(conn.header('content-type')).toContain('text/event-stream');
+    expect(conn.comments).toContain('connected');
+
+    await new Promise((r) => setTimeout(r, 11_000)); // ≥ 2 keepalive intervals (min(heartbeat 5 s, 25 s))
+    expect(conn.comments.filter((c) => c === 'keepalive').length).toBeGreaterThanOrEqual(2);
+    expect(conn.events).toHaveLength(0); // comments are never events
+    expect(conn.isClosed()).toBe(false);
+  }, 20_000);
+
+  it('C1b — the per-user slot is released when a stream closes, so a refused client gets in on its retry', async () => {
+    const org = await factory.createOrganisation();
+    const manager = await factory.createInternalManager(org, { label: 'rtg-slot' });
+    const token = await factory.login(manager);
+    const a = connectSse(baseUrl, { Authorization: `Bearer ${token}` });
+    const b = connectSse(baseUrl, { Authorization: `Bearer ${token}` });
+    openConnections.push(a, b);
+    await new Promise((r) => setTimeout(r, 200));
+    const refused = connectSse(baseUrl, { Authorization: `Bearer ${token}` });
+    openConnections.push(refused);
+    await refused.waitForClose();
+    expect(refused.statusCode()).toBe(429);
+
+    a.close();
+    await new Promise((r) => setTimeout(r, 200));
+    const retry = connectSse(baseUrl, { Authorization: `Bearer ${token}` });
+    openConnections.push(retry);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(retry.statusCode()).toBe(200);
+    expect(retry.comments).toContain('connected');
   });
 
   it('8. an exact duplicate event (same eventId) is delivered to one connection only once', async () => {
@@ -549,4 +621,71 @@ describeIfDb('realtime gateway — authenticated SSE stream (integration)', () =
     await conn.waitForClose(8000);
     expect(conn.isClosed()).toBe(true);
   }, 15_000);
+  // ------------------------------------------------------------------ Phase C1b: a REAL business transition, end to
+  // end through the outbox → (the publisher's own validate/build/publish step) → Redis → gateway → the wire. Proves the
+  // server-computed recipients receive it, a same-organisation non-recipient does not, and another organisation's user
+  // never does — even though every one of them holds a live, valid stream at the time.
+  it('C1b — offer.declined reaches exactly its recipients over SSE; a same-org outsider and another organisation receive nothing', async () => {
+    const org = await factory.createOrganisation();
+    const owner = await factory.createInternalManager(org, { label: 'rtg-e2e-owner' });
+    const staff = await factory.createStaff(org, { owner, label: 'rtg-e2e-staff' });
+    const bystander = await factory.createStaff(org, { owner, label: 'rtg-e2e-bystander' });
+    const foreignOrg = await factory.createOrganisation();
+    const foreign = await factory.createInternalManager(foreignOrg, { label: 'rtg-e2e-foreign' });
+    const ownerCtx = { organisationId: org.id, workspaceId: owner.workspaceId, userId: owner.userId, role: '' };
+    const shiftId = await tenantContext.runInTenantContext(ownerCtx, async (m) => {
+      await m.update(StaffProfile, { id: staff.profileId! }, { employmentStatus: EmploymentStatus.ACTIVE });
+      const venue = await m.save(Venue, { organisationId: org.id, name: `RTG E2E ${randomUUID().slice(0, 6)}`, createdBy: owner.userId, workspaceId: owner.workspaceId! });
+      const role = await m.save(JobRole, { organisationId: org.id, name: `RTG E2E ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: owner.userId, workspaceId: owner.workspaceId! });
+      const startsAt = new Date(Date.now() + 5 * 24 * 3600 * 1000);
+      const endsAt = new Date(startsAt.getTime() + 4 * 3600 * 1000);
+      const shift = await m.save(Shift, { organisationId: org.id, venueId: venue.id, jobRoleId: role.id, startsAt, endsAt, defaultStartsAt: startsAt, defaultEndsAt: endsAt, breakMinutes: 0, requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: owner.userId, workspaceId: owner.workspaceId! } as Partial<Shift>);
+      return shift.id;
+    });
+    const offers = app.get(OfferService);
+    const offer = await offers.send(ownerCtx, shiftId, { staffProfileId: staff.profileId! });
+
+    const ownerConn = connectSse(baseUrl, { Authorization: `Bearer ${await factory.login(owner)}` });
+    const staffConn = connectSse(baseUrl, { Authorization: `Bearer ${await factory.login(staff)}` });
+    const bystanderConn = connectSse(baseUrl, { Authorization: `Bearer ${await factory.login(bystander)}` });
+    const foreignConn = connectSse(baseUrl, { Authorization: `Bearer ${await factory.login(foreign)}` });
+    openConnections.push(ownerConn, staffConn, bystanderConn, foreignConn);
+    await new Promise((r) => setTimeout(r, 300));
+
+    await offers.decline({ organisationId: org.id, workspaceId: owner.workspaceId, userId: staff.userId, role: '' }, offer.id, { reason: 'busy' } as never);
+    // The publisher's step, verbatim: claim → validateAndBuildEnvelope (ids only, from authoritative columns) → publish.
+    const claimed = await adminDataSource.manager.query(
+      `SELECT id, organisation_id, workspace_id, target_user_id, event_type, entity_id, schema_version, created_at FROM core.realtime_event WHERE entity_id = $1 AND event_type = 'offer.declined'`,
+      [offer.id],
+    );
+    expect(claimed.length).toBeGreaterThan(0);
+    for (const row of claimed) {
+      const built = validateAndBuildEnvelope(
+        { id: row.id, organisationId: row.organisation_id, workspaceId: row.workspace_id, targetUserId: row.target_user_id, eventType: row.event_type, entityId: row.entity_id, schemaVersion: row.schema_version, createdAt: new Date(row.created_at) },
+        nodeEnv,
+      );
+      expect(built.ok).toBe(true);
+      if (built.ok) await publishRaw(built.channel, JSON.stringify(built.envelope));
+    }
+    // A forged copy addressed to the foreign user's channel but carrying THIS organisation is dropped by the gateway.
+    await publishRaw(realtimeUserChannel(nodeEnv, foreign.userId), JSON.stringify(validEnvelope({ organisationId: org.id, targetUserId: foreign.userId, type: 'offer.declined', entityId: offer.id })));
+
+    // Both may already have arrived (waitForEvent only catches the NEXT frame), so poll the recorded events instead.
+    const deliveredTo = async (conn: SseConnection) => {
+      for (let i = 0; i < 60 && conn.events.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+      expect(conn.events).toHaveLength(1);
+      return conn.events[0]!;
+    };
+    const toOwner = await deliveredTo(ownerConn);
+    const toStaff = await deliveredTo(staffConn);
+    for (const received of [toOwner, toStaff]) {
+      expect(received.event).toBe('offer.declined');
+      const body = JSON.parse(received.data);
+      expect(body.entityId).toBe(offer.id);
+      expect(Object.keys(body).sort()).toEqual(['entityId', 'eventId', 'occurredAt', 'organisationId', 'targetUserId', 'type', 'version', 'workspaceId']);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(bystanderConn.events).toHaveLength(0);
+    expect(foreignConn.events).toHaveLength(0);
+  }, 30_000);
 });

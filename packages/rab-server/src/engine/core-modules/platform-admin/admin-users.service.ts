@@ -24,6 +24,7 @@ import {
   RawWorkspaceRow,
 } from './admin-panel.mappers';
 import { PlatformAdminService } from './platform-admin.service';
+import { deactivateAllPushDevicesForUser } from '../push/push-device-deactivation';
 
 type Actor = Pick<AuthContext, 'userId' | 'organisationId' | 'workspaceId' | 'sessionId' | 'inspectedBy'>;
 
@@ -184,6 +185,8 @@ export class AdminUsersService {
         const [, tokens] = await manager.query<[unknown[], number]>('UPDATE core.refresh_token SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [targetUserId]);
         revokedSessions = sessions ?? 0;
         revokedRefreshTokens = tokens ?? 0;
+        // C1b push (D5): signed out everywhere → no device keeps receiving this account's pushes (target org binding).
+        await deactivateAllPushDevicesForUser(manager, targetUserId, 'sessions_revoked:admin_signed_out_everywhere');
         await this.securityVersion.bumpUser(manager, targetUserId);
         // The target organisation's own trail shows who did it and why (platform-admin actor: allowed cross-organisation).
         await recordAdminPanelAudit(this.audit, manager, { organisationId: targetOrg, userId: actor.userId }, ADMIN_PANEL_AUDIT_ACTION.SESSIONS_REVOKED, {

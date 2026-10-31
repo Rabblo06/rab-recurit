@@ -9,7 +9,8 @@ struct ShellTab: Identifiable, Hashable {
 
 /// Shared shell: every tab keeps its own NavigationStack alive (switching
 /// tabs never reloads or loses scroll position), and the floating tab bar
-/// sits in the bottom safe-area inset so content scrolls clear of it.
+/// sits in the bottom safe-area inset so content scrolls clear of it. Each
+/// tab gets `\.shellTabActive` so its pollers stop while it is hidden.
 struct TabShell<Content: View>: View {
     let tabs: [ShellTab]
     let content: (ShellTab) -> Content
@@ -29,6 +30,9 @@ struct TabShell<Content: View>: View {
                     content(tab)
                         .toolbar(.hidden, for: .navigationBar)
                 }
+                // Hidden tabs stay mounted, so their screens never get
+                // onDisappear: pollers read this instead (Phase C1).
+                .environment(\.shellTabActive, active)
                 .opacity(active ? 1 : 0)
                 .allowsHitTesting(active)
                 .accessibilityHidden(!active)

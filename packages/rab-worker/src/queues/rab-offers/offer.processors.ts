@@ -11,8 +11,8 @@ export class OfferScanProcessor {
 
   @Process('offer-expiry')
   async offerExpiry(): Promise<void> {
-    const { runtimeDataSource, tenantContext, notificationService, auditService, logger } = this.deps.get();
-    const result = await runOfferExpiryCycle(runtimeDataSource, tenantContext, notificationService, auditService);
+    const { runtimeDataSource, tenantContext, notificationService, auditService, realtimeEventService, logger } = this.deps.get();
+    const result = await runOfferExpiryCycle(runtimeDataSource, tenantContext, notificationService, auditService, realtimeEventService);
     if (result.expired) logger.log(`offer expiry: expired=${result.expired}`);
   }
 

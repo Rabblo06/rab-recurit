@@ -6,15 +6,26 @@ import 'dart:convert';
 /// never get ahead of the backend's own `KNOWN_REALTIME_EVENT_TYPES`.
 const int realtimeEnvelopeSchemaVersion = 1;
 
-/// Only these two event types are actually produced end-to-end today
-/// (`OfferService.sendOne()` / `OfferService.staffAccept()`, see
-/// `realtime-event.service.ts`). Adding a type here with no real backend
-/// producer is exactly what the Stage 5 brief forbids — do not extend this
-/// set speculatively.
+/// The server's recipient-only catalogue this app acts on (Phase C1b; mirrors
+/// iOS `RealtimeEnvelope.knownTypes`). `navigation_layout.saved` is a
+/// web-console event and is ignored here. Never ahead of the server's
+/// `KNOWN_REALTIME_EVENT_TYPES` (realtime-envelope.ts).
 const Set<String> knownRealtimeEventTypes = {
   'offer.sent',
   'offer.accepted',
   'offer.confirmed',
+  'offer.declined',
+  'offer.withdrawn',
+  'offer.expired',
+  'offer.rejected',
+  'shift.updated',
+  'shift.cancelled',
+  'shift_request.created',
+  'shift_request.approved',
+  'shift_request.declined',
+  'attendance.changed',
+  'notification.created',
+  'payroll.record_changed',
 };
 
 final RegExp _uuidPattern = RegExp(

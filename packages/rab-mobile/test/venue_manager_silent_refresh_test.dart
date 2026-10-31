@@ -11,9 +11,10 @@ import 'support/biometric_test_support.dart';
 
 /// Mirrors `AttendanceProvider`'s own `silent` regression tests (and the web
 /// Users-table fix both are modelled on): `VenueManagerProvider.refresh()`
-/// unconditionally set `loading = true` on every call, including the 5s
-/// Sent Shifts poll and the app-resume refresh — both of which already have
-/// good data on screen. A real first load or a user-initiated action must
+/// unconditionally set `loading = true` on every call, including the
+/// app-resume refresh (and, before Phase C1, the 5 s Sent Shifts full-refresh
+/// poll, now a first-page read that never touches `loading`) — which already
+/// has good data on screen. A real first load or a user-initiated action must
 /// still show loading as before.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

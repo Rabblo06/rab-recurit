@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct CrewflowApp: App {
+    /// Push hooks only (token callbacks, notification presentation/taps).
+    @UIApplicationDelegateAdaptor(CrewflowAppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
 
     var body: some Scene {

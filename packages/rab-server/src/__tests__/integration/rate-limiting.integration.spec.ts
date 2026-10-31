@@ -108,6 +108,25 @@ describeIfDb('rate limiting (integration)', () => {
     expect(sixth.status).toBe(429);
   });
 
+  it('the GLOBAL limit (120/min/IP) answers the 121st request with 429 and a Retry-After in seconds, which pollers rely on', async () => {
+    // Phase C1 (contract §4): every polling client waits `Retry-After` after a 429. This is the global tier, not a
+    // per-route @Throttle override: an ordinary authenticated route, unauthenticated here (the throttler guard runs
+    // before the JWT guard, so 120 cheap 401s fill the bucket). A unique trusted client IP (CF-Connecting-IP, honoured
+    // because loopback is a trusted proxy in this suite) keeps this bucket away from every other test.
+    const clientIp = `198.51.100.${120 + Math.floor(Math.random() * 100)}`;
+    const hit = () => request(app.getHttpServer()).get('/rest/v1/offers/mine').set('CF-Connecting-IP', clientIp);
+    for (let i = 0; i < 120; i++) {
+      const res = await hit();
+      expect(res.status).toBe(401);
+    }
+    const limited = await hit();
+    expect(limited.status).toBe(429);
+    const retryAfter = Number(limited.headers['retry-after']);
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(60);
+  });
+
   it('does not throttle a normal authenticated GET route at the same volume', async () => {
     for (let i = 0; i < 6; i++) {
       const res = await request(app.getHttpServer()).get('/healthz');

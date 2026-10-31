@@ -25,8 +25,26 @@ struct StaffRepository {
 
     // MARK: Offers (§3.1)
 
-    func myOffers(background: Bool = false) async throws -> [StaffOfferSummary] {
-        try await api.get("/offers/mine", options: reads(background), as: [StaffOfferSummary].self)
+    /// Page sizes (API contract §1/§3). `current` is bounded server-side
+    /// (shifts not yet ended + offers sent in the last 30 days), so walking
+    /// it is cheap enough for every poll.
+    static let currentOffersPageSize = 50
+    static let allOffersPageSize = 200
+    static let historyPageSize = 200
+
+    /// `GET /offers/mine?scope=…&limit=…`, every keyset page until
+    /// `nextCursor` is null (`sent_at DESC, id DESC`). An older server that
+    /// still answers the bare array is read with ONE legacy call (no
+    /// parameters, its original default) — see `KeysetPaging`.
+    func myOffers(scope: StaffOfferScope, background: Bool = false) async throws -> [StaffOfferSummary] {
+        try await KeysetPaging.fetchAll(
+            api,
+            path: "/offers/mine",
+            query: "scope=\(scope.rawValue)",
+            limit: scope == .all ? Self.allOffersPageSize : Self.currentOffersPageSize,
+            options: reads(background),
+            as: StaffOfferSummary.self
+        )
     }
 
     /// 201 `JobOffer`; ignored (Flutter reloads `/offers/mine`).
@@ -45,10 +63,18 @@ struct StaffRepository {
         try await api.get("/attendance/me/active", options: reads(background), as: StaffActiveAttendance.self)
     }
 
-    /// Plain array, newest first. The server does NOT filter by payroll; the
-    /// History gate is applied client-side (`StaffHistoryRules`).
+    /// Newest first, every keyset page (`limit` + `cursor` until `nextCursor`
+    /// is null; legacy bare array from an older server). The server does NOT
+    /// filter by payroll; the History gate is applied client-side
+    /// (`StaffHistoryRules`).
     func attendanceHistory(background: Bool = false) async throws -> [StaffAttendanceSummary] {
-        try await api.get("/attendance/me/history", options: reads(background), as: [StaffAttendanceSummary].self)
+        try await KeysetPaging.fetchAll(
+            api,
+            path: "/attendance/me/history",
+            limit: Self.historyPageSize,
+            options: reads(background),
+            as: StaffAttendanceSummary.self
+        )
     }
 
     /// [TEST-DB] `GET /attendance/me/shift/:shiftId/check-in`.
@@ -71,8 +97,8 @@ struct StaffRepository {
         try await api.post("/attendance/clock-out", body: body, options: Self.nonRepeatable, as: StaffAttendanceSummary.self)
     }
 
-    func team(shiftId: String) async throws -> [StaffTeamMember] {
-        try await api.get("/attendance/me/shift/\(StaffPath.segment(shiftId))/team", as: [StaffTeamMember].self)
+    func team(shiftId: String, background: Bool = false) async throws -> [StaffTeamMember] {
+        try await api.get("/attendance/me/shift/\(StaffPath.segment(shiftId))/team", options: reads(background), as: [StaffTeamMember].self)
     }
 
     // MARK: Notifications (§9)
@@ -131,6 +157,14 @@ struct StaffRepository {
     func document(fileId: String) async throws -> DownloadedFile {
         try await api.downloadFile("/files/\(StaffPath.segment(fileId))/download")
     }
+}
+
+/// `/offers/mine` scope (API contract §3): `current` = offers whose shift has
+/// not ended plus offers sent in the last 30 days; `all` = every offer (the
+/// explicit history path, e.g. the Calendar's past months).
+enum StaffOfferScope: String, Sendable {
+    case current
+    case all
 }
 
 /// Path segment encoding: ids are UUIDs, but anything else is percent-encoded

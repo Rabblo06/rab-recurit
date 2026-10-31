@@ -52,8 +52,8 @@ class VenueHistoryScreen extends StatelessWidget {
   );
 }
 
-/// Same guard as every Venue Manager page: a failed provider refresh (e.g. a revoked permission) replaces the list
-/// with the error state and drops its rows; no report permission, no list.
+/// Same guard as every Venue Manager page: a revoked permission (403) or a first load that failed replaces the list
+/// with the error state and drops its rows (an outage keeps them, with a notice); no report permission, no list.
 Widget _guarded(Widget list) => VmData(
   keepContentWhileRefreshing: true,
   builder: (p) => p.allows('report.view')

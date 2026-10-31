@@ -10,6 +10,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { contentSwap } from '../../shared/motion';
 import StaffReviewsTab from './StaffReviewsTab';
 import { api } from '../../shared/api';
+import { lastAnsweredAt, pollingOptions, settlingInterval } from '../../shared/lib/polling';
 import Drawer from '../../shared/components/Drawer';
 import Avatar from '../../shared/components/Avatar';
 import DateInput, { isoToDisplay, todayIso } from '../../shared/components/DateInput';
@@ -465,14 +466,24 @@ export default function UserDetailPanel() {
 
   const endpoint = userType === 'staff' ? 'staff' : scope === 'workspace' ? 'venue-managers' : 'managers';
 
+  // While the invitation email is queued/sending, re-read the record on the settling backoff (Phase C1: 2 → 4 → 8 → 15 s,
+  // stopping after 3 minutes; was every 2 s with no limit), paused while the tab is hidden.
+  const invitationPendingSince = useRef(new Map<string, number>());
   const { data: record, isLoading } = useQuery({
     queryKey: [endpoint, id],
     queryFn: async () => { const { data } = await api.get(`/${endpoint}/${id}`); return data; },
     enabled: !!id && open,
-    refetchInterval: (query) => {
+    ...pollingOptions((query) => {
       const status = (query.state.data as { invitationStatus?: InvitationStatus } | undefined)?.invitationStatus;
-      return status === 'queued' || status === 'sending' ? 2000 : false;
-    },
+      const key = query.queryHash;
+      if (status !== 'queued' && status !== 'sending') {
+        invitationPendingSince.current.delete(key);
+        return false;
+      }
+      const answeredAt = lastAnsweredAt(query);
+      if (!invitationPendingSince.current.has(key)) invitationPendingSince.current.set(key, answeredAt);
+      return settlingInterval(invitationPendingSince.current.get(key)!, answeredAt);
+    }),
   });
   // A workspace Venue Manager opened by their own Manager (reference layout: More tabs, Assigned staff tab, photo tile).
   const vmScope = userType === 'manager' && scope === 'workspace' && record?.type === 'venue';

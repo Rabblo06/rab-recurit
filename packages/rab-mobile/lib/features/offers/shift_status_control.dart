@@ -27,25 +27,27 @@ class ShiftStatusControl extends StatefulWidget {
 class _ShiftStatusControlState extends State<ShiftStatusControl>
     with WidgetsBindingObserver {
   Timer? _tick;
-  int _seconds = 0;
   DateTime? _requestedBoundary;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Phase C1: no periodic `/offers/mine` poll here any more — AppShell's
+    // reconcile already polls it every 30 s. This tick only re-renders the
+    // live elapsed time and reloads once when the server's own next
+    // transition time is reached.
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || !TickerMode.of(context)) return;
       final provider = context.read<OffersProvider>();
       final boundary = widget.offer.presentation?.nextTransitionAt;
       final now = provider.trustedNow;
-      _seconds++;
-      if (_seconds % 30 == 0 ||
-          (boundary != null &&
-              now != null &&
-              !now.isBefore(boundary) &&
-              _requestedBoundary != boundary)) {
+      if (boundary != null &&
+          now != null &&
+          !now.isBefore(boundary) &&
+          _requestedBoundary != boundary) {
         _requestedBoundary = boundary;
-        provider.load(silent: true);
+        // Timer-driven: background traffic (never slides the idle window).
+        provider.load(silent: true, background: true);
       }
       if (widget.offer.presentation?.state == 'live') setState(() {});
     });
@@ -53,8 +55,9 @@ class _ShiftStatusControlState extends State<ShiftStatusControl>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Shares AppShell's resume reload when both fire for the same resume.
     if (state == AppLifecycleState.resumed) {
-      context.read<OffersProvider>().load(silent: true);
+      context.read<OffersProvider>().load(silent: true, joinInFlight: true);
     }
   }
 

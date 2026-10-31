@@ -129,7 +129,7 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     await p.managerConfirmationTimeout();
     await p.replacementStaff();
     const base = [d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService];
-    expect((offers.runOfferExpiryCycle as jest.Mock).mock.calls[0]).toEqual(base);
+    expect((offers.runOfferExpiryCycle as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService]);
     expect((offers.runManagerConfirmationTimeoutCycle as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService, 45]);
     expect((replacement.runReplacementStaffCycle as jest.Mock).mock.calls[0]).toEqual(base);
   });

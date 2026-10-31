@@ -403,8 +403,8 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
       expect(res.body.archivedAt).toEqual(expect.any(String));
       expect(await audit('manager.archived', target.profileId!)).toHaveLength(1);
       const ids = (r: request.Response) => (r.body.data as Array<{ id: string }>).map((m) => m.id);
-      expect(ids(await http().get('/rest/v1/managers?limit=1000').set(auth(tokenCeo)))).not.toContain(target.profileId);
-      expect(ids(await http().get('/rest/v1/managers?limit=1000&includeArchived=true').set(auth(tokenCeo)))).toContain(target.profileId);
+      expect(ids(await http().get('/rest/v1/managers?limit=200').set(auth(tokenCeo)))).not.toContain(target.profileId);
+      expect(ids(await http().get('/rest/v1/managers?limit=200&includeArchived=true').set(auth(tokenCeo)))).toContain(target.profileId);
       const re = await http().post(`/rest/v1/managers/${target.profileId}/reactivate`).set(auth(tokenCeo));
       expect(re.status).toBe(409);
       expect((await http().post(`/rest/v1/managers/${target.profileId}/restore`).set(auth(tokenOtherCeo))).status).toBe(404);

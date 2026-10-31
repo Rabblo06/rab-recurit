@@ -1,5 +1,17 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, type Query } from '@tanstack/react-query';
 import { api } from '../api';
+import { lastAnsweredAt, pollingOptions } from '../lib/polling';
+
+/** When the current CREATING wait was first observed, per query (the backoff below is measured from it). */
+const creatingSince = new WeakMap<Query<any, any, any, any>, number>();
+
+/** Bounded backoff for a long CREATING: the base interval for a minute, then 5 s, 10 s, and 30 s from five minutes. */
+export function creatingInterval(elapsedMs: number, baseMs: number): number {
+  if (elapsedMs < 60_000) return baseMs;
+  if (elapsedMs < 120_000) return Math.max(baseMs, 5_000);
+  if (elapsedMs < 300_000) return Math.max(baseMs, 10_000);
+  return Math.max(baseMs, 30_000);
+}
 
 /**
  * The real, authoritative backend enum (`core.manager_workspace.schema_status`, CHECK-constrained
@@ -61,7 +73,7 @@ export function useMyWorkspace(opts: { pollWhileCreating?: boolean; pollInterval
         // flips `schema_status`). NOTE: that cache is disabled by default in this environment
         // (`CORE_ENTITY_CACHE_ENABLED=false`) and was confirmed NOT to be the cause of a separate,
         // live "stuck on Preparing" report — kept anyway as a genuine fix for any environment where
-        // it is enabled. The actual live cause turned out to be `refetchIntervalInBackground` below.
+        // it is enabled. The actual live cause turned out to be the hidden-tab polling stall (see below).
         const { data } = await api.get<MyWorkspace>(`/manager-workspaces/me${opts.pollWhileCreating ? '?fresh=1' : ''}`);
         return data;
       } catch (err: any) {
@@ -75,18 +87,22 @@ export function useMyWorkspace(opts: { pollWhileCreating?: boolean; pollInterval
     // instead of firing a request guaranteed to 404. UX-only: the real enforcement is still the
     // backend's own ownership-only `/manager-workspaces/me` lookup.
     enabled: opts.enabled ?? true,
-    refetchInterval: opts.pollWhileCreating
-      ? (query) => (query.state.data?.schemaStatus === 'CREATING' ? opts.pollIntervalMs ?? 2500 : false)
-      : undefined,
-    // Confirmed live, not theoretical: TanStack Query's `refetchInterval` only fires while the
-    // document is visible by default (`refetchIntervalInBackground` defaults to `false`) — if the
-    // browser tab loses focus even once while CREATING (switching windows, reading something else),
-    // automatic polling silently stalls. The app's global `QueryClient` ALSO sets
-    // `refetchOnWindowFocus: false`, so returning to the tab doesn't resume it either — only a
-    // manual action (`WorkspacePreparationScreen`'s "Check again", which calls `refetch()` directly)
-    // broke it loose, which is exactly the "stuck until I click Check again 10+ times" symptom this
-    // was reported as. `pollWhileCreating` exists specifically because the caller is actively
-    // waiting on a time-sensitive one-time event — background-throttling that wait serves no one.
-    refetchIntervalInBackground: opts.pollWhileCreating ? true : undefined,
+    // Phase C1 (shared/lib/polling.ts): while CREATING, poll only while the tab is visible and re-read once, at once, the
+    // moment it becomes visible again. History: polling used to stall silently once the tab had been hidden (the app's
+    // QueryClient disables refetchOnWindowFocus, so returning to the tab did not resume it — the live "stuck on
+    // Preparing until I click Check again" report), first fixed by polling while hidden (`refetchIntervalInBackground`);
+    // the visible catch-up fixes the same symptom without background traffic. A long CREATING backs off (2.5 s for the
+    // first minute, then 5 s, 10 s, and 30 s after five minutes) and never stops on its own; "Check again" stays.
+    ...(opts.pollWhileCreating
+      ? pollingOptions((query: Query<any, any, any, any>) => {
+          if ((query.state.data as MyWorkspace | null | undefined)?.schemaStatus !== 'CREATING') {
+            creatingSince.delete(query);
+            return false;
+          }
+          const answeredAt = lastAnsweredAt(query);
+          if (!creatingSince.has(query)) creatingSince.set(query, answeredAt);
+          return creatingInterval(answeredAt - creatingSince.get(query)!, opts.pollIntervalMs ?? 2500);
+        })
+      : {}),
   });
 }

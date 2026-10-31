@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -27,9 +27,11 @@ const LANES = {
   attendance: ['Late staff', 'Checked in', 'Clocked in', 'Pending review', 'Clocked out', 'Attendance missing', 'No show'],
   closed: ['Rejected', 'Cancelled', 'Deleted'],
 };
-function mount(wrap: (page: ReactNode) => ReactNode = (page) => page, path = '/venue-offers/shift') {
+/** The app's own QueryClient defaults (App.tsx): no window-focus refetch, 30 s staleTime. */
+const APP_QUERY_DEFAULTS = { retry: false, refetchOnWindowFocus: false, staleTime: 30_000 } as const;
+function mount(wrap: (page: ReactNode) => ReactNode = (page) => page, path = '/venue-offers/shift', queries: Record<string, unknown> = { retry: false }) {
   const qc = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    defaultOptions: { queries, mutations: { retry: false } },
   });
   render(
     <QueryClientProvider client={qc}>
@@ -341,6 +343,22 @@ describe('Send offer', () => {
     await waitFor(() => expect(pipelineCalls()).toBe(before + 2));
   });
 
+  it('one send action (its mutation success plus the offers-sent event it dispatches) refreshes the board once', async () => {
+    const qc = mount();
+    await screen.findByRole('heading', { name: 'Example venue' });
+    const pipelineCalls = () => mock.get.mock.calls.filter(([u]) => u === '/shifts/shift/pipeline').length;
+    const before = pipelineCalls();
+    await act(async () => {
+      await qc.getMutationCache().build(qc, {
+        mutationFn: async () => ({}),
+        onSuccess: () => { document.dispatchEvent(new CustomEvent('offers-sent', { detail: { shiftId: 'shift' } })); },
+      }).execute({ shiftId: 'shift', staffProfileIds: ['x'] });
+    });
+    await waitFor(() => expect(pipelineCalls()).toBe(before + 1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(pipelineCalls()).toBe(before + 1);
+  });
+
   it('tags Replacement / Standby cards only from the server offerKind', async () => {
     board.staff = [
       card({ offerKind: 'replacement' }),
@@ -563,29 +581,122 @@ describe('preserved behaviour', () => {
     await userEvent.click(screen.getByLabelText('Actions for Jordan Staff'));
     expect(screen.getByRole('button', { name: 'Cancel offer' })).toBeDisabled();
   });
-  it('polls and moves cards from new server state without browser reload', async () => {
+  it('polls (15 s ±20 %, not 5 s) and moves cards from new server state without browser reload', async () => {
     jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5); // jitter factor exactly 1
     const qc = mount(undefined, '/venue-offers/shift?tab=attendance');
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(20);
     });
-    await act(async () => {
-      jest.advanceTimersByTime(20);
-    });
+    const pipelineCalls = () => mock.get.mock.calls.filter(([u]) => u === '/shifts/shift/pipeline').length;
+    expect(pipelineCalls()).toBe(1);
     board.staff[0].stage = 'clocked_out';
     board.staff[0].clockOutAt = '2030-01-01T23:00:00Z';
     board.stageCounts = { clocked_out: 1 };
     await act(async () => {
-      jest.advanceTimersByTime(5000);
-      await Promise.resolve();
-      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(10_000);
     });
+    expect(pipelineCalls()).toBe(1); // the old 5 s poll would have fetched twice by now
     await act(async () => {
-      jest.advanceTimersByTime(20);
+      await jest.advanceTimersByTimeAsync(5_100);
     });
+    expect(pipelineCalls()).toBe(2);
     expect(within(lane('Clocked out')).getByText('Jordan Staff')).toBeTruthy();
     qc.clear();
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  it('pauses while the tab is hidden and catches up once when it becomes visible', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    const qc = mount(undefined, undefined, APP_QUERY_DEFAULTS);
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20);
+    });
+    const pipelineCalls = () => mock.get.mock.calls.filter(([u]) => u === '/shifts/shift/pipeline').length;
+    expect(pipelineCalls()).toBe(1);
+    act(() => focusManager.setFocused(false));
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(120_000);
+    });
+    expect(pipelineCalls()).toBe(1);
+    act(() => focusManager.setFocused(true));
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20);
+    });
+    expect(pipelineCalls()).toBe(2);
+    focusManager.setFocused(undefined);
+    qc.clear();
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  it('keeps the board on screen when a background refresh fails, with a non-blocking note', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    const qc = mount();
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20);
+    });
+    expect(screen.getByText('Jordan Staff')).toBeTruthy();
+    const base = mock.get.getMockImplementation()!;
+    mock.get.mockImplementation(async (url: string) => {
+      if (url === '/shifts/shift/pipeline') throw Object.assign(new Error('503'), { response: { status: 503 } });
+      return base(url);
+    });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(15_100);
+    });
+    expect(screen.getByText('Jordan Staff')).toBeTruthy();
+    expect(screen.queryByText('Could not load staffing pipeline')).toBeNull();
+    expect(screen.getByText(/Couldn.t refresh/)).toBeTruthy();
+    qc.clear();
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  it('a refresh the server now refuses (404: no longer visible) replaces the board with the error page and stops polling', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    const qc = mount();
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20);
+    });
+    expect(screen.getByText('Jordan Staff')).toBeTruthy();
+    const base = mock.get.getMockImplementation()!;
+    mock.get.mockImplementation(async (url: string) => {
+      if (url === '/shifts/shift/pipeline') throw Object.assign(new Error('404'), { response: { status: 404 } });
+      return base(url);
+    });
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(15_100);
+    });
+    expect(screen.getByText('Could not load staffing pipeline')).toBeTruthy();
+    expect(screen.queryByText('Jordan Staff')).toBeNull();
+    const calls = mock.get.mock.calls.filter(([u]) => u === '/shifts/shift/pipeline').length;
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(600_000);
+    });
+    expect(mock.get.mock.calls.filter(([u]) => u === '/shifts/shift/pipeline').length).toBe(calls);
+    qc.clear();
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+  it('avatar previews are fetched once for the visible ids, not re-polled every minute', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    board.staff[0].avatarFileId = 'file-1';
+    mock.post.mockImplementation(async (url: string) => (url === '/files/previews' ? { data: { previews: { 'file-1': 'blob:x' } } } : { data: {} }));
+    const qc = mount();
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(20);
+    });
+    const previewCalls = () => mock.post.mock.calls.filter(([u]) => u === '/files/previews').length;
+    expect(previewCalls()).toBe(1);
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(180_000);
+    });
+    expect(previewCalls()).toBe(1);
+    qc.clear();
+    jest.restoreAllMocks();
     jest.useRealTimers();
   });
   it('shows both existing report versions and sign-off identity', async () => {

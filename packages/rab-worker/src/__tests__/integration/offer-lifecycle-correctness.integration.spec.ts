@@ -7,6 +7,8 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
+import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
@@ -679,6 +681,41 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       expect(plan['Node Type']).toBe('Limit');
       expect(plan['Plan Rows']).toBeLessThanOrEqual(500);
       expect(JSON.stringify(plan)).toContain('workspace_id');
+    });
+  });
+
+  describe('E. Phase C1b realtime: the proactive expiry emits offer.expired', () => {
+    const realtime = (enabled: boolean) =>
+      new RealtimeEventService({ get: (key: string) => (key === 'REALTIME_ENABLED' ? enabled : undefined) } as unknown as EnvironmentService);
+    const expiredRows = (offerId: string) =>
+      adminDataSource.query(
+        `SELECT target_user_id, event_type, entity_type, entity_id, payload FROM core.realtime_event WHERE event_key LIKE $1`,
+        [`offer.expired:${offerId}%`],
+      );
+
+    it('flag off: the cycle expires the offer and writes no outbox row', async () => {
+      const fx = await seedNormalFixture('rtExpireOff');
+      const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'rtExpireOff' });
+      const offer = await sendOfferAndBackdate(fx, (await seedOpenShift(fx)).id, staff.profileId!, new Date(Date.now() - 60_000));
+      await runOfferExpiryCycle(adminDataSource, tenantContext, notificationService, auditService, realtime(false));
+      const final = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
+      expect(final.status).toBe(OfferStatus.EXPIRED);
+      expect(await expiredRows(offer.id)).toEqual([]);
+    });
+
+    it('flag on: one offer.expired row per recipient (the staff member and the sender), ids only', async () => {
+      const fx = await seedNormalFixture('rtExpireOn');
+      const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA, label: 'rtExpireOn' });
+      const offer = await sendOfferAndBackdate(fx, (await seedOpenShift(fx)).id, staff.profileId!, new Date(Date.now() - 60_000));
+      await runOfferExpiryCycle(adminDataSource, tenantContext, notificationService, auditService, realtime(true));
+      const rows = await expiredRows(offer.id);
+      const targets = rows.map((r: { target_user_id: string }) => r.target_user_id);
+      expect(targets).toEqual(expect.arrayContaining([staff.userId, fx.managerA.userId]));
+      expect(new Set(targets).size).toBe(targets.length);
+      for (const r of rows) {
+        expect(r).toMatchObject({ event_type: 'offer.expired', entity_type: 'offer', entity_id: offer.id });
+        expect(r.payload).toEqual({});
+      }
     });
   });
 });

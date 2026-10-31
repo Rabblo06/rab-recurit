@@ -30,7 +30,9 @@ export const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..');
 export const COMPOSE_FILE = join(REPO_ROOT, 'packages', 'rab-e2e-testing', 'system', 'docker-compose.e2e.yml');
 export const PARITY_COMPOSE_FILE = join(REPO_ROOT, 'packages', 'rab-e2e-testing', 'system', 'docker-compose.parity.yml');
 export const COMPOSE_FILES = HWS_ON ? [COMPOSE_FILE] : [COMPOSE_FILE, PARITY_COMPOSE_FILE];
-export const COMPOSE_PROJECT = MODES[MODE].project;
+/** Overridable (parity mode only) to run a second parity stack beside an existing one; never the dev project. */
+export const COMPOSE_PROJECT = (MODE === 'parity' && process.env.E2E_COMPOSE_PROJECT) || MODES[MODE].project;
+if (COMPOSE_PROJECT === 'rab') throw new Error('e2e: refusing to use the dev compose project `rab`.');
 
 export const API_HOST = '127.0.0.1';
 export const API_PORT = Number(process.env.E2E_API_PORT ?? MODES[MODE].api);

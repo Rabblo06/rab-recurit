@@ -1,7 +1,7 @@
 import Foundation
 
-/// Per-install push identity (no push registration is implemented in this
-/// build; this is the shared seam the push feature uses).
+/// Per-install push identity, used by `PushRegistrar` (Core/Push; the APNs
+/// path is prepared but not activated in this build).
 ///
 /// - `deviceId` is a `UUID().uuidString` persisted in the Keychain for the
 ///   life of the install. It MUST be a UUID: `/push/devices/:deviceId/...`
@@ -12,7 +12,8 @@ import Foundation
 ///   (never an FCM token; the server has a direct APNs sender) and then
 ///   calls `markRegistered(userId:)`.
 /// - `SessionCoordinator.logout()` deactivates the device BEFORE
-///   `/auth/logout` (logout does not deactivate push server-side).
+///   `/auth/logout` and also names it there (`pushDeviceId`), so the server
+///   can deactivate exactly this device with the session.
 public final class PushDeviceIdentity: Sendable {
     static let deviceIdKey = "rab.push.deviceId"
     static let registeredUserIdKey = "rab.push.registeredUserId"

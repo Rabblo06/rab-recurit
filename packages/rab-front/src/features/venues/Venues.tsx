@@ -3,6 +3,7 @@ import { ListViewSelect, RecordFooter, ListError } from '../../shared/table-tool
 import { useQuery } from '@tanstack/react-query';
 import { IconArchive, IconArchiveOff, IconPencil, IconPlus } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -89,6 +90,7 @@ export default function Venues() {
   const { status: view, ...otherFilters } = filters;
   const params = {
     page,
+    limit: LIST_PAGE_SIZE,
     q: search || undefined,
     ...otherFilters,
     ...(view === 'archived' ? { status: 'archived' } : {}),
@@ -206,7 +208,7 @@ export default function Venues() {
           </table>
         )}
       </div>
-<RecordFooter total={total} page={page} onPage={setPage} />
+<RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
       {archiveRestore.dialog}
     </div>
   );

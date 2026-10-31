@@ -15,6 +15,8 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { payrollAudience, RealtimeRecipient } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
 import { ListPayrollRecordsDto } from '../dto/payroll-record.dto';
@@ -269,6 +271,28 @@ const NOT_FOUND_MESSAGE = 'Payroll can\'t be approved until verified hours and p
 @Injectable()
 export class PayrollService {
   /** Wave 5: layer-2 field policy on payroll read DTOs (FieldPolicyService 'payroll_record'). */
+  /** C1b realtime outbox — property-injected so the constructor signature is unchanged. */
+  @Inject(RealtimeEventService)
+  private readonly realtimeEvents!: RealtimeEventService;
+
+  /**
+   * C1b realtime (inside the caller's transaction): payroll.record_changed → ONLY workspace members who may read payroll
+   * (`payrollAudience`: payroll.view, never a venue manager). Ids only — never minutes, rates or amounts.
+   */
+  private async emitPayrollChanged(
+    manager: EntityManager,
+    ctx: AuthContext,
+    workspaceId: string,
+    entityType: string,
+    entityId: string,
+    occurrence: string,
+    audience: (m: EntityManager) => Promise<RealtimeRecipient[]> = (m) => payrollAudience(m, workspaceId),
+  ): Promise<void> {
+    await this.realtimeEvents.recordForRecipients(manager, {
+      organisationId: ctx.organisationId!, eventKey: `payroll.record_changed:${entityId}:${occurrence}`, eventType: RealtimeEventType.PAYROLL_RECORD_CHANGED, entityType, entityId,
+    }, audience);
+  }
+
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
 
@@ -316,6 +340,8 @@ export class PayrollService {
         [ctx.organisationId, row.workspace_id, row.id, shiftId, row.staff_profile_id, PayrollRecordStatus.PENDING_APPROVAL, workedMinutes, ratePence, amountPence],
       );
     }
+    // C1b realtime: new pending records for this shift (no RETURNING here by design, so the shift is the entity).
+    if (rows.length) await this.emitPayrollChanged(manager, ctx, rows[0]!.workspace_id, 'shift', shiftId, 'created');
     return rows.length;
   }
 
@@ -526,6 +552,10 @@ export class PayrollService {
       [ids, ctx.workspaceId, PayrollRecordStatus.APPROVED, ctx.userId, PayrollRecordStatus.PENDING_APPROVAL],
     )) as [unknown, number];
     if (updated !== ids.length) throw new ConflictException('Payroll changed while you were approving it. Refresh and try again.');
+    // C1b realtime (review F8): the payroll audience is the same for every record of this workspace — resolved at most
+    // ONCE per approval (lazily, so still zero SQL while REALTIME_ENABLED is false), one event per record from it.
+    let audienceOnce: Promise<RealtimeRecipient[]> | undefined;
+    const sharedAudience = (m: EntityManager) => (audienceOnce ??= payrollAudience(m, ctx.workspaceId!));
     for (const record of records) {
       await this.auditService.record(manager, ctx, AuditAction.PAYROLL_RECORD_APPROVED, {
         entityType: 'payroll_record',
@@ -535,6 +565,7 @@ export class PayrollService {
           workedMinutes: Number(record.worked_minutes), amountPence: Number(record.amount_pence), bulk, payStatementRequested: true,
         },
       });
+      await this.emitPayrollChanged(manager, ctx, ctx.workspaceId!, 'payroll_record', record.id, 'approved', sharedAudience); // C1b realtime
     }
   }
 
@@ -579,6 +610,7 @@ export class PayrollService {
         entityId: id,
         metadata: { attendanceId: record.attendance_id, shiftId: record.shift_id, staffProfileId: record.staff_profile_id, reason: trimmed },
       });
+      await this.emitPayrollChanged(manager, ctx, ctx.workspaceId!, 'payroll_record', id, 'rejected'); // C1b realtime
       const [view] = await this.views(manager, ctx, [id]);
       return view!;
     });

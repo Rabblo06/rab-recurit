@@ -3,126 +3,233 @@ import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 
 import '../api/api_client.dart';
 import '../../features/notifications/notifications_provider.dart';
 import 'push_device_store.dart';
 
-/// Stage 6 — registers this device for push with the backend
-/// (`POST /rest/v1/push/devices`) and deregisters it on logout. Lives and
-/// dies with the SAME identity-scoped `MultiProvider` key `app.dart` already
-/// uses for every other per-session provider — registration happens once in
-/// the constructor (fresh login, or app restart landing straight back on an
-/// already-authenticated identity), deregistration happens in [dispose]
-/// (logout tears down this whole subtree; by the time Provider disposes it,
-/// `AuthProvider.logout()` has not yet cleared tokens — that happens later
-/// in its own method body, after the best-effort `/auth/logout` network
-/// call — so the access token this needs is still valid).
+/// The OS/Firebase side of push. Production: [FirebasePushMessaging]; tests
+/// inject a fake (no Firebase credentials are ever needed in tests).
+abstract class PushMessaging {
+  /// False when push cannot work here (not Android, or Firebase is not
+  /// configured — there is no real Firebase project yet).
+  Future<bool> initialize();
+
+  /// The CURRENT permission, without prompting.
+  Future<bool> isPermitted();
+
+  /// Shows the system prompt. Only ever from an explicit user action.
+  Future<bool> requestPermission();
+
+  Future<String?> getToken();
+  Stream<String> get onTokenRefresh;
+
+  /// A notification arrived in the foreground or was opened (tap, including
+  /// the one that launched the app). Never carries data to the app.
+  Stream<PushActivity> get onActivity;
+}
+
+/// [arrived] is not user activity (background refetch, never slides the idle
+/// window); [opened] (a tap) is.
+enum PushActivity { arrived, opened }
+
+/// Android-only FCM. iOS uses the native app's direct APNs path; this Flutter
+/// project has no `ios/` folder. Every call is a safe no-op where Firebase is
+/// not configured: a missing config never blocks login, logout or anything.
+class FirebasePushMessaging implements PushMessaging {
+  @override
+  Future<bool> initialize() async {
+    if (kIsWeb || !Platform.isAndroid) return false;
+    try {
+      await Firebase.initializeApp();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> isPermitted() async {
+    final settings = await FirebaseMessaging.instance.getNotificationSettings();
+    return settings.authorizationStatus == AuthorizationStatus.authorized ||
+        settings.authorizationStatus == AuthorizationStatus.provisional;
+  }
+
+  @override
+  Future<bool> requestPermission() async {
+    final settings = await FirebaseMessaging.instance.requestPermission();
+    return settings.authorizationStatus == AuthorizationStatus.authorized ||
+        settings.authorizationStatus == AuthorizationStatus.provisional;
+  }
+
+  @override
+  Future<String?> getToken() => FirebaseMessaging.instance.getToken();
+
+  @override
+  Stream<String> get onTokenRefresh =>
+      FirebaseMessaging.instance.onTokenRefresh;
+
+  @override
+  Stream<PushActivity> get onActivity {
+    final controller = StreamController<PushActivity>();
+    final subscriptions = <StreamSubscription<RemoteMessage>>[];
+    controller
+      ..onListen = () {
+        subscriptions
+          ..add(
+            FirebaseMessaging.onMessage.listen(
+              (_) => controller.add(PushActivity.arrived),
+            ),
+          )
+          ..add(
+            FirebaseMessaging.onMessageOpenedApp.listen(
+              (_) => controller.add(PushActivity.opened),
+            ),
+          );
+        FirebaseMessaging.instance.getInitialMessage().then((message) {
+          if (message != null && !controller.isClosed) {
+            controller.add(PushActivity.opened);
+          }
+        }, onError: (Object _) {});
+      }
+      ..onCancel = () async {
+        for (final s in subscriptions) {
+          await s.cancel();
+        }
+      };
+    return controller.stream;
+  }
+}
+
+/// Registers this device for push (`POST /rest/v1/push/devices`) for the
+/// signed-in identity and deactivates it on sign-out. Lives and dies with the
+/// identity-scoped `MultiProvider` in `app.dart` (created eagerly, Phase C1b).
 ///
-/// ANDROID ONLY today. This Flutter project has no `ios/` platform folder at
-/// all (no Xcode project exists on this machine), and the owner's approved
-/// architecture routes iOS through a DIRECT Apple APNs integration, never
-/// through Firebase — wiring that up needs `flutter create --platforms=ios`
-/// plus native Swift registration code (`UNUserNotificationCenter`,
-/// `didRegisterForRemoteNotificationsWithDeviceToken`), neither of which
-/// exists yet. Every method here is a safe no-op on iOS and everywhere
-/// Firebase isn't actually configured (there is no real Firebase project —
-/// Stage 6 explicitly forbids creating one without approval): a missing
-/// config must never block login, logout, or anything else in the app. This
-/// is "implemented," not "verified against a real device."
-///
-/// Payload handling never writes push content into state: a foreground
-/// message or an app resume (which also covers tapping a background
-/// notification) both just call [NotificationsProvider.load] — the same
-/// "go refetch the authoritative list" idiom `RealtimeConnectionService`
-/// already uses, never the push payload's own fields. Per-notification-type
-/// deep-linking (opening a specific offer/shift from a tapped notification)
-/// is NOT implemented — scoped out of this pass, left as a documented
-/// follow-up in the Stage 6 report.
-class PushRegistrationService extends ChangeNotifier
-    with WidgetsBindingObserver {
+/// - Opt-in only: on start it registers ONLY if notification permission was
+///   already granted; it never shows the system prompt by itself. [enable] is
+///   the explicit "Turn on notifications" action (prompt, then register).
+/// - Identity fencing: the session generation is captured at construction;
+///   nothing is registered once it changed (logout / account switch), so a
+///   registration can never survive into another account.
+/// - Sign-out: the device id is handed to `ApiClient` right before the
+///   registration request, so `/auth/logout` names it (`pushDeviceId`, the
+///   server deactivates exactly this device in the logout transaction), and
+///   [dispose] also calls `POST /push/devices/:uuid/deactivate` (best effort).
+/// - A notification (foreground arrival or tap) never writes its payload
+///   anywhere: it only refetches — the notifications list plus [onActivity]
+///   (the realtime client's reconcile). Presentation stays the server's
+///   generic text; the app adds nothing to the lock screen.
+class PushRegistrationService extends ChangeNotifier {
   PushRegistrationService({
     required ApiClient api,
     NotificationsProvider? notifications,
+    void Function({required bool background})? onActivity,
     PushDeviceStore? deviceStore,
+    PushMessaging? messaging,
   }) : _api = api,
        _notifications = notifications,
-       _deviceStore = deviceStore ?? PushDeviceStore() {
-    WidgetsBinding.instance.addObserver(this);
-    unawaited(_register());
+       _onActivity = onActivity,
+       _deviceStore = deviceStore ?? PushDeviceStore(),
+       _messaging = messaging ?? FirebasePushMessaging(),
+       _generation = api.sessionGeneration {
+    unawaited(_start(prompt: false));
   }
 
   final ApiClient _api;
   final NotificationsProvider? _notifications;
+  final void Function({required bool background})? _onActivity;
   final PushDeviceStore _deviceStore;
+  final PushMessaging _messaging;
+  final int _generation;
 
   bool _disposed = false;
+  bool _starting = false;
   String? _registeredDeviceId;
   StreamSubscription<String>? _tokenRefreshSubscription;
-  StreamSubscription<RemoteMessage>? _foregroundMessageSubscription;
+  StreamSubscription<PushActivity>? _activitySubscription;
 
-  Future<void> _register() async {
-    if (!Platform.isAndroid) return; // iOS: see class doc comment.
+  /// The device id registered for this session, if any (tests, diagnostics).
+  String? get registeredDeviceId => _registeredDeviceId;
+
+  bool get _current => !_disposed && _api.sessionGeneration == _generation;
+
+  /// The explicit "Turn on notifications" action: prompts, then registers.
+  /// Returns whether this device is registered afterwards.
+  Future<bool> enable() async {
+    await _start(prompt: true);
+    return _registeredDeviceId != null;
+  }
+
+  Future<void> _start({required bool prompt}) async {
+    if (_starting || _registeredDeviceId != null || !_current) return;
+    _starting = true;
     try {
-      await Firebase.initializeApp();
-      final messaging = FirebaseMessaging.instance;
-      final settings = await messaging.requestPermission();
-      if (_disposed) return;
-      if (settings.authorizationStatus == AuthorizationStatus.denied) return;
-
-      final token = await messaging.getToken();
-      if (_disposed || token == null) return;
-
+      if (!await _messaging.initialize() || !_current) return;
+      final permitted = prompt
+          ? await _messaging.requestPermission()
+          : await _messaging.isPermitted();
+      if (!permitted || !_current) return;
+      final token = await _messaging.getToken();
+      if (token == null || !_current) return;
       final deviceId = await _deviceStore.getOrCreateDeviceId();
-      if (_disposed) return;
-      await _sendRegistration(deviceId, token);
+      if (!await _send(deviceId, token)) return;
       _registeredDeviceId = deviceId;
-
-      _tokenRefreshSubscription = messaging.onTokenRefresh.listen((refreshed) {
-        unawaited(_sendRegistration(deviceId, refreshed));
+      _tokenRefreshSubscription = _messaging.onTokenRefresh.listen((fresh) {
+        unawaited(_send(deviceId, fresh));
       });
-      _foregroundMessageSubscription = FirebaseMessaging.onMessage.listen((_) {
-        unawaited(_notifications?.load());
+      _activitySubscription = _messaging.onActivity.listen((activity) {
+        if (!_current) return;
+        // An arrival is not the user: background traffic only, so a stream of
+        // pushes cannot keep an unattended session alive. A tap is the user.
+        final background = activity == PushActivity.arrived;
+        unawaited(
+          _notifications
+              ?.load(background: background)
+              .catchError((Object _) {}),
+        );
+        _onActivity?.call(background: background);
       });
+      notifyListeners();
     } catch (_) {
-      // Push is best-effort — see class doc comment. No real Firebase
-      // project exists yet, so this path is expected to fail today.
+      // Push is best-effort; Firebase is not configured in any build yet.
+    } finally {
+      _starting = false;
     }
   }
 
-  Future<void> _sendRegistration(String deviceId, String token) async {
+  /// One registration upsert, only for the identity this service belongs to.
+  Future<bool> _send(String deviceId, String token) async {
+    if (!_current) return false;
+    // Named in /auth/logout from now on, even if this request is still on
+    // the wire when the user signs out.
+    _api.pushDeviceIdForLogout = deviceId;
     try {
       await _api.post(
         '/push/devices',
         body: {'deviceId': deviceId, 'platform': 'android', 'pushToken': token},
       );
+      return _current;
     } catch (_) {
-      // Best-effort — a failed registration retries on the next cold start.
-    }
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Covers both "tapped a background push" and any other reason the app
-      // came back to the foreground — same reasoning as
-      // `RealtimeConnectionService._leaveBackground`: a push cannot be
-      // assumed to have arrived while this provider was mounted, so the
-      // authoritative list is refetched directly rather than waited for.
-      unawaited(_notifications?.load());
+      // Best-effort — a failed registration retries on the next start.
+      return false;
     }
   }
 
   @override
   void dispose() {
     _disposed = true;
-    WidgetsBinding.instance.removeObserver(this);
     unawaited(_tokenRefreshSubscription?.cancel());
-    unawaited(_foregroundMessageSubscription?.cancel());
+    unawaited(_activitySubscription?.cancel());
     final deviceId = _registeredDeviceId;
-    if (deviceId != null) {
-      unawaited(_api.post('/push/devices/$deviceId/deactivate').catchError((_) {}));
+    // Only while this session's tokens still exist (sign-out disposes this
+    // before the tokens are cleared); never under another identity.
+    if (deviceId != null && _api.sessionGeneration == _generation) {
+      unawaited(
+        _api
+            .post('/push/devices/$deviceId/deactivate')
+            .catchError((Object _) {}),
+      );
     }
     super.dispose();
   }

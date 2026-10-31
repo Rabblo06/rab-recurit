@@ -168,7 +168,9 @@ export class VenueService {
       if (dto.type && visible('type')) qb.andWhere('venue.type = :type', { type: dto.type });
 
       const sortColumn = VENUE_SORT_COLUMNS[dto.sort ?? 'name'] ?? VENUE_SORT_COLUMNS.name;
-      qb.orderBy(sortColumn, (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC');
+      // Unique tie-breaker (Phase C1): offset pages walked by fetchAllPages must never repeat or skip rows that tie on the sort column.
+      const venueDirection = (dto.direction ?? 'asc').toUpperCase() as 'ASC' | 'DESC';
+      qb.orderBy(sortColumn, venueDirection).addOrderBy('venue.id', venueDirection);
 
       const { skip, take } = paginationSkipTake(dto);
       qb.skip(skip).take(take);
