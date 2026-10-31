@@ -38,7 +38,17 @@ jobs:
       # download those universal artifacts and `flutter test` does not fetch them. No platform engines are needed.
       # --force: the cached SDK reports the universal artifacts as up to date while material_fonts is missing.
       - run: flutter precache --force --universal --no-android --no-ios --no-web --no-linux --no-macos --no-windows
-      - run: test -f "$FLUTTER_ROOT/bin/cache/artifacts/material_fonts/roboto-regular.ttf"
+      # The tests open the fonts by lower-case name (written on a case-insensitive file system); on Linux the artifact's
+      # names may differ in case, so add lower-case links next to them, then fail early if the font is still missing.
+      - name: Lower-case Material font names
+        run: |
+          cd "$FLUTTER_ROOT/bin/cache/artifacts/material_fonts"
+          ls -1
+          for f in *; do
+            lower="$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]')"
+            if [ "$f" != "$lower" ] && [ ! -e "$lower" ]; then ln -s "$f" "$lower"; fi
+          done
+          test -f roboto-regular.ttf
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
