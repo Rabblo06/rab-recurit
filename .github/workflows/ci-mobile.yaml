@@ -36,7 +36,9 @@ jobs:
       - run: flutter --version
       # The golden/visual tests load Roboto from the SDK cache (bin/cache/artifacts/material_fonts); the action does not
       # download those universal artifacts and `flutter test` does not fetch them. No platform engines are needed.
-      - run: flutter precache --universal --no-android --no-ios --no-web --no-linux --no-macos --no-windows
+      # --force: the cached SDK reports the universal artifacts as up to date while material_fonts is missing.
+      - run: flutter precache --force --universal --no-android --no-ios --no-web --no-linux --no-macos --no-windows
+      - run: test -f "$FLUTTER_ROOT/bin/cache/artifacts/material_fonts/roboto-regular.ttf"
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
