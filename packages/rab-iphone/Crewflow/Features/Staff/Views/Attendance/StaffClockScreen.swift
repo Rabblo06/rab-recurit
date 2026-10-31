@@ -29,12 +29,16 @@ private struct StaffClockContent: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.shellTabActive) private var tabActive
 
     @State private var expanded = false
-    @State private var team: [StaffTeamMember] = []
-    @State private var teamShiftId: String?
-    @State private var teamLoading = false
-    @State private var teamError: String?
+    /// The team list keeps its rows across refreshes (Phase C1).
+    @StateObject private var teamLoader = StaffTeamLoader()
+    /// Teams screen: 30 s ±20 % silent team refresh while this screen is on
+    /// screen in the selected tab and the app is in the foreground
+    /// (background-flagged). Resume reloads the team on its own below.
+    @StateObject private var teamPoll = PollScheduler(interval: 30, refreshOnResume: false)
+    @State private var onScreen = false
     @State private var resumeToken = 0
 
     init(snapshot: StaffOfferSummary?, teams: Bool, store: StaffStore) {
@@ -170,10 +174,19 @@ private struct StaffClockContent: View {
         .background(ScheduleTokens.background.ignoresSafeArea())
         .staffPushedScreen()
         .accessibilityIdentifier(teams ? "staff.teams" : "staff.clock")
-        .onAppear { store.clearAttendanceError() }
+        .onAppear {
+            store.clearAttendanceError()
+            onScreen = true
+            teamPoll.setVisible(tabActive)
+        }
+        .onDisappear {
+            onScreen = false
+            teamPoll.setVisible(false)
+        }
+        .onChange(of: tabActive) { active in teamPoll.setVisible(onScreen && active) }
         .task { await store.loadHistory(silent: !store.history.isEmpty) }
         .task(id: teamKey(s)) { await loadTeamIfNeeded(s) }
-        .task(id: teams ? s.selected?.shiftId : nil) { await teamRefreshLoop(s.selected?.shiftId) }
+        .task { await startTeamPolling() }
         .task(id: checkInKey(s)) {
             if checkInKey(s) != nil, let shiftId = s.selected?.shiftId {
                 await store.loadCheckIn(shiftId: shiftId)
@@ -181,6 +194,7 @@ private struct StaffClockContent: View {
         }
         .task(id: nextBoundary(s)) { await refreshAtBoundary(nextBoundary(s)) }
         .onChange(of: scenePhase) { phase in
+            teamPoll.setForeground(phase != .background)
             guard phase == .active else { return }
             resumeToken += 1
             Task { @MainActor in
@@ -263,8 +277,8 @@ private struct StaffClockContent: View {
                     HStack {
                         Text("Your team").scheduleType(ScheduleType.secondary)
                         Spacer()
-                        if !team.isEmpty, teamShiftId == selected.shiftId {
-                            StaffAvatarStack(names: team.map(\.displayName))
+                        if !teamLoader.members.isEmpty, teamLoader.shiftId == selected.shiftId {
+                            StaffAvatarStack(names: teamLoader.members.map(\.displayName))
                         }
                         Image(systemName: "chevron.right").foregroundStyle(ScheduleTokens.muted).accessibilityHidden(true)
                     }
@@ -339,8 +353,8 @@ private struct StaffClockContent: View {
                         Text("Working together on this shift").scheduleType(ScheduleType.caption)
                     }
                     Spacer()
-                    if s.canTeam, !teamLoading, teamError == nil {
-                        Text("\(team.count) \(team.count == 1 ? "person" : "people")").scheduleType(ScheduleType.caption)
+                    if s.canTeam, !teamLoader.loading, teamLoader.error == nil {
+                        Text("\(teamLoader.members.count) \(teamLoader.members.count == 1 ? "person" : "people")").scheduleType(ScheduleType.caption)
                     }
                 }
                 .padding(.top, 24)
@@ -359,18 +373,21 @@ private struct StaffClockContent: View {
 
     @ViewBuilder
     private func teamContent(_ s: Snapshot) -> some View {
-        if teamLoading {
+        if teamLoader.loading {
             ProgressView().frame(maxWidth: .infinity).padding(24)
-        } else if let teamError {
+        } else if let teamError = teamLoader.error {
             MessageCard(title: "Team unavailable", message: teamError, kind: .error, actionTitle: s.selected == nil ? nil : "Retry") {
                 if let shiftId = s.selected?.shiftId { Task { await loadTeam(shiftId) } }
             }
         } else if !s.canTeam {
             MessageCard(title: "Team unavailable", message: "Team visibility requires a current confirmed assignment.")
-        } else if team.isEmpty {
-            MessageCard(title: "No confirmed teammates yet")
         } else {
-            StaffTeamList(members: team)
+            if teamLoader.stale { StaleRefreshNotice() }
+            if teamLoader.members.isEmpty {
+                MessageCard(title: "No confirmed teammates yet")
+            } else {
+                StaffTeamList(members: teamLoader.members)
+            }
         }
     }
 
@@ -488,52 +505,50 @@ private struct StaffClockContent: View {
         return [opensAt, s.starts, s.ends].compactMap { $0 }.first { $0 > now }
     }
 
+    /// A timer-driven reload at the next server boundary (window opens,
+    /// shift starts/ends): background traffic.
     private func refreshAtBoundary(_ boundary: Date?) async {
         guard let boundary, let now = store.attendanceNow else { return }
         let wait = boundary.timeIntervalSince(now) + 0.01
         guard wait > 0 else { return }
         try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
         guard !Task.isCancelled else { return }
-        await refresh()
+        await refresh(background: true)
     }
 
-    private func refresh() async {
-        async let offers: Void = store.loadOffers(silent: true)
-        async let active: Void = store.refreshActive(silent: true)
-        async let history: Void = store.loadHistory(silent: true)
+    private func refresh(background: Bool = false) async {
+        async let offers: Void = store.loadOffers(silent: true, background: background)
+        async let active: Void = store.refreshActive(silent: true, background: background)
+        async let history: Void = store.loadHistory(silent: true, background: background)
         _ = await (offers, active, history)
     }
 
     private func loadTeamIfNeeded(_ s: Snapshot) async {
-        guard let shiftId = teamKey(s), teamShiftId != shiftId, !teamLoading else { return }
+        guard let shiftId = teamKey(s), teamLoader.shiftId != shiftId else { return }
         await loadTeam(shiftId)
     }
 
+    /// The person's own (or resume) reload: never background-flagged. Rows
+    /// of the same shift stay on screen while it runs and if it fails.
     private func loadTeam(_ shiftId: String) async {
-        guard !teamLoading else { return }
-        teamShiftId = shiftId
-        teamLoading = true
-        teamError = nil
-        team = []
-        do {
-            let rows = try await store.loadTeam(shiftId: shiftId)
-            team = rows
-        } catch {
-            if !StaffStore.ignorable(error) {
-                teamError = "Unable to load your team. Please try again."
-            }
-        }
-        teamLoading = false
+        try? await teamLoader.load(shiftId: shiftId, using: store)
     }
 
-    /// Teams screen: 30 s silent team refresh while visible (Flutter).
-    private func teamRefreshLoop(_ shiftId: String?) async {
-        guard teams, let shiftId else { return }
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            if store.isForeground { await loadTeam(shiftId) }
-        }
+    /// Only the Teams variant polls its team list.
+    @MainActor
+    private func startTeamPolling() async {
+        guard teams else { return }
+        let loader = teamLoader
+        let store = self.store
+        let api = store.repository.api
+        await teamPoll.start(
+            foreground: scenePhase != .background,
+            identity: { await api.currentGeneration() },
+            task: { trigger in
+                guard let shiftId = loader.shiftId else { return }
+                try await loader.load(shiftId: shiftId, background: trigger.isBackground, using: store)
+            }
+        )
     }
 }
 

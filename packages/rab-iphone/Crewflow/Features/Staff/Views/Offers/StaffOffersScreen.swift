@@ -46,7 +46,7 @@ struct StaffOffersScreen: View {
                 LazyVStack(spacing: 16) {
                     if let error = store.offersError {
                         MessageCard(title: "Shifts unavailable", message: error, kind: .error, actionTitle: "Retry") {
-                            Task { await store.loadOffers() }
+                            Task { await store.loadOffers(full: true) }
                         }
                     } else if items.isEmpty {
                         EmptyStateView(
@@ -66,7 +66,7 @@ struct StaffOffersScreen: View {
                 .padding(.top, 12)
                 .padding(.bottom, 32)
             }
-            .refreshable { await store.loadOffers(silent: true) }
+            .refreshable { await store.loadOffers(silent: true, full: true) }
         }
     }
 }

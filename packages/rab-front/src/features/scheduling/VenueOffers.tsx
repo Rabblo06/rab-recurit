@@ -4,6 +4,9 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { IconClock } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { isPermanentRefusal, pollingOptions, REFRESH_FAILED_NOTE } from '../../shared/lib/polling';
+import { useIsRealtimeLive } from '../../shared/lib/RealtimeProvider';
+import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -25,6 +28,9 @@ interface VenueOffer {
   roleName: string;
   venueManagerName: string;
 }
+
+/** Nominal Venue Offers poll (Phase C1: was 10 s); jittered ±20 % by `pollingOptions`. */
+export const VENUE_OFFERS_POLL_MS = 30_000;
 
 function openShiftApproval(shiftId: string) {
   document.dispatchEvent(new CustomEvent('open-shift-approval', { detail: { shiftId } }));
@@ -103,7 +109,7 @@ export default function VenueOffers() {
   const columnVisibility = useColumnVisibility(VENUE_OFFERS_TABLE_CONFIG.storageKey, VENUE_OFFERS_TABLE_CONFIG.columns);
   const isVisible = columnVisibility.isVisible;
   const config = VENUE_OFFERS_TABLE_CONFIG;
-  const { search, filters, sort, setSort, setSearch, setFilters, activeFilterCount } = useTableQueryState(config);
+  const { search, filters, sort, page, setPage, setSort, setSearch, setFilters, activeFilterCount } = useTableQueryState(config);
   // An unrecognised URL value (`?status=garbage`) must never reach the API
   // as an unchecked filter — fail safe to "All" rather than forwarding it.
   // The server's own `@IsIn` on this DTO field would reject it anyway (400),
@@ -114,10 +120,14 @@ export default function VenueOffers() {
     ? (rawStatus as VenueOfferStatus)
     : '';
 
-  const params = { q: search || undefined, status: activeStatus || undefined };
-  const { data, isLoading, isFetching, isError, refetch } = useQuery({
+  // Phase C1: a bounded page (50, was the server's 500 default) with a real pager, polled every 30 s ±20 % while the tab
+  // is visible (was 10 s). Approve/decline/cancel/send refresh `['venue-offers']` at once wherever they happen.
+  const params = { q: search || undefined, status: activeStatus || undefined, page, limit: LIST_PAGE_SIZE };
+  // C1b: 120 s while realtime (shift_request.* / offer.* events) is live.
+  const realtimeLive = useIsRealtimeLive();
+  const { data, error, isLoading, isFetching, isError, isRefetchError, refetch } = useQuery({
     queryKey: ['venue-offers', params],
-    refetchInterval: 10000,
+    ...pollingOptions(VENUE_OFFERS_POLL_MS, { realtimeLive }),
     queryFn: async () => {
       const { data } = await api.get<{ data: VenueOffer[]; total: number }>('/shifts/requests', { params });
       return data;
@@ -142,10 +152,11 @@ export default function VenueOffers() {
         <div className="list-toolbar-actions"><TableViewControls config={config} filters={filters} onFiltersChange={setFilters} sort={sort} onSortChange={setSort} activeFilterCount={activeFilterCount} columnVisibility={columnVisibility} /></div>
       </div>
 
+      {isRefetchError && !isPermanentRefusal(error) && <p className="muted" role="status">{REFRESH_FAILED_NOTE}</p>}
       <div className={`table-container${isFetching ? ' table-loading' : ''}`}>
         {isLoading ? (
           <TableSkeleton columns={10} />
-        ) : isError ? (
+        ) : isError && (!data || isPermanentRefusal(error)) ? (
           <EmptyState
             variant="matches"
             title="Could not load Venue Offers."
@@ -213,7 +224,7 @@ export default function VenueOffers() {
           </table>
         )}
       </div>
-      <RecordFooter total={total} />
+      <RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
     </div>
   );
 }

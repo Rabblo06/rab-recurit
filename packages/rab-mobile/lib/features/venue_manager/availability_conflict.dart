@@ -48,8 +48,9 @@ class AvailabilityConflict {
   static AvailabilityConflict? fromError(Object error) {
     if (error is! ApiException ||
         error.statusCode != 409 ||
-        error.code != 'STAFF_AVAILABILITY_CONFLICT')
+        error.code != 'STAFF_AVAILABILITY_CONFLICT') {
       return null;
+    }
     final raw = error.body?['conflicts'];
     if (raw is! List) return null;
     final entries = raw.whereType<Map>().map((c) {

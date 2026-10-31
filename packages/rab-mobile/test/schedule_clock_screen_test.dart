@@ -78,8 +78,12 @@ class ClockFixture {
   bool delayHistory = false;
   bool failHistory = false, hideWorkedMinutes = false;
   bool failTeam = false;
+  int teamFailStatus = 503;
   List<Map<String, dynamic>> team = [];
   int teamReads = 0, activeReads = 0;
+
+  /// Every read: path and its X-Crewflow-Background header (null = foreground).
+  final reads = <(String, String?)>[];
   Completer<void>? gate;
   int ins = 0, outs = 0;
   String? postedShift;
@@ -94,6 +98,9 @@ class ClockFixture {
   late final api = ApiClient(
     httpClient: MockClient((request) async {
       final path = request.url.path;
+      if (request.method == 'GET') {
+        reads.add((path, request.headers['X-Crewflow-Background']));
+      }
       if (path.endsWith('/offers/mine')) {
         return http.Response(jsonEncode(empty ? [] : [offer]), 200);
       }
@@ -113,7 +120,7 @@ class ClockFixture {
       if (path.endsWith('/team')) {
         teamReads++;
         return failTeam
-            ? http.Response('{"message":"Unavailable"}', 503)
+            ? http.Response('{"message":"Unavailable"}', teamFailStatus)
             : http.Response(jsonEncode(team), 200);
       }
       if (path.endsWith('/attendance/me/history')) {
@@ -286,6 +293,28 @@ void main() {
 
   final primary = find.byKey(const ValueKey('clock-primary'));
   final expand = find.byKey(const ValueKey('clock-expand'));
+
+  testWidgets(
+    'the shift-boundary reload is timer-driven background traffic (never slides the idle window)',
+    (tester) async {
+      final f = ClockFixture();
+      await mount(tester, f);
+      await tester.pumpAndSettle();
+      final before = f.reads.length;
+      expect(before, greaterThan(0));
+      expect(
+        f.reads.every((r) => r.$2 == null),
+        isTrue,
+        reason: 'opening the screen is the user',
+      );
+      // endsAt is now + 6 h: the boundary timer fires once just after it.
+      await tester.pump(const Duration(hours: 6, seconds: 1));
+      await tester.pump();
+      final after = f.reads.sublist(before);
+      expect(after.map((r) => r.$1), contains(endsWith('/offers/mine')));
+      expect(after.every((r) => r.$2 == '1'), isTrue, reason: '$after');
+    },
+  );
 
   testWidgets(
     'clock-in failure, retry, correct shift ID and double-tap guard',
@@ -571,19 +600,58 @@ void main() {
       expect(f.teamReads, greaterThanOrEqualTo(2));
       expect(find.text('Test coworker'), findsOneWidget);
       await shot(tester, 'teams-overdue');
+      // Phase C1: a failed refresh keeps the rows, with a non-blocking notice.
       f.failTeam = true;
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
-      expect(find.text('Team unavailable'), findsOneWidget);
+      expect(find.text('Test coworker'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('stale-refresh-notice')),
+        findsOneWidget,
+      );
+      expect(find.text('Team unavailable'), findsNothing);
+      // ...but a permanent refusal (no longer on this shift: 404) drops them: the
+      // screen never keeps showing coworkers the server has just refused.
+      f.teamFailStatus = 404;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
       expect(find.text('Test coworker'), findsNothing);
-      await shot(tester, 'teams-error');
+      expect(find.text('Team unavailable'), findsOneWidget);
+      f.teamFailStatus = 503;
       f.failTeam = false;
       f.team = [];
-      await tester.tap(find.text('Retry'));
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(find.text('No confirmed teammates yet'), findsOneWidget);
+      expect(find.byKey(const ValueKey('stale-refresh-notice')), findsNothing);
       await shot(tester, 'teams-empty');
+
+      // A first load that fails (nothing to show yet): error card + Retry.
+      await tester.pumpWidget(const SizedBox());
+      f.failTeam = true;
+      await mount(tester, f);
+      await tester.tap(expand);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Teams'));
+      await tester.pumpAndSettle();
+      expect(find.text('Team unavailable'), findsOneWidget);
+      await shot(tester, 'teams-error');
+      f.failTeam = false;
+      f.team = [
+        {
+          'displayName': 'Test coworker',
+          'startsAt': f.offer['startsAt'],
+          'endsAt': f.offer['endsAt'],
+          'isYou': false,
+        },
+      ];
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(find.text('Test coworker'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
     },
   );
 

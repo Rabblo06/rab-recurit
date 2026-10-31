@@ -20,13 +20,20 @@ jobs:
     needs: changed
     if: needs.changed.outputs.mobile == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # packages/rab-mobile is a Flutter app, not an Nx project: the previous `nx run-many -p rab-mobile` steps ran nothing.
+    # Phase C1 (D4): install the Flutter SDK and run the app's own analyzer and test suite.
+    defaults:
+      run:
+        working-directory: packages/rab-mobile
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: ./.github/actions/yarn-install
-      - uses: ./.github/actions/restore-cache
-      - run: npx nx run-many -t lint -p rab-mobile
-      - run: npx nx run-many -t test -p rab-mobile
-      # Native builds go through EAS (eas.build), not this pipeline —
-      # nothing to compile here in M0.
-      - uses: ./.github/actions/save-cache
-        if: always()
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.38.7
+          cache: true
+      - run: flutter --version
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

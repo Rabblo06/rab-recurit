@@ -200,11 +200,15 @@ describe('resume, retry and connection loss', () => {
       if (url.startsWith('/manager-workspaces/me')) return Promise.reject(Object.assign(new Error('Network Error'), { response: undefined }));
       return Promise.resolve({ data: { id: 'u-1', email: 'j@example.com', firstName: 'Jamie', lastName: 'R', jobTitle: null, avatarKey: null } });
     });
-    await advance(2_600);
+    await advance(3_100); // 2.5 s poll, ±20 % jitter (Phase C1)
     expect(screen.getByText(/Connection lost — still trying/)).toBeInTheDocument();
     expect(stepStates()).toEqual(['complete', 'complete', 'current', 'current', 'current', 'pending']);
     mockServer('READY');
-    await advance(2_600);
+    // After a failure the next poll backs off ×2 (5 s ±20 %, Phase C1), then continues: wait for that read.
+    const reads = () => get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length;
+    const before = reads();
+    for (let waited = 0; waited < 6_100 && reads() === before; waited += 100) await advance(100);
+    expect(reads()).toBe(before + 1);
     await waitFor(() => expect(stepStates()).toEqual(['complete', 'complete', 'complete', 'complete', 'complete', 'complete']));
     expect(screen.queryByText(/Connection lost/)).toBeNull();
   });
@@ -340,7 +344,7 @@ it('a CREATING workspace keeps polling automatically', async () => {
   mockServer('CREATING');
   await mount();
   const callsBefore = get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length;
-  await advance(2_500);
+  await advance(3_100); // 2.5 s poll, ±20 % jitter (Phase C1)
   expect(get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length).toBeGreaterThan(callsBefore);
 });
 
@@ -412,7 +416,7 @@ describe('prolonged CREATING', () => {
     expect(screen.getByText('Preparing your workspace')).toBeInTheDocument();
     expect(screen.queryByText('DASHBOARD')).toBeNull();
     const callsBefore = get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length;
-    await advance(2_500);
+    await advance(3_100); // 2.5 s poll, ±20 % jitter (Phase C1)
     expect(get.mock.calls.filter(([u]) => u.startsWith('/manager-workspaces/me')).length).toBeGreaterThan(callsBefore);
   });
 
@@ -423,7 +427,7 @@ describe('prolonged CREATING', () => {
     await advance(LONG_WAIT_MS);
     expect(screen.queryByText('Still preparing your workspace')).toBeNull();
     currentStatus = 'READY';
-    await advance(2_500 + READY_BEAT_MS);
+    await advance(3_100 + READY_BEAT_MS); // 2.5 s poll, ±20 % jitter (Phase C1)
     await waitFor(() => expect(screen.getByText(headingText('Northside Staffing is ready'))).toBeInTheDocument());
   });
 });

@@ -1,12 +1,14 @@
 import { ListViewSelect, RecordFooter, ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient, type Query } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
   IconUserOff, IconUserCheck, IconEye, IconKey, IconLock, IconMail, IconPlus, IconArchive, IconArchiveOff,
 } from '@tabler/icons-react';
 import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
 import { api } from '../../shared/api';
+import { lastAnsweredAt, pollingOptions, settlingInterval } from '../../shared/lib/polling';
+import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import PageHeader from '../../shared/components/PageHeader';
@@ -188,18 +190,78 @@ const getColor = (name: string) => avatarColors[(name?.charCodeAt(0) ?? 0) % ava
  * badge freezes on whatever transient state it had at fetch time even
  * after the real state has already moved on (confirmed live: the list
  * showed "Invitation sending…" long after the detail panel, fetched
- * fresh, already showed "Pending invite"). Poll only while at least one
- * row is actually mid-flight, stopping once nothing is — never a
- * permanent background poll.
+ * fresh, already showed "Pending invite").
+ *
+ * Phase C1: only the pending rows are re-read, each from its own record
+ * (`GET /staff/:id` / `GET /managers/:id`), on a settling backoff
+ * (2 → 4 → 8 → 15 s, `settlingInterval`) that stops when the row settles or
+ * after 3 minutes — never the whole page every 2 s. A newer answer is
+ * written into the list rows in place. With more than
+ * `INVITATION_DETAIL_POLL_LIMIT` pending rows (a bulk invite), one page
+ * request per step is cheaper than one request per row, so the page itself
+ * is re-read on the same schedule instead.
  */
 const TRANSIENT_INVITATION_STATUSES: InvitationStatus[] = ['queued', 'sending'];
-function pollWhileInvitationInFlight<T extends { invitationStatus: InvitationStatus }>(rows: T[] | undefined): number | false {
-  return rows?.some((r) => TRANSIENT_INVITATION_STATUSES.includes(r.invitationStatus)) ? 2000 : false;
+const INVITATION_DETAIL_POLL_LIMIT = 10;
+type InvitationFields = { invitationStatus: InvitationStatus; pendingInvite: PendingInvite | null };
+
+function useInvitationSettling<T extends { id: string } & InvitationFields>(
+  endpoint: 'staff' | 'managers',
+  listKey: readonly unknown[],
+  rows: T[] | undefined,
+  listUpdatedAt: number,
+): (listQuery: Query<any, any, any, any>) => number | false {
+  const qc = useQueryClient();
+  const pending = (rows ?? []).filter((r) => TRANSIENT_INVITATION_STATUSES.includes(r.invitationStatus));
+  // When each row was first seen pending in this view: the start of its 3-minute settling window.
+  const firstSeen = useRef(new Map<string, number>());
+  const now = Date.now();
+  for (const id of [...firstSeen.current.keys()]) if (!pending.some((r) => r.id === id)) firstSeen.current.delete(id);
+  for (const r of pending) if (!firstSeen.current.has(r.id)) firstSeen.current.set(r.id, now);
+  const perRow = pending.length > 0 && pending.length <= INVITATION_DETAIL_POLL_LIMIT;
+  const details = useQueries({
+    queries: (perRow ? pending : []).map((row) => ({
+      queryKey: ['invitation-status', endpoint, row.id],
+      queryFn: async (): Promise<InvitationFields> => {
+        const { data } = await api.get<Partial<InvitationFields>>(`/${endpoint}/${row.id}`);
+        return { invitationStatus: data.invitationStatus ?? null, pendingInvite: data.pendingInvite ?? null };
+      },
+      // Seeded from the row the list just returned, so the first re-read waits for the first step.
+      initialData: { invitationStatus: row.invitationStatus, pendingInvite: row.pendingInvite },
+      initialDataUpdatedAt: listUpdatedAt,
+      staleTime: Infinity,
+      gcTime: 0,
+      ...pollingOptions((query) => settlingInterval(firstSeen.current.get(row.id) ?? now, lastAnsweredAt(query))),
+    })),
+  });
+  const answers = details
+    .map((d, i) => ({ id: pending[i]?.id, data: d.data, at: d.dataUpdatedAt }))
+    .filter((a): a is { id: string; data: InvitationFields; at: number } => !!a.id && !!a.data && a.at > listUpdatedAt);
+  const answersKey = answers.map((a) => `${a.id}:${a.data.invitationStatus}:${a.at}`).join(',');
+  useEffect(() => {
+    if (!answers.length) return;
+    qc.setQueryData<{ data: T[]; total: number }>(listKey, (old) =>
+      old
+        ? {
+            ...old,
+            data: old.data.map((r) => {
+              const answer = answers.find((a) => a.id === r.id);
+              return answer ? { ...r, invitationStatus: answer.data.invitationStatus, pendingInvite: answer.data.pendingInvite } : r;
+            }),
+          }
+        : old,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answersKey]);
+  return (listQuery) => {
+    if (perRow || pending.length === 0) return false;
+    return settlingInterval(Math.min(...pending.map((r) => firstSeen.current.get(r.id) ?? now)), lastAnsweredAt(listQuery));
+  };
 }
 
 /**
  * `isFetching` is true for every fetch, including the silent
- * `pollWhileInvitationInFlight` background poll — applying `table-loading`
+ * invitation settling poll (`useInvitationSettling`) — applying `table-loading`
  * (which sets `pointer-events: none` on the whole table, see index.css) for
  * every one of those blocks row clicks for the ~2s of each poll tick, even
  * though the poll never reorders rows. Only a real filter/sort/search/page
@@ -309,13 +371,17 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page, limit: LIST_PAGE_SIZE };
+  const listKey = ['staff', params];
+  // The page itself is re-read only during a bulk invite (see `useInvitationSettling`); otherwise never on a timer.
+  const pagePoll = useRef<(query: Query<any, any, any, any>) => number | false>(() => false);
+  const { data, dataUpdatedAt, isLoading, isFetching, isError, error, refetch } = useQuery({
     retry: retryUnlessPermanent,
-    queryKey: ['staff', params],
+    queryKey: listKey,
     queryFn: async () => { const { data } = await api.get<{ data: StaffRow[]; total: number }>('/staff', { params }); return data; },
-    refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
+    ...pollingOptions((query) => pagePoll.current(query)),
   });
+  pagePoll.current = useInvitationSettling('staff', listKey, data?.data, dataUpdatedAt);
   const staff = data?.data ?? [];
   const total = data?.total ?? 0;
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
@@ -488,7 +554,7 @@ function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }
           </table>
         )}
       </div>
-      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+      {data && <RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />}
       {staffArchive.dialog}
       <RowActionConfirm
         pending={pendingAction}
@@ -511,13 +577,17 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page };
-  const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
+  const params = { q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction, page, limit: LIST_PAGE_SIZE };
+  const listKey = ['managers', params];
+  // The page itself is re-read only during a bulk invite (see `useInvitationSettling`); otherwise never on a timer.
+  const pagePoll = useRef<(query: Query<any, any, any, any>) => number | false>(() => false);
+  const { data, dataUpdatedAt, isLoading, isFetching, isError, error, refetch } = useQuery({
     retry: retryUnlessPermanent,
-    queryKey: ['managers', params],
+    queryKey: listKey,
     queryFn: async () => { const { data } = await api.get<{ data: ManagerRow[]; total: number }>('/managers', { params }); return data; },
-    refetchInterval: (query) => pollWhileInvitationInFlight(query.state.data?.data),
+    ...pollingOptions((query) => pagePoll.current(query)),
   });
+  pagePoll.current = useInvitationSettling('managers', listKey, data?.data, dataUpdatedAt);
   const managers = data?.data ?? [];
   const total = data?.total ?? 0;
   const isParamsRefetch = useIsParamsRefetch(params, isFetching);
@@ -689,7 +759,7 @@ function ManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, onTota
           </table>
         )}
       </div>
-      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+      {data && <RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />}
       {managerArchive.dialog}
       <RowActionConfirm
         pending={pendingAction}
@@ -725,7 +795,7 @@ function VenueManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, o
   const retryUnlessPermanent = useRetryUnlessPermanent();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const params = { q: search || undefined, page };
+  const params = { q: search || undefined, page, limit: LIST_PAGE_SIZE };
   const { data, isLoading, isError, error, refetch } = useQuery({
     retry: retryUnlessPermanent,
     queryKey: ['venue-managers', params],
@@ -797,7 +867,7 @@ function VenueManagersTab({ selected, onToggle, onSelectAllVisible, onVisible, o
           </table>
         )}
       </div>
-      {data && <RecordFooter total={total} page={page} onPage={setPage} />}
+      {data && <RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />}
     </>
   );
 }

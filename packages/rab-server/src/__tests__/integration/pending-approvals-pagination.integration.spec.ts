@@ -138,10 +138,10 @@ describeIfDb('pending approvals pagination (PERF-01, integration)', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(res.body.total).toBe(63);
-    // Default PaginationDto limit (500) exceeds 63, so this also proves the
-    // default page genuinely contains everything when under the cap —
-    // the "bounded" property is proven properly by test 2 below instead.
-    expect(res.body.data).toHaveLength(63);
+    // Phase C1: the default PaginationDto limit is 50 (was 500), so a request
+    // naming no limit gets one bounded page of 50 while `total` still reports
+    // all 63 — the caller pages through `total`, nothing is silently lost.
+    expect(res.body.data).toHaveLength(50);
     expect(Array.isArray(res.body.data)).toBe(true);
   });
 
@@ -168,8 +168,8 @@ describeIfDb('pending approvals pagination (PERF-01, integration)', () => {
     await seedPendingShifts(organisation.id, manager!, venueId, jobRoleId, 5);
     const token = await login(manager!.email);
 
-    // 1,000,000 exceeds PaginationDto's own @Max(1000) — must be rejected
-    // (400), never silently clamped into an unbounded scan.
+    // 1,000,000 exceeds PaginationDto's own @Max(200) (Phase C1; was 1000) —
+    // must be rejected (400), never silently clamped into an unbounded scan.
     const res = await request(app.getHttpServer())
       .get('/rest/v1/shifts/requests/pending')
       .query({ limit: 1000000 })

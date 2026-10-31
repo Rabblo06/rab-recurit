@@ -60,7 +60,7 @@ struct StaffHistoryScreen: View {
             }
             .refreshable {
                 async let history: Void = store.loadHistory(silent: true)
-                async let offers: Void = store.loadOffers(silent: true)
+                async let offers: Void = store.loadOffers(silent: true, full: true)
                 _ = await (history, offers)
             }
         }

@@ -44,7 +44,7 @@ struct StaffCalendarScreen: View {
                         kind: .error,
                         actionTitle: "Retry"
                     ) {
-                        Task { await store.loadOffers() }
+                        Task { await store.loadOffers(full: true) }
                     }
                 } else if month {
                     dayContent(selectedDay)
@@ -56,7 +56,7 @@ struct StaffCalendarScreen: View {
             .padding(.top, 8)
             .padding(.bottom, 24)
         }
-        .refreshable { await store.loadOffers(silent: true) }
+        .refreshable { await store.loadOffers(silent: true, full: true) }
         .background(StaffPalette.calendarBackground.ignoresSafeArea())
         .accessibilityIdentifier("staff.calendar")
     }

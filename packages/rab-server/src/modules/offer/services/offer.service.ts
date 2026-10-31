@@ -15,6 +15,7 @@ import {
   ShiftAssignmentStatus,
   ShiftStatus,
   ShiftStatusType,
+  POST_SHIFT_EXPIRED_MS,
 } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -31,10 +32,12 @@ import { toTstzRange } from '../../scheduling/utils/tstzrange';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { approverAudience, offerAudience, shiftAudience } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { isLegacyUnpagedRequest, keysetSkipTake, LEGACY_UNPAGED_LIMIT, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage, keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { NotificationService } from '../../notification/services/notification.service';
 import { VenueService } from '../../venue/services/venue.service';
@@ -42,6 +45,7 @@ import { ApproveShiftRequestDto } from '../dto/approve-shift-request.dto';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
 import { ListOffersDto } from '../dto/list-offers.dto';
+import { ListMyOffersDto } from '../dto/list-my-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
@@ -124,6 +128,13 @@ export interface OfferSummary {
 export interface BulkOfferResult {
   batchId: string;
   results: Array<{ staffProfileId: string; ok: boolean; offerId?: string; message?: string }>;
+}
+
+/** `GET /offers/mine` when any paging parameter is sent (Phase C1, contract §3). */
+export interface MyOffersPage {
+  data: OfferSummary[];
+  /** Opaque keyset cursor for the next page, or null when there are no more rows. */
+  nextCursor: string | null;
 }
 
 /** `POST /shifts/:id/offers/bulk` with `mode: 'replacement'` — the same batch result plus what the server decided. */
@@ -335,7 +346,7 @@ export class OfferService {
       const { skip, take } = paginationSkipTake(dto);
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
-      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
+      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
       return { data: rows.map(toOfferSummary), total: count };
     }, { useReplica: true });
   }
@@ -375,17 +386,84 @@ export class OfferService {
     });
   }
 
-  /** Staff-facing: only the caller's own offers (mobile "my offers"). */
-  listMine(ctx: AuthContext, pagination: PaginationDto = {}): Promise<OfferSummary[]> {
+  /**
+   * Staff-facing: only the caller's own offers (mobile "my offers"). Two shapes (Phase C1, contract §2/§3):
+   *
+   * - LEGACY — none of `limit`, `cursor`, `scope` sent: the pre-C1 response exactly (bare array, up to
+   *   `LEGACY_UNPAGED_LIMIT` = 500 rows, newest sent first, `page` offsets by 500, no time window). Installed staff app
+   *   builds call it this way and cannot change; do not route this through the global default page size.
+   * - PAGED — any of them sent: `{ data, nextCursor }`, `limit` <= 200 (default 50), keyset order `sent_at DESC, id
+   *   DESC`, `scope=current` (default) or `all` (see `ListMyOffersDto`).
+   *
+   * Either way the only row filter that grants access is `o.staff_profile_id = <the caller's own profile>` inside the
+   * caller's tenant context (RLS underneath); window and cursor only narrow it.
+   */
+  listMine(ctx: AuthContext, dto?: { page?: number; limit?: undefined; cursor?: undefined; scope?: undefined }): Promise<OfferSummary[]>;
+  listMine(ctx: AuthContext, dto: ListMyOffersDto): Promise<OfferSummary[] | MyOffersPage>;
+  listMine(ctx: AuthContext, dto: ListMyOffersDto = {}): Promise<OfferSummary[] | MyOffersPage> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const legacy = isLegacyUnpagedRequest(dto);
+      // Validated before anything is read, so a malformed cursor is a 400 whoever calls (no staff profile included).
+      const after = legacy ? null : decodeOptionalKeysetCursor(dto.cursor);
+      const paging = legacy ? null : keysetSkipTake(dto);
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
-      if (!staffProfile) return [];
-      const { skip, take } = paginationSkipTake(pagination);
-      const rows = await manager.query(
-        `${OFFER_SUMMARY_SELECT} WHERE o.staff_profile_id = $1 ORDER BY o.sent_at DESC LIMIT $2 OFFSET $3`,
-        [staffProfile.id, take, skip],
+      if (!staffProfile) return legacy ? [] : { data: [], nextCursor: null };
+
+      // Two steps, same rows and order as one joined query (Phase C1, measured with EXPLAIN ANALYZE on 200k offers /
+      // 1M audit rows): (1) the page's offer ids from job_offer alone, in keyset order; (2) the summary
+      // of exactly those ids. As one joined query the planner, blind to the selectivity of the RLS predicates, started from
+      // the venues and joined every shift and seat of the organisation before filtering to this staff member (~0.4 s for
+      // a long-tenure staff member, on every poll). Every read in both steps runs under the caller's tenant context/RLS,
+      // and the caller's own staff profile is the only row filter that grants anything.
+      const params: unknown[] = [staffProfile.id];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const conditions = ['o.staff_profile_id = $1'];
+      let skip: number;
+      let take: number;
+      if (legacy) {
+        // LEGACY: up to 500 rows, `page` offsets by 500, no window — exactly the pre-C1 response.
+        ({ skip, take } = paginationSkipTake({ page: dto.page, limit: LEGACY_UNPAGED_LIMIT }));
+      } else {
+        ({ skip, take } = paging!);
+        if ((dto.scope ?? 'current') === 'current') {
+          // "Current" (database clock): sent in the last 30 days (contract §3), OR the booking's lifecycle has not ended —
+          // its window has not ended, the staff member is still clocked in, or the post-shift steps after a clock-out are
+          // still running (the same POST_SHIFT_EXPIRED_MS the presentation uses). Correlated per offer, so the page is
+          // still read from job_offer in keyset order.
+          conditions.push(`(o.sent_at >= now() - interval '30 days' OR EXISTS (
+            SELECT 1 FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+              LEFT JOIN attendance a ON a.shift_assignment_id = sa.id AND a.staff_profile_id = o.staff_profile_id AND a.organisation_id = o.organisation_id
+             WHERE sa.id = o.shift_assignment_id
+               AND (${assignmentTimeSql().end} > now()
+                    OR a.status IN ('clocked_in', 'on_break')
+                    OR a.clock_out_at > now() - make_interval(secs => ${nextParam(POST_SHIFT_EXPIRED_MS / 1000)}))))`);
+        }
+        if (after) conditions.push(keysetBeforeSql('o.sent_at', 'o.id', nextParam(after.t), nextParam(after.i)));
+      }
+      // Paged mode reads one extra key to know whether a next page exists; the cursor's timestamp is PostgreSQL's exact
+      // (microsecond) text form of sent_at, which a JS Date would truncate.
+      const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
+        `SELECT o.id, ${keysetTimestampSql('o.sent_at')} AS keyset_ts FROM job_offer o
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY o.sent_at DESC, o.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
+        params,
       );
-      return rows.map(toOfferSummary);
+      const page = legacy ? { data: keys, nextCursor: null } : keysetPage(keys, take, (k) => ({ t: k.keyset_ts, i: k.id }));
+      // Hydrate key by key: a fenced (OFFSET 0) LATERAL per id is one primary-key lookup each, whatever the planner
+      // estimates (with `o.id = ANY(<500 ids>)` it went back to starting from the venues). JIT off for this transaction
+      // only: the RLS sub-plans inflate the estimate past jit_above_cost, and compiling (~0.2 s measured) can never pay
+      // off for a few hundred primary-key lookups.
+      if (page.data.length) await manager.query(`SELECT set_config('jit', 'off', true)`);
+      const rows: Array<Record<string, unknown>> = page.data.length
+        ? await manager.query(
+            `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
+               CROSS JOIN LATERAL (${OFFER_SUMMARY_SELECT} WHERE o.id = k.id AND o.staff_profile_id = $2 OFFSET 0) x
+              ORDER BY x.sent_at DESC, x.id DESC`,
+            [page.data.map((k) => k.id), staffProfile.id],
+          )
+        : [];
+      const data = rows.map(toOfferSummary);
+      return legacy ? data : { data, nextCursor: page.nextCursor };
     });
   }
 
@@ -1015,6 +1093,11 @@ export class OfferService {
           relatedEntityId: shift.id,
         });
       }
+      // C1b realtime (same transaction): shift_request.approved → requester, new owner, venue managers, and every other
+      // approver (their pending-approval list just lost this row).
+      await this.realtimeEventService.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `shift_request.approved:${shift.id}`, eventType: RealtimeEventType.SHIFT_REQUEST_APPROVED, entityType: 'shift', entityId: shift.id,
+      }, async (m) => [...(await shiftAudience(m, shift.id)), ...(await approverAudience(m, ctx.organisationId!))]);
 
       return { batchId, shiftId: shift.id, results };
     });
@@ -1060,6 +1143,12 @@ export class OfferService {
     });
     await this.notificationService.notify(manager, { organisationId: ctx.organisationId!, userId: staff.userId,
       type: 'shift_cancelled', title: 'Offer cancelled', message: reason?.trim() || 'Your booking has been cancelled by your manager.', relatedEntityType: 'offer', relatedEntityId: offer.id });
+    // C1b realtime (same transaction): the offer went to MANAGER_REJECTED (accepted, unconfirmed) or WITHDRAWN (pending,
+    // or a confirmed booking called off — audited as OFFER_WITHDRAWN). Recipients: staff, sender, shift owner, venue managers.
+    const cancelledAs = offer.status === OfferStatus.STAFF_ACCEPTED ? RealtimeEventType.OFFER_REJECTED : RealtimeEventType.OFFER_WITHDRAWN;
+    await this.realtimeEventService.recordForRecipients(manager, {
+      organisationId: ctx.organisationId!, eventKey: `${cancelledAs}:${offer.id}`, eventType: cancelledAs, entityType: 'offer', entityId: offer.id, payload: { shiftId: shift.id },
+    }, (m) => offerAudience(m, offer.id));
   }
 
   async withdraw(ctx: AuthContext, offerId: string): Promise<JobOffer> {
@@ -1090,6 +1179,10 @@ export class OfferService {
         entityId: offer.id,
         metadata: { offerBatchId: offer.offerBatchId },
       });
+      // C1b realtime (same transaction): offer.withdrawn → staff, sender, shift owner, venue managers. Ids only.
+      await this.realtimeEventService.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `offer.withdrawn:${offer.id}`, eventType: RealtimeEventType.OFFER_WITHDRAWN, entityType: 'offer', entityId: offer.id, payload: { shiftId: assignment.shiftId },
+      }, (m) => offerAudience(m, offer.id));
 
       return manager.findOneByOrFail(JobOffer, { id: offer.id });
     });
@@ -1285,6 +1378,10 @@ export class OfferService {
             relatedEntityId: offer.id,
           });
         }
+        // C1b realtime (same transaction as the expiry claim): offer.expired → staff, sender, shift owner, venue managers.
+        await this.realtimeEventService.recordForRecipients(manager, {
+          organisationId: ctx.organisationId!, eventKey: `offer.expired:${offer.id}`, eventType: RealtimeEventType.OFFER_EXPIRED, entityType: 'offer', entityId: offer.id,
+        }, (m) => offerAudience(m, offer.id));
       }
       return offer;
     });
@@ -1338,6 +1435,10 @@ export class OfferService {
           relatedEntityId: offer.id,
         });
       }
+      // C1b realtime (same transaction): offer.declined → staff (own other devices), sender, shift owner, venue managers.
+      await this.realtimeEventService.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `offer.declined:${offer.id}`, eventType: RealtimeEventType.OFFER_DECLINED, entityType: 'offer', entityId: offer.id, payload: { shiftId: assignment.shiftId },
+      }, (m) => offerAudience(m, offer.id));
 
       return manager.findOneByOrFail(JobOffer, { id: offer.id });
     });
@@ -1489,6 +1590,10 @@ export class OfferService {
           relatedEntityId: offer.id,
         });
       }
+      // C1b realtime (same transaction): offer.rejected → staff, sender, shift owner, venue managers. Ids only (never the reason).
+      await this.realtimeEventService.recordForRecipients(manager, {
+        organisationId: ctx.organisationId!, eventKey: `offer.rejected:${offer.id}`, eventType: RealtimeEventType.OFFER_REJECTED, entityType: 'offer', entityId: offer.id, payload: { shiftId: assignment.shiftId },
+      }, (m) => offerAudience(m, offer.id));
 
       return manager.findOneByOrFail(JobOffer, { id: offer.id });
     });

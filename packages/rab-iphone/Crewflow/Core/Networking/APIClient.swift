@@ -61,6 +61,25 @@ public struct DownloadedFile: Sendable, Equatable {
     }
 }
 
+/// A long-lived `text/event-stream` response (`GET /realtime/stream`).
+/// `lines` yields every line, empty ones included (they end an event);
+/// `close` cancels the underlying request. For any status other than 200
+/// the request is already closed and `lines` finishes immediately.
+public struct EventStreamResponse: @unchecked Sendable {
+    public let status: Int
+    /// Raw `Retry-After` header (429).
+    public let retryAfter: String?
+    public let lines: AsyncThrowingStream<String, Error>
+    public let close: @Sendable () -> Void
+
+    public init(status: Int, retryAfter: String?, lines: AsyncThrowingStream<String, Error>, close: @escaping @Sendable () -> Void) {
+        self.status = status
+        self.retryAfter = retryAfter
+        self.lines = lines
+        self.close = close
+    }
+}
+
 struct HTTPResult: @unchecked Sendable {
     let data: Data
     let response: HTTPURLResponse
@@ -87,6 +106,9 @@ public final class APIClient: @unchecked Sendable {
     /// CF-19: upper bounds for one API request and for one token refresh.
     public static let requestTimeout: TimeInterval = 30
     public static let refreshTimeout: TimeInterval = 20
+    /// Idle bound for an event stream (the server sends a keepalive every
+    /// 25 s; the realtime client's own watchdog drops it after 50 s).
+    public static let streamIdleTimeout: TimeInterval = 75
     public static let platformHeaderName = "X-Client-Platform"
     public static let platformHeaderValue = "mobile"
     /// Account security step 1 (P3): the sign-in steps this build can finish.
@@ -224,6 +246,18 @@ public final class APIClient: @unchecked Sendable {
         return try await download(path, retried: false, dispatchGeneration: generation)
     }
 
+    /// Opens a Server-Sent Events stream under the CURRENT identity with the
+    /// same transport rules as every other call: `Authorization: Bearer`,
+    /// `X-Client-Platform`, no redirects, no cookies, and a 401 answered by
+    /// ONE shared refresh then ONE retry under the same identity generation
+    /// (a rejected refresh ends the session through the usual expiry path
+    /// and throws `.unauthorized`). It is automatic traffic, so it carries
+    /// `X-Crewflow-Background: 1` and never slides the idle window.
+    public func openEventStream(_ path: String) async throws -> EventStreamResponse {
+        let generation = await gate.generation
+        return try await openEventStream(path, retried: false, dispatchGeneration: generation)
+    }
+
     /// `GET /healthz` — NOT under `/rest/v1`, no auth. True only for 2xx.
     public func healthCheck() async -> Bool {
         var root = baseString
@@ -349,8 +383,10 @@ public final class APIClient: @unchecked Sendable {
                 // this single replay is safe even for a non-idempotent POST.
                 var retryBody = body
                 if path == "/auth/logout" {
-                    // The refresh just rotated the token the original body named.
-                    retryBody = try encode(RefreshTokenBody(refreshToken: tokens.refreshToken()))
+                    // The refresh just rotated the token the original body named;
+                    // the push device id (if any) is kept.
+                    let original = body.flatMap { try? JSONDecoder().decode(LogoutBody.self, from: $0) }
+                    retryBody = try encode(LogoutBody(refreshToken: tokens.refreshToken(), pushDeviceId: original?.pushDeviceId))
                 }
                 return try await execute(method, path, body: retryBody, options: options, retried: true, dispatchGeneration: generation)
             }
@@ -363,6 +399,86 @@ public final class APIClient: @unchecked Sendable {
         guard await gate.isCurrent(generation) else { throw APIError.sessionChanged }
         if status >= 300 { throw failure(for: result) }
         return result.data
+    }
+
+    private func openEventStream(_ path: String, retried: Bool, dispatchGeneration generation: UInt64) async throws -> EventStreamResponse {
+        let bearer = tokens.accessToken()
+        var request = try makeRequest(.get, path, body: nil, bearer: bearer, timeout: Self.streamIdleTimeout)
+        request.setValue(nil, forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue("1", forHTTPHeaderField: "X-Crewflow-Background")
+        let opened: (URLSession.AsyncBytes, URLResponse)
+        do {
+            opened = try await session.bytes(for: request)
+        } catch let error as URLError {
+            throw APIError.from(urlError: error)
+        } catch is CancellationError {
+            throw APIError.cancelled
+        } catch {
+            throw APIError.offline
+        }
+        let bytes = opened.0
+        let dataTask = bytes.task
+        let close: @Sendable () -> Void = { dataTask.cancel() }
+        guard let http = opened.1 as? HTTPURLResponse else {
+            close()
+            throw APIError.decoding("Non-HTTP response")
+        }
+        let status = http.statusCode
+        Log.network.debug("GET \(path, privacy: .private) stream -> \(status, privacy: .public)")
+
+        if status == 401, !retried {
+            close()
+            // Same rules as `execute`: never refresh for an old identity.
+            guard await gate.isCurrent(generation) else { throw APIError.sessionChanged }
+            let refreshed = try await refreshAccessToken(presented: bearer)
+            guard await gate.isCurrent(generation) else { throw APIError.sessionChanged }
+            if refreshed {
+                return try await openEventStream(path, retried: true, dispatchGeneration: generation)
+            }
+            await expire(ifCurrent: generation)
+            throw APIError.unauthorized(message: APIMessages.sessionExpired)
+        }
+        guard await gate.isCurrent(generation) else {
+            close()
+            throw APIError.sessionChanged
+        }
+        guard status == 200 else {
+            close()
+            return EventStreamResponse(
+                status: status,
+                retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
+                lines: AsyncThrowingStream { $0.finish() },
+                close: close
+            )
+        }
+        return EventStreamResponse(status: 200, retryAfter: nil, lines: Self.eventStreamLines(bytes), close: close)
+    }
+
+    /// Bytes → lines (empty lines kept), bounded per line. Cancelling the
+    /// consumer cancels the request.
+    static func eventStreamLines(_ bytes: URLSession.AsyncBytes, maxLineBytes: Int = 65_536) -> AsyncThrowingStream<String, Error> {
+        let dataTask = bytes.task
+        return AsyncThrowingStream { continuation in
+            let reader = Task {
+                var splitter = SSELineSplitter(maxLineBytes: maxLineBytes)
+                do {
+                    for try await byte in bytes {
+                        if let line = try splitter.push(byte) {
+                            continuation.yield(line)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in
+                reader.cancel()
+                dataTask.cancel()
+            }
+        }
     }
 
     private func download(_ path: String, retried: Bool, dispatchGeneration: UInt64?) async throws -> DownloadedFile {
@@ -542,6 +658,14 @@ public final class APIClient: @unchecked Sendable {
 
 struct RefreshTokenBody: Encodable {
     let refreshToken: String?
+}
+
+/// `POST /auth/logout`. `pushDeviceId` (optional, a UUID) names this
+/// install's push device so the server deactivates exactly that device with
+/// the session (Phase C1b); omitted when this install never registered.
+struct LogoutBody: Codable, Equatable {
+    let refreshToken: String?
+    let pushDeviceId: String?
 }
 
 /// Refuses every automatic redirect so an `Authorization` header can never

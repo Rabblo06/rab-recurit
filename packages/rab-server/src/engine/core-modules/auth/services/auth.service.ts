@@ -31,6 +31,7 @@ import { StepUpReauthService } from './step-up-reauth.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
 import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
 import { CAPABILITY_MFA_VERIFY, CLIENT_UPDATE_REQUIRED_BODY, hasClientCapability } from '../constants/client-capabilities';
+import { deactivatePushDeviceForUser } from '../../push/push-device-deactivation';
 
 export interface RequestMeta {
   ip?: string;
@@ -829,13 +830,15 @@ export class AuthService {
    * from `rotate()`'s own unknown-token case, deliberately does not distinguish "this token
    * doesn't exist" from "this token belongs to someone else," so neither response is an oracle.
    */
-  async logout(ctx: AuthContext, refreshToken: string | undefined): Promise<void> {
+  async logout(ctx: AuthContext, refreshToken: string | undefined, pushDeviceId?: string): Promise<void> {
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // Audit F9: also end the session that authenticated THIS request (cookie or Bearer `sid`), so logout works even
       // when no refresh token is presented. A presented refresh token is ownership-checked FIRST: on a mismatch
       // nothing at all is revoked (the existing abuse-case contract).
       const result = refreshToken ? await this.refreshTokenService.revokeByToken(manager, refreshToken, ctx.userId) : ('revoked' as const);
       if (result !== 'mismatch' && ctx.sessionId) await this.refreshTokenService.revokeFamily(manager, ctx.sessionId, 'logout');
+      // C1b push (D5): the device being logged out, and only it — scoped to the caller, so another user's id is a no-op.
+      if (result !== 'mismatch' && pushDeviceId) await deactivatePushDeviceForUser(manager, ctx.userId, pushDeviceId, 'user_logout');
       await this.auditService.record(
         manager,
         ctx,

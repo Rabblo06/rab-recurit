@@ -9,39 +9,110 @@ import 'package:http/http.dart' as http;
 import '../api/api_client.dart';
 import '../auth/auth_provider.dart';
 import '../../features/home/attendance_provider.dart';
+import '../../features/notifications/notifications_provider.dart';
 import '../../features/offers/offers_provider.dart';
 import '../../features/venue_manager/venue_manager_provider.dart';
 import 'realtime_envelope.dart';
 
-enum RealtimeConnectionStatus { connecting, connected, reconnecting, offline }
+enum RealtimeConnectionStatus {
+  connecting,
+  connected,
+  reconnecting,
+  offline,
 
-const Duration _defaultBaseBackoff = Duration(seconds: 1);
-const Duration _defaultMaxBackoff = Duration(seconds: 30);
-const int _dedupWindowSize = 200;
+  /// 204 (`REALTIME_ENABLED=false`, the default) or 404 (no route): never
+  /// retried for the life of this service, i.e. until a new session/identity.
+  disabled,
 
-/// Stage 5 — the Flutter foreground real-time client. Connects to the exact
-/// same authenticated gateway (`GET /rest/v1/realtime/stream`) the React web
-/// console already uses (see `rab-front/src/shared/lib/realtime-client.ts`,
-/// same wire format, same envelope, same dedup/backoff shape) — no new
-/// backend, no second auth system, no direct Redis connection.
+  /// Refused (401/403 after one shared refresh) or the identity changed.
+  stopped,
+}
+
+/// Timings of [RealtimeConnectionService] (tests shorten nothing: they run on
+/// fake time).
+class RealtimeTimings {
+  const RealtimeTimings({
+    this.keepalive = const Duration(seconds: 25),
+    this.baseBackoff = const Duration(seconds: 1),
+    this.maxBackoff = const Duration(seconds: 30),
+    this.sustainedConnection = const Duration(seconds: 60),
+    this.defaultRetryAfter = const Duration(seconds: 30),
+    this.coalesce = const Duration(milliseconds: 500),
+  });
+
+  final Duration keepalive;
+  final Duration baseBackoff;
+  final Duration maxBackoff;
+  final Duration sustainedConnection;
+  final Duration defaultRetryAfter;
+  final Duration coalesce;
+
+  /// No byte (event or `: keepalive` comment) for this long → reconnect.
+  Duration get watchdog => keepalive * 2;
+}
+
+/// What a set of realtime event types refreshes. Only the providers' existing
+/// reads; nothing from an event is ever written into application state.
+enum RealtimeRefresh { offers, attendance, history, venueManager, unreadCount }
+
+Set<RealtimeRefresh> realtimeRefreshesFor(
+  Set<String> types, {
+  required bool staff,
+  required bool venueManager,
+}) {
+  final result = <RealtimeRefresh>{};
+  for (final type in types) {
+    if (type == 'notification.created') result.add(RealtimeRefresh.unreadCount);
+    if (staff) {
+      if (type.startsWith('offer.') ||
+          type == 'shift.updated' ||
+          type == 'shift.cancelled') {
+        result.add(RealtimeRefresh.offers);
+      }
+      if (type == 'attendance.changed') {
+        result
+          ..add(RealtimeRefresh.attendance)
+          ..add(RealtimeRefresh.history);
+      }
+      if (type == 'payroll.record_changed') result.add(RealtimeRefresh.history);
+    }
+    if (venueManager &&
+        (type.startsWith('offer.') ||
+            type.startsWith('shift.') ||
+            type.startsWith('shift_request.') ||
+            type == 'attendance.changed')) {
+      result.add(RealtimeRefresh.venueManager);
+    }
+  }
+  return result;
+}
+
+/// The Flutter foreground realtime client (Phase C1b): `GET
+/// /rest/v1/realtime/stream` (Server-Sent Events) on the same session and
+/// bearer token as every other request (`ApiClient.openStream`), mirroring the
+/// iOS `RealtimeClient` and the web `realtime-client.ts`.
 ///
-/// Lives and dies with the SAME identity-scoped `MultiProvider` key `app.dart`
-/// already uses for `OffersProvider`/`AttendanceProvider`/`VenueManagerProvider`
-/// (`'${auth.user!.id}:${auth.presentation.name}'`) — logout and account
-/// switching are therefore handled for free by Provider's own lifecycle
-/// (the whole subtree, this service included, is disposed and a fresh one
-/// constructed under the new identity), exactly like every other provider in
-/// this app. The generation check in [_handleFrame] is defence in depth for
-/// the brief window between an identity change and the next widget rebuild,
-/// not the primary teardown mechanism.
-///
-/// Event routing never writes event data directly into application state —
-/// every known event type triggers one of the EXISTING provider refresh
-/// methods (`OffersProvider.load`, `VenueManagerProvider.refresh`), the same
-/// ones the app's own 30s `app_shell.dart` reconcile timer and resume hooks
-/// already call. A late or duplicate event can therefore never restore stale
-/// state or create duplicate UI data — the only effect of any event is "go
-/// refetch the authoritative list," which is idempotent by construction.
+/// - 204 (`REALTIME_ENABLED=false`) / 404 / a 200 that is not an event stream
+///   = disabled: one request, then silence until a new session/identity (this
+///   service lives in the identity-keyed `MultiProvider` in `app.dart`).
+/// - 401/403: ONE refresh through the shared path (`GET /auth/me`, which runs
+///   `ApiClient`'s single-flight refresh-or-expire); refused again → stopped.
+/// - 429: waits `Retry-After` (default 30 s) plus up to 20 % jitter.
+/// - Any other failure or a dropped stream: backoff 1 s ×2 up to 30 s at
+///   50–100 % jitter, reset only after a connection that stayed up ≥ 60 s.
+/// - Watchdog: no byte for 2 × keepalive (50 s) → dropped and reconnected.
+/// - Foreground only (closed on paused/detached, reopened on resume; the
+///   shells run their own resume reconcile). After a reconnect that followed a
+///   failure or a drop, [reconcile] refetches what may have been missed.
+/// - The stream request is background traffic (`X-Crewflow-Background: 1`).
+/// - Events: validated envelope, `targetUserId` must be the signed-in user,
+///   deduplicated (last 200 ids), coalesced ~0.5 s, then only the providers'
+///   existing refreshes run ([realtimeRefreshesFor]), background-flagged.
+/// - While live, the polls it covers (Sent Shifts first page, notifications,
+///   staff reconcile) slow to `realtimeFallbackPollInterval`; they revert as
+///   soon as it is not live ([isLive] + `notifyListeners`).
+/// - The session generation is re-checked before every connect and dispatch;
+///   a changed identity stops this service for good.
 class RealtimeConnectionService extends ChangeNotifier
     with WidgetsBindingObserver {
   RealtimeConnectionService({
@@ -50,204 +121,324 @@ class RealtimeConnectionService extends ChangeNotifier
     OffersProvider? offers,
     AttendanceProvider? attendance,
     VenueManagerProvider? venueManager,
-    http.Client? httpClient,
-    // Test-only overrides — production call sites (app.dart) never pass
-    // these, so they always get the real 1s/30s production backoff.
-    Duration? baseBackoff,
-    Duration? maxBackoff,
+    NotificationsProvider? notifications,
+    RealtimeTimings timings = const RealtimeTimings(),
+    Random? random,
   }) : _api = api,
        _auth = auth,
        _offers = offers,
        _attendance = attendance,
        _venueManager = venueManager,
-       _http = httpClient ?? http.Client(),
-       _baseBackoff = baseBackoff ?? _defaultBaseBackoff,
-       _maxBackoff = maxBackoff ?? _defaultMaxBackoff {
+       _notifications = notifications,
+       _timings = timings,
+       _random = random ?? Random(),
+       _generation = auth.sessionGeneration {
     WidgetsBinding.instance.addObserver(this);
     unawaited(_connect());
   }
+
+  static const dedupeWindow = 200;
+  static const streamPath = '/realtime/stream';
 
   final ApiClient _api;
   final AuthProvider _auth;
   final OffersProvider? _offers;
   final AttendanceProvider? _attendance;
   final VenueManagerProvider? _venueManager;
-  final http.Client _http;
-  final Duration _baseBackoff;
-  final Duration _maxBackoff;
+  final NotificationsProvider? _notifications;
+  final RealtimeTimings _timings;
+  final Random _random;
+  final int _generation;
 
   RealtimeConnectionStatus _status = RealtimeConnectionStatus.offline;
   RealtimeConnectionStatus get status => _status;
+  bool get isLive => _status == RealtimeConnectionStatus.connected;
+
+  /// Consecutive failed / short-lived connections (drives the backoff).
+  int get attempt => _attempt;
+
+  /// The last wait before a reconnect (tests and diagnostics).
+  Duration? lastDelay;
 
   StreamSubscription<String>? _subscription;
   Timer? _reconnectTimer;
+  Timer? _watchdog;
+  Timer? _dispatchTimer;
+
+  /// Fires once the current connection has stayed up long enough to reset
+  /// the backoff (a Timer, not a Stopwatch: it follows the app's clock).
+  Timer? _sustainedTimer;
+  bool _sustained = false;
   int _attempt = 0;
   bool _disposed = false;
   bool _backgrounded = false;
-  int _generationAtConnect = -1;
+  bool _authRetried = false;
+  bool _needsReconcile = false;
+  bool _connecting = false;
+  final Set<String> _pendingTypes = {};
 
   final Queue<String> _seenEventIds = Queue<String>();
   final Set<String> _seenEventIdSet = <String>{};
 
+  bool get _ended =>
+      _status == RealtimeConnectionStatus.disabled ||
+      _status == RealtimeConnectionStatus.stopped;
+  bool get _canConnect => !_disposed && !_backgrounded && !_ended;
+
   void _setStatus(RealtimeConnectionStatus next) {
     if (_disposed || _status == next) return;
+    final wasLive = isLive;
     _status = next;
+    if (wasLive != isLive) _notifications?.setRealtimeLive(isLive);
     notifyListeners();
   }
 
+  bool _identityChanged() {
+    if (_auth.sessionGeneration == _generation) return false;
+    _end(RealtimeConnectionStatus.stopped);
+    return true;
+  }
+
   Future<void> _connect() async {
-    if (_disposed || _backgrounded) return;
-    _generationAtConnect = _auth.sessionGeneration;
+    if (!_canConnect || _connecting || _subscription != null) return;
+    if (_identityChanged()) return;
+    _connecting = true;
     _setStatus(RealtimeConnectionStatus.connecting);
-
-    final String? token;
+    final http.StreamedResponse response;
     try {
-      token = await _api.getAccessToken();
+      if (await _api.getAccessToken() == null) {
+        // No credential at all: AuthProvider owns re-authentication.
+        _connecting = false;
+        _end(RealtimeConnectionStatus.stopped);
+        return;
+      }
+      response = await _api.openStream(streamPath);
     } catch (_) {
-      _scheduleReconnect();
+      _connecting = false;
+      if (_canConnect && !_identityChanged()) _retry(_backoff());
       return;
     }
-    if (_disposed || _backgrounded) return;
-    if (token == null) {
-      // No credential at all — nothing this service can do; `AuthProvider`
-      // owns re-authentication, this just waits for the next identity swap.
-      _setStatus(RealtimeConnectionStatus.offline);
+    _connecting = false;
+    if (!_canConnect || _identityChanged()) {
+      _drain(response);
       return;
     }
-    if (_auth.sessionGeneration != _generationAtConnect) return; // identity moved on while we awaited the token
+    switch (response.statusCode) {
+      case 200
+          when (response.headers['content-type'] ?? '').contains(
+            'text/event-stream',
+          ):
+        _authRetried = false;
+        _consume(response);
+      case 200 || 204 || 404:
+        // Disabled (or not an event stream at all): never hammer it.
+        _drain(response);
+        _end(RealtimeConnectionStatus.disabled);
+      case 401 || 403:
+        _drain(response);
+        await _refreshOnceThenRetry();
+      case 429:
+        _drain(response);
+        final parsed =
+            parseRetryAfter(response.headers['retry-after']) ??
+            _timings.defaultRetryAfter;
+        final wait = parsed < minRetryAfter ? minRetryAfter : parsed;
+        _retry(wait + _scale(wait, _random.nextDouble() * 0.2));
+      default:
+        _drain(response);
+        _retry(_backoff());
+    }
+  }
 
+  /// One refresh through the shared path; a second refusal stops for good.
+  Future<void> _refreshOnceThenRetry() async {
+    if (_authRetried) {
+      _end(RealtimeConnectionStatus.stopped);
+      return;
+    }
+    _authRetried = true;
     try {
-      final request = http.Request(
-        'GET',
-        Uri.parse('${_api.baseUrl}/realtime/stream'),
-      );
-      // Never a token in the URL/query string (Stage 5 §4.1) — only ever a header.
-      request.headers.addAll({
-        'Authorization': 'Bearer $token',
-        'Accept': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-      });
-      final response = await _http.send(request);
-      if (_disposed || _backgrounded) {
-        unawaited(response.stream.drain<void>().catchError((_) {}));
-        return;
-      }
-      if (_auth.sessionGeneration != _generationAtConnect) return;
-
-      if (response.statusCode != 200) {
-        await _handleConnectFailure(response.statusCode);
-        return;
-      }
-
-      _attempt = 0;
-      _setStatus(RealtimeConnectionStatus.connected);
-      final parser = SseStreamParser();
-      _subscription = response.stream
-          .transform(utf8.decoder)
-          .listen(
-            (chunk) {
-              for (final frame in parser.addChunk(chunk)) {
-                _handleFrame(frame);
-              }
-            },
-            onError: (_) => _onStreamEnded(),
-            onDone: _onStreamEnded,
-            cancelOnError: true,
-          );
+      // `ApiClient` refreshes on 401 (single-flight) and, when the refresh is
+      // refused, ends the session itself (`onSessionExpired`).
+      await _api.get('/auth/me', background: true);
     } catch (_) {
-      _onStreamEnded();
+      _end(RealtimeConnectionStatus.stopped);
+      return;
     }
+    if (_canConnect && !_identityChanged()) unawaited(_connect());
   }
 
-  Future<void> _handleConnectFailure(int statusCode) async {
-    if (statusCode == 401 || statusCode == 403) {
-      // Reuse the EXISTING refresh-or-fail path verbatim — `/auth/me` is a
-      // real, already-used-elsewhere endpoint; `ApiClient._request` already
-      // does single-flight refresh-on-401 and, on failure, calls
-      // `onSessionExpired` and clears tokens itself. No second refresh
-      // implementation is introduced here (Stage 5 §5.1).
-      try {
-        await _api.get('/auth/me');
-      } catch (_) {
-        // Refresh failed: `onSessionExpired` already ran inside `ApiClient`,
-        // `AuthProvider.phase` is already transitioning to `unauthenticated`,
-        // and this whole provider subtree will be disposed shortly. Do not
-        // schedule a reconnect — an unrecoverable auth rejection must not
-        // retry forever (Stage 5 §5.2).
-        return;
-      }
-    }
-    _onStreamEnded();
-  }
-
-  void _onStreamEnded() {
-    _subscription = null;
-    if (_disposed || _backgrounded) return;
-    _scheduleReconnect();
-  }
-
-  void _scheduleReconnect() {
-    if (_disposed || _backgrounded) return;
-    _attempt += 1;
-    _setStatus(RealtimeConnectionStatus.reconnecting);
-    final backoffMs = min(
-      _maxBackoff.inMilliseconds,
-      _baseBackoff.inMilliseconds * pow(2, _attempt - 1).toInt(),
+  void _consume(http.StreamedResponse response) {
+    _sustained = false;
+    _sustainedTimer?.cancel();
+    _sustainedTimer = Timer(
+      _timings.sustainedConnection,
+      () => _sustained = true,
     );
-    final jitterMs = (backoffMs * (0.5 + Random().nextDouble() * 0.5)).toInt();
-    _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(Duration(milliseconds: jitterMs), () {
-      unawaited(_connect());
+    _setStatus(RealtimeConnectionStatus.connected);
+    if (_needsReconcile) {
+      _needsReconcile = false;
+      reconcile();
+    }
+    _armWatchdog();
+    final parser = SseStreamParser();
+    _subscription = response.stream
+        .transform(utf8.decoder)
+        .listen(
+          (chunk) {
+            _armWatchdog();
+            for (final frame in parser.addChunk(chunk)) {
+              _handleFrame(frame);
+            }
+          },
+          onError: (Object _) => _dropped(),
+          onDone: _dropped,
+          cancelOnError: true,
+        );
+  }
+
+  void _armWatchdog() {
+    _watchdog?.cancel();
+    _watchdog = Timer(_timings.watchdog, () {
+      unawaited(_subscription?.cancel());
+      _dropped();
     });
   }
 
-  void _handleFrame(SseFrame frame) {
-    if (_disposed || _backgrounded) return;
-    if (_auth.sessionGeneration != _generationAtConnect) {
-      // The identity bound to this connection has moved on (logout, a
-      // different account logging in on the same device) — a stale stream
-      // must never deliver into the new identity's state. Close it outright
-      // rather than keep silently reading frames nobody should act on.
-      unawaited(_subscription?.cancel());
-      _subscription = null;
-      return;
-    }
-    final envelope = parseRealtimeEnvelope(frame.data);
-    if (envelope == null) return; // malformed, unknown version/type — dropped, never crashes the app
-    if (!_rememberEventId(envelope.eventId)) return; // at-least-once duplicate, already handled
-    _route(envelope);
+  void _dropped() {
+    if (_subscription == null) return;
+    _subscription = null;
+    _watchdog?.cancel();
+    _sustainedTimer?.cancel();
+    if (!_canConnect) return;
+    if (_sustained) _attempt = 0;
+    if (_identityChanged()) return;
+    _retry(_backoff());
   }
 
-  /// Bounded FIFO containment — returns false (and does nothing) for an
-  /// eventId already seen within the last [_dedupWindowSize] events.
+  Duration _backoff() {
+    _attempt++;
+    final step = _timings.baseBackoff * pow(2, min(_attempt - 1, 20)).toInt();
+    final base = step > _timings.maxBackoff ? _timings.maxBackoff : step;
+    // 50–100 % of the step: phones that lost the server together do not come
+    // back together.
+    return _scale(base, 0.5 + _random.nextDouble() * 0.5);
+  }
+
+  void _retry(Duration delay) {
+    _needsReconcile = true;
+    lastDelay = delay;
+    _setStatus(RealtimeConnectionStatus.reconnecting);
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, () => unawaited(_connect()));
+  }
+
+  static Duration _scale(Duration d, double factor) =>
+      Duration(microseconds: (d.inMicroseconds * factor).round());
+
+  void _drain(http.StreamedResponse response) =>
+      unawaited(response.stream.drain<void>().catchError((Object _) {}));
+
+  void _close() {
+    _reconnectTimer?.cancel();
+    _watchdog?.cancel();
+    _sustainedTimer?.cancel();
+    _dispatchTimer?.cancel();
+    _dispatchTimer = null;
+    _pendingTypes.clear();
+    final subscription = _subscription;
+    _subscription = null;
+    unawaited(subscription?.cancel());
+  }
+
+  void _end(RealtimeConnectionStatus status) {
+    _close();
+    _setStatus(status);
+  }
+
+  void _handleFrame(SseFrame frame) {
+    if (!_canConnect || _identityChanged()) return;
+    final envelope = parseRealtimeEnvelope(frame.data);
+    if (envelope == null) return; // malformed / unknown: dropped, never crashes
+    // The server already addresses the recipient; this is defence in depth.
+    final userId = _auth.user?.id;
+    if (userId == null ||
+        envelope.targetUserId?.toLowerCase() != userId.toLowerCase()) {
+      return;
+    }
+    if (!_rememberEventId(envelope.eventId)) return; // at-least-once duplicate
+    _pendingTypes.add(envelope.type);
+    _dispatchTimer ??= Timer(_timings.coalesce, _dispatch);
+  }
+
+  /// Bounded FIFO dedupe; false for an id already seen.
   bool _rememberEventId(String eventId) {
-    if (_seenEventIdSet.contains(eventId)) return false;
-    _seenEventIdSet.add(eventId);
-    _seenEventIds.add(eventId);
-    if (_seenEventIds.length > _dedupWindowSize) {
+    final key = eventId.toLowerCase();
+    if (!_seenEventIdSet.add(key)) return false;
+    _seenEventIds.add(key);
+    if (_seenEventIds.length > dedupeWindow) {
       _seenEventIdSet.remove(_seenEventIds.removeFirst());
     }
     return true;
   }
 
-  /// Every branch calls an EXISTING provider refresh method — never writes
-  /// the envelope's own fields into application state. The authoritative
-  /// API response, not the event payload, is always the source of truth.
-  void _route(RealtimeEnvelope envelope) {
-    switch (envelope.type) {
-      case 'offer.sent':
-      case 'offer.confirmed':
-        // Staff-facing: Offers/Confirmed/Upcoming/Calendar all read this one
-        // provider (see offers_provider.dart's own fan-out via notifyListeners).
-        unawaited(_offers?.load(silent: true));
-      case 'offer.accepted':
-        // Manager-facing (`assignedBy`) — the only Flutter root that can ever
-        // be the recipient is Venue Manager; an internal Manager/CEO account
-        // uses the web console for this (see app.dart's `ConsoleEntryScreen`
-        // deep-link for those two presentations), so there is nothing to
-        // refresh here when `_venueManager` is null.
-        unawaited(_venueManager?.refresh(silent: true));
+  void _dispatch() {
+    _dispatchTimer = null;
+    final types = Set<String>.of(_pendingTypes);
+    _pendingTypes.clear();
+    if (types.isEmpty || _disposed || _identityChanged()) return;
+    _run(
+      realtimeRefreshesFor(
+        types,
+        staff: _offers != null || _attendance != null,
+        venueManager: _venueManager != null,
+      ),
+    );
+  }
+
+  /// Every refresh is an existing provider read, background-flagged, and
+  /// single-flight inside the provider (a burst costs at most one extra run).
+  void _run(Set<RealtimeRefresh> refreshes, {bool background = true}) {
+    for (final refresh in refreshes) {
+      switch (refresh) {
+        case RealtimeRefresh.offers:
+          unawaited(_offers?.load(silent: true, background: background));
+        case RealtimeRefresh.attendance:
+          unawaited(
+            _attendance?.refreshActive(silent: true, background: background),
+          );
+        case RealtimeRefresh.history:
+          unawaited(
+            _attendance?.loadHistory(silent: true, background: background),
+          );
+        case RealtimeRefresh.venueManager:
+          unawaited(
+            _venueManager?.refresh(silent: true, background: background),
+          );
+        case RealtimeRefresh.unreadCount:
+          unawaited(_notifications?.refreshUnreadCount(background: background));
+      }
     }
+  }
+
+  /// Refetches everything this identity shows (after a reconnect that
+  /// followed a drop, or a push notification): the stream cannot have
+  /// delivered what happened while it was down. [background] is false only
+  /// for a notification TAP (real user activity); a reconnect or a push
+  /// arrival never slides the session's idle window.
+  void reconcile({bool background = true}) {
+    if (_disposed || _identityChanged()) return;
+    unawaited(
+      _offers?.load(silent: true, background: background, joinInFlight: true),
+    );
+    _run(background: background, {
+      if (_attendance != null) ...[
+        RealtimeRefresh.attendance,
+        RealtimeRefresh.history,
+      ],
+      if (_venueManager != null) RealtimeRefresh.venueManager,
+      RealtimeRefresh.unreadCount,
+    });
   }
 
   @override
@@ -260,42 +451,31 @@ class RealtimeConnectionService extends ChangeNotifier
         _leaveBackground();
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
-        break; // transient, not a real background transition — no existing observer in this app treats these as backgrounded either
+        break;
     }
   }
 
   void _enterBackground() {
     if (_disposed || _backgrounded) return;
     _backgrounded = true;
-    _reconnectTimer?.cancel();
-    unawaited(_subscription?.cancel());
-    _subscription = null;
-    _setStatus(RealtimeConnectionStatus.offline);
+    _close();
+    if (!_ended) _setStatus(RealtimeConnectionStatus.offline);
   }
 
   void _leaveBackground() {
     if (_disposed || !_backgrounded) return;
     _backgrounded = false;
+    // The shells reconcile on resume themselves; the backoff starts over.
     _attempt = 0;
+    _needsReconcile = false;
     unawaited(_connect());
-    // Reconcile exactly like the app's own existing resume hooks already do
-    // (app_shell.dart, schedule_clock_screen.dart, venue_manager_screens.dart)
-    // — an SSE connection cannot be assumed to have delivered every event
-    // that occurred while backgrounded, so the authoritative lists are
-    // refetched directly, not merely "waited for the next push."
-    unawaited(_offers?.load(silent: true));
-    unawaited(_attendance?.refreshActive(silent: true));
-    unawaited(_attendance?.loadHistory(silent: true));
-    unawaited(_venueManager?.refresh(silent: true));
   }
 
   @override
   void dispose() {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
-    _reconnectTimer?.cancel();
-    unawaited(_subscription?.cancel());
-    _http.close();
+    _close();
     super.dispose();
   }
 }

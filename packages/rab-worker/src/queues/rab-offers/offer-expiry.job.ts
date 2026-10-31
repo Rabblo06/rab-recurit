@@ -2,7 +2,8 @@ import { NotificationType, OfferStatus, ShiftStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
-import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
+import { RealtimeEventService, RealtimeEventType } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
+import { offerAudience } from '@rab/server/engine/core-modules/realtime/realtime-recipients';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
@@ -58,6 +59,9 @@ export async function runOfferExpiryCycle(
   tenantContext: TenantContextService,
   notificationService: NotificationService,
   auditService: AuditService,
+  // Phase C1b: optional so existing callers (and the specs that drive this cycle directly) keep their signature; the
+  // processor passes it. It writes nothing while REALTIME_ENABLED is false.
+  realtimeEventService?: RealtimeEventService,
 ): Promise<OfferExpiryResult> {
   const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
       return await manager.query<ScanCandidate[]>(`
@@ -100,6 +104,11 @@ export async function runOfferExpiryCycle(
           relatedEntityId: offer.id,
         });
       }
+      // C1b realtime (same transaction as the expiry claim; same key and audience as the API's lazy expiry in
+      // OfferService.staffAccept): offer.expired → staff, sender, shift owner, venue managers. Ids only.
+      await realtimeEventService?.recordForRecipients(manager, {
+        organisationId: candidate.organisation_id, eventKey: `offer.expired:${offer.id}`, eventType: RealtimeEventType.OFFER_EXPIRED, entityType: 'offer', entityId: offer.id,
+      }, (m) => offerAudience(m, offer.id));
       return true;
     });
     if (didExpire) expired += 1;

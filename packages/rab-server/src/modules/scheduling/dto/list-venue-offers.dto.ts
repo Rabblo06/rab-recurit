@@ -1,6 +1,6 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
+import { KeysetPaginationDto } from '../../../engine/dto/pagination.dto';
 
 /**
  * `status` is a small, closed set of *view* filters, not raw `ShiftStatus`
@@ -11,7 +11,8 @@ import { PaginationDto } from '../../../engine/dto/pagination.dto';
  */
 export const VENUE_OFFER_VIEW_STATUSES = ['pending', 'approved', 'declined'] as const;
 
-export class ListVenueOffersDto extends PaginationDto {
+/** Offset (`page`) or keyset (`cursor`, Phase C1) paging; see `SchedulingService`. */
+export class ListVenueOffersDto extends KeysetPaginationDto {
   @IsOptional()
   @IsIn(VENUE_OFFER_VIEW_STATUSES)
   status?: (typeof VENUE_OFFER_VIEW_STATUSES)[number];

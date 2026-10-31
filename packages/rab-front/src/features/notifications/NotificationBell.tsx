@@ -5,6 +5,11 @@ import { api } from '../../shared/api';
 import { EmptyState } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import { notifyApiError } from '../../shared/lib/mutationFeedback';
+import { pollingOptions } from '../../shared/lib/polling';
+import { useIsRealtimeLive } from '../../shared/lib/RealtimeProvider';
+
+/** Nominal unread-count poll; jittered ±20 % by `pollingOptions`. */
+export const UNREAD_POLL_MS = 60_000;
 
 interface NotificationItem {
   id: string;
@@ -31,10 +36,13 @@ export default function NotificationBell() {
     return () => document.removeEventListener('open-notifications', show);
   }, []);
 
+  const realtimeLive = useIsRealtimeLive();
   const { data: unread } = useQuery({
     queryKey: ['notifications', 'unread-count'],
     queryFn: async () => { const { data } = await api.get<{ count: number }>('/notifications/unread-count'); return data; },
-    refetchInterval: 30000,
+    // Phase C1: a 60 s ±20 % fallback (was 30 s), paused while the tab is hidden with one catch-up when it becomes
+    // visible; a failed refresh keeps the last count. C1b: 120 s while realtime (notification.created) is live.
+    ...pollingOptions(UNREAD_POLL_MS, { realtimeLive }),
   });
 
   const { data: notifications = [] } = useQuery({

@@ -20,6 +20,8 @@ import { api } from '../../shared/api';
 import Avatar from '../../shared/components/Avatar';
 import Drawer from '../../shared/components/Drawer';
 import { toast } from '../../shared/lib/toast';
+import { isPermanentRefusal, pollingOptions, REFRESH_FAILED_NOTE, refreshQuery } from '../../shared/lib/polling';
+import { useIsRealtimeLive } from '../../shared/lib/RealtimeProvider';
 import { PageSlot } from '../../shared/page-slots';
 import { layoutSpring, listItem } from '../../shared/motion';
 import VenueOfferPipelineAnalytics, { initials, rowStatus } from './VenueOfferPipelineAnalytics';
@@ -238,6 +240,9 @@ export const TIMESHEET_READY = 'Timesheet is ready. All required staff have cloc
  */
 export const SEND_OFFER_EVENT = 'open-send-offer';
 
+/** Nominal pipeline poll (Phase C1: was 5 s); jittered ±20 % by `pollingOptions`. */
+export const PIPELINE_POLL_MS = 15_000;
+
 export default function VenueOfferPipeline() {
   const { shiftId } = useParams();
   const qc = useQueryClient();
@@ -254,12 +259,15 @@ export default function VenueOfferPipeline() {
   // Set when the manager asked for the timesheet before it was ready: once the board then reports it ready, they
   // get the "ready" toast once. Never on page load or on a poll that merely confirms the same state.
   const awaitingTimesheet = useRef(false);
+  // Phase C1 polling policy (shared/lib/polling.ts): 15 s ±20 %, paused while the tab is hidden with one catch-up when it
+  // becomes visible, one request at a time, 429/failure backoff. The user's own actions refresh at once (`refresh`).
+  // C1b: 120 s while realtime (offer.* / shift.* events) is live.
+  const realtimeLive = useIsRealtimeLive();
   const query = useQuery({
     queryKey: ['venue-pipeline', shiftId],
     queryFn: async () =>
       (await api.get<Pipeline>(`/shifts/${shiftId}/pipeline`)).data,
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    ...pollingOptions(PIPELINE_POLL_MS, { realtimeLive }),
   });
   // Display hints only: the send routes enforce `offer.send` and the shift's ownership themselves.
   const capabilities = useQuery({
@@ -284,11 +292,12 @@ export default function VenueOfferPipeline() {
       ].filter((id): id is string => !!id),
     ),
   ].sort();
+  // Not polled: the key is the sorted id set, so a new or changed avatar is a new key and fetched at once; the same set
+  // is re-read only after 10 minutes (a preview URL outlives that), never on a timer.
   const avatars = useQuery({
     queryKey: ['pipeline-avatars', avatarIds],
     enabled: avatarIds.length > 0,
-    staleTime: 60000,
-    refetchInterval: 60000,
+    staleTime: 10 * 60_000,
     queryFn: async () => {
       const previews: Record<string, string> = {};
       for (let i = 0; i < avatarIds.length; i += 32)
@@ -310,10 +319,10 @@ export default function VenueOfferPipeline() {
       toast.success(TIMESHEET_READY);
     }
   }, [timesheetReady]);
-  const refresh = async () => {
-    await qc.invalidateQueries({ queryKey: ['venue-pipeline', shiftId] });
-    await qc.invalidateQueries({ queryKey: ['venue-offers'] });
-  };
+  // Queued behind an in-flight poll (never dropped) and coalesced, so one action that both succeeds as a mutation and
+  // dispatches `offers-sent` refreshes the board once.
+  const refresh = () =>
+    Promise.all([refreshQuery(qc, ['venue-pipeline', shiftId]), refreshQuery(qc, ['venue-offers'])]);
   // After the Send offers drawer succeeds for THIS shift, refresh the board at once (not on the next poll): its send
   // mutation carries `shiftId` in its variables; an explicit `offers-sent` event is honoured too.
   useEffect(() => {
@@ -375,7 +384,9 @@ export default function VenueOfferPipeline() {
         <p role="status">Loading staffing pipeline...</p>
       </div>
     );
-  if (query.isError || !data)
+  // A failed background refresh keeps the board on screen (note below); a board that never loaded, or one the server now
+  // refuses (403/404: no longer visible to this account), is an error page — never stale data it was just refused.
+  if (!data || (query.isError && isPermanentRefusal(query.error)))
     return (
       <div className="page pipeline">
         <Link to="/venue-offers">&larr; Venue Offers</Link>
@@ -711,6 +722,11 @@ export default function VenueOfferPipeline() {
           </button>
         </div>
       </header>
+      {query.isRefetchError && (
+        <p className="muted pipeline-refresh-note" role="status">
+          {REFRESH_FAILED_NOTE}
+        </p>
+      )}
       {attention && (
         <div className={`pipeline-attention tone-${attention.tone}`} role="status">
           <IconAlertCircle size={16} aria-hidden />

@@ -3,7 +3,8 @@ import '../../core/widgets/schedule_feedback.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'sent_shift.dart';
-import 'dart:async';
+import '../../core/polling/poll_scheduler.dart';
+import '../../core/realtime/realtime_connection_service.dart';
 import '../../core/theme/schedule_tokens.dart';
 import 'venue_manager_provider.dart';
 import 'venue_manager_screens.dart';
@@ -12,6 +13,13 @@ import 'shift_staff_screens.dart';
 
 class VenueSentShiftsScreen extends StatefulWidget {
   const VenueSentShiftsScreen({super.key});
+
+  /// Phase C1: was a 5 s FULL refresh (10–12 requests). Now only the first
+  /// page of the tab on screen, every [pollInterval] ±20 %, while this screen
+  /// is visible (current route, selected shell tab) and the app is in the
+  /// foreground. The full refresh still runs on resume (VenueManagerShell),
+  /// pull-to-refresh and after the Venue Manager's own changes.
+  static const pollInterval = Duration(seconds: 30);
   @override
   State<VenueSentShiftsScreen> createState() => _VenueSentShiftsScreenState();
 }
@@ -20,7 +28,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
   String query = '';
 
   /// Server view (`/shifts/sent?view=`): All never contains expired requests; Expired holds only those.
-  String view = 'all';
+  String get view => context.read<VenueManagerProvider>().sentView;
   static const views = <String, String>{
     'all': 'All',
     'pending': 'Pending',
@@ -29,34 +37,56 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
     'declined': 'Declined',
     'expired': 'Expired',
   };
-  Future<List<SentShift>>? _viewRows;
-  DateTime? _viewLoadedFor;
-  Timer? _poll;
+
+  late final PollScheduler _poll;
+
+  /// While the realtime stream is live this poll is only a safety net.
+  RealtimeConnectionService? _realtime;
+  void _realtimeChanged() => _poll.setInterval(
+    _realtime?.isLive == true
+        ? realtimeFallbackPollInterval
+        : VenueSentShiftsScreen.pollInterval,
+  );
 
   void _select(String next) {
-    setState(() {
-      view = next;
-      _viewRows = next == 'all'
-          ? null
-          : context.read<VenueManagerProvider>().loadSentView(next);
-      _viewLoadedFor = context.read<VenueManagerProvider>().updatedAt;
-    });
+    final provider = context.read<VenueManagerProvider>();
+    if (provider.sentView == next) return;
+    provider.selectSentView(next);
+    // The tab was just read in full (or is already loaded): restart the interval.
+    _poll.restartInterval();
   }
 
   @override
   void initState() {
     super.initState();
-    _poll = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
-        final provider = context.read<VenueManagerProvider>();
-        if (!provider.loading) provider.refresh(silent: true);
-      }
-    });
+    final provider = context.read<VenueManagerProvider>();
+    // Every visit opens on All, as before (no notify: this screen builds next).
+    provider.sentView = 'all';
+    _poll = PollScheduler(
+      interval: VenueSentShiftsScreen.pollInterval,
+      identity: () => provider.api.sessionGeneration,
+      // VenueManagerShell already runs the full refresh on resume.
+      refreshOnResume: false,
+      task: (trigger) =>
+          provider.pollSentView(background: trigger.isBackground),
+    )..start();
+    _realtime = context.read<RealtimeConnectionService?>()
+      ?..addListener(_realtimeChanged);
+    _realtimeChanged();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _poll.setVisible(
+      TickerMode.of(context) && (ModalRoute.of(context)?.isCurrent ?? true),
+    );
   }
 
   @override
   void dispose() {
-    _poll?.cancel();
+    _realtime?.removeListener(_realtimeChanged);
+    _poll.dispose();
     super.dispose();
   }
 
@@ -149,22 +179,15 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                 : VmData(
                     keepContentWhileRefreshing: true,
                     builder: (p) {
-                      // A tab other than All re-queries the server whenever the provider refreshes (poll / pull).
-                      if (view != 'all' && _viewLoadedFor != p.updatedAt) {
-                        _viewLoadedFor = p.updatedAt;
-                        _viewRows = p.loadSentView(view);
-                      }
-                      return FutureBuilder<List<SentShift>>(
-                        future: _viewRows,
-                        builder: (context, snapshot) {
-                          final source = view == 'all'
-                              ? p.sentShifts
-                              : (snapshot.data ?? const <SentShift>[]);
-                          final loadingView =
-                              view != 'all' &&
-                              snapshot.connectionState !=
-                                  ConnectionState.done &&
-                              snapshot.data == null;
+                      final view = p.sentView;
+                      final rows = p.sentRows(view);
+                      final viewError = rows == null
+                          ? p.sentViewErrors[view]
+                          : null;
+                      final loadingView = rows == null && viewError == null;
+                      return Builder(
+                        builder: (context) {
+                          final source = rows ?? const <SentShift>[];
                           final groups = source
                               .where(
                                 (shift) => '${shift.venue} ${shift.role}'
@@ -338,7 +361,7 @@ class _VenueSentShiftsScreenState extends State<VenueSentShiftsScreen> {
                                       child: CircularProgressIndicator(),
                                     ),
                                   )
-                                else if (snapshot.hasError && view != 'all')
+                                else if (viewError != null)
                                   const ScheduleMessageCard(
                                     title:
                                         'Could not load this view. Pull to refresh.',

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../shared/api';
 import { toast } from '../../shared/lib/toast';
+import { pollingOptions } from '../../shared/lib/polling';
 import { getApiErrorMessage, isSafeServerMessage } from '../../shared/lib/apiError';
 import { bulkMessage, type BulkApproveResult, type PayrollPeriod, type ShiftStatementRef } from './payrollModel';
 
@@ -37,7 +38,9 @@ export function usePayroll(month: string) {
   const period = useQuery({
     queryKey: ['payroll', 'period', month],
     queryFn: async () => (await api.get<PayrollPeriod>('/payroll/period', { params: { month } })).data,
-    refetchInterval: watchingIds.length ? POLL_MS : false,
+    // Shared polling policy (Phase C1): ±20 % jitter, paused while the tab is hidden with one catch-up when it becomes
+    // visible, backoff on failure; only while a just-released statement is being watched (bounded by WATCH_MS).
+    ...pollingOptions(() => (watchingIds.length ? POLL_MS : false)),
   });
 
   // Statement watcher: report the document only once the server says it exists.

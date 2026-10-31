@@ -160,7 +160,7 @@ struct StaffJobDetailScreen: View {
     }
 
     private func retry() async {
-        async let offers: Void = store.loadOffers()
+        async let offers: Void = store.loadOffers(full: true)
         async let active: Void = store.refreshActive()
         async let history: Void = store.loadHistory()
         _ = await (offers, active, history)
@@ -228,6 +228,8 @@ struct StaffShiftStatusControl: View {
             try? await Task.sleep(nanoseconds: UInt64((wait + 0.5) * 1_000_000_000))
         }
         guard !Task.isCancelled else { return }
-        await store.loadOffers(silent: true)
+        // Timer-driven (the server's next transition): background traffic,
+        // queued behind any offers read already in flight.
+        await store.loadOffers(silent: true, background: true)
     }
 }

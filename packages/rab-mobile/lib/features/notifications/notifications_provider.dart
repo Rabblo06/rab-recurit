@@ -4,32 +4,43 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/models/notification_item.dart';
+import '../../core/polling/poll_scheduler.dart';
 
 /// In-app only — polling, no push (mirrors the web console's
 /// `NotificationBell.tsx` scope decision this session). Polls unread-count
-/// on a timer so the bottom-nav badge stays current even while the user is
-/// on a different tab, same cadence as web (30s).
+/// so the badge stays current while the user is on any screen: every
+/// [pollInterval] ±20 % (Phase C1), only while the app is in the foreground
+/// (one immediate refresh on resume), as background traffic
+/// (`X-Crewflow-Background`), with 429/backoff from [PollScheduler].
 class NotificationsProvider extends ChangeNotifier {
   NotificationsProvider(this._api) {
-    _refreshUnreadCount();
-    _timer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => _refreshUnreadCount(),
-    );
+    unawaited(_refreshUnreadCount().catchError((Object _) {}));
+    _poll = PollScheduler(
+      interval: pollInterval,
+      identity: () => _api.sessionGeneration,
+      task: (trigger) => _refreshUnreadCount(background: trigger.isBackground),
+    )..start();
   }
 
+  static const pollInterval = Duration(seconds: 60);
+
   final ApiClient _api;
-  Timer? _timer;
+  late final PollScheduler _poll;
+  bool _disposed = false;
 
   List<NotificationItem> notifications = [];
   bool isLoading = true;
   int unreadCount = 0;
 
-  Future<void> load() async {
+  /// [background]: a push ARRIVAL (`X-Crewflow-Background`); a tap or the
+  /// inbox screen is the user's own request.
+  Future<void> load({bool background = false}) async {
     isLoading = true;
     notifyListeners();
     try {
-      final data = await _api.get('/notifications') as List<dynamic>;
+      final data =
+          await _api.get('/notifications', background: background)
+              as List<dynamic>;
       notifications = data
           .map((e) => NotificationItem.fromJson(e as Map<String, dynamic>))
           .toList();
@@ -40,16 +51,24 @@ class NotificationsProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> _refreshUnreadCount() async {
-    try {
-      final data =
-          await _api.get('/notifications/unread-count') as Map<String, dynamic>;
-      unreadCount = data['count'] as int;
-      notifyListeners();
-    } catch (_) {
-      // Best-effort — a failed poll shouldn't disrupt the rest of the app.
-    }
+  /// Best-effort for the UI (a failed poll keeps the last count); the error
+  /// still reaches the scheduler so it can back off.
+  Future<void> _refreshUnreadCount({bool background = false}) async {
+    final data =
+        await _api.get('/notifications/unread-count', background: background)
+            as Map<String, dynamic>;
+    if (_disposed) return;
+    unreadCount = data['count'] as int;
+    notifyListeners();
   }
+
+  /// Realtime `notification.created` (background traffic). Never throws.
+  Future<void> refreshUnreadCount({bool background = false}) =>
+      _refreshUnreadCount(background: background).catchError((Object _) {});
+
+  /// While the realtime stream is live the badge poll is only a safety net.
+  void setRealtimeLive(bool live) =>
+      _poll.setInterval(live ? realtimeFallbackPollInterval : pollInterval);
 
   Future<void> markRead(String id) async {
     try {
@@ -71,7 +90,8 @@ class NotificationsProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _disposed = true;
+    _poll.dispose();
     super.dispose();
   }
 }

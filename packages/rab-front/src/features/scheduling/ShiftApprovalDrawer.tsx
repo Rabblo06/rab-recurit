@@ -138,6 +138,8 @@ export default function ShiftApprovalDrawer() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
+      // The board opened next must show the approval at once, not on its next poll.
+      qc.invalidateQueries({ queryKey: ['venue-pipeline', shiftId] });
       setOpen(false);
       toast.success('Shift request approved. Offers are being sent.');
       document.dispatchEvent(new CustomEvent('open-venue-pipeline', { detail: { shiftId } }));
@@ -148,6 +150,7 @@ export default function ShiftApprovalDrawer() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
       qc.invalidateQueries({ queryKey: ['venue-offers'] });
+      qc.invalidateQueries({ queryKey: ['venue-pipeline', shiftId] });
       setOpen(false);
       toast.success('Shift request declined.');
     },

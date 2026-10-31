@@ -7,6 +7,7 @@ import '../../core/api/api_client.dart';
 import '../../core/api/attendance_messages.dart';
 import '../../core/models/attendance.dart';
 import '../../core/models/offer.dart';
+import '../../core/polling/keyset_pages.dart';
 import '../../core/services/location_service.dart';
 import 'shift_team_member.dart';
 
@@ -23,10 +24,15 @@ class AttendanceProvider extends ChangeNotifier {
 
   final ApiClient _api;
 
-  Future<List<ShiftTeamMember>> loadTeam(String shiftId) async {
+  /// [background]: the Teams screen's timer refresh (`X-Crewflow-Background`).
+  Future<List<ShiftTeamMember>> loadTeam(
+    String shiftId, {
+    bool background = false,
+  }) async {
     final rows =
         await _api.get(
               '/attendance/me/shift/${Uri.encodeComponent(shiftId)}/team',
+              background: background,
             )
             as List<dynamic>;
     return rows
@@ -36,6 +42,13 @@ class AttendanceProvider extends ChangeNotifier {
 
   AttendanceSummary? active;
   List<AttendanceSummary> history = [];
+  static const historyPageSize = 200;
+  int _activeSequence = 0;
+  bool _disposed = false;
+
+  /// The error of the last `/attendance/me/active` read (null after a
+  /// success), for pollers' backoff.
+  Object? lastActiveFailure;
   bool isLoadingActive = true;
   bool isLoadingHistory = false;
   bool isBusy = false;
@@ -182,14 +195,24 @@ class AttendanceProvider extends ChangeNotifier {
   /// (`isFetching` driving a visible loading state for an invisible
   /// background poll). A real first load, pull-to-refresh's own spinner
   /// already being visible, or an explicit "Retry" tap should still show it.
-  Future<void> refreshActive({bool silent = false}) async {
+  ///
+  /// [background]: AppShell's timer reconcile (`X-Crewflow-Background`). Only
+  /// the most recently started read is applied, so a slow poll can never
+  /// overwrite the state a clock-in/out just reloaded.
+  Future<void> refreshActive({
+    bool silent = false,
+    bool background = false,
+  }) async {
+    final sequence = ++_activeSequence;
     if (!silent) {
       isLoadingActive = true;
       notifyListeners();
     }
     try {
       final data =
-          await _api.get('/attendance/me/active') as Map<String, dynamic>;
+          await _api.get('/attendance/me/active', background: background)
+              as Map<String, dynamic>;
+      if (_disposed || sequence != _activeSequence) return;
       final attendanceJson = data['attendance'] as Map<String, dynamic>?;
       active = attendanceJson == null
           ? null
@@ -202,6 +225,7 @@ class AttendanceProvider extends ChangeNotifier {
           locationEvidence;
       _anchor(serverNowRaw);
       activeLoadError = null;
+      lastActiveFailure = null;
       // Restores geofence monitoring across an app kill/reopen while a
       // shift is still live — mirrors how the timer itself survives restart
       // by re-deriving from the server rather than local state.
@@ -210,28 +234,41 @@ class AttendanceProvider extends ChangeNotifier {
       } else {
         stopGeofenceMonitoring();
       }
-    } catch (_) {
+    } catch (e) {
+      if (_disposed || sequence != _activeSequence) return;
       activeLoadError = 'Could not check attendance. Please try again.';
+      lastActiveFailure = e;
       // A failed restore leaves `active` as-is rather than clearing a
       // possibly-still-valid state on a transient network error.
     } finally {
-      isLoadingActive = false;
-      notifyListeners();
+      if (!_disposed && sequence == _activeSequence) {
+        isLoadingActive = false;
+        notifyListeners();
+      }
     }
   }
 
   /// `silent: true` — see `refreshActive`'s own doc comment; same reasoning,
   /// since `isLoadingHistory` feeds the same loading-state checks.
-  Future<void> loadHistory({bool silent = false}) async {
+  ///
+  /// [background]: a realtime-driven reload (`X-Crewflow-Background`).
+  Future<void> loadHistory({
+    bool silent = false,
+    bool background = false,
+  }) async {
     if (!silent) {
       isLoadingHistory = true;
       notifyListeners();
     }
     try {
-      final data = await _api.get('/attendance/me/history') as List<dynamic>;
-      history = data
-          .map((e) => AttendanceSummary.fromJson(e as Map<String, dynamic>))
-          .toList();
+      // Every page (keyset, API contract §3), never truncated.
+      final data = await fetchAllKeysetPages(
+        _api,
+        '/attendance/me/history',
+        limit: historyPageSize,
+        background: background,
+      );
+      history = data.map(AttendanceSummary.fromJson).toList();
       historyLoadError = null;
     } catch (_) {
       historyLoadError = 'Could not check completed shifts. Please try again.';
@@ -374,6 +411,7 @@ class AttendanceProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     stopGeofenceMonitoring();
     super.dispose();
   }

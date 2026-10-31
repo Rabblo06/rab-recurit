@@ -5,11 +5,11 @@ import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } f
 import { AuthUser } from '../../../engine/decorators/auth-user.decorator';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { JwtAuthGuard } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
-import { PaginationDto } from '../../../engine/dto/pagination.dto';
 import { PermissionGuard } from '../../../engine/guards/permission.guard';
 import { ApproveShiftRequestDto } from '../dto/approve-shift-request.dto';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
+import { ListMyOffersDto } from '../dto/list-my-offers.dto';
 import { ListOffersDto } from '../dto/list-offers.dto';
 import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
@@ -32,12 +32,16 @@ export class OfferController {
     return this.offerService.list(ctx, dto);
   }
 
-  /** Staff-facing (mobile): only the caller's own offers — gated on the same permission staff need to respond at all. */
+  /**
+   * Staff-facing (mobile): only the caller's own offers — gated on the same permission staff need to respond at all.
+   * No `limit`/`cursor`/`scope` = the legacy bare array installed apps rely on; any of them = `{ data, nextCursor }`
+   * (see `OfferService.listMine`).
+   */
   @MobileApplication('staff_app')
   @Get('offers/mine')
   @UseGuards(PermissionGuard(PermissionFlag.OFFER_RESPOND))
-  listMine(@AuthUser() ctx: AuthContext, @Query() pagination: PaginationDto) {
-    return this.offerService.listMine(ctx, pagination);
+  listMine(@AuthUser() ctx: AuthContext, @Query() dto: ListMyOffersDto) {
+    return this.offerService.listMine(ctx, dto);
   }
 
   @Post('shifts/:shiftId/offers')

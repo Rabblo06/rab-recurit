@@ -8,6 +8,7 @@ import { WEB_SESSION_TOKEN_PREFIX } from '../../constants/web-session-cookie.con
 import { RefreshToken, UserSession } from '../../../../../modules/identity/entities';
 import { PlatformAdminService } from '../../../platform-admin/platform-admin.service';
 import { RefreshTokenReuseError } from './refresh-token-reuse.error';
+import { deactivateAllPushDevicesForOrganisation, deactivateAllPushDevicesForUser, deactivatePushDevicesIfNoLiveSession } from '../../../push/push-device-deactivation';
 
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -298,6 +299,9 @@ export class RefreshTokenService {
         WHERE id = $1 AND revoked_at IS NULL`,
       [familyId, reason],
     );
+    // C1b push (D5): same transaction. No session → device link yet, so a device goes only once no live session is left.
+    const [session] = await manager.query<Array<{ user_id: string }>>(`SELECT user_id FROM core.user_session WHERE id = $1`, [familyId]);
+    if (session) await deactivatePushDevicesIfNoLiveSession(manager, session.user_id, `session_revoked:${reason}`);
   }
 
   /**
@@ -315,6 +319,8 @@ export class RefreshTokenService {
         WHERE user_id = $1 AND revoked_at IS NULL`,
       [userId, reason],
     );
+    // C1b push (D5): every session ended (password change/reset, suspension, sign-out-everywhere, deletion) → every device.
+    await deactivateAllPushDevicesForUser(manager, userId, `sessions_revoked:${reason}`);
   }
 
   /**
@@ -336,6 +342,8 @@ export class RefreshTokenService {
         WHERE organisation_id = $1 AND revoked_at IS NULL`,
       [organisationId, reason],
     );
+    // C1b push (D5): organisation suspension → every device of the organisation, same transaction.
+    await deactivateAllPushDevicesForOrganisation(manager, organisationId, `sessions_revoked:${reason}`);
   }
 
   /**
@@ -355,6 +363,9 @@ export class RefreshTokenService {
         WHERE user_id = $1 AND id != $2 AND revoked_at IS NULL`,
       [userId, exceptFamilyId, reason],
     );
+    // C1b push (D5): deliberately NO push deactivation — the surviving session keeps the account alive and nothing
+    // links a session to a device, so the revoked sessions' devices cannot be told apart from the survivor's (never
+    // guess). Exact per-session deactivation: docs/plans/C1-PUSH-SESSION-LINK-MIGRATION.md.
   }
 
   /**

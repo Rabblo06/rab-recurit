@@ -64,18 +64,6 @@ class _RabMaterialApp extends StatelessWidget {
             ChangeNotifierProvider(
               create: (_) => NotificationsProvider(auth.api),
             ),
-            // Stage 6 — one push registration per authenticated session,
-            // every presentation (not gated to staff/venueManager like
-            // RealtimeConnectionService below, since any logged-in user can
-            // receive a notification). Placed after NotificationsProvider so
-            // its `create` can `context.read` it for foreground/resume
-            // refresh.
-            ChangeNotifierProvider(
-              create: (context) => PushRegistrationService(
-                api: auth.api,
-                notifications: context.read<NotificationsProvider>(),
-              ),
-            ),
             if (auth.presentation == AppPresentation.staff)
               ChangeNotifierProvider(
                 create: (_) => AttendanceProvider(auth.api),
@@ -84,14 +72,16 @@ class _RabMaterialApp extends StatelessWidget {
               ChangeNotifierProvider(
                 create: (_) => VenueManagerProvider(auth.api, auth.user!.id),
               ),
-            // Stage 5 — placed last so its `create` can `context.read` the
-            // providers above (same ordering rule `MultiProvider` already
-            // relies on): one real-time connection per authenticated
-            // session, torn down and recreated by this SAME keyed subtree
-            // on logout/account switch, exactly like every provider above it.
+            // Stage 5 / Phase C1b — one real-time connection per
+            // authenticated session, torn down and recreated by this SAME
+            // keyed subtree on logout/account switch. `lazy: false`: nothing
+            // ever reads it before the shells do, so a lazy provider never
+            // started at all. Safe while REALTIME_ENABLED=false: the server
+            // answers 204 and the client stops after that one request.
             if (auth.presentation == AppPresentation.staff ||
                 auth.presentation == AppPresentation.venueManager)
               ChangeNotifierProvider(
+                lazy: false,
                 create: (context) => RealtimeConnectionService(
                   api: auth.api,
                   auth: auth,
@@ -101,11 +91,30 @@ class _RabMaterialApp extends StatelessWidget {
                   attendance: auth.presentation == AppPresentation.staff
                       ? context.read<AttendanceProvider>()
                       : null,
-                  venueManager: auth.presentation == AppPresentation.venueManager
+                  venueManager:
+                      auth.presentation == AppPresentation.venueManager
                       ? context.read<VenueManagerProvider>()
                       : null,
+                  notifications: context.read<NotificationsProvider>(),
                 ),
               ),
+            // Stage 6 / Phase C1b — one push registration per authenticated
+            // session, every presentation, created eagerly (registers only
+            // when notification permission was already granted; Android with
+            // Firebase configured only). Placed last so a notification can
+            // ask the realtime client (when this presentation has one) to
+            // reconcile.
+            ChangeNotifierProvider(
+              lazy: false,
+              create: (context) {
+                final realtime = context.read<RealtimeConnectionService?>();
+                return PushRegistrationService(
+                  api: auth.api,
+                  notifications: context.read<NotificationsProvider>(),
+                  onActivity: realtime?.reconcile,
+                );
+              },
+            ),
           ],
           child: child,
         );

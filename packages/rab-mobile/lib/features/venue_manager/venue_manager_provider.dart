@@ -2,6 +2,7 @@ import 'sent_shift.dart';
 import 'package:flutter/foundation.dart';
 import '../../core/api/api_client.dart';
 import '../../core/models/offer.dart';
+import '../../core/polling/single_flight.dart';
 import '../../core/theme/shift_visual_style.dart';
 import '../../core/theme/display_labels.dart';
 import 'confirmed_staff.dart';
@@ -139,9 +140,166 @@ class VenueManagerProvider extends ChangeNotifier {
   Map<String, int> sentCounts = {};
   int? get sentSubmitted => sentCounts['submitted'];
 
+  /// The Sent Shifts tab on screen (`all` or another server view). Its rows are
+  /// re-read by every full refresh and by the Sent Shifts first-page poll.
+  String sentView = 'all';
+
+  /// Rows of the non-All tabs that have been opened (All is [sentShifts]).
+  final Map<String, List<SentShift>> _sentViewRows = {};
+
+  /// A tab's rows, or null while that tab has never loaded.
+  List<SentShift>? sentRows(String view) =>
+      view == 'all' ? sentShifts : _sentViewRows[view];
+
+  /// The last failure loading a non-All tab that has no rows yet.
+  final Map<String, String> sentViewErrors = {};
+
+  /// Page size of the Sent Shifts poll (first page only, API contract §1).
+  static const sentPollLimit = 50;
+
   /// One Sent Shifts tab, filtered and paginated by the server (never by the phone).
   Future<List<SentShift>> loadSentView(String view) async =>
       (await all('/shifts/sent?view=$view')).map(SentShift.fromJson).toList();
+
+  /// Selects a Sent Shifts tab (a user action: no background header). A tab
+  /// that has never loaded is read in full; one already loaded re-reads its
+  /// first page, as every tab used to re-query when it was selected.
+  Future<void> selectSentView(String view) async {
+    sentView = view;
+    notifyListeners();
+    if (view == 'all') return;
+    if (_sentViewRows.containsKey(view)) {
+      try {
+        await pollSentView(background: false);
+      } catch (_) {
+        // Kept rows + the non-blocking refreshFailed notice.
+      }
+      return;
+    }
+    final generation = _generation;
+    try {
+      final rows = await loadSentView(view);
+      if (_disposed || generation != _generation) return;
+      _sentViewRows[view] = rows;
+      sentViewErrors.remove(view);
+    } catch (e) {
+      if (_disposed || generation != _generation) return;
+      sentViewErrors[view] = _message(e);
+    }
+    notifyListeners();
+  }
+
+  /// The Sent Shifts poll: ONLY the first page of the tab on screen
+  /// (`/shifts/sent?view=<tab>&page=1&limit=50`), merged into the rows already
+  /// loaded (nothing loaded is discarded) together with the server's tab
+  /// `counts`. Skipped while a full refresh is in flight (no overlap: that
+  /// refresh brings fresher data anyway). Throws on failure, after recording a
+  /// non-blocking [refreshFailed] — the rows on screen stay.
+  Future<void> pollSentView({bool background = true}) async {
+    if (_disposed || _refreshFlight.isRunning || updatedAt == null) return;
+    final view = sentView;
+    final generation = _generation;
+    final Map<String, dynamic> response;
+    try {
+      response = Map<String, dynamic>.from(
+        await api.get(
+              '/shifts/sent?view=$view&page=1&limit=$sentPollLimit',
+              background: background,
+            )
+            as Map,
+      );
+    } catch (e) {
+      if (_disposed || generation != _generation) rethrow;
+      _backgroundFailure(e);
+      notifyListeners();
+      rethrow;
+    }
+    if (_disposed || generation != _generation) return;
+    final page = (response['data'] as List)
+        .map((j) => SentShift.fromJson(Map<String, dynamic>.from(j as Map)))
+        .toList();
+    final total = (response['total'] as num?)?.toInt();
+    if (view == 'all') {
+      sentShifts = mergeSentFirstPage(sentShifts, page, total: total);
+    } else if (_sentViewRows.containsKey(view)) {
+      _sentViewRows[view] = mergeSentFirstPage(
+        _sentViewRows[view]!,
+        page,
+        total: total,
+      );
+    }
+    final counts = response['counts'];
+    if (counts is Map) sentCounts = _counts(counts);
+    refreshFailed = false;
+    notifyListeners();
+  }
+
+  /// Merges a fresh first page (server order `submittedAt DESC, id DESC`) into
+  /// the rows already loaded: the page is authoritative for everything down to
+  /// its last row; rows further down that the page did not reach are kept as
+  /// last read. A page that holds the whole list replaces it.
+  @visibleForTesting
+  static List<SentShift> mergeSentFirstPage(
+    List<SentShift> previous,
+    List<SentShift> page, {
+    int? total,
+    int limit = sentPollLimit,
+  }) {
+    if (page.length < limit || (total != null && total <= page.length)) {
+      return page;
+    }
+    final last = page.last;
+    final ids = {for (final row in page) row.id};
+    bool below(SentShift row) {
+      final a = row.submittedAt, b = last.submittedAt;
+      if (a == null || b == null) return false;
+      final byTime = a.compareTo(b);
+      return byTime < 0 || (byTime == 0 && row.id.compareTo(last.id) < 0);
+    }
+
+    return [
+      ...page,
+      for (final row in previous)
+        if (!ids.contains(row.id) && below(row)) row,
+    ];
+  }
+
+  static Map<String, int> _counts(Map counts) => {
+    for (final e in counts.entries)
+      if (e.value is num) e.key as String: (e.value as num).toInt(),
+  };
+
+  /// A background or silent refresh failed while data is on screen: keep it
+  /// and say so (non-blocking). A permission change (403) still clears every
+  /// list — sensitive records are never kept after the scope changed.
+  bool refreshFailed = false;
+
+  void _backgroundFailure(Object e) {
+    if (e is ApiException && e.statusCode == 403) {
+      _clear(_message(e));
+    } else {
+      refreshFailed = true;
+    }
+  }
+
+  void _clear(String message) {
+    error = message;
+    refreshFailed = false;
+    events = [];
+    offers = [];
+    sentShifts = [];
+    _sentViewRows.clear();
+    sentViewErrors.clear();
+    sentCounts = {};
+    venues = [];
+    jobRoles = [];
+    capabilities = {};
+    userCount = null;
+    currentReportCount = null;
+    historyReportCount = null;
+    updatedAt = null;
+  }
+
   List<Map<String, dynamic>> venues = [];
   List<Map<String, dynamic>> jobRoles = [];
   int? userCount;
@@ -229,12 +387,23 @@ class VenueManagerProvider extends ChangeNotifier {
         current.end.isAfter(DateTime.now());
   }
 
-  Future<List<Map<String, dynamic>>> all(String path) async {
+  /// Every page of an offset-paged list (limit 100, within the server's 200
+  /// cap). [onFirstPage] receives the first response (e.g. `/shifts/sent`
+  /// `counts`).
+  Future<List<Map<String, dynamic>>> all(
+    String path, {
+    void Function(Map<String, dynamic> response)? onFirstPage,
+    bool background = false,
+  }) async {
     final result = <Map<String, dynamic>>[];
     for (var page = 1; ; page++) {
       final response = await api.get(
         '$path${path.contains('?') ? '&' : '?'}page=$page&limit=100',
+        background: background,
       );
+      if (page == 1 && response is Map) {
+        onFirstPage?.call(Map<String, dynamic>.from(response));
+      }
       final rows = response is List ? response : response['data'] as List;
       result.addAll(rows.cast<Map<String, dynamic>>());
       if (response is List || result.length >= (response['total'] as int)) {
@@ -247,40 +416,72 @@ class VenueManagerProvider extends ChangeNotifier {
     return result;
   }
 
-  /// `silent: true` — same reasoning as `AttendanceProvider.refreshActive`'s
-  /// own `silent` parameter (mirrors the web Users-table fix too): the 5s
-  /// Sent Shifts poll (`sent_shifts_screen.dart`) and the app-resume refresh
-  /// (`venue_manager_screens.dart`) both already have good data on screen,
-  /// and flipping `loading` back to `true` for either flashed every screen
-  /// built on this provider back to its loading state every few seconds and
-  /// on every unlock. A real first load or a user-initiated action (sending
-  /// a shift, pull-to-refresh) still shows loading as before.
-  Future<void> refresh({bool silent = false}) async {
+  final SingleFlight _refreshFlight = SingleFlight();
+  bool _pendingLoud = false;
+  bool _pendingForeground = false;
+
+  /// The FULL refresh (capabilities, every shift/venue/role/offer page, the
+  /// Sent Shifts tab on screen, counts) — first load, app resume,
+  /// pull-to-refresh and right after the Venue Manager's own mutations. It is
+  /// never timer-driven (the Sent Shifts poll reads one page instead).
+  ///
+  /// One at a time: a call while one is in flight is queued (one follow-up
+  /// after it, shared), never dropped and never overlapping.
+  ///
+  /// `silent: true` — the app-resume refresh already has good data on screen;
+  /// flipping `loading` back to `true` flashed every screen built on this
+  /// provider back to its loading state on every unlock. A real first load or
+  /// a user-initiated action (sending a shift, pull-to-refresh) still shows
+  /// loading as before.
+  ///
+  /// Failure: with data already on screen the lists are KEPT and
+  /// [refreshFailed] shows a non-blocking notice; only a load with nothing to
+  /// show (or a permission refusal, 403) shows the error page.
+  ///
+  /// [background]: realtime-driven (`X-Crewflow-Background`); a queued run is
+  /// foreground if any caller waiting for it was.
+  Future<void> refresh({bool silent = false, bool background = false}) {
+    _pendingLoud |= !silent;
+    _pendingForeground |= !background;
+    return _refreshFlight.run(_refresh);
+  }
+
+  Future<void> _refresh() async {
+    final silent = !_pendingLoud;
+    final bg = !_pendingForeground;
+    _pendingLoud = false;
+    _pendingForeground = false;
+    if (_disposed) return;
     final generation = ++_generation;
     if (!silent) loading = true;
-    error = null;
+    if (updatedAt == null) error = null;
     directoryError = null;
     notifyListeners();
     try {
       final caps = Map<String, dynamic>.from(
-        await api.get('/auth/capabilities') as Map,
+        await api.get('/auth/capabilities', background: bg) as Map,
       );
       if (caps['schedule.view'] != true || caps['venue.view'] != true) {
         throw ApiException(403, 'Your account cannot view venue schedules.');
       }
+      Map<String, dynamic>? sentMeta;
+      final view = sentView;
       final results = await Future.wait([
-        all('/shifts'),
+        all('/shifts', background: bg),
         // Wave 5: `GET /venues` hides archived venues unless asked. Historical
         // shifts at an archived venue must still resolve its name, so fetch
         // them all here and keep only live venues for pickers/directory below.
-        all('/venues?includeArchived=true'),
-        all('/job-roles'),
-        all('/offers'),
-        all('/shifts/sent?view=all'),
+        all('/venues?includeArchived=true', background: bg),
+        all('/job-roles', background: bg),
+        all('/offers', background: bg),
+        // `counts` come with the first page; no separate count probe.
+        all(
+          '/shifts/sent?view=all',
+          onFirstPage: (r) => sentMeta = r,
+          background: bg,
+        ),
+        if (view != 'all') all('/shifts/sent?view=$view', background: bg),
       ]);
-      final sentMeta =
-          await api.get('/shifts/sent?view=all&limit=1')
-              as Map<String, dynamic>;
       if (_disposed || generation != _generation) return;
       capabilities = caps;
       venues = results[1].where((v) => !isArchivedVenue(v)).toList();
@@ -303,14 +504,27 @@ class VenueManagerProvider extends ChangeNotifier {
       ShiftVisualStyle.registerGroup(events.map((event) => event.shiftId));
       offers = results[3].map(OfferSummary.fromJson).toList();
       sentShifts = results[4].map(SentShift.fromJson).toList();
-      sentCounts = {
-        for (final e in ((sentMeta['counts'] as Map?) ?? const {}).entries)
-          e.key as String: (e.value as num).toInt(),
-      };
+      // Other tabs re-load when opened again; the one on screen is fresh (a
+      // tab selected while this refresh ran keeps what it loaded itself).
+      final selectedMeanwhile = sentView == view
+          ? null
+          : _sentViewRows[sentView];
+      _sentViewRows.clear();
+      sentViewErrors.clear();
+      if (view != 'all') {
+        _sentViewRows[view] = results[5].map(SentShift.fromJson).toList();
+      }
+      if (selectedMeanwhile != null) {
+        _sentViewRows[sentView] = selectedMeanwhile;
+      }
+      sentCounts = _counts((sentMeta?['counts'] as Map?) ?? const {});
       userCount = null;
       if (allows('staff.view')) {
         try {
-          final response = await api.get('/staff/venue-directory?limit=1');
+          final response = await api.get(
+            '/staff/venue-directory?limit=1',
+            background: bg,
+          );
           if (_disposed || generation != _generation) return;
           userCount = response['total'] as int;
         } catch (e) {
@@ -320,8 +534,8 @@ class VenueManagerProvider extends ChangeNotifier {
       if (allows('report.view')) {
         try {
           final counts = await Future.wait([
-            loadReports('current', limit: 1),
-            loadReports('history', limit: 1),
+            loadReports('current', limit: 1, background: bg),
+            loadReports('history', limit: 1, background: bg),
           ]);
           if (_disposed || generation != _generation) return;
           currentReportCount = counts[0].total;
@@ -331,21 +545,18 @@ class VenueManagerProvider extends ChangeNotifier {
           historyReportCount = null;
         }
       }
+      error = null;
+      refreshFailed = false;
       updatedAt = DateTime.now();
     } catch (e) {
       if (!_disposed && generation == _generation) {
-        error = _message(e);
-        // Do not retain sensitive records after scope/permission changes.
-        events = [];
-        offers = [];
-        sentShifts = [];
-        sentCounts = {};
-        venues = [];
-        jobRoles = [];
-        capabilities = {};
-        userCount = null;
-        currentReportCount = null;
-        historyReportCount = null;
+        if (updatedAt == null) {
+          _clear(_message(e));
+        } else {
+          // Keeps the last good data (or, on 403, clears it: do not retain
+          // sensitive records after scope/permission changes).
+          _backgroundFailure(e);
+        }
       }
     } finally {
       if (!_disposed && generation == _generation) {
@@ -440,9 +651,15 @@ class VenueManagerProvider extends ChangeNotifier {
   /// load, since per-staff attendance detail for every shift would be far
   /// more data than the roster view needs; only fetched when a Venue
   /// Manager actually opens a shift's report.
-  Future<ShiftReportDetail> loadReport(String shiftId) async {
+  Future<ShiftReportDetail> loadReport(
+    String shiftId, {
+    bool background = false,
+  }) async {
     final json =
-        await api.get('/attendance/report/shift/$shiftId')
+        await api.get(
+              '/attendance/report/shift/$shiftId',
+              background: background,
+            )
             as Map<String, dynamic>;
     return ShiftReportDetail.fromJson(json);
   }
@@ -599,11 +816,13 @@ class VenueManagerProvider extends ChangeNotifier {
     String bucket, {
     int page = 1,
     int limit = 30,
+    bool background = false,
   }) async {
     assert(bucket == 'current' || bucket == 'history');
     final json =
         await api.get(
               '/attendance/report/shifts?bucket=$bucket&page=$page&limit=$limit',
+              background: background,
             )
             as Map<String, dynamic>;
     return (

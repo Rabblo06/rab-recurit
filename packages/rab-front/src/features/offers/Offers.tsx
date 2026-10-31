@@ -7,6 +7,7 @@ import {
   IconClock, IconBan, IconCheck, IconX, IconUsers,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { toast } from '../../shared/lib/toast';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
 import { confirmAllSummary } from './confirm-all-summary';
@@ -144,7 +145,7 @@ export default function Offers() {
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
   const activeStatus = filters.status ?? '';
 
-  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const params = { page, limit: LIST_PAGE_SIZE, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['offers', params],
     queryFn: async () => { const { data } = await api.get<{ data: Offer[]; total: number }>('/offers', { params }); return data; },
@@ -356,7 +357,7 @@ export default function Offers() {
           </table>
         )}
       </div>
-<RecordFooter total={total} page={page} onPage={setPage} />
+<RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
     </div>
   );
 }

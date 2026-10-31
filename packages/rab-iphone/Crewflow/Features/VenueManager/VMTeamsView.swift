@@ -28,6 +28,11 @@ struct VMTeamsView: View {
     @EnvironmentObject private var store: VenueManagerStore
     @EnvironmentObject private var session: SessionCoordinator
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.shellTabActive) private var tabActive
+    /// Staff check in on their own phones: rows refresh every 30 s ±20 %
+    /// while this screen is on screen in the selected tab and the app is in
+    /// the foreground (background-flagged); resume reloads on its own.
+    @StateObject private var poll = PollScheduler(interval: 30, refreshOnResume: false)
     @State private var report: ShiftReportDetail?
     @State private var clock: VMServerClock?
     @State private var error: String?
@@ -36,13 +41,15 @@ struct VMTeamsView: View {
     @State private var sheet: Sheet?
     @State private var openReviewAfterSheet: ShiftReportStaffRow?
     @State private var review: (ShiftReportDetail, ShiftReportStaffRow)?
-    @State private var visible = false
+    @State private var onScreen = false
+    @State private var stale = false
 
     var body: some View {
         VStack(spacing: 0) {
             NavHeader("Teams", backgroundColor: .white).padding(.horizontal, 8)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if stale { StaleRefreshNotice() }
                     summaryCard
                     sectionTitle("Team Leader", count: 1).padding(.top, 22)
                     leaderRow.padding(.top, 8)
@@ -59,10 +66,18 @@ struct VMTeamsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .accessibilityIdentifier("vm.teams")
         .task { await load(silent: false) }
-        .task(id: visible) { await poll() }
-        .onAppear { visible = true }
-        .onDisappear { visible = false }
+        .task { await startPolling() }
+        .onAppear {
+            onScreen = true
+            poll.setVisible(tabActive)
+        }
+        .onDisappear {
+            onScreen = false
+            poll.setVisible(false)
+        }
+        .onChange(of: tabActive) { active in poll.setVisible(onScreen && active) }
         .onChange(of: scenePhase) { phase in
+            poll.setForeground(phase != .background)
             if phase == .active { Task { await load(silent: true) } }
         }
         .sheet(item: $sheet, onDismiss: sheetDismissed) { sheet in
@@ -101,40 +116,58 @@ struct VMTeamsView: View {
         if let next = VMServerClock(serverNow: fresh.serverNow) { clock = next }
     }
 
+    /// - Parameter background: only the timer's reads are background
+    ///   traffic (`X-Crewflow-Background: 1`); resume and pull-to-refresh
+    ///   are the person's own activity.
+    /// - Returns: the failure, for the poller's backoff (nil on success).
     @MainActor
-    private func load(silent: Bool) async {
+    @discardableResult
+    private func load(silent: Bool, background: Bool = false) async -> Error? {
         generation += 1
         let stamp = generation
         if !silent {
             loading = true
             error = nil
         }
+        var failure: Error?
         do {
-            let fresh = try await store.report(for: event.id, background: silent)
-            guard stamp == generation else { return }
+            let fresh = try await store.report(for: event.id, background: background)
+            guard stamp == generation else { return nil }
             apply(fresh)
             error = nil
+            stale = false
         } catch {
-            guard stamp == generation else { return }
+            guard stamp == generation else { return nil }
+            failure = error
             let api = error as? APIError
-            // A silent refresh never replaces good rows with an error.
-            if api != .cancelled, api != .sessionChanged, !silent || report == nil {
-                self.error = vmMessage(error, fallback: "Unable to load your team.")
+            if api != .cancelled, api != .sessionChanged {
+                // A refresh never replaces good rows with an error page — except a permanent
+                // refusal (401/403/404/410), which drops them.
+                if StaffTeamLoader.isPermanentRefusal(error) {
+                    report = nil
+                    stale = false
+                }
+                if report == nil {
+                    self.error = vmMessage(error, fallback: "Unable to load your team.")
+                } else {
+                    stale = true
+                }
             }
         }
         if stamp == generation { loading = false }
+        return failure
     }
 
-    /// Staff check in on their own phones: keep rows current while visible
-    /// (30 s, background-flagged so it never keeps an idle session alive).
     @MainActor
-    private func poll() async {
-        guard visible else { return }
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            guard !Task.isCancelled, visible, scenePhase == .active else { continue }
-            await load(silent: true)
-        }
+    private func startPolling() async {
+        let api = store.repository.api
+        await poll.start(
+            foreground: scenePhase != .background,
+            identity: { await api.currentGeneration() },
+            task: { trigger in
+                if let failure = await load(silent: true, background: trigger.isBackground) { throw failure }
+            }
+        )
     }
 
     private func sheetDismissed() {

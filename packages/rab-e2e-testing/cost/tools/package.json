@@ -1,0 +1,8 @@
+{
+  "name": "crewflow-cost-loadgen",
+  "private": true,
+  "description": "Load generator for the crewflow-cost harness. Installed by scripts/run.sh into $COST_WORK/tools (never into the repo) with `npm ci` inside node:24-alpine.",
+  "dependencies": {
+    "autocannon": "8.0.0"
+  }
+}

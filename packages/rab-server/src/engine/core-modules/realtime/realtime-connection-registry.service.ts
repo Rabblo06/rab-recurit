@@ -17,8 +17,12 @@ export interface RealtimeConnectionRecord {
   transport: 'sse';
   connectedAt: Date;
   lastHeartbeatAt: Date;
-  /** Captured at connect time (or last successful heartbeat) — compared against a fresh `readVector()` call to detect mid-connection revocation without redoing the full security-snapshot build. */
-  securityVector: SecurityVersionVector;
+  /**
+   * Captured at connect time (or last successful heartbeat) — compared against a fresh `readVector()` call to detect
+   * mid-connection revocation without redoing the full security-snapshot build. `null` only for the instant between
+   * the synchronous slot reservation (C1b: the per-user cap is claimed before the stream opens) and the first async read.
+   */
+  securityVector: SecurityVersionVector | null;
 }
 
 /**

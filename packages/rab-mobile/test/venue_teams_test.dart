@@ -73,6 +73,10 @@ class TeamsFixture {
     'attendance.edit': true,
   };
   final posts = <String, Map<String, dynamic>>{};
+  // Phase C1 polling: every report read's background header, and an outage.
+  final reportReads = <String?>[];
+  bool failReport = false;
+  int reportFailStatus = 503;
   String? clockOutError;
   Map<String, dynamic> actions = {};
   Map<String, dynamic> qrWindow = {};
@@ -147,6 +151,10 @@ class TeamsFixture {
     httpClient: MockClient((r) async {
       final path = r.url.path.replaceFirst('/rest/v1', '');
       if (path == '/attendance/report/shift/shift-1') {
+        reportReads.add(r.headers['X-Crewflow-Background']);
+        if (failReport) {
+          return http.Response('{"message":"Unavailable"}', reportFailStatus);
+        }
         return http.Response(jsonEncode(report()), 200);
       }
       final onBehalf = RegExp(
@@ -709,5 +717,90 @@ void main() {
     });
     expect(teamRowAction(noShow, canEdit: true, finalised: false), isNull);
     expect(teamRowState(noShow).$1, 'Attendance missing');
+  });
+
+  testWidgets(
+    'Teams poll: 30 s ±20 % background reads, rows kept with a notice on '
+    'failure, nothing while backgrounded, foreground read on resume',
+    (tester) async {
+      final f = TeamsFixture();
+      await mount(tester, f, teams);
+      expect(f.reportReads, [null], reason: 'first load: user action');
+      await tester.pump(const Duration(seconds: 23));
+      expect(f.reportReads, hasLength(1), reason: 'never before 30 s − 20 %');
+      await tester.pump(const Duration(seconds: 14));
+      expect(f.reportReads, [null, '1'], reason: 'timer read = background');
+
+      f.failReport = true;
+      await tester.pump(const Duration(seconds: 37));
+      await tester.pumpAndSettle();
+      expect(f.reportReads, hasLength(3));
+      expect(find.text('Lucy Example'), findsOneWidget);
+      expect(find.text('4 people'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('stale-refresh-notice')),
+        findsOneWidget,
+      );
+      expect(find.text('Team unavailable'), findsNothing);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump(const Duration(minutes: 10));
+      expect(f.reportReads, hasLength(3), reason: 'no polling in background');
+
+      f.failReport = false;
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+      expect(f.reportReads, hasLength(4));
+      expect(f.reportReads.last, isNull, reason: 'resume: user action');
+      expect(find.byKey(const ValueKey('stale-refresh-notice')), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Teams poll: a permanent refusal (404: no longer this manager\'s shift) '
+    'drops the rows instead of keeping them with a notice',
+    (tester) async {
+      final f = TeamsFixture();
+      await mount(tester, f, teams);
+      expect(find.text('Lucy Example'), findsOneWidget);
+      f
+        ..failReport = true
+        ..reportFailStatus = 404;
+      await tester.pump(const Duration(seconds: 37));
+      await tester.pumpAndSettle();
+      expect(f.reportReads, hasLength(2));
+      expect(find.text('Lucy Example'), findsNothing);
+      expect(find.text('Team unavailable'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('stale-refresh-notice')),
+        findsNothing,
+      );
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('Teams poll stops while another screen covers it', (
+    tester,
+  ) async {
+    final f = TeamsFixture();
+    await mount(tester, f, teams);
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    navigator.push(
+      MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('x'))),
+    );
+    await tester.pumpAndSettle();
+    final before = f.reportReads.length;
+    await tester.pump(const Duration(minutes: 5));
+    expect(f.reportReads, hasLength(before));
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(f.reportReads, hasLength(before + 1), reason: 'visible again');
+    expect(f.reportReads.last, isNull);
+    await tester.pumpWidget(const SizedBox());
   });
 }

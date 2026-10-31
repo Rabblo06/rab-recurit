@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
@@ -250,5 +250,56 @@ describe('VenueOffers — WEB-02 status filter regression', () => {
     params = new URLSearchParams(screen.getByTestId('query-state').textContent ?? '');
     expect(params.has('status')).toBe(false);
     expect(params.get('sort')).toBe('submittedAt');
+  });
+});
+
+describe('VenueOffers — Phase C1 paging and polling', () => {
+  beforeEach(() => {
+    mockApi.get.mockReset();
+    mockApi.post.mockReset();
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('requests an explicit bounded page (limit 50) and the pager reaches page 2', async () => {
+    mockApi.get.mockResolvedValue({ data: { data: [offerRow()], total: 120 } });
+    mount();
+    await waitFor(() => expect(screen.getByText('The Grand Venue')).toBeInTheDocument());
+    expect(lastRequestsCall()?.params).toMatchObject({ limit: 50, page: 1 });
+    expect(screen.getByText('Page 1 of 3')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(lastRequestsCall()?.params).toMatchObject({ limit: 50, page: 2 }));
+    expect(screen.getByText('Page 2 of 3')).toBeInTheDocument();
+  });
+
+  it('polls every 30 s ±20 % (was 10 s), never sooner', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    mockApi.get.mockResolvedValue({ data: { data: [offerRow()], total: 1 } });
+    const { qc } = mount();
+    await act(async () => { await jest.advanceTimersByTimeAsync(20); });
+    expect(requestsCallCount()).toBe(1);
+    await act(async () => { await jest.advanceTimersByTimeAsync(25_000); });
+    expect(requestsCallCount()).toBe(1);
+    await act(async () => { await jest.advanceTimersByTimeAsync(5_100); });
+    expect(requestsCallCount()).toBe(2);
+    qc.clear();
+  });
+
+  it('a failed background refresh keeps the rows on screen with a non-blocking note', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(Math, 'random').mockReturnValue(0.5);
+    mockApi.get.mockResolvedValueOnce({ data: { data: [offerRow()], total: 1 } }).mockRejectedValue(new Error('network error'));
+    const { qc } = mount();
+    await act(async () => { await jest.advanceTimersByTimeAsync(20); });
+    expect(screen.getByText('The Grand Venue')).toBeInTheDocument();
+    await act(async () => { await jest.advanceTimersByTimeAsync(30_100); });
+    expect(requestsCallCount()).toBe(2);
+    expect(screen.getByText('The Grand Venue')).toBeInTheDocument();
+    expect(screen.queryByText('Could not load Venue Offers.')).toBeNull();
+    expect(screen.getByText(/Couldn.t refresh/)).toBeInTheDocument();
+    qc.clear();
   });
 });

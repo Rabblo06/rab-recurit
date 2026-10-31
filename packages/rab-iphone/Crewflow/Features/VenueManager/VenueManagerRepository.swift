@@ -90,9 +90,31 @@ struct VenueManagerRepository {
         try await all("/shifts/sent?view=\(Self.encode(view))", as: SentShift.self, options: options)
     }
 
-    /// `counts` for the Sent Shifts tabs and Home's "Staffing requests".
-    func sentShiftCounts(options: RequestOptions? = nil) async throws -> [String: Int] {
-        try await api.get("/shifts/sent?view=all&limit=1", options: options, as: SentShiftsPage.self).counts
+    /// Page size of the Sent Shifts poll (first page only, API contract §1).
+    static let sentPollLimit = 50
+
+    /// ONE page of a Sent Shifts view with the server's `total` and tab
+    /// `counts` (`/shifts/sent?view=<view>&page=<page>&limit=<limit>`).
+    func sentShiftsPage(view: String, page: Int = 1, limit: Int = VenueManagerRepository.sentPollLimit,
+                        options: RequestOptions? = nil) async throws -> SentShiftsPage {
+        try await api.get("/shifts/sent?view=\(Self.encode(view))&page=\(page)&limit=\(limit)", options: options, as: SentShiftsPage.self)
+    }
+
+    /// Every page of a Sent Shifts view (limit 100) plus the first page's
+    /// `counts`, so a full refresh needs no separate count probe.
+    func sentShiftsWithCounts(view: String, options: RequestOptions? = nil) async throws -> (rows: [SentShift], counts: [String: Int]) {
+        var rows: [SentShift] = []
+        var counts: [String: Int] = [:]
+        var page = 1
+        while true {
+            let response = try await sentShiftsPage(view: view, page: page, limit: Self.allPageLimit, options: options)
+            if page == 1 { counts = response.counts }
+            rows += response.data
+            if rows.count >= response.total { return (rows, counts) }
+            if response.data.isEmpty { throw VenueManagerError.listChanged }
+            page += 1
+            if page > 1000 { throw VenueManagerError.listChanged }
+        }
     }
 
     /// One sent request (works for expired ones too; 404 → no longer available).

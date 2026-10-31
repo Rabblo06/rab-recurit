@@ -15,10 +15,20 @@ import '../storage/secure_storage.dart';
 const kClientCapabilitiesHeader = 'X-Client-Capabilities';
 const kClientCapabilities = 'mfa-verify';
 
+/// Marks a timer- or background-driven request (polling). The server still fully authenticates it but does not slide
+/// the session's idle window, so an unattended open app cannot keep a session alive forever. User-initiated requests
+/// (taps, pull-to-refresh, the refresh on app resume) never send it. Mirrors iOS `RequestOptions.backgroundPoll`.
+const kBackgroundRequestHeader = 'X-Crewflow-Background';
+
 class ApiException implements Exception {
   final int statusCode;
   final String message;
   final int? retryAfterSeconds;
+
+  /// The server's own `Retry-After` on a 429 (seconds or HTTP date), or null when it sent none. Unlike
+  /// [retryAfterSeconds] (which falls back to 60 s for the message text) this is never a guess: pollers use their own
+  /// default when it is absent.
+  final Duration? retryAfter;
 
   /// The decoded JSON error body, when the response was structured JSON
   /// (e.g. `{code: 'CLOCK_IN_TOO_EARLY', shiftStart, availableAt}` from
@@ -30,6 +40,7 @@ class ApiException implements Exception {
     this.statusCode,
     this.message, {
     this.retryAfterSeconds,
+    this.retryAfter,
     this.body,
   });
 
@@ -118,6 +129,27 @@ String userMessageFor(Object error, {String? fallback}) {
   return fallback ?? ApiMessages.serverError;
 }
 
+/// The shortest wait any `Retry-After` may produce: a 0, negative or past
+/// value must never become an immediate retry (a retry storm).
+const minRetryAfter = Duration(seconds: 1);
+
+/// A `Retry-After` header (delta seconds or HTTP date) as a wait of at least
+/// [minRetryAfter], or null when absent or unreadable.
+Duration? parseRetryAfter(String? header, {DateTime? now}) {
+  final value = header?.trim();
+  if (value == null || value.isEmpty) return null;
+  final seconds = int.tryParse(value);
+  if (seconds != null) return Duration(seconds: seconds < 1 ? 1 : seconds);
+  try {
+    final wait = HttpDate.parse(value).difference(now ?? DateTime.now());
+    return Duration(
+      seconds: (wait.inMilliseconds / 1000).ceil().clamp(1, 1 << 31),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Thin REST client mirroring `rab-front/src/api.ts` and the Expo build's
 /// `rab-mobile/src/api/client.ts` this replaces: bearer token attached per
 /// request, single-flight refresh-on-401 (concurrent 401s share one
@@ -186,6 +218,10 @@ class ApiClient {
     return 'http://${android ? '10.0.2.2' : 'localhost'}:3000/rest/v1';
   }
 
+  /// Bumped by every [clearTokens] (logout / account switch). Pollers capture it before a request and drop the result
+  /// (and stop) when it changed, so nothing loaded under one identity is ever applied under another.
+  int get sessionGeneration => _tokenGeneration;
+
   Future<String?> getAccessToken() => _storage.read(key: _accessTokenKey);
   Future<String?> getRefreshToken() => _storage.read(key: _refreshTokenKey);
 
@@ -201,14 +237,23 @@ class ApiClient {
   Future<void> setSessionUserId(String id) =>
       _storage.write(key: 'rab.sessionUserId', value: id);
 
+  /// The push installation registered for the CURRENT session (set by
+  /// `PushRegistrationService` right before it registers). `/auth/logout`
+  /// names it (`pushDeviceId`, Phase C1b) so the server deactivates exactly
+  /// this device with the session; forgotten with the session's tokens.
+  String? pushDeviceIdForLogout;
+
   Future<void> clearTokens() async {
     ++_tokenGeneration;
+    pushDeviceIdForLogout = null;
     await _storage.delete(key: 'rab.sessionUserId');
     await _storage.delete(key: _accessTokenKey);
     await _storage.delete(key: _refreshTokenKey);
   }
 
-  Future<dynamic> get(String path) => _request('GET', path);
+  /// [background]: a timer/poll-driven read (sends [kBackgroundRequestHeader]); never set it for a user action.
+  Future<dynamic> get(String path, {bool background = false}) =>
+      _request('GET', path, background: background);
 
   /// Raw response bytes (e.g. an image via `GET /files/:id`, which always streams through the API and never
   /// redirects). Same token, refresh and error handling as every other request.
@@ -273,8 +318,44 @@ class ApiClient {
     final plain = RegExp(r'filename="?([^";]+)"?', caseSensitive: false).firstMatch(cd);
     return plain?.group(1)?.trim();
   }
-  Future<dynamic> post(String path, {Map<String, dynamic>? body}) =>
-      _request('POST', path, body: body);
+  Future<dynamic> post(String path, {Map<String, dynamic>? body}) async {
+    final pushDeviceId = pushDeviceIdForLogout;
+    if (path != '/auth/logout' || pushDeviceId == null) {
+      return _request('POST', path, body: body);
+    }
+    try {
+      return await _request(
+        'POST',
+        path,
+        body: {...?body, 'pushDeviceId': pushDeviceId},
+      );
+    } on ApiException catch (e) {
+      // A server without the optional field rejects the whole body (400,
+      // forbidNonWhitelisted) BEFORE anything is revoked: send it once more
+      // without it. The explicit deactivate call covers the device.
+      if (e.statusCode != 400) rethrow;
+      return _request('POST', path, body: body);
+    }
+  }
+
+  /// Opens a long-lived stream (`GET /realtime/stream`, Server-Sent Events)
+  /// with the session's bearer token in a header — never in the URL. Always
+  /// background traffic: an open stream must not keep an idle session alive.
+  /// Returns the raw response; the caller handles every status (no refresh
+  /// here: the realtime client uses the shared refresh path itself).
+  Future<http.StreamedResponse> openStream(String path) async {
+    final token = await getAccessToken();
+    final request = http.Request('GET', Uri.parse('$baseUrl$path'))
+      ..headers.addAll({
+        if (token != null) 'Authorization': 'Bearer $token',
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'X-Client-Platform': 'mobile',
+        kClientCapabilitiesHeader: kClientCapabilities,
+        kBackgroundRequestHeader: '1',
+      });
+    return _http.send(request).timeout(requestTimeout);
+  }
   Future<dynamic> patch(String path, {Map<String, dynamic>? body}) =>
       _request('PATCH', path, body: body);
   Future<dynamic> put(String path, {Map<String, dynamic>? body}) =>
@@ -287,6 +368,7 @@ class ApiClient {
     bool retried = false,
     int? dispatchGeneration,
     bool rawBytes = false,
+    bool background = false,
   }) async {
     // P0.1/#9 (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B): captured on the FIRST attempt only (a
     // retry passes its own already-captured value through) — before this fix, the 401-retry below
@@ -311,6 +393,7 @@ class ApiClient {
       // cookie this client would never read.
       'X-Client-Platform': 'mobile',
       kClientCapabilitiesHeader: kClientCapabilities,
+      if (background) kBackgroundRequestHeader: '1',
     };
 
     final encodedBody = body != null ? jsonEncode(body) : null;
@@ -347,7 +430,7 @@ class ApiClient {
       // account-mixing finding this whole section mirrors.
       if (refreshed && generation == _tokenGeneration) {
         final retryBody = path == '/auth/logout'
-            ? {'refreshToken': await getRefreshToken()}
+            ? {...?body, 'refreshToken': await getRefreshToken()}
             : body;
         return _request(
           method,
@@ -356,6 +439,7 @@ class ApiClient {
           retried: true,
           dispatchGeneration: generation,
           rawBytes: rawBytes,
+          background: background,
         );
       }
       await clearTokens();
@@ -371,13 +455,14 @@ class ApiClient {
       // Too Many Requests"), not the {message, error, statusCode} shape
       // every other error response uses — worth a friendlier message on its
       // own account rather than falling through to _extractMessage.
-      final header = res.headers['retry-after'];
-      final seconds = int.tryParse(header ?? '') ?? _retryDate(header) ?? 60;
+      final sent = parseRetryAfter(res.headers['retry-after'])?.inSeconds;
+      final seconds = sent ?? 60;
       final minutes = ((seconds + 59) ~/ 60).clamp(1, 100000);
       throw ApiException(
         429,
         'Too many requests. Please try again in $minutes ${minutes == 1 ? 'minute' : 'minutes'}.',
         retryAfterSeconds: seconds,
+        retryAfter: sent == null ? null : Duration(seconds: sent),
       );
     }
     if (res.statusCode >= 400) {
@@ -414,18 +499,6 @@ class ApiClient {
       return _tryDecodeBody(responseBody)?['code'] != 'MFA_CODE_INVALID';
     }
     return false;
-  }
-
-  int? _retryDate(String? header) {
-    if (header == null) return null;
-    try {
-      return (HttpDate.parse(header).difference(DateTime.now()).inMilliseconds /
-              1000)
-          .ceil()
-          .clamp(0, 2147483647);
-    } catch (_) {
-      return null;
-    }
   }
 
   Future<bool> _refreshAccessToken() {

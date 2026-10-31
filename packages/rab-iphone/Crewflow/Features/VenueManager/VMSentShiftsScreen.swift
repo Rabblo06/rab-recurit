@@ -4,18 +4,27 @@ import SwiftUI
 /// staffing requests. Views (All / Pending / Accepted / Confirmed /
 /// Declined / Expired) are filtered and counted by the SERVER
 /// (`/shifts/sent?view=`); pill text/colours come only from
-/// `sentShiftLook`. Polls every 5 s while visible (background-flagged).
+/// `sentShiftLook`.
+///
+/// Phase C1: was a 5 s FULL refresh (10–12 requests). Now only the first
+/// page of the tab on screen, every `pollInterval` ±20 %, while this screen
+/// is on screen, its shell tab is selected and the app is active
+/// (`PollScheduler`, background-flagged). The full refresh still runs on
+/// resume (VenueManagerTabs), pull-to-refresh and after the Venue
+/// Manager's own changes. A failed refresh keeps the rows on screen.
 struct VMSentShiftsScreen: View {
+    static let pollInterval: TimeInterval = 30
+
     @EnvironmentObject private var store: VenueManagerStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.shellTabActive) private var tabActive
+    // VenueManagerTabs already runs the full refresh on resume.
+    @StateObject private var poll = PollScheduler(interval: VMSentShiftsScreen.pollInterval, refreshOnResume: false)
     @State private var query = ""
-    @State private var view = "all"
-    @State private var viewRows: [SentShift]?
-    @State private var viewError = false
-    @State private var viewLoadedFor: Date?
     @State private var open: String?
     @State private var showsSend: Bool?
-    @State private var visible = false
+    @State private var onScreen = false
+    @State private var didOpen = false
 
     var body: some View {
         VMPage(title: "Sent Shifts", trailing: {
@@ -32,21 +41,32 @@ struct VMSentShiftsScreen: View {
                 list
             }
         }
-        .task(id: visible) { await poll() }
-        .onAppear { visible = true }
-        .onDisappear { visible = false }
-        .onChange(of: store.updatedAt) { _ in
-            // A tab other than All re-queries whenever the store refreshes.
-            if view != "all" { Task { await loadView() } }
+        .onAppear {
+            if !didOpen {
+                // Every visit opens on All, as before.
+                didOpen = true
+                store.resetSentView()
+            }
+            onScreen = true
+            poll.setVisible(tabActive)
         }
+        .onDisappear {
+            onScreen = false
+            poll.setVisible(false)
+        }
+        .onChange(of: tabActive) { active in poll.setVisible(onScreen && active) }
+        .onChange(of: scenePhase) { phase in poll.setForeground(phase != .background) }
+        .task { await startPolling() }
         .vmDestination($open) { VMSentShiftDetailView(shiftId: $0) }
-        .vmDestination($showsSend, onReturn: { Task { await store.refresh() } }) { _ in
+        .vmDestination($showsSend, onReturn: { Task { await refreshAll() } }) { _ in
             VMSendShiftView(initialStaff: [])
         }
         .accessibilityIdentifier("vm.sentShifts")
     }
 
-    private var source: [SentShift] { view == "all" ? store.sentShifts : (viewRows ?? []) }
+    private var view: String { store.sentView }
+
+    private var source: [SentShift] { store.sentRows(view) ?? [] }
 
     private var list: some View {
         let summary = VMSentViews.summary(sentShifts: store.sentShifts, counts: store.sentCounts)
@@ -54,6 +74,7 @@ struct VMSentShiftsScreen: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Track submitted staffing requests").scheduleType(ScheduleType.caption)
+                if store.refreshFailed { StaleRefreshNotice() }
                 HStack(spacing: 8) {
                     summaryCard("Sent", summary.sent, RGBA(argb: 0xFFFFF2E8).color, "paperplane.fill")
                     summaryCard("Accepted", summary.accepted, RGBA(argb: 0xFFECFDF5).color, "checkmark.circle.fill")
@@ -89,7 +110,8 @@ struct VMSentShiftsScreen: View {
                         }
                     }
                 }
-                if view != "all" && viewRows == nil && !viewError {
+                let viewError = store.sentViewErrors.contains(view)
+                if view != "all" && store.sentRows(view) == nil && !viewError {
                     VMInlineLoading()
                 } else if viewError && view != "all" {
                     MessageCard(title: "Could not load this view. Pull to refresh.", kind: .error)
@@ -104,7 +126,7 @@ struct VMSentShiftsScreen: View {
             .frame(maxWidth: ScheduleTokens.contentMaxWidth)
             .frame(maxWidth: .infinity)
         }
-        .refreshable { await store.refresh() }
+        .refreshable { await refreshAll() }
     }
 
     @ViewBuilder
@@ -138,38 +160,32 @@ struct VMSentShiftsScreen: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// A tab choice is the person's own action: never background-flagged.
     private func select(_ next: String) {
-        view = next
-        viewRows = nil
-        viewError = false
-        if next != "all" { Task { await loadView() } }
-    }
-
-    @MainActor
-    private func loadView() async {
-        let requested = view
-        guard requested != "all" else { return }
-        viewLoadedFor = store.updatedAt
-        do {
-            let rows = try await store.repository.sentShifts(view: requested)
-            guard view == requested else { return }
-            viewRows = rows
-            viewError = false
-        } catch {
-            guard view == requested else { return }
-            let api = error as? APIError
-            if api != .cancelled, api != .sessionChanged, viewRows == nil { viewError = true }
+        Task { @MainActor in
+            await store.selectSentView(next)
+            // The tab was just read: restart the interval from now.
+            poll.restartInterval()
         }
     }
 
+    /// Pull-to-refresh and the return from Send Shift: the full refresh
+    /// (queued behind any refresh in flight, never dropped).
     @MainActor
-    private func poll() async {
-        guard visible else { return }
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            guard !Task.isCancelled, visible, scenePhase == .active, !store.loading else { continue }
-            await store.refresh(silent: true, background: true)
-        }
+    private func refreshAll() async {
+        await store.refresh()
+        poll.restartInterval()
+    }
+
+    @MainActor
+    private func startPolling() async {
+        let store = self.store
+        let api = store.repository.api
+        await poll.start(
+            foreground: scenePhase != .background,
+            identity: { await api.currentGeneration() },
+            task: { trigger in try await store.pollSentView(background: trigger.isBackground) }
+        )
     }
 }
 

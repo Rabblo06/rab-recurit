@@ -4,6 +4,7 @@ import { SecretEncryptionService } from '../secret-encryption/secret-encryption.
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { PushDevice } from './entities/push-device.entity';
+import { deactivateAllPushDevicesForUser, deactivatePushDeviceForUser } from './push-device-deactivation';
 
 export interface RegisterDeviceParams {
   deviceId: string;
@@ -46,6 +47,25 @@ export class PushDeviceService {
         .where('device_id = :deviceId AND user_id <> :userId AND active = true', { deviceId: params.deviceId, userId: ctx.userId })
         .execute();
 
+      // C1b (D5): the SAME user's other active row carrying this exact provider token is the same phone under an older
+      // installation id (e.g. the mobile app's 32-hex → UUID device-id migration, or a reinstall); keeping both would
+      // double-deliver and leave one that logout can never name. Tokens are encrypted non-deterministically, so they are
+      // compared after decryption — only over this one user's own active rows (a handful).
+      const others = await manager
+        .createQueryBuilder(PushDevice, 'd')
+        .addSelect('d.pushTokenEncrypted') // `select: false` on the entity
+        .where('d.user_id = :userId AND d.device_id <> :deviceId AND d.active = true', { userId: ctx.userId, deviceId: params.deviceId })
+        .getMany();
+      for (const other of others) {
+        let sameToken = false;
+        try {
+          sameToken = this.secretEncryption.decrypt(other.pushTokenEncrypted) === params.pushToken;
+        } catch {
+          sameToken = false; // an undecryptable old token is left alone (the provider will report it invalid)
+        }
+        if (sameToken) await manager.update(PushDevice, { id: other.id }, { active: false, deactivatedAt: now, deactivatedReason: 'superseded_by_new_device_id' });
+      }
+
       if (existing) {
         await manager.update(PushDevice, { id: existing.id }, {
           platform: params.platform,
@@ -74,23 +94,26 @@ export class PushDeviceService {
     });
   }
 
-  /** One device, on explicit single-device logout. Idempotent — deactivating an already-inactive or unknown device is a silent no-op, never a 404 (mirrors `ProfileService`'s own session-revoke tolerance for an already-gone row). */
+  /**
+   * One device of the caller, by the client's own explicit `POST /push/devices/:deviceId/deactivate` call. Idempotent —
+   * an already-inactive or unknown device is a silent no-op, never a 404 (mirrors `ProfileService`'s own session-revoke
+   * tolerance for an already-gone row). Logout itself can do the same server-side, in the logout transaction, when the
+   * client sends `pushDeviceId` (`AuthService.logout`).
+   */
   async deactivate(ctx: AuthContext, deviceId: string, reason: string): Promise<void> {
-    await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager.update(PushDevice, { userId: ctx.userId, deviceId }, { active: false, deactivatedAt: new Date(), deactivatedReason: reason }),
-    );
+    await this.tenantContext.runInTenantContext(ctx, (manager) => deactivatePushDeviceForUser(manager, ctx.userId, deviceId, reason));
   }
 
-  /** Every device for this user — "logout all" / session revocation / account suspension. */
+  /**
+   * Every device of the caller, by the client's own explicit `POST /push/devices/deactivate-all` call. This endpoint is
+   * NOT what makes revocation safe: the server deactivates registrations itself, inside the revoking transaction, via
+   * `push-device-deactivation.ts` — every session revoked (`RefreshTokenService.revokeAllForUser`: password change/reset,
+   * account suspension, sign-out-everywhere, deletion), the last live session revoked (`revokeFamily`), organisation
+   * suspension (`revokeAllForOrganisation`), platform-admin sign-out-everywhere and workspace-access suspension.
+   * Revoking ONE other session while others stay live does not touch devices (no session → device link yet).
+   */
   async deactivateAll(ctx: AuthContext, reason: string): Promise<void> {
-    await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager
-        .createQueryBuilder()
-        .update(PushDevice)
-        .set({ active: false, deactivatedAt: new Date(), deactivatedReason: reason })
-        .where('user_id = :userId AND active = true', { userId: ctx.userId })
-        .execute(),
-    );
+    await this.tenantContext.runInTenantContext(ctx, (manager) => deactivateAllPushDevicesForUser(manager, ctx.userId, reason));
   }
 
   /** Marks a device as having a confirmed-dead token (FCM's own unregistered/invalid-token classification) — separate from a user-initiated deactivate, so the reason is always honest in audit/debugging. */

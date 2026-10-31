@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { IconRefresh, IconX } from '@tabler/icons-react';
 import { api } from '../../../shared/api';
@@ -6,6 +6,7 @@ import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import { TableSkeleton } from '../../../shared/components/LoadingState';
 import { getApiErrorMessage } from '../../../shared/lib/apiError';
 import { toast } from '../../../shared/lib/toast';
+import { lastAnsweredAt, pollingOptions, settlingInterval, showsError } from '../../../shared/lib/polling';
 
 /** A custom workspace-member role the caller may assign — loaded from the server, never hardcoded here. */
 export interface AssignableRole { id: string; name: string; permissionKeys: string[] }
@@ -106,12 +107,24 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
     queryFn: async () => (await api.get<AssignableRole[]>('/member-invitations/assignable-roles')).data,
   });
   const selectedRole = roles.data?.find((r) => r.id === roleId) ?? roles.data?.[0];
+  const inFlightSince = useRef<number | null>(null);
   const invitations = useQuery({
     queryKey: ['member-invitations', 'list', page, statusFilter],
     queryFn: async () =>
       (await api.get<{ data: MemberInvitation[]; total: number; page: number; limit: number }>(`/member-invitations?page=${page}&limit=${PAGE_SIZE}${statusFilter ? `&status=${statusFilter}` : ''}`)).data,
-    // A queued email turns into Sent or Delivery failed without the admin doing anything.
-    refetchInterval: (query) => (query.state.data?.data.some((i) => i.status === 'queued' || i.status === 'sending') ? 5000 : false),
+    // A queued email turns into Sent or Delivery failed without the admin doing anything. Phase C1: this page (10 rows,
+    // bounded) is re-read on the settling backoff (2 → 4 → 8 → 15 s, stopping after 3 minutes; was every 5 s with no
+    // limit) only while one of its rows is queued/sending, and never while the tab is hidden.
+    ...pollingOptions((query) => {
+      const inFlight = (query.state.data as { data: MemberInvitation[] } | undefined)?.data.some((i) => i.status === 'queued' || i.status === 'sending');
+      if (!inFlight) {
+        inFlightSince.current = null;
+        return false;
+      }
+      const answeredAt = lastAnsweredAt(query);
+      inFlightSince.current ??= answeredAt;
+      return settlingInterval(inFlightSince.current, answeredAt);
+    }),
   });
   const parsed = useMemo(() => parseEmails(raw), [raw]);
   const refresh = () => qc.invalidateQueries({ queryKey: ['member-invitations', 'list'] });
@@ -211,7 +224,7 @@ export default function InviteMembersPanel({ workspaceName, modeSelect, onCreate
 
     <section className="pending-invitations" aria-labelledby="pending-heading">
       <h3 id="pending-heading">Pending invitations</h3>
-      {invitations.isLoading ? <TableSkeleton columns={4} /> : invitations.isError ? (
+      {invitations.isLoading ? <TableSkeleton columns={4} /> : showsError(invitations) ? (
         <p role="alert" className="member-error feedback-error">Invitations could not be loaded. <button className="btn btn-outline" onClick={() => invitations.refetch()}>Retry</button></p>
       ) : !invitations.data?.data.length ? (
         <p className="pending-empty">No invitations pending. Your next teammate is one invite away.</p>

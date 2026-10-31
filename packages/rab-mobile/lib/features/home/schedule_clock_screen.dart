@@ -9,8 +9,11 @@ import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import '../../core/api/api_client.dart';
 import '../../core/models/attendance.dart';
 import '../../core/models/offer.dart';
+import '../../core/polling/poll_scheduler.dart';
+import '../../core/polling/stale_refresh_notice.dart';
 import '../../core/widgets/venue_photo.dart';
 import '../../core/widgets/shift_countdown_panel.dart';
 import '../../core/motion/shift_motion.dart';
@@ -92,8 +95,16 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   bool _teamLoading = false;
   String? _teamError;
   String? _teamShiftId;
+
+  /// The shift whose team [_team] holds a successful server answer for. A
+  /// refresh keeps those rows on screen while it loads and if it fails.
+  String? _teamLoadedFor;
   List<ShiftTeamMember> _team = [];
-  Timer? _teamRefresh;
+
+  /// Teams screen only: the team is re-read every [teamPollInterval] ±20 %
+  /// while this screen is visible and the app is in the foreground.
+  static const teamPollInterval = Duration(seconds: 30);
+  PollScheduler? _teamPoll;
 
   /// The shift whose server Check In state this screen has requested.
   String? _checkInShiftId;
@@ -102,11 +113,20 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   void initState() {
     super.initState();
     if (widget.teams) {
-      _teamRefresh = Timer.periodic(const Duration(seconds: 30), (_) {
-        if (mounted && TickerMode.of(context) && widget.offer != null) {
-          _loadTeam(widget.offer!.shiftId);
-        }
-      });
+      _teamPoll = PollScheduler(
+        interval: teamPollInterval,
+        // The resume handler below already reloads the team (foreground).
+        refreshOnResume: false,
+        task: (trigger) async {
+          final shiftId = _teamShiftId ?? widget.offer?.shiftId;
+          if (!mounted || shiftId == null) return;
+          final error = await _loadTeam(
+            shiftId,
+            background: trigger.isBackground,
+          );
+          if (error != null) throw error;
+        },
+      )..start();
     }
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -120,9 +140,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _teamPoll?.setVisible(
+      TickerMode.of(context) && (ModalRoute.of(context)?.isCurrent ?? true),
+    );
+  }
+
+  @override
   void dispose() {
     _boundary?.cancel();
-    _teamRefresh?.cancel();
+    _teamPoll?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -139,14 +167,30 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     }
   }
 
-  // Resume-only (see `didChangeAppLifecycleState` above) — this screen
-  // already has good data on it; a silent refresh just reconciles against
-  // the server without flashing back to the loading state.
-  Future<void> _refresh() async => Future.wait([
-    context.read<OffersProvider>().refresh(),
-    context.read<AttendanceProvider>().refreshActive(silent: true),
-    context.read<AttendanceProvider>().loadHistory(silent: true),
-  ]);
+  /// Resume, time boundary, back from Teams — this screen already has good
+  /// data on it; a silent refresh just reconciles against the server without
+  /// flashing back to the loading state.
+  ///
+  /// [join]: on resume the offers read is shared with AppShell's own resume
+  /// reconcile; a time boundary passes false so the read starts after it.
+  /// [background]: a timer-driven read (the boundary timer) is background
+  /// traffic and never slides the session idle window (Phase C1).
+  Future<void> _refresh({bool join = true, bool background = false}) async =>
+      Future.wait([
+        context.read<OffersProvider>().load(
+          silent: true,
+          joinInFlight: join,
+          background: background,
+        ),
+        context.read<AttendanceProvider>().refreshActive(
+          silent: true,
+          background: background,
+        ),
+        context.read<AttendanceProvider>().loadHistory(
+          silent: true,
+          background: background,
+        ),
+      ]);
 
   OfferDetailUiState? _state(
     OfferSummary? offer,
@@ -440,23 +484,48 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
     if (mounted) await _refresh();
   }
 
-  Future<void> _loadTeam(String shiftId) async {
-    if (_teamLoading) return;
+  /// One team read at a time. Rows already shown for this shift stay on
+  /// screen while it loads and when it fails (only a first load shows the
+  /// spinner or the error card). Returns the failure, if any, for the poller.
+  Future<Object?> _loadTeam(String shiftId, {bool background = false}) async {
+    if (_teamLoading) return null;
     setState(() {
+      if (_teamShiftId != shiftId) {
+        _team = [];
+        _teamLoadedFor = null;
+        _teamError = null;
+      }
       _teamShiftId = shiftId;
       _teamLoading = true;
-      _teamError = null;
-      _team = [];
     });
     try {
-      final rows = await context.read<AttendanceProvider>().loadTeam(shiftId);
-      if (mounted) setState(() => _team = rows);
-    } catch (_) {
-      if (mounted) {
-        setState(
-          () => _teamError = 'Unable to load your team. Please try again.',
-        );
+      final rows = await context.read<AttendanceProvider>().loadTeam(
+        shiftId,
+        background: background,
+      );
+      if (mounted && _teamShiftId == shiftId) {
+        setState(() {
+          _team = rows;
+          _teamLoadedFor = shiftId;
+          _teamError = null;
+        });
       }
+      return null;
+    } catch (e) {
+      if (mounted && _teamShiftId == shiftId) {
+        setState(() {
+          // A permanent refusal (no longer on this shift, signed out, gone)
+          // drops the rows already shown; any other failure keeps them with
+          // the stale-refresh notice.
+          if (e is ApiException &&
+              const {401, 403, 404, 410}.contains(e.statusCode)) {
+            _team = [];
+            _teamLoadedFor = null;
+          }
+          _teamError = 'Unable to load your team. Please try again.';
+        });
+      }
+      return e;
     } finally {
       if (mounted) setState(() => _teamLoading = false);
     }
@@ -508,7 +577,7 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
         _boundary = Timer(
           nextBoundary.difference(now) + const Duration(milliseconds: 10),
           () {
-            if (mounted) _refresh();
+            if (mounted) _refresh(join: false, background: true);
           },
         );
       }
@@ -776,7 +845,9 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                         ],
                       ),
                     ),
-                    if (canTeam && !_teamLoading && _teamError == null)
+                    if (canTeam &&
+                        _teamLoadedFor != null &&
+                        _teamLoadedFor == _teamShiftId)
                       Text(
                         '${_team.length} ${_team.length == 1 ? 'person' : 'people'}',
                         style: ScheduleType.caption,
@@ -784,12 +855,17 @@ class _ScheduleClockScreenState extends State<ScheduleClockScreen>
                   ],
                 ),
                 const SizedBox(height: 12),
-                if (_teamLoading)
+                if (canTeam &&
+                    _teamLoadedFor != null &&
+                    _teamLoadedFor == _teamShiftId &&
+                    _teamError != null)
+                  const StaleRefreshNotice(),
+                if (_teamLoading && _teamLoadedFor != _teamShiftId)
                   const Padding(
                     padding: EdgeInsets.all(24),
                     child: Center(child: CircularProgressIndicator()),
                   )
-                else if (_teamError != null)
+                else if (_teamError != null && _teamLoadedFor != _teamShiftId)
                   ScheduleMessageCard(
                     title: 'Team unavailable',
                     message: _teamError,

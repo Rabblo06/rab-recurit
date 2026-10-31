@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AI_MODEL_STATE_LABEL, type AiModelView } from '@rab/shared';
 
 import { toast } from '../../../shared/lib/toast';
+import { pollingOptions, showsError } from '../../../shared/lib/polling';
 import { formatMicroUsd } from '../../ai/AiComposerControls';
 import AdminActionDialog from './AdminActionDialog';
 import { ADMIN_ERROR_TEXT, adminApi, formatDateTime, type AiAdminOverview, type AiAdminUsageRow } from './adminPanelApi';
@@ -39,8 +40,12 @@ const n = (v: number | undefined) => (typeof v === 'number' ? v.toLocaleString('
 const micros = (v: number | undefined) => (typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? formatMicroUsd(v) : '—');
 const ALERT_TEXT: Record<'cost' | 'tokens', string> = { cost: 'Cost 80 %', tokens: 'Tokens 80 %' };
 
-export function useAiOverview() {
-  return useQuery({ queryKey: AI_OVERVIEW_KEY, queryFn: adminApi.aiOverview, refetchInterval: 15_000 });
+/**
+ * Phase C1: polled (15 s ±20 %) only by the Health tab (`{ poll: true }`); Config, Security and the organisation cards
+ * read it when they mount (re-read on a later visit once the app's 30 s staleTime has passed), never on a timer.
+ */
+export function useAiOverview({ poll = false }: { poll?: boolean } = {}) {
+  return useQuery({ queryKey: AI_OVERVIEW_KEY, queryFn: adminApi.aiOverview, ...(poll ? pollingOptions(15_000) : {}) });
 }
 
 // Tolerant of an older server that does not send these lists yet (the dev front can be ahead of the API): shown as empty.
@@ -56,12 +61,12 @@ function OnOff({ on, onText = 'On', offText = 'Off', tone = 'ok' }: { on: boolea
 
 /** Health → AI: switch, available models, rab-ai queue, turns and per-organisation usage against the daily budget. */
 export function AiHealthSection() {
-  const overview = useAiOverview();
+  const overview = useAiOverview({ poll: true });
   const [range, setRange] = useState<RangeId>('today');
   const days = RANGES.find((r) => r.id === range)!.days;
   const from = utcDay(days);
   const to = utcDay();
-  const usage = useQuery({ queryKey: ['admin', 'ai', 'usage', from, to], queryFn: () => adminApi.aiUsage(from, to), refetchInterval: 30_000 });
+  const usage = useQuery({ queryKey: ['admin', 'ai', 'usage', from, to], queryFn: () => adminApi.aiUsage(from, to), ...pollingOptions(30_000) });
   const o = overview.data;
   const rows = usage.data?.organisations ?? [];
   const totals = rows.reduce(
@@ -76,7 +81,7 @@ export function AiHealthSection() {
         <h2 className="ap-h2">AI assistant</h2>
         <p className="ap-sub">Counts and settings only. Questions, answers and tool results are never shown here.</p>
       </div>
-      {overview.isError ? (
+      {showsError(overview) ? (
         <p className="ap-callout ap-warn">The AI status could not be loaded.</p>
       ) : (
         <div className="ap-grid-3">
@@ -131,7 +136,7 @@ export function AiHealthSection() {
           <tbody>
             {usage.isLoading ? (
               <tr><td colSpan={13} className="ap-empty">Loading usage…</td></tr>
-            ) : usage.isError ? (
+            ) : showsError(usage) ? (
               <tr><td colSpan={13} className="ap-empty">Usage could not be loaded.</td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={13} className="ap-empty">No organisation has AI turned on or any AI usage in this range.</td></tr>
@@ -176,7 +181,9 @@ function UsageRow({ row, budget, days, today }: { row: AiAdminUsageRow; budget: 
 
 /** Config → AI: readiness, default/disabled model lists, provider keys (configured yes/no), the model catalogue with states, limits and the tool catalogue. */
 export function AiConfigSection() {
-  const { data: o, isLoading, isError } = useAiOverview();
+  const overview = useAiOverview();
+  const { isLoading } = overview;
+  const o = showsError(overview) ? undefined : overview.data;
   return (
     <section className="ap-block" aria-label="AI configuration">
       <div className="ap-block-head">
@@ -186,7 +193,7 @@ export function AiConfigSection() {
       <div className="ap-card">
         {isLoading ? (
           <p className="ap-muted" style={{ margin: 0 }}>Loading…</p>
-        ) : isError || !o ? (
+        ) : !o ? ( // a failed refresh keeps the last overview; a permanent refusal drops it (Phase C1)
           <p className="ap-muted" style={{ margin: 0 }}>The AI configuration is not available.</p>
         ) : (
           <div className="ap-grid-2">
@@ -295,7 +302,9 @@ const RETENTION_MODE: Record<string, string> = { off: 'Off: nothing is deleted o
 
 /** Security → AI privacy: telemetry, retention, what administrators can and cannot see. */
 export function AiPrivacySection() {
-  const { data: o, isLoading, isError } = useAiOverview();
+  const overview = useAiOverview();
+  const { isLoading } = overview;
+  const o = showsError(overview) ? undefined : overview.data;
   return (
     <section className="ap-block" aria-label="AI privacy">
       <div className="ap-block-head">
@@ -308,7 +317,7 @@ export function AiPrivacySection() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={3} className="ap-empty">Loading…</td></tr>
-            ) : isError || !o ? (
+            ) : !o ? ( // a failed refresh keeps the last overview; a permanent refusal drops it (Phase C1)
               <tr><td colSpan={3} className="ap-empty">The AI privacy settings could not be loaded.</td></tr>
             ) : (
               <>

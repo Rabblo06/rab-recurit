@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { IconSend } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
 import Drawer from '../../shared/components/Drawer';
 import { SearchableSelect } from '../../shared/components/SearchableSelect';
 import StaffSelectionPage, { type RequestedStaff } from './StaffSelectionPage';
@@ -184,7 +185,8 @@ export default function ShiftDrawers() {
 
   const { data: venues = [] } = useQuery({
     queryKey: ['venues'],
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues'); return Array.isArray(data) ? data : data.data; },
+    // Every page (Phase C1: the server's default page is now 50), so no venue silently drops out of the picker.
+    queryFn: () => fetchAllPages<Venue>('/venues'),
     enabled: showCreate || !!assignTarget,
   });
   const { data: jobRoles = [] } = useQuery({
@@ -194,7 +196,7 @@ export default function ShiftDrawers() {
   });
   const { data: staff = [] } = useQuery({
     queryKey: ['staff'],
-    queryFn: async () => { const { data } = await api.get<{ data: StaffMember[] } | StaffMember[]>('/staff'); return Array.isArray(data) ? data : data.data; },
+    queryFn: () => fetchAllPages<StaffMember>('/staff'),
     enabled: showCreate || !!assignTarget,
   });
   const replacementContext = useQuery({
@@ -279,8 +281,11 @@ export default function ShiftDrawers() {
 
   const cancel = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => api.post(`/shifts/${id}/cancel`, { reason }),
-    onSuccess: () => {
+    onSuccess: (_r, { id }) => {
       qc.invalidateQueries({ queryKey: ['shifts'] });
+      // An open staffing board / Venue Offers list shows the cancellation at once, not on its next poll.
+      qc.invalidateQueries({ queryKey: ['venue-pipeline', id] });
+      qc.invalidateQueries({ queryKey: ['venue-offers'] });
       setCancelTarget(null);
       setCancelReason('');
       toast.success('Shift cancelled.');

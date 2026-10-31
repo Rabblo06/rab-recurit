@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { IconCheck, IconChevronDown, IconChevronLeft, IconChevronRight, IconTable } from '@tabler/icons-react';
 import Popover from '../components/Popover';
+import { LIST_PAGE_SIZE } from './pageSize';
 import './list-view-select.css';
 
 /** A compact view selector, using the same server-filter state as the full filter popover. */
@@ -65,12 +66,15 @@ export function ListViewSelect({ label, value, options, onChange }: {
   </div>;
 }
 
-/** Only counts returned by the API; the 500-row page size is the existing server default. */
-export function RecordFooter({ total, page = 1, onPage, loaded, children }: {
-  total: number; page?: number; onPage?: (page: number) => void; loaded?: number; children?: ReactNode;
+/**
+ * Only counts returned by the API. `pageSize` is the `limit` the list was requested with (or the one the server echoed
+ * back) — Phase C1: every table names it explicitly (`LIST_PAGE_SIZE`, 50) instead of relying on a server default.
+ */
+export function RecordFooter({ total, page = 1, onPage, pageSize = LIST_PAGE_SIZE, loaded, children }: {
+  total: number; page?: number; onPage?: (page: number) => void; pageSize?: number; loaded?: number; children?: ReactNode;
 }) {
   const [countVisible, setCountVisible] = useState(false);
-  const pages = Math.max(1, Math.ceil(total / 500));
+  const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
   return <div className="list-footer">
     <span>{total.toLocaleString()} record{total === 1 ? '' : 's'}</span>
     {onPage && pages > 1 && <div className="record-pagination">

@@ -23,7 +23,7 @@ struct StaffHomeScreen: View {
                 Group {
                     if let error = store.offersError, store.offers.isEmpty {
                         MessageCard(title: "Offers unavailable", message: error, kind: .error, actionTitle: "Retry") {
-                            Task { await store.loadOffers() }
+                            Task { await store.loadOffers(full: true) }
                         }
                     } else if mySpace {
                         personal

@@ -1,10 +1,11 @@
 import { EmailOutboxJobType, NotificationTypeType } from '@rab/shared';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { PushDeliveryService } from '../../../engine/core-modules/push/push-delivery.service';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { escapeHtml } from '../../../engine/utils/escape-html';
@@ -63,6 +64,10 @@ export class NotificationService {
     private readonly pushDelivery: PushDeliveryService,
   ) {}
 
+  /** C1b realtime outbox — property-injected so the constructor signature (and every existing construction) is unchanged. */
+  @Inject(RealtimeEventService)
+  private readonly realtimeEvents!: RealtimeEventService;
+
   /**
    * Consults `notification_preference` before doing anything — both
    * in-app and email delivery are real, preference-gated behaviour, not a
@@ -113,6 +118,11 @@ export class NotificationService {
         userId: params.userId,
         notificationId: entry.id,
       });
+      // C1b realtime (same transaction as the in-app row): notification.created → exactly this notification's
+      // recipient, nobody else. Ids only — never the title/message. The bell/list refetch it over REST.
+      await this.realtimeEvents.recordForRecipients(manager, {
+        organisationId: params.organisationId, eventKey: `notification.created:${entry.id}`, eventType: RealtimeEventType.NOTIFICATION_CREATED, entityType: 'notification', entityId: entry.id,
+      }, async () => [{ userId: params.userId, workspaceId: null }]);
     }
 
     if (emailEnabled) {

@@ -6,6 +6,8 @@ import {
   IconClock, IconSend, IconBan, IconRocket, IconPlus, IconArchive, IconArchiveOff, IconTimelineEvent,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
+import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -110,7 +112,7 @@ export default function Shifts() {
   const { data: venues = [] } = useQuery({
     queryKey: ['venues', 'with-archived'],
     // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
-    queryFn: async () => { const { data } = await api.get<{ data: Venue[] } | Venue[]>('/venues', { params: { includeArchived: true } }); return Array.isArray(data) ? data : data.data; },
+    queryFn: () => fetchAllPages<Venue>('/venues', { includeArchived: true }),
   });
   const { data: jobRoles = [] } = useQuery({
     queryKey: ['job-roles'],
@@ -129,7 +131,7 @@ export default function Shifts() {
   const { search, filters, sort, page, setPage, setSearch, setFilters, setSort, activeFilterCount } = useTableQueryState(config);
   const columnVisibility = useColumnVisibility(config.storageKey, config.columns);
 
-  const params = { page, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
+  const params = { page, limit: LIST_PAGE_SIZE, q: search || undefined, ...filters, sort: sort.sort, direction: sort.direction };
   const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ['shifts', params],
     queryFn: async () => { const { data } = await api.get<{ data: Shift[]; total: number }>('/shifts', { params }); return data; },
@@ -309,7 +311,7 @@ export default function Shifts() {
           </table>
         )}
       </div>
-<RecordFooter total={total} page={page} onPage={setPage} />
+<RecordFooter total={total} page={page} onPage={setPage} pageSize={LIST_PAGE_SIZE} />
       {shiftArchive.dialog}
       <ShiftTimelinePanel
         shiftId={timelineFor?.id ?? null}

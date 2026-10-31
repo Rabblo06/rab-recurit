@@ -80,3 +80,28 @@ it('loading, safe failure and Retry use the same request context', async () => {
   mock.get.mockImplementation(original);await userEvent.click(screen.getByRole('button',{name:'Retry'}));
   expect(await screen.findByRole('checkbox',{name:'Select Alpha Staff'})).toBeChecked();expect(screen.queryByText('Could not load staff')).toBeNull();
 });
+
+describe('Phase C1: the staffing board refreshes at once after approve / decline (never waits for a poll)', () => {
+  function mountWithClient() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    qc.setQueryData(['venue-pipeline', 'shift-1'], { stale: true });
+    const spy = jest.spyOn(qc, 'invalidateQueries');
+    render(<QueryClientProvider client={qc}><ShiftApprovalDrawer /></QueryClientProvider>);
+    return spy;
+  }
+  it('approve invalidates this shift\'s pipeline and the Venue Offers list', async () => {
+    const spy = mountWithClient();
+    open();
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['venue-pipeline', 'shift-1'] }));
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['venue-offers'] });
+  });
+  it('decline invalidates this shift\'s pipeline and the Venue Offers list', async () => {
+    const spy = mountWithClient();
+    open();
+    await userEvent.click(await screen.findByRole('button', { name: 'Decline' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm decline' }));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith({ queryKey: ['venue-pipeline', 'shift-1'] }));
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['venue-offers'] });
+  });
+});

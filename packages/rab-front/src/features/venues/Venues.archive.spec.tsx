@@ -65,3 +65,12 @@ it('archive asks for confirmation first, then calls the NAMED action (never a st
   await waitFor(() => expect(mock.post).toHaveBeenCalledWith('/venues/A/archive'));
   expect(mock.post).toHaveBeenCalledTimes(1);
 });
+
+it('Phase C1: the Venues table requests an explicit page of 50 and its pager reaches page 2', async () => {
+  mock.get.mockImplementation(async () => ({ data: { data: [venue('A')], total: 120 } }));
+  mount();
+  expect(await screen.findByText('Page 1 of 3')).toBeInTheDocument();
+  expect(mock.get.mock.calls.at(-1)![1].params).toMatchObject({ page: 1, limit: 50 });
+  await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  await waitFor(() => expect(mock.get.mock.calls.at(-1)![1].params).toMatchObject({ page: 2, limit: 50 }));
+});

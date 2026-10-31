@@ -7,6 +7,7 @@ import {
   IconArrowUpRight, IconCalendar, IconCheck, IconChevronLeft, IconChevronRight, IconCircleDashed, IconClock,
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
+import { fetchAllPages } from '../../shared/table-toolbar/pagination';
 import Avatar from '../../shared/components/Avatar';
 import AnimatedNumber, { COUNT_EASE } from '../../shared/components/AnimatedNumber';
 import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
@@ -277,11 +278,12 @@ function HoursWorked({ index, now }: { index: number; now: Date }) {
   const from = addDays(startOfDay(now), -6);
   const q = useQuery({
     queryKey: ['dashboard', 'hours', ymd(from)],
-    queryFn: async () => (await api.get<Page<AttendanceRow>>('/attendance', { params: { clockInFrom: from.toISOString(), clockInTo: now.toISOString(), limit: 1000 } })).data,
+    // Every record in the 7 days, in pages of 200 (Phase C1: was one capped request of 1,000).
+    queryFn: () => fetchAllPages<AttendanceRow>('/attendance', { clockInFrom: from.toISOString(), clockInTo: now.toISOString() }),
   });
   const days = useMemo(() => {
     const out = Array.from({ length: 7 }, (_, i) => ({ date: addDays(from, i), minutes: 0 }));
-    for (const r of listOf(q.data ?? [])) {
+    for (const r of q.data ?? []) {
       if (r.workedMinutes == null) continue; // still clocked in: not worked time yet
       const i = Math.floor((startOfDay(new Date(r.clockInAt)).getTime() - from.getTime()) / DAY_MS);
       if (i >= 0 && i < 7) out[i].minutes += r.workedMinutes;
@@ -291,7 +293,6 @@ function HoursWorked({ index, now }: { index: number; now: Date }) {
   const max = Math.max(60, ...days.map((d) => d.minutes));
   const worked = days.filter((d) => d.minutes > 0);
   const avg = worked.length ? worked.reduce((s, d) => s + d.minutes, 0) / worked.length / 60 : 0;
-  const capped = q.data && !Array.isArray(q.data) && q.data.total > listOf(q.data).length;
   const revealing = useRevealWindow(!!q.data);
   return (
     <Card index={index} title="Hours worked" to="/payroll" className="dash-hours">
@@ -299,7 +300,7 @@ function HoursWorked({ index, now }: { index: number; now: Date }) {
         <>
           <div className="dash-hours-head">
             <p className="dash-big"><AnimatedNumber value={avg} format={(n) => n.toFixed(1)} reveal /> <small>h</small></p>
-            <p className="dash-muted">Avg. workday<br />last 7 days{capped ? ' (latest 1,000 records)' : ''}</p>
+            <p className="dash-muted">Avg. workday<br />last 7 days</p>
           </div>
           <div className="dash-bars" role="img" aria-label={`Hours worked per day: ${days.map((d) => `${d.date.toLocaleDateString('en-GB', { weekday: 'short' })} ${(d.minutes / 60).toFixed(1)} h`).join(', ')}`} onMouseLeave={() => setHover(null)}>
             {days.map((d, i) => (
@@ -331,20 +332,20 @@ function ShiftsByVenue({ index, now }: { index: number; now: Date }) {
   const from = addDays(startOfDay(now), -30);
   const shifts = useQuery({
     queryKey: ['dashboard', 'shifts-30d', ymd(from)],
-    queryFn: async () => (await api.get<Page<ShiftRow>>('/shifts', { params: { from: from.toISOString(), to: now.toISOString(), limit: 1000 } })).data,
+    queryFn: () => fetchAllPages<ShiftRow>('/shifts', { from: from.toISOString(), to: now.toISOString() }),
   });
   const venues = useQuery({
     queryKey: ['dashboard', 'venues'],
-    queryFn: async () => listOf((await api.get<Page<VenueRow> | VenueRow[]>('/venues')).data),
+    queryFn: () => fetchAllPages<VenueRow>('/venues'),
     staleTime: 5 * 60_000,
   });
   const rows = useMemo(() => {
     const names = new Map((venues.data ?? []).map((v) => [v.id, v.name]));
     const counts = new Map<string, number>();
-    for (const s of listOf(shifts.data ?? [])) counts.set(s.venueId, (counts.get(s.venueId) ?? 0) + 1);
+    for (const s of shifts.data ?? []) counts.set(s.venueId, (counts.get(s.venueId) ?? 0) + 1);
     return [...counts.entries()].map(([id, count]) => ({ id, name: names.get(id) ?? 'Venue', count })).sort((a, b) => b.count - a.count).slice(0, 5);
   }, [shifts.data, venues.data]);
-  const total = shifts.data && !Array.isArray(shifts.data) ? shifts.data.total : listOf(shifts.data ?? []).length;
+  const total = (shifts.data ?? []).length;
   const max = Math.max(1, ...rows.map((r) => r.count));
   const error = shifts.isError ? shifts : venues.isError ? venues : null;
   const revealing = useRevealWindow(!!shifts.data && !!venues.data);
@@ -574,10 +575,10 @@ function WeekCalendar({ index, now }: { index: number; now: Date }) {
   const end = addDays(start, 7);
   const shifts = useQuery({
     queryKey: ['dashboard', 'week', ymd(start)],
-    queryFn: async () => listOf((await api.get<Page<ShiftRow>>('/shifts', { params: { from: start.toISOString(), to: end.toISOString(), sort: 'startsAt', direction: 'asc', limit: 500 } })).data),
+    queryFn: () => fetchAllPages<ShiftRow>('/shifts', { from: start.toISOString(), to: end.toISOString(), sort: 'startsAt', direction: 'asc' }),
     placeholderData: (prev) => prev,
   });
-  const venues = useQuery({ queryKey: ['dashboard', 'venues'], queryFn: async () => listOf((await api.get<Page<VenueRow> | VenueRow[]>('/venues')).data), staleTime: 5 * 60_000 });
+  const venues = useQuery({ queryKey: ['dashboard', 'venues'], queryFn: () => fetchAllPages<VenueRow>('/venues'), staleTime: 5 * 60_000 });
   const names = new Map((venues.data ?? []).map((v) => [v.id, v.name]));
   const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
   const go = (d: number) => { setDir(d); setOffset((o) => o + d); };

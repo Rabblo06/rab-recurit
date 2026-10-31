@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignment-time';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
@@ -33,7 +34,10 @@ import { FieldPolicyService } from '../../identity/member-access/field-policy.se
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { attendanceAudience } from '../../../engine/core-modules/realtime/realtime-recipients';
+import { isLegacyUnpagedRequest, KeysetPaginationDto, keysetSkipTake, LEGACY_UNPAGED_LIMIT, paginationSkipTake } from '../../../engine/dto/pagination.dto';
+import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage, keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { AttendanceLocationDto } from '../dto/attendance-location.dto';
 import { CheckInDto, OnBehalfPunchDto } from '../dto/check-in.dto';
@@ -167,6 +171,13 @@ export interface CheckInState {
   serverNow: string;
 }
 
+/** `GET /attendance/me/history` when `limit`/`cursor` is sent (Phase C1, contract §3). */
+export interface AttendanceHistoryPage {
+  data: AttendanceSummary[];
+  /** Opaque keyset cursor for the next page, or null when there are no more rows. */
+  nextCursor: string | null;
+}
+
 const ATTENDANCE_SUMMARY_SELECT = `
   SELECT
     a.id, a.status, a.clock_in_at, a.clock_out_at, a.worked_minutes, a.earned_pence,
@@ -245,6 +256,21 @@ export class AttendanceService {
     private readonly permissions: PermissionsService,
     private readonly shiftReports: ShiftReportService,
   ) {}
+
+  /** C1b realtime outbox — property-injected so the constructor signature (and every existing construction) is unchanged. */
+  @Inject(RealtimeEventService)
+  private readonly realtimeEvents!: RealtimeEventService;
+
+  /**
+   * C1b realtime (always inside the caller's transaction): attendance.changed → the staff member, the shift's owner and
+   * the venue's managers. Ids only — never times, location, minutes or pay. A fresh key per occurrence: one attendance
+   * row legitimately changes many times (clock-in, clock-out, corrections).
+   */
+  private async emitAttendanceChanged(manager: EntityManager, ctx: AuthContext, attendanceId: string): Promise<void> {
+    await this.realtimeEvents.recordForRecipients(manager, {
+      organisationId: ctx.organisationId!, eventKey: `attendance.changed:${attendanceId}:${randomUUID()}`, eventType: RealtimeEventType.ATTENDANCE_CHANGED, entityType: 'attendance', entityId: attendanceId,
+    }, (m) => attendanceAudience(m, attendanceId));
+  }
 
   /**
    * Server-authoritative attendance window: `[startsAt - CLOCK_IN_EARLY_MINUTES, endsAt + QR_POST_SHIFT_GRACE_MINUTES]`
@@ -530,6 +556,7 @@ export class AttendanceService {
         entityId: attendance.id,
         metadata: { shiftId: shift.id, method: 'staff', checkedIn: !!assignment.checkedInAt },
       });
+      await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
 
       return this.loadSummary(manager, attendance.id);
     });
@@ -710,6 +737,7 @@ export class AttendanceService {
         ...(onBehalf ? { staffProfileId: attendance.staffProfileId, reason: onBehalf.reason, serverTime: now.toISOString() } : {}),
       },
     });
+    await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
 
     return this.loadSummary(manager, attendance.id);
   }
@@ -821,6 +849,7 @@ export class AttendanceService {
           geofenceEnforced: venue.enforceGeofence,
         },
       });
+      await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
       return this.shiftReports.getReportWithManager(manager, ctx, shiftId);
     });
   }
@@ -884,29 +913,63 @@ export class AttendanceService {
     });
   }
 
-  /** Staff-facing (mobile): the caller's own past-clocking attendance history, newest first — anything no longer actively clocked in, regardless of manager review/approval state. */
-  getHistory(ctx: AuthContext, pagination: PaginationDto = {}): Promise<AttendanceSummary[]> {
+  /**
+   * Staff-facing (mobile): the caller's own past-clocking attendance history, newest first — anything no longer actively
+   * clocked in, regardless of manager review/approval state. Two shapes (Phase C1, contract §2/§3), like
+   * `OfferService.listMine`:
+   *
+   * - LEGACY — no `limit`/`cursor`: the pre-C1 bare array of up to `LEGACY_UNPAGED_LIMIT` (500) rows (`page` offsets by
+   *   500). Installed staff app builds build History from exactly this call; it must not follow the global default.
+   * - PAGED — `limit` and/or `cursor`: `{ data, nextCursor }`, `limit` <= 200 (default 50), keyset `clock_in_at DESC, id
+   *   DESC`. The cursor only bounds the order; the caller's own staff profile is still the only row filter.
+   */
+  getHistory(ctx: AuthContext, dto?: { page?: number; limit?: undefined; cursor?: undefined }): Promise<AttendanceSummary[]>;
+  getHistory(ctx: AuthContext, dto: KeysetPaginationDto): Promise<AttendanceSummary[] | AttendanceHistoryPage>;
+  getHistory(ctx: AuthContext, dto: KeysetPaginationDto = {}): Promise<AttendanceSummary[] | AttendanceHistoryPage> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const legacy = isLegacyUnpagedRequest(dto);
+      const after = legacy ? null : decodeOptionalKeysetCursor(dto.cursor);
+      const paging = legacy ? null : keysetSkipTake(dto);
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
-      if (!staffProfile) return [];
-      const { skip, take } = paginationSkipTake(pagination);
-      const rows = await manager.query(
-        `${ATTENDANCE_SUMMARY_SELECT} WHERE a.staff_profile_id = $1 AND a.status = ANY($2::text[])
-           ORDER BY a.clock_in_at DESC LIMIT $3 OFFSET $4`,
+      if (!staffProfile) return legacy ? [] : { data: [], nextCursor: null };
+      const params: unknown[] = [
+        staffProfile.id,
         [
-          staffProfile.id,
-          [
-            AttendanceStatus.CLOCKED_OUT,
-            AttendanceStatus.UNDER_REVIEW,
-            AttendanceStatus.APPROVED,
-            AttendanceStatus.DISPUTED,
-            AttendanceStatus.MISSING_CLOCK_OUT,
-          ],
-          take,
-          skip,
+          AttendanceStatus.CLOCKED_OUT,
+          AttendanceStatus.UNDER_REVIEW,
+          AttendanceStatus.APPROVED,
+          AttendanceStatus.DISPUTED,
+          AttendanceStatus.MISSING_CLOCK_OUT,
         ],
+      ];
+      const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const conditions = ['a.staff_profile_id = $1', 'a.status = ANY($2::text[])'];
+      // LEGACY: up to 500 rows, `page` offsets by 500 — exactly the pre-C1 response.
+      const { skip, take } = legacy ? paginationSkipTake({ page: dto.page, limit: LEGACY_UNPAGED_LIMIT }) : paging!;
+      if (after) conditions.push(keysetBeforeSql('a.clock_in_at', 'a.id', nextParam(after.t), nextParam(after.i)));
+      // Same two steps as OfferService.listMine (Phase C1): the page's ids from attendance alone in keyset order, then the
+      // summary of exactly those ids — so the plan always starts from this staff member's rows, never from the
+      // organisation's venues/shifts (the RLS predicates hide every selectivity from the planner). Same rows, same order.
+      const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
+        `SELECT a.id, ${keysetTimestampSql('a.clock_in_at')} AS keyset_ts FROM attendance a
+          WHERE ${conditions.join(' AND ')}
+          ORDER BY a.clock_in_at DESC, a.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
+        params,
       );
-      return rows.map(toAttendanceSummary);
+      const page = legacy ? { data: keys, nextCursor: null } : keysetPage(keys, take, (k) => ({ t: k.keyset_ts, i: k.id }));
+      // Key by key (fenced LATERAL, one primary-key lookup each) with JIT off for this transaction, as in
+      // OfferService.listMine (measured: ~12 ms of execution behind ~240 ms of JIT compilation for 500 rows).
+      if (page.data.length) await manager.query(`SELECT set_config('jit', 'off', true)`);
+      const rows: Array<Record<string, unknown>> = page.data.length
+        ? await manager.query(
+            `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
+               CROSS JOIN LATERAL (${ATTENDANCE_SUMMARY_SELECT} WHERE a.id = k.id AND a.staff_profile_id = $2 OFFSET 0) x
+              ORDER BY x.clock_in_at DESC, x.id DESC`,
+            [page.data.map((k) => k.id), staffProfile.id],
+          )
+        : [];
+      const data = rows.map(toAttendanceSummary);
+      return legacy ? data : { data, nextCursor: page.nextCursor };
     });
   }
 
@@ -991,7 +1054,7 @@ export class AttendanceService {
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
       const rows = await manager.query(
-        `${ATTENDANCE_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
+        `${ATTENDANCE_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, a.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
         params,
       );
       return { data: rows.map((r: Record<string, unknown>) => this.fieldPolicy.omit(fields, toAttendanceSummary(r))), total: count };
@@ -1219,6 +1282,7 @@ export class AttendanceService {
       entityId: attendance.id,
       metadata: opts.audit,
     });
+    await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
   }
 
   /**
@@ -1485,6 +1549,7 @@ export class AttendanceService {
           supersededProvisionalNoShow,
         },
       });
+      await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
       return this.shiftReports.getReportWithManager(manager, ctx, shiftId);
     });
   }

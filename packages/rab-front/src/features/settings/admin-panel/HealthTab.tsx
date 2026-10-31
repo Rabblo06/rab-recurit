@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { toast } from '../../../shared/lib/toast';
+import { pollingOptions } from '../../../shared/lib/polling';
 import AdminActionDialog from './AdminActionDialog';
 import { AiHealthSection } from './AiAdminSections';
 import { ADMIN_ERROR_TEXT, METRICS_RANGES, adminApi, formatDateTime, metricsSummary, shortId, type HealthCard, type HealthStatus, type JobState, type MetricsRange, type QueueSummary } from './adminPanelApi';
@@ -34,7 +35,8 @@ function secondsAgo(iso: string | undefined, now: number): string {
 }
 
 /**
- * Admin panel → Health (mockup v2). Probes, queues and the outbox refetch every 15 s while the tab is visible. The chart
+ * Admin panel → Health (mockup v2). Probes, queues and the outbox refetch every 15 s (±20 %, Phase C1 polling policy)
+ * while this tab is open and the browser tab visible. The chart
  * shows completed vs failed jobs per bucket from the Workers' BullMQ metrics (`GET /admin/queues/:queue/metrics`,
  * 1H per minute, 4H/12H/1D/7D per hour, refetched every 30 s); with no recorded point it says "Metrics unavailable" and
  * never draws numbers made up from counts. Job DATA is never shown: ids, attempts and a safe error class only.
@@ -46,9 +48,9 @@ export default function HealthTab() {
     const t = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(t);
   }, []);
-  const health = useQuery({ queryKey: ['admin', 'health'], queryFn: adminApi.health, refetchInterval: HEALTH_REFETCH_MS });
-  const queues = useQuery({ queryKey: ['admin', 'queues'], queryFn: adminApi.queues, refetchInterval: HEALTH_REFETCH_MS });
-  const outbox = useQuery({ queryKey: ['admin', 'outbox'], queryFn: adminApi.failedOutbox, refetchInterval: HEALTH_REFETCH_MS });
+  const health = useQuery({ queryKey: ['admin', 'health'], queryFn: adminApi.health, ...pollingOptions(HEALTH_REFETCH_MS) });
+  const queues = useQuery({ queryKey: ['admin', 'queues'], queryFn: adminApi.queues, ...pollingOptions(HEALTH_REFETCH_MS) });
+  const outbox = useQuery({ queryKey: ['admin', 'outbox'], queryFn: adminApi.failedOutbox, ...pollingOptions(HEALTH_REFETCH_MS) });
 
   const [queueName, setQueueName] = useState('rab-email');
   const [state, setState] = useState<JobState>('failed');
@@ -60,13 +62,13 @@ export default function HealthTab() {
     queryKey: ['admin', 'jobs', queue?.name, state],
     queryFn: () => adminApi.jobs(queue!.name, state),
     enabled: Boolean(queue),
-    refetchInterval: HEALTH_REFETCH_MS,
+    ...pollingOptions(HEALTH_REFETCH_MS),
   });
   const metrics = useQuery({
     queryKey: ['admin', 'queue-metrics', queue?.name, range],
     queryFn: () => adminApi.queueMetrics(queue!.name, range),
     enabled: Boolean(queue),
-    refetchInterval: METRICS_REFETCH_MS,
+    ...pollingOptions(METRICS_REFETCH_MS),
   });
   useEffect(() => setSelected(new Set()), [queue?.name, state]);
 
@@ -267,7 +269,7 @@ export default function HealthTab() {
             <tbody>
               {outbox.isLoading ? (
                 <tr><td colSpan={7} className="ap-empty">Loading…</td></tr>
-              ) : outbox.isError ? (
+              ) : outbox.isError && !outbox.data ? (
                 <tr><td colSpan={7} className="ap-empty">Failed messages could not be loaded.</td></tr>
               ) : !Array.isArray(outbox.data) || !outbox.data.length ? (
                 <tr><td colSpan={7} className="ap-empty">No failed messages.</td></tr>

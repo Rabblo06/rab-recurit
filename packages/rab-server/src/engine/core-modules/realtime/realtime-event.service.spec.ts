@@ -36,4 +36,46 @@ describe('RealtimeEventService — REALTIME_ENABLED gating', () => {
     expect(values).toEqual(['org-1', 'ws-1', 'user-1', 'offer.sent:o1', 'offer.sent', 'offer', 'o1', '{}']);
     await expect(serviceWith(true).record(managerReturning([]) as unknown as EntityManager, params)).resolves.toBeNull();
   });
+  describe('C1b recordForRecipients', () => {
+    const base = { organisationId: 'org-1', eventKey: 'offer.declined:o1', eventType: RealtimeEventType.OFFER_DECLINED, entityType: 'offer', entityId: 'o1' };
+
+    it('disabled: no recipient lookup and no SQL at all (zero cost while REALTIME_ENABLED=false)', async () => {
+      const manager = managerReturning([]);
+      const resolve = jest.fn(async () => [{ userId: 'u1', workspaceId: 'ws-1' }]);
+      await expect(serviceWith(false).recordForRecipients(manager as unknown as EntityManager, base, resolve)).resolves.toBe(0);
+      expect(resolve).not.toHaveBeenCalled();
+      expect(manager.query).not.toHaveBeenCalled();
+    });
+
+    it('an unknown type is rejected before the flag check (fail closed)', async () => {
+      const manager = managerReturning([]);
+      await expect(serviceWith(false).recordForRecipients(manager as unknown as EntityManager, { ...base, eventType: 'bogus.type' }, async () => [])).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('enabled: ONE insert for every distinct recipient, per-recipient keys, workspace kept only when it is the bound one', async () => {
+      const manager = managerReturning([{ id: 'e1' }, { id: 'e2' }]);
+      const written = await serviceWith(true).recordForRecipients(manager as unknown as EntityManager, base, async () => [
+        { userId: 'u1', workspaceId: 'ws-1' },
+        { userId: 'u2', workspaceId: null },
+        { userId: 'u1', workspaceId: 'ws-1' },
+        null,
+      ]);
+      expect(written).toBe(2);
+      expect(manager.query).toHaveBeenCalledTimes(1);
+      const [sql, values] = manager.query.mock.calls[0];
+      expect(sql).toMatch(/INSERT INTO core\.realtime_event/);
+      expect(sql).toMatch(/core\.current_workspace\(\)/);
+      expect(sql).toMatch(/ON CONFLICT \(event_key\) DO NOTHING/);
+      // Review F6: one active-account filter for every audience — a suspended/deleted user never gets a row.
+      expect(sql).toMatch(/JOIN core\."user" u ON u\.id = t\.user_id AND u\.status = 'active' AND u\.deleted_at IS NULL/);
+      expect(values[6]).toEqual(['u1', 'u2']);
+      expect(values[7]).toEqual(['ws-1', null]);
+    });
+
+    it('enabled with nobody to tell: no insert', async () => {
+      const manager = managerReturning([]);
+      await expect(serviceWith(true).recordForRecipients(manager as unknown as EntityManager, base, async () => [])).resolves.toBe(0);
+      expect(manager.query).not.toHaveBeenCalled();
+    });
+  });
 });
