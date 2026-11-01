@@ -29,7 +29,8 @@ const PROCESSES: CompatibilityProcess[] = ['api', 'worker', 'cli', 'provisioner'
 
 const CURRENT_FN: ProvisionFunctionState = {
   state: 'known',
-  literal: 'db:provision_workspace@ProvisionWorkspaceGuards1786721210000',
+  // Phase D: module 19 (StatementDispatchPointer1786721320000) is the current body (final pending the owner's SQL approval).
+  literal: 'db:provision_workspace@StatementDispatchPointer1786721320000',
   moduleVersion: LATEST_WORKSPACE_MODULE_VERSION,
 };
 
@@ -178,13 +179,15 @@ describe('assertSchemaCompatible', () => {
 describe('provision function body → module version (frozen map)', () => {
   const body = (literal: string) => `BEGIN ... 'APPLIED', v_started, pg_catalog.clock_timestamp(), NULL, '${literal}' ... END`;
 
-  it('maps the four frozen literals; the newest equals LATEST_WORKSPACE_MODULE_VERSION', () => {
+  it('maps the five frozen literals; the newest equals LATEST_WORKSPACE_MODULE_VERSION (19, Phase D)', () => {
     expect(PROVISION_FUNCTION_MODULE_VERSIONS).toEqual({
       'db:provision_workspace@AttendanceMoneyChecks1786719810000': 15,
       'db:provision_workspace@ArchiveAndSearchSchema1786719920000': 17,
       'db:provision_workspace@VenueTeamOrgAdmin1786721090000': 18,
       'db:provision_workspace@ProvisionWorkspaceGuards1786721210000': 18,
+      'db:provision_workspace@StatementDispatchPointer1786721320000': 19,
     });
+    expect(LATEST_WORKSPACE_MODULE_VERSION).toBe(19);
     expect(Math.max(...Object.values(PROVISION_FUNCTION_MODULE_VERSIONS))).toBe(LATEST_WORKSPACE_MODULE_VERSION);
     expect(Object.isFrozen(PROVISION_FUNCTION_MODULE_VERSIONS)).toBe(true);
   });
@@ -223,7 +226,8 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     };
     return { query, seen };
   }
-  const guards = `... 'db:provision_workspace@ProvisionWorkspaceGuards1786721210000' ...`;
+  // The current (module 19) body; the module-18 guards body is now "behind" for the API/Worker and refused for the provisioner.
+  const guards = `... 'db:provision_workspace@StatementDispatchPointer1786721320000' ...`;
 
   it('an unreadable ledger and an empty migration list refuse (gate pending-migrations), never pass', async () => {
     const err = Object.assign(new Error('permission denied'), { code: '42501' });
@@ -271,7 +275,7 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     });
     await expect(
       checkSchemaCompatibility(f.query, { process: 'provisioner', production: false, expected: CODE, label: 'provisioner process', workspaces: true }),
-    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(/w3@19/) });
+    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(/w3@20/) });
     expect(f.seen.filter((s) => s === 'BEGIN')).toHaveLength(3);
     expect(f.seen.filter((s) => s === 'COMMIT')).toHaveLength(3);
   });

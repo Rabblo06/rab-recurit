@@ -38,18 +38,27 @@ const DUMMY = {
   PROV: 'postgres://crewflow:dummy-prov-pw@db.example:5432/rab',
 };
 
-/** Compose-style interpolation with dummy values: ${X:?msg} / ${X:-default} / ${X}. `vars` wins; else the default; else a dummy. */
+/**
+ * Compose-style interpolation with dummy values: ${X:?msg} / ${X:-default} / ${X}. `vars` wins; else the default; else a
+ * dummy. Nested defaults (`${A:-${B:-}}`, Phase D dev worker URL) resolve innermost-first, as Compose does.
+ */
 function interpolate(value, vars) {
   if (typeof value !== 'string')
     return value === null || value === undefined ? value : String(value);
-  return value.replace(
-    /\$\{([A-Z0-9_]+)(?:(:?[-?])([^}]*))?\}/g,
-    (_m, name, op, arg) => {
-      if (Object.prototype.hasOwnProperty.call(vars, name)) return vars[name];
-      if (op === ':-' || op === '-') return arg;
-      return 'dummy-pw';
-    },
-  );
+  let out = value;
+  for (let pass = 0; pass < 8; pass++) {
+    const next = out.replace(
+      /\$\{([A-Z0-9_]+)(?:(:?[-?])([^${}]*))?\}/g,
+      (_m, name, op, arg) => {
+        if (Object.prototype.hasOwnProperty.call(vars, name)) return vars[name];
+        if (op === ':-' || op === '-') return arg;
+        return 'dummy-pw';
+      },
+    );
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 function loadCompose(rel) {

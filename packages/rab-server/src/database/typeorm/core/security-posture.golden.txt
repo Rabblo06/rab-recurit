@@ -443,9 +443,24 @@ execute|user_owns_manager_workspace(uuid)|crewflow_app|true
 execute|user_owns_manager_workspace(uuid)|crewflow|true
 execute|verify_workspace_schema_v1(uuid)|crewflow_app|false
 execute|verify_workspace_schema_v1(uuid)|crewflow|true
+execute|worker_account_invite_cleanup_candidates(integer,timestamp with time zone,uuid)|PUBLIC|false
+execute|worker_account_invite_cleanup_candidates(integer,timestamp with time zone,uuid)|crewflow_app|false
+execute|worker_account_invite_cleanup_candidates(integer,timestamp with time zone,uuid)|crewflow|false
 execute|worker_claim_due_work(text,integer,integer)|PUBLIC|false
 execute|worker_claim_due_work(text,integer,integer)|crewflow_app|true
 execute|worker_claim_due_work(text,integer,integer)|crewflow|true
+execute|worker_claim_email_dispatch(integer)|PUBLIC|false
+execute|worker_claim_email_dispatch(integer)|crewflow_app|false
+execute|worker_claim_email_dispatch(integer)|crewflow|false
+execute|worker_claim_push_dispatch(integer)|PUBLIC|false
+execute|worker_claim_push_dispatch(integer)|crewflow_app|false
+execute|worker_claim_push_dispatch(integer)|crewflow|false
+execute|worker_claim_realtime_publish(integer)|PUBLIC|false
+execute|worker_claim_realtime_publish(integer)|crewflow_app|false
+execute|worker_claim_realtime_publish(integer)|crewflow|false
+execute|worker_claim_statement_dispatch(integer)|PUBLIC|false
+execute|worker_claim_statement_dispatch(integer)|crewflow_app|false
+execute|worker_claim_statement_dispatch(integer)|crewflow|false
 execute|worker_cleanup_auth_tokens(integer)|PUBLIC|false
 execute|worker_cleanup_auth_tokens(integer)|crewflow_app|true
 execute|worker_cleanup_auth_tokens(integer)|crewflow|true
@@ -455,6 +470,26 @@ execute|worker_cleanup_oauth_transaction_state(integer)|crewflow|true
 execute|worker_complete_due_work(uuid,uuid)|PUBLIC|false
 execute|worker_complete_due_work(uuid,uuid)|crewflow_app|true
 execute|worker_complete_due_work(uuid,uuid)|crewflow|true
+execute|worker_delete_expired_invited_user(uuid)|PUBLIC|false
+execute|worker_delete_expired_invited_user(uuid)|crewflow_app|false
+execute|worker_delete_expired_invited_user(uuid)|crewflow|false
+execute|worker_dispatch_claim_impl(text,integer,integer,integer)|crewflow_app|false
+execute|worker_dispatch_claim_impl(text,integer,integer,integer)|crewflow|false
+execute|worker_dispatch_pointer_email_trg()|PUBLIC|false
+execute|worker_dispatch_pointer_email_trg()|crewflow_app|false
+execute|worker_dispatch_pointer_email_trg()|crewflow|false
+execute|worker_dispatch_pointer_push_trg()|PUBLIC|false
+execute|worker_dispatch_pointer_push_trg()|crewflow_app|false
+execute|worker_dispatch_pointer_push_trg()|crewflow|false
+execute|worker_dispatch_pointer_realtime_trg()|PUBLIC|false
+execute|worker_dispatch_pointer_realtime_trg()|crewflow_app|false
+execute|worker_dispatch_pointer_realtime_trg()|crewflow|false
+execute|worker_dispatch_pointer_statement_trg()|PUBLIC|false
+execute|worker_dispatch_pointer_statement_trg()|crewflow_app|false
+execute|worker_dispatch_pointer_statement_trg()|crewflow|true
+execute|worker_expire_account_invites(integer)|PUBLIC|false
+execute|worker_expire_account_invites(integer)|crewflow_app|false
+execute|worker_expire_account_invites(integer)|crewflow|false
 execute|worker_list_organisations(uuid,integer)|PUBLIC|false
 execute|worker_list_organisations(uuid,integer)|crewflow_app|true
 execute|worker_list_organisations(uuid,integer)|crewflow|true
@@ -464,6 +499,9 @@ execute|worker_list_pending_workspace_schemas(integer)|crewflow|true
 execute|worker_list_workspaces(uuid,integer)|PUBLIC|false
 execute|worker_list_workspaces(uuid,integer)|crewflow_app|true
 execute|worker_list_workspaces(uuid,integer)|crewflow|true
+execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|PUBLIC|false
+execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|crewflow_app|false
+execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|crewflow|false
 execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|PUBLIC|false
 execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|crewflow_app|true
 execute|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|crewflow|true
@@ -608,13 +646,26 @@ owner|function|suspend_workspace_membership(uuid)|rab_secure_owner|definer=true|
 owner|function|unlink_provider_identities_for_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|user_owns_manager_workspace(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|verify_workspace_schema_v1(uuid)|crewflow|definer=false
+owner|function|worker_account_invite_cleanup_candidates(integer,timestamp with time zone,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|worker_claim_due_work(text,integer,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|worker_claim_email_dispatch(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_claim_push_dispatch(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_claim_realtime_publish(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_claim_statement_dispatch(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|worker_cleanup_auth_tokens(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_cleanup_oauth_transaction_state(integer)|crewflow|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_complete_due_work(uuid,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|worker_delete_expired_invited_user(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_dispatch_claim_impl(text,integer,integer,integer)|rab_secure_owner|definer=false
+owner|function|worker_dispatch_pointer_email_trg()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_dispatch_pointer_push_trg()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_dispatch_pointer_realtime_trg()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_dispatch_pointer_statement_trg()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|worker_expire_account_invites(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|worker_list_organisations(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_list_pending_workspace_schemas(integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_list_workspaces(uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|worker_release_dispatch_claim(text,uuid,uuid,integer)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_workspace_provisioning_health()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -708,6 +759,7 @@ owner|table|user|rab_secure_owner
 owner|table|venue_manager_staff|crewflow
 owner|table|venue_role_rate|crewflow
 owner|table|venue|crewflow
+owner|table|worker_dispatch_pointer|rab_secure_owner
 owner|table|worker_due_work|rab_secure_owner
 owner|table|worker_event|crewflow
 owner|table|workspace_membership|crewflow
@@ -795,12 +847,14 @@ rls|user|enable=true|force=false
 rls|venue_manager_staff|enable=true|force=true
 rls|venue_role_rate|enable=true|force=true
 rls|venue|enable=true|force=true
+rls|worker_dispatch_pointer|enable=true|force=true
 rls|worker_due_work|enable=true|force=false
 rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
 rls|workspace_schema_migration|enable=true|force=true
 rls|workspace_schema_registry|enable=true|force=true
 role|crewflow_app|super=false|bypassrls=false|login=true|member_of=
+role|crewflow_worker|super=false|bypassrls=false|login=true|inherit=true|createrole=false|createdb=false|replication=false|member_of=crewflow_app:inherit=true:set=false:admin=false|members=0
 role|crewflow|super=false|bypassrls=false|login=true|member_of=
 role|rab_secure_owner|super=false|bypassrls=false|login=false|member_of=
 schema|core|crewflow_app|usage=true|create=false
@@ -971,6 +1025,8 @@ table|venue_role_rate|crewflow_app|S,I,U,D
 table|venue_role_rate|crewflow|S,I,U,D,T,R,G
 table|venue|crewflow_app|S,I,U,D
 table|venue|crewflow|S,I,U,D,T,R,G
+table|worker_dispatch_pointer|crewflow_app|
+table|worker_dispatch_pointer|crewflow|
 table|worker_due_work|crewflow_app|S,I,U,D
 table|worker_due_work|crewflow|S,I,U,D
 table|worker_event|crewflow_app|S,I,U
@@ -981,6 +1037,30 @@ table|workspace_schema_migration|crewflow_app|S
 table|workspace_schema_migration|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_registry|crewflow_app|S
 table|workspace_schema_registry|crewflow|S,I,U,D,T,R,G
+trigger|email_outbox|email_outbox_dispatch_pointer_del|enabled=O|worker_dispatch_pointer_email_trg()
+trigger|email_outbox|email_outbox_dispatch_pointer_ins|enabled=O|worker_dispatch_pointer_email_trg()
+trigger|email_outbox|email_outbox_dispatch_pointer_trunc|enabled=O|worker_dispatch_pointer_email_trg()
+trigger|email_outbox|email_outbox_dispatch_pointer_upd|enabled=O|worker_dispatch_pointer_email_trg()
+trigger|payroll_record|payroll_record_statement_pointer_del|enabled=O|worker_dispatch_pointer_statement_trg()
+trigger|payroll_record|payroll_record_statement_pointer_ins|enabled=O|worker_dispatch_pointer_statement_trg()
+trigger|payroll_record|payroll_record_statement_pointer_trunc|enabled=O|worker_dispatch_pointer_statement_trg()
+trigger|payroll_record|payroll_record_statement_pointer_upd|enabled=O|worker_dispatch_pointer_statement_trg()
+trigger|push_delivery|push_delivery_dispatch_pointer_del|enabled=O|worker_dispatch_pointer_push_trg()
+trigger|push_delivery|push_delivery_dispatch_pointer_ins|enabled=O|worker_dispatch_pointer_push_trg()
+trigger|push_delivery|push_delivery_dispatch_pointer_trunc|enabled=O|worker_dispatch_pointer_push_trg()
+trigger|push_delivery|push_delivery_dispatch_pointer_upd|enabled=O|worker_dispatch_pointer_push_trg()
+trigger|realtime_event|realtime_event_dispatch_pointer_del|enabled=O|worker_dispatch_pointer_realtime_trg()
+trigger|realtime_event|realtime_event_dispatch_pointer_ins|enabled=O|worker_dispatch_pointer_realtime_trg()
+trigger|realtime_event|realtime_event_dispatch_pointer_trunc|enabled=O|worker_dispatch_pointer_realtime_trg()
+trigger|realtime_event|realtime_event_dispatch_pointer_upd|enabled=O|worker_dispatch_pointer_realtime_trg()
+worker-delta|execute|worker_account_invite_cleanup_candidates(integer,timestamp with time zone,uuid)|true
+worker-delta|execute|worker_claim_email_dispatch(integer)|true
+worker-delta|execute|worker_claim_push_dispatch(integer)|true
+worker-delta|execute|worker_claim_realtime_publish(integer)|true
+worker-delta|execute|worker_claim_statement_dispatch(integer)|true
+worker-delta|execute|worker_delete_expired_invited_user(uuid)|true
+worker-delta|execute|worker_expire_account_invites(integer)|true
+worker-delta|execute|worker_release_dispatch_claim(text,uuid,uuid,integer)|true
 ws|acl|attendance_correction|crewflow_app|DELETE,INSERT,SELECT,UPDATE
 ws|acl|attendance_correction|crewflow|DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE
 ws|acl|attendance|crewflow_app|DELETE,INSERT,SELECT,UPDATE
@@ -1434,3 +1514,7 @@ ws|table|venue|crewflow_app|S,I,U,D
 ws|table|venue|crewflow|S,I,U,D,T,R,G
 ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
 ws|trigger|payroll_record|payroll_record_guard|enabled=O|core.payroll_record_guard()
+ws|trigger|payroll_record|payroll_record_statement_pointer_del|enabled=O|core.worker_dispatch_pointer_statement_trg()
+ws|trigger|payroll_record|payroll_record_statement_pointer_ins|enabled=O|core.worker_dispatch_pointer_statement_trg()
+ws|trigger|payroll_record|payroll_record_statement_pointer_trunc|enabled=O|core.worker_dispatch_pointer_statement_trg()
+ws|trigger|payroll_record|payroll_record_statement_pointer_upd|enabled=O|core.worker_dispatch_pointer_statement_trg()

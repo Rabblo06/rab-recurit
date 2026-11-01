@@ -111,14 +111,17 @@ function applicationNameFor(resolved: ResolvedPgEnvironment, endpoint: PgEndpoin
 }
 
 /** libpq-style startup options. Exported for its unit test. */
-export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequest): string {
+export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequest, dispatchNotify = false): string {
   const statement = assertTimeout('statementTimeoutMs', request.statementTimeoutMs ?? PG_RUNTIME_STATEMENT_TIMEOUT_MS);
   const idle = assertTimeout('idleInTransactionTimeoutMs', request.idleInTransactionTimeoutMs ?? PG_IDLE_IN_TRANSACTION_TIMEOUT_MS);
   const parts: string[] = [];
   if (endpoint.target.providerOptions) parts.push(endpoint.target.providerOptions);
   if (endpoint.target.sessionRoleOption) parts.push(endpoint.target.sessionRoleOption);
   parts.push(`-c statement_timeout=${statement}`, `-c idle_in_transaction_session_timeout=${idle}`);
-  if (request.role === 'replica' || request.readOnly === true) parts.push('-c default_transaction_read_only=on');
+  const readOnly = request.role === 'replica' || request.readOnly === true;
+  if (readOnly) parts.push('-c default_transaction_read_only=on');
+  // Phase D (E-1): see ResolvedPgEnvironment.dispatchNotify. Writable sessions only; absent (not 'off') otherwise.
+  if (dispatchNotify && !readOnly) parts.push('-c crewflow.dispatch_notify=on');
   return parts.join(' ');
 }
 
@@ -138,7 +141,7 @@ function prepare(resolved: ResolvedPgEnvironment, request: PgConnectionRequest) 
     endpoint,
     queryTimeout,
     connectTimeout,
-    options: pgStartupOptions(endpoint, request),
+    options: pgStartupOptions(endpoint, request, resolved.dispatchNotify === true),
     applicationName: applicationNameFor(resolved, endpoint, request),
   };
 }

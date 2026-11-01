@@ -397,7 +397,8 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
         const err = new Error('permanent rejection') as Error & {
           responseCode: number;
         };
-        err.responseCode = 400;
+        // D5: an SMTP 5xx reply is permanent (4xx is transient and now retried).
+        err.responseCode = 550;
         throw err;
       });
       const processor = createEmailSendProcessor({

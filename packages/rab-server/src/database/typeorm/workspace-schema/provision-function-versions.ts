@@ -17,6 +17,8 @@ export const PROVISION_FUNCTION_MODULE_VERSIONS: Readonly<Record<string, number>
   'db:provision_workspace@ArchiveAndSearchSchema1786719920000': 17,
   'db:provision_workspace@VenueTeamOrgAdmin1786721090000': 18,
   'db:provision_workspace@ProvisionWorkspaceGuards1786721210000': 18,
+  // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): the guarded v3 body over the module-19 composition.
+  'db:provision_workspace@StatementDispatchPointer1786721320000': 19,
 });
 
 /**

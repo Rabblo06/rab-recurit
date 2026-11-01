@@ -4,8 +4,9 @@ import '@rab/server/instrument';
 
 import { Logger as NestLogger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { Queue, Worker } from 'bullmq';
+import { Worker } from 'bullmq';
 import Redis from 'ioredis';
+import type { Client as PgClient } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -33,16 +34,25 @@ import {
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
+  WORKER_STATS_KEY,
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
+import { boundedPublish, createQueueProducerConnection, QUEUE_PRODUCER_REDIS_OPTIONS } from '@rab/server/engine/worker-shared/queue-producer-connection';
+import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
+import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
-import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
+import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
+import { DispatchWakeListener } from './core/wake/dispatch-listener';
+import { createNotificationQueueMonitor, NotificationQueueMonitor } from './core/wake/notification-queue-monitor';
+import { resolveInviteAutoDeleteEnabled } from './queues/rab-maintenance/account-invite-cleanup.job';
+import { buildDispatchBindings, DISPATCH_SCAN_JOBS, dispatchIntervalOf, resolveDispatchConfig, withGlobalDispatch } from './core/wake/dispatch-wiring';
 import { WorkerModule } from './worker.module';
 import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/connection-budget';
 import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
@@ -131,7 +141,11 @@ function refuseStartup(error: unknown): never {
           ? '[pg-config] refused: '
         : error instanceof ProcessorRegistrationError || error instanceof RedisPreflightError
           ? '[worker-scheduler] refused: '
-          : '';
+          : error instanceof Error && error.name === 'DispatchConfigError'
+            ? '[worker-dispatch] refused: '
+            : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
+              ? '[worker-retention] refused: '
+              : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
@@ -175,7 +189,11 @@ async function bootstrap(): Promise<void> {
   // heartbeat `redis` above. Not because PUBLISH itself needs isolation (it's an ordinary command,
   // safe on any connection) — it's kept separate so this job's connection lifecycle (and any future
   // retry/backoff tuning specific to Pub/Sub) never couples to BullMQ's own connection semantics.
-  const realtimePublisherRedis = redis.duplicate();
+  // Lead follow-up (C-report §6.1): a FAIL-FAST client (no offline queue, bounded commandTimeout — Agent C's
+  // QUEUE_PRODUCER_REDIS_OPTIONS) instead of `redis.duplicate()` (which inherited `maxRetriesPerRequest: null` + the offline
+  // queue: a PUBLISH during an outage hung, wedging the publisher, then flushed late after a re-claim). A failed PUBLISH
+  // marks the event `retry` (fenced on its claim token, 15 s backoff) and the cycle moves on.
+  const realtimePublisherRedis = new Redis(redisUrl, { ...QUEUE_PRODUCER_REDIS_OPTIONS });
   // ioredis reconnects on its own; without a listener every failed reconnect during a Redis outage printed
   // "[ioredis] Unhandled error event" (found by the Lane A outage harness). A failed PUBLISH still fails its cycle.
   realtimePublisherRedis.on('error', () => undefined);
@@ -208,9 +226,17 @@ async function bootstrap(): Promise<void> {
 
   const environmentService = appContext.get(EnvironmentService);
   const schedulerMode = environmentService.get('WORKER_SCHEDULER');
-  const realtimePublish = (channel: string, message: string) => realtimePublisherRedis.publish(channel, message);
+  const realtimePublish = (channel: string, message: string) =>
+    boundedPublish(realtimePublisherRedis, 'realtime publish', () => realtimePublisherRedis.publish(channel, message));
   // Approved Shift Statement producer (legacy `bull` prefix): the dispatcher adapter publishes through it.
-  const shiftStatementQueue = new Queue<ShiftStatementJobData>(SHIFT_STATEMENT_QUEUE_NAME, { connection: redis });
+  // Lead follow-up (C-report §6.1): its OWN fail-fast producer connection (never the blocking main `redis`) and a bounded
+  // `add`: a publish that cannot reach Redis rejects within seconds; the dispatcher counts `publishFailed` and the committed
+  // claim is re-queued by its lease (per_scope) / re-claimed via its pointer (global) — the runner is never wedged.
+  const shiftStatementQueue = new BoundedProducerQueue<ShiftStatementJobData>(
+    SHIFT_STATEMENT_QUEUE_NAME,
+    createQueueProducerConnection(redisUrl),
+    'shift-statement publish',
+  );
   appContext.get(WorkerDependencies).provide({
     logger,
     runtimeDataSource,
@@ -247,7 +273,32 @@ async function bootstrap(): Promise<void> {
       return refuseStartup(error);
     }
   })();
-  const intervalOf = (def: (typeof SCAN_JOBS)[number]) => resolveIntervalMs(def, environmentService);
+  // Phase D (D1/D2): WORKER_CLAIM_MODE / WORKER_DISPATCH_MODE (+ backstop, reconcile, batch). Defaults (per_scope + poll)
+  // install nothing: the registry and every interval below stay exactly as before. Re-checked here, fail closed.
+  const dispatchConfig = (() => {
+    try {
+      return resolveDispatchConfig({ get: (key: string) => environmentService.get(key as never) });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  // Phase D wave 2 retention gate: WORKER_INVITE_AUTO_DELETE_ENABLED (default false), read through the same accessor as
+  // WORKER_CLAIM_MODE and re-checked here, fail closed (an invalid value, or true in production before the owner's
+  // approval, refuses to start). Logged once at startup; the maintenance processor re-reads it on every cycle.
+  const inviteAutoDelete = (() => {
+    try {
+      return resolveInviteAutoDeleteEnabled({ get: (key: string) => environmentService.get(key as never) });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  logger.log(
+    inviteAutoDelete
+      ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
+      : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
+  );
+  // event mode: the four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS (the backstop); every other interval as before.
+  const intervalOf = (def: (typeof SCAN_JOBS)[number]) => dispatchIntervalOf(def, resolveIntervalMs(def, environmentService), dispatchConfig);
   // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.
   const isEnabled = (def: (typeof SCAN_JOBS)[number]) => isScanJobEnabled(def, environmentService);
   // Fail closed before any consumer, scheduler or loop exists: every scan interval must resolve (validated env + bounds).
@@ -269,6 +320,46 @@ async function bootstrap(): Promise<void> {
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
   let scheduler: BullmqScheduler | null = null;
+
+  // Phase D (D1): global claim mode. The four dispatch scans call the coordinator (reconciliation sweep when due + global
+  // claim through core.worker_claim_*); wake-ups (event mode) run through runtime.runOnce so they take a scan slot, are
+  // counted in the loop's stats/metrics and are drained on shutdown. per_scope: `scanRegistry === registry`.
+  let coordinator: DispatchCoordinator | null = null;
+  let scanRegistry = registry;
+  if (dispatchConfig.claimMode === 'global') {
+    const deps = appContext.get(WorkerDependencies).get();
+    const defByQueue = new Map(SCAN_JOBS.filter((d) => d.jobName in DISPATCH_SCAN_JOBS).map((d) => [DISPATCH_SCAN_JOBS[d.jobName]!, d]));
+    coordinator = new DispatchCoordinator(buildDispatchBindings(deps, registry, SCAN_JOBS, isEnabled), {
+      claimer: runtimeDataSource,
+      batch: dispatchConfig.claimBatch,
+      reconcileMs: dispatchConfig.reconcileSeconds * 1000,
+      logger,
+      // OD-1: repeated claims (claim_count > 1) and claims over 20 join the queue's own cycle metrics (rab:worker:cycle-durations
+      // + the 15-min log line); the claim-count alert itself is the coordinator's throttled warning.
+      onRunStats: (queue, stats) => {
+        const jobName = defByQueue.get(queue)!.jobName;
+        runtime.metrics.increment(jobName, 'claims', stats.claimed);
+        runtime.metrics.increment(jobName, 'claimsRepeated', stats.repeatedClaims);
+        runtime.metrics.increment(jobName, 'claimsOver20', stats.highClaimCount);
+      },
+      executeWake: (queue, run) => {
+        const def = defByQueue.get(queue)!;
+        return runtime.runOnce({
+          name: `${def.name} (wake)`,
+          intervalMs: 0,
+          statKeys: { lastRunAt: def.statKeys.lastRunAt, failures: def.statKeys.failures },
+          metricKey: `${def.jobName}:wake`,
+          run: () => run(),
+        });
+      },
+    });
+    scanRegistry = withGlobalDispatch(registry, coordinator);
+    logger.log(
+      `dispatch: WORKER_CLAIM_MODE=global WORKER_DISPATCH_MODE=${dispatchConfig.dispatchMode} queues=${coordinator.queues.join(',') || 'none'} ` +
+        `batch=${dispatchConfig.claimBatch} reconcile=${dispatchConfig.reconcileSeconds}s` +
+        (dispatchConfig.dispatchMode === 'event' ? ` backstop=${dispatchConfig.backstopSeconds}s` : ''),
+    );
+  }
 
   // Heartbeat: unchanged in both modes (the liveness signal Admin Health and invitation sends read).
   const beat = () => {
@@ -294,7 +385,7 @@ async function bootstrap(): Promise<void> {
       prefix,
       reconcileMs: environmentService.get('WORKER_SCHEDULER_RECONCILE_SECONDS') * 1000,
       runtime,
-      registry,
+      registry: scanRegistry,
       jobs: SCAN_JOBS, // ALL scans: a disabled scan's scheduler is removed on reconcile, re-added when re-enabled
       intervalOf,
       isEnabled,
@@ -304,8 +395,54 @@ async function bootstrap(): Promise<void> {
   } else {
     // interval (default): the historical behaviour — every ENABLED loop on this process's own timer, in the original
     // order, registered exactly once.
-    const { disabled } = registerIntervalScans(runtime, registry, SCAN_JOBS, intervalOf, isEnabled);
+    // Phase D (D3): the daily scans (firstRunAfterInterval) are timed from their persisted cluster stamp — a restart neither
+    // re-runs them nor postpones an overdue one. An unreadable stats hash → one full interval (never an extra run).
+    const stamps: Record<string, string> = await redis.hgetall(WORKER_STATS_KEY).catch(() => ({}));
+    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) => firstRunDelayFromStamp(stamps[def.statKeys.lastRunAt], intervalMs);
+    const { disabled } = registerIntervalScans(runtime, scanRegistry, SCAN_JOBS, intervalOf, isEnabled, firstRunDelayOf);
     if (disabled.length) logger.log(`interval scheduler: not registered (disabled by their enable switch): ${disabled.join(', ')}`);
+  }
+
+  // Phase D (D2): event mode — ONE dedicated LISTEN session (the factory's direct `lock` endpoint, session-affine; the
+  // connection budget's listener row), identity-verified on every new session, re-LISTEN + catch-up after each reconnect.
+  // NOTIFY is only a hint: the backstop ticks above run regardless. A first LISTEN that fails refuses to start.
+  let wakeListener: DispatchWakeListener<PgClient> | null = null;
+  if (coordinator && dispatchConfig.dispatchMode === 'event') {
+    const wakeCoordinator = coordinator;
+    const listenConnection = new ReconnectingPgClient(
+      {
+        ...pgClientConfig(pg, { endpoint: 'lock', purpose: 'wake-listener', statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
+        keepAlive: true,
+      },
+      { label: 'wake-listener', logger, initialBackoffMs: 1_000, maxBackoffMs: 30_000 },
+    );
+    wakeListener = new DispatchWakeListener<PgClient>(listenConnection, {
+      onWake: (queue) => wakeCoordinator.wake(queue),
+      onConnected: () => wakeCoordinator.wakeAll(),
+      verifyIdentity: async (client) => {
+        const shim = { query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows } as unknown as DataSource;
+        await assertRuntimeDbRole(shim, 'worker-wake-listener');
+      },
+      logger,
+    });
+    await wakeListener.start().catch(refuseStartup);
+  }
+
+  // Phase D wave 2 — OD-2: event mode only (poll mode constructs nothing and never queries it). Samples
+  // pg_notification_queue_usage() at the backstop cadence on the existing runtime pool (cluster-wide value; no new
+  // connection), reports it in the stats hash (Admin Health) + the instance heartbeat file, warns > 0.1, errors > 0.5.
+  const notificationQueueMonitor: NotificationQueueMonitor | null = createNotificationQueueMonitor(dispatchConfig, runtimeDataSource, {
+    logger,
+    onSample: (sample) =>
+      runtime.setGauges({
+        notificationQueueUsage: sample.usage === null ? 'unknown' : sample.usage.toFixed(6),
+        notificationQueueLevel: sample.level,
+        notificationQueueSampledAt: sample.at,
+      }),
+  });
+  if (notificationQueueMonitor) {
+    await notificationQueueMonitor.sample();
+    notificationQueueMonitor.start();
   }
 
   // eslint-disable-next-line no-console
@@ -332,6 +469,10 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      // Phase D: no new wake-up or claim run; the LISTEN session closes (its in-flight runs are runtime cycles → drained below).
+      coordinator?.stop();
+      notificationQueueMonitor?.stop();
+      await wakeListener?.stop().catch(() => undefined);
       // AI Phase 1: in-flight AI turns stop calling the model now and finalise as AI_WORKER_INTERRUPTED (no partial re-run).
       const abortedTurns = aiTurns.abortAll();
       if (abortedTurns) logger.log(`aborting ${abortedTurns} in-flight AI turn(s) for shutdown`);
@@ -353,7 +494,7 @@ async function bootstrap(): Promise<void> {
       } else {
         for (const worker of consumerWorkers) await worker.close(); // 2. BullMQ stops taking jobs and waits for the active ones
       }
-      await shiftStatementQueue.close();
+      await shiftStatementQueue.closeBounded();
       const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;
       const { drained, pending } = await runtime.drain(remaining); // 3. in-flight cycles (a PDF render, an email claim)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
@@ -364,7 +505,7 @@ async function bootstrap(): Promise<void> {
       }
       await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
       await directDataSource.destroy();
-      await realtimePublisherRedis.quit();
+      await realtimePublisherRedis.quit().catch(() => realtimePublisherRedis.disconnect());
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');

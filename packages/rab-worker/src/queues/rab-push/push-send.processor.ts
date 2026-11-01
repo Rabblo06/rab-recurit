@@ -5,7 +5,7 @@ import { Job, UnrecoverableError } from 'bullmq';
 import { Notification } from '@rab/server/modules/notification/entities/notification.entity';
 import { PushDevice } from '@rab/server/engine/core-modules/push/entities/push-device.entity';
 import { PushDelivery } from '@rab/server/engine/core-modules/push/entities/push-delivery.entity';
-import { PushSendError } from '@rab/server/engine/core-modules/push/drivers/interfaces/push-driver.interface';
+import { PushSendError, PushSendResult } from '@rab/server/engine/core-modules/push/drivers/interfaces/push-driver.interface';
 import { PushService } from '@rab/server/engine/core-modules/push/push.service';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
 import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
@@ -47,7 +47,12 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
 
     const outcome = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
       const row = await manager.findOne(PushDelivery, { where: { id: pushDeliveryId } });
-      if (!row) return { skip: true as const };
+      // E8 (D0-C §3.3): not visible (yet) — a producer or claim that published before its commit, or a different binding.
+      // Completing here would retain `push-delivery.<id>.attempt.0` as COMPLETED for 7 days, and the dispatcher's re-add of
+      // that jobId would be silently dropped by BullMQ, stranding the row PENDING. Throw instead: BullMQ retries THIS job
+      // (no add(), so no jobId dedupe) with its jittered backoff; a row that never appears exhausts the attempts and nothing
+      // is sent. Same rule as email-send.processor.ts. A later republish keeps the `.attempt.<generation>` convention.
+      if (!row) throw new Error(`push delivery row ${pushDeliveryId} is not visible yet — retrying`);
       if (row.status === 'ACCEPTED' || row.status === 'CANCELLED') return { skip: true as const };
 
       const claim = await manager
@@ -95,22 +100,15 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
     if (outcome.skip) return;
     const { row, device, notification } = outcome;
 
+    let result: PushSendResult;
     try {
       const token = deps.secretEncryption.decrypt(device.pushTokenEncrypted);
-      const result = await deps.pushService.send(device.platform, {
+      result = await deps.pushService.send(device.platform, {
         token,
         title: 'Crewflow',
         body: 'You have a new notification. Tap to view.',
         data: { notificationId: notification.id, type: notification.type },
       });
-      await deps.tenantContext.runInTenantContext(ctx, (manager) =>
-        manager
-          .createQueryBuilder()
-          .update(PushDelivery)
-          .set({ status: 'ACCEPTED', acceptedAt: () => 'now()', attemptCount: job.attemptsMade + 1, provider: result.provider, providerMessageId: result.providerMessageId ?? null })
-          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
-          .execute(),
-      );
     } catch (error) {
       const pushError = error instanceof PushSendError ? error : new PushSendError(sanitizeErrorMessage(error), true);
       if (pushError.invalidToken) {
@@ -135,5 +133,50 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
       if (isFinal) throw new UnrecoverableError(pushError.message);
       throw pushError;
     }
+
+    // Completion correctness: the provider ACCEPTED the push. A failure from here on is a persistence failure, never a
+    // provider failure — classifying it as RETRY (as the single try/catch used to) would send a second real push.
+    await persistAccepted(deps, ctx, row.id, processingToken, job.attemptsMade + 1, result);
   };
+}
+
+/**
+ * Writes ACCEPTED (fenced by this attempt's token) with a short local retry for a transient database blip — mirrors
+ * email-send.processor.ts's persistSent. If every try fails, it logs loudly and rethrows: the row stays PROCESSING under
+ * this token with provider_call_started_at set, and the dispatcher's stale-PROCESSING recovery resolves it as
+ * DELIVERY_UNCERTAIN (push is not safe to resend). A lost token (another claim owns the row) is a correct no-op.
+ */
+async function persistAccepted(
+  deps: PushSendProcessorDeps,
+  ctx: AuthContext,
+  id: string,
+  processingToken: string,
+  attemptCount: number,
+  result: PushSendResult,
+): Promise<void> {
+  const delays = [0, 100, 400];
+  let lastError: unknown;
+  for (const delayMs of delays) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      await deps.tenantContext.runInTenantContext(ctx, (manager) =>
+        manager
+          .createQueryBuilder()
+          .update(PushDelivery)
+          .set({ status: 'ACCEPTED', acceptedAt: () => 'now()', attemptCount, provider: result.provider, providerMessageId: result.providerMessageId ?? null })
+          .where('id = :id AND status = :processing AND processing_token = :token', { id, processing: 'PROCESSING', token: processingToken })
+          .execute(),
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // eslint-disable-next-line no-console
+  console.error(
+    `push send: PROVIDER ACCEPTED (provider=${result.provider}) but persisting ACCEPTED for push delivery ${id} failed after ${delays.length} attempts. ` +
+      'The row remains PROCESSING; recovery will resolve it as an uncertain delivery (no resend).',
+    lastError,
+  );
+  throw lastError;
 }

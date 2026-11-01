@@ -8,7 +8,7 @@ import { FileService } from '@rab/server/engine/core-modules/storage/file.servic
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
-import { SHIFT_STATEMENT_MAX_ATTEMPTS, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
+import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_MAX_ATTEMPTS, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import {
   ApprovedShiftStatementData,
   breakPaidFromFigures,
@@ -67,7 +67,61 @@ export async function runShiftStatementDispatchCycle(
   const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, (m) =>
     m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`),
   options.organisationId);
+  await claimAndPublishCandidates(tenantContext, candidates, publish, result);
+  return result;
+}
 
+/**
+ * Phase D (D1, `WORKER_CLAIM_MODE=global`): ONE workspace's dispatch for the ids the global pointer claim returned.
+ * The discovery scan of the per_scope walk (same DUE_SQL, order and bound, READ ONLY, worker context of the pointer's
+ * own organisation + workspace — exactly what `discoverInWorkspaces` binds) restricted to those ids, then the SAME
+ * per-row CAS claim (its own short transaction, generation + 1) and publication after its commit. A stale or forged id
+ * matches nothing under RLS / DUE_SQL and is never claimed. Throws a WorkspaceRoutingError for a workspace that is not
+ * routable yet (the global runner releases the claims).
+ */
+export async function dispatchStatementScope(
+  tenantContext: TenantContextService,
+  organisationId: string,
+  workspaceId: string,
+  ids: readonly string[],
+  publish: (data: ShiftStatementJobData) => Promise<void>,
+): Promise<ShiftStatementDispatchResult> {
+  const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
+  if (ids.length === 0) return result;
+  const candidates = await tenantContext.runInTenantContext(workerCtx(organisationId, workspaceId), async (m) => {
+    await m.query('SET TRANSACTION READ ONLY');
+    return m.query<Candidate[]>(
+      `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
+      [[...ids]],
+    );
+  });
+  await claimAndPublishCandidates(tenantContext, candidates, publish, result);
+  return result;
+}
+
+/**
+ * The BullMQ `add()` arguments for one claimed statement (jobId carries the dispatch generation; attempts 1 — retries are
+ * the dispatcher's; 7 d / 30 d retention). Global mode's publisher uses this; it is asserted identical to what the
+ * report processor's per_scope adapter passes (shift-statement.job.spec.ts).
+ */
+export function shiftStatementJobOptions(data: ShiftStatementJobData) {
+  return [
+    SHIFT_STATEMENT_JOB_NAME,
+    data,
+    {
+      jobId: `shift-statement.${data.payrollRecordId}.gen.${data.generation}`, attempts: 1,
+      removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 },
+    },
+  ] as const;
+}
+
+/** The per-row CAS claim + publish of the per_scope dispatcher (unchanged), shared by both claim modes. */
+async function claimAndPublishCandidates(
+  tenantContext: TenantContextService,
+  candidates: readonly Candidate[],
+  publish: (data: ShiftStatementJobData) => Promise<void>,
+  result: ShiftStatementDispatchResult,
+): Promise<void> {
   for (const c of candidates) {
     const generation = await tenantContext.runInTenantContext(workerCtx(c.organisation_id, c.workspace_id), async (m) => {
       const [rows] = (await m.query(
@@ -92,7 +146,6 @@ export async function runShiftStatementDispatchCycle(
       logger.warn(`shift statement ${c.id}: publish failed, will be re-queued after the lease: ${(error as Error).name}`);
     }
   }
-  return result;
 }
 
 export interface ShiftStatementProcessorDeps {

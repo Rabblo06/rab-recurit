@@ -215,6 +215,50 @@ async function loadReminderCandidate(manager: EntityManager, assignmentId: strin
   return { assignment, shift, staffProfile, user };
 }
 
+/**
+ * Phase D (D6) — idempotency short-circuit for the reminder path, measured as the dominant idle re-load loop (cost harness
+ * d0-baseline idle-O200: Shift / ShiftAssignment / User / StaffProfile loads ≈ 920/min each + ≈ 460/min conflicting
+ * `INSERT … core.worker_event … ON CONFLICT DO NOTHING`). Every 5 min each confirmed assignment starting within 24 h is
+ * re-discovered; for an assignment whose applicable reminder windows were ALL claimed on an earlier tick, the code below
+ * could only load the 4 entities (`first`), load them again per window (Pass A), INSERT the window's worker_event, get
+ * null back from the UNIQUE claim and `continue` — no side effect at all.
+ *
+ * This read answers the same question first, in one statement, in the same scoped transaction: the assignment's
+ * effective start (period / parent shift — parsed by `effectiveAssignmentTime`, exactly as the loop does) and which of
+ * its window event keys already exist. It returns true ONLY when the shift has not started and every window with
+ * `msUntilStart <= window.ms` already has its worker_event row — the case in which the existing loop is a guaranteed
+ * no-op (a visible row with that key makes the INSERT conflict). It never decides anything else: an unclaimed window, the
+ * no-show path (shift started), an assignment not visible here all return false and the existing code runs unchanged,
+ * with its own Pass A / claim / Pass B revalidation. Business rules, windows and deadlines are untouched; the worker_event
+ * key remains the cross-replica authority.
+ */
+async function reminderWindowsAlreadyClaimed(
+  manager: EntityManager,
+  assignmentId: string,
+  reminderWindows: readonly ReminderWindowDefinition[],
+): Promise<boolean> {
+  const keys = reminderWindows.map((w) => `${w.eventKeySlug}:${assignmentId}`);
+  const [row] = await manager.query<Array<{ period: string | null; starts_at: Date; ends_at: Date; claimed: string[] | null }>>(
+    `SELECT sa.period::text AS period, s.starts_at, s.ends_at,
+            ARRAY(SELECT we.event_key FROM core.worker_event we WHERE we.event_key = ANY($2::text[])) AS claimed
+       FROM shift_assignment sa
+       JOIN shift s ON s.id = sa.shift_id
+      WHERE sa.id = $1`,
+    [assignmentId, keys],
+  );
+  if (!row) return false;
+  let startsAt: Date;
+  try {
+    ({ startsAt } = effectiveAssignmentTime({ period: row.period }, { startsAt: new Date(row.starts_at), endsAt: new Date(row.ends_at) }));
+  } catch {
+    return false; // an unparsable period: let the existing code meet it exactly as before
+  }
+  const msUntilStart = startsAt.getTime() - Date.now();
+  if (msUntilStart <= 0) return false;
+  const claimed = new Set(row.claimed ?? []);
+  return reminderWindows.every((w, i) => msUntilStart > w.ms || claimed.has(keys[i]!));
+}
+
 export async function runShiftMonitorCycle(
   ownerDataSource: DataSource,
   tenantContext: TenantContextService,
@@ -271,6 +315,8 @@ export async function runShiftMonitorCycle(
 
   for (const candidate of discovery.assignments) {
     const result = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
+      // Phase D (D6): nothing left to do for this assignment on this tick (every applicable window already claimed).
+      if (await reminderWindowsAlreadyClaimed(manager, candidate.assignment_id, reminderWindows)) return { reminders: 0, noShow: false };
       // Shared by Pass A (below) and every window/no-show's own Pass B —
       // one definition of "still a real, active, staffed occurrence."
       const loadCurrent = () => loadReminderCandidate(manager, candidate.assignment_id);

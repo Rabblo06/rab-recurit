@@ -562,6 +562,25 @@ export class EnvironmentVariables {
   LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: number = 15;
 
   /**
+   * Phase D wave 2 (owner decision 2026-11-01) — retention switch for the account-invite cleanup (rab-worker
+   * `account-invite-cleanup.job.ts`): may it automatically DELETE the user account of an invite that expired unused?
+   *  - `false` (DEFAULT): no automatic deletion of any user account; today's externally visible behaviour is preserved,
+   *    no alternative cleanup path is enabled, expired/revoked/consumed links are still rejected at redemption (that check
+   *    lives in the auth/invite services, not in this job), and every audit/security check is unchanged.
+   *  - `true`: the job may delete eligible users through the narrow definers. The SQL eligibility conditions are never
+   *    weakened by this flag. **Needs a separate owner approval** (grace period, eligibility, audit wording, retention
+   *    policy, rollback/monitoring): until it is recorded (`WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED` in
+   *    env.validation.ts), `true` in production refuses to boot; test/development may set it for disposable tests.
+   * Strict boolean: anything but true/false (e.g. `1`, `TRUE`, `yes`) refuses to boot — never silently true.
+   * Validated by the API and the Worker alike (shared class); only the Worker acts on it.
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: 'WORKER_INVITE_AUTO_DELETE_ENABLED must be exactly true or false' })
+  WORKER_INVITE_AUTO_DELETE_ENABLED: boolean = false;
+
+  /**
    * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its 20 periodic scans.
    *  - `interval` (DEFAULT): every replica runs every loop on its own process-local timer, exactly as before.
    *  - `bullmq`: ONE cluster-wide BullMQ job scheduler per scan (`crewflow:<queue>:<jobName>`) hands each tick to one
@@ -593,6 +612,60 @@ export class EnvironmentVariables {
   @Min(10)
   @Max(3600)
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
+
+  // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
+  // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
+  // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot
+  // (env.validation.ts); global needs the Worker's live database login to be `crewflow_worker` (the boot gate,
+  // database/boot-checks/database-boot-gate-rules.ts — that rule needs the database, so it is not checked here).
+
+  /**
+   * How the email/push/realtime/statement dispatchers find due work.
+   *  - `per_scope` (DEFAULT): walk every organisation/workspace and claim inside its own tenant transaction (today).
+   *  - `global`: claim due routing ids through the `core.worker_claim_*_dispatch` SECURITY DEFINER functions (EXECUTE
+   *    granted to `crewflow_worker` only), then process each id inside its own tenant scope.
+   */
+  @IsOptional()
+  @IsIn(['per_scope', 'global'], { message: 'WORKER_CLAIM_MODE must be exactly per_scope or global' })
+  WORKER_CLAIM_MODE: 'per_scope' | 'global' = 'per_scope';
+
+  /**
+   * What wakes the global claim.
+   *  - `poll` (DEFAULT): the dispatch loops' own intervals.
+   *  - `event`: a LISTEN connection on `crewflow_worker_wake` (a non-durable hint; rows are the truth) plus the backstop
+   *    below. Needs WORKER_CLAIM_MODE=global and adds one listener connection per Worker replica (connection budget).
+   */
+  @IsOptional()
+  @IsIn(['poll', 'event'], { message: 'WORKER_DISPATCH_MODE must be exactly poll or event' })
+  WORKER_DISPATCH_MODE: 'poll' | 'event' = 'poll';
+
+  /** event mode: a global claim runs at least this often even with no notification (lost NOTIFY, listener outage). 10–120 s; default 30. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'WORKER_DISPATCH_BACKSTOP_SECONDS must be a whole number of seconds' })
+  @Min(10, { message: 'WORKER_DISPATCH_BACKSTOP_SECONDS must be at least 10' })
+  @Max(120, { message: 'WORKER_DISPATCH_BACKSTOP_SECONDS must be at most 120' })
+  WORKER_DISPATCH_BACKSTOP_SECONDS: number = 30;
+
+  /**
+   * global mode: how often the legacy per-scope sweep runs to pick up rows with no pointer (written before the triggers
+   * existed, drift). 60–900 s; default 900. Owner decision (Phase D wave 3): 900 s is the normal maximum — a longer
+   * interval needs a separate owner approval (a reviewed change here), so there is deliberately no override.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'WORKER_DISPATCH_RECONCILE_SECONDS must be a whole number of seconds' })
+  @Min(60, { message: 'WORKER_DISPATCH_RECONCILE_SECONDS must be at least 60' })
+  @Max(900, { message: 'WORKER_DISPATCH_RECONCILE_SECONDS must be at most 900 (a longer interval needs separate owner approval)' })
+  WORKER_DISPATCH_RECONCILE_SECONDS: number = 900;
+
+  /** global mode: routing ids requested per claim call (the server also clamps to 1..200). 1–200; default 100. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'WORKER_DISPATCH_CLAIM_BATCH must be a whole number' })
+  @Min(1, { message: 'WORKER_DISPATCH_CLAIM_BATCH must be at least 1' })
+  @Max(200, { message: 'WORKER_DISPATCH_CLAIM_BATCH must be at most 200' })
+  WORKER_DISPATCH_CLAIM_BATCH: number = 100;
 
   // ───────────────────────── Phase A pa-intervals — worker scan intervals (seconds) ─────────────────────────
   // One key per periodic Worker scan. Defaults = the pre-existing hard-coded cadences (unset ⇒ no behaviour change);

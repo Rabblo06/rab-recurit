@@ -82,9 +82,24 @@ interface ClaimRow {
  */
 export async function claimRealtimeEvents(
   manager: EntityManager,
-  params: { limit: number; claimToken: string; leaseSeconds?: number },
+  params: {
+    limit: number;
+    claimToken: string;
+    leaseSeconds?: number;
+    /**
+     * Phase D (D1, `WORKER_CLAIM_MODE=global`): restrict the claim to these ids (the global pointer claim's result for
+     * this scope). Same MATERIALIZED CTE, eligibility, order, SKIP LOCKED, lease and token — only `AND id = ANY($4)`
+     * is added. Absent → the per_scope claim, byte-for-byte unchanged.
+     */
+    ids?: readonly string[];
+  },
 ): Promise<ClaimedRealtimeEvent[]> {
   const leaseSeconds = params.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
+  if (params.ids !== undefined) {
+    if (params.ids.length === 0) return [];
+    const [rows] = await manager.query<[ClaimRow[], number]>(GLOBAL_CLAIM_SQL, [params.claimToken, String(leaseSeconds), params.limit, [...params.ids]]);
+    return rows.map(toClaimedRealtimeEvent);
+  }
   // `manager.query()` on an UPDATE/DELETE returns `[rows, rowCount]`, NOT bare
   // `rows` (unlike SELECT/INSERT) — `PostgresQueryRunner.query()`'s own switch
   // on `raw.command`. Destructure explicitly; `rows.map(...)` directly on the
@@ -126,7 +141,26 @@ export async function claimRealtimeEvents(
      RETURNING id, organisation_id, workspace_id, target_user_id, event_type, entity_type, entity_id, payload, schema_version, attempt_count, max_attempts, claim_token, created_at`,
     [params.claimToken, String(leaseSeconds), params.limit],
   );
-  return rows.map((r) => ({
+  return rows.map(toClaimedRealtimeEvent);
+}
+
+/** Phase D (D1): the per_scope claim above with `AND id = ANY($4::uuid[])` inside the MATERIALIZED CTE (see `ids`). */
+const GLOBAL_CLAIM_SQL = `WITH claimable AS MATERIALIZED (
+       SELECT id FROM core.realtime_event
+       WHERE ((status IN ('pending', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= now()))
+          OR (status = 'processing' AND lease_expires_at < now()))
+         AND id = ANY($4::uuid[])
+       ORDER BY created_at
+       LIMIT $3
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE core.realtime_event
+        SET status = 'processing', claimed_at = now(), claim_token = $1, lease_expires_at = now() + ($2 || ' seconds')::interval
+      WHERE id IN (SELECT id FROM claimable)
+     RETURNING id, organisation_id, workspace_id, target_user_id, event_type, entity_type, entity_id, payload, schema_version, attempt_count, max_attempts, claim_token, created_at`;
+
+function toClaimedRealtimeEvent(r: ClaimRow): ClaimedRealtimeEvent {
+  return ({
     id: r.id,
     organisationId: r.organisation_id,
     workspaceId: r.workspace_id,
@@ -140,7 +174,7 @@ export async function claimRealtimeEvents(
     maxAttempts: r.max_attempts,
     claimToken: r.claim_token,
     createdAt: r.created_at,
-  }));
+  });
 }
 
 /** Marks a claimed event durably delivered. Fenced on `claimToken` — a no-op (not an error) if the lease was reclaimed since. Returns whether this call's write actually took effect. */

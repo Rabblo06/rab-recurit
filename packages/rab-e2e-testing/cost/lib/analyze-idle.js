@@ -21,7 +21,8 @@ const r0 = kv('redis-stats-start.txt'), r1 = kv('redis-stats-end.txt'), rm = kv(
 const cmds = Number(r1.total_commands_processed) - Number(r0.total_commands_processed);
 const pg = rd('pgss.txt').trim().split(/\r?\n/).filter(Boolean).map((l) => { const p = l.split('|'); return { role: p[0], calls: Number(p[1]), ms: Number(p[2]), rows: Number(p[3]), toplevel: p[4] === 't', query: p.slice(5).join('|') }; });
 const app = pg.filter((r) => r.role !== 'rab'); // 'rab' = this harness's own psql
-const runtime = app.filter((r) => r.role === 'crewflow_app' || r.role === 'crewflow');
+// Phase D: the Worker may log in as crewflow_worker (global claim mode); its statements are runtime statements too.
+const runtime = app.filter((r) => r.role === 'crewflow_app' || r.role === 'crewflow' || r.role === 'crewflow_worker');
 const nested = app.filter((r) => r.role === 'rab_secure_owner');
 const sum = (a, k) => a.reduce((s, r) => s + r[k], 0);
 const perMin = (n) => +(n / mins).toFixed(1);
@@ -43,7 +44,7 @@ const out = {
   label, windowMinutes: +mins.toFixed(2),
   sql: {
     topLevelCallsPerMin: perMin(sum(runtime, 'calls')),
-    topLevelByRole: Object.fromEntries(['crewflow_app', 'crewflow'].map((r) => [r, perMin(sum(runtime.filter((x) => x.role === r), 'calls'))])),
+    topLevelByRole: Object.fromEntries(['crewflow_app', 'crewflow', 'crewflow_worker'].map((r) => [r, perMin(sum(runtime.filter((x) => x.role === r), 'calls'))])),
     clientStatementsPerMin: perMin(sum(runtime.filter((r) => r.toplevel), 'calls')),
     nestedInsideDefinerFunctionsPerMin: perMin(sum(nested, 'calls')),
     allIncludingNestedPerMin: perMin(sum(app, 'calls')),

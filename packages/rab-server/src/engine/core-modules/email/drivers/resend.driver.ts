@@ -2,6 +2,30 @@ import { CreateEmailOptions, Resend } from 'resend';
 
 import { EmailSendOptions } from '../interfaces/email-send-options.interface';
 import { EmailDriverInterface, EmailSendResult } from './interfaces/email-driver.interface';
+import { EmailProviderError, parseRetryAfterMs } from './email-provider-error';
+
+/**
+ * D5: Resend error names (the SDK's RESEND_ERROR_CODE_KEY) that a retry of the SAME request can never fix — bad input,
+ * bad credentials, a disallowed sender. Everything else (rate limits, 5xx, network failures reported as
+ * `application_error` with no status, concurrent idempotent requests, quota and any new name) stays retryable.
+ */
+const RESEND_PERMANENT_ERRORS = new Set([
+  'validation_error',
+  'missing_api_key',
+  'restricted_api_key',
+  'invalid_api_key',
+  'not_found',
+  'method_not_allowed',
+  'invalid_idempotency_key',
+  'invalid_idempotent_request',
+  'invalid_attachment',
+  'invalid_from_address',
+  'invalid_access',
+  'invalid_parameter',
+  'invalid_region',
+  'missing_required_field',
+  'security_error',
+]);
 
 export interface ResendDriverOptions {
   apiKey: string;
@@ -47,10 +71,10 @@ export class ResendDriver implements EmailDriverInterface {
    */
   async send(options: EmailSendOptions): Promise<EmailSendResult> {
     if (!options.from) {
-      throw new Error('ResendDriver requires a from address (EMAIL_FROM_ADDRESS).');
+      throw Object.assign(new Error('ResendDriver requires a from address (EMAIL_FROM_ADDRESS).'), { code: 'ECONFIG' });
     }
     if (!options.html && !options.text) {
-      throw new Error('ResendDriver requires at least one of html or text content.');
+      throw Object.assign(new Error('ResendDriver requires at least one of html or text content.'), { code: 'ECONFIG' });
     }
 
     const replyTo = options.replyTo ?? this.defaultReplyTo;
@@ -61,7 +85,7 @@ export class ResendDriver implements EmailDriverInterface {
     // express on its own since `html`/`text` are independently optional on
     // `EmailSendOptions`. The assertion is narrow and backed by that check,
     // not a blanket escape hatch.
-    const { data, error } = await this.client.emails.send(
+    const { data, error, headers } = await this.client.emails.send(
       {
         from: options.from,
         to: options.to,
@@ -75,14 +99,22 @@ export class ResendDriver implements EmailDriverInterface {
     );
 
     if (error) {
+      const details = {
+        provider: this.name,
+        code: String(error.name),
+        statusCode: typeof error.statusCode === 'number' ? error.statusCode : null,
+        retryable: !RESEND_PERMANENT_ERRORS.has(String(error.name)),
+        retryAfterMs: parseRetryAfterMs(headers?.['retry-after'] ?? headers?.['Retry-After']),
+      };
       if (error.name === 'invalid_from_address') {
-        throw new Error(
+        throw new EmailProviderError(
           `Resend rejected the from address "${options.from}": its domain isn't verified in Resend. ` +
             'Verify the sending domain (SPF/DKIM records) in the Resend dashboard, or set EMAIL_FROM_ADDRESS ' +
             'to an address on a domain that already is verified.',
+          details,
         );
       }
-      throw new Error(`Resend rejected the email (${error.name}): ${error.message}`);
+      throw new EmailProviderError(`Resend rejected the email (${error.name}): ${error.message}`, details);
     }
     return { provider: this.name, providerMessageId: data?.id };
   }

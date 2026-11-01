@@ -67,6 +67,15 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     }
   }
 
+  // Phase D (D2): the LISTEN/NOTIFY wake-up only wakes the GLOBAL claim — event dispatch over per-scope claims is not a
+  // supported combination (it would listen and then still walk every tenant). The second rule, "global ⇒ the Worker's
+  // live login is crewflow_worker", needs the database and is enforced by the Worker's boot gate.
+  if (validated.WORKER_DISPATCH_MODE === 'event' && validated.WORKER_CLAIM_MODE !== 'global') {
+    throw new Error(
+      'Invalid environment configuration:\nWORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global (supported: per_scope+poll, global+poll, global+event).',
+    );
+  }
+
   // Fail fast on a malformed STORAGE_KEY_PREFIX (e.g. `../etc`) rather than on the first object write.
   try {
     normaliseKeyPrefix(validated.STORAGE_KEY_PREFIX);
@@ -154,11 +163,24 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
   return validated;
 }
 
+/**
+ * Phase D wave 2 (owner decision 2026-11-01): automatic deletion of expired-invite user accounts is NOT approved for
+ * production. It flips to `true` only in a reviewed code change that records the owner's separate approval of the
+ * retention policy (grace period, eligibility, audit wording, rollback/monitoring) — deliberately a code constant, never an
+ * environment variable, so no deployment setting alone can turn account deletion on in production.
+ */
+export const WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED = false as boolean;
+
 /** Exported for its unit test. Pure: reads only the validated configuration. */
 export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
   const problems: string[] = [];
   // Wave 2 lane A2: weak APP_SECRET / keyring secrets / cache MAC key (names only).
   problems.push(...productionKeyMaterialProblems(env));
+  if (env.WORKER_INVITE_AUTO_DELETE_ENABLED === true && !WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED) {
+    problems.push(
+      'WORKER_INVITE_AUTO_DELETE_ENABLED=true would let the Worker automatically delete user accounts, and the owner has not approved a retention policy for that (grace period, eligibility, audit wording, rollback/monitoring). Missing owner approval: set WORKER_INVITE_AUTO_DELETE_ENABLED=false (or leave it unset) in production.',
+    );
+  }
   if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');
   if (env.STORAGE_DRIVER === 'LOCAL') problems.push('STORAGE_DRIVER=LOCAL keeps uploads on one container disk. Configure S3-compatible storage.');
   if (env.PUSH_ENABLED && env.PUSH_PROVIDER === 'FAKE') problems.push('PUSH_ENABLED=true with PUSH_PROVIDER=FAKE sends nothing. Configure a real push provider or disable push.');

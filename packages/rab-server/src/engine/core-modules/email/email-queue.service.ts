@@ -2,15 +2,23 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 
+import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+
 import { EnvironmentService } from '../environment/environment.service';
 import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from './email-queue.constants';
 
-const QUEUE_OPTIONS = {
+/**
+ * D5: the same 5 attempts and 5 s exponential base, now with JITTER — each retry waits a random 50–100 % of its
+ * exponential step (BullMQ 5.81 `backoff.jitter`), so the retries of many jobs that failed together (a provider or network
+ * outage) do not all hit the provider again in the same second.
+ */
+export const EMAIL_QUEUE_JOB_OPTIONS = {
   attempts: 5,
-  backoff: { type: 'exponential' as const, delay: 5_000 },
+  backoff: { type: 'exponential' as const, delay: 5_000, jitter: 0.5 },
   removeOnComplete: { age: 7 * 24 * 60 * 60 },
   removeOnFail: { age: 30 * 24 * 60 * 60 },
 };
+const QUEUE_OPTIONS = EMAIL_QUEUE_JOB_OPTIONS;
 
 /**
  * API-process side of the queue — publish only, never consumes. Bounded,
@@ -38,8 +46,10 @@ export class EmailQueueService implements OnModuleDestroy {
   private readonly queue: Queue<EmailQueueJobData>;
 
   constructor(env: EnvironmentService) {
-    this.connection = new Redis(env.get('REDIS_URL'), { maxRetriesPerRequest: null });
+    // D5: fail fast (no offline queue, bounded commands) — a lost publish is safe, the outbox row is durable.
+    this.connection = createQueueProducerConnection(env.get('REDIS_URL'));
     this.queue = new Queue<EmailQueueJobData>(EMAIL_QUEUE_NAME, { connection: this.connection });
+    this.queue.on('error', () => undefined);
   }
 
   /**
@@ -60,7 +70,7 @@ export class EmailQueueService implements OnModuleDestroy {
    * separate string with no such constraint and is unaffected.
    */
   async publish(emailOutboxId: string, organisationId: string): Promise<void> {
-    await this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.0`, ...QUEUE_OPTIONS });
+    await boundedPublish(this.connection, 'email-outbox publish', () => this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.0`, ...QUEUE_OPTIONS }));
   }
 
   /**
@@ -73,11 +83,10 @@ export class EmailQueueService implements OnModuleDestroy {
    * "new" generation for the same row.
    */
   async republish(emailOutboxId: string, organisationId: string, generation: number): Promise<void> {
-    await this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.${generation}`, ...QUEUE_OPTIONS });
+    await boundedPublish(this.connection, 'email-outbox publish', () => this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.${generation}`, ...QUEUE_OPTIONS }));
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.queue.close();
-    await this.connection.quit();
+    await closeQueueProducer(this.queue, this.connection);
   }
 }

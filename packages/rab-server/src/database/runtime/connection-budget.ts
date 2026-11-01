@@ -12,6 +12,9 @@
  *   PG_EXPECTED_MIGRATE_CONNECTIONS  default 3  — the one-shot rab-migrate step while it runs
  *   PG_PROVIDER_RESERVED_CONNECTIONS default 0  — slots a managed provider keeps for itself beyond what the server
  *                                    reports (declared by the operator; see the runbook)
+ *   WORKER_DISPATCH_MODE             default poll — Phase D: `event` adds one LISTEN connection per Worker replica (direct
+ *                                    endpoint, crewflow_worker). In event mode set it in EVERY service of the deployment
+ *                                    (the API ignores it otherwise) so each process budgets the listeners.
  * Each process also verifies that ITS OWN pool is not larger than the budgeted value for its role: otherwise the shared
  * calculation would understate the real total, so that too refuses to start.
  *
@@ -21,9 +24,12 @@
  * Boot probes are short-lived and sequential (runtime guard, boot gates, session probe); BOOT_PROBE_ALLOWANCE covers
  * the probes of one starting process plus one operator session.
  *
+ * Phase D event mode: + 1 listener connection per Worker replica (WORKER_DISPATCH_LISTENER_CONNECTIONS).
+ *
  * Capacity: max_connections − superuser_reserved_connections − reserved_connections (PostgreSQL 16) − the RDS-style
  * rds.rds_superuser_reserved_connections when the server reports it − PG_PROVIDER_RESERVED_CONNECTIONS. Also bounded by
- * the database's datconnlimit and, for the crewflow_app processes only, the login's rolconnlimit.
+ * the database's datconnlimit and the checking login's rolconnlimit: crewflow_app is compared with every runtime-role row
+ * (the API, and Workers that still log in as crewflow_app); a crewflow_worker Worker with the Worker rows only.
  */
 
 export const WORKER_DIRECT_POOL_MAX_BUDGET = 6;
@@ -31,6 +37,8 @@ export const WORKER_SCAN_LOCK_CONNECTIONS = 1;
 export const WORKER_STORAGE_LOCK_CONNECTIONS = 1;
 export const WORKER_PROVISIONER_CONNECTIONS = 2;
 export const BOOT_PROBE_ALLOWANCE = 3;
+/** Phase D (D2): the LISTEN crewflow_worker_wake connection of one Worker replica in WORKER_DISPATCH_MODE=event. */
+export const WORKER_DISPATCH_LISTENER_CONNECTIONS = 1;
 
 export const DEFAULT_API_POOL_MAX = 10;
 export const DEFAULT_WORKER_POOL_MAX = 12;
@@ -61,6 +69,8 @@ export interface DeploymentShape {
   workerPoolMax: number;
   migrateConnections: number;
   providerReserved: number;
+  /** Phase D: Worker dispatch mode (default poll). event → one listener connection per Worker replica. */
+  workerDispatchMode?: 'poll' | 'event';
 }
 
 export interface BudgetRow {
@@ -70,12 +80,16 @@ export interface BudgetRow {
   total: number;
   /** Whether these connections log in as the runtime role (counted against its rolconnlimit). */
   runtimeRole: boolean;
+  /** Phase D: opened by the Worker's runtime login (crewflow_app or crewflow_worker) — a crewflow_worker rolconnlimit covers these only. */
+  workerLogin?: boolean;
 }
 
 export interface BudgetPlan {
   rows: BudgetRow[];
   total: number;
   runtimeRoleTotal: number;
+  /** Phase D: connections opened by the Worker runtime login (compared with crewflow_worker's rolconnlimit). */
+  workerRoleTotal: number;
 }
 
 export interface ServerCapacity {
@@ -85,6 +99,8 @@ export interface ServerCapacity {
   providerSettingReserved: number;
   roleLimit: number | null;
   databaseLimit: number | null;
+  /** Phase D: the checking login (current_user), so its rolconnlimit is compared with the rows it opens. */
+  login?: string;
 }
 
 export interface BudgetEvaluation {
@@ -111,6 +127,7 @@ export function readDeploymentShape(env: Env): { shape: DeploymentShape | null; 
     workerPoolMax: intEnv(env, 'PG_EXPECTED_WORKER_POOL_MAX', DEFAULT_WORKER_POOL_MAX, 1, 100) as number,
     migrateConnections: intEnv(env, 'PG_EXPECTED_MIGRATE_CONNECTIONS', DEFAULT_MIGRATE_CONNECTIONS, 0, 100) as number,
     providerReserved: intEnv(env, 'PG_PROVIDER_RESERVED_CONNECTIONS', 0, 0, 10_000) as number,
+    workerDispatchMode: readWorkerDispatchMode(env),
   };
   const missing = [apiInstances === null ? 'PG_EXPECTED_API_INSTANCES' : null, workerInstances === null ? 'PG_EXPECTED_WORKER_INSTANCES' : null].filter(
     (x): x is string => x !== null,
@@ -119,17 +136,32 @@ export function readDeploymentShape(env: Env): { shape: DeploymentShape | null; 
   return { shape: { apiInstances, workerInstances, ...shapeRest }, missing };
 }
 
+function readWorkerDispatchMode(env: Env): 'poll' | 'event' {
+  const raw = env.WORKER_DISPATCH_MODE?.trim();
+  if (raw === undefined || raw === '' || raw === 'poll') return 'poll';
+  if (raw === 'event') return 'event';
+  throw new ConnectionBudgetError('WORKER_DISPATCH_MODE must be exactly poll or event. Refusing to start.');
+}
+
 /** Worst-case connections of the whole deployment against the primary. Pure. */
 export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
   const rows: BudgetRow[] = [
     { item: 'API runtime pool', each: shape.apiPoolMax, count: shape.apiInstances, total: shape.apiPoolMax * shape.apiInstances, runtimeRole: true },
-    { item: 'Worker runtime pool', each: shape.workerPoolMax, count: shape.workerInstances, total: shape.workerPoolMax * shape.workerInstances, runtimeRole: true },
+    {
+      item: 'Worker runtime pool',
+      each: shape.workerPoolMax,
+      count: shape.workerInstances,
+      total: shape.workerPoolMax * shape.workerInstances,
+      runtimeRole: true,
+      workerLogin: true,
+    },
     {
       item: 'Worker direct/lock pool',
       each: WORKER_DIRECT_POOL_MAX_BUDGET,
       count: shape.workerInstances,
       total: WORKER_DIRECT_POOL_MAX_BUDGET * shape.workerInstances,
       runtimeRole: true,
+      workerLogin: true,
     },
     {
       item: 'Worker scan-lock + storage-lock clients',
@@ -137,7 +169,20 @@ export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
       count: shape.workerInstances,
       total: (WORKER_SCAN_LOCK_CONNECTIONS + WORKER_STORAGE_LOCK_CONNECTIONS) * shape.workerInstances,
       runtimeRole: true,
+      workerLogin: true,
     },
+    ...(shape.workerDispatchMode === 'event'
+      ? [
+          {
+            item: 'Worker dispatch listener (event mode)',
+            each: WORKER_DISPATCH_LISTENER_CONNECTIONS,
+            count: shape.workerInstances,
+            total: WORKER_DISPATCH_LISTENER_CONNECTIONS * shape.workerInstances,
+            runtimeRole: true,
+            workerLogin: true,
+          },
+        ]
+      : []),
     {
       item: 'Worker provisioner child (until E6)',
       each: WORKER_PROVISIONER_CONNECTIONS,
@@ -152,6 +197,7 @@ export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
     rows,
     total: rows.reduce((sum, r) => sum + r.total, 0),
     runtimeRoleTotal: rows.filter((r) => r.runtimeRole).reduce((sum, r) => sum + r.total, 0),
+    workerRoleTotal: rows.filter((r) => r.workerLogin).reduce((sum, r) => sum + r.total, 0),
   };
 }
 
@@ -173,8 +219,11 @@ export function evaluateConnectionBudget(plan: BudgetPlan, capacity: ServerCapac
         `${capacity.databaseLimit !== null && capacity.databaseLimit >= 0 ? `, database limit ${capacity.databaseLimit}` : ''})`,
     );
   }
-  if (capacity.roleLimit !== null && capacity.roleLimit >= 0 && plan.runtimeRoleTotal > capacity.roleLimit) {
-    problems.push(`the runtime login can open up to ${plan.runtimeRoleTotal} connections but its connection limit is ${capacity.roleLimit}`);
+  // Phase D: a crewflow_worker login opens only the Worker rows; crewflow_app is compared with every runtime row (it may
+  // still be the Workers' login in per_scope mode — conservative).
+  const roleTotal = capacity.login === 'crewflow_worker' ? plan.workerRoleTotal : plan.runtimeRoleTotal;
+  if (capacity.roleLimit !== null && capacity.roleLimit >= 0 && roleTotal > capacity.roleLimit) {
+    problems.push(`the runtime login can open up to ${roleTotal} connections but its connection limit is ${capacity.roleLimit}`);
   }
   return { ok: problems.length === 0, capacity: usable, problems };
 }
@@ -191,6 +240,7 @@ SELECT pg_catalog.current_setting('max_connections')::int AS max_connections,
        COALESCE(NULLIF(pg_catalog.current_setting('reserved_connections', true), ''), '0')::int AS reserved,
        COALESCE(NULLIF(pg_catalog.current_setting('rds.rds_superuser_reserved_connections', true), ''), '0')::int AS provider_reserved,
        (SELECT r.rolconnlimit FROM pg_catalog.pg_roles r WHERE r.rolname = current_user) AS role_limit,
+       current_user::text AS login,
        (SELECT d.datconnlimit FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()) AS database_limit`;
 
 export type BudgetQuery = (sql: string) => Promise<Array<Record<string, unknown>>>;
@@ -206,6 +256,7 @@ export async function readServerCapacity(query: BudgetQuery): Promise<ServerCapa
     providerSettingReserved: Number(row.provider_reserved),
     roleLimit: num(row.role_limit),
     databaseLimit: num(row.database_limit),
+    ...(row.login === undefined || row.login === null ? {} : { login: String(row.login) }),
   };
 }
 
@@ -261,6 +312,9 @@ export async function assertConnectionBudget(input: AssertConnectionBudgetInput)
         'Lower the pool sizes or instance counts (PG_POOL_MAX_CONNECTIONS with PG_EXPECTED_*_POOL_MAX), or use a larger database plan. Refusing to start.',
     );
   }
-  log(`[db-budget] ok: worst case ${plan.total} of ${evaluation.capacity} usable connections (api ${shape.apiInstances}×${shape.apiPoolMax}, worker ${shape.workerInstances}).`);
+  log(
+    `[db-budget] ok: worst case ${plan.total} of ${evaluation.capacity} usable connections (api ${shape.apiInstances}×${shape.apiPoolMax}, worker ${shape.workerInstances}` +
+      `${shape.workerDispatchMode === 'event' ? `, +${shape.workerInstances} event listener(s)` : ''}).`,
+  );
   return { checked: true, plan, usable: evaluation.capacity, warnings: [] };
 }

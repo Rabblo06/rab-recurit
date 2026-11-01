@@ -2,7 +2,8 @@
 /**
  * Crewflow Worker bundle supervisor — ONE deployment service, TWO existing entrypoints, two OS identities.
  *
- *   jobs         packages/rab-worker/dist/main.js                    uid/gid 1000  (restricted crewflow_app only)
+ *   jobs         packages/rab-worker/dist/main.js                    uid/gid 1000  (restricted crewflow_app, or the Worker-only
+ *                                                                                  crewflow_worker login — Phase D)
  *   provisioner  packages/rab-worker/dist/workspace-provisioner.main.js  uid/gid 10001 (privileged crewflow, direct)
  *
  * Phase A (pa-provisioner): CREWFLOW_PROVISIONER_ENABLED switches the provisioner child. Strict values:
@@ -31,6 +32,15 @@
  * hws-startup-guard.ts. The string checks in makePlan() only reject an obviously wrong configuration early, with a
  * clear message; the cluster cross-check below compares what the two children's OWN live probes reported.
  *
+ * Phase D (D1/D2): the jobs child's credential keeps the name PG_DATABASE_URL; its VALUE is per process. It may log in as
+ * crewflow_app (old runtime mode, WORKER_CLAIM_MODE=per_scope) or as crewflow_worker (the operator-created Worker-only
+ * login that alone holds the dispatch-claim grants; required for WORKER_CLAIM_MODE=global). The API service never gets
+ * the crewflow_worker credential (its boot gate refuses it). The dispatch flags WORKER_CLAIM_MODE / WORKER_DISPATCH_MODE /
+ * WORKER_DISPATCH_BACKSTOP_SECONDS / WORKER_DISPATCH_RECONCILE_SECONDS / WORKER_DISPATCH_CLAIM_BATCH are forwarded to the
+ * jobs child only; unset means the defaults (per_scope / poll / 30 / 900 / 100). makePlan() string-checks the two
+ * combination rules early (event ⇒ global, global ⇒ crewflow_worker); the jobs child's env validation and boot gate are
+ * the authority.
+ *
  * Credentials: the launcher receives CREWFLOW_PROVISIONER_DATABASE_URL (direct `crewflow`) and hands it ONLY to the
  * provisioner child, as the DATABASE_URL / DATABASE_URL_UNPOOLED names its existing entrypoint reads. Each child gets an
  * explicit allowlisted environment — process.env is never inherited — so NODE_OPTIONS, DOTENV_CONFIG_*, migration
@@ -49,6 +59,8 @@ const readline = require('node:readline');
 const health = require('./worker-bundle-health.cjs');
 
 const APP_ROOT = '/app';
+/** Phase D: the logins the jobs child's PG_DATABASE_URL may name (code constants; the live boot gate is the authority). */
+const JOBS_LOGINS = Object.freeze(['crewflow_app', 'crewflow_worker']);
 const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
 /**
@@ -121,6 +133,12 @@ const JOBS_ENV_KEYS = Object.freeze([
   'WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS', 'WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS', 'WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS',
   'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS', 'WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS',
   'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS',
+  // Phase D (D1/D2): dispatch claim mode, wake-up mode, backstop, legacy reconciliation and claim batch (validated by the
+  // shared EnvironmentVariables class; defaults per_scope / poll / 30 / 900 / 100; event without global refuses to boot).
+  'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH',
+  // Phase D wave 2: may the account-invite cleanup delete expired-invite user accounts — default false; true in production
+  // refuses to boot until the owner approves a retention policy (env.validation.ts). Forwarded verbatim, never invented.
+  'WORKER_INVITE_AUTO_DELETE_ENABLED',
   // AI Phase 1 (docs/ai/PHASE1_PLAN.md, PHASE1_TWENTY_PLAN.md): the rab-ai consumer + ai-retention scan. Provider keys are
   // jobs-only, never the provisioner. The retired AI_PROVIDER / AI_MODEL / AI_PROVIDER_API_KEY are NOT forwarded.
   'AI_ENABLED', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'MISTRAL_API_KEY', 'XAI_API_KEY', 'AI_DEV_ALLOW_REAL_PROVIDERS', 'AI_DAILY_BUDGET_USD', 'AI_MODELS_DEFAULT_FAST', 'AI_MODELS_DEFAULT_SMART', 'AI_MODELS_DEFAULT_DISABLED', 'AI_MAX_OUTPUT_TOKENS', 'AI_MAX_STEPS', 'AI_MAX_INPUT_CHARS', 'AI_ORG_DAILY_TOKEN_BUDGET', 'AI_USER_RATE_PER_MIN', 'AI_ORG_MAX_ACTIVE_TURNS', 'AI_TURN_TIMEOUT_SECONDS', 'AI_RETENTION_DAYS', 'AI_RETENTION_MODE', 'AI_RETENTION_INTERVAL_MINUTES',
@@ -372,8 +390,20 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   }
   const direct = directName ? pgUrl(env[directName].trim(), directName) : null;
   const provisioner = provisionerUrl ? pgUrl(provisionerUrl, 'CREWFLOW_PROVISIONER_DATABASE_URL') : null;
-  if (app.user !== 'crewflow_app' || (direct && direct.user !== 'crewflow_app')) {
-    throw new BundleConfigError(`${appName}${direct ? ` and ${directName}` : ''} must log in as crewflow_app (the live role guards still run too)`);
+  // Phase D: crewflow_app (old runtime mode) or the Worker-only crewflow_worker login; the live boot gate decides the rest.
+  if (!JOBS_LOGINS.includes(app.user) || (direct && !JOBS_LOGINS.includes(direct.user))) {
+    throw new BundleConfigError(`${appName}${direct ? ` and ${directName}` : ''} must log in as crewflow_app or crewflow_worker (the live role guards still run too)`);
+  }
+  if (direct && direct.user !== app.user) {
+    throw new BundleConfigError(`${appName} and ${directName} must log in as the same login`);
+  }
+  const claimMode = nonEmpty(env, 'WORKER_CLAIM_MODE') ? env.WORKER_CLAIM_MODE : 'per_scope';
+  const dispatchMode = nonEmpty(env, 'WORKER_DISPATCH_MODE') ? env.WORKER_DISPATCH_MODE : 'poll';
+  if (claimMode !== 'per_scope' && claimMode !== 'global') throw new BundleConfigError('WORKER_CLAIM_MODE must be exactly per_scope or global');
+  if (dispatchMode !== 'poll' && dispatchMode !== 'event') throw new BundleConfigError('WORKER_DISPATCH_MODE must be exactly poll or event');
+  if (dispatchMode === 'event' && claimMode !== 'global') throw new BundleConfigError('WORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global');
+  if (claimMode === 'global' && app.user !== 'crewflow_worker') {
+    throw new BundleConfigError(`WORKER_CLAIM_MODE=global requires ${appName} to log in as crewflow_worker (the only login with the claim grants)`);
   }
   if (provisioner && provisioner.user !== 'crewflow') throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL must log in as crewflow');
   if ((direct && app.database !== direct.database) || (provisioner && app.database !== provisioner.database)) {
@@ -415,7 +445,8 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
     uid: layout.jobs.uid,
     gid: layout.jobs.gid,
     healthFile: layout.jobs.healthFile,
-    expectGuard: { process: 'worker', role: 'crewflow_app' },
+    // Phase D: the live probe must report the login PG_DATABASE_URL names (crewflow_app or crewflow_worker).
+    expectGuard: { process: 'worker', role: app.user },
   };
   if (!withProvisioner) return [jobs];
 

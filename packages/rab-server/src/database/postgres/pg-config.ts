@@ -190,8 +190,24 @@ export interface ResolvedPgEnvironment {
    * test (the M2 restricted-migrator harness's phase-A identity). Everything else refuses it.
    */
   allowSessionRole: boolean;
+  /**
+   * Phase D (SQL review E-1): every writable API / Worker session carries `-c crewflow.dispatch_notify=on` when
+   * WORKER_DISPATCH_MODE=event, so the dispatch-pointer triggers' pg_notify fires only then (default poll ⇒ the setting is
+   * absent ⇒ zero NOTIFY). Set by the factory as a startup option — every pooled/direct (re)connection gets it; nothing a
+   * request sends can choose it. Other process roles (provisioner, CLI, migrate, ops) never set it.
+   */
+  dispatchNotify: boolean;
   /** Deprecation and pooler warnings. Names only, never values. */
   warnings: string[];
+}
+
+/** WORKER_DISPATCH_MODE as the connection factory reads it (same values as environment-variables.ts; fail closed). */
+export function dispatchNotifyFor(env: Env, processRole: PgProcessRole): boolean {
+  const raw = env.WORKER_DISPATCH_MODE?.trim();
+  if (raw !== undefined && raw !== '' && raw !== 'poll' && raw !== 'event') {
+    throw new PgConfigError('WORKER_DISPATCH_MODE must be exactly poll or event. Refusing.');
+  }
+  return raw === 'event' && (processRole === 'api' || processRole === 'worker');
 }
 
 export interface ResolvePgOptions {
@@ -452,6 +468,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     tls,
     declaredDirect,
     allowSessionRole,
+    dispatchNotify: dispatchNotifyFor(env, processRole),
     warnings,
   };
 }
@@ -497,7 +514,7 @@ export function emitPgWarnings(resolved: ResolvedPgEnvironment, env: Env = proce
   }
 }
 
-const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...OPS_ONLY_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'];
+const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...OPS_ONLY_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
 const cache = new Map<string, ResolvedPgEnvironment>();
 
 /**

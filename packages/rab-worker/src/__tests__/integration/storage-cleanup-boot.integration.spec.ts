@@ -82,6 +82,9 @@ describeIfDb('storage-cleanup scan: no reconcile on boot when recent, one replic
     const run = options.run;
     runtime.every({
       ...options,
+      // Phase D (D3): storage cleanup now opts in to firstRunAfterInterval (main.ts times its first run from this same
+      // stamp). This suite exercises the CYCLE's own spacing check (defence in depth) on an immediate tick, so it opts out.
+      firstRunAfterInterval: false,
       run: async (ctx) => {
         try {
           const value = await run(ctx);

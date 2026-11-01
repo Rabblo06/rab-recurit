@@ -8,7 +8,7 @@ import { Process, Processor } from '../../core/scheduler/decorators';
 import { SCAN_QUEUES } from '../../core/scheduler/queue-registry';
 import { SCAN_JOBS } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
-import { runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
+import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 import { runLoginHandoffCleanupCycle } from './login-handoff-cleanup.job';
 import { runOutboxRetentionCycle } from './outbox-retention.job';
 import { checkRecentStorageCleanup, runStorageCleanupCycle } from './storage-cleanup.job';
@@ -29,10 +29,14 @@ export class MaintenanceScanProcessor {
     private readonly moduleRef?: ModuleRef,
   ) {}
 
+  // Phase D wave 2 retention gate: WORKER_INVITE_AUTO_DELETE_ENABLED (default false — validated by the server environment
+  // config and re-checked by resolveInviteAutoDeleteEnabled, the same accessor path as WORKER_CLAIM_MODE). OFF ⇒ the
+  // pre-Phase-D cycle exactly as on main; never a definer call, never an automatic account deletion.
   @Process('account-invite-cleanup')
   async accountInviteCleanup(): Promise<void> {
-    const { runtimeDataSource, logger } = this.deps.get();
-    const result = await runAccountInviteCleanupCycle(runtimeDataSource);
+    const { runtimeDataSource, environmentService, logger } = this.deps.get();
+    const autoDeleteEnabled = resolveInviteAutoDeleteEnabled({ get: (key: string) => environmentService.get(key as never) });
+    const result = await runAccountInviteCleanupCycle(runtimeDataSource, { autoDeleteEnabled });
     if (result.expired || result.deleted || result.retained) {
       logger.log(`account-invite cleanup: expired=${result.expired} deleted=${result.deleted} retained=${result.retained}`);
     }

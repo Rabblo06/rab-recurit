@@ -1046,3 +1046,63 @@ test('B2 outside production the deprecated names still plan (DATABASE_URL + DATA
 test('B3 the bootstrap flag of an unbound production database is refused on the Worker service', () => {
   assert.match(refusal({ CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' }).message, /^CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP must not be configured/);
 });
+
+// ---------------------------------------------------------------- Phase D (D1/D2): the Worker credential and the dispatch flags
+
+const PHASE_D_FLAGS = ['WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH'];
+const WORKER_LOGIN_URL = 'postgres://crewflow_worker:dummy-app-pw@db.example:5432/testdb?sslmode=verify-full';
+
+test('D1 the dispatch flags reach the jobs child only (unset = defaults; production compose sets none)', () => {
+  for (const key of PHASE_D_FLAGS) {
+    assert.ok(JOBS_ENV_KEYS.includes(key), `${key} is forwarded to the jobs child`);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), `${key} must not reach the provisioner`);
+  }
+  const values = { WORKER_CLAIM_MODE: 'global', WORKER_DISPATCH_MODE: 'event', WORKER_DISPATCH_BACKSTOP_SECONDS: '30', WORKER_DISPATCH_RECONCILE_SECONDS: '900', WORKER_DISPATCH_CLAIM_BATCH: '100' };
+  const [jobs, provisioner] = makePlan({ ...env(), PG_DATABASE_URL: WORKER_LOGIN_URL, ...values });
+  for (const [k, v] of Object.entries(values)) {
+    assert.equal(jobs.env[k], v);
+    assert.equal(provisioner.env[k], undefined);
+  }
+  const [defaults] = makePlan(env());
+  for (const key of PHASE_D_FLAGS) assert.equal(defaults.env[key], undefined, `${key} is not invented by the launcher`);
+});
+
+test('D2 PG_DATABASE_URL may log in as crewflow_app (old runtime mode) or crewflow_worker; never anything else', () => {
+  const [jobs] = makePlan({ ...env(), PG_DATABASE_URL: WORKER_LOGIN_URL });
+  assert.match(jobs.env.PG_DATABASE_URL, /crewflow_worker/);
+  // The supervisor compares the jobs child's live identity probe with the login it was given.
+  assert.deepEqual(jobs.expectGuard, { process: 'worker', role: 'crewflow_worker' });
+  assert.deepEqual(makePlan(env())[0].expectGuard, { process: 'worker', role: 'crewflow_app' });
+  assert.equal(makePlan(env()).length, 2);
+  assert.match(refusal({ PG_DATABASE_URL: 'postgres://crewflow:x@db/testdb' }).message, /must log in as crewflow_app or crewflow_worker/);
+  assert.match(refusal({ PG_DATABASE_URL: 'postgres://crewflow_worker2:x@db/testdb' }).message, /must log in as crewflow_app or crewflow_worker/);
+  // The deprecated split (non-production): both URLs must be the same login.
+  assert.match(
+    legacyRefusal({ DATABASE_URL: 'postgres://crewflow_worker:x@db-pooler.example:5432/testdb', DATABASE_DIRECT_URL: 'postgres://crewflow_app:x@db.example:5432/testdb' }).message,
+    /must log in as the same login/,
+  );
+  // The provisioner keeps its own crewflow credential; the Worker login is never handed to it.
+  const [, provisioner] = makePlan({ ...env(), PG_DATABASE_URL: WORKER_LOGIN_URL });
+  assert.doesNotMatch(provisioner.env.PG_DATABASE_URL, /crewflow_worker/);
+});
+
+test('D3 early string checks mirror the boot gate: global needs crewflow_worker; event needs global (the live gates still run)', () => {
+  assert.match(refusal({ WORKER_CLAIM_MODE: 'global' }).message, /WORKER_CLAIM_MODE=global requires PG_DATABASE_URL to log in as crewflow_worker/);
+  assert.equal(makePlan({ ...env(), PG_DATABASE_URL: WORKER_LOGIN_URL, WORKER_CLAIM_MODE: 'global' }).length, 2);
+  assert.match(refusal({ PG_DATABASE_URL: WORKER_LOGIN_URL, WORKER_DISPATCH_MODE: 'event' }).message, /WORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global/);
+  assert.match(refusal({ PG_DATABASE_URL: WORKER_LOGIN_URL, WORKER_CLAIM_MODE: 'Global' }).message, /WORKER_CLAIM_MODE must be exactly per_scope or global/);
+  assert.match(refusal({ PG_DATABASE_URL: WORKER_LOGIN_URL, WORKER_CLAIM_MODE: 'global', WORKER_DISPATCH_MODE: 'listen' }).message, /WORKER_DISPATCH_MODE must be exactly poll or event/);
+  for (const msg of [refusal({ WORKER_CLAIM_MODE: 'global' }).message]) for (const s of SECRET_MARKERS) assert.ok(!msg.includes(s));
+});
+
+test('D4 WORKER_INVITE_AUTO_DELETE_ENABLED reaches the jobs child only, verbatim; the launcher never invents it (default false = validator)', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('WORKER_INVITE_AUTO_DELETE_ENABLED'), 'forwarded to the jobs child (the account-invite cleanup reads it)');
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('WORKER_INVITE_AUTO_DELETE_ENABLED'), 'never reaches the provisioner');
+  // Verbatim: a malformed value is NOT normalised here — the jobs child's env validator refuses to boot on it.
+  for (const value of ['false', 'true', 'TRUE']) {
+    const [jobs, provisioner] = makePlan({ ...env(), WORKER_INVITE_AUTO_DELETE_ENABLED: value });
+    assert.equal(jobs.env.WORKER_INVITE_AUTO_DELETE_ENABLED, value);
+    assert.equal(provisioner.env.WORKER_INVITE_AUTO_DELETE_ENABLED, undefined);
+  }
+  assert.equal(makePlan(env())[0].env.WORKER_INVITE_AUTO_DELETE_ENABLED, undefined);
+});

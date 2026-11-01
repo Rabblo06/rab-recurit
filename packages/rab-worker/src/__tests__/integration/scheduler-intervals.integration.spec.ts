@@ -31,9 +31,16 @@ const GATED = [PUSH_ID, REALTIME_ID];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const def = (jobName: string) => SCAN_JOBS.find((d) => d.jobName === jobName)!;
 
-/** The enable predicate exactly as main.ts builds it, from an env stub. */
-const enabledFrom = (switches: { PUSH_ENABLED: boolean; REALTIME_ENABLED: boolean }) => (d: ScanJobDefinition) => isScanJobEnabled(d, { get: (k) => switches[k] });
-const ALL_OFF = enabledFrom({ PUSH_ENABLED: false, REALTIME_ENABLED: false }); // the defaults
+/**
+ * The enable predicate exactly as main.ts builds it, from an env stub. Phase D (D3) gated three more scans (login handoff
+ * cleanup, outbox retention, AI retention); this suite isolates the push/realtime switches, so those three are held ON
+ * here (their own gating is covered by core/scheduler/scheduler-d3.spec.ts).
+ */
+const enabledFrom = (switches: { PUSH_ENABLED: boolean; REALTIME_ENABLED: boolean }) => {
+  const env: Record<string, unknown> = { ...switches, LOGIN_HANDOFF_CLEANUP_ENABLED: true, OUTBOX_RETENTION_ENABLED: true, AI_RETENTION_MODE: 'report' };
+  return (d: ScanJobDefinition) => isScanJobEnabled(d, { get: (k) => env[k] });
+};
+const ALL_OFF = enabledFrom({ PUSH_ENABLED: false, REALTIME_ENABLED: false }); // push/realtime at their defaults
 const ALL_ON = enabledFrom({ PUSH_ENABLED: true, REALTIME_ENABLED: true });
 const intervalOfEnv = (overrides: Record<string, number> = {}) => {
   const env = defaultIntervalEnv(overrides);

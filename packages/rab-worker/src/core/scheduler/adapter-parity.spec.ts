@@ -15,7 +15,10 @@ jest.mock('../../queues/rab-reports/final-timesheet.job', () => ({ runFinalTimes
 jest.mock('../../queues/rab-reports/shift-statement.job', () => ({ runShiftStatementDispatchCycle: jest.fn(), processShiftStatementJob: jest.fn() }));
 jest.mock('../../queues/rab-reports/payroll-period-attention.job', () => ({ runPayrollPeriodAttentionCycle: jest.fn() }));
 jest.mock('../../queues/rab-realtime/publish-outbox.job', () => ({ runRealtimeOutboxPublishCycle: jest.fn() }));
-jest.mock('../../queues/rab-maintenance/account-invite-cleanup.job', () => ({ runAccountInviteCleanupCycle: jest.fn() }));
+jest.mock('../../queues/rab-maintenance/account-invite-cleanup.job', () => ({
+  runAccountInviteCleanupCycle: jest.fn(),
+  resolveInviteAutoDeleteEnabled: jest.requireActual('../../queues/rab-maintenance/account-invite-cleanup.job').resolveInviteAutoDeleteEnabled,
+}));
 jest.mock('../../queues/rab-maintenance/token-cleanup.job', () => ({ runTokenCleanupCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/login-handoff-cleanup.job', () => ({ runLoginHandoffCleanupCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/storage-cleanup.job', () => ({ runStorageCleanupCycle: jest.fn() }));
@@ -157,6 +160,22 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     });
   });
 
+  it('account-invite cleanup passes WORKER_INVITE_AUTO_DELETE_ENABLED (read like WORKER_CLAIM_MODE) — true only when set true', async () => {
+    (invite.runAccountInviteCleanupCycle as jest.Mock).mockReset().mockResolvedValue({});
+    ENV.WORKER_INVITE_AUTO_DELETE_ENABLED = true;
+    try {
+      await new MaintenanceScanProcessor(holder).accountInviteCleanup();
+    } finally {
+      delete ENV.WORKER_INVITE_AUTO_DELETE_ENABLED;
+    }
+    await new MaintenanceScanProcessor(holder).accountInviteCleanup();
+    expect((invite.runAccountInviteCleanupCycle as jest.Mock).mock.calls).toEqual([
+      [d.runtimeDataSource, { autoDeleteEnabled: true }],
+      [d.runtimeDataSource, { autoDeleteEnabled: false }],
+    ]);
+    (invite.runAccountInviteCleanupCycle as jest.Mock).mockReset();
+  });
+
   it('maintenance scans: enable switches stay inside the cycle; disabled → false (never stamped); retention stats via ctx', async () => {
     (invite.runAccountInviteCleanupCycle as jest.Mock).mockResolvedValue({});
     (token.runTokenCleanupCycle as jest.Mock).mockResolvedValue({});
@@ -169,7 +188,8 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     await expect(p.loginHandoffCleanup()).resolves.toBe(false);
     await p.storageCleanup();
     await expect(p.outboxRetention(ctx)).resolves.toBe(true);
-    expect((invite.runAccountInviteCleanupCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource]);
+    // Phase D wave 2 retention gate: WORKER_INVITE_AUTO_DELETE_ENABLED unset ⇒ OFF is passed explicitly.
+    expect((invite.runAccountInviteCleanupCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, { autoDeleteEnabled: false }]);
     expect((token.runTokenCleanupCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource]);
     expect((handoff.runLoginHandoffCleanupCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.directDataSource, { enabled: false }]);
     expect((storage.runStorageCleanupCycle as jest.Mock).mock.calls[0]).toEqual([d.storageReconcileCommand, 9]);

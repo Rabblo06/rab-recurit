@@ -123,6 +123,11 @@ services:
       PG_DATABASE_URL: ${DEVDB_URL:-}
       DATABASE_URL: ''
       DATABASE_URL_UNPOOLED: ''
+      # Phase D (E-1): the same WORKER_DISPATCH_MODE as the worker — event makes this API's sessions carry
+      # crewflow.dispatch_notify=on (its outbox writes wake the Worker); poll (default) = no NOTIFY. The API never claims.
+      WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
+      # The env validator refuses event without global, so the API takes the same pair (its claim mode is otherwise unused).
+      WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       DATABASE_DIRECT_URL: ''
       REDIS_URL: redis://redis:6379
       # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22, rab-devdb TEST database): workspace-scoped
@@ -223,7 +228,10 @@ services:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       # Explicitly overridden so ../rab-server/.env's own URLs (possibly a real remote database) can never leak through.
-      PG_DATABASE_URL: ${DEVDB_URL:-}
+      # Phase D: the jobs child may instead log in as the operator-created Worker-only crewflow_worker login — set
+      # DEVDB_WORKER_URL to it (same container name PG_DATABASE_URL; the server keeps DEVDB_URL = crewflow_app and refuses
+      # crewflow_worker). Unset = DEVDB_URL, exactly as before.
+      PG_DATABASE_URL: ${DEVDB_WORKER_URL:-${DEVDB_URL:-}}
       # Command authority: the Worker bundle launcher refuses it (security review L-4); blanked in case ../rab-server/.env sets it.
       DB_TARGET: ''
       # Phase B (B5): the Worker runtime pool size (connection-budget.ts DEFAULT_WORKER_POOL_MAX).
@@ -257,6 +265,11 @@ services:
       # (optionally then remove the inert schedulers: packages/rab-worker/dist/tools/remove-crewflow-schedulers.js).
       WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
       BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
+      # Phase D (D1/D2): dispatch claims and wake-ups for a deliberate local trial; unset = the code defaults (per_scope /
+      # poll; backstop 30 s, reconciliation 900 s, batch 100). global needs DEVDB_WORKER_URL (crewflow_worker); event needs
+      # global. The launcher and the jobs child refuse any other combination.
+      WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
+      WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev

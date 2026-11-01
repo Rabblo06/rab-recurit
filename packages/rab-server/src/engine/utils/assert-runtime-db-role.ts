@@ -19,6 +19,41 @@ import { DataSource } from 'typeorm';
 // NOLOGIN `rab_secure_owner`, which neither `crewflow` nor `crewflow_app` is ever a member of or can
 // SET ROLE into. `rab_app`/`rab_owner` are retired (NOLOGIN, zero remaining grants).
 const RUNTIME_DB_ROLE = 'crewflow_app';
+/**
+ * Phase D (D2): the Worker-only login (member of crewflow_app WITH INHERIT TRUE, SET FALSE; the only holder of the
+ * dispatch-claim grants). Accepted only for the Worker identity below; the API and every other caller refuse it.
+ */
+const WORKER_DB_ROLE = 'crewflow_worker';
+
+/**
+ * Which process the asserted connection serves. Default `{ process: 'api' }` = exactly crewflow_app (every pre-Phase-D
+ * caller). A Worker connection passes its WORKER_CLAIM_MODE: per_scope accepts crewflow_app or crewflow_worker (old
+ * runtime mode keeps working), global accepts crewflow_worker only. The accepted roles are these code constants, never env.
+ */
+export type RuntimeDbIdentity = { process: 'api' } | { process: 'worker'; claimMode: 'per_scope' | 'global' };
+
+export function acceptedRuntimeDbRoles(identity: RuntimeDbIdentity = { process: 'api' }): readonly string[] {
+  if (identity.process === 'api') return [RUNTIME_DB_ROLE];
+  if (identity.claimMode === 'global') return [WORKER_DB_ROLE];
+  if (identity.claimMode === 'per_scope') return [RUNTIME_DB_ROLE, WORKER_DB_ROLE];
+  return []; // fail closed on anything else
+}
+
+/**
+ * The Worker's own connection labels (code constants, exact match): the jobs child's runtime pool, its direct/lock pool,
+ * the BullMQ scan-lock session and the event-mode wake listener. A call with one of these labels and no explicit identity
+ * is asserted as the Worker, with WORKER_CLAIM_MODE read from the process environment (unset/empty = per_scope; any
+ * other value than per_scope/global accepts NO role — fail closed). Every other label (the API, CLI commands, prestart
+ * checks, e2e boots) stays crewflow_app only.
+ */
+export const WORKER_CONNECTION_LABELS: readonly string[] = Object.freeze(['worker', 'worker-direct', 'worker-scan-lock', 'worker-wake-listener']);
+
+export function runtimeDbIdentityFor(processName: string, env: Record<string, string | undefined> = process.env): RuntimeDbIdentity {
+  if (!WORKER_CONNECTION_LABELS.includes(processName)) return { process: 'api' };
+  const raw = env.WORKER_CLAIM_MODE;
+  const claimMode = raw === undefined || raw === '' ? 'per_scope' : raw;
+  return { process: 'worker', claimMode: claimMode as 'per_scope' | 'global' };
+}
 
 /**
  * A cryptographically valid request/job can still be served against the wrong
@@ -36,12 +71,22 @@ const RUNTIME_DB_ROLE = 'crewflow_app';
  * owner connection for read-only cross-tenant discovery — that one is never
  * this DataSource.)
  */
-export async function assertRuntimeDbRole(dataSource: DataSource, processName: string): Promise<void> {
+export async function assertRuntimeDbRole(dataSource: DataSource, processName: string, explicitIdentity?: RuntimeDbIdentity): Promise<void> {
+  const identity = explicitIdentity ?? runtimeDbIdentityFor(processName);
+  const accepted = acceptedRuntimeDbRoles(identity);
   const [{ current_user: connectedAs }] = await dataSource.query<[{ current_user: string }]>('SELECT current_user');
-  if (connectedAs !== RUNTIME_DB_ROLE) {
+  if (connectedAs === WORKER_DB_ROLE && !accepted.includes(WORKER_DB_ROLE)) {
     throw new Error(
-      `Refusing to start: DATABASE_URL connects as "${connectedAs}", not "${RUNTIME_DB_ROLE}". ` +
-        `The ${processName} must never run tenant-scoped work as the migration/owner role — see postgres-init/01-roles.sql.`,
+      `Refusing to start: the ${processName} connects as "${WORKER_DB_ROLE}", the Worker-only login that holds the dispatch-claim grants. ` +
+        `It must connect as ${accepted.join(' or ') || '(no accepted role)'} — never with the Worker's credential.`,
+    );
+  }
+  if (!accepted.includes(connectedAs)) {
+    throw new Error(
+      `Refusing to start: DATABASE_URL connects as "${connectedAs}", not ${accepted.map((r) => `"${r}"`).join(' or ') || '(no accepted role)'}. ` +
+        (identity.process === 'worker' && identity.claimMode === 'global' && connectedAs === RUNTIME_DB_ROLE
+          ? `WORKER_CLAIM_MODE=global requires the ${processName} to connect as "${WORKER_DB_ROLE}".`
+          : `The ${processName} must never run tenant-scoped work as the migration/owner role — see postgres-init/01-roles.sql.`),
     );
   }
   const [{ rolbypassrls, rolsuper }] = await dataSource.query<[{ rolbypassrls: boolean; rolsuper: boolean }]>(
@@ -52,17 +97,28 @@ export async function assertRuntimeDbRole(dataSource: DataSource, processName: s
   }
   // CF-43: `current_user` alone can be the result of a privileged login running SET ROLE. The LOGIN identity must be the
   // runtime role itself, and that role must not be able to act as any table-owning or privileged role.
-  const [identity] = await dataSource.query<[{ session_user: string; session_super: boolean; owner_roles: string | null }]>(
-    `SELECT session_user AS session_user,
+  // Phase D: membership is tested with MEMBER (PG16: any membership, whatever its INHERIT/SET options), not USAGE — USAGE
+  // missed an INHERIT FALSE, SET TRUE grant, through which the login could still SET ROLE to an owner role. Both the
+  // acting role and the login are checked (same rule as the boot gate's BOOT_FACTS_SQL).
+  const [session] = await dataSource.query<[{ session_user: string; session_super: boolean; owner_roles: string | null; worker_member: boolean | null }]>(
+    RUNTIME_IDENTITY_SQL,
+  );
+  if (session.session_user !== connectedAs || session.session_super) {
+    throw new Error(`Refusing to start: the database login is "${session.session_user}", not "${connectedAs}" itself (SET ROLE is not accepted).`);
+  }
+  if (session.owner_roles) {
+    throw new Error(`Refusing to start: runtime role "${connectedAs}" can act as ${session.owner_roles}, which own tables and would bypass row-level security.`);
+  }
+  if (session.worker_member === true && !accepted.includes(WORKER_DB_ROLE)) {
+    throw new Error(`Refusing to start: runtime role "${connectedAs}" is a member of ${WORKER_DB_ROLE} and would inherit the Worker-only dispatch-claim grants.`);
+  }
+}
+
+/** Exported for its unit test. */
+export const RUNTIME_IDENTITY_SQL = `SELECT session_user AS session_user,
             (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = session_user) AS session_super,
             (SELECT string_agg(r.rolname, ',') FROM pg_roles r
               WHERE r.rolname <> current_user AND r.rolname IN ('crewflow', 'rab_secure_owner', 'rab_owner')
-                AND pg_has_role(current_user, r.oid, 'USAGE')) AS owner_roles`,
-  );
-  if (identity.session_user !== RUNTIME_DB_ROLE || identity.session_super) {
-    throw new Error(`Refusing to start: the database login is "${identity.session_user}", not "${RUNTIME_DB_ROLE}" itself (SET ROLE is not accepted).`);
-  }
-  if (identity.owner_roles) {
-    throw new Error(`Refusing to start: runtime role "${connectedAs}" can act as ${identity.owner_roles}, which own tables and would bypass row-level security.`);
-  }
-}
+                AND (pg_has_role(current_user, r.oid, 'MEMBER') OR pg_has_role(session_user, r.oid, 'MEMBER'))) AS owner_roles,
+            (SELECT pg_has_role(current_user, w.oid, 'MEMBER') OR pg_has_role(session_user, w.oid, 'MEMBER')
+               FROM pg_roles w WHERE w.rolname = 'crewflow_worker') AS worker_member`;

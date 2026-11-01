@@ -166,15 +166,18 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
       expect(opts.removeOnComplete).toEqual({ age: 3600, count: 1000 });
       expect(opts.removeOnFail).toEqual({ age: 604800 });
     }
-    // The raw scheduler hashes hold only name/every/template metadata — no ids, tokens, bodies, URLs.
+    // The raw scheduler hashes hold only name/every/template metadata — no ids, tokens, bodies, URLs. Phase D (D3): the
+    // three daily scans now use firstRunAfterInterval, so their (new) scheduler also stores its `startDate` (a timestamp).
+    const allowed = ['data', 'every', 'ic', 'name', 'offset', 'opts', 'startDate'];
     const schedulerHashes = await keysUnder(redis, `${prefix}:*:repeat:crewflow:*`);
     expect(schedulerHashes.length).toBeGreaterThanOrEqual(EXPECTED_COUNT);
     for (const key of schedulerHashes) {
       if ((await redis.type(key)) !== 'hash') continue;
       const h = await redis.hgetall(key);
       if (!('every' in h)) continue; // a per-iteration job hash, checked through getJobs above
-      expect(Object.keys(h).sort()).toEqual(['data', 'every', 'ic', 'name', 'offset', 'opts'].filter((k) => k in h).sort());
-      expect(Object.keys(h).every((k) => ['data', 'every', 'ic', 'name', 'offset', 'opts'].includes(k))).toBe(true);
+      expect(Object.keys(h).sort()).toEqual(allowed.filter((k) => k in h).sort());
+      expect(Object.keys(h).every((k) => allowed.includes(k))).toBe(true);
+      if ('startDate' in h) expect(h.startDate).toMatch(/^\d+$/);
       expect(h.data).toBe('{"v":1}');
       expect(JSON.stringify(h)).not.toMatch(/postgres:|redis:\/\/|password|@/i);
     }

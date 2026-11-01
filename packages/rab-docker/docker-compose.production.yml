@@ -279,6 +279,24 @@ services:
   #                         Stays until gate G2 retires the privileged provisioner.
   #   SENTRY_DSN, APP_VERSION                                    (optional)
   #
+  # Phase D (global worker claims) — NOT enabled by this file. It sets none of
+  # WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE, WORKER_DISPATCH_BACKSTOP_SECONDS,
+  # WORKER_DISPATCH_RECONCILE_SECONDS, WORKER_DISPATCH_CLAIM_BATCH, so the code
+  # defaults apply (per_scope / poll / 30 / 900 / 100). The later cutover is a
+  # reviewed change: rab-worker's PG_DATABASE_URL (same name) then holds the
+  # operator-created crewflow_worker login @ the DIRECT host (rab-api keeps
+  # crewflow_app; rab-api REFUSES crewflow_worker), and WORKER_CLAIM_MODE=global
+  # requires it (the boot gate refuses otherwise). WORKER_DISPATCH_MODE=event
+  # needs global and adds one listener connection per Worker replica — set it
+  # on rab-api too (with WORKER_CLAIM_MODE=global, same pair as rab-worker): rab-api's sessions then carry
+  # crewflow.dispatch_notify=on so its outbox writes NOTIFY the Worker, and its
+  # connection budget counts the listeners. Unset (poll) = no NOTIFY at all.
+  #
+  # WORKER_INVITE_AUTO_DELETE_ENABLED — NOT set by this file (code default
+  # false: the account-invite cleanup never deletes user accounts). Do not
+  # enter true: production refuses to boot with it until the owner approves a
+  # retention policy for automatic account deletion (env.validation.ts).
+  #
   # MUST NOT BE ENTERED ON rab-worker (the launcher refuses to start if any is
   # non-empty): DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL,
   # DB_POOL_MAX, CREWFLOW_MIGRATION_APPROVED, CREWFLOW_MIGRATION_DATABASE_URL,

@@ -13,9 +13,13 @@ import { composeServerPathTemplateV1AttendanceMoney } from './v1/server-path-tem
 import { composeServerPathTemplateV1PayrollRestrict } from './v1/server-path-template-payroll-restrict';
 import { composeServerPathTemplateV1VenueTeamAdmin, expectedWorkspacePolicyCount } from './v1/server-path-template-venue-team-admin';
 import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
+import { composeServerPathTemplateV1StatementPointer } from './v1/server-path-template-statement-pointer';
+import { statementDispatchPointerSql } from './v1/statement-dispatch-pointer';
+import { PENDING_FINGERPRINT_VERSIONS } from './v1/expected-fingerprints';
 import { errorClassOf, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
 import {
   GUARDS_PROVISION_APP_VERSION,
+  provisionWorkspaceFunctionV3Sql,
   provisionWorkspaceGuardsDownSql,
   provisionWorkspaceGuardsUpSql,
 } from '../core/provision-workspace-guards-sql';
@@ -55,6 +59,8 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   ['v1.016-archive-columns', '45853be54b724a4d7d292a8d39a1998e22f9cf9f0c19e87e74489065357954aa'],
   ['v1.017-search-vectors', 'c8dcf4c8247323c4dbd5346e57cb69ea29c05aa16801af913c2e7b5663631d2a'],
   ['v1.018-venue-team-org-admin', 'de2c5d96ac0d0637e8a2e876bf22c522c2847fa97c9c07b93dca43abdde24498'],
+  // Phase D: frozen at the text the owner approved (SQL gate + v19 fingerprint sign-off, 2026-11-01).
+  ['v1.019-statement-dispatch-pointer', '34da4890d853152677fc3e9fea3b8dee0b5ac59f4a6c79d68b845b36ab218c2a'],
 ];
 
 describe('workspace schema modules (B3 single source of truth)', () => {
@@ -73,6 +79,38 @@ describe('workspace schema modules (B3 single source of truth)', () => {
 
   it('modules 1..17 compose exactly the frozen 1786719920000 server-path template (waves 4+5 lane DB5)', () => {
     expect(composeModulesForSentinel(17)).toBe(composeServerPathTemplateV1ArchiveSearch());
+  });
+
+  it('modules 1..19 compose exactly the frozen 1786721320000 server-path template (Phase D statement dispatch pointer)', () => {
+    expect(composeModulesForSentinel(19)).toBe(composeServerPathTemplateV1StatementPointer());
+  });
+
+  it('module 19 only (re)creates the three statement pointer triggers on payroll_record, calling the reviewed core function', () => {
+    const sql = statementDispatchPointerSql(SERVER_PATH_SENTINEL_SCHEMA);
+    const t = `"${SERVER_PATH_SENTINEL_SCHEMA}".payroll_record`;
+    expect(sql.match(/CREATE TRIGGER (\w+) AFTER (INSERT|UPDATE|DELETE|TRUNCATE) ON "[^"]+"\.(\w+)/g)).toEqual([
+      `CREATE TRIGGER payroll_record_statement_pointer_ins AFTER INSERT ON ${t}`,
+      `CREATE TRIGGER payroll_record_statement_pointer_upd AFTER UPDATE ON ${t}`,
+      `CREATE TRIGGER payroll_record_statement_pointer_del AFTER DELETE ON ${t}`,
+      `CREATE TRIGGER payroll_record_statement_pointer_trunc AFTER TRUNCATE ON ${t}`,
+    ]);
+    expect(sql.match(/EXECUTE FUNCTION ([\w.]+\(\))/g)).toEqual(Array(4).fill('EXECUTE FUNCTION core.worker_dispatch_pointer_statement_trg()'));
+    expect(sql).not.toMatch(/\b(ALTER TABLE|POLICY|GRANT|REVOKE|CREATE TABLE|CREATE INDEX|DROP TABLE|CREATE FUNCTION|SECURITY|BYPASSRLS)\b/);
+    expect(statementDispatchPointerSql('core')).toContain('ON core.payroll_record');
+    expect(() => statementDispatchPointerSql('public')).toThrow('Invalid workspace schema');
+    expect(expectedWorkspacePolicyCount(19)).toBe(41);
+  });
+
+  it('every module through LATEST carries a generated sha256 fingerprint and none is pending (module 19: Phase D rehearsal); the floor stays routable at 18', () => {
+    expect(PENDING_FINGERPRINT_VERSIONS).toEqual([]);
+    expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3');
+    for (let v = 14; v <= LATEST_WORKSPACE_MODULE_VERSION; v++) expect(EXPECTED_WORKSPACE_FINGERPRINTS[v]).toMatch(/^[0-9a-f]{64}$/);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(18);
+  });
+
+  it('REMINDER (E-10): the floor is LATEST - 1 only while LATEST is 19; the next module must reset it (to LATEST or a reviewed value)', () => {
+    if (LATEST_WORKSPACE_MODULE_VERSION === 19) expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(18);
+    else expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).not.toBe(18);
   });
 
   it('modules 1..18 compose exactly the frozen 1786721090000 server-path template (org-admin Assigned Staff)', () => {
@@ -297,13 +335,16 @@ describe('Phase B: provision_workspace body → module version map (schema-versi
     const creators = fs
       .readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith('.ts'))
-      .filter((f) => /provisionWorkspaceFunctionV2Sql\(|provisionWorkspaceGuardsUpSql\b/.test(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')))
+      .filter((f) =>
+        /provisionWorkspaceFunctionV2Sql\(|provisionWorkspaceFunctionV3Sql\(|provisionWorkspaceGuardsUpSql\b/.test(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')),
+      )
       .map((f) => /^(\d{13})-(\w+)\.ts$/.exec(f)!)
       .map((m) => `${m[2]}${m[1]}`);
     expect(creators.sort()).toEqual([
       'ArchiveAndSearchSchema1786719920000',
       'AttendanceMoneyChecks1786719810000',
       'ProvisionWorkspaceGuards1786721210000',
+      'StatementDispatchPointer1786721320000',
       'VenueTeamOrgAdmin1786721090000',
     ]);
     for (const name of creators) expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${name}`]).toBeDefined();
@@ -311,6 +352,16 @@ describe('Phase B: provision_workspace body → module version map (schema-versi
     const newest = creators.sort((a, b) => Number(a.slice(-13)) - Number(b.slice(-13)))[creators.length - 1]!;
     expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${newest}`]).toBe(LATEST_WORKSPACE_MODULE_VERSION);
     expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
+  });
+
+  it('Phase D: the v19 guarded body parses to module 19 (built only with a real fingerprint; a placeholder is refused)', () => {
+    const modules = modulesThrough(19).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+    const fakeFp = 'f'.repeat(64); // unit test only: the real v19 value is PENDING (SQL gate)
+    const v19 = provisionWorkspaceFunctionV3Sql(composeServerPathTemplateV1StatementPointer(), modules, fakeFp, 'db:provision_workspace@StatementDispatchPointer1786721320000');
+    expect(parseProvisionFunctionSource(v19)).toEqual({ state: 'known', literal: 'db:provision_workspace@StatementDispatchPointer1786721320000', moduleVersion: 19 });
+    expect(v19).toContain('core.worker_dispatch_pointer_statement_trg()');
+    expect(v19).toContain('CWP01');
+    expect(() => provisionWorkspaceFunctionV3Sql(composeServerPathTemplateV1StatementPointer(), modules, 'PENDING', 'db:x')).toThrow();
   });
 
   it('the rendered bodies parse to their mapped module versions (guards v3: 18; its down(): the v18 VenueTeamOrgAdmin body)', () => {
