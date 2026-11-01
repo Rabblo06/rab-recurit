@@ -230,6 +230,8 @@ const PASSWORDS = {
   crewflow_worker: process.env.CREWFLOW_WORKER_BOOTSTRAP_PASSWORD?.trim() || randomBytes(24).toString('hex'),
 };
 let workerPasswordKnown = false;
+/** Set when THIS run created crewflow_worker: the next scenario on the same cluster finds it and must not refuse its own role. */
+let workerRoleCreatedThisRun = false;
 /**
  * Discovery mode (local use only): record unlisted migrations that need privilege instead of stopping on them. The run
  * still FAILS when anything is discovered, and the mode is refused under CI.
@@ -341,10 +343,12 @@ async function ensureWorkerRole(): Promise<void> {
       await c.query('GRANT crewflow_app TO crewflow_worker WITH INHERIT TRUE, SET FALSE');
     });
     workerPasswordKnown = true;
+    workerRoleCreatedThisRun = true;
     log('created crewflow_worker (operator bootstrap step; random password, never printed)');
     f = await facts();
   } else {
-    if (!EXISTING_ROLES_OK) {
+    // Only a role this run did NOT create needs the explicit opt-in; ours (fresh scenario, then upgrade) is re-verified below.
+    if (!workerRoleCreatedThisRun && !EXISTING_ROLES_OK) {
       throw new CheckFailure('crewflow_worker already exists on this cluster. Refusing unless MIGRATION_SECURITY_ALLOW_EXISTING_ROLES=true.');
     }
     workerPasswordKnown = workerPasswordKnown || Boolean(process.env.CREWFLOW_WORKER_BOOTSTRAP_PASSWORD?.trim());
