@@ -4656,11 +4656,22 @@ Regression:   phase-d-due-work-cutover.integration.spec.ts with PHASE_D_D5=after
   check) and `worker-dispatch-pointer-sql.ts:951-982` (the D5 SQL constants). `engine/` and `modules/` never import
   rab-worker. So revoking them from `crewflow_app` removes nothing the API uses; it removes what an API compromise could
   abuse, and what an **old Worker still on `crewflow_app`** uses today.
-- Related, out of this finding's scope (not due-work, not covered by 1330000): `crewflow_app` also executes the
-  Worker-only global definers `worker_cleanup_auth_tokens(integer)`, `worker_cleanup_oauth_transaction_state(integer)`,
-  `worker_list_organisations(uuid, integer)` and `worker_list_workspaces(uuid, integer)` (golden :465,:468,:494,:500).
-  Their abuse value differs (expired-row cleanup; organisation / workspace id listing) and needs its own assessment
-  before a similar move.
+- Related, out of this finding's scope (not due-work, not covered by 1330000; corrected after the X1.9 review):
+  `crewflow_app` also executes four other global `worker_*` definers (golden :465,:468,:494,:500).
+  - `worker_list_organisations(uuid, integer)` and `worker_list_workspaces(uuid, integer)` are **not** Worker-only: the
+    API uses them and they must stay granted to `crewflow_app`. `engine/worker-shared/maintenance-catalogue.ts:14,54`
+    (`organisationIds`, `storageScopes`) is called by the platform-admin `outbox-operations.service.ts:16,165,269`,
+    `secret-rotation.service.ts:4` and `ai-retention.service.ts:7`; the API's schema-compatibility boot check reads
+    `worker_list_workspaces` directly (`database/boot-checks/schema-compatibility.ts:308`). They return ids only.
+  - `worker_cleanup_auth_tokens(integer)` and `worker_cleanup_oauth_transaction_state(integer)` have no API caller (the
+    only calls are `rab-worker/src/queues/rab-maintenance/token-cleanup.job.ts:28,34`; rab-server names the first in a
+    comment only, `auth/token/retention-policy.ts:7`). They delete expired auth-token and OAuth-state rows; whether to
+    move them to `crewflow_worker` too needs its own assessment.
+- Also part of the picture, not an extra hole: `crewflow_app` (and `crewflow`) hold SELECT, INSERT, UPDATE, DELETE on the
+  `core.worker_due_work` TABLE itself (golden :1030-1031). Producers need that to schedule pointers. Those grants are
+  RLS-bound: the owner is `rab_secure_owner` (golden :763), so the missing FORCE (golden :851) exempts only that NOLOGIN
+  owner, and the `worker_due_work_tenant` policy (`1786676800000-WorkerDueWork.ts:59-61`) limits `crewflow_app` to rows of
+  its bound organisation and workspace. The cross-tenant reach comes only from the three definers above.
 
 **Exposure today:** any SQL execution on an API session. No HTTP route reaches these functions; the API code has no
 call path to them. Severity stays MEDIUM, not HIGH, because it needs a prior API compromise, and it discloses routing
