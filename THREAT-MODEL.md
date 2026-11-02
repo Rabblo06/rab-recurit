@@ -4638,5 +4638,5 @@ payroll, attendance or staffing rule change; email preferences untouched (notify
 - **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
   dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
   lease instead of the 5 s dispatcher, a lease-outcome change.
-- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The production worker bundle does not
-  forward the flag, so Worker-originated notify() rows keep using the dispatcher.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
+  to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
