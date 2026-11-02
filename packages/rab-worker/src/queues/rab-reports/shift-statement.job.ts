@@ -18,6 +18,7 @@ import {
 import { allocateRecords, paydayLabel, periodLabel } from '@rab/server/modules/payroll/services/payroll-allocation';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 import { renderHtmlToPdf } from './render-pdf.util';
 
 const logger = new Logger('ShiftStatementJob');
@@ -47,6 +48,9 @@ export interface ShiftStatementDispatchResult {
   publishFailed: number;
 }
 
+/** The per-workspace discovery bound of the per_scope sweep (the `LIMIT 200` in its SQL). */
+const STATEMENT_DISCOVERY_LIMIT = 200;
+
 const workerCtx = (organisationId: string, workspaceId: string) => ({ organisationId, workspaceId, userId: '', role: '', actorType: 'worker' as const });
 
 /**
@@ -64,9 +68,12 @@ export async function runShiftStatementDispatchCycle(
   options: { organisationId?: string } = {},
 ): Promise<ShiftStatementDispatchResult> {
   const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
-  const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, (m) =>
-    m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`),
-  options.organisationId);
+  const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, async (m) => {
+    const rows = await m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`);
+    // #24: a full discovery page (200) means more due records may remain in this workspace (global-mode follow-up sweep).
+    if (rows.length >= STATEMENT_DISCOVERY_LIMIT) noteLegacyBatchLimitReached();
+    return rows;
+  }, options.organisationId);
   await claimAndPublishCandidates(tenantContext, candidates, publish, result);
   return result;
 }

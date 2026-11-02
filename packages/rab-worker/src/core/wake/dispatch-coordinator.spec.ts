@@ -1,4 +1,5 @@
-import { DispatchCoordinator, DispatchQueueBinding } from './dispatch-coordinator';
+import { DispatchCoordinator, DispatchQueueBinding, RECONCILE_RETRY_AFTER_FAILURE_MS } from './dispatch-coordinator';
+import { noteLegacyBatchLimitReached } from './legacy-batch-limit';
 
 /**
  * Phase D (D1/D2) — the per-process dispatch coordinator: scan ticks (poll / backstop), the slow legacy reconciliation
@@ -224,7 +225,7 @@ describe('DispatchCoordinator', () => {
     const coordinator = new DispatchCoordinator([binding('email', store, [])], { claimer: store, batch: 10, reconcileMs: 900_000, logger, now: () => 0, debounceMs: 0, executeWake });
     coordinator.wake('email');
     await settle();
-    expect(executeWake).toHaveBeenCalledWith('email', expect.any(Function));
+    expect(executeWake).toHaveBeenCalledWith('email', expect.any(Function), 'wake');
   });
 
   it('a failed legacy sweep does not stop the global claim; the tick still fails (counted) and the sweep retries after a minute, not every tick', async () => {
@@ -359,5 +360,261 @@ describe('DispatchCoordinator — F-W4-1 (single-organisation backlog)', () => {
     expect(store.claimCalls).toBe(2);
     await settle();
     expect(store.claimCalls).toBe(2);
+  });
+});
+
+/**
+ * #24 — bounded, fair follow-up reconciliation. A model of the POINTERLESS backlog the legacy sweep drains: one pass
+ * takes at most `batch` rows per organisation (the per_scope cycle; the take is atomic, as SKIP LOCKED + the state
+ * transition make it on the server) and notes a FULL batch through the real `noteLegacyBatchLimitReached`.
+ */
+class PointerlessBacklog {
+  readonly remaining = new Map<string, number>();
+  readonly passes: Array<Record<string, number>> = [];
+  readonly passTimes: number[] = [];
+  failNext = 0;
+  inFlight = 0;
+  maxInFlight = 0;
+
+  constructor(private readonly batch: number, private readonly clock?: { now: number }) {}
+
+  add(org: string, n: number): this {
+    this.remaining.set(org, (this.remaining.get(org) ?? 0) + n);
+    return this;
+  }
+
+  get total(): number {
+    return [...this.remaining.values()].reduce((a, b) => a + b, 0);
+  }
+
+  sweep = async (): Promise<boolean> => {
+    this.inFlight += 1;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    try {
+      await Promise.resolve();
+      if (this.failNext > 0) {
+        this.failNext -= 1;
+        throw new Error('connection terminated'); // PostgreSQL restart / lost session mid-sweep
+      }
+      const taken: Record<string, number> = {};
+      let any = false;
+      for (const [org, n] of this.remaining) {
+        const t = Math.min(this.batch, n);
+        this.remaining.set(org, n - t);
+        taken[org] = t;
+        if (t > 0) any = true;
+        if (t >= this.batch) noteLegacyBatchLimitReached();
+      }
+      this.passes.push(taken);
+      if (this.clock) this.passTimes.push(this.clock.now);
+      return any;
+    } finally {
+      this.inFlight -= 1;
+    }
+  };
+}
+
+const ORG_B = '00000000-0000-4000-8000-00000000000b';
+const ORG_C = '00000000-0000-4000-8000-00000000000c';
+const DELAY = 5_000;
+const WINDOW = 900_000;
+
+/** A coordinator over the backlog model with a controllable clock and timers (no pointers: the global claim finds nothing). */
+function backlogCoordinator(
+  backlog: PointerlessBacklog,
+  clock: { now: number },
+  timers = manualTimers(),
+  extra: Partial<ConstructorParameters<typeof DispatchCoordinator>[1]> = {},
+  legacy: DispatchQueueBinding['legacy'] = backlog.sweep,
+) {
+  const store = new FakePointerStore(30_000);
+  const warn = jest.fn();
+  const executeWake = jest.fn((_q: string, run: () => Promise<boolean>) => run());
+  const coordinator = new DispatchCoordinator([{ queue: 'email', legacy, processScope: async () => 0 }], {
+    claimer: store, batch: 100, reconcileMs: WINDOW, logger: { log: jest.fn(), warn }, now: () => clock.now, debounceMs: 0,
+    followUpDelayMs: DELAY, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, executeWake, ...extra,
+  });
+  /** Advance the clock by `ms`, then fire the pending follow-up timer (it was set `DELAY` ms ahead). */
+  const advance = async (ms = DELAY) => {
+    clock.now += ms;
+    await timers.flush();
+    await coordinator.idle();
+  };
+  /** Drive follow-ups until none is pending (bounded). */
+  const drain = async (max = 100) => {
+    for (let i = 0; i < max && timers.size > 0; i += 1) await advance();
+  };
+  return { coordinator, timers, warn, executeWake, advance, drain, store };
+}
+
+describe('DispatchCoordinator — #24 bounded, fair follow-up reconciliation', () => {
+  it('0 pointerless rows: one sweep, no follow-up, and regular poll ticks add no sweep until the window ends (idle-neutral)', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50);
+    const { coordinator, timers } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    expect(backlog.passes).toHaveLength(1);
+    expect(timers.size).toBe(0);
+    for (clock.now = 2_000; clock.now < WINDOW; clock.now += 2_000) await coordinator.tick('email'); // poll every 2 s
+    expect(backlog.passes).toHaveLength(1);
+    clock.now = WINDOW;
+    await coordinator.tick('email');
+    expect(backlog.passes).toHaveLength(2);
+  });
+
+  it.each([
+    [49, 1],
+    [50, 2], // a full batch is followed by one confirming pass that finds the rest empty
+    [51, 2],
+    [500, 11], // 10 full passes + the confirming pass
+  ])('%i pointerless rows in one organisation drain in %i sweep(s), each at most one batch, DELAY apart, inside the window', async (rows, sweeps) => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, rows);
+    const { coordinator, timers, drain } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    await drain();
+    expect(backlog.total).toBe(0);
+    expect(backlog.passes).toHaveLength(sweeps);
+    expect(backlog.passes.every((p) => (p[ORG] ?? 0) <= 50)).toBe(true);
+    expect(backlog.passTimes).toEqual(Array.from({ length: sweeps }, (_, i) => i * DELAY));
+    expect(backlog.passTimes[sweeps - 1]!).toBeLessThan(WINDOW);
+    expect(timers.size).toBe(0); // the chain ends: back to the regular cadence
+  });
+
+  it('fair across organisations: every sweep takes one batch from EACH organisation with work, so a large backlog never starves a small one', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 500).add(ORG_B, 30).add(ORG_C, 120);
+    const { coordinator, drain } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    await drain();
+    expect(backlog.total).toBe(0);
+    expect(backlog.passes[0]).toEqual({ [ORG]: 50, [ORG_B]: 30, [ORG_C]: 50 }); // the small ones are served in the FIRST sweep
+    expect(backlog.passes[2]).toEqual({ [ORG]: 50, [ORG_B]: 0, [ORG_C]: 20 }); // C done at sweep 3
+    expect(backlog.passes).toHaveLength(11); // A (500) bounds the episode
+  });
+
+  it('bounded: at most maxFollowUpsPerInterval follow-ups per window, a warning, then the rest waits for the next window (no loop)', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 500);
+    const { coordinator, timers, warn, drain } = backlogCoordinator(backlog, clock, manualTimers(), { maxFollowUpsPerInterval: 3 });
+    await coordinator.tick('email');
+    await drain();
+    expect(backlog.passes).toHaveLength(4); // 1 regular + 3 follow-ups
+    expect(timers.size).toBe(0);
+    expect(warn.mock.calls.map((c) => c[0] as string).filter((m) => m.includes('follow-up budget exhausted'))).toHaveLength(1);
+    for (clock.now += 2_000; clock.now < WINDOW; clock.now += 30_000) await coordinator.tick('email');
+    expect(backlog.passes).toHaveLength(4); // no sweep before the window ends, however many ticks
+    clock.now = WINDOW;
+    await coordinator.tick('email'); // a new window: a fresh budget
+    await drain();
+    expect(backlog.passes).toHaveLength(8);
+    expect(backlog.total).toBe(500 - 8 * 50);
+  });
+
+  it('maxFollowUpsPerInterval = 0 keeps the pre-#24 behaviour: one sweep per window', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 500);
+    const { coordinator, timers } = backlogCoordinator(backlog, clock, manualTimers(), { maxFollowUpsPerInterval: 0 });
+    await coordinator.tick('email');
+    expect(timers.size).toBe(0);
+    expect(backlog.passes).toHaveLength(1);
+  });
+
+  it('poll ticks between follow-ups never add sweeps: a tick before the follow-up is due sweeps nothing; one after it runs the follow-up once', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 120);
+    const { coordinator, timers, advance } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    clock.now = 2_000;
+    await coordinator.tick('email'); // not due yet
+    expect(backlog.passes).toHaveLength(1);
+    clock.now = DELAY;
+    await coordinator.tick('email'); // due: the tick runs the follow-up and schedules the next one (old timer replaced)
+    expect(backlog.passes).toHaveLength(2);
+    expect(timers.size).toBe(1);
+    await advance(DELAY);
+    expect(backlog.passes).toHaveLength(3);
+    expect(backlog.total).toBe(0);
+    expect(backlog.maxInFlight).toBe(1);
+  });
+
+  it('follow-ups run through the injected executor as trigger "reconcile" (main.ts: scan slot, metrics, shutdown drain)', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 60);
+    const { coordinator, executeWake, drain } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    await drain();
+    expect(executeWake).toHaveBeenCalledWith('email', expect.any(Function), 'reconcile');
+  });
+
+  it('a sweep that fails mid-drain (PostgreSQL restart) schedules no follow-up, retries on the 60 s cadence and loses nothing', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 300);
+    const { coordinator, timers, advance, drain } = backlogCoordinator(backlog, clock);
+    await coordinator.tick('email');
+    backlog.failNext = 1;
+    await advance(); // the follow-up sweep throws
+    expect(backlog.passes).toHaveLength(1);
+    expect(timers.size).toBe(0);
+    clock.now += 30_000;
+    await coordinator.tick('email');
+    expect(backlog.passes).toHaveLength(1); // not before the retry delay
+    clock.now = DELAY + RECONCILE_RETRY_AFTER_FAILURE_MS;
+    await coordinator.tick('email');
+    await drain();
+    expect(backlog.total).toBe(0);
+    expect(backlog.passes).toHaveLength(7); // 300 = 6 full sweeps + the confirming one
+  });
+
+  it('Worker interruption: stop() cancels the pending follow-up; a restarted Worker sweeps on its first tick and finishes the drain', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 500);
+    const first = backlogCoordinator(backlog, clock);
+    await first.coordinator.tick('email');
+    await first.advance();
+    await first.advance();
+    expect(backlog.passes).toHaveLength(3);
+    first.coordinator.stop();
+    expect(first.timers.size).toBe(0);
+    await first.advance();
+    expect(backlog.passes).toHaveLength(3); // nothing ran after stop()
+    const second = backlogCoordinator(backlog, clock); // the restarted process
+    await second.coordinator.tick('email');
+    await second.drain();
+    expect(backlog.total).toBe(0);
+    expect(backlog.passes).toHaveLength(11);
+  });
+
+  it('two Worker replicas drain one backlog together: each runs one sweep loop at a time, each within its own budget', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50).add(ORG, 500).add(ORG_B, 75);
+    const shared = manualTimers();
+    const a = backlogCoordinator(backlog, clock, shared);
+    const b = backlogCoordinator(backlog, clock, shared);
+    await Promise.all([a.coordinator.tick('email'), b.coordinator.tick('email')]);
+    for (let i = 0; i < 40 && shared.size > 0; i += 1) {
+      clock.now += DELAY;
+      await shared.flush();
+      await Promise.all([a.coordinator.idle(), b.coordinator.idle()]);
+    }
+    expect(backlog.total).toBe(0);
+    expect(backlog.passes.length).toBeLessThanOrEqual(2 * 31);
+    expect(backlog.passes.reduce((sum, p) => sum + (p[ORG] ?? 0) + (p[ORG_B] ?? 0), 0)).toBe(575); // every row taken exactly once
+  });
+
+  it('stop() during a sweep that reaches its limit schedules no follow-up', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 500);
+    const timers = manualTimers();
+    let stopNow: () => void = () => undefined;
+    const { coordinator } = backlogCoordinator(backlog, clock, timers, {}, async () => {
+      const result = await backlog.sweep();
+      stopNow();
+      return result;
+    });
+    stopNow = () => coordinator.stop();
+    await coordinator.tick('email');
+    expect(backlog.passes).toHaveLength(1);
+    expect(timers.size).toBe(0);
   });
 });

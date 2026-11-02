@@ -342,13 +342,14 @@ async function bootstrap(): Promise<void> {
         runtime.metrics.increment(jobName, 'claimsRepeated', stats.repeatedClaims);
         runtime.metrics.increment(jobName, 'claimsOver20', stats.highClaimCount);
       },
-      executeWake: (queue, run) => {
+      // `trigger`: 'wake' (NOTIFY hint, claim follow-up) or 'reconcile' (#24 follow-up reconciliation sweep).
+      executeWake: (queue, run, trigger) => {
         const def = defByQueue.get(queue)!;
         return runtime.runOnce({
-          name: `${def.name} (wake)`,
+          name: `${def.name} (${trigger})`,
           intervalMs: 0,
           statKeys: { lastRunAt: def.statKeys.lastRunAt, failures: def.statKeys.failures },
-          metricKey: `${def.jobName}:wake`,
+          metricKey: `${def.jobName}:${trigger}`,
           run: () => run(),
         });
       },

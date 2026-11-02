@@ -7,6 +7,7 @@ import { storageScopes, MaintenanceScope } from '@rab/server/engine/worker-share
 import { runScopedForOrg } from '../../core/database/scoped-job';
 import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent } from '../../core/database/realtime-event';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 /**
  * Stage 2 — the Redis Pub/Sub publisher for `core.realtime_event`
@@ -155,6 +156,8 @@ export async function publishRealtimeScope(
   const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
     claimRealtimeEvents(manager, { limit, claimToken, leaseSeconds, ...(opts.ids !== undefined ? { ids: opts.ids } : {}) }),
   );
+  // #24: a full per_scope batch means more due events may remain in this scope (global-mode follow-up sweep).
+  if (opts.ids === undefined && claimed.length >= limit) noteLegacyBatchLimitReached();
   if (claimed.length === 0) return result;
   result.claimed += claimed.length;
   for (const event of claimed) {
