@@ -216,6 +216,7 @@ describe('Phase D dispatch pointer SQL — privilege shape (offline)', () => {
       '1786721310000-WorkerDispatchPointerOutboxTriggers.ts',
       '1786721320000-StatementDispatchPointer.ts',
       '1786721340000-AccountInviteCleanupDefiner.ts',
+      '1786721350000-StatementPointerPhysicalIdentity.ts', // F2, owner-approved 2026-11-01
     ]);
     const sources = [...files.map((f) => readFileSync(join(__dirname, 'migrations', f), 'utf8')), readFileSync(join(__dirname, 'worker-dispatch-pointer-sql.ts'), 'utf8')];
     for (const s of sources) expect(migrationSourceViolations(s)).toEqual([]);

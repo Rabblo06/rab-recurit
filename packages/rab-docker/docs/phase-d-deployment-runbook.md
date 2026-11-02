@@ -144,8 +144,9 @@ suspected exposure.
 | 2 | 1786721310000 `WorkerDispatchPointerOutboxTriggers` | Triggers on the email, push and realtime outboxes. |
 | 3 | 1786721320000 `StatementDispatchPointer` | Workspace module v1.019: payroll-statement pointer trigger (core and workspace schemas). |
 | 4 | 1786721340000 `AccountInviteCleanupDefiner` | Invite expiry / deletion definers. They are never called while `WORKER_INVITE_AUTO_DELETE_ENABLED=false`. |
+| 5 | 1786721350000 `StatementPointerPhysicalIdentity` | Finding F2 fix (§6): pointer identity = (queue, subject id, source schema), copy-scoped trigger writes and deletes, per-row claim token. Core only; v19 fingerprint and posture unchanged. |
 
-All four ship in one release and are applied in this order through the **normal approved migration path**: the
+All five ship in one release and are applied in this order through the **normal approved migration path**: the
 one-off migration service with the migration-only login, and the per-migration production approval. Never with an
 application login and never by hand.
 
@@ -293,8 +294,26 @@ environment, and its prerequisites (OD-2) must be in place first.
 - The affected statement then waits for the reconcile sweep, for up to one reconcile interval (≤ 900 s). This is an
   availability effect only, and per_scope mode is unaffected.
 
-A proposed SQL fix (scope-aware pointer identity, migration 1786721350000) is under review; until it is approved and
-applied, this restriction is mandatory.
+**Fix: migration 1786721350000 (`StatementPointerPhysicalIdentity`), owner-approved 2026-11-01.** It ships in the same
+release as the other Phase D migrations. The pointer identity becomes the physical source row (queue, subject id,
+source schema); every trigger write and delete is scoped to its own copy, and a generated statement retires the same
+record's other copies' pointers in the same workspace. Until 1350000 is applied in an environment, the rule above is
+mandatory there. Applying it removes existing statement pointers once (their source is unknown); per_scope never reads
+them, so apply it before global activation, as the release order already does.
+
+**After 1350000: HWS cutover sweep.** A copy that is due but never routed (for example a frozen `core` copy after a
+workspace moved to its schema) keeps its own pointer and is re-claimed every lease. It shows up as OD-1 `claim_count`
+alerts (§7), not silently. After switching a workspace to its schema, and after dropping a workspace schema, run as
+`rab_secure_owner` (W = the workspace id):
+
+```sql
+DELETE FROM core.worker_dispatch_pointer
+ WHERE queue = 'statement' AND workspace_id = $1::uuid
+   AND source_schema IS DISTINCT FROM 'workspace_' || replace($1::text, '-', '');
+```
+
+Do not generate statements for both copies of one record by hand at the same time: the two transactions can deadlock
+(PostgreSQL aborts one). The Worker never does this.
 
 ## 7. Monitoring
 
@@ -402,14 +421,14 @@ Use this image rollback only with the owner exception, and keep it as short as p
 | Provisioning | Background provisioning cycles pause while jobs-only. In the rehearsal, new workspaces were still created through the API's server path, but that path does not exist in production (server-path provisioning is not approved there). **In production, new workspaces stay CREATING for the whole duration of the rollback**, until the Phase D Worker image, with its provisioner, runs again. |
 | Risk | The redeploy itself is low risk. In production it suspends workspace provisioning for its duration, and it cannot be ended by rolling the schema back. The triggers keep writing pointers, so the write cost continues while nothing reads them (§9 still applies). |
 
-### 8.4 Database migration rollback (`down()` of 1786721340000 → 1786721320000 → 1786721310000 → 1786721300000)
+### 8.4 Database migration rollback (`down()` of 1786721350000 → 1786721340000 → 1786721320000 → 1786721310000 → 1786721300000)
 
 **Not instantaneous and not risk-free.** Use it only if the release is abandoned or the trigger cost must be removed.
 
 A migration rollback removes the trigger write cost. It does **not** make the previous Worker image deployable again:
 workspaces stay at module 19, and the previous provisioner refuses any READY workspace above its module (§8.3). The
 Phase D images cannot run either: the API and Worker refuse to start while migrations they know are pending, and after
-the `down()`s the four Phase D migrations are pending to them. So after a migration rollback the only runnable
+the `down()`s the five Phase D migrations are pending to them. So after a migration rollback the only runnable
 combination is **the previous API image plus the previous Worker image in jobs-only mode** (the §8.3 owner exception; in
 production, workspace provisioning stays suspended) until the migrations are re-applied in an approved release. Treat a
 migration rollback as a last resort.
@@ -417,12 +436,12 @@ migration rollback as a last resort.
 | | |
 |---|---|
 | Preconditions | Its own approval and a planned maintenance window. Every Worker in per_scope (§8.1), because the claim functions disappear. No global-mode or event-mode process running. An operator identity that can `SET ROLE rab_secure_owner` (or the bootstrap superuser). A verified backup. A staging rehearsal on a **production-sized** copy. The previous API image and the previous Worker image in jobs-only mode ready, with the §8.3 owner exception approved (the Phase D images refuse pending migrations after the `down()`s). |
-| Steps | Run the four `down()`s in reverse order through the approved migration path. Then verify the ledger, the security posture against the previous release's golden file, and that pending outbox rows and payroll records are intact. |
+| Steps | Run the five `down()`s in reverse order (1350000 first: it restores the approved statement body before 1320000 makes it inert) through the approved migration path. Then verify the ledger, the security posture against the previous release's golden file, and that pending outbox rows and payroll records are intact. |
 | What it does | Drops the pointer table, the outbox triggers and the Phase D definers; pointer data is discarded (acceptable, because the rows are the truth). 1786721320000's `down()` restores the previous `provision_workspace` body and **leaves the statement trigger function in place with an inert body (`RETURN NULL`)**. Its triggers stay attached in `core` and in every workspace that reached module 19, because workspaces keep module 19 (append-only ledger). This residue is by approved design. |
-| Locking | DROP TRIGGER and DROP TABLE take **ACCESS EXCLUSIVE** locks on the outbox tables, so writes to them wait while each statement runs. On a disposable database each `down()` took 37–53 ms; the duration on production-sized data has not been measured and must be measured on the staging rehearsal. |
+| Locking | DROP TRIGGER and DROP TABLE take **ACCESS EXCLUSIVE** locks on the outbox tables, so writes to them wait while each statement runs. On a disposable database the four original `down()`s took 32–60 ms and 1350000's took about 1 s (it rebuilds the pointer primary key, ACCESS EXCLUSIVE on the pointer table only); the duration on production-sized data has not been measured and must be measured on the staging rehearsal. |
 | Partial failure | Stops inside the failed migration's transaction; the earlier `down()`s stay applied. Re-run, or re-apply forward. |
 | What keeps processing | Pending outbox rows and payroll records are untouched (tested), and per_scope Workers keep processing throughout. The account-invite cleanup returns to its pre-Phase-D no-op; deletion was never enabled. |
-| Evidence | **Tested only on disposable databases.** A live round trip on a disposable database passed 18/18 checks. The posture returned to the previous golden file except the documented inert-trigger residue. A pending email and a module-19 workspace survived. Re-applying returned the exact golden posture and fingerprint, and a second module-19 workspace built. Not yet rehearsed on a production-sized copy. |
+| Evidence | **Tested only on disposable databases.** A live round trip of all five migrations on a disposable database passed 19/19 checks (2026-11-01, with 1350000). The posture returned to the previous golden file except the documented inert-trigger residue. A pending email and a module-19 workspace survived. Re-applying returned the exact golden posture and fingerprint, and a second module-19 workspace built. Not yet rehearsed on a production-sized copy. |
 | Risk | Not instantaneous and not risk-free: writes to the outbox tables wait during the drops, the previous Worker image stays undeployable with its provisioner on, and re-applying later is another approved migration release. |
 
 ## 9. The 14-day maximum
@@ -475,7 +494,7 @@ Each item is a separate owner decision. Nothing on this list is approved by this
 | # | Approval | Staging | Production |
 |---|---|---|---|
 | 1 | `crewflow_worker` creation (§3) | [ ] | [ ] |
-| 2 | Migration release: 1786721300000, 1786721310000, 1786721320000, 1786721340000 (§4) | [ ] | [ ] |
+| 2 | Migration release: 1786721300000, 1786721310000, 1786721320000, 1786721340000, 1786721350000 (§4) | [ ] | [ ] |
 | 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9) | [ ] | [ ] |
 
 Environment-independent decisions:
@@ -486,7 +505,7 @@ Environment-independent decisions:
 - [ ] Invite auto-delete retention policy (`WORKER_INVITE_AUTO_DELETE_ENABLED`): grace period, eligibility, audit
   wording, rollback and monitoring. Production refuses `true` until then.
 - [ ] SMTP post-DATA duplicate policy (§10).
-- [ ] F2 SQL fix: scope-aware pointer identity, migration 1786721350000 (§6).
+- [x] F2 SQL fix: physical pointer identity, migration 1786721350000 (§6), owner-approved 2026-11-01 (option C).
 - [ ] F3: a database-side switch (and in-definer audit) for the invite-cleanup definers. Today the flag and the audit
   live only in the Worker.
 - [ ] Send-time realtime recipient re-authorisation (§10).

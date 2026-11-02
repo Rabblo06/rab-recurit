@@ -1161,3 +1161,370 @@ export const ALL_SECURE_FUNCTION_SQL: Readonly<Record<string, string>> = {
   invite_candidates: INVITE_CANDIDATES_SQL,
   invite_delete: INVITE_DELETE_SQL,
 };
+
+
+// =====================================================================================================================
+// F2 (PROPOSED, NOT APPROVED, NOT RUN): migration 1786721350000-StatementPointerPhysicalIdentity. The approved constants
+// above stay byte-identical (1786721300000 / 1310000 / 1320000 import them); 1350000 uses only the F2_* builders below.
+// Pointer identity = the physical source row: (queue, subject_id, source_schema), where source_schema is 'core' or the
+// row's own 'workspace_<hex>' (checked by the statement trigger's place guard and by worker_dispatch_pointer_source_check).
+// A write to one copy of a payroll_record therefore only ever touches that copy's own pointer. Sibling retirement: when a
+// copy's statement_file_id is set, the same record's other copies in the SAME workspace lose their pointers, because
+// generation is fenced per record id across copies (core.worker_event.event_key 'shift-statement:<id>' is UNIQUE). These
+// notes live here, not in the SQL bodies: Phase 0b R4 scans function bodies word by word, comments included.
+// The claim gives every claimed row its own token, so a release can only ever re-time the row it was handed.
+// =====================================================================================================================
+function f2UpsertSql(q: DispatchQueueLabel, ws: string, src: string): string {
+  return `  INSERT INTO core.worker_dispatch_pointer AS w (queue, subject_id, source_schema, organisation_id, workspace_id, due_at)
+  VALUES ('${q}', NEW.id, ${src}, NEW.organisation_id, ${ws}, v_due)
+  ON CONFLICT (queue, subject_id, source_schema) DO UPDATE
+     SET organisation_id = EXCLUDED.organisation_id,
+         workspace_id = EXCLUDED.workspace_id,
+         due_at = EXCLUDED.due_at,
+         claim_token = NULL,
+         claimed_at = NULL,
+         repoint_count = w.repoint_count
+           + CASE WHEN w.organisation_id IS DISTINCT FROM EXCLUDED.organisation_id
+                    OR w.workspace_id IS DISTINCT FROM EXCLUDED.workspace_id THEN 1 ELSE 0 END,
+         updated_at = pg_catalog.now();`;
+}
+
+function f2OutboxTriggerFunctionSql(t: OutboxTrigger): string {
+  const ws = t.workspaceScoped ? 'NEW.workspace_id' : 'NULL::uuid';
+  const scopeChanged = t.workspaceScoped
+    ? 'OLD.id IS DISTINCT FROM NEW.id OR OLD.organisation_id IS DISTINCT FROM NEW.organisation_id OR OLD.workspace_id IS DISTINCT FROM NEW.workspace_id'
+    : 'OLD.id IS DISTINCT FROM NEW.id OR OLD.organisation_id IS DISTINCT FROM NEW.organisation_id';
+  const pairing = t.workspaceScoped
+    ? `
+  IF NEW.workspace_id IS NOT NULL THEN
+    SELECT mw.organisation_id INTO v_ws_org FROM core.manager_workspace mw WHERE mw.id = NEW.workspace_id;
+    IF v_ws_org IS DISTINCT FROM NEW.organisation_id THEN
+      ${SCOPE_MISMATCH_ERROR};
+    END IF;
+  END IF;`
+    : '';
+  return `CREATE OR REPLACE FUNCTION core.worker_dispatch_pointer_${t.queue}_trg()
+RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_due timestamptz;${t.workspaceScoped ? '\n  v_ws_org uuid;' : ''}
+BEGIN
+  IF TG_TABLE_SCHEMA IS DISTINCT FROM 'core' OR TG_TABLE_NAME IS DISTINCT FROM '${t.table}' OR TG_WHEN IS DISTINCT FROM 'AFTER' THEN
+    ${PLACE_ERROR};
+  END IF;
+  IF TG_OP = 'TRUNCATE' THEN
+    IF TG_LEVEL IS DISTINCT FROM 'STATEMENT' THEN
+      ${PLACE_ERROR};
+    END IF;
+    DELETE FROM core.worker_dispatch_pointer w WHERE w.queue = '${t.queue}';
+    RETURN NULL;
+  END IF;
+  IF TG_LEVEL IS DISTINCT FROM 'ROW' THEN
+    ${PLACE_ERROR};
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+${typeGuards('OLD', [['id', 'uuid']])}
+    DELETE FROM core.worker_dispatch_pointer w WHERE w.queue = '${t.queue}' AND w.subject_id = OLD.id;
+    RETURN NULL;
+  END IF;
+${typeGuards('NEW', t.columns)}
+  IF TG_OP = 'UPDATE' THEN
+    IF ${scopeChanged} THEN
+      ${SCOPE_CHANGE_ERROR};
+    END IF;
+  END IF;
+  v_due := ${t.due};
+  IF v_due IS NULL THEN
+    DELETE FROM core.worker_dispatch_pointer w WHERE w.queue = '${t.queue}' AND w.subject_id = NEW.id;
+    RETURN NULL;
+  END IF;${pairing}
+${f2UpsertSql(t.queue, ws, "'core'")}
+${notifyBlock(t.queue)}
+  RETURN NULL;
+END
+$fn$`;
+}
+
+export const F2_CLAIM_IMPL_SQL = `CREATE OR REPLACE FUNCTION ${IMPL_SIGNATURE.replace('(text, integer, integer, integer)', '(p_queue text, p_limit integer, p_lease_seconds integer, p_per_org integer)')}
+RETURNS TABLE (${CLAIM_COLUMNS})
+LANGUAGE plpgsql VOLATILE SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+#variable_conflict error
+DECLARE
+  v_limit   integer;
+  v_now     timestamptz := pg_catalog.clock_timestamp();
+  v_lease   timestamptz;
+  v_pivot   uuid := pg_catalog.gen_random_uuid();
+  v_orgs    uuid[] := ARRAY[]::uuid[];
+  v_cursor  uuid := NULL;
+  v_next    uuid;
+  v_due     timestamptz;
+  v_steps   integer := 0;
+  v_wrapped boolean := false;
+BEGIN
+  IF p_queue IS NULL OR p_queue NOT IN (${QUEUE_LIST}) THEN
+    RAISE EXCEPTION 'worker dispatch claim: unknown queue' USING ERRCODE = '22023';
+  END IF;
+  IF p_lease_seconds IS NULL OR p_lease_seconds NOT BETWEEN 5 AND 300 OR p_per_org IS NULL OR p_per_org NOT BETWEEN 1 AND 50 THEN
+    RAISE EXCEPTION 'worker dispatch claim: invalid server-side lease or cap' USING ERRCODE = '22023';
+  END IF;
+  v_limit := LEAST(GREATEST(COALESCE(p_limit, ${CLAIM_BATCH_DEFAULT}), 1), ${CLAIM_BATCH_MAX});
+
+  LOOP
+    EXIT WHEN pg_catalog.cardinality(v_orgs) >= v_limit OR v_steps >= ${CLAIM_MAX_ORG_STEPS};
+    v_steps := v_steps + 1;
+    v_next := NULL;
+    v_due := NULL;
+    IF NOT v_wrapped THEN
+      IF v_cursor IS NULL THEN
+        SELECT p.organisation_id, p.due_at INTO v_next, v_due
+          FROM core.worker_dispatch_pointer p
+         WHERE p.queue = p_queue AND p.organisation_id >= v_pivot
+         ORDER BY p.organisation_id, p.due_at
+         LIMIT 1;
+      ELSE
+        SELECT p.organisation_id, p.due_at INTO v_next, v_due
+          FROM core.worker_dispatch_pointer p
+         WHERE p.queue = p_queue AND p.organisation_id > v_cursor
+         ORDER BY p.organisation_id, p.due_at
+         LIMIT 1;
+      END IF;
+      IF v_next IS NULL THEN
+        v_wrapped := true;
+        v_cursor := NULL;
+        CONTINUE;
+      END IF;
+    ELSE
+      IF v_cursor IS NULL THEN
+        SELECT p.organisation_id, p.due_at INTO v_next, v_due
+          FROM core.worker_dispatch_pointer p
+         WHERE p.queue = p_queue AND p.organisation_id < v_pivot
+         ORDER BY p.organisation_id, p.due_at
+         LIMIT 1;
+      ELSE
+        SELECT p.organisation_id, p.due_at INTO v_next, v_due
+          FROM core.worker_dispatch_pointer p
+         WHERE p.queue = p_queue AND p.organisation_id > v_cursor AND p.organisation_id < v_pivot
+         ORDER BY p.organisation_id, p.due_at
+         LIMIT 1;
+      END IF;
+      EXIT WHEN v_next IS NULL;
+    END IF;
+    v_cursor := v_next;
+    IF v_due <= v_now THEN
+      v_orgs := v_orgs || v_next;
+    END IF;
+  END LOOP;
+
+  IF pg_catalog.cardinality(v_orgs) = 0 THEN
+    RETURN;
+  END IF;
+
+  v_lease := pg_catalog.clock_timestamp();
+  RETURN QUERY
+  WITH cand AS MATERIALIZED (
+    SELECT x.sid, x.src, x.due
+      FROM pg_catalog.unnest(v_orgs) AS o(org)
+      CROSS JOIN LATERAL (
+        SELECT p.subject_id AS sid, p.source_schema AS src, p.due_at AS due
+          FROM core.worker_dispatch_pointer p
+         WHERE p.queue = p_queue AND p.organisation_id = o.org AND p.due_at <= v_now
+         ORDER BY p.due_at
+         LIMIT p_per_org) x
+     ORDER BY x.due
+     LIMIT v_limit
+  ), picked AS MATERIALIZED (
+    SELECT p.subject_id AS sid, p.source_schema AS src
+      FROM core.worker_dispatch_pointer p
+      JOIN cand c ON c.sid = p.subject_id AND c.src = p.source_schema
+     WHERE p.queue = p_queue AND p.due_at <= v_now
+     FOR UPDATE OF p SKIP LOCKED
+  )
+  UPDATE core.worker_dispatch_pointer w
+     SET due_at = v_lease + pg_catalog.make_interval(secs => p_lease_seconds),
+         claim_token = pg_catalog.gen_random_uuid(),
+         claim_count = w.claim_count + 1,
+         claimed_at = v_lease,
+         updated_at = v_lease
+    FROM picked k
+   WHERE w.queue = p_queue AND w.subject_id = k.sid AND w.source_schema = k.src
+  RETURNING w.subject_id, w.organisation_id, w.workspace_id, w.claim_token, w.claim_count;
+END
+$fn$`;
+
+export const F2_STATEMENT_TRIGGER_FUNCTION_SQL = `CREATE OR REPLACE FUNCTION ${STATEMENT_TRIGGER_FUNCTION}
+RETURNS trigger
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_due timestamptz;
+  v_ws_org uuid;
+  v_ws uuid;
+  v_src text;
+BEGIN
+  IF TG_TABLE_NAME IS DISTINCT FROM 'payroll_record' OR TG_WHEN IS DISTINCT FROM 'AFTER' THEN
+    ${PLACE_ERROR};
+  END IF;
+  IF (SELECT n.nspowner FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = TG_RELID)
+       IS DISTINCT FROM 'rab_secure_owner'::pg_catalog.regrole::pg_catalog.oid THEN
+    ${PLACE_ERROR};
+  END IF;
+  IF TG_OP = 'TRUNCATE' THEN
+    IF TG_LEVEL IS DISTINCT FROM 'STATEMENT' THEN
+      ${PLACE_ERROR};
+    END IF;
+    IF TG_TABLE_SCHEMA = 'core' THEN
+      DELETE FROM core.worker_dispatch_pointer w WHERE w.queue = 'statement' AND w.source_schema = 'core';
+    ELSIF TG_TABLE_SCHEMA ~ '^workspace_[0-9a-f]{32}$' THEN
+      DELETE FROM core.worker_dispatch_pointer w
+       WHERE w.queue = 'statement' AND w.source_schema = TG_TABLE_SCHEMA
+         AND w.workspace_id = (pg_catalog.substr(TG_TABLE_SCHEMA, 11))::uuid;
+    ELSE
+      ${PLACE_ERROR};
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF TG_LEVEL IS DISTINCT FROM 'ROW' THEN
+    ${PLACE_ERROR};
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+${typeGuards('OLD', [['id', 'uuid'], ['organisation_id', 'uuid'], ['workspace_id', 'uuid']])}
+    v_ws := OLD.workspace_id;
+  ELSE
+${typeGuards('NEW', [
+  ['id', 'uuid'],
+  ['organisation_id', 'uuid'],
+  ['workspace_id', 'uuid'],
+  ['status', 'text'],
+  ['statement_status', 'text'],
+  ['statement_file_id', 'uuid'],
+  ['statement_attempts', 'int4'],
+  ['statement_queued_at', 'timestamptz'],
+  ['statement_processing_at', 'timestamptz'],
+  ['updated_at', 'timestamptz'],
+])}
+    v_ws := NEW.workspace_id;
+  END IF;
+  IF TG_TABLE_SCHEMA IS DISTINCT FROM 'core'
+     AND TG_TABLE_SCHEMA IS DISTINCT FROM ('workspace_' || pg_catalog.replace(v_ws::text, '-', '')) THEN
+    ${PLACE_ERROR};
+  END IF;
+  v_src := TG_TABLE_SCHEMA;
+  IF TG_OP = 'DELETE' THEN
+    DELETE FROM core.worker_dispatch_pointer w
+     WHERE w.queue = 'statement' AND w.subject_id = OLD.id AND w.source_schema = v_src;
+    RETURN NULL;
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.id IS DISTINCT FROM NEW.id OR OLD.organisation_id IS DISTINCT FROM NEW.organisation_id OR OLD.workspace_id IS DISTINCT FROM NEW.workspace_id THEN
+      ${SCOPE_CHANGE_ERROR};
+    END IF;
+    IF OLD.statement_file_id IS NULL AND NEW.statement_file_id IS NOT NULL THEN
+      DELETE FROM core.worker_dispatch_pointer w
+       WHERE w.queue = 'statement' AND w.subject_id = NEW.id AND w.workspace_id = NEW.workspace_id
+         AND w.source_schema <> v_src;
+    END IF;
+  END IF;
+  v_due := NULL;
+  IF NEW.workspace_id IS NOT NULL AND NEW.status IN ('approved', 'processing', 'paid') AND NEW.statement_file_id IS NULL THEN
+    v_due := CASE
+      WHEN NEW.statement_status IN ('none', 'pending') THEN pg_catalog.now()
+      WHEN NEW.statement_status IN ('queued', 'processing')
+        THEN COALESCE(NEW.statement_processing_at, NEW.statement_queued_at, NEW.updated_at) + pg_catalog.make_interval(mins => ${DUE_CONSTANTS.statementLeaseMinutes})
+      WHEN NEW.statement_status = 'failed' AND NEW.statement_attempts < ${DUE_CONSTANTS.statementMaxAttempts}
+        THEN NEW.updated_at + pg_catalog.make_interval(mins => ${DUE_CONSTANTS.statementRetryBackoffMinutes} * NEW.statement_attempts)
+      ELSE NULL END;
+  END IF;
+  IF v_due IS NULL THEN
+    DELETE FROM core.worker_dispatch_pointer w
+     WHERE w.queue = 'statement' AND w.subject_id = NEW.id AND w.source_schema = v_src;
+    RETURN NULL;
+  END IF;
+  SELECT mw.organisation_id INTO v_ws_org FROM core.manager_workspace mw WHERE mw.id = NEW.workspace_id;
+  IF v_ws_org IS DISTINCT FROM NEW.organisation_id THEN
+    ${SCOPE_MISMATCH_ERROR};
+  END IF;
+${f2UpsertSql('statement', 'NEW.workspace_id', 'v_src')}
+${notifyBlock('statement')}
+  RETURN NULL;
+END
+$fn$`;
+
+export const F2_OUTBOX_TRIGGER_FUNCTION_SQL: Readonly<Record<'email' | 'push' | 'realtime', string>> = {
+  email: f2OutboxTriggerFunctionSql(OUTBOX_TRIGGERS[0]!),
+  push: f2OutboxTriggerFunctionSql(OUTBOX_TRIGGERS[1]!),
+  realtime: f2OutboxTriggerFunctionSql(OUTBOX_TRIGGERS[2]!),
+};
+
+/** Runs as rab_secure_owner inside the migration transaction (F2_ROLE_ASSERT_SQL first). */
+export const F2_ROLE_ASSERT_SQL = `DO $assert$
+BEGIN
+  IF CURRENT_USER IS DISTINCT FROM 'rab_secure_owner'::name THEN
+    RAISE EXCEPTION 'StatementPointerPhysicalIdentity must run as rab_secure_owner inside its migration transaction' USING ERRCODE = '42501';
+  END IF;
+END
+$assert$`;
+export const F2_TABLE_UP_SQL: readonly string[] = [
+  `ALTER TABLE core.worker_dispatch_pointer ADD COLUMN source_schema text NOT NULL DEFAULT 'core'`,
+  `ALTER TABLE core.worker_dispatch_pointer ADD CONSTRAINT worker_dispatch_pointer_source_check CHECK (
+    source_schema = 'core'
+    OR (queue = 'statement' AND workspace_id IS NOT NULL
+        AND source_schema = 'workspace_' || pg_catalog.replace(workspace_id::text, '-', '')))`,
+  // Existing statement pointers have no known source. They are routing hints: removing them delays nothing in per_scope
+  // mode; in global mode each is re-created by the record's next write, and until then the per-workspace legacy sweep
+  // (at most WORKER_DISPATCH_RECONCILE_SECONDS) still finds the work. Global mode is not active before this release.
+  `DELETE FROM core.worker_dispatch_pointer WHERE queue = 'statement'`,
+  `ALTER TABLE core.worker_dispatch_pointer DROP CONSTRAINT worker_dispatch_pointer_pkey`,
+  `ALTER TABLE core.worker_dispatch_pointer ADD CONSTRAINT worker_dispatch_pointer_pkey PRIMARY KEY (queue, subject_id, source_schema)`,
+];
+export const F2_TABLE_DOWN_SQL: readonly string[] = [
+  `DELETE FROM core.worker_dispatch_pointer WHERE queue = 'statement'`,
+  `ALTER TABLE core.worker_dispatch_pointer DROP CONSTRAINT worker_dispatch_pointer_pkey`,
+  `ALTER TABLE core.worker_dispatch_pointer ADD CONSTRAINT worker_dispatch_pointer_pkey PRIMARY KEY (queue, subject_id)`,
+  `ALTER TABLE core.worker_dispatch_pointer DROP CONSTRAINT worker_dispatch_pointer_source_check`,
+  `ALTER TABLE core.worker_dispatch_pointer DROP COLUMN source_schema`,
+];
+/** HWS cutover sweep (operator, as rab_secure_owner, per workspace W after routing switched to its schema). */
+export const F2_CUTOVER_SWEEP_SQL = `DELETE FROM core.worker_dispatch_pointer
+ WHERE queue = 'statement' AND workspace_id = $1::uuid
+   AND source_schema IS DISTINCT FROM 'workspace_' || pg_catalog.replace($1::text, '-', '')`;
+
+/** F2 post-condition: the pointer key, the source check and the column (after up() / after down()). */
+export const F2_TABLE_STATE_SQL = `
+SELECT
+  (SELECT pg_catalog.pg_get_constraintdef(c.oid) FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = 'core.worker_dispatch_pointer'::regclass AND c.conname = 'worker_dispatch_pointer_pkey') AS pkey,
+  (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid = 'core.worker_dispatch_pointer'::regclass AND c.conname = 'worker_dispatch_pointer_source_check') AS source_check,
+  (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = 'core.worker_dispatch_pointer'::regclass AND a.attname = 'source_schema' AND NOT a.attisdropped) AS source_column`;
+export const F2_TABLE_EXPECTED_UP = { pkey: 'PRIMARY KEY (queue, subject_id, source_schema)', source_check: 1, source_column: 1 } as const;
+export const F2_TABLE_EXPECTED_DOWN = { pkey: 'PRIMARY KEY (queue, subject_id)', source_check: 0, source_column: 0 } as const;
+
+/** The five functions whose bodies 1786721350000 replaces, with the SQL each must carry after up() and after down(). */
+export const F2_FUNCTIONS: ReadonlyArray<{ signature: string; up: string; down: string }> = [
+  { signature: IMPL_SIGNATURE, up: F2_CLAIM_IMPL_SQL, down: CLAIM_IMPL_SQL },
+  ...(['email', 'push', 'realtime'] as const).map((q) => ({
+    signature: `core.worker_dispatch_pointer_${q}_trg()`,
+    up: F2_OUTBOX_TRIGGER_FUNCTION_SQL[q],
+    down: OUTBOX_TRIGGER_FUNCTION_SQL[q],
+  })),
+  { signature: STATEMENT_TRIGGER_FUNCTION, up: F2_STATEMENT_TRIGGER_FUNCTION_SQL, down: STATEMENT_TRIGGER_FUNCTION_SQL },
+];
+
+/** `pg_proc.prosrc` of a CREATE [OR REPLACE] FUNCTION ... AS $fn$<body>$fn$ statement: the text between the quotes. */
+export function functionBody(sql: string): string {
+  const open = sql.indexOf('$fn$');
+  const close = sql.lastIndexOf('$fn$');
+  if (open < 0 || close <= open) throw new Error('functionBody: no $fn$ body');
+  return sql.slice(open + 4, close);
+}
+
+/** CREATE FUNCTION → CREATE OR REPLACE FUNCTION (down() re-creates the approved bodies over the F2 ones). */
+export function orReplace(sql: string): string {
+  return sql.replace(/^CREATE FUNCTION /, 'CREATE OR REPLACE FUNCTION ');
+}

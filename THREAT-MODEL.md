@@ -4565,9 +4565,28 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
     id whichever copy fired, a terminal update or delete of one copy can drop the pointer the other copy still needs:
     a stale `core` copy touched by a mixed-version runtime, or the backfill's rollback deleting workspace copies. That
     statement waits for the reconcile sweep, and a `TRUNCATE` of `core.payroll_record` clears every statement pointer.
-    The impact is global mode only and a delay of at most one reconcile interval. Operational rule (runbook §10.5): run
-    HWS data operations with the Workers in per_scope. The structural fix (scope-aware key or delete) is new SQL and
-    needs a separate review.
+    The impact is global mode only and a delay of at most one reconcile interval.
+    **FIXED by `StatementPointerPhysicalIdentity1786721350000`** (owner-approved option C, 2026-11-01; forward migration in
+    the same release, the approved 1300000/1310000/1320000 SQL untouched and sha256-pinned):
+    - Root cause: the pointer identity was the logical record, `(queue, subject_id)`, but one id can exist as two
+      physical rows (core and workspace copy, or two workspaces).
+    - Fix: the identity is the physical row, `PRIMARY KEY (queue, subject_id, source_schema)`. A CHECK binds
+      `source_schema` to `core` or the pointer's own `workspace_<hex>`. Every statement-trigger write and delete
+      (row, TRUNCATE) is scoped to the firing table's schema. A generated statement retires the same record's other
+      copies' pointers in the same workspace only (generation is fenced by the UNIQUE `core.worker_event` key). Each
+      claimed row gets its own claim token, so a release re-times only the row it was handed. No grant, owner, definer
+      or `search_path` change; the v19 fingerprint and the posture golden are unchanged (migration post-conditions,
+      R4 included).
+    - Residuals (accepted, Low): a stale copy that is due but never routed keeps its own pointer and is re-claimed
+      each lease (visible as OD-1 `claim_count` alerts, not silent); the operator HWS cutover sweep removes it
+      (runbook §6). Two manual transactions generating both copies of one id at once could deadlock (40P01); the
+      Worker cannot, because it inserts the UNIQUE event key first. The migration purges existing statement pointers
+      (their source is unknown); per_scope never reads them, so this is harmless before global activation.
+    - Regression tests: `phase-d-f2-pointer-identity.integration.spec.ts` (paths a–d, written failing-first against
+      the approved key; two-copy claim; sibling retirement; per-row token; CHECK and cutover sweep) and
+      `worker-dispatch-pointer-sql.f2.spec.ts` (approved constants byte-identical, no comments or dynamic SQL in the
+      new bodies, R4 table set unchanged, every statement delete scoped).
+    - Until 1350000 is applied, the runbook rule stands: run HWS data operations with the Workers in per_scope.
   - **F3, Low.** The invite expire/delete definers are executable by the Worker login without a database-side switch or
     an in-definer audit row. The flag and audit live in the Worker process. They are bounded by the never-activated
     predicate, grace period, owner and admin blocks and FKs.

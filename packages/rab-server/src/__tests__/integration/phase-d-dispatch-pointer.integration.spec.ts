@@ -591,7 +591,9 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
       );
       expect(rows[0].cols).toBe(
         'queue:text,subject_id:uuid,organisation_id:uuid,workspace_id:uuid,due_at:timestamp with time zone,claim_token:uuid,' +
-          'claim_count:integer,claimed_at:timestamp with time zone,repoint_count:integer,updated_at:timestamp with time zone',
+          'claim_count:integer,claimed_at:timestamp with time zone,repoint_count:integer,updated_at:timestamp with time zone,' +
+          // F2 (StatementPointerPhysicalIdentity1786721350000): the source row's schema, a routing id like the others.
+          'source_schema:text',
       );
     });
   });
@@ -680,7 +682,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
         throw e;
       }
       for (const r of first) expect((await pointer('email', r.subject_id))!.claim_token).toBe(r.claim_token);
-      expect(new Set(first.map((r) => r.claim_token)).size).toBe(1); // one token per claim call
+      expect(new Set(first.map((r) => r.claim_token)).size).toBe(first.length); // one token per claimed row (F2, 1786721350000)
     });
 
     it('batch clamp lower bound: 0 and a negative value → at most 1 row; NULL → the default (≤ 100)', async () => {
@@ -768,16 +770,24 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
         `pd-${deviceId}`,
         envelope,
       ]);
-      const pushId = await asTenant(app, a.org, null, async () => {
-        const { rows } = await app.query(
-          `INSERT INTO core.push_delivery (organisation_id, notification_id, push_device_id, status) VALUES ($1, $2, $3, 'PENDING') RETURNING id`,
-          [a.org, notificationId, deviceId],
-        );
-        return rows[0].id as string;
-      });
-      expect(await pointer('push', pushId)).toMatchObject({ organisation_id: a.org, workspace_id: null, due: true });
-      await asTenant(app, a.org, null, () => app.query(`UPDATE core.push_delivery SET status = 'CANCELLED', cancelled_at = now() WHERE id = $1`, [pushId]));
-      expect(await pointer('push', pushId)).toBeUndefined();
+      try {
+        const pushId = await asTenant(app, a.org, null, async () => {
+          const { rows } = await app.query(
+            `INSERT INTO core.push_delivery (organisation_id, notification_id, push_device_id, status) VALUES ($1, $2, $3, 'PENDING') RETURNING id`,
+            [a.org, notificationId, deviceId],
+          );
+          return rows[0].id as string;
+        });
+        expect(await pointer('push', pushId)).toMatchObject({ organisation_id: a.org, workspace_id: null, due: true });
+        await asTenant(app, a.org, null, () => app.query(`UPDATE core.push_delivery SET status = 'CANCELLED', cancelled_at = now() WHERE id = $1`, [pushId]));
+        expect(await pointer('push', pushId)).toBeUndefined();
+      } finally {
+        // The synthetic envelope is deliberately undecryptable; a committed copy would fail any later whole-database
+        // ciphertext scan (secret-rotation-wave5's retire gate). Remove everything this test committed.
+        await admin.query(`DELETE FROM core.push_delivery WHERE push_device_id = $1`, [deviceId]);
+        await admin.query(`DELETE FROM core.push_device WHERE id = $1`, [deviceId]);
+        await admin.query(`DELETE FROM core.notification WHERE id = $1`, [notificationId]);
+      }
     });
 
     it('source-table / schema checks: an outbox function fired anywhere but AFTER ROW on its own core table refuses the write (42501)', async () => {
@@ -904,8 +914,18 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
         await admin.query(`INSERT INTO ${tb} ${PAYROLL_COLS} VALUES ${PAYROLL_VALS}`, [victim, wb.org, wb.id]);
         await admin.query(`ALTER TABLE ${tb} ENABLE TRIGGER ALL`);
         await admin.query('SET LOCAL ROLE rab_secure_owner');
+        // F2 (1786721350000): a pointer naming A's workspace with B's source schema is refused by the table itself.
+        expect(
+          await stateIn(
+            admin,
+            `UPDATE core.worker_dispatch_pointer SET organisation_id = $1, workspace_id = $2, due_at = now() WHERE queue = 'statement' AND subject_id = $3`,
+            [wa.org, wa.id, victim],
+          ),
+        ).toBe('23514');
+        // The strongest forgery left: a self-consistent pointer (A's scope AND A's source) for B's record id.
         await admin.query(
-          `UPDATE core.worker_dispatch_pointer SET organisation_id = $1, workspace_id = $2, due_at = now() WHERE queue = 'statement' AND subject_id = $3`,
+          `UPDATE core.worker_dispatch_pointer SET organisation_id = $1, workspace_id = $2::uuid, source_schema = 'workspace_' || replace($2::uuid::text, '-', ''), due_at = now()
+            WHERE queue = 'statement' AND subject_id = $3`,
           [wa.org, wa.id, victim],
         );
         await admin.query('COMMIT');
