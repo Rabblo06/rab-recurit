@@ -5,6 +5,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { resolveClientIp } from '../../utils/client-ip.util';
+import { isTestRateLimitBypassActive } from './rate-limit-test-bypass';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
 import { RabThrottlerGuard } from './rab-throttler.guard';
@@ -49,18 +50,13 @@ import { RabThrottlerGuard } from './rab-throttler.guard';
         // runtime; `resolveClientIp` only reads the fields it declares.
         getTracker: (req: Record<string, any>) =>
           resolveClientIp(req as { headers: Record<string, any>; ip?: string; socket?: { remoteAddress?: string } }, environmentService.trustedProxyCidrs),
-        // The integration suite shares one IP (the local supertest client)
-        // across many spec files that each call /auth/login, /auth/refresh
-        // etc. repeatedly within the same 60s window — none of that is the
-        // abuse this guard exists to catch. Deliberately keyed off
-        // JEST_WORKER_ID (Jest always and only sets this, unlike NODE_ENV,
-        // which this toolchain sets inconsistently across nx/jest/dotenv
-        // layering) rather than a plain env flag, so this can never be
-        // mistakenly left on outside an actual Jest run even if
-        // RAB_DISABLE_RATE_LIMIT ends up set somewhere it shouldn't be.
-        // `rate-limiting.integration.spec.ts` is the one file that flips the
-        // flag back off, to exercise the real throttle end-to-end.
-        skipIf: () => process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false',
+        // The integration suite shares one IP (the local supertest client) across many spec files that each call
+        // /auth/login, /auth/refresh etc. repeatedly within the same 60s window: none of that is the abuse this guard exists
+        // to catch. The skip is the ONE shared predicate (rate-limit-test-bypass.ts, X1.4): RAB_DISABLE_RATE_LIMIT exactly
+        // 'true' AND JEST_WORKER_ID set, never in a production runtime. Both are ordinary environment variables, not proof
+        // of a Jest run, which is why production also refuses to boot while either is present (env.validation.ts).
+        // `rate-limiting.integration.spec.ts` flips the flag to 'false' to exercise the real throttle end-to-end.
+        skipIf: () => isTestRateLimitBypassActive(process.env),
       }),
     }),
   ],

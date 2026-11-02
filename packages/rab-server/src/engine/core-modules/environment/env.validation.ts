@@ -8,6 +8,7 @@ import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-en
 import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
+import { testRateLimitBypassProductionProblem } from '../throttler/rate-limit-test-bypass';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -151,11 +152,23 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
   // Phase B (B1): the database rules (PG_DATABASE_URL, legacy names, URL policy, TLS, strict pool numbers). In production
   // the problem is reported with the other production refusals.
   const databaseProblem = databaseConfigurationProblem(normalised);
+  // X1.4 (cleanup audit DUP-03): the Jest rate-limit switch (JEST_WORKER_ID + RAB_DISABLE_RATE_LIMIT) must never be present
+  // in a production process, not even blank: read from the RAW configuration (a blank value is dropped from `normalised`).
+  // Production = NODE_ENV or RAB_RUNTIME_ENV says so (rate-limit-test-bypass.ts).
+  const rawStrings = Object.fromEntries(Object.entries(config).filter(([, v]) => typeof v === 'string')) as Record<string, string>;
+  const rateLimitBypassProblem = testRateLimitBypassProductionProblem(rawStrings);
   if (validated.NODE_ENV === 'production') {
-    const problems = [...productionConfigurationProblems(validated), ...(databaseProblem ? [databaseProblem] : [])];
+    const problems = [
+      ...productionConfigurationProblems(validated),
+      ...(databaseProblem ? [databaseProblem] : []),
+      ...(rateLimitBypassProblem ? [rateLimitBypassProblem] : []),
+    ];
     if (problems.length > 0) {
       throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
     }
+  } else if (rateLimitBypassProblem) {
+    // RAB_RUNTIME_ENV=production with another NODE_ENV: still a production runtime for this rule.
+    throw new Error(`Invalid environment configuration for production:\n${rateLimitBypassProblem}`);
   } else if (databaseProblem) {
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }

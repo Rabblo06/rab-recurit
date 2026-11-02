@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 
 import { EnvironmentService } from '../../environment/environment.service';
 import { TOKEN_BUCKET_SCRIPT, TokenBucketDecision, TokenBucketSpec } from '../../rate-limit/token-bucket';
+import { isTestRateLimitBypassActive } from '../../throttler/rate-limit-test-bypass';
 import { AuthCacheRedisClientProvider } from './auth-cache-redis-client.provider';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -53,7 +54,8 @@ export const ADMIN_MFA_RESET_LIMIT = { capacity: 5, windowMs: 60 * 60 * 1000 } a
  *
  * Keys: `crewflow:{NODE_ENV}:login-rate:{scope}:{sha256(identifier)}` — no email address or IP appears in Redis.
  *
- * Jest: skipped exactly like `RabThrottlerModule` (JEST_WORKER_ID set AND RAB_DISABLE_RATE_LIMIT !== 'false'), because the
+ * Jest: skipped through the same predicate as `RabThrottlerModule` (`isTestRateLimitBypassActive`, X1.4: RAB_DISABLE_RATE_LIMIT
+ * exactly 'true' AND JEST_WORKER_ID set, never in production, and production refuses to boot with either present), because the
  * integration suite shares one client IP across hundreds of logins. `login-attempt-limiter.integration.spec.ts` turns the
  * real limiter on.
  */
@@ -200,7 +202,7 @@ export class LoginAttemptLimiterService {
   }
 
   private skipped(): boolean {
-    return process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false';
+    return isTestRateLimitBypassActive(process.env);
   }
 
   private async consume(buckets: TokenBucketSpec[]): Promise<TokenBucketDecision> {

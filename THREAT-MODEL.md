@@ -4609,3 +4609,35 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase X1.4 — the Jest rate-limit bypass cannot reach production (cleanup audit DUP-03)
+
+```
+LOW (defence in depth)
+Failure:      whoever controls a service's environment (misconfiguration, a compromised deploy config or platform) sets
+              JEST_WORKER_ID (any value) → the API boots normally → the global per-IP throttle, the per-route auth tiers,
+              the login / MFA / admin-MFA-reset limiter and the attendance per-user throttle are all skipped, silently →
+              credential stuffing and brute force unthrottled.
+Actor:        the service environment (already high privilege; not an anonymous attacker).
+Location:     throttler.module.ts:63, login-attempt-limiter.service.ts:203, attendance-per-user-throttle.guard.ts:47 (main
+              8aacdddb): three copies of `JEST_WORKER_ID !== undefined && RAB_DISABLE_RATE_LIMIT !== 'false'`.
+Root cause:   the bypass treated an environment variable as proof of a Jest run, an UNSET flag satisfied `!== 'false'`, and
+              nothing refused either variable at boot. The comments (jest-setup.ts:8-10, throttler.module.ts:56-60) claimed
+              it "can never be true outside an actual Jest run".
+Fix:          one predicate, engine/core-modules/throttler/rate-limit-test-bypass.ts isTestRateLimitBypassActive: needs
+              RAB_DISABLE_RATE_LIMIT exactly 'true' AND a non-empty JEST_WORKER_ID, and is never active when NODE_ENV or
+              RAB_RUNTIME_ENV says production. env.validation.ts refuses to boot a production process (NODE_ENV or
+              RAB_RUNTIME_ENV production) while either variable is present, even blank or 'false' (names only). The
+              three call sites use the predicate; rab-worker's jest-setup now sets the flag explicitly. Comments corrected.
+Regression:   rate-limit-test-bypass.spec.ts (truth table incl. the old-copy abuse cases, production refusal, and a source
+              scan that no `process.env.JEST_WORKER_ID` / `RAB_DISABLE_RATE_LIMIT` read survives outside the helper);
+              env.validation.rate-limit-bypass.spec.ts (production + either variable → refused; RAB_RUNTIME_ENV=production
+              → refused; development / test keep it); rate-limiting.integration.spec.ts (the Jest bypass still skips the
+              auth throttle with the flag 'true'; with the flag UNSET under Jest the 6th forgot-password gets 429).
+```
+
+- **Unchanged:** every rate-limit value, key, 429 / 503 contract and Redis failure policy; InvitationRateLimitService and
+  AiQuotaService still have no bypass.
+- **Residual:** outside production the switch still exists by design (the suite shares one IP); a development or staging
+  service started with both variables set runs unthrottled. Staging is not a declared runtime value here (production is
+  decided by NODE_ENV / RAB_RUNTIME_ENV only).
