@@ -111,6 +111,8 @@ jobs:
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
       - name: Worker bundle launcher and committed deployment definitions
         run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+      - name: Compose credential isolation fails closed without its YAML parser (X1.6 / DEAD-08)
+        run: node --test packages/rab-docker/scripts/compose-credential-isolation.test.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
 

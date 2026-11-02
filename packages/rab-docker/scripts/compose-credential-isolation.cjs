@@ -27,6 +27,12 @@
  *     sentinel and none of the ops-only names (CREWFLOW_OPS_*, PG_OPS_*).
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
+ *
+ * X1.6 (cleanup audit DEAD-08): the env_file part reads the committed YAML with the `yaml` package, now a declared root
+ * devDependency (exact version). It used to be skipped, with only a note, when `yaml` could not be loaded, so a missing
+ * parser silently turned off the ".env.migrate / .env.ops is named only by its own service" checks. A missing or broken
+ * parser is now a FAILED check (exit 1), in CI and locally: a security check that cannot run its checks has not passed.
+ * compose-credential-isolation.test.cjs injects a failing loader to prove it.
  */
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -103,17 +109,21 @@ function render(rel) {
 
 const envOf = (svc) => svc.environment ?? {};
 
-/**
- * `config` inlines env_file contents into `environment` and drops the key, so which service NAMES .env.migrate is read
- * from the committed YAML itself (the `yaml` package of the monorepo; skipped, and said so, when it is not installed).
- */
-function rawEnvFiles(rel) {
-  let YAML;
+/** The YAML parser (the root devDependency `yaml`), or null when it cannot be loaded. `requireFn` is the test seam. */
+function loadYamlParser(requireFn = require) {
   try {
-    YAML = require(require.resolve('yaml', { paths: [REPO] }));
+    const YAML = requireFn(requireFn.resolve ? requireFn.resolve('yaml', { paths: [REPO] }) : 'yaml');
+    return YAML && typeof YAML.parse === 'function' ? YAML : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * `config` inlines env_file contents into `environment` and drops the key, so which service NAMES .env.migrate is read
+ * from the committed YAML itself, with the `yaml` parser (required: see the header, X1.6).
+ */
+function rawEnvFiles(rel, YAML) {
   const doc = YAML.parse(fs.readFileSync(path.join(REPO, rel), 'utf8'), { merge: true });
   const out = {};
   for (const [name, svc] of Object.entries(doc.services ?? {})) {
@@ -123,12 +133,21 @@ function rawEnvFiles(rel) {
   return out;
 }
 
-function main() {
+/** Runs every check; returns the exit code. `options.loadYaml` is the test seam for the parser loader. */
+function main(options = {}) {
+  failures = 0;
+  // X1.6: fail closed BEFORE anything else when the parser is unavailable (never a silent skip of the env_file checks).
+  const YAML = (options.loadYaml ?? loadYamlParser)();
+  if (!YAML) {
+    check(false, 'the yaml parser (root devDependency "yaml") loads, so the env_file checks can run: it did not. Run `yarn install`.');
+    console.log('[compose-isolation] 1 check(s) failed');
+    return 1;
+  }
   try {
     execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' });
   } catch {
     console.error('[compose-isolation] docker compose is not available');
-    process.exit(2);
+    return 2;
   }
   for (const [rel, migrateName, runtimeNames, production] of FILES) {
     let model;
@@ -139,17 +158,16 @@ function main() {
       continue;
     }
     const services = model.services ?? {};
-    const raw = rawEnvFiles(rel);
-    if (raw === null) console.log(`[compose-isolation] note ${rel}: the yaml package is not installed; env_file names not checked`);
-    const namesMigrateFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.migrate$/.test(f));
-    const namesOpsFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.ops$/.test(f));
+    const raw = rawEnvFiles(rel, YAML);
+    const namesMigrateFile = (name) => (raw[name] ?? []).some((f) => /(^|\/)\.env\.migrate$/.test(f));
+    const namesOpsFile = (name) => (raw[name] ?? []).some((f) => /(^|\/)\.env\.ops$/.test(f));
     const opsName = OPS_SERVICES[rel] ?? null;
     // Phase B (ops): every service but the ops one (runtime AND migrate) carries nothing of the ops environment.
     for (const [name, svc] of Object.entries(services)) {
       if (name === opsName) continue;
       const env = envOf(svc);
       const values = Object.values(env).map((v) => String(v ?? ''));
-      if (raw) check(!namesOpsFile(name), `${rel}: ${name} does not name .env.ops`);
+      check(!namesOpsFile(name), `${rel}: ${name} does not name .env.ops`);
       check(!values.some((v) => v.includes(OPS_SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the ops environment`);
       const held = OPS_ONLY_NAMES.filter((k) => String(env[k] ?? '').trim() !== '');
       check(held.length === 0, `${rel}: ${name} holds no ops-only variable${held.length ? ` (${held.join(', ')})` : ''}`);
@@ -162,7 +180,7 @@ function main() {
         const env = envOf(ops);
         check(env.PG_OPS_APP_DATABASE_URL === OPS_SENTINEL_APP_URL, `${rel}: ${opsName} receives PG_OPS_APP_DATABASE_URL from .env.ops`);
         check(env.CREWFLOW_OPS_RUN === 'one-off', `${rel}: ${opsName} declares CREWFLOW_OPS_RUN=one-off from .env.ops`);
-        if (raw) check(namesOpsFile(opsName) && !namesMigrateFile(opsName), `${rel}: ${opsName} names .env.ops (and not .env.migrate) as its env_file`);
+        check(namesOpsFile(opsName) && !namesMigrateFile(opsName), `${rel}: ${opsName} names .env.ops (and not .env.migrate) as its env_file`);
         check(Array.isArray(ops.profiles) && ops.profiles.length === 1 && ops.profiles[0] === 'ops', `${rel}: ${opsName} has only the "ops" profile (never started by up)`);
         check(String(ops.restart ?? 'no') === 'no', `${rel}: ${opsName} restart is "no"`);
         check(JSON.stringify(ops.entrypoint ?? []).includes('dist/command/main.js'), `${rel}: ${opsName} runs the CLI entrypoint`);
@@ -174,7 +192,7 @@ function main() {
     check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
     if (migrate) {
       check(envOf(migrate).PG_DATABASE_URL === SENTINEL_URL, `${rel}: ${migrateName} receives PG_DATABASE_URL from .env.migrate`);
-      if (raw) check(namesMigrateFile(migrateName), `${rel}: ${migrateName} names .env.migrate as its env_file`);
+      check(namesMigrateFile(migrateName), `${rel}: ${migrateName} names .env.migrate as its env_file`);
       check(String(migrate.restart ?? 'no') === 'no', `${rel}: ${migrateName} restart is "no"`);
     }
     for (const name of runtimeNames) {
@@ -183,8 +201,8 @@ function main() {
       if (!svc) continue;
       const env = envOf(svc);
       const values = Object.values(env).map((v) => String(v ?? ''));
-      if (raw) check(!namesMigrateFile(name), `${rel}: ${name} does not name .env.migrate`);
-      if (raw) check(Object.entries(raw).every(([other, files]) => other === migrateName || !files.some((f) => /\.env\.migrate$/.test(f))), `${rel}: no service but ${migrateName} names .env.migrate`);
+      check(!namesMigrateFile(name), `${rel}: ${name} does not name .env.migrate`);
+      check(Object.entries(raw).every(([other, files]) => other === migrateName || !files.some((f) => /\.env\.migrate$/.test(f))), `${rel}: no service but ${migrateName} names .env.migrate`);
       check(!values.some((v) => v.includes(SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the migration credential`);
       check(!values.some((v) => v.includes('crewflow_migrator')), `${rel}: ${name} carries no migrator login`);
       const authority = MIGRATION_AUTHORITY.filter((k) => String(env[k] ?? '').trim() !== '');
@@ -203,7 +221,9 @@ function main() {
     }
   }
   console.log(`[compose-isolation] ${failures === 0 ? 'all checks passed' : `${failures} check(s) failed`}`);
-  process.exit(failures === 0 ? 0 : 1);
+  return failures === 0 ? 0 : 1;
 }
 
-main();
+module.exports = { loadYamlParser, rawEnvFiles, main, FILES };
+
+if (require.main === module) process.exit(main());
