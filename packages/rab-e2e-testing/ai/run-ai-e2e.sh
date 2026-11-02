@@ -12,6 +12,10 @@
 #        AI_E2E_WORK=<scratch dir for logs, identities, evidence> packages/rab-e2e-testing/ai/run-ai-e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# X1.3 / DBT-12: ai_e2e_runtime_exec / ai_e2e_client_exec start every child except the seed without the test superuser URL,
+# the other TEST_* logins, role bootstrap passwords and command authority (run-ai-e2e-env.test.cjs runs these functions).
+# shellcheck source=runtime-env.sh
+source "$ROOT/packages/rab-e2e-testing/ai/runtime-env.sh"
 : "${AI_E2E_ENV:?set AI_E2E_ENV to the disposable test env file}"
 : "${AI_E2E_WORK:?set AI_E2E_WORK to a scratch directory}"
 mkdir -p "$AI_E2E_WORK"
@@ -45,7 +49,8 @@ trap cleanup EXIT
 # Runtime env shared by API and Worker. No .env is read: both run with cwd = the scratch dir.
 export NODE_ENV=test
 export AI_E2E_MARK=ai-e2e-stack
-# Phase B: one PG_DATABASE_URL (the restricted runtime login); the deprecated names never reach the API or the Worker.
+# Phase B: one PG_DATABASE_URL (the restricted runtime login); the deprecated names never reach the API or the Worker. The
+# TEST_* names stay in this shell for the seed only; the API, Worker, Vite and Playwright are started without them (X1.3).
 export PG_DATABASE_URL="$TEST_DATABASE_URL"
 unset DATABASE_URL DATABASE_URL_UNPOOLED DATABASE_DIRECT_URL || true
 # Security review L-4: command / bootstrap authority never reaches the API or the Worker (their runtime guard refuses it;
@@ -68,13 +73,13 @@ grep '\[ai-e2e-seed\]' "$AI_E2E_WORK/seed.log"
 # Both from SOURCE with ts-node --transpile-only (never tsx: decorator metadata), NODE_ENV=test, test model seams on.
 TS_NODE=("node" "$ROOT/node_modules/ts-node/dist/bin.js" "--transpile-only" "-P" "$ROOT/packages/rab-server/tsconfig.spec.json")
 echo "[ai-e2e] starting API on :$API_PORT (test-only boot from source)"
-(cd "$AI_E2E_WORK" && exec "${TS_NODE[@]}" "$ROOT/packages/rab-e2e-testing/ai/boot-api.e2e.ts" ai-e2e-stack) > "$AI_E2E_WORK/api.log" 2>&1 &
+(cd "$AI_E2E_WORK" && ai_e2e_runtime_exec "${TS_NODE[@]}" "$ROOT/packages/rab-e2e-testing/ai/boot-api.e2e.ts" ai-e2e-stack) > "$AI_E2E_WORK/api.log" 2>&1 &
 PIDS+=($!)
 echo "[ai-e2e] starting the rab-ai consumer (test-only boot from source)"
-(cd "$AI_E2E_WORK" && exec "${TS_NODE[@]}" "$ROOT/packages/rab-e2e-testing/ai/boot-worker.e2e.ts" ai-e2e-stack) > "$AI_E2E_WORK/worker.log" 2>&1 &
+(cd "$AI_E2E_WORK" && ai_e2e_runtime_exec "${TS_NODE[@]}" "$ROOT/packages/rab-e2e-testing/ai/boot-worker.e2e.ts" ai-e2e-stack) > "$AI_E2E_WORK/worker.log" 2>&1 &
 PIDS+=($!)
 echo "[ai-e2e] starting Vite on :$WEB_PORT"
-(cd "$ROOT/packages/rab-front" && VITE_API_URL="$API" exec node "$ROOT/node_modules/vite/bin/vite.js" --port "$WEB_PORT" --strictPort --host localhost) > "$AI_E2E_WORK/vite.log" 2>&1 &
+(cd "$ROOT/packages/rab-front" && export VITE_API_URL="$API" && ai_e2e_client_exec node "$ROOT/node_modules/vite/bin/vite.js" --port "$WEB_PORT" --strictPort --host localhost) > "$AI_E2E_WORK/vite.log" 2>&1 &
 PIDS+=($!)
 
 wait_for() {
@@ -98,5 +103,6 @@ if [ "${1:-}" = "--hold" ]; then
 fi
 
 cd "$ROOT"
-AI_E2E_WEB="$WEB" AI_E2E_API="$API" AI_E2E_IDENTITIES="$AI_E2E_WORK/identities.json" AI_E2E_EVIDENCE="$AI_E2E_WORK/evidence.json" \
-  node node_modules/@playwright/test/cli.js test -c packages/rab-e2e-testing/ai/playwright.ai.config.ts "$@"
+# In a subshell: ai_e2e_client_exec replaces its shell, and this one must survive to run the EXIT trap (stack cleanup).
+(export AI_E2E_WEB="$WEB" AI_E2E_API="$API" AI_E2E_IDENTITIES="$AI_E2E_WORK/identities.json" AI_E2E_EVIDENCE="$AI_E2E_WORK/evidence.json" \
+  && ai_e2e_client_exec node node_modules/@playwright/test/cli.js test -c packages/rab-e2e-testing/ai/playwright.ai.config.ts "$@")

@@ -4609,3 +4609,42 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase X1.2 / X1.3 — test database isolation fails closed (cleanup audit DBT-01, DBT-02, DBT-10, DBT-12)
+
+- **Asset:** the development database and any non-test database reachable from a developer machine; the disposable test
+  cluster's bootstrap superuser credential. **Actor:** not an attacker: a developer `.env`, a shell export or a harness
+  that hands the wrong environment to a test or e2e process (the 2026-10-05 incident class the guard exists for).
+- **DBT-01 (reproduced 2026-11-02, disposable `rab_x1_int` + an unreachable decoy):** with `packages/rab-server/.env` =
+  `NODE_ENV=development` + a decoy `DATABASE_URL` (127.0.0.1:1), `nx test rab-server` passed globalSetup (the TEST pair was
+  valid) and then 1,089 application connection attempts went to the decoy: Nx loads `.env` into the task without
+  overriding, the Nx Jest executor and Jest only default `NODE_ENV` when it is unset, and `applyIntegrationTestDatabaseEnv`
+  returned early for any NODE_ENV but `test`, while fixtures used the TEST admin URL. With a real dev URL in `.env`, the
+  application side of every integration spec would have run against it. CI was not affected (`NODE_ENV: test`).
+- **Control (`test-database-guard.ts`):** under Jest any NODE_ENV but `test` is refused in every test file (setupFiles,
+  `JEST_WORKER_ID` set) and in globalSetup (`resolveForJestGlobalSetup`); outside Jest a non-test NODE_ENV stays inert, so
+  runtime and CLI processes are unchanged. Also refused: the development database (rab-devdb 127.0.0.1:15432, compose host
+  `devdb`, or the `DEVDB_URL` database); an inherited `PG_DATABASE_URL`, `DATABASE_DIRECT_URL`, `PG_DATABASE_REPLICA_URL`,
+  `PG_OPS_APP_DATABASE_URL` or `CREWFLOW_*_DATABASE_URL` naming any other database or endpoint (DBT-02: never silently
+  kept; empty = unset); target-changing libpq variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, ...); a TEST URL without
+  its login; `TEST_DATABASE_CREWFLOW_URL` / `TEST_DATABASE_WORKER_URL` on another database (DBT-10). The catalog disposable
+  marker and the same-cluster probe are unchanged. Messages carry variable names, host, port and database only.
+  `seed-ai-e2e.ts` now refuses a null routing and runs the same live identity + marker proof as `seed-live-e2e.ts`.
+- **DBT-12 (`run-ai-e2e.sh`):** the API, the rab-ai consumer, Vite and Playwright start through `runtime-env.sh`
+  (`ai_e2e_runtime_exec` / `ai_e2e_client_exec`), which remove every `TEST_DATABASE_*` URL, `MIGRATION_SECURITY_ADMIN_URL`,
+  the role bootstrap passwords, the legacy URLs and command authority from the child; clients also lose `PG_DATABASE_URL`
+  and `APP_SECRET`. Only the seed keeps the admin connection.
+- **Regression tests:** `test-database-guard.spec.ts` (24 new cases; 21 fail against the previous guard, the other 3 pin
+  behaviour that is kept); `run-ai-e2e-env.test.cjs` (runs the harness's own launch functions and checks the real child
+  environment by NAME, with a no-wrapper control; fails against the previous harness), wired into `ci-e2e` spec-coverage.
+- **X1.9 review follow-ups (same PR):** an inherited `DATABASE_DIRECT_URL` / `PG_DATABASE_REPLICA_URL` is refused whenever
+  non-empty (a test process never uses them; a superuser login on the TEST database used to pass), and the other inherited
+  names must also carry the TEST application login (compared, never printed); the working directory's `.env` and
+  `DOTENV_CONFIG_PATH` are read as data so a name present only there (loaded later by @nestjs/config) is checked too; a
+  percent-encoded host is refused, and loopback aliases (localhost, 127.0.0.0/8, ::1, 0.0.0.0, ::, IPv4-mapped) are one
+  endpoint for the development-database and same-database comparisons. 19 new spec cases, 13 failing against the X1.2 guard.
+- **Residual:** a developer who sets `NODE_ENV=test` and points `TEST_DATABASE_URL` at a real database that also carries
+  `crewflow.disposable_test_database = 'true'` is not stopped (the marker is the positive opt-in, by design). The devdb
+  endpoint list is the repository's own compose shape; another local dev cluster on another port relies on the marker.
+  `runtime-env.sh` is a deny-list: a NEW credential variable added to the AI e2e env file later reaches the API / Worker
+  unless it is added to `AI_E2E_STRIPPED_NAMES` (its test pins the current list, not future names).
