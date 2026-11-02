@@ -5,13 +5,12 @@
 // does not get that for free.
 import 'reflect-metadata';
 
-// RabThrottlerModule skips rate limiting whenever this is 'true' AND
-// JEST_WORKER_ID is set (the latter can never be true outside an actual
-// Jest run, so this can't leak into a real deployment even by accident).
-// The integration suite shares one IP across many spec files that each hit
-// /auth/login repeatedly within the same 60s window — none of that is real
-// abuse. `rate-limiting.integration.spec.ts` flips this back to 'false' at
-// its own top level to exercise the real throttle end-to-end.
+// The Jest rate-limit bypass (engine/core-modules/throttler/rate-limit-test-bypass.ts, X1.4): RabThrottlerModule, the
+// login/MFA limiter and the attendance per-user throttle skip rate limiting while this is exactly 'true' AND JEST_WORKER_ID
+// is set, and never in a production runtime. JEST_WORKER_ID is an ordinary environment variable, not proof of a Jest run:
+// production refuses to boot while either variable is present (env.validation.ts). The integration suite shares one IP
+// across many spec files that each hit /auth/login repeatedly within the same 60s window; none of that is real abuse.
+// `rate-limiting.integration.spec.ts` (and the other limiter suites) flip this to 'false' to exercise the real throttles.
 process.env.RAB_DISABLE_RATE_LIMIT = 'true';
 
 // EMAIL_DRIVER is forced to LOGGER for every Jest run, unconditionally,

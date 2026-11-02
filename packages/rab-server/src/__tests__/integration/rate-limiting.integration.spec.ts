@@ -134,6 +134,40 @@ describeIfDb('rate limiting (integration)', () => {
     }
   });
 
+  // X1.4 (audit DUP-03): the one shared bypass predicate is read per request, so these flip the flag for one test only.
+  // A unique trusted client IP per test keeps each bucket away from every other test.
+  const forgotFrom = (clientIp: string) => () =>
+    request(app.getHttpServer())
+      .post('/rest/v1/auth/forgot-password')
+      .set('CF-Connecting-IP', clientIp)
+      .send({ email: `ratelimit-bypass-${randomUUID()}@example.test` });
+  const withFlag = async (value: string | undefined, body: () => Promise<void>) => {
+    const previous = process.env.RAB_DISABLE_RATE_LIMIT;
+    if (value === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+    else process.env.RAB_DISABLE_RATE_LIMIT = value;
+    try {
+      await body();
+    } finally {
+      process.env.RAB_DISABLE_RATE_LIMIT = previous;
+    }
+  };
+
+  it('X1.4: the Jest bypass still works (RAB_DISABLE_RATE_LIMIT=true under Jest): 8 auth requests from one IP, no 429', async () => {
+    const attempt = forgotFrom(`198.51.100.${10 + Math.floor(Math.random() * 50)}`);
+    await withFlag('true', async () => {
+      for (let i = 0; i < 8; i++) expect((await attempt()).status).toBe(204);
+    });
+  });
+
+  it('X1.4 abuse case: JEST_WORKER_ID with the flag UNSET no longer skips the throttle (the old `!== "false"` copies did)', async () => {
+    expect(process.env.JEST_WORKER_ID).toBeDefined();
+    const attempt = forgotFrom(`203.0.113.${10 + Math.floor(Math.random() * 50)}`);
+    await withFlag(undefined, async () => {
+      for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(204);
+      expect((await attempt()).status).toBe(429);
+    });
+  });
+
   describe('trust proxy (SEC-03 / PHASE 11 EDGE-01)', () => {
     // Deliberately no assertion pinned to a specific literal IP anywhere
     // below — supertest's direct connection resolves to whatever loopback
