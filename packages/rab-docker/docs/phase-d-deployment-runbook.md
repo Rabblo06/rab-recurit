@@ -345,7 +345,7 @@ move to steady state.
 | Signal | Source | Threshold / expectation | On breach |
 |---|---|---|---|
 | Repeated claims | Worker log `dispatch claim-count alert`; `claimsOver20` in `rab:worker:stats` | Alert on any claim with `claim_count > 20` (`claimsOver20 > 0`). Starvation, excessive SQL or material delivery delay from repeated claims is a release blocker. | Global-mode rollback (§8.1), then investigate. |
-| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). | Global-mode rollback, then investigate. |
+| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). Until #24 is fixed, a documented drain of a queue-and-scope backlog larger than one batch (§5.2, §5.3) may run to about ceil(backlog / batch) intervals; that alone is not a breach. | Outside such a drain: global-mode rollback, then investigate. |
 | Delivery failures | `DELIVERY_UNCERTAIN` and failed counts (email, push) | No rise against the pre-change baseline. | Investigate; roll back if caused by the change. |
 | Worker restarts | Platform restart count, bundle exit lines | No unexplained restarts. | Investigate; check the boot gate messages. |
 | PostgreSQL load | CPU, statements per minute | Should fall after global activation (measured −86 to −95 % idle SQL at 200 organisations). | A rise is a breach: roll back, investigate. |
