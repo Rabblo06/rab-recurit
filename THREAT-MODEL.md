@@ -4609,3 +4609,43 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase D-Q1 — one complete queue registry, a required tenant scope on every enqueue (branch phase-d/dq1-queue-registry, not merged)
+
+Structural change; no option value, job name, jobId format, prefix, payload or business rule changed (pinned by
+`queue-registry.spec.ts` and `queue-enqueue.spec.ts` against the pre-D-Q1 literals). No migration, role, grant, RLS or
+posture change.
+
+- **Tenant scope at enqueue (new control, producer side).** Every BullMQ job is built by `registeredJob` /
+  `scanJobTemplate` (`engine/worker-shared/queue-enqueue.ts`) with a REQUIRED scope: `{ kind: 'organisation',
+  organisationId }` (a UUID, equal to the payload's `organisationId`) for the four consumer queues, `{ kind: 'system' }`
+  for the seven scan queues. Missing, malformed or wrong-kind scopes, a scope naming another organisation than the
+  payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
+  with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
+  (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+- **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
+  (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
+  `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
+  `shift-statement.job.ts processShiftStatementJob` (`payroll_record ... FOR UPDATE` in `workerCtx(org, workspace)`),
+  `AiTurnRunnerService` / `AiTitleService` (turn / conversation rows under the job's org + workspace). A forged id
+  combination matches no row.
+- **Unknown job name on an existing queue — finding, FIXED (Low, integrity).** Actor → action → consequence: anything
+  able to add a job to `rab-email` / `rab-push` / `rab-shift-statements` (only Crewflow processes hold the Redis
+  credentials; production Redis is unauthenticated, see Phase D-Q plan §7) under ANY job name → the consumer handed it
+  to the one send / generate handler → the email/push/statement for the id in the payload was processed as if it had
+  been published under the registered name. `rab-ai` completed an unknown name silently. Where:
+  `rab-worker/src/core/scheduler/bullmq-scheduler.ts` `createConsumerWorkers` (`(job) => handler(job)`). Fix: a job
+  whose name the registry does not list for the queue is failed closed (`UnrecoverableError`: failed set after one
+  attempt, a warning naming the queue and job id only, the handler never runs). Regression tests:
+  `queue-registry-worker.spec.ts` (all four queues) and `queue-registry-consumers.integration.spec.ts` (real Redis:
+  a `bogus-job` with `attempts: 5` ends failed after one attempt, handler not called; registered names still handled).
+  The tenant re-read above already bounded the impact to the job's own organisation's rows.
+- **Unknown queue name:** `queueSettingsOf` throws `UnknownQueueError`; the Worker refuses to start on an invalid or
+  incomplete registry (`assertQueueRegistryValid`), on a `@Processor` naming an unregistered queue (unchanged) and, in
+  bullmq mode, on scan settings that drifted from `SCAN_JOBS` (`assertScanQueueSettings`). No queue name is read from the
+  environment (`BULLMQ_PREFIX` is a validated prefix, not a queue name); the Admin queue view answers 404 for an
+  unregistered queue name (unchanged).
+- **Missed-tick record:** `rab:worker:scan-ticks` (one epoch-ms field per scan, 7-day TTL) — timestamps only, no ids,
+  no configuration, no tenant data.
+- **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
+  decision); the producer-side checks are defence in depth, not an authentication boundary.
