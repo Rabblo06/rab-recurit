@@ -4609,3 +4609,34 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
+
+Flag `WORKER_FAST_PUBLISH_NOTIFY` (default false = today). No migration, no role, grant, RLS or posture change; no
+payroll, attendance or staffing rule change; email preferences untouched (notify() email stays default-off).
+
+- **Asset:** delivery of another person's notification email/push (the `email_outbox` / `push_delivery` rows notify()
+  writes in a business transaction). **Actor:** the API process acting on a committed business change; anyone able to
+  make the transaction roll back, stall Redis, or forge a job.
+- **Change:** with the flag on, `NotifyFastPublishService` adds the SAME BullMQ jobs the dispatcher's first publish adds
+  (`email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0`, existing producers, same options) right after the
+  transaction's OUTERMOST commit (TypeORM `AfterTransactionCommit`; savepoint releases ignored). Any rollback — of the
+  transaction or a savepoint in it — discards everything registered on it. Outside a transaction nothing is registered.
+- **Controls:** never published before commit (a rolled-back business change publishes nothing — tested). The fast path
+  writes nothing to the database: no status, `queued_at` or generation; the dispatcher's later add of the same jobId is
+  deduplicated by BullMQ and the consumers' fenced compare-and-set allows one delivery (tested: one job, one send).
+  `provider_call_started_at`, `DELIVERY_UNCERTAIN`, the idempotency key, attempts, backoff and leases are untouched.
+  Redis down or slow: publishes run detached from the request and are bounded by the producers' fail-fast connection;
+  failures are swallowed and the row is published later by the dispatcher (tested). Job payload = the committed row's id
+  and its `organisation_id` only (server values); consumers re-read the row under that organisation's RLS context and
+  revalidate before sending (tested: other organisation's context and no context see zero rows; a job naming another
+  organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
+- **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
+  publish error is caught per row instead of aborting the cycle. The claim SQL is byte-identical; FAILED /
+  DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
+  only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
+- **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
+  dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
+  lease instead of the 5 s dispatcher, a lease-outcome change.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The production worker bundle does not
+  forward the flag, so Worker-originated notify() rows keep using the dispatcher.
