@@ -134,7 +134,7 @@ export const WORKER_ROLE_EXPECTED = {
 /** Problems with crewflow_worker's shape; empty = matches the contract. Pure (unit-tested). */
 export function workerRoleProblems(f: WorkerRoleFacts | undefined): string[] {
   if (!f || !f.present) {
-    return ['crewflow_worker does not exist: an operator must create it first (reviewed bootstrap step, see docs/runbooks/phase-d-worker-dispatch.md §2); a migration never creates a role'];
+    return ['crewflow_worker does not exist: an operator must create it first (reviewed bootstrap step, see packages/rab-docker/docs/phase-d-deployment-runbook.md §3); a migration never creates a role'];
   }
   const problems: string[] = [];
   let attrs: Record<string, unknown> = {};
@@ -1164,7 +1164,7 @@ export const ALL_SECURE_FUNCTION_SQL: Readonly<Record<string, string>> = {
 
 
 // =====================================================================================================================
-// F2 (PROPOSED, NOT APPROVED, NOT RUN): migration 1786721350000-StatementPointerPhysicalIdentity. The approved constants
+// F2 (owner-approved 2026-11-01, option C): migration 1786721350000-StatementPointerPhysicalIdentity. The approved constants
 // above stay byte-identical (1786721300000 / 1310000 / 1320000 import them); 1350000 uses only the F2_* builders below.
 // Pointer identity = the physical source row: (queue, subject_id, source_schema), where source_schema is 'core' or the
 // row's own 'workspace_<hex>' (checked by the statement trigger's place guard and by worker_dispatch_pointer_source_check).

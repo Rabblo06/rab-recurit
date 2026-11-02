@@ -46,6 +46,34 @@ describe('DispatchQueueRunner', () => {
     expect(maxActive).toBe(1);
   });
 
+  it('a call made in the gap after a run settles, before its queued follow-up starts, joins that follow-up (no second loop)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const gates = [deferred(), deferred(), deferred()];
+    const seen: string[][] = [];
+    const runner = new DispatchQueueRunner(async (reasons) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      seen.push([...reasons].sort());
+      await gates[seen.length - 1]!.promise;
+      active -= 1;
+    });
+    const first = runner.run('a');
+    // Registered on the running promise BEFORE the follow-up is queued, so it runs in the gap: `active` already cleared,
+    // the queued follow-up not started yet (a tick() caller re-entering from the continuation of an earlier tick()).
+    const reentered = first.then(() => runner.run('c'));
+    const followUp = runner.run('b');
+    gates[0]!.resolve();
+    await first;
+    await new Promise((r) => setImmediate(r));
+    expect(maxActive).toBe(1);
+    expect(seen).toEqual([['a'], ['b', 'c']]);
+    gates[1]!.resolve();
+    await Promise.all([followUp, reentered]);
+    expect(seen).toHaveLength(2);
+    expect(maxActive).toBe(1);
+  });
+
   it('a failed run does not block the next one, and the failure reaches only its own callers', async () => {
     let calls = 0;
     const runner = new DispatchQueueRunner(async () => {

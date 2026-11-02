@@ -79,7 +79,9 @@ export function migrationSourceViolations(source: string): string[] {
   if (/\b(?:CREATE|DROP)\s+ROLE\b/i.test(s) || /\bALTER\s+ROLE\s+"?crewflow_worker"?(?![\w])/i.test(s)) {
     out.push('creates, drops or alters a login role (operator bootstrap only, never a migration)');
   }
-  if (/\bGRANT\s+(?![^;`]*\bON\b)[^;`]*\bTO\s+"?crewflow_worker"?(?![\w])/i.test(s)) {
+  // A membership grant has no ON between GRANT and TO. Tempered (not a lookahead to the next ; or backtick), so an ON in
+  // a LATER string of an SQL-string array cannot hide it, and quoted identifiers still match.
+  if (/\bGRANT\s+(?:(?!\bON\b)[^;`])*?\bTO\s+"?crewflow_worker"?(?![\w])/i.test(s)) {
     out.push('grants a role membership to crewflow_worker (operator bootstrap only, never a migration)');
   }
   return out;

@@ -4451,7 +4451,7 @@ production; realtime production enablement is additionally blocked on Phase D (s
 
 Owner approvals: D0 plan (conditional, 2026-10-31); master SQL gate (2026-11-01) for disposable databases only. Defaults
 unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_SCHEDULER=interval`, `REALTIME_ENABLED=false`,
-`PUSH_ENABLED=false`, `WORKER_INVITE_AUTO_DELETE_ENABLED=false`. Operator runbook: `docs/runbooks/phase-d-worker-dispatch.md`.
+`PUSH_ENABLED=false`, `WORKER_INVITE_AUTO_DELETE_ENABLED=false`. Operator runbook: `packages/rab-docker/docs/phase-d-deployment-runbook.md` (`crewflow_worker` creation §3, global-mode activation §5, the separately approved D5 cutover §11).
 
 ### D-a: separate Worker identity (owner-approved exception to Phase B's single runtime login)
 - **Asset:** the ability to discover and lease every tenant's pending work (claim/release functions). **Actor:** anyone who

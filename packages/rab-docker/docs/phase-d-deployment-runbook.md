@@ -63,9 +63,16 @@ The jobs child's own environment validation and live boot gate remain the author
 
 ### 3.1 Who and what
 
-- **Who:** the database operator, using the cluster's administrative login. It needs `CREATEROLE` **and ADMIN OPTION on
-  `crewflow_app`** (PostgreSQL 16 lets a CREATEROLE role grant only roles it administers), or a superuser where the
-  platform provides one. Never one of the application's own logins.
+- **Who:** the database operator, as a **superuser** (for example the bootstrap identity). Never one of the
+  application's own logins.
+  - **A non-superuser `CREATEROLE` login cannot create a passing role on its own.** PostgreSQL 16 automatically makes
+    the creating login a member of the new role (`admin=true, inherit=false, set=false`, granted by the bootstrap
+    superuser), and that login cannot revoke the membership itself (verified on 16.15). The shape check below then finds
+    one member, and migration 1786721300000 refuses to run (fail-closed).
+  - If the role is created by a `CREATEROLE` login (it also needs ADMIN OPTION on `crewflow_app` to grant it), a
+    **superuser must then run** `REVOKE crewflow_worker FROM <that login>;` before the shape check.
+  - On a managed platform without any superuser, neither path is available. Accepting exactly that creator membership
+    in the shape check is a separate, security-reviewed owner decision (§11); never loosen the check ad hoc.
 - **Approval:** separate owner approval per environment.
 - **Required shape:**
 
@@ -162,7 +169,7 @@ application login and never by hand.
 
 | Check | Expected |
 |---|---|
-| Migration ledger | Exactly the four migrations above were added; 1786721330000 absent. |
+| Migration ledger | Exactly the five migrations above were added; 1786721330000 absent. |
 | Workspace fingerprint | Every READY workspace at module 19 matches the v19 value in `packages/rab-server/src/database/typeorm/workspace-schema/v1/expected-fingerprints.ts`: `b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3`. |
 | Security posture | Clean against `packages/rab-server/src/database/typeorm/core/security-posture.golden.txt`. |
 | Migration-security harness | The restricted-migrator / migration-security harness re-run on a **production-like rehearsal copy** (not on the live database). Rehearsal result, 2026-11-01: 117 pass, 0 fail, including the RLS coverage gate run as both `crewflow_app` and `crewflow_worker`. |
@@ -512,6 +519,7 @@ Environment-independent decisions:
   wording, rollback and monitoring. Production refuses `true` until then.
 - [ ] SMTP post-DATA duplicate policy (§10).
 - [x] F2 SQL fix: physical pointer identity, migration 1786721350000 (§6), owner-approved 2026-11-01 (option C).
+- [ ] Managed PostgreSQL without a superuser: whether the `crewflow_worker` shape check may accept exactly the creating login's automatic membership (`admin=true, inherit=false, set=false`) (§3.1). Security review first.
 - [ ] F3: a database-side switch (and in-definer audit) for the invite-cleanup definers. Today the flag and the audit
   live only in the Worker.
 - [ ] Send-time realtime recipient re-authorisation (§10).

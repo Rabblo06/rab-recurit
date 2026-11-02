@@ -78,8 +78,8 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
   { id: 'v1.016-archive-columns', version: 16, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: archiveColumnsSql },
   { id: 'v1.017-search-vectors', version: 17, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: searchVectorsSql },
   { id: 'v1.018-venue-team-org-admin', version: 18, introducedBy: 'VenueTeamOrgAdmin1786721090000', sql: venueTeamOrgAdminSql },
-  // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): statement dispatch pointer triggers. Its expected fingerprint is computed
-  // only after the owner approves the SQL (v1/expected-fingerprints.ts, PENDING_FINGERPRINT_VERSIONS).
+  // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): statement dispatch pointer triggers. Its expected
+  // fingerprint is recorded in v1/expected-fingerprints.ts (EXPECTED_WORKSPACE_FINGERPRINTS[19]).
   { id: 'v1.019-statement-dispatch-pointer', version: 19, introducedBy: 'StatementDispatchPointer1786721320000', sql: statementDispatchPointerSql },
 ];
 

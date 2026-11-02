@@ -50,7 +50,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE rab_owner IN SCHEMA core
 -- role (IF NOT EXISTS ... ELSE ALTER ROLE ... PASSWORD): it is pre-created here with exactly that migration's attributes
 -- and a throwaway dev-only password the migration replaces with CREWFLOW_APP_BOOTSTRAP_PASSWORD, so that the membership
 -- can be granted at init time, before any migration runs. Production / staging / CI: the reviewed operator runbook step
--- (docs/runbooks/phase-d-worker-dispatch.md §2), with a secret-store password — never this file.
+-- (packages/rab-docker/docs/phase-d-deployment-runbook.md §3), with a secret-store password — never this file.
 CREATE ROLE crewflow_app LOGIN PASSWORD 'crewflow_app_dev_placeholder_replaced_by_migration' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 CREATE ROLE crewflow_worker LOGIN PASSWORD 'crewflow_worker_dev_only'
   NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT;

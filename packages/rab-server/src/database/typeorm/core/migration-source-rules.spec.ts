@@ -63,5 +63,15 @@ describe('core migrations after Phase 0b follow the scoped-CREATE and runtime-pr
       bad('`ALTER ROLE crewflow CREATEROLE`', 'CREATEROLE');
       ok('`ALTER ROLE crewflow_app NOBYPASSRLS`');
     });
+
+    it('a role membership granted to crewflow_worker is refused wherever the SQL strings break; object privileges are not', () => {
+      bad('`GRANT crewflow_app TO crewflow_worker`', 'role membership to crewflow_worker');
+      bad('`GRANT "crewflow_app" TO "crewflow_worker"`', 'role membership to crewflow_worker');
+      // SQL kept as an array of strings: an ON in a LATER string must not hide the membership grant.
+      bad("['GRANT crewflow_app TO crewflow_worker', 'REVOKE ALL ON FUNCTION core.f() FROM PUBLIC']", 'role membership to crewflow_worker');
+      bad('["GRANT crewflow_app TO crewflow_worker", "GRANT EXECUTE ON FUNCTION core.f() TO crewflow_worker"]', 'role membership to crewflow_worker');
+      ok('`GRANT EXECUTE ON FUNCTION core.worker_claim_email_dispatch(integer) TO crewflow_worker`');
+      ok("['GRANT USAGE ON SCHEMA core TO crewflow_worker', 'GRANT EXECUTE ON FUNCTION core.f() TO crewflow_worker']");
+    });
   });
 });

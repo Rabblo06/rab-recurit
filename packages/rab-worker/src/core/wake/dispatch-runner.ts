@@ -20,11 +20,13 @@ export class DispatchQueueRunner<T> {
 
   run(reason: string): Promise<T | undefined> {
     if (this.stopped) return Promise.resolve(undefined);
-    if (!this.active) return this.start(new Set([reason]));
+    // Join a queued follow-up FIRST: between a run settling (start()'s finally clears `active`) and the follow-up's own
+    // reaction starting it, `active` is null while `queued` is set; starting here would run two loops at once.
     if (this.queued) {
       this.queued.reasons.add(reason);
       return this.queued.promise;
     }
+    if (!this.active) return this.start(new Set([reason]));
     const reasons = new Set([reason]);
     const promise = this.active
       .catch(() => undefined)

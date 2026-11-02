@@ -119,6 +119,17 @@ describe('realtime publisher — global mode scope', () => {
     expect(claim!.params).toEqual([expect.any(String), '60', 1, [E1]]);
   });
 
+  it('global and per_scope share the eligibility predicate text (global only wraps it and adds the id restriction)', async () => {
+    const respond = (sql: string) => (sql.includes('WITH claimable') ? [[], 0] : []);
+    const a = fakeTenant(respond);
+    await runRealtimeOutboxPublishCycle(a.dataSource as never, a.tenant as never, jest.fn(), 'test', { scopes: [{ organisationId: ORG, workspaceId: null }] });
+    const b = fakeTenant(respond);
+    await publishRealtimeScope(b.tenant as never, jest.fn(), 'test', { organisationId: ORG, workspaceId: WS }, { ids: [E1] });
+    const predicate = (sql: string) => sql.slice(sql.indexOf('WHERE') + 'WHERE'.length, sql.indexOf('ORDER BY')).replace(/\s+/g, ' ').trim();
+    const claim = (s: { sql: string }[]) => s.find((x) => x.sql.includes('WITH claimable'))!.sql;
+    expect(predicate(claim(b.statements))).toBe(`(${predicate(claim(a.statements))}) AND id = ANY($4::uuid[])`);
+  });
+
   it('LEASE: a re-visit (pointer lease expired) while the row lease is held claims nothing — no duplicate publish', async () => {
     const table = new RealtimeTable();
     table.insert(E1);
