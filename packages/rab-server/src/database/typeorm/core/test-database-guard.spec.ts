@@ -2,8 +2,10 @@ import {
   ALLOW_REMOTE_TEST_DATABASE,
   TEST_DATABASE_URL,
   TEST_DATABASE_URL_UNPOOLED,
+  TEST_DATABASE_WORKER_URL,
   TestDatabaseConfigError,
   applyIntegrationTestDatabaseEnv,
+  resolveForJestGlobalSetup,
   resolveIntegrationTestDatabase,
 } from './test-database-guard';
 
@@ -116,5 +118,146 @@ describe('integration test database guard', () => {
     const env: NodeJS.ProcessEnv = { NODE_ENV: 'production', DATABASE_URL: NEON_POOLED };
     expect(applyIntegrationTestDatabaseEnv(env)).toBeNull();
     expect(env.DATABASE_URL).toBe(NEON_POOLED);
+  });
+
+  // ---- X1.2 (audit DBT-01, DBT-02, DBT-10): fail closed for the wrong NODE_ENV, the development database, redirecting
+  // inherited database URLs, libpq target variables, URLs without a login and test logins on another database. Every refusal
+  // is checked for the planted secret and for leaving DATABASE_URL untouched (nothing routed half-way).
+  describe('X1.2 fail-closed process rules', () => {
+    const DEV_DB = `postgres://crewflow_app:${SECRET}@127.0.0.1:15432/rab`;
+    const OTHER_LOCAL = `postgres://crewflow_app:${SECRET}@127.0.0.1:55499/rab_dev_other`;
+    const jestEnv = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+      NODE_ENV: 'test',
+      JEST_WORKER_ID: '1',
+      [TEST_DATABASE_URL]: LOCAL_APP,
+      [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
+      ...over,
+    });
+    function expectApplyRefused(env: NodeJS.ProcessEnv, pattern: RegExp): void {
+      const before = env.DATABASE_URL;
+      let message = '';
+      try {
+        applyIntegrationTestDatabaseEnv(env);
+      } catch (error) {
+        expect(error).toBeInstanceOf(TestDatabaseConfigError);
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(pattern);
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toMatch(/postgres(ql)?:\/\//);
+      expect(env.DATABASE_URL).toBe(before);
+    }
+
+    it('DBT-01 reproduction: under Jest, NODE_ENV=development (an Nx-loaded .env) is refused instead of skipping the routing', () => {
+      // Before X1.2 this returned null and left DATABASE_URL on the .env value while the fixtures used the TEST admin URL.
+      expectApplyRefused(jestEnv({ NODE_ENV: 'development', DATABASE_URL: DEV_DB }), /Jest is running with NODE_ENV="development", not "test"/);
+    });
+
+    it('under Jest, an unset or unrecognised NODE_ENV is refused too, without echoing an unrecognised value', () => {
+      expectApplyRefused(jestEnv({ NODE_ENV: undefined }), /NODE_ENV=unset/);
+      expectApplyRefused(jestEnv({ NODE_ENV: `weird-${SECRET}` }), /NODE_ENV=an unrecognised value \(not shown\)/);
+    });
+
+    it('globalSetup (the Jest parent, no JEST_WORKER_ID) refuses a NODE_ENV other than test before any probe', () => {
+      const pair = { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN };
+      expect(() => resolveForJestGlobalSetup({ NODE_ENV: 'development', ...pair })).toThrow(/Jest is running with NODE_ENV="development"/);
+      expect(() => resolveForJestGlobalSetup({ NODE_ENV: 'test', ...pair, PG_DATABASE_URL: DEV_DB })).toThrow(/PG_DATABASE_URL is set/);
+      expect(resolveForJestGlobalSetup({ NODE_ENV: 'test', ...pair }).app.database).toBe('rab_test_a');
+    });
+
+    it('outside Jest a non-test NODE_ENV still leaves the runtime and CLI untouched', () => {
+      const env: NodeJS.ProcessEnv = { NODE_ENV: 'development', DATABASE_URL: DEV_DB };
+      expect(applyIntegrationTestDatabaseEnv(env)).toBeNull();
+      expect(env.DATABASE_URL).toBe(DEV_DB);
+    });
+
+    it('refuses the development database (rab-devdb 127.0.0.1:15432, compose host devdb, or the DEVDB_URL database)', () => {
+      expectRefused(
+        { [TEST_DATABASE_URL]: DEV_DB, [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab` },
+        /development database \(rab-devdb\)/,
+      );
+      expectRefused(
+        {
+          [TEST_DATABASE_URL]: `postgres://crewflow_app:${SECRET}@devdb:5432/rab`,
+          [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@devdb:5432/rab`,
+          [ALLOW_REMOTE_TEST_DATABASE]: 'true',
+        },
+        /development database host "devdb"/,
+      );
+      expectRefused(
+        { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN, DEVDB_URL: `postgres://crewflow_app:${SECRET}@127.0.0.1:55462/rab_test_a` },
+        /same database and endpoint as DEVDB_URL/,
+      );
+      // A DEVDB_URL naming another database does not block the test database.
+      expect(resolveIntegrationTestDatabase({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN, DEVDB_URL: DEV_DB }).app.database).toBe(
+        'rab_test_a',
+      );
+    });
+
+    it('DBT-02: an inherited PG_DATABASE_URL naming another database is refused (never silently kept or overwritten)', () => {
+      expectApplyRefused(
+        jestEnv({ PG_DATABASE_URL: DEV_DB }),
+        /PG_DATABASE_URL is set \(inherited.*names "rab" on 127\.0\.0\.1:15432, not the test database "rab_test_a"/,
+      );
+      expectApplyRefused(jestEnv({ PG_DATABASE_URL: NEON_POOLED }), /PG_DATABASE_URL is set/);
+    });
+
+    it.each([
+      'DATABASE_DIRECT_URL',
+      'PG_DATABASE_REPLICA_URL',
+      'PG_OPS_APP_DATABASE_URL',
+      'CREWFLOW_MIGRATION_DATABASE_URL',
+      'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL',
+      'CREWFLOW_PROVISIONER_DATABASE_URL',
+    ])('an inherited %s naming another database is refused', (name) => {
+      expectApplyRefused(jestEnv({ [name]: OTHER_LOCAL }), new RegExp(`${name} is set \\(inherited`));
+    });
+
+    it('an inherited database URL that is not a URL is refused without echoing it', () => {
+      expectApplyRefused(jestEnv({ PG_DATABASE_URL: `garbage ${SECRET}` }), /PG_DATABASE_URL is set and is not a valid postgres URL \(value not shown\)/);
+    });
+
+    it('an empty inherited value counts as unset, and one naming the test database is allowed (and kept)', () => {
+      const empty = jestEnv({ PG_DATABASE_URL: '', DATABASE_DIRECT_URL: '  ' });
+      expect(applyIntegrationTestDatabaseEnv(empty)?.app.database).toBe('rab_test_a');
+      expect(empty.DATABASE_URL).toBe(LOCAL_APP);
+      const same = jestEnv({ PG_DATABASE_URL: LOCAL_APP });
+      expect(applyIntegrationTestDatabaseEnv(same)?.app.database).toBe('rab_test_a');
+      expect(same.PG_DATABASE_URL).toBe(LOCAL_APP);
+    });
+
+    it('legacy DATABASE_URL / DATABASE_URL_UNPOOLED inherited from .env cannot redirect: they are replaced by the validated pair', () => {
+      const env = jestEnv({ DATABASE_URL: DEV_DB, DATABASE_URL_UNPOOLED: OTHER_LOCAL });
+      applyIntegrationTestDatabaseEnv(env);
+      expect(env.DATABASE_URL).toBe(LOCAL_APP);
+      expect(env.DATABASE_URL_UNPOOLED).toBe(LOCAL_ADMIN);
+    });
+
+    it.each(['PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGHOSTADDR', 'PGSERVICE', 'PGOPTIONS'])('a target-changing libpq variable (%s) is refused', (name) => {
+      expectApplyRefused(jestEnv({ [name]: 'x' }), new RegExp(`libpq variable\\(s\\) ${name} are set`));
+    });
+
+    it('refuses a TEST URL that does not name its login (the driver would fall back to PGUSER / the OS user)', () => {
+      expectRefused({ [TEST_DATABASE_URL]: 'postgres://127.0.0.1:55462/rab_test_a', [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN }, /TEST_DATABASE_URL must name its login/);
+      expectRefused(
+        { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: `postgres://:${SECRET}@127.0.0.1:55462/rab_test_a` },
+        /TEST_DATABASE_URL_UNPOOLED must name its login/,
+      );
+    });
+
+    it('DBT-10: TEST_DATABASE_WORKER_URL / TEST_DATABASE_CREWFLOW_URL on another database are refused; on the test database accepted', () => {
+      expectRefused(
+        { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN, [TEST_DATABASE_WORKER_URL]: OTHER_LOCAL },
+        /TEST_DATABASE_WORKER_URL names "rab_dev_other"/,
+      );
+      expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN, TEST_DATABASE_CREWFLOW_URL: DEV_DB }, /TEST_DATABASE_CREWFLOW_URL names "rab"/);
+      expect(
+        resolveIntegrationTestDatabase({
+          [TEST_DATABASE_URL]: LOCAL_APP,
+          [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
+          [TEST_DATABASE_WORKER_URL]: `postgres://crewflow_worker:${SECRET}@127.0.0.1:55462/rab_test_a`,
+        }).app.database,
+      ).toBe('rab_test_a');
+    });
   });
 });
