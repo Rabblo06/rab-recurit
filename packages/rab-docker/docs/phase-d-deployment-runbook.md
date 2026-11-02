@@ -229,6 +229,9 @@ the Worker, then check every item:
 - [ ] per_scope still delivers email, push, realtime and statements on the new login.
 - [ ] At least one full reconcile interval (≤ 900 s) has passed since the migrations were applied. Recommended: run
   per_scope for at least one full reconcile interval before switching.
+- [ ] **HARD BLOCKER (owner decision 2026-11-02):** the bounded, fair follow-up reconciliation for legacy sweeps that
+  reach their batch limit ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)) is merged and verified. Until it
+  is, `WORKER_CLAIM_MODE=global` must not be enabled in staging or production, whatever the other items show.
 
 Rollback for this step: §8.2.
 
@@ -240,8 +243,10 @@ restart. The API is unchanged in poll mode.
 Switching to global is itself the supervised initial reconciliation. On each Worker process's **first** scan tick for
 each queue (immediately at start with `WORKER_SCHEDULER=interval`), the legacy per-scope sweep runs. It is the same
 bounded, idempotent, tenant-scoped code as per_scope mode, dispatches pre-cutover work directly, and creates no
-pointers. It then repeats every reconcile interval, so a row whose pointer is missing is found within 15 minutes at
-most.
+pointers. It then repeats every reconcile interval. Each pass claims one batch (50) per organisation, so today a row
+whose pointer is missing is found within 15 minutes **only while its organisation's pointerless backlog fits in one
+batch**. A larger backlog drains about 50 rows per organisation per interval. That is a delay, not a loss. It is the
+§5.1 hard blocker, tracked in [#24](https://github.com/Rabblo06/rab-recurit/issues/24).
 
 ### 5.3 What to watch in the first sweep
 
@@ -493,7 +498,9 @@ Further limits:
 
 - **Crashed Worker:** its claimed work waits for its lease to expire (15 s realtime, 30 s email/push), then another
   claim picks it up.
-- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s).
+- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s), but only while the organisation's
+  pointerless backlog fits in one batch (50). A larger backlog drains one batch per interval until
+  [#24](https://github.com/Rabblo06/rab-recurit/issues/24) is fixed (a §5.1 hard blocker for global activation).
 - **Event mode:** a full notification queue fails the producer's COMMIT (§5.4).
 
 **Known limitation: send-time realtime authorisation.** A realtime event is not re-authorised against its recipient at
@@ -508,9 +515,18 @@ Each item is a separate owner decision. Nothing on this list is approved by this
 |---|---|---|---|
 | 1 | `crewflow_worker` creation (§3) | [ ] | [ ] |
 | 2 | Migration release: 1786721300000, 1786721310000, 1786721320000, 1786721340000, 1786721350000 (§4) | [ ] | [ ] |
-| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9) | [ ] | [ ] |
+| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9). **Blocked until #24 is fixed.** | [ ] | [ ] |
+
+**HARD BLOCKER before item 3 in any environment:** [#24](https://github.com/Rabblo06/rab-recurit/issues/24), bounded and
+fair follow-up reconciliation when a legacy sweep reaches its batch limit. The fix must preserve Phase D's measured
+idle-load improvements. Owner decision 2026-11-02: a tracked follow-up, not a blocker for merging #23. Because of §9,
+apply the item 2 migrations to an environment only once #24 is ready, so the 14-day clock does not start while
+activation is blocked.
 
 Environment-independent decisions:
+
+- [ ] [#24](https://github.com/Rabblo06/rab-recurit/issues/24): legacy-sweep batch-limit follow-up reconciliation,
+  merged and verified (hard blocker for item 3).
 
 - [ ] Event mode (`WORKER_DISPATCH_MODE=event`), with its OD-2 prerequisites (§5.4).
 - [ ] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: gated, outside the migration glob.
