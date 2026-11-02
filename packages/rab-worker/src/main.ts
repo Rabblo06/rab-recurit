@@ -34,6 +34,7 @@ import {
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
+  WORKER_SCAN_TICKS_KEY,
   WORKER_STATS_KEY,
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
@@ -322,6 +323,8 @@ async function bootstrap(): Promise<void> {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
     statsWrite: schedulerMode === 'bullmq' ? 'fields' : 'whole',
     durationsKey: WORKER_CYCLE_DURATIONS_KEY,
+    // D-Q1 missed-tick record: when each scan's trigger last fired, whatever the outcome (rab:worker:scan-ticks).
+    ticksKey: WORKER_SCAN_TICKS_KEY,
   });
   // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
