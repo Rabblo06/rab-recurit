@@ -4609,3 +4609,97 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase X1.8 — risk register: the API login can still execute the due-work definers (cleanup audit DBA-01, Phase D D0-A1)
+
+Documentation only. No grant, migration or D5 step is changed or executed by this entry.
+
+```
+MEDIUM (accepted residual until the D5 cutover; owner decision needed to close)
+Failure:      attacker with SQL execution on an API session (SQL injection, or code execution in the API process) →
+              SELECT * FROM core.worker_claim_due_work('<job type>', <batch>, <lease>) → receives every tenant's due-work
+              pointers with their claim tokens → core.worker_complete_due_work(id, token) deletes them, or
+              core.worker_reschedule_due_work(id, token, <far future>) pushes them out → other tenants'
+              manager-confirmation timeouts silently never fire (cross-tenant integrity / availability; the pointers
+              carry routing ids only, no names, emails or amounts).
+Actor:        crewflow_app, the API's runtime login (also the Worker's login until it moves to crewflow_worker).
+Location:     packages/rab-server/src/database/typeorm/core/security-posture.golden.txt:450,471,506
+              (execute|worker_{claim,complete,reschedule}_due_work|crewflow_app|true; lines 451,472,507 the same for
+              crewflow; PUBLIC false). The three are SECURITY DEFINER, owner rab_secure_owner,
+              search_path=pg_catalog, core, pg_temp (golden :650,:657,:669), with no tenant predicate by design: they
+              are the Worker's cross-tenant timer discovery (core.worker_due_work is on the NOT-FORCE allowlist for the
+              same reason, golden :851).
+Root cause:   the API and the Worker shared one runtime login (Phase B), so a Worker-only global definer is executable
+              by the API. Phase D created crewflow_worker; the grants move only at the gated D5 cutover.
+Fix:          the owner-approved, application-gated migration
+              packages/rab-server/src/database/typeorm/core/gated-migrations/1786721330000-WorkerDueWorkClaimsToWorkerRole.ts
+              (REVOKE EXECUTE … FROM crewflow, crewflow_app; GRANT EXECUTE … TO crewflow_worker on exactly these three
+              signatures: worker-dispatch-pointer-sql.ts DUE_WORK_TO_WORKER_UP_SQL / DUE_WORK_EXECUTORS_AFTER).
+Regression:   phase-d-due-work-cutover.integration.spec.ts with PHASE_D_D5=after (crewflow_app → permission denied on
+              claim / complete / reschedule; crewflow_worker succeeds), the down() rehearsal back to PHASE_D_D5=before,
+              the posture golden regenerated to show EXECUTE for crewflow_worker (+ owner) only.
+```
+
+**Verified on main `8aacdddb` (2026-11-02):**
+- Exactly three due-work definers are executable by `crewflow_app`: `core.worker_claim_due_work(text, integer, integer)`,
+  `core.worker_complete_due_work(uuid, uuid)`, `core.worker_reschedule_due_work(uuid, uuid, timestamp with time zone)`
+  (posture golden lines above; the same answer from `has_function_privilege` on a disposable database migrated to the
+  main ledger of 250 migrations, `1786721330000` absent). `crewflow_worker`, where it exists, can execute them too, by
+  inheritance through its `crewflow_app` membership.
+- The gated `1786721330000` is the planned cutover: it lives in `core/gated-migrations/`, outside the
+  `core/migrations/*` glob TypeORM and the M2 harness load; `worker-dispatch-pointer-sql.spec.ts:208-209` asserts it is
+  there and absent from `core/migrations/`; its pre-flight refuses unless the executors are exactly
+  `crewflow+crewflow_app+rab_secure_owner` and its self-check requires exactly `crewflow_worker+rab_secure_owner` after.
+- **The API never calls them.** `git grep -E "worker_(claim|complete|reschedule)_due_work"` outside migrations, tests,
+  specs and the golden finds only: `rab-worker/src/core/database/due-work.ts:29,34,44` (the Worker's callers), and in
+  rab-server only names, never calls — `database-boot-gate-rules.ts:31` (`DUE_WORK_FUNCTIONS`, the boot gate's privilege
+  check) and `worker-dispatch-pointer-sql.ts:951-982` (the D5 SQL constants). `engine/` and `modules/` never import
+  rab-worker. So revoking them from `crewflow_app` removes nothing the API uses; it removes what an API compromise could
+  abuse, and what an **old Worker still on `crewflow_app`** uses today.
+- Related, out of this finding's scope (not due-work, not covered by 1330000; corrected after the X1.9 review):
+  `crewflow_app` also executes four other global `worker_*` definers (golden :465,:468,:494,:500).
+  - `worker_list_organisations(uuid, integer)` and `worker_list_workspaces(uuid, integer)` are **not** Worker-only: the
+    API uses them and they must stay granted to `crewflow_app`. `engine/worker-shared/maintenance-catalogue.ts:14,54`
+    (`organisationIds`, `storageScopes`) is called by the platform-admin `outbox-operations.service.ts:16,165,269`,
+    `secret-rotation.service.ts:4` and `ai-retention.service.ts:7`; the API's schema-compatibility boot check reads
+    `worker_list_workspaces` directly (`database/boot-checks/schema-compatibility.ts:308`). They return ids only.
+  - `worker_cleanup_auth_tokens(integer)` and `worker_cleanup_oauth_transaction_state(integer)` have no API caller (the
+    only calls are `rab-worker/src/queues/rab-maintenance/token-cleanup.job.ts:28,34`; rab-server names the first in a
+    comment only, `auth/token/retention-policy.ts:7`). They delete expired auth-token and OAuth-state rows; whether to
+    move them to `crewflow_worker` too needs its own assessment.
+- Also part of the picture, not an extra hole: `crewflow_app` (and `crewflow`) hold SELECT, INSERT, UPDATE, DELETE on the
+  `core.worker_due_work` TABLE itself (golden :1030-1031). Producers need that to schedule pointers. Those grants are
+  RLS-bound: the owner is `rab_secure_owner` (golden :763), so the missing FORCE (golden :851) exempts only that NOLOGIN
+  owner, and the `worker_due_work_tenant` policy (`1786676800000-WorkerDueWork.ts:59-61`) limits `crewflow_app` to rows of
+  its bound organisation and workspace. The cross-tenant reach comes only from the three definers above.
+
+**Exposure today:** any SQL execution on an API session. No HTTP route reaches these functions; the API code has no
+call path to them. Severity stays MEDIUM, not HIGH, because it needs a prior API compromise, and it discloses routing
+ids only.
+
+**Preconditions to close it (all from the D5 gate; none is met or approved by this entry):**
+1. `crewflow_worker` exists in the environment with the reviewed shape (runbook `phase-d-deployment-runbook.md` §3,
+   approval item 1) and **every** Worker process in that environment authenticates as it, per_scope included (per_scope
+   still claims due work): boot log `[runtime-db-guard]` identity and `pg_stat_activity.usename`; no old Worker image or
+   replica on `crewflow_app` remains.
+2. The API refuses the Worker identity (boot gate, already in code) and never holds these grants.
+3. The Phase D migrations (1300000–1350000) are released there (approval item 2) and #24 is resolved where global mode is
+   planned (runbook §11).
+4. On a disposable database first: rename 1786721330000 to a NEW id newer than every applied migration, move it into
+   `core/migrations/`, apply it; run `phase-d-due-work-cutover.integration.spec.ts` with `PHASE_D_D5=after`, then
+   `migration:revert` and `PHASE_D_D5=before` (rollback rehearsal), the mixed-version check (an old `crewflow_app` Worker
+   refused by the boot gate after D5, `database-boot-gate-rules.ts:414-431`), the M2 migration-security harness and
+   `check-rls-coverage`; regenerate and review `security-posture.golden.txt`.
+5. **Operator approvals:** the owner's separate D5 cutover approval per environment (runbook §11 "1786721330000 … gated,
+   outside the migration glob"), recorded before the move; the production migration approval
+   (`production-migration-approval.ts`) for the renamed migration; never remove the permission while a running Worker
+   still uses it.
+
+**Interim controls (in place):** the API's boot gate refuses `crewflow_worker`; the restricted login has no BYPASSRLS and
+owns nothing; the definers are pinned (`search_path`), owned by the NOLOGIN `rab_secure_owner`, and a claim hands out a
+fresh lease token, so complete / reschedule need a token the attacker obtained by claiming first. There is **no backstop
+scan** for these timers: `offer-expiry.job.ts` `runManagerConfirmationTimeoutCycle` discovers work only through
+`claimDueWork`, so a deleted pointer means that offer's manager-confirmation timeout does not fire (the offer row itself
+is untouched and stays `STAFF_ACCEPTED`). The audit's optional interim
+`REVOKE … FROM crewflow_app` migration (batch S3) is **not** taken: it would break every Worker still on `crewflow_app`
+and duplicate the D5 cutover.
