@@ -13,6 +13,33 @@ export interface SmtpDriverOptions {
   auth?: { user: string; pass: string };
 }
 
+export interface SmtpTimeouts {
+  connectionTimeoutMs: number;
+  greetingTimeoutMs: number;
+  socketTimeoutMs: number;
+  sendDeadlineMs: number;
+}
+
+/**
+ * D5 (D0-C §4.5) — every SMTP wait bounded well below the email PROCESSING lease (10 min today; D4 test target 30 s):
+ *  - connectionTimeout 10 s: in nodemailer 10 it covers the DNS lookup AND every address tried (dnsTimeout is capped by
+ *    it). A real handshake takes well under a second; a silently dropped port should fail fast.
+ *  - greetingTimeout 10 s: nodemailer 10 also caps it by what is left of connectionTimeout.
+ *  - socketTimeout 20 s: inactivity on an established connection (was nodemailer's 10-minute default = the lease, so a
+ *    stalled DATA phase raced lease recovery). A responsive server answers every command within seconds.
+ *  - sendDeadlineMs 25 s: hard bound on the whole sendMail (inactivity timeouts restart on every byte, so a server that
+ *    trickles could otherwise exceed them). 25 s + the fenced DB writes stays inside even the 30 s D4 lease target; a
+ *    larger attachment over a slow link is the one case that could need more (report PDFs are small).
+ * A timed-out send is reported as code ETIMEDOUT (retryable). If the server had in fact accepted the message, the retry
+ * is a duplicate: SMTP has no deduplication (`ambiguousDeliverySafeToRetry = false`) — at-least-once, as documented.
+ */
+export const SMTP_TIMEOUTS: Readonly<SmtpTimeouts> = Object.freeze({
+  connectionTimeoutMs: 10_000,
+  greetingTimeoutMs: 10_000,
+  socketTimeoutMs: 20_000,
+  sendDeadlineMs: 25_000,
+});
+
 /**
  * nodemailer (9.x, still so in 10.x) has no `family`/IPv4-only transport option — its own
  * `lib/shared` resolver always looks up both A and AAAA records and picks a
@@ -77,8 +104,11 @@ export class SmtpDriver implements EmailDriverInterface {
   readonly ambiguousDeliverySafeToRetry = false;
   private readonly transport: Transporter;
   private readonly logger = new Logger(SmtpDriver.name);
+  private readonly timeouts: SmtpTimeouts;
 
-  constructor(options: SmtpDriverOptions) {
+  /** `timeouts` is a test seam (short timers against a local fake server); production uses SMTP_TIMEOUTS. */
+  constructor(options: SmtpDriverOptions, timeouts: Partial<SmtpTimeouts> = {}) {
+    this.timeouts = { ...SMTP_TIMEOUTS, ...timeouts };
     disableSmtpIpv6Resolution(this.logger);
     // nodemailer's own defaults are 2 minutes to establish a connection and
     // 30 seconds for the server greeting — reasonable for a human waiting on
@@ -90,7 +120,13 @@ export class SmtpDriver implements EmailDriverInterface {
     // in ~15s, not leave `sendAccountInvite` — and the request that called
     // it — hanging for two minutes before the caller's own prepare()/
     // commit() gating even finds out delivery didn't happen.
-    this.transport = nodemailer.createTransport({ ...options, connectionTimeout: 15_000, greetingTimeout: 15_000 });
+    // D5: see SMTP_TIMEOUTS (was 15 s / 15 s and nodemailer's 10-minute socketTimeout).
+    this.transport = nodemailer.createTransport({
+      ...options,
+      connectionTimeout: this.timeouts.connectionTimeoutMs,
+      greetingTimeout: this.timeouts.greetingTimeoutMs,
+      socketTimeout: this.timeouts.socketTimeoutMs,
+    });
   }
 
   /**
@@ -107,7 +143,7 @@ export class SmtpDriver implements EmailDriverInterface {
   async send(options: EmailSendOptions): Promise<EmailSendResult> {
     const fromDomain = (options.from ?? '').split('@')[1] ?? 'localhost';
     const messageId = `<email-outbox-${options.idempotencyKey.replace(/[^a-zA-Z0-9:-]/g, '')}@${fromDomain}>`;
-    const info = await this.transport.sendMail({
+    const sending = this.transport.sendMail({
       to: options.to,
       from: options.from,
       replyTo: options.replyTo,
@@ -117,6 +153,23 @@ export class SmtpDriver implements EmailDriverInterface {
       attachments: options.attachments?.map((a) => ({ filename: a.filename, content: a.content, contentType: a.contentType })),
       messageId,
     });
-    return { provider: this.name, providerMessageId: info.messageId ?? messageId };
+    // A send abandoned at the deadline may still settle later: never an unhandled rejection.
+    sending.catch(() => undefined);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const info = await Promise.race([
+        sending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            this.transport.close();
+            reject(Object.assign(new Error(`SMTP send did not complete within ${this.timeouts.sendDeadlineMs} ms`), { code: 'ETIMEDOUT', timeoutType: 'SEND_DEADLINE' }));
+          }, this.timeouts.sendDeadlineMs);
+          timer.unref?.();
+        }),
+      ]);
+      return { provider: this.name, providerMessageId: info.messageId ?? messageId };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }

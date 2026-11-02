@@ -25,6 +25,11 @@ export interface CycleDurationSummary {
   idle: number;
   failed: number;
   skipped: number;
+  /**
+   * Phase D wave 2 (OD-1): named cumulative counters (fixed names chosen in code, e.g. `claimsRepeated`, `claimsOver20`).
+   * Present only once a counter was incremented, so every other loop's summary shape is unchanged.
+   */
+  counters?: Record<string, number>;
 }
 
 interface LoopSamples {
@@ -35,6 +40,7 @@ interface LoopSamples {
   idle: number;
   failed: number;
   skipped: number;
+  counters: Map<string, number>;
   dirty: boolean;
 }
 
@@ -53,7 +59,7 @@ export class CycleMetrics {
   private loop(key: string): LoopSamples {
     let entry = this.loops.get(key);
     if (!entry) {
-      entry = { ring: [], next: 0, lastMs: null, succeeded: 0, idle: 0, failed: 0, skipped: 0, dirty: false };
+      entry = { ring: [], next: 0, lastMs: null, succeeded: 0, idle: 0, failed: 0, skipped: 0, counters: new Map(), dirty: false };
       this.loops.set(key, entry);
     }
     return entry;
@@ -79,10 +85,19 @@ export class CycleMetrics {
     }
   }
 
+  /** Adds `by` (> 0) to a named cumulative counter of this loop (OD-1). Anything else is ignored. */
+  increment(key: string, counter: string, by = 1): void {
+    if (!Number.isFinite(by) || by <= 0) return;
+    const entry = this.loop(key);
+    entry.counters.set(counter, (entry.counters.get(counter) ?? 0) + Math.trunc(by));
+    entry.dirty = true;
+  }
+
   summary(key: string): CycleDurationSummary | null {
     const entry = this.loops.get(key);
     if (!entry) return null;
     const sorted = [...entry.ring].sort((a, b) => a - b);
+    const counters = entry.counters.size ? { counters: Object.fromEntries(entry.counters) } : {};
     return {
       n: sorted.length,
       p50: percentile(sorted, 50),
@@ -94,6 +109,7 @@ export class CycleMetrics {
       idle: entry.idle,
       failed: entry.failed,
       skipped: entry.skipped,
+      ...counters,
     };
   }
 

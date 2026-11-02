@@ -1,6 +1,8 @@
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
   BOOT_FACTS_SQL,
+  DISPATCH_NOTIFY_SESSION_SQL,
+  DISPATCH_NOTIFY_STORED_SQL,
   cliCommandFromArgv,
   DatabaseBootGateError,
   evaluateBootGates,
@@ -12,6 +14,7 @@ import {
   isProductionProcess,
   PROVISIONER_ROLE,
   RLS_DISABLED_TENANT_TABLES_SQL,
+  ROUTINE_GRANTS_SQL,
   withDatabaseRetry,
 } from './database-boot-gate-rules';
 import { assertSchemaCompatible, assessSchemaCompatibility } from './schema-compatibility';
@@ -60,10 +63,16 @@ const GATE_HOST = 'devdb';
 function fakeQuery(db: FakeDb): Query {
   return async (sql: string) => {
     if (sql === BOOT_FACTS_SQL) return [db.facts];
+    // Phase D wave 3 gate 1c (covered in database-boot-gate-rules.dispatch-notify.spec.ts): nothing stored, poll-mode session.
+    if (sql === DISPATCH_NOTIFY_STORED_SQL) return [];
+    if (sql === DISPATCH_NOTIFY_SESSION_SQL) return [{ dispatch_notify: null }];
     if (sql === MARKER_PRESENT_SQL) return [{ present: db.markerPresent, database: db.facts.database }];
     if (sql === MARKER_READ_SQL) return db.markerRows;
     if (sql === FORCE_RLS_SQL) return db.force;
     if (sql === RLS_DISABLED_TENANT_TABLES_SQL) return db.disabled.map((relname) => ({ relname }));
+    // Phase D gate 8 (covered in database-boot-gate-rules.worker-identity.spec.ts): today's main schema — crewflow_app can
+    // run the due-work functions; the dispatch-claim functions do not exist yet.
+    if (sql === ROUTINE_GRANTS_SQL) return ['worker_claim_due_work', 'worker_complete_due_work', 'worker_reschedule_due_work'].map((name) => ({ name, can_execute: true }));
     throw new Error(`unexpected SQL ${sql.slice(0, 40)}`);
   };
 }

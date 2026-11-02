@@ -6,7 +6,8 @@ import type Redis from 'ioredis';
 
 import { WORKER_SCHEDULER_STATUS_KEY } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { ScanLock } from '../locking/scan-lock';
-import { WorkerLoopOptions, WorkerRuntime } from '../runtime/worker-runtime';
+import type { AdvisoryLockResult } from '../locking/advisory-lock';
+import { CycleOutcome, WorkerLoopOptions, WorkerRuntime } from '../runtime/worker-runtime';
 import { HandlerRegistry, ProcessHandler } from './processor-explorer';
 import { CONSUMER_QUEUES, ConsumerQueueDefinition, SCAN_QUEUE_NAMES, ScanQueueName } from './queue-registry';
 import { assertRedisReadyForBullmq, assertSupportedBullmqApi } from './redis-preflight';
@@ -41,6 +42,11 @@ export function registerIntervalScans(
   jobs: readonly ScanJobDefinition[],
   intervalOf: (def: ScanJobDefinition) => number,
   isEnabled: (def: ScanJobDefinition) => boolean = () => true,
+  /**
+   * Phase D (D3): for a `firstRunAfterInterval` scan, the delay of its first run (main.ts: `firstRunDelayFromStamp` on
+   * the persisted lastRunAt stamp). `undefined` → one full interval (the Phase A behaviour).
+   */
+  firstRunDelayOf?: (def: ScanJobDefinition, intervalMs: number) => number | undefined,
 ): { registered: string[]; disabled: string[] } {
   if (intervalScansRegistered.has(runtime)) throw new Error('interval-mode scans are already registered on this runtime');
   const ids = jobs.map(schedulerIdOf);
@@ -54,12 +60,86 @@ export function registerIntervalScans(
       disabled.push(def.jobName);
       return;
     }
-    plan.push(loopOptionsOf(def, registry.scan(def), intervals[i]!));
+    const options = loopOptionsOf(def, registry.scan(def), intervals[i]!);
+    if (def.firstRunAfterInterval && firstRunDelayOf) {
+      const delay = firstRunDelayOf(def, intervals[i]!);
+      if (delay !== undefined) options.firstRunDelayMs = delay;
+    }
+    plan.push(options);
     registered.push(def.jobName);
   });
   intervalScansRegistered.add(runtime);
   for (const options of plan) runtime.every(options);
   return { registered, disabled };
+}
+
+/**
+ * Phase D (D3): the first-run delay of a daily (`firstRunAfterInterval`) scan in interval mode, from the persisted cluster
+ * stamp (`last<Loop>At` in the Worker stats hash, epoch ms): the time left until one interval after the last successful
+ * run, clamped to [0, interval]. No stamp, an unparsable one, or one in the future → one full interval. So a restart never
+ * re-runs a daily scan early, and frequent deploys can never postpone it forever (an overdue scan runs at start).
+ */
+export function firstRunDelayFromStamp(stamp: string | null | undefined, intervalMs: number, now: number = Date.now()): number {
+  const last = stamp === null || stamp === undefined || stamp === '' ? NaN : Number(stamp);
+  if (!Number.isFinite(last) || last > now) return intervalMs;
+  return Math.min(intervalMs, Math.max(0, last + intervalMs - now));
+}
+
+/**
+ * Phase D (D3): per-scan outcome counters for bullmq mode. BullMQ counts every job that RETURNS as "completed" (the Admin
+ * Health chart's completed series), including a skipped, idle or disabled tick; throwing would count them as FAILED,
+ * which is equally wrong. So the processor returns normally and ALSO records the real outcome here — one HINCRBY on
+ * field `<jobName>:<outcome>` (succeeded | idle | failed | skipped-locked | skipped-running | skipped-shutdown |
+ * disabled), 7-day TTL refreshed. Counts only: no ids, no configuration. A reader computes "really ran" as `succeeded`.
+ */
+export const SCAN_OUTCOMES_KEY = 'rab:worker:scan-outcomes';
+export const SCAN_OUTCOMES_TTL_SECONDS = 7 * 24 * 60 * 60;
+export type ScanOutcome = CycleOutcome | 'disabled';
+
+export function redisScanOutcomeRecorder(redis: Pick<Redis, 'multi'>): (def: ScanJobDefinition, outcome: ScanOutcome) => void {
+  return (def, outcome) => {
+    redis
+      .multi()
+      .hincrby(SCAN_OUTCOMES_KEY, `${def.jobName}:${outcome}`, 1)
+      .expire(SCAN_OUTCOMES_KEY, SCAN_OUTCOMES_TTL_SECONDS)
+      .exec()
+      .catch(() => undefined);
+  };
+}
+
+export interface ScanJobProcessorDeps {
+  /** jobName → definition, for ONE scan queue. */
+  defs: ReadonlyMap<string, ScanJobDefinition>;
+  isEnabled: (def: ScanJobDefinition) => boolean;
+  registry: Pick<HandlerRegistry, 'scan'>;
+  intervalOf: (def: ScanJobDefinition) => number;
+  runtime: Pick<WorkerRuntime, 'runOnce'>;
+  /** The cross-replica scan lock (ScanLock.run). */
+  lock: <T>(schedulerId: string, work: () => Promise<T>) => Promise<AdvisoryLockResult<T>>;
+  recordOutcome: (def: ScanJobDefinition, outcome: ScanOutcome) => void;
+}
+
+/**
+ * The scan-queue job processor (bullmq mode), extracted so its outcome handling is unit-testable. Unchanged behaviour:
+ * unknown job → UnrecoverableError; disabled scan → acknowledged without running; `failed` → throws (BullMQ failed);
+ * every other outcome → returns `{ outcome }`. Phase D (D3): every outcome is also recorded via `recordOutcome`.
+ */
+export function createScanJobProcessor(deps: ScanJobProcessorDeps): (job: Pick<Job, 'name'>) => Promise<{ outcome: ScanOutcome }> {
+  return async (job) => {
+    const def = deps.defs.get(job.name);
+    // Fail closed: a job this registry does not know is never mapped to some other scan.
+    if (!def) throw new UnrecoverableError('unknown scan job');
+    // Phase A: a leftover job of a scan disabled on this replica is acknowledged without running the cycle.
+    if (!deps.isEnabled(def)) {
+      deps.recordOutcome(def, 'disabled');
+      return { outcome: 'disabled' };
+    }
+    const options = loopOptionsOf(def, deps.registry.scan(def), deps.intervalOf(def));
+    const outcome = await deps.runtime.runOnce(options, (work) => deps.lock(schedulerIdOf(def), work));
+    deps.recordOutcome(def, outcome);
+    if (outcome === 'failed') throw scanFailure(def);
+    return { outcome };
+  };
 }
 
 /**
@@ -177,24 +257,24 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   }
 
   const scanWorkers: Worker[] = [];
+  const recordOutcome = redisScanOutcomeRecorder(redis);
   for (const queue of SCAN_QUEUE_NAMES) {
     const defs = byQueue.get(queue);
     if (!defs) continue;
     // Phase A: a queue whose scans are ALL disabled gets no Worker on this replica (nothing of it may run here).
     if (![...defs.values()].some(isEnabled)) continue;
+    const processScanJob = createScanJobProcessor({
+      defs,
+      isEnabled,
+      registry,
+      intervalOf: deps.intervalOf,
+      runtime,
+      lock: (schedulerId, work) => scanLock.run(schedulerId, work),
+      recordOutcome,
+    });
     const worker = new Worker(
       queue,
-      async (job: Job) => {
-        const def = defs.get(job.name);
-        // Fail closed: a job this registry does not know is never mapped to some other scan.
-        if (!def) throw new UnrecoverableError('unknown scan job');
-        // Phase A: a leftover job of a scan disabled on this replica is acknowledged without running the cycle.
-        if (!isEnabled(def)) return { outcome: 'disabled' };
-        const options = loopOptionsOf(def, registry.scan(def), deps.intervalOf(def));
-        const outcome = await runtime.runOnce(options, (work) => scanLock.run(schedulerIdOf(def), work));
-        if (outcome === 'failed') throw scanFailure(def);
-        return { outcome };
-      },
+      async (job: Job) => processScanJob(job),
       {
         connection: redis,
         prefix: deps.prefix,

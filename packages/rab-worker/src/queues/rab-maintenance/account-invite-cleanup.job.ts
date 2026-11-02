@@ -34,6 +34,44 @@ export interface AccountInviteCleanupResult {
   retained: number;
 }
 
+export interface InviteCleanupOptions {
+  /** WORKER_INVITE_AUTO_DELETE_ENABLED. Only `true` enables the Phase D definer path (expire + delete). */
+  autoDeleteEnabled: boolean;
+}
+
+/** The retention flag's environment name (validated by the server's environment config — Agent C — and re-checked here). */
+export const INVITE_AUTO_DELETE_ENV = 'WORKER_INVITE_AUTO_DELETE_ENABLED';
+
+export class InviteAutoDeleteConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InviteAutoDeleteConfigError';
+  }
+}
+
+/**
+ * Reads WORKER_INVITE_AUTO_DELETE_ENABLED through the same environment accessor the Worker uses for WORKER_CLAIM_MODE
+ * (`resolveDispatchConfig`), fail closed:
+ *  - unset / false / 'false' / '' ⇒ false (the DEFAULT — no automatic deletion of user accounts);
+ *  - true / 'true' ⇒ true, outside production only;
+ *  - true in production ⇒ refuses to start: enabling it needs a separate owner approval (grace period, eligibility, audit
+ *    wording, retention policy, rollback/monitoring) that this release does not carry;
+ *  - anything else ⇒ refuses to start (never guessed).
+ */
+export function resolveInviteAutoDeleteEnabled(env: { get(key: string): unknown }): boolean {
+  const raw = env.get(INVITE_AUTO_DELETE_ENV);
+  let enabled: boolean;
+  if (raw === undefined || raw === null || raw === '' || raw === false || raw === 'false') enabled = false;
+  else if (raw === true || raw === 'true') enabled = true;
+  else throw new InviteAutoDeleteConfigError(`${INVITE_AUTO_DELETE_ENV} must be exactly true or false`);
+  if (enabled && env.get('NODE_ENV') === 'production') {
+    throw new InviteAutoDeleteConfigError(
+      `${INVITE_AUTO_DELETE_ENV}=true is not allowed in production until the owner approval (grace period, eligibility, audit wording, retention policy) is recorded`,
+    );
+  }
+  return enabled;
+}
+
 /**
  * The one and only application-level scheduled job in this codebase (no
  * existing job/queue architecture was found to reuse — `bullmq` is a
@@ -101,9 +139,29 @@ export interface AccountInviteCleanupResult {
  * overlapping the next scheduled tick, or a second worker replica, waits
  * for the lock rather than racing.
  */
-export async function runAccountInviteCleanupCycle(dataSource: DataSource): Promise<AccountInviteCleanupResult> {
+export async function runAccountInviteCleanupCycle(
+  dataSource: DataSource,
+  /**
+   * Phase D wave 2 retention gate — `WORKER_INVITE_AUTO_DELETE_ENABLED` (default false; read by
+   * `resolveInviteAutoDeleteEnabled`). Absent ⇒ OFF (fail closed): only an explicit `true` can reach the definer path.
+   */
+  options: InviteCleanupOptions = { autoDeleteEnabled: false },
+): Promise<AccountInviteCleanupResult> {
   return dataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_account_invite_cleanup'))`);
+
+    // Phase D F-1 (D8): when automatic deletion is ENABLED (owner approval required; never in production in this release)
+    // AND this login can EXECUTE all three narrow definers (migration 1786721340000, crewflow_worker only), the cycle
+    // reaches core."user" / core.account_invite through them — as the runtime role it otherwise sees no row of either (RLS,
+    // no tenant context) and has been a silent no-op.
+    // Retention gate OFF (the default): neither definer is ever called and no probe runs — everything below is the
+    // pre-Phase-D code path exactly as on main. On the runtime login that path is today's silent no-op under RLS (D0 F-1),
+    // so OFF changes nothing externally visible: no account is deleted, no invite status flips, no new audit row appears;
+    // expired / revoked / consumed links are still rejected at redemption (AccountInviteService checks the live row).
+    if (options.autoDeleteEnabled === true) {
+      const [probe] = await manager.query<Array<{ usable: boolean | null }>>(DEFINER_PROBE_SQL);
+      if (probe?.usable === true) return runDefinerCleanup(manager);
+    }
 
     // `account_invite` is ENABLE-but-not-FORCE (AccountInviteSchema1786670100000)
     // specifically so an owner-privileged connection like this one already
@@ -236,6 +294,120 @@ export async function runAccountInviteCleanupCycle(dataSource: DataSource): Prom
   });
 }
 
+/**
+ * Phase D F-1: the three definers of migration 1786721340000 (docs/plans/PHASE-D-SQL-GATE.md §1786721340000). `to_regprocedure` returns NULL
+ * for a function that does not exist (no error), and `has_function_privilege` honours role inheritance and PUBLIC, so
+ * this is false on crewflow_app (no EXECUTE) and on a database without the migration.
+ */
+const DEFINER_FUNCTIONS = [
+  'core.worker_expire_account_invites(integer)',
+  'core.worker_account_invite_cleanup_candidates(integer, timestamp with time zone, uuid)',
+  'core.worker_delete_expired_invited_user(uuid)',
+] as const;
+const DEFINER_PROBE_SQL = `SELECT COALESCE(bool_and(f.p IS NOT NULL AND has_function_privilege(f.p, 'EXECUTE')), false) AS usable
+  FROM (VALUES ${DEFINER_FUNCTIONS.map((fn) => `(to_regprocedure('${fn}'))`).join(', ')}) AS f(p)`;
+
+interface DefinerCandidate {
+  user_id: string;
+  organisation_id: string;
+  cleanup_at: Date;
+  /** Global blocks reported by the definer (manager_workspace owner, platform_admin), or null. */
+  blocking_reason: string | null;
+}
+
+/**
+ * Phase D F-1 — the same two phases, rules, bounds, audits and per-candidate savepoints as the cycle above, with the
+ * reads/writes of `core."user"` / `core.account_invite` (and the global blocks: owned workspace, platform admin, never
+ * signed in / no token / no session) done by the definers. The workspace business-history checks stay HERE, under each of
+ * the candidate's workspaces' tenant context with FORCE RLS unchanged (the workspaces come from
+ * `core.worker_list_workspaces`, the Worker's existing routing catalogue). Audit rows are written by the Worker with the
+ * organisation bound, as before. The delete itself is the definer's (`deleted` | `not_eligible` | `manager_workspace` |
+ * `platform_admin` | `referenced`).
+ */
+async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteCleanupResult> {
+  const expired = await manager.query<Array<{ user_id: string; organisation_id: string }>>(
+    'SELECT user_id, organisation_id FROM core.worker_expire_account_invites($1::integer)',
+    [EXPIRE_BATCH_SIZE],
+  );
+  for (const row of expired) {
+    await writeAuditRow(manager, row.organisation_id, row.user_id, 'user.invite_expired', {});
+  }
+
+  let workspacesByOrg: Map<string, string[]> | null = null;
+  const workspacesOf = async (organisationId: string): Promise<string[]> => {
+    workspacesByOrg ??= await loadWorkspaceCatalogue(manager);
+    return workspacesByOrg.get(organisationId) ?? [];
+  };
+
+  let deleted = 0;
+  let retained = 0;
+  let cursorCleanupAt: Date | null = null;
+  let cursorId: string | null = null;
+  for (let page = 0; page < MAX_CLEANUP_PAGES_PER_TICK; page++) {
+    const candidates: DefinerCandidate[] = await manager.query<DefinerCandidate[]>(
+      'SELECT user_id, organisation_id, cleanup_at, blocking_reason FROM core.worker_account_invite_cleanup_candidates($1::integer, $2::timestamptz, $3::uuid)',
+      [BATCH_SIZE, cursorCleanupAt, cursorId],
+    );
+    if (candidates.length === 0) break;
+
+    for (const candidate of candidates) {
+      await manager.query('SAVEPOINT sp_invite_cleanup_candidate');
+      try {
+        // Any reason the DEFINER reports for a candidate it returns (today: manager_workspace / platform_admin; the N-4
+        // re-review adds excluded users with their own skip reason - exact shape pending from Agent A) is retained and
+        // audited as `user.invite_cleanup_skipped {reason}` right here; only reason-free candidates get the Worker checks.
+        const blockingReason =
+          candidate.blocking_reason ??
+          (await findBlockingDependency(manager, candidate.user_id, {
+            organisationId: candidate.organisation_id,
+            workspaceIds: await workspacesOf(candidate.organisation_id),
+          }));
+        if (blockingReason) {
+          retained += 1;
+          await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_skipped', { reason: blockingReason });
+          continue;
+        }
+        const [row] = await manager.query<Array<{ outcome: string }>>('SELECT core.worker_delete_expired_invited_user($1::uuid) AS outcome', [candidate.user_id]);
+        if (row?.outcome === 'deleted') {
+          deleted += 1;
+          await writeAuditRow(manager, candidate.organisation_id, null, 'user.invite_cleaned_up', { deletedUserId: candidate.user_id });
+        } else {
+          retained += 1;
+          await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_skipped', { reason: row?.outcome ?? 'unknown' });
+        }
+      } catch (error) {
+        await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
+        await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_failed', {
+          reason: error instanceof Error ? error.constructor.name : 'unknown_error',
+        });
+      }
+    }
+
+    const last = candidates[candidates.length - 1]!;
+    cursorCleanupAt = last.cleanup_at;
+    cursorId = last.user_id;
+    if (candidates.length < BATCH_SIZE) break;
+  }
+
+  return { expired: expired.length, deleted, retained };
+}
+
+/** organisation → workspace ids, from the routing catalogue (`core.worker_list_workspaces`, keyset pages of 100). */
+async function loadWorkspaceCatalogue(manager: EntityManager): Promise<Map<string, string[]>> {
+  const byOrg = new Map<string, string[]>();
+  let after: string | null = null;
+  for (;;) {
+    const rows: Array<{ workspace_id: string; organisation_id: string }> = await manager.query(
+      'SELECT workspace_id, organisation_id FROM core.worker_list_workspaces($1::uuid, 100)',
+      [after],
+    );
+    if (!rows.length) break;
+    for (const row of rows) byOrg.set(row.organisation_id, [...(byOrg.get(row.organisation_id) ?? []), row.workspace_id]);
+    after = rows[rows.length - 1]!.workspace_id;
+  }
+  return byOrg;
+}
+
 // Business-history dependency checks keep FORCE RLS active and enumerate the
 // user's actual workspace scopes. Foreign keys still reject hidden legacy or
 // concurrently-created dependencies; the candidate savepoint retains the user.
@@ -286,21 +458,37 @@ async function resolveReadyPhysicalSchema(manager: EntityManager, workspaceId: s
 }
 
 /** Returns a short machine-readable reason if any business-history table references this user, or null if none do (safe to delete). */
-async function findBlockingDependency(manager: EntityManager, userId: string): Promise<string | null> {
+async function findBlockingDependency(
+  manager: EntityManager,
+  userId: string,
+  /**
+   * Phase D F-1 definer path: the global checks were done by the definer, and the candidate's scopes are given (its
+   * organisation org-wide + each of its workspaces). Absent → the original behaviour, unchanged.
+   */
+  definerScopes?: { organisationId: string; workspaceIds: string[] },
+): Promise<string | null> {
   // Maintenance retains its existing owner transaction, but protected business
   // tables are read only under each actual workspace with FORCE RLS unchanged.
   // A hidden/legacy dependency remains protected by database foreign keys.
   const [previous] = await manager.query(`SELECT current_setting('rab.organisation_id', true) AS org,
     current_setting('rab.workspace_id', true) AS workspace`);
-  const scopes = await manager.query(`SELECT id, organisation_id FROM core.manager_workspace
+  const scopes: Array<{ id: string; organisation_id: string }> = definerScopes
+    ? [
+        { id: '', organisation_id: definerScopes.organisationId },
+        ...definerScopes.workspaceIds.map((id) => ({ id, organisation_id: definerScopes.organisationId })),
+      ]
+    : await manager.query(`SELECT id, organisation_id FROM core.manager_workspace
     WHERE organisation_id = (SELECT organisation_id FROM core."user" WHERE id=$1) ORDER BY id`, [userId]);
   try {
-    for (const [reason, sql] of GLOBAL_TABLE_DEPENDENCY_CHECKS) {
-      if ((await manager.query(sql, [userId])).length > 0) return reason;
+    if (!definerScopes) {
+      for (const [reason, sql] of GLOBAL_TABLE_DEPENDENCY_CHECKS) {
+        if ((await manager.query(sql, [userId])).length > 0) return reason;
+      }
     }
 
-    // Include the original org context for org-wide references, even with no workspace.
-    for (const scope of [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
+    // Include the original org context for org-wide references, even with no workspace (definer path: the scopes above
+    // already start with the candidate's organisation-wide scope).
+    for (const scope of definerScopes ? scopes : [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
       await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
         [scope.organisation_id, scope.id]);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {

@@ -8,8 +8,8 @@ import { coreDataSourceOptions } from '../../database/typeorm/core/core.datasour
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { schemaCompatibilityPostCheckProblems } from '../../database/typeorm/scripts/migrate/deploy-post-checks';
 import { runLockedMigrations } from '../../database/typeorm/scripts/migrate/locked-migration-runner';
-import { readProvisionFunctionState } from '../../database/typeorm/workspace-schema/provision-function-versions';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { PROVISION_FUNCTION_MODULE_VERSIONS, readProvisionFunctionState } from '../../database/typeorm/workspace-schema/provision-function-versions';
+import { LATEST_WORKSPACE_MODULE_VERSION, MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { AllExceptionsFilter } from '../../engine/filters/all-exceptions.filter';
 import { assertNoPendingMigrations } from '../../engine/utils/assert-no-pending-migrations';
@@ -21,10 +21,12 @@ import { provisionServerPath, SeededWorkspace, seedWorkspace } from './helpers/w
  *   - a fake FUTURE ledger row (an image rollback): API / Worker / CLI boot with a warning; the provisioner refuses; a
  *     rab-migrate apply run refuses, its check run warns;
  *   - a fake INTERLEAVED ledger row (another branch / wrong database): every process refuses; RETIRED_MIGRATIONS excuses it;
- *   - a READY workspace at module LATEST-1: routing refuses that workspace only (503), the deploy post-check refuses; at
+ *   - a READY workspace below MIN_COMPATIBLE: routing refuses that workspace only (503), the deploy post-check refuses; at
+ *     LATEST-1 but at/above the floor (an additive newest module, Phase D's 19): it routes and the post-check reports it; at
  *     LATEST+1: the provisioner refuses to start, the API does not scan the fleet.
  *
- * It WRITES fixture rows to `core.migrations` (as the bootstrap superuser) and always deletes them again in `finally`, so it
+ * It WRITES fixture rows to `core.migrations` (as the bootstrap superuser) and always deletes them again in `finally`; its two
+ * workspace fixtures are deleted completely in afterAll (and any leftover in beforeAll — removeCompatWorkspaces), so it
  * must run in band (CI does) — and is meant to run against a throwaway copy of the harness database (the Phase B
  * verification does). The provisioner cases need TEST_DATABASE_CREWFLOW_URL (the `crewflow` login; set by ci-worker and
  * the AI environments), and are skipped without it.
@@ -37,11 +39,49 @@ const CREWFLOW_URL = process.env.TEST_DATABASE_CREWFLOW_URL?.trim();
 const itIfCrewflow = CREWFLOW_URL ? it : it.skip;
 
 const FUTURE = 'CompatFutureRollback9999999999999';
+/** Subdomain prefixes of this suite's workspace fixtures (c1 / c2). Every one of them is deleted again (see removeCompatWorkspaces). */
+const COMPAT_WORKSPACE_LABELS = ['compat-behind-', 'compat-current-'] as const;
 const INTERLEAVED = 'CompatOtherBranch1786000000001';
 const quiet = () => undefined;
 
 function gateOptions(url: string, extra: Partial<RunBootGatesOptions> = {}): RunBootGatesOptions {
   return { env: { NODE_ENV: 'test' }, connectionEnv: { NODE_ENV: 'test', PG_DATABASE_URL: url }, retry: { attempts: 1 }, log: quiet, ...extra };
+}
+
+/**
+ * Test hygiene (Phase D wave 4): deletes this suite's workspace fixtures completely, as the bootstrap superuser, in ONE
+ * transaction — the workspace schema, its registry row and the workspace (its host_label_claim cascades). What stays is inert
+ * and append-only by design: the migration ledger, the released_host_label quarantine row, and the organisation + owner
+ * (audit_log is insert-only, so an organisation delete cascading into it is refused). A forged registry row (module_version without the matching ledger) must never
+ * outlive the suite: the real workspace migrator rightly refuses such a workspace (LEDGER_GAP) and would fail closed on the
+ * next chain run. Called in beforeAll (a run that was killed) and afterAll (always). Matches only the two fixture prefixes.
+ */
+async function removeCompatWorkspaces(admin: Client): Promise<number> {
+  const patterns = COMPAT_WORKSPACE_LABELS.map((p) => `${p}%`);
+  const { rows } = await admin.query<{ id: string; organisation_id: string; owner_user_id: string }>(
+    `SELECT id, organisation_id, owner_user_id FROM core.manager_workspace WHERE subdomain::text LIKE ANY ($1::text[])`,
+    [patterns],
+  );
+  if (rows.length === 0) return 0;
+  const ids = rows.map((r) => r.id);
+  await admin.query('BEGIN');
+  try {
+    for (const id of ids) await admin.query(`DROP SCHEMA IF EXISTS workspace_${id.replace(/-/g, '')} CASCADE`);
+    // core.workspace_schema_migration is append-only (its trigger refuses DELETE, even here) and is left as is: with the
+    // workspace and its registry row gone, the migrator (which walks core.worker_list_workspaces) never visits those rows.
+    await admin.query('DELETE FROM core.workspace_schema_registry WHERE workspace_id = ANY ($1::uuid[])', [ids]);
+    // The workspace row itself (cascades its host_label_claim, memberships, pointers ...). Its organisation and owner stay:
+    // provisioning wrote audit_log rows for them, and audit_log is insert-only — an organisation delete cascading into it is
+    // refused even for the superuser (rightly). They are inert: no workspace, no registry row, nothing for any migrator.
+    await admin.query('DELETE FROM core.manager_workspace WHERE id = ANY ($1::uuid[])', [ids]);
+    // The host_label_sync trigger quarantines each subdomain (core.released_host_label, append-only: rows are never
+    // deleted). This suite's labels carry a random suffix, so the quarantine never collides with a later run.
+    await admin.query('COMMIT');
+  } catch (error) {
+    await admin.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  }
+  return ids.length;
 }
 
 async function refusal(promise: Promise<unknown>): Promise<DatabaseBootGateError> {
@@ -103,7 +143,10 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
     await app.connect();
     try {
       const fn = await readProvisionFunctionState(async (sql, params) => (await app.query(sql, params as unknown[])).rows);
-      expect(fn).toEqual({ state: 'known', literal: 'db:provision_workspace@ProvisionWorkspaceGuards1786721210000', moduleVersion: LATEST_WORKSPACE_MODULE_VERSION });
+      // The literal of the code's LATEST module (from the frozen map; not hard-coded, so a new module cannot strand it).
+      const latestLiterals = Object.entries(PROVISION_FUNCTION_MODULE_VERSIONS).filter(([, v]) => v === LATEST_WORKSPACE_MODULE_VERSION).map(([k]) => k);
+      expect(latestLiterals).toHaveLength(1);
+      expect(fn).toEqual({ state: 'known', literal: latestLiterals[0], moduleVersion: LATEST_WORKSPACE_MODULE_VERSION });
     } finally {
       await app.end();
     }
@@ -209,7 +252,16 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
       if (f.count <= 5) expect(f.text).toContain(entry);
     };
 
+    /** One module below the routing floor: what this code refuses to route. */
+    const INCOMPATIBLE = MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION - 1;
     const setModule = (ws: SeededWorkspace, v: number) => admin.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [ws.id, v]);
+    /**
+     * The module version each fixture REALLY reached (read right after provisioning). Every forged value is restored to
+     * this, never to LATEST_WORKSPACE_MODULE_VERSION: the code's LATEST can be ahead of the database's provision function
+     * (a gated workspace module), and a registry row above its ledger is exactly what the real migrator refuses.
+     */
+    const provisioned = new Map<string, number>();
+    const restoreModule = (ws: SeededWorkspace) => setModule(ws, provisioned.get(ws.id)!);
 
     /** SchemaResolverService over the restricted runtime role, organisation bound, cache pass-through. */
     const resolveAsApp = async (ws: SeededWorkspace): Promise<string> => {
@@ -239,21 +291,39 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
     };
 
     beforeAll(async () => {
+      await removeCompatWorkspaces(admin); // a killed earlier run
       behind = await seedWorkspace(admin, `compat-behind-${suffix}`);
       current = await seedWorkspace(admin, `compat-current-${suffix}`);
       expect(await provisionServerPath(appUrl, behind)).toBe('READY');
       expect(await provisionServerPath(appUrl, current)).toBe('READY');
+      for (const ws of [behind, current]) {
+        const version = (await admin.query('SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.id])).rows[0]?.module_version;
+        expect(Number.isInteger(version)).toBe(true);
+        provisioned.set(ws.id, version);
+      }
+      // The cases below assume the database provisions at the code's LATEST module (c1: LATEST-1 is "behind").
+      expect([...provisioned.values()]).toEqual([LATEST_WORKSPACE_MODULE_VERSION, LATEST_WORKSPACE_MODULE_VERSION]);
     });
 
     afterAll(async () => {
-      // Leave both READY at LATEST (what a provisioned workspace looks like), so no later suite sees a skewed fleet.
-      for (const ws of [behind, current]) if (ws) await setModule(ws, LATEST_WORKSPACE_MODULE_VERSION);
+      // Always: no fixture (and no forged registry row) outlives the suite.
+      await removeCompatWorkspaces(admin);
+      const ids = [behind, current].filter(Boolean).map((ws) => ws.id);
+      const left = await admin.query(
+        `SELECT (SELECT count(*) FROM core.manager_workspace WHERE subdomain::text LIKE ANY ($1::text[]) OR id = ANY ($2::uuid[]))
+              + (SELECT count(*) FROM core.workspace_schema_registry WHERE workspace_id = ANY ($2::uuid[]))
+              + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname = ANY ($3::text[])) AS n`,
+        [COMPAT_WORKSPACE_LABELS.map((p) => `${p}%`), ids, [behind, current].filter(Boolean).map((ws) => ws.schema)],
+      );
+      if (Number(left.rows[0].n) !== 0) throw new Error(`schema-compatibility fixtures left behind: ${left.rows[0].n}`);
     });
 
-    it('(c1) a READY workspace one module behind: routing refuses THAT workspace (503), the other one routes', async () => {
+    it('(c1) a READY workspace below the compatibility floor: routing refuses THAT workspace (503), the other one routes', async () => {
       const before = await postCheck();
       expect(before.join('\n')).not.toContain(behind.id);
-      await setModule(behind, LATEST_WORKSPACE_MODULE_VERSION - 1);
+      // Below MIN_COMPATIBLE (not simply LATEST-1: a release may keep LATEST-1 routable when the newest module is additive,
+      // as Phase D does for module 19 — asserted separately below).
+      await setModule(behind, INCOMPATIBLE);
       try {
         const error = await resolveAsApp(behind).then(
           () => null,
@@ -273,11 +343,26 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
         const behindNow = finding(problems, 'workspace-behind');
         expect(behindNow.text).toMatch(new RegExp(`^schema-compatibility workspace-behind: \\d+ READY workspace\\(s\\) are below module ${LATEST_WORKSPACE_MODULE_VERSION}: `));
         expect(behindNow.count).toBe(finding(before, 'workspace-behind').count + 1);
-        expectListed(behindNow, `${behind.id}@${LATEST_WORKSPACE_MODULE_VERSION - 1}`);
+        expectListed(behindNow, `${behind.id}@${INCOMPATIBLE}`);
         expect(behindNow.text).not.toContain(current.id);
         expect(without(problems, 'workspace-behind')).toEqual(without(before, 'workspace-behind'));
       } finally {
-        await setModule(behind, LATEST_WORKSPACE_MODULE_VERSION);
+        await restoreModule(behind);
+      }
+      expect(await postCheck()).toEqual(before);
+    });
+
+    it('(c1b) a READY workspace at LATEST-1 but at/above the compatibility floor stays routable; the post-check still reports it behind', async () => {
+      if (MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION >= LATEST_WORKSPACE_MODULE_VERSION) return; // floor = LATEST: (c1) covers LATEST-1
+      const before = await postCheck();
+      await setModule(behind, LATEST_WORKSPACE_MODULE_VERSION - 1);
+      try {
+        await expect(resolveAsApp(behind)).resolves.toBe(behind.schema);
+        const behindNow = finding(await postCheck(), 'workspace-behind');
+        expect(behindNow.count).toBe(finding(before, 'workspace-behind').count + 1);
+        expectListed(behindNow, `${behind.id}@${LATEST_WORKSPACE_MODULE_VERSION - 1}`);
+      } finally {
+        await restoreModule(behind);
       }
       expect(await postCheck()).toEqual(before);
     });
@@ -299,7 +384,7 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
           expect(error.message).toMatch(new RegExp(`above this code's module ${LATEST_WORKSPACE_MODULE_VERSION}: ${current.id}@${LATEST_WORKSPACE_MODULE_VERSION + 1}`));
         }
       } finally {
-        await setModule(current, LATEST_WORKSPACE_MODULE_VERSION);
+        await restoreModule(current);
       }
       expect(await postCheck()).toEqual(before);
     });

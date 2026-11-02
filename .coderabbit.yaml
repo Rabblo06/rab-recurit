@@ -1,0 +1,51 @@
+# CodeRabbit review configuration (proposed with Phase D, PR #23). Draft PRs are still NOT auto-reviewed: a review of a
+# draft is requested explicitly (comment "@coderabbitai review") once the owner says it is ready.
+language: en-GB
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - '!**/dist/**'
+    - '!**/*.golden.txt'
+    - '!yarn.lock'
+  path_instructions:
+    - path: 'packages/rab-server/src/database/typeorm/core/migrations/**'
+      instructions: >-
+        Migrations are never edited after merge. Every tenant-scoped table needs organisation_id, ENABLE + FORCE ROW LEVEL
+        SECURITY and USING + WITH CHECK policies in the same migration (exceptions only via NOT_FORCED_ALLOWLIST in
+        tools/check-rls-coverage.ts). SECURITY DEFINER functions must be owned by rab_secure_owner, pin
+        search_path = pg_catalog, pg_temp, revoke PUBLIC, use no dynamic SQL, and grant EXECUTE only to the intended role.
+        Flag any grant to crewflow_app of a Worker-only function, any migration that creates a role, and any change to
+        the workspace v19 fingerprint inputs.
+    - path: 'packages/rab-server/src/database/typeorm/core/gated-migrations/**'
+      instructions: >-
+        Gated migrations must stay outside the core/migrations glob and must never be imported by a data source.
+    - path: 'packages/rab-server/src/database/typeorm/core/worker-dispatch-pointer-sql.ts'
+      instructions: >-
+        Dispatch pointers carry routing ids only. Check claim fencing (lease, claim token, SKIP LOCKED), that release
+        never deletes, that trigger functions validate their table/schema/column types and refuse scope changes, and that
+        no path lets one tenant or workspace delete or re-point another's pointer.
+    - path: 'packages/rab-worker/src/**'
+      instructions: >-
+        The Worker must bind organisation/workspace from claimed pointers through TenantContextService and re-read rows
+        under RLS; it must never trust ids beyond routing. Check that delivery is not claimed to be exactly-once, that
+        errors never log tokens, e-mail addresses or bodies, and that process-global state (process.exitCode, env) is not
+        changed by scheduled jobs.
+    - path: 'packages/rab-server/src/{database/boot-checks,engine/utils}/**'
+      instructions: >-
+        Boot gates fail closed: the API must refuse the crewflow_worker login; WORKER_CLAIM_MODE=global must refuse any
+        other login; no environment variable may widen the accepted roles.
+    - path: 'packages/rab-server/src/engine/core-modules/environment/**'
+      instructions: >-
+        Defaults must stay safe: WORKER_CLAIM_MODE=per_scope, WORKER_DISPATCH_MODE=poll, REALTIME_ENABLED=false,
+        PUSH_ENABLED=false, WORKER_INVITE_AUTO_DELETE_ENABLED=false (production refuses true via a code constant).
+    - path: 'packages/rab-docker/**'
+      instructions: >-
+        No secrets or real credentials. Production compose must not set the Phase D mode variables, and must not override
+        the committed CREWFLOW_PROVISIONER_ENABLED or HWS_RUNTIME_ENABLED values.
+chat:
+  auto_reply: true

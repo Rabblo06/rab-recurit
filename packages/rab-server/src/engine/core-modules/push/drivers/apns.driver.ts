@@ -11,7 +11,30 @@ export interface ApnsDriverConfig {
   environment: 'sandbox' | 'production';
 }
 
-const PROVIDER_TOKEN_TTL_MS = 45 * 60 * 1000; // Apple allows up to 60 minutes; refresh at 45 to stay well inside it.
+/**
+ * Provider JWT lifetime in the cache. Apple accepts a token for up to 60 minutes and answers 429
+ * TooManyProviderTokenUpdates when it changes more than once per 20 minutes; 45 minutes is inside both (D5: ≤ 50 min,
+ * re-signed before expiry, never per push).
+ */
+export const APNS_PROVIDER_TOKEN_TTL_MS = 45 * 60 * 1000;
+const PROVIDER_TOKEN_TTL_MS = APNS_PROVIDER_TOKEN_TTL_MS;
+
+/**
+ * D5 transport bounds. Request 10 s (connect wait included) and connect 5 s keep a send far inside the push PROCESSING
+ * lease (10 min today; the D4 test target is 30 s). Idle sessions close after 5 min.
+ */
+export const APNS_REQUEST_TIMEOUT_MS = 10_000;
+export const APNS_CONNECT_TIMEOUT_MS = 5_000;
+export const APNS_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Test seams (a local HTTP/2 server, short timers, a clock). Production uses the defaults and Apple's host. */
+export interface ApnsTransportOptions {
+  origin?: string;
+  requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  now?: () => number;
+}
 
 /**
  * The real direct-APNs driver — Apple's HTTP/2 Provider API, called directly over Node's built-in
@@ -32,15 +55,30 @@ export class ApnsDriver implements PushDriverInterface {
   readonly ambiguousDeliverySafeToRetry = false;
 
   private cachedProviderToken: { jwt: string; issuedAt: number } | null = null;
+  private session: http2.ClientHttp2Session | null = null;
+  private readonly origin: string;
+  private readonly requestTimeoutMs: number;
+  private readonly connectTimeoutMs: number;
+  private readonly idleTimeoutMs: number;
+  private readonly now: () => number;
 
-  constructor(private readonly config: ApnsDriverConfig) {}
+  constructor(
+    private readonly config: ApnsDriverConfig,
+    transport: ApnsTransportOptions = {},
+  ) {
+    this.origin = transport.origin ?? `https://${this.host}`;
+    this.requestTimeoutMs = transport.requestTimeoutMs ?? APNS_REQUEST_TIMEOUT_MS;
+    this.connectTimeoutMs = transport.connectTimeoutMs ?? APNS_CONNECT_TIMEOUT_MS;
+    this.idleTimeoutMs = transport.idleTimeoutMs ?? APNS_IDLE_TIMEOUT_MS;
+    this.now = transport.now ?? Date.now;
+  }
 
   private get host(): string {
     return this.config.environment === 'production' ? 'api.push.apple.com' : 'api.sandbox.push.apple.com';
   }
 
   private signProviderToken(): string {
-    const now = Date.now();
+    const now = this.now();
     if (this.cachedProviderToken && now - this.cachedProviderToken.issuedAt < PROVIDER_TOKEN_TTL_MS) {
       return this.cachedProviderToken.jwt;
     }
@@ -58,6 +96,61 @@ export class ApnsDriver implements PushDriverInterface {
     return jwt;
   }
 
+  /**
+   * The driver's one active HTTP/2 session (bounded: one per driver; the factory keeps one driver per process). A session
+   * that received GOAWAY, closed, errored or idled out is dropped here and a new one is opened on the next send; a dropped
+   * session that still carries streams is closed gracefully (close() lets them finish) and then goes away on its own.
+   */
+  private getSession(): http2.ClientHttp2Session {
+    const current = this.session;
+    if (current && !current.closed && !current.destroyed) return current;
+    this.session = null;
+
+    const session = http2.connect(this.origin);
+    this.session = session;
+    const drop = () => {
+      if (this.session === session) this.session = null;
+    };
+    const connectTimer = setTimeout(() => {
+      // Never connected: destroy it so queued requests fail now (their own timers would fire anyway).
+      if (!session.connecting) return;
+      drop();
+      session.destroy(new Error('APNs connection timed out'));
+    }, this.connectTimeoutMs);
+    connectTimer.unref?.();
+    session.once('connect', () => clearTimeout(connectTimer));
+    // A session-level error with no listener would be an uncaught 'error' event (process crash). Requests on the session
+    // see their own stream errors; here the session is only dropped so the next send reconnects.
+    session.on('error', () => {
+      clearTimeout(connectTimer);
+      drop();
+    });
+    session.on('goaway', () => {
+      drop();
+      if (!session.closed && !session.destroyed) session.close();
+    });
+    session.on('close', () => {
+      clearTimeout(connectTimer);
+      drop();
+    });
+    // Idle handling: no activity for idleTimeoutMs → close gracefully (Apple keeps idle connections only so long; a stale
+    // NAT/LB path is worse than a reconnect).
+    session.setTimeout(this.idleTimeoutMs, () => {
+      drop();
+      if (!session.closed && !session.destroyed) session.close();
+    });
+    // Never keep a Worker process alive just for an idle push connection.
+    session.unref();
+    return session;
+  }
+
+  /** Closes the current session (process shutdown / tests). Safe to call more than once. */
+  close(): void {
+    const session = this.session;
+    this.session = null;
+    if (session && !session.closed && !session.destroyed) session.close();
+  }
+
   async send(options: PushSendOptions): Promise<PushSendResult> {
     if (!this.config.bundleId) {
       throw new Error('APNS_BUNDLE_ID is required for PUSH_PROVIDER=REAL ios delivery.');
@@ -68,49 +161,67 @@ export class ApnsDriver implements PushDriverInterface {
       ...(options.data ?? {}),
     });
 
-    const client = http2.connect(`https://${this.host}`);
-    try {
-      const { status, headers, body } = await new Promise<{ status: number; headers: http2.IncomingHttpHeaders; body: string }>(
-        (resolve, reject) => {
-          const req = client.request({
-            ':method': 'POST',
-            ':path': `/3/device/${options.token}`,
-            authorization: `bearer ${jwt}`,
-            'apns-topic': this.config.bundleId,
-            'apns-push-type': 'alert',
-            'content-type': 'application/json',
-          });
-          let responseHeaders: http2.IncomingHttpHeaders = {};
-          let data = '';
-          req.on('response', (h) => {
-            responseHeaders = h;
-          });
-          req.setEncoding('utf8');
-          req.on('data', (chunk: string) => {
-            data += chunk;
-          });
-          req.on('end', () => resolve({ status: Number(responseHeaders[':status']), headers: responseHeaders, body: data }));
-          req.on('error', reject);
-          req.write(payload);
-          req.end();
-        },
-      );
-
-      if (status === 200) {
-        const providerMessageId = typeof headers['apns-id'] === 'string' ? headers['apns-id'] : undefined;
-        return { provider: this.name, providerMessageId };
+    const session = this.getSession();
+    const { status, headers, body } = await new Promise<{ status: number; headers: http2.IncomingHttpHeaders; body: string }>((resolve, reject) => {
+      let settled = false;
+      const fail = (error: PushSendError) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      let req: http2.ClientHttp2Stream;
+      try {
+        req = session.request({
+          ':method': 'POST',
+          ':path': `/3/device/${options.token}`,
+          authorization: `bearer ${jwt}`,
+          'apns-topic': this.config.bundleId,
+          'apns-push-type': 'alert',
+          'content-type': 'application/json',
+        });
+      } catch (error) {
+        // The session died between getSession() and request() (e.g. GOAWAY just arrived): retryable, never a crash.
+        if (this.session === session) this.session = null;
+        fail(new PushSendError(`APNs session unavailable: ${(error as Error).message}`, true, false, 'session'));
+        return;
       }
-      const reason = (() => {
-        try {
-          return (JSON.parse(body) as { reason?: string }).reason;
-        } catch {
-          return undefined;
-        }
-      })();
-      throw this.classify(status, reason);
-    } finally {
-      client.close();
+      let responseHeaders: http2.IncomingHttpHeaders = {};
+      let data = '';
+      // Bounded request time (connect wait included: the request is queued until the session connects). A timed-out
+      // request is retryable — at-least-once delivery, as documented for every provider (PHASE-D-PLAN §7.6).
+      req.setTimeout(this.requestTimeoutMs, () => {
+        fail(new PushSendError(`APNs request timed out after ${this.requestTimeoutMs} ms`, true, false, 'timeout'));
+        req.close(http2.constants.NGHTTP2_CANCEL);
+      });
+      req.on('response', (h) => {
+        responseHeaders = h;
+      });
+      req.setEncoding('utf8');
+      req.on('data', (chunk: string) => {
+        data += chunk;
+      });
+      req.on('end', () => {
+        if (settled) return;
+        settled = true;
+        resolve({ status: Number(responseHeaders[':status']), headers: responseHeaders, body: data });
+      });
+      req.on('error', (error: Error) => fail(new PushSendError(`APNs transport error: ${error.message}`, true, false, (error as { code?: string }).code ?? 'transport')));
+      req.on('close', () => fail(new PushSendError('APNs stream closed before a response', true, false, 'closed')));
+      req.end(payload);
+    });
+
+    if (status === 200) {
+      const providerMessageId = typeof headers['apns-id'] === 'string' ? headers['apns-id'] : undefined;
+      return { provider: this.name, providerMessageId };
     }
+    const reason = (() => {
+      try {
+        return (JSON.parse(body) as { reason?: string }).reason;
+      } catch {
+        return undefined;
+      }
+    })();
+    throw this.classify(status, reason);
   }
 
   /**

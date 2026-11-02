@@ -164,7 +164,8 @@ describeIfDb('F1: token-bearing email bodies are not retained after a terminal s
   it('terminal FAILED (non-retryable) clears the body and keeps the error metadata', async () => {
     const row = await resetRow();
     const permanent = driver(async () => {
-      throw new Error('mailbox does not exist');
+      // D5: an SMTP permanent rejection as nodemailer 10 reports it (an unrecognised error is now retryable).
+      throw Object.assign(new Error('mailbox does not exist'), { code: 'EENVELOPE', responseCode: 550, permanent: true });
     });
     await expect(processorWith(permanent)(fakeJob(row.id))).rejects.toThrow(/permanently failed/);
     const after = await rowOf(row.id);

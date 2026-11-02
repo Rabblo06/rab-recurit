@@ -7,7 +7,9 @@ import { createHash } from 'node:crypto';
  *   - handing an object to crewflow (`OWNER TO crewflow`) without using withCrewflowCoreCreate in the same file;
  *   - changing the owner of schema core;
  *   - granting rab_secure_owner / crewflow / rab_owner membership to a runtime login;
- *   - giving crewflow or crewflow_app SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB.
+ *   - giving crewflow, crewflow_app or crewflow_worker SUPERUSER, BYPASSRLS, CREATEROLE or CREATEDB;
+ *   - Phase D: creating or dropping a role, altering crewflow_worker, or granting any role membership to crewflow_worker —
+ *     the Worker login is created by an operator (reviewed bootstrap step), never by a migration (owner decision D2).
  *
  * LIMITATIONS (documented on purpose): this is text, not SQL semantics. SQL assembled at run time (format(), string
  * concatenation, variables) or `EXECUTE` inside a DO block can evade it, and a file that uses the helper for one statement
@@ -55,7 +57,8 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1').replace(/--.*$/gm, '');
 }
 
-const RUNTIME = String.raw`"?(?:crewflow|crewflow_app)"?`;
+/** Phase D: crewflow_worker (the Worker's login) is a runtime login too. */
+const RUNTIME = String.raw`"?(?:crewflow|crewflow_app|crewflow_worker)"?`;
 
 export function migrationSourceViolations(source: string): string[] {
   const s = stripComments(source);
@@ -72,6 +75,14 @@ export function migrationSourceViolations(source: string): string[] {
   }
   if (new RegExp(String.raw`ALTER\s+ROLE\s+${RUNTIME}\s[^;\`]*\b(?:SUPERUSER|BYPASSRLS|CREATEROLE|CREATEDB)\b`, 'i').test(s)) {
     out.push('gives a runtime login SUPERUSER / BYPASSRLS / CREATEROLE / CREATEDB');
+  }
+  if (/\b(?:CREATE|DROP)\s+ROLE\b/i.test(s) || /\bALTER\s+ROLE\s+"?crewflow_worker"?(?![\w])/i.test(s)) {
+    out.push('creates, drops or alters a login role (operator bootstrap only, never a migration)');
+  }
+  // A membership grant has no ON between GRANT and TO. Tempered (not a lookahead to the next ; or backtick), so an ON in
+  // a LATER string of an SQL-string array cannot hide it, and quoted identifiers still match.
+  if (/\bGRANT\s+(?:(?!\bON\b)[^;`])*?\bTO\s+"?crewflow_worker"?(?![\w])/i.test(s)) {
+    out.push('grants a role membership to crewflow_worker (operator bootstrap only, never a migration)');
   }
   return out;
 }

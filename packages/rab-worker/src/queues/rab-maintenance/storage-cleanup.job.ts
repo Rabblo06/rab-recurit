@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
+import { runtimeDbIdentityFor } from '@rab/server/engine/utils/assert-runtime-db-role';
 
 const logger = new Logger('StorageCleanupJob');
 
@@ -45,12 +46,30 @@ export type StorageCleanupResult =
  * Phase A (storage): `lockWaitSeconds: 0` — one non-blocking attempt at the command's cluster-wide reconciliation lock.
  * A replica that loses returns `ran: false` (the processor then does NOT stamp `lastStorageCleanupAt`): the winner is
  * already reconciling, and a second pass straight after it would only repeat the same storage calls.
+ *
+ * The command also reports through `process.exitCode` for the CLI (1 = integrity problems, 3 = lock held elsewhere). In
+ * the long-running Worker that value means nothing and would leak into the process's own exit status (and into Jest),
+ * so the scheduled run restores whatever the process had before; the outcome is read from `lastReport` / `lastSkipped`.
+ *
+ * Phase D: the command's connections are asserted as the Worker identity (`runtimeDbIdentityFor('worker')`, the same
+ * WORKER_CLAIM_MODE rule as every other Worker connection): global mode runs on crewflow_worker, which the CLI identity
+ * refuses, so without it every scheduled storage cleanup in global mode would refuse to start.
  */
 export async function runStorageCleanupCycle(
   command: StorageReconcileCommand,
   purgeDeletedImagesOlderThanDays: number,
 ): Promise<StorageCleanupResult> {
-  await command.run([], { failStalePending: true, purgeDeletedImagesOlderThanDays, lockWaitSeconds: 0 });
+  const exitCodeBefore = process.exitCode;
+  try {
+    await command.run([], {
+      failStalePending: true,
+      purgeDeletedImagesOlderThanDays,
+      lockWaitSeconds: 0,
+      runtimeIdentity: runtimeDbIdentityFor('worker'),
+    });
+  } finally {
+    process.exitCode = exitCodeBefore;
+  }
   if (command.lastSkipped === 'locked') return { ran: false, skipped: 'locked' };
   const report = command.lastReport;
   const result: StorageCleanupResult = {

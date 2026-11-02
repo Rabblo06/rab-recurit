@@ -15,6 +15,7 @@ import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { shiftReviewSignoffSql } from './v1/shift-review-signoff';
 import { shiftReviewWorkerScanSql } from './v1/shift-review-worker-scan';
 import { shiftTeamPolicy } from './v1/shift-team-policy';
+import { statementDispatchPointerSql } from './v1/statement-dispatch-pointer';
 import { venueManagerStaffAssignmentSql } from './v1/venue-manager-staff-assignment';
 import { venuePhotoSql } from './v1/venue-photo';
 import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
@@ -77,6 +78,9 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
   { id: 'v1.016-archive-columns', version: 16, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: archiveColumnsSql },
   { id: 'v1.017-search-vectors', version: 17, introducedBy: 'ArchiveAndSearchSchema1786719920000', sql: searchVectorsSql },
   { id: 'v1.018-venue-team-org-admin', version: 18, introducedBy: 'VenueTeamOrgAdmin1786721090000', sql: venueTeamOrgAdminSql },
+  // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): statement dispatch pointer triggers. Its expected
+  // fingerprint is recorded in v1/expected-fingerprints.ts (EXPECTED_WORKSPACE_FINGERPRINTS[19]).
+  { id: 'v1.019-statement-dispatch-pointer', version: 19, introducedBy: 'StatementDispatchPointer1786721320000', sql: statementDispatchPointerSql },
 ];
 
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */
@@ -88,7 +92,12 @@ export const LATEST_WORKSPACE_MODULE_VERSION = WORKSPACE_SCHEMA_MODULES[WORKSPAC
  * Default: LATEST. Lower it in a release only when the newest module(s) are additive for this code, so a workspace the
  * migrator has not reached yet stays routable. Never above LATEST.
  */
-export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = LATEST_WORKSPACE_MODULE_VERSION;
+export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = 18;
+/*
+ * Phase D: 18, not LATEST (19). Module 19 only adds the statement dispatch pointer triggers (no table, column, policy or
+ * grant): this code reads nothing module 19 creates, so a READY v18 workspace the migrator has not reached yet stays
+ * routable. Its statements are then dispatched by the per-workspace (reconciliation) cycle instead of the global claim.
+ */
 
 /** Highest version the hand-looped migrations applied before the ledger existed: what a backfill may baseline. */
 export const BASELINE_WORKSPACE_MODULE_VERSION = 14;

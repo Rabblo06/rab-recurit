@@ -21,7 +21,8 @@
  *     rab_secure_owner when a definer touches the table — including expressions that read any table through SPI. So R4
  *     means crewflow can still read (and write) as rab_secure_owner: E1 is PARTIALLY mitigated, not resolved. Accepted
  *     until `crewflow` stops being a runtime login (E6 / Phase B); the list may only shrink by an owner-reviewed change.
- *   - definers that use dynamic SQL (`EXECUTE`), whose targets a text scan cannot follow.
+ *   - functions it owns (definers, and since Phase D wave 2 invoker helpers too) that use dynamic SQL (`EXECUTE`), whose
+ *     targets a text scan cannot follow.
  * Also outside these checks (recorded as open findings H2 / H3, separate remediation): the database owner (database-level
  * settings such as search_path, and CREATE on `public`) and the owner of the extensions (`citext`, `pgcrypto`, ...) whose
  * functions and operators the definers call.
@@ -42,7 +43,86 @@ export const R4_CREWFLOW_TABLES_REACHED_BY_SECURE_DEFINERS: readonly string[] = 
   'workspace_schema_registry',
 ];
 
-/** rab_secure_owner-owned SECURITY DEFINER functions that use dynamic SQL — reviewed 2026-10-28 (Phase 0b). */
+/**
+ * Phase D, review findings E-2 + N-1 (owner-approved 2026-11-01): each pointer trigger function binds itself to its
+ * ONE table with `TG_TABLE_NAME IS DISTINCT FROM '<table>'`, so its body names that crewflow-owned table as a string literal
+ * (a comparison with TG_TABLE_NAME, which never touches the table). Exempted from R4 as EXACT (function, table) PAIRS — never
+ * by table name: any other rab_secure_owner definer naming one of these tables is still `r4-table-added`, and the frozen R4
+ * list itself is unchanged. Each pair is REQUIRED once its function exists with its live body (the binding must not be
+ * dropped silently); before its migration, or after 1786721320000.down() made the statement function inert, it is absent.
+ */
+export const R4_PHASE_D_TRIGGER_PAIRS: ReadonlyArray<{ fn: string; table: string }> = [
+  { fn: 'worker_dispatch_pointer_email_trg', table: 'email_outbox' },
+  { fn: 'worker_dispatch_pointer_push_trg', table: 'push_delivery' },
+  { fn: 'worker_dispatch_pointer_realtime_trg', table: 'realtime_event' },
+  { fn: 'worker_dispatch_pointer_statement_trg', table: 'payroll_record' },
+];
+const R4_PAIR_VALUES = R4_PHASE_D_TRIGGER_PAIRS.map((x) => `('${x.fn}', '${x.table}')`).join(', ');
+
+/**
+ * Phase D (reviewed and approved with migrations 1786721310000 / 1786721320000): every place a rab_secure_owner
+ * function may fire as a trigger on a table rab_secure_owner does NOT own. Such a function evaluates rows of a table a LOGIN
+ * role owns, as rab_secure_owner — the R4 class (their own-table literal is exempted per pair: R4_PHASE_D_TRIGGER_PAIRS). Checked
+ * ONE way: an attachment missing from this list fails (e.g. crewflow attaching the statement function, on which it holds
+ * EXECUTE, to a table of its own); a listed attachment that does not exist yet does not (the migrations add them one by
+ * one). `table` is the exact table name; `workspaceCopies` also admits it in every `workspace_<32 hex>` schema; trigger names are
+ * exact.
+ */
+export const REVIEWED_SECURE_TRIGGER_ATTACHMENTS: ReadonlyArray<{ fn: string; table: string; workspaceCopies: boolean; triggers: readonly string[] }> = [
+  // Pre-existing (AuditLogRecordedIdentityOrganisationCheck1786719610000), found by this check on main's schema (rab_c1d,
+  // read-only catalog query, 2026-10-31): the only such attachment before Phase D.
+  {
+    fn: 'core.audit_log_enforce_recorded_identities()',
+    table: 'audit_log',
+    workspaceCopies: false,
+    triggers: ['audit_log_recorded_identities'],
+  },
+  {
+    fn: 'core.worker_dispatch_pointer_email_trg()',
+    table: 'email_outbox',
+    workspaceCopies: false,
+    triggers: ['email_outbox_dispatch_pointer_del', 'email_outbox_dispatch_pointer_ins', 'email_outbox_dispatch_pointer_trunc', 'email_outbox_dispatch_pointer_upd'],
+  },
+  {
+    fn: 'core.worker_dispatch_pointer_push_trg()',
+    table: 'push_delivery',
+    workspaceCopies: false,
+    triggers: ['push_delivery_dispatch_pointer_del', 'push_delivery_dispatch_pointer_ins', 'push_delivery_dispatch_pointer_trunc', 'push_delivery_dispatch_pointer_upd'],
+  },
+  {
+    fn: 'core.worker_dispatch_pointer_realtime_trg()',
+    table: 'realtime_event',
+    workspaceCopies: false,
+    triggers: ['realtime_event_dispatch_pointer_del', 'realtime_event_dispatch_pointer_ins', 'realtime_event_dispatch_pointer_trunc', 'realtime_event_dispatch_pointer_upd'],
+  },
+  {
+    fn: 'core.worker_dispatch_pointer_statement_trg()',
+    table: 'payroll_record',
+    workspaceCopies: true,
+    triggers: ['payroll_record_statement_pointer_del', 'payroll_record_statement_pointer_ins', 'payroll_record_statement_pointer_trunc', 'payroll_record_statement_pointer_upd'],
+  },
+];
+
+/**
+ * Every non-internal trigger whose function rab_secure_owner owns, on a table it does not own — the function in ANY schema
+ * (Phase D wave 2: a rab_secure_owner function in another schema, e.g. a same-named `public.worker_dispatch_pointer_*_trg()`,
+ * was not listed at all before). `fn` carries the function's real schema, so only the reviewed `core.` functions match.
+ */
+export const SECURE_TRIGGERS_ON_FOREIGN_TABLES_SQL = `
+SELECT pg_catalog.format('%s.%s()', pn.nspname, p.proname) AS fn, n.nspname AS sch, c.relname AS tbl, t.tgname AS trg
+  FROM pg_catalog.pg_trigger t
+  JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+  JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+  JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+ WHERE NOT t.tgisinternal AND p.proowner = 'rab_secure_owner'::regrole AND c.relowner <> 'rab_secure_owner'::regrole
+ ORDER BY 1, 2, 3, 4`;
+
+/**
+ * rab_secure_owner-owned functions that use dynamic SQL — reviewed 2026-10-28 (Phase 0b). Since Phase D wave 2 the scan
+ * covers every function rab_secure_owner owns, not only DEFINERs: an INVOKER helper it owns runs as rab_secure_owner whenever
+ * a definer calls it, so its dynamic SQL is the definer's (no new entry: the catalog had none, rab_c1d 2026-11-01).
+ */
 export const REVIEWED_DYNAMIC_SQL_SECURE_DEFINERS: readonly string[] = [
   // Builds `workspace_<32 hex>` from a validated uuid (format %I): CREATE SCHEMA ... AUTHORIZATION rab_secure_owner + grants.
   'core.provision_workspace_schema(pg_catalog.uuid)',
@@ -169,27 +249,62 @@ violations AS (
     FROM pg_catalog.pg_roles r WHERE r.rolname = 'rab_secure_owner' AND (r.rolcanlogin OR r.rolsuper OR r.rolbypassrls)
   UNION ALL
   -- 7. The runtime logins never act as rab_secure_owner (CF-41 / assert-runtime-db-role.ts, re-asserted in the catalog).
+  --    Phase D: crewflow_worker (the Worker's login) is a runtime login too.
   SELECT 'runtime-member-of-secure-owner', r.rolname, 'member of rab_secure_owner'
     FROM pg_catalog.pg_roles r
-   WHERE r.rolname IN ('crewflow', 'crewflow_app')
+   WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker')
      AND (pg_catalog.pg_has_role(r.oid, 'rab_secure_owner', 'USAGE') OR pg_catalog.pg_has_role(r.oid, 'rab_secure_owner', 'SET'))
+  UNION ALL
+  -- 8. Phase D: nothing but superusers may act as crewflow_worker (a member would inherit the Worker-only claim grants —
+  --    the API login above all), and crewflow_worker itself never reaches crewflow (an owner of the source tables).
+  SELECT 'member-of-worker', m.rolname, 'member of crewflow_worker'
+    FROM pg_catalog.pg_auth_members a JOIN pg_catalog.pg_roles m ON m.oid = a.member
+   WHERE a.roleid = (SELECT w.oid FROM pg_catalog.pg_roles w WHERE w.rolname = 'crewflow_worker')
+  UNION ALL
+  SELECT 'worker-reaches-owner', r.rolname, 'can use or SET ROLE to crewflow'
+    FROM pg_catalog.pg_roles r
+   WHERE r.rolname = 'crewflow_worker'
+     AND (pg_catalog.pg_has_role(r.oid, 'crewflow', 'USAGE') OR pg_catalog.pg_has_role(r.oid, 'crewflow', 'SET'))
 )
 SELECT kind || '|' || object || '|' || detail AS line FROM violations ORDER BY 1`;
 
-/** R4 set as it stands: crewflow-owned (non-rab_secure_owner) core tables named in a rab_secure_owner definer's body. */
+/**
+ * R4 set as it stands: crewflow-owned (non-rab_secure_owner) core tables named in the body of a function rab_secure_owner
+ * owns — a DEFINER, or (Phase D wave 2) an INVOKER helper, which runs as rab_secure_owner whenever a definer calls it (no
+ * change to the frozen list: the only such helper naming one, current_role_name(), names `role`, already listed).
+ * Phase D pairs (N-1, tightened in wave 2): for a reviewed pair — the core, no-argument function of that exact name and its
+ * own table — ONLY the exact binding literal `TG_TABLE_NAME IS DISTINCT FROM '<table>'` is ignored; any other mention of
+ * that table in the same body (a read, a write, another literal) is still `r4-table-added`. The name alone exempts nothing.
+ */
 export const R4_TABLES_SQL = `
 SELECT DISTINCT c.relname
   FROM pg_catalog.pg_proc p, pg_catalog.pg_class c
- WHERE p.proowner = 'rab_secure_owner'::regrole AND p.prosecdef
+ WHERE p.proowner = 'rab_secure_owner'::regrole
    AND c.relnamespace = 'core'::regnamespace AND c.relkind = 'r' AND c.relowner <> 'rab_secure_owner'::regrole
-   AND p.prosrc ~* ('\\m(core\\.)?"?' || c.relname || '"?\\M')
+   AND CASE WHEN p.pronamespace = 'core'::regnamespace AND p.pronargs = 0 AND (p.proname::text, c.relname::text) IN (VALUES ${R4_PAIR_VALUES})
+            THEN pg_catalog.replace(p.prosrc, 'TG_TABLE_NAME IS DISTINCT FROM ''' || c.relname || '''', '')
+            ELSE p.prosrc
+       END ~* ('\\m(core\\.)?"?' || c.relname || '"?\\M')
  ORDER BY 1`;
 
-/** rab_secure_owner definers whose body runs dynamic SQL. */
+/**
+ * N-1: reviewed pairs whose function exists (rab_secure_owner, core, no arguments) with its LIVE body (it writes the pointer
+ * table) but no longer names its own table — the TG_TABLE_NAME binding was lost. Zero rows = every live pair is bound.
+ */
+export const R4_PHASE_D_MISSING_PAIRS_SQL = `
+SELECT v.fn, v.tbl
+  FROM (VALUES ${R4_PAIR_VALUES}) AS v(fn, tbl)
+  JOIN pg_catalog.pg_proc p ON p.proname = v.fn AND p.pronamespace = 'core'::regnamespace AND p.pronargs = 0
+ WHERE p.proowner = 'rab_secure_owner'::regrole
+   AND pg_catalog.strpos(p.prosrc, 'worker_dispatch_pointer') > 0
+   AND pg_catalog.strpos(p.prosrc, 'TG_TABLE_NAME IS DISTINCT FROM ''' || v.tbl || '''') = 0
+ ORDER BY 1`;
+
+/** rab_secure_owner functions (definers and invoker helpers, any schema) whose body runs dynamic SQL. */
 export const DYNAMIC_SQL_SECURE_DEFINERS_SQL = `
 SELECT ${fnLabel('p')} AS fn
   FROM pg_catalog.pg_proc p
- WHERE p.prosecdef AND p.proowner = 'rab_secure_owner'::regrole AND p.prosrc ~* '\\mEXECUTE\\M'
+ WHERE p.proowner = 'rab_secure_owner'::regrole AND p.prosrc ~* '\\mEXECUTE\\M'
  ORDER BY 1`;
 
 type Query = (sql: string) => Promise<Array<Record<string, unknown>>>;
@@ -202,6 +317,15 @@ export async function secureOwnerInvariantViolations(query: Query): Promise<stri
     for (const f of frozen) if (!actual.includes(f)) out.push(`${label}-removed|${f}|reviewed list is stale`);
   };
   diff('r4-table', (await query(R4_TABLES_SQL)).map((r) => String(r.relname)), R4_CREWFLOW_TABLES_REACHED_BY_SECURE_DEFINERS);
+  for (const r of await query(R4_PHASE_D_MISSING_PAIRS_SQL)) {
+    out.push(`r4-phase-d-pair-missing|core.${String(r.fn)}()|its live body no longer binds itself to ${String(r.tbl)} (TG_TABLE_NAME)`);
+  }
   diff('dynamic-sql-definer', (await query(DYNAMIC_SQL_SECURE_DEFINERS_SQL)).map((r) => String(r.fn)), REVIEWED_DYNAMIC_SQL_SECURE_DEFINERS);
+  for (const r of await query(SECURE_TRIGGERS_ON_FOREIGN_TABLES_SQL)) {
+    const [fn, sch, tbl, trg] = [String(r.fn), String(r.sch), String(r.tbl), String(r.trg)];
+    const schemaOk = (a: { workspaceCopies: boolean }) => sch === 'core' || (a.workspaceCopies && /^workspace_[0-9a-f]{32}$/.test(sch));
+    const ok = REVIEWED_SECURE_TRIGGER_ATTACHMENTS.some((a) => a.fn === fn && a.table === tbl && schemaOk(a) && a.triggers.includes(trg));
+    if (!ok) out.push(`secure-trigger-attachment-added|${sch}.${tbl}.${trg}|${fn} fires as rab_secure_owner on a table it does not own; not in the reviewed list`);
+  }
   return out;
 }

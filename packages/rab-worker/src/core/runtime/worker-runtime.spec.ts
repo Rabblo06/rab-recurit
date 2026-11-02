@@ -170,4 +170,13 @@ describe('WorkerRuntime (BullMQ migration M1/M5)', () => {
     runtime.markReconcileOk(6);
     expect(runtime.progress()).toMatchObject({ mode: 'bullmq', consumersReadyAt: 5, reconcileOkAt: 6 });
   });
+
+  it('OD-2: setGauges writes the fields to rab:worker:stats (health) and exposes them in progress().gauges (instance heartbeat file)', async () => {
+    const { redis, hashes } = fakeRedis();
+    const runtime = new WorkerRuntime(redis, { metricsLogMs: 0, statsWrite: 'fields' });
+    runtime.setGauges({ notificationQueueUsage: '0.000000', notificationQueueLevel: 'ok', notificationQueueSampledAt: 7 });
+    await flush();
+    expect(hashes.get(WORKER_STATS_KEY)).toMatchObject({ notificationQueueUsage: '0.000000', notificationQueueLevel: 'ok', notificationQueueSampledAt: '7' });
+    expect(runtime.progress()).toMatchObject({ gauges: { notificationQueueUsage: '0.000000', notificationQueueLevel: 'ok', notificationQueueSampledAt: 7 } });
+  });
 });

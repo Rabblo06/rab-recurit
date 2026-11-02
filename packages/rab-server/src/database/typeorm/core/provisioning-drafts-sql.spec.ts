@@ -60,8 +60,10 @@ function invariantsHold(q: string): unknown[] | undefined {
 }
 
 describe('ProvisionWorkspaceGuards1786721210000: provision_workspace v3', () => {
-  it('is authored against the latest module composition (re-base this draft if a module migration lands first)', () => {
-    expect(GUARDS_THROUGH_VERSION).toBe(LATEST_WORKSPACE_MODULE_VERSION);
+  it('stays pinned to the module composition it was merged with (v18; later modules re-create the function themselves)', () => {
+    // Merged history (Phase B): StatementDispatchPointer1786721320000 (module 19) re-creates provision_workspace itself.
+    expect(GUARDS_THROUGH_VERSION).toBe(18);
+    expect(LATEST_WORKSPACE_MODULE_VERSION).toBeGreaterThanOrEqual(GUARDS_THROUGH_VERSION);
   });
 
   it('down() restores byte-for-byte the statement VenueTeamOrgAdmin1786721090000 itself sends (captured, not re-typed)', async () => {

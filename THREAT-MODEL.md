@@ -4446,3 +4446,166 @@ production; realtime production enablement is additionally blocked on Phase D (s
   poll; no confidentiality impact);
   F4 (Info) — shift creator/sender recipients are not re-checked for current manager scope (id-only signal; the client
   re-reads through scoped REST).
+
+## Phase D — global Worker claims, dispatch pointers, event wake-ups (branch phase-d/global-worker-claims, not merged)
+
+Owner approvals: D0 plan (conditional, 2026-10-31); master SQL gate (2026-11-01) for disposable databases only. Defaults
+unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_SCHEDULER=interval`, `REALTIME_ENABLED=false`,
+`PUSH_ENABLED=false`, `WORKER_INVITE_AUTO_DELETE_ENABLED=false`. Operator runbook: `packages/rab-docker/docs/phase-d-deployment-runbook.md` (`crewflow_worker` creation §3, global-mode activation §5, the separately approved D5 cutover §11).
+
+### D-a: separate Worker identity (owner-approved exception to Phase B's single runtime login)
+- **Asset:** the ability to discover and lease every tenant's pending work (claim/release functions). **Actor:** anyone who
+  gains code execution or SQL injection in the API. **Before:** the API and Worker shared `crewflow_app`, so the API could
+  execute the due-work claim/complete definers (D0-A1: claim every tenant's due-work pointers, complete = delete →
+  other tenants' timeouts never fire).
+- **Control:** `crewflow_worker` (LOGIN, member of `crewflow_app` WITH INHERIT TRUE / SET FALSE, no elevated attributes,
+  owns nothing) is the only role with EXECUTE on the Phase D claim/release functions; the API's boot gate refuses that
+  identity; the Worker's global mode refuses anything else. D0-A1 itself closes only at the D5 cutover
+  (`WorkerDueWorkClaimsToWorkerRole`, gated) — until then `crewflow_app` keeps the due-work grants (documented residual).
+- **Residual:** `crewflow_worker` inherits every `crewflow_app` right (RLS still applies: no BYPASSRLS). Compromise of the
+  Worker host = compromise of both. Real-environment creation is a separate operator approval.
+
+### D-b: `core.worker_dispatch_pointer` (routing ids only) and the claim functions
+- Owner `rab_secure_owner`, ENABLE + FORCE RLS, no grant to any login, owner-only permissive policy + restrictive deny for
+  `crewflow` / `crewflow_app` / `crewflow_worker`. Columns: queue, subject id, organisation id, workspace id, due time,
+  lease/claim token/counts — no names, e-mails, amounts or payloads. Composite FK `(workspace_id, organisation_id) →
+  manager_workspace` makes a cross-tenant pairing unrepresentable.
+- Claims: SECURITY DEFINER, `search_path = pg_catalog, pg_temp`, lease / per-organisation cap / batch clamp fixed
+  server-side, `FOR UPDATE SKIP LOCKED`, random organisation pivot (fairness), returns routing ids + a fresh claim token.
+  Release requires the matching token; it re-times, never deletes.
+- **Forged / stale pointer:** worst case is a wasted Worker visit. The Worker re-reads the subject under the pointer's own
+  organisation (and workspace) with RLS, and completion is fenced by the row's own state machine (status CAS,
+  processing token, realtime claim token + 60 s row lease, statement generation, `worker_event` uniqueness). A pointer
+  lease never authorises completion; a stale claim token cannot release another Worker's claim.
+- **OD-1 (accepted temporarily):** orphan pointers (replica-mode restore, disabled trigger) are re-claimed forever with a
+  growing `claim_count`; the Worker warns at `claim_count > 20`; operator-only supervised cleanup in the runbook. No
+  pointer-delete operation exists for API users; no automatic purge. Starvation or material delay = release blocker.
+
+### D-c: pointer triggers (email/push/realtime outboxes; `payroll_record` in core and every workspace schema)
+- SECURITY DEFINER (`rab_secure_owner`), AFTER ROW + AFTER TRUNCATE, checks `TG_TABLE_NAME`, schema, column types and that
+  organisation/workspace do not change on UPDATE; they run in the producer's transaction (rollback removes both).
+- **SECURITY TRADE-OFF (owner-accepted 2026-11-01):** `crewflow` holds EXECUTE on the statement trigger function because
+  it builds workspace schemas (CREATE TRIGGER checks EXECUTE). Compensating controls: exact `payroll_record` name, `core`
+  or the workspace's own schema, schema owned by `rab_secure_owner`, workspace/organisation pairing, reviewed column types;
+  secure-owner invariants report any other attachment. `crewflow` already owns every payroll table, so the grant adds no
+  data access. The narrower provisioning function was rejected: it needs dynamic SQL in a `rab_secure_owner` definer
+  (Phase 0b forbids) and still would not reduce `crewflow`'s power.
+- Phase 0b R4: exactly four function→own-table pairs are exempt (N-1); any other `rab_secure_owner` function that reads a
+  protected table is still rejected (`phase-d-r4-secure-owner-regression.integration.spec.ts`, 51 tests, failing-first).
+  That test found and wave 2 fixed three **detective-control gaps** in `secure-owner-invariants.ts`. All three checks are
+  stricter now, no frozen list changed, and the rehearsal database is still clean:
+  - **F-R4-1, Medium.** The exemption was keyed on the function name, so a pair function could read its own table anywhere
+    in its body. Now only the exact `TG_TABLE_NAME` binding literal is exempt.
+  - **F-R4-2, Medium.** A `rab_secure_owner` trigger function outside `core` was never listed. The namespace filter is
+    removed.
+  - **F-R4-3, Low.** INVOKER helpers owned by `rab_secure_owner` were not scanned for R4 or for dynamic SQL. Every
+    function it owns is scanned now.
+
+### D-d: LISTEN/NOTIFY wake-ups (event mode; off by default)
+- Payload = queue label only. Poll mode sends **no** NOTIFY: the triggers notify only when the producing session set
+  `crewflow.dispatch_notify=on`, which only an event-mode process sets at connect time (E-1).
+- **Availability risk (OD-2):** a full notification queue makes the producer's COMMIT fail (business write lost to the
+  user, retried by the user/client). Mitigations required before event mode anywhere: `pg_notification_queue_usage()`
+  monitoring (alert 0.1, escalate 0.5) and role-level `idle_in_transaction_session_timeout` ≈ 60 s on the three logins.
+  Durable truth stays in rows; a missed NOTIFY is caught by the 30 s backstop and the reconcile after reconnect.
+- **Assessed (wave 2):** in event mode a NOTIFY failure **is** a business-write failure. Notifications are processed in
+  `PreCommit_Notify` before the commit record, so the whole producer transaction rolls back, and an EXCEPTION block in
+  the trigger cannot catch it. Causes in PostgreSQL 16:
+  - the queue is full (54000, fixed 8 GB);
+  - the cluster-wide notify-lock wait reaches `statement_timeout` or `lock_timeout`;
+  - `PREPARE TRANSACTION` (2PC; not used today).
+
+  Poll mode is structurally immune: `pg_notify` is never called, so there is no lock and no queue entry. OD-2 makes the
+  risk observable and bounds its main cause; it does not remove it.
+- **Residual:** `crewflow.dispatch_notify` is an unregistered GUC. An `ALTER ROLE/DATABASE … SET` of it would switch
+  every session into NOTIFY. **Closed (owner decision 2026-11-01):** every process refuses to boot on a stored value
+  (`pg_db_role_setting`, this or all databases, own or inherited role) or a session value that does not match its mode;
+  the security posture and the CI RLS gate also fail. Residual: `postgresql.conf` / `ALTER SYSTEM` (superuser) is only
+  caught by poll-mode processes.
+- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode.
+
+### D-e: account-invite cleanup (F-1) and automatic deletion
+- Redemption refuses expired, revoked and consumed links whether or not cleanup runs (tested). Today's cleanup is a no-op
+  in production (RLS, D0 F-1). `1786721340000` adds narrow definers (EXECUTE `crewflow_worker` only; delete only
+  never-activated accounts with no session/refresh history, never a platform admin or workspace owner, FK-restricted,
+  skips audited). **Automatic deletion stays off** (`WORKER_INVITE_AUTO_DELETE_ENABLED=false`; production refuses `true`)
+  until the owner approves the retention policy. **SECURITY TRADE-OFF:** the Worker login can delete a user row through
+  that definer — narrowed by the never-activated predicate.
+
+### D-f: transport resilience (no behaviour change for tenants)
+- SMTP/Resend classification: unknown errors are now retryable (bounded by 5 attempts) — more attempts, never unbounded.
+  APNs/SMTP timeouts are retried: delivery is **at-least-once** (a timed-out send may be delivered twice); exactly-once is
+  not claimed. Push stays off in production; the F2 relevance policy is unchanged. Push payloads stay generic (ids only).
+- Redis producer clients fail fast (3 s) instead of hanging; the outbox row stays the truth and is re-dispatched.
+
+### D-g: independent security review of the integrated diff (2026-11-01) and the performance gate
+- **Performance gate (owner decision 2026-11-01, Option A):** the pointer-trigger write cost is accepted unchanged, and no
+  security check is removed for performance: E-2/R4 guards, FORCE RLS, the restricted Worker claims, lease fencing and
+  tenant isolation all stay as reviewed. The release must enable global mode in a supervised rollout (runbook §9), never
+  by default and never before its prerequisites pass.
+- **F1, Medium, availability/retention: FIXED (failing-first).**
+  - Actor → action → consequence: an operator moves the Worker to `crewflow_worker`, as global mode requires. Every
+    scheduled storage-cleanup tick then refused to start, because the embedded `storage:reconcile` command asserted its
+    connections as the API identity (`crewflow_app` only). Stale-pending, orphan and deleted-image handling stopped
+    silently, apart from failure counters.
+  - Where: `storage-reconcile.command.ts` `run()` and `acquireReconcileLock()`.
+  - Root cause: the labels `'storage reconciliation'` and `'storage reconciliation lock'` are not Worker connection labels.
+  - Fix: an internal `runtimeIdentity` option (not a CLI flag). The Worker job passes `runtimeDbIdentityFor('worker')`.
+    The CLI still refuses `crewflow_worker`.
+  - Regression tests: `phase-d-storage-cleanup-worker-login.integration.spec.ts` (Worker cycle on `crewflow_worker` with
+    global mode, plus CLI refusal on the same credential) and `storage-cleanup.job.spec.ts` (the identity follows
+    `WORKER_CLAIM_MODE`).
+- **Residuals (owner to decide; each needs reviewed SQL, so not changed now):**
+  - **F2, Low, availability.** The statement pointer key is (queue, subject id). A writer able to choose a
+    `payroll_record` id in another workspace equal to a victim's id could re-point the victim's pointer. The victim then
+    waits for the reconcile sweep (≤ 900 s). Ids are server-generated UUIDs, so this needs a compromised writer that
+    already knows the victim id. No data exposure: the Worker re-reads under RLS in the pointer's scope.
+    **It also arises from legitimate data** (owner question, 2026-11-01): the HWS backfill copies `core` rows into the
+    workspace schema with the same id, and `payroll_record` is in the copy set. Because the pointer is deleted by subject
+    id whichever copy fired, a terminal update or delete of one copy can drop the pointer the other copy still needs:
+    a stale `core` copy touched by a mixed-version runtime, or the backfill's rollback deleting workspace copies. That
+    statement waits for the reconcile sweep, and a `TRUNCATE` of `core.payroll_record` clears every statement pointer.
+    The impact is global mode only and a delay of at most one reconcile interval.
+    **FIXED by `StatementPointerPhysicalIdentity1786721350000`** (owner-approved option C, 2026-11-01; forward migration in
+    the same release, the approved 1300000/1310000/1320000 SQL untouched and sha256-pinned):
+    - Root cause: the pointer identity was the logical record, `(queue, subject_id)`, but one id can exist as two
+      physical rows (core and workspace copy, or two workspaces).
+    - Fix: the identity is the physical row, `PRIMARY KEY (queue, subject_id, source_schema)`. A CHECK binds
+      `source_schema` to `core` or the pointer's own `workspace_<hex>`. Every statement-trigger write and delete
+      (row, TRUNCATE) is scoped to the firing table's schema. A generated statement retires the same record's other
+      copies' pointers in the same workspace only (generation is fenced by the UNIQUE `core.worker_event` key). Each
+      claimed row gets its own claim token, so a release re-times only the row it was handed. No grant, owner, definer
+      or `search_path` change; the v19 fingerprint and the posture golden are unchanged (migration post-conditions,
+      R4 included).
+    - Residuals (accepted, Low): a stale copy that is due but never routed keeps its own pointer and is re-claimed
+      each lease (visible as OD-1 `claim_count` alerts, not silent); the operator HWS cutover sweep removes it
+      (runbook §6). Two manual transactions generating both copies of one id at once could deadlock (40P01); the
+      Worker cannot, because it inserts the UNIQUE event key first. The migration purges existing statement pointers
+      (their source is unknown); per_scope never reads them, so this is harmless before global activation.
+    - Regression tests: `phase-d-f2-pointer-identity.integration.spec.ts` (paths a–d, written failing-first against
+      the approved key; two-copy claim; sibling retirement; per-row token; CHECK and cutover sweep) and
+      `worker-dispatch-pointer-sql.f2.spec.ts` (approved constants byte-identical, no comments or dynamic SQL in the
+      new bodies, R4 table set unchanged, every statement delete scoped).
+    - Until 1350000 is applied, the runbook rule stands: run HWS data operations with the Workers in per_scope.
+  - **F3, Low.** The invite expire/delete definers are executable by the Worker login without a database-side switch or
+    an in-definer audit row. The flag and audit live in the Worker process. They are bounded by the never-activated
+    predicate, grace period, owner and admin blocks and FKs.
+  - **F4, Low.** Push (APNs) and SMTP timeouts are retried, which gives at-least-once delivery (D-f). This belongs with
+    the SMTP post-DATA duplicate policy (owner decision pending).
+- **F5, Info, pre-existing.** Resend's own error message is appended to the stored or queued error text as before Phase D.
+  The class comment is corrected. Sanitising provider text is a separate change.
+- **Verified, not a finding:** `workspace_schema_registry_versioning_guard()` only restricts `current_user =
+  'crewflow_app'`, but no runtime login holds a write privilege on the registry (`crewflow_app` = SELECT only), so the
+  Worker login inherits nothing to bypass. The guard's comment is stale (pre-existing).
+- **Sensitive data:** none confirmed exposed. NOTIFY carries a fixed queue label, pointers hold routing ids, and the new
+  logs carry counts and ids only.
+- **Known limitation, pre-existing (owner: document, do not change): send-time realtime authorisation.** The Worker does
+  not re-check the recipient's access when it PUBLISHes a realtime event. Revocation is enforced by the SSE gateway,
+  which checks organisation and target user per event, and whose heartbeat revalidation (session revoked, idle or
+  absolute, security version) closes a stream within one heartbeat (≈ 30 s). Window: between a revocation and the next
+  heartbeat, an already-open stream can still receive an id-only envelope (no names, emails, amounts or payloads).
+  Global claiming does not change this. `phase-d-two-worker-concurrency` case 12 ("a recipient suspended before
+  delivery") pins the current behaviour: the API already denies them, and the Worker publishes only the id-only envelope.
+- **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
+  timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
+  (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.

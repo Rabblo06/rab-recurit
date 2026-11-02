@@ -22,7 +22,9 @@ const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL;
 const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 const quiet = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
-const def = SCAN_JOBS.find((d) => d.jobName === 'storage-cleanup')!; // a long scan in real life
+// A long scan in real life. Phase D (D3) gave storage cleanup firstRunAfterInterval (a new scheduler's first job is then
+// due one interval later); this suite needs the first job to run at once, so it opts out.
+const def = { ...SCAN_JOBS.find((d) => d.jobName === 'storage-cleanup')!, firstRunAfterInterval: false };
 const prefixFor = () => `crewflow:it-${randomBytes(4).toString('hex')}:bull`;
 
 async function replica(prefix: string, handlerMs: number, onRun: (who: string) => void, who: string) {

@@ -70,6 +70,10 @@ services:
       POSTGRES_DB: rab
       POSTGRES_INITDB_ARGS: --data-checksums
       COST_RAB_OWNER_PW: ${RAB_OWNER_PW:?}
+      # Phase D (D2): initdb pre-creates crewflow_app (the restricted-runtime migration accepts and re-passwords an existing
+      # role) and the operator-created crewflow_worker login, exactly like packages/rab-docker/postgres-init/01-roles.sql.
+      COST_CREWFLOW_APP_PW: ${CREWFLOW_APP_PW:?}
+      COST_CREWFLOW_WORKER_PW: ${CREWFLOW_WORKER_PW:?}
     ports:
       - '127.0.0.1:${COST_PG_PORT:-25470}:5432'
     volumes:
@@ -157,6 +161,9 @@ services:
       # production compose. Only `measure.sh flags-up` recreates the API with them on.
       REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
       PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
+      # Phase D (E-1): event-mode phases must set the same value on the API (its writes then NOTIFY; budget counts listeners).
+      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
+      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
     command: ['node', 'packages/rab-server/dist/main.js']
     ports:
       - '127.0.0.1:${COST_API_PORT:-23070}:3000'
@@ -186,7 +193,9 @@ services:
     environment:
       <<: *app-env
       # Phase B: also the jobs child's session-lock connection (direct), as in the e2e/production compose.
-      PG_DATABASE_URL: postgres://crewflow_app:${CREWFLOW_APP_PW:?}@pg:5432/rab
+      # Phase D: a global-claim phase logs the jobs child in as crewflow_worker by exporting COST_WORKER_DB_USER=crewflow_worker
+      # and COST_WORKER_DB_PW (harness scripts); unset = crewflow_app with CREWFLOW_APP_PW, exactly as before.
+      PG_DATABASE_URL: postgres://${COST_WORKER_DB_USER:-crewflow_app}:${COST_WORKER_DB_PW:-${CREWFLOW_APP_PW:?}}@pg:5432/rab
       PG_POOL_MAX_CONNECTIONS: '12'
       # Pass-through (no value here): lib/common.sh load_secrets exports postgres://crewflow:<CREWFLOW_PW>@costaudit-pg:5432/rab;
       # a configuration with `-CREWFLOW_PROVISIONER_DATABASE_URL` (lib/worker-env.sh) runs compose without it, so the key is
@@ -196,6 +205,12 @@ services:
       # The `idleflags` phase recreates the worker with both true (COST_REALTIME_ENABLED / COST_PUSH_ENABLED).
       REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
       PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
+      # Phase D (D1/D2): poll vs event and per_scope vs global phases; defaults = the code defaults (production sets none).
+      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
+      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
+      WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
+      WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
+      WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
     command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
     user: '0:0'
     read_only: true

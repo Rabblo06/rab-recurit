@@ -16,19 +16,25 @@ import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
  * constants this file used to hold, bounded, out-of-range refuses to boot); 3 keep their pre-existing minutes keys
  * (LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES, OUTBOX_RETENTION_INTERVAL_MINUTES, AI_RETENTION_INTERVAL_MINUTES).
  *
- * Enable switches: the login handoff cleanup / outbox retention / AI retention switches stay INSIDE the cycle (a disabled
- * job still fires on schedule and returns `ran: false`, never stamped as a successful run). Phase A adds a REGISTRATION
- * predicate for two scans only (`enabledBy`): `push-dispatch` runs only when PUSH_ENABLED=true and
- * `realtime-outbox-publish` only when REALTIME_ENABLED=true. A disabled scan is not registered in interval mode, and in
- * bullmq mode its Crewflow scheduler is removed on reconcile (re-added when re-enabled).
+ * Enable switches: Phase A added a REGISTRATION predicate (`enabledBy`) for `push-dispatch` (PUSH_ENABLED=true) and
+ * `realtime-outbox-publish` (REALTIME_ENABLED=true). Phase D (D3, owner decision: do not schedule disabled scans) adds the
+ * three switches that used to be checked only inside their cycle: login handoff cleanup (LOGIN_HANDOFF_CLEANUP_ENABLED,
+ * default true), outbox retention (OUTBOX_RETENTION_ENABLED, default false) and AI retention (AI_RETENTION_MODE report |
+ * purge, default off). A disabled scan is not registered in interval mode, and in bullmq mode its Crewflow scheduler is
+ * removed on reconcile (re-added when re-enabled). The cycles keep their own in-cycle check as defence in depth.
  */
 export type IntervalSource =
   | { kind: 'constant'; ms: number }
   | { kind: 'env-seconds'; key: WorkerScanIntervalKey }
   | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' };
 
-/** Boolean env switches a scan's registration may depend on (Phase A contract with the realtime/push gating lane). */
-export type ScanEnableKey = 'REALTIME_ENABLED' | 'PUSH_ENABLED';
+/**
+ * Env switches a scan's registration may depend on. Phase A: REALTIME_ENABLED / PUSH_ENABLED. Phase D (D3, owner
+ * decision "do not schedule disabled scans"): the three switches that used to be checked only INSIDE their cycle —
+ * LOGIN_HANDOFF_CLEANUP_ENABLED, OUTBOX_RETENTION_ENABLED (booleans) and AI_RETENTION_MODE (enabled in `report` / `purge`).
+ * The cycles keep their own check (defence in depth).
+ */
+export type ScanEnableKey = 'REALTIME_ENABLED' | 'PUSH_ENABLED' | 'LOGIN_HANDOFF_CLEANUP_ENABLED' | 'OUTBOX_RETENTION_ENABLED' | 'AI_RETENTION_MODE';
 
 export interface ScanJobDefinition {
   queue: ScanQueueName;
@@ -52,7 +58,7 @@ export interface ScanJobDefinition {
    * Phase A generic scheduler hook (default OFF for every scan): when true, a newly registered scan first runs ONE
    * INTERVAL after registration instead of immediately (interval mode: no tick at process start; bullmq mode: a new
    * scheduler's first job is delayed by one interval). Exists for scans whose immediate start-up run is undesirable
-   * (e.g. a 24 h sweep on every deploy); enabling it for a scan is a coordinator/owner decision, not set here.
+   * (e.g. a 24 h sweep on every deploy). Phase D (D3, owner decision): on for the three daily housekeeping scans.
    */
   firstRunAfterInterval?: boolean;
 }
@@ -92,7 +98,9 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
   job(SCAN_QUEUES.offers, 'offer-expiry', 'offer expiry', envSeconds('WORKER_OFFER_EXPIRY_INTERVAL_SECONDS'), 'lastOfferExpiryAt', 'offerExpiryFailures'),
   job(SCAN_QUEUES.offers, 'manager-confirmation-timeout', 'manager confirmation timeout', envSeconds('WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS'), 'lastManagerConfirmationTimeoutAt', 'managerConfirmationTimeoutFailures'),
   job(SCAN_QUEUES.offers, 'replacement-staff', 'replacement staff', envSeconds('WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS'), 'lastReplacementStaffAt', 'replacementStaffFailures'),
-  job(SCAN_QUEUES.maintenance, 'token-cleanup', 'token cleanup', envSeconds('WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS'), 'lastTokenCleanupAt', 'tokenCleanupFailures'),
+  // Phase D (D3): the daily housekeeping scans first run one interval after start (interval mode: timed from the persisted
+  // lastRunAt stamp, so frequent deploys never starve them — see registerIntervalScans / firstRunDelayFromStamp).
+  job(SCAN_QUEUES.maintenance, 'token-cleanup', 'token cleanup', envSeconds('WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS'), 'lastTokenCleanupAt', 'tokenCleanupFailures', false, { firstRunAfterInterval: true }),
   job(
     SCAN_QUEUES.maintenance,
     'login-handoff-cleanup',
@@ -101,9 +109,10 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'lastLoginHandoffCleanupAt',
     'loginHandoffCleanupFailures',
     true,
+    { enabledBy: 'LOGIN_HANDOFF_CLEANUP_ENABLED' },
   ),
   // Phase A pa-storage: returns false when it skips (recent run cluster-wide, or another replica holds the reconcile lock).
-  job(SCAN_QUEUES.maintenance, 'storage-cleanup', 'storage cleanup', envSeconds('WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS'), 'lastStorageCleanupAt', 'storageCleanupFailures', true),
+  job(SCAN_QUEUES.maintenance, 'storage-cleanup', 'storage cleanup', envSeconds('WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS'), 'lastStorageCleanupAt', 'storageCleanupFailures', true, { firstRunAfterInterval: true }),
   job(SCAN_QUEUES.reports, 'shift-report-scheduler', 'shift report scheduler', envSeconds('WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS'), 'lastShiftReportSchedulerAt', 'shiftReportSchedulerFailures'),
   job(SCAN_QUEUES.reports, 'final-timesheet', 'final timesheet', envSeconds('WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS'), 'lastFinalTimesheetAt', 'finalTimesheetFailures'),
   job(SCAN_QUEUES.reports, 'shift-statement-dispatch', 'shift statement dispatch', envSeconds('WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'), 'lastShiftStatementDispatchAt', 'shiftStatementDispatchFailures', true),
@@ -117,6 +126,7 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'lastOutboxRetentionAt',
     'outboxRetentionFailures',
     true,
+    { enabledBy: 'OUTBOX_RETENTION_ENABLED' },
   ),
   // AI Phase 1: AI conversation retention (queues/rab-ai/ai.processors.ts). OFF by default (AI_RETENTION_MODE=off ⇒ returns
   // false, never stamped); report/purge through core.ai_purge_expired_conversations, one organisation at a time.
@@ -128,6 +138,7 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'lastAiRetentionAt',
     'aiRetentionFailures',
     true,
+    { enabledBy: 'AI_RETENTION_MODE' },
   ),
   // Phase B P8 (E6 gates 10/14, owner decision C): READ-ONLY daily stuck-workspace alert on the runtime connection — counts
   // only through core.worker_workspace_provisioning_health() (ProvisioningHealth1786721220000); Sentry warning + warn line
@@ -139,6 +150,8 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     { kind: 'constant', ms: 24 * 60 * MINUTE },
     'lastWorkspaceProvisioningHealthAt',
     'workspaceProvisioningHealthFailures',
+    false,
+    { firstRunAfterInterval: true },
   ),
 ]);
 
@@ -171,9 +184,16 @@ export function resolveIntervalMs(def: ScanJobDefinition, env: { get(key: Interv
 }
 export type IntervalSourceEnvKey = Exclude<IntervalSource, { kind: 'constant' }>['key'];
 
-/** Phase A registration predicate: true unless the scan names a switch that is not exactly `true` (fail closed). */
-export function isScanJobEnabled(def: Pick<ScanJobDefinition, 'enabledBy'>, env: { get(key: ScanEnableKey): boolean }): boolean {
-  return def.enabledBy === undefined || env.get(def.enabledBy) === true;
+/**
+ * Registration predicate: true unless the scan names a switch that is off. Boolean switches must be exactly `true`;
+ * AI_RETENTION_MODE must be exactly `report` or `purge`. Anything else — false, missing, malformed — means NOT
+ * registered (fail closed).
+ */
+export function isScanJobEnabled(def: Pick<ScanJobDefinition, 'enabledBy'>, env: { get(key: ScanEnableKey): unknown }): boolean {
+  if (def.enabledBy === undefined) return true;
+  const value = env.get(def.enabledBy);
+  if (def.enabledBy === 'AI_RETENTION_MODE') return value === 'report' || value === 'purge';
+  return value === true;
 }
 
 /**

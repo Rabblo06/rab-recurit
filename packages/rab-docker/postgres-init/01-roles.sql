@@ -40,3 +40,18 @@ ALTER DEFAULT PRIVILEGES FOR ROLE rab_owner IN SCHEMA core
   GRANT USAGE, SELECT ON SEQUENCES TO rab_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE rab_owner IN SCHEMA core
   GRANT EXECUTE ON FUNCTIONS TO rab_app;
+
+-- Phase D (D2; SQL owner-approved 2026-11-01; dev init only): the Worker's own login, `crewflow_worker`.
+-- Owner decision D2: an operator / bootstrap script creates it, never a migration — migration
+-- WorkerDispatchPointer1786721300000 only ASSERTS its reviewed shape and refuses to run without it:
+--   LOGIN, INHERIT, a member of exactly crewflow_app WITH INHERIT TRUE, SET FALSE (no ADMIN), no member of its own,
+--   owns nothing, no SUPERUSER / BYPASSRLS / CREATEROLE / CREATEDB / REPLICATION.
+-- crewflow_app is normally created later, by CrewflowAppRestrictedRuntimeRole1786687000000, which accepts an existing
+-- role (IF NOT EXISTS ... ELSE ALTER ROLE ... PASSWORD): it is pre-created here with exactly that migration's attributes
+-- and a throwaway dev-only password the migration replaces with CREWFLOW_APP_BOOTSTRAP_PASSWORD, so that the membership
+-- can be granted at init time, before any migration runs. Production / staging / CI: the reviewed operator runbook step
+-- (packages/rab-docker/docs/phase-d-deployment-runbook.md §3), with a secret-store password — never this file.
+CREATE ROLE crewflow_app LOGIN PASSWORD 'crewflow_app_dev_placeholder_replaced_by_migration' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+CREATE ROLE crewflow_worker LOGIN PASSWORD 'crewflow_worker_dev_only'
+  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT;
+GRANT crewflow_app TO crewflow_worker WITH INHERIT TRUE, SET FALSE;

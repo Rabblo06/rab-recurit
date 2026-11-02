@@ -26,7 +26,10 @@ import { ManagerType } from '@rab/shared';
 import { AppModule } from '../../app.module';
 import { ProvisionWorkspaceGuards1786721210000 } from '../../database/typeorm/core/migrations/1786721210000-ProvisionWorkspaceGuards';
 import { ProvisioningHealth1786721220000 } from '../../database/typeorm/core/migrations/1786721220000-ProvisioningHealth';
-import { PROVISION_WORKSPACE_STATE_SQL } from '../../database/typeorm/core/provision-workspace-guards-sql';
+import { PROVISION_WORKSPACE_STATE_SQL, provisionWorkspaceFunctionV3Sql } from '../../database/typeorm/core/provision-workspace-guards-sql';
+import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { composeServerPathTemplateV1StatementPointer } from '../../database/typeorm/workspace-schema/v1/server-path-template-statement-pointer';
+import { moduleChecksum, modulesThrough } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { PROVISIONING_HEALTH_EXPECTED_STATE, PROVISIONING_HEALTH_STATE_SQL } from '../../database/typeorm/core/workspace-provisioning-health-sql';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
@@ -41,6 +44,26 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 const { appUrl } = resolveIntegrationTestDatabase(process.env);
+
+/**
+ * The body (the text between `AS $provision$` and the closing `$provision$`, which is what pg_proc.prosrc stores) of
+ * core.provision_workspace exactly as StatementDispatchPointer1786721320000.up() installs it: the same builder, template,
+ * modules 1..19 with their checksums, the approved v19 expected fingerprint and the migration's own app_version literal.
+ */
+function approvedV19ProvisionBody(): string {
+  const fingerprint = EXPECTED_WORKSPACE_FINGERPRINTS[19];
+  if (!fingerprint) throw new Error('no approved expected fingerprint for module 19');
+  const modules = modulesThrough(19).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+  const literal = 'db:provision_workspace@StatementDispatchPointer1786721320000';
+  const sql = provisionWorkspaceFunctionV3Sql(composeServerPathTemplateV1StatementPointer(), modules, fingerprint, literal);
+  const open = 'AS $provision$';
+  const start = sql.indexOf(open);
+  const end = sql.lastIndexOf('$provision$');
+  if (start < 0 || end <= start) throw new Error('could not locate the $provision$ body');
+  const body = sql.slice(start + open.length, end);
+  if (!body.includes(literal) || !body.includes('CWP01') || !body.includes('CWP02')) throw new Error('derived v19 body lacks its literal or guards');
+  return body;
+}
 
 describe('Phase B P8 provisioning guards + counts-only health (migrations 1786721210000, 1786721220000)', () => {
   jest.setTimeout(180_000);
@@ -117,7 +140,17 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
 
   it('both migrations are applied with the reviewed shape (fails loudly, never skips); the deferred drift wrapper does not exist', async () => {
     const [guards] = await admin.query(PROVISION_WORKSPACE_STATE_SQL);
-    expect(guards).toMatchObject({ owner: 'crewflow', definer: true, path_ok: true, lock_timeout_ok: true, executors: 'crewflow,crewflow_app', is_guarded_body: true, has_guards: true });
+    // Privilege shape and guards: unchanged whichever approved body is installed.
+    expect(guards).toMatchObject({ owner: 'crewflow', definer: true, path_ok: true, lock_timeout_ok: true, executors: 'crewflow,crewflow_app', has_guards: true });
+    if (guards.is_guarded_body !== true) {
+      // Phase D (owner-approved v19): StatementDispatchPointer1786721320000 replaces this migration's body with the module-19
+      // body (same guards, its own app_version literal). Accepted ONLY when that migration is in the ledger AND the live body
+      // is byte-for-byte the approved v19 SQL, derived exactly as the migration derives it — never "any body with guards".
+      const v19 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StatementDispatchPointer1786721320000'`);
+      expect(v19).toHaveLength(1);
+      const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
+      expect(prosrc).toBe(approvedV19ProvisionBody());
+    }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);
     expect(n).toBe(0);

@@ -12,7 +12,32 @@ function postureClient(connectionString: string): Client {
 }
 
 /**
- * Database security posture: who owns every `core` object and what `crewflow` / `crewflow_app` may do with it.
+ * Phase D wave 3 (owner-approved, OD-2 follow-up): `crewflow.dispatch_notify` switches the pointer triggers' NOTIFY on
+ * (event mode), and in event mode a NOTIFY failure fails the producer's COMMIT. It must only ever come from the runtime
+ * pool's per-session startup option (WORKER_DISPATCH_MODE=event). A PERSISTENT setting — `ALTER DATABASE <this db> SET`
+ * (setrole 0) or `ALTER ROLE <any role> [IN DATABASE <this db>] SET` (setdatabase this db or 0 = every database) — would
+ * silently put every matching session into event-mode NOTIFY, so any such row is reported as a `setting|` line, whatever
+ * its value. The golden snapshot never contains one (goldenLinesFrom refuses to store it), so any occurrence is drift.
+ * Line: `setting|<role, or * for the database-wide entry>|crewflow.dispatch_notify|<value>`.
+ */
+export const DISPATCH_NOTIFY_SETTING_NAME = 'crewflow.dispatch_notify';
+export const DISPATCH_NOTIFY_SETTING_LINES_SQL = `
+  SELECT 'setting|' || CASE WHEN s.setrole = 0 THEN '*' ELSE coalesce((SELECT r.rolname::text FROM pg_catalog.pg_roles r WHERE r.oid = s.setrole), 'oid:' || s.setrole::text) END
+         || '|crewflow.dispatch_notify|' || substr(c.cfg, strpos(c.cfg, '=') + 1) AS line
+    FROM pg_catalog.pg_db_role_setting s CROSS JOIN LATERAL unnest(s.setconfig) AS c(cfg)
+   WHERE s.setdatabase IN (0, (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database()))
+     AND lower(split_part(c.cfg, '=', 1)) = 'crewflow.dispatch_notify'`;
+
+/** The same rows as CI-gate problems (tools/check-rls-coverage.ts). Empty = no persistent setting anywhere that applies here. */
+export async function dispatchNotifySettingProblems(query: (sql: string) => Promise<Array<Record<string, unknown>>>): Promise<string[]> {
+  return (await query(`SELECT line FROM (${DISPATCH_NOTIFY_SETTING_LINES_SQL}) x ORDER BY line`)).map(
+    (r) => `${String(r.line)}: a persistent ${DISPATCH_NOTIFY_SETTING_NAME} setting turns event-mode NOTIFY on outside the runtime configuration (remove it: ALTER ROLE/DATABASE … RESET ${DISPATCH_NOTIFY_SETTING_NAME})`,
+  );
+}
+
+/**
+ * Database security posture: who owns every `core` object and what `crewflow` / `crewflow_app` may do with it (and, Phase D,
+ * where `crewflow_worker` — which inherits crewflow_app — differs from it).
  *
  * Why (CF-09, CF-41, CF-48): grant and ownership drift went unnoticed because tests ran on a long-lived database with
  * hand-applied grants. A database built only from migrations returned 503 on every cookie request. This module reads
@@ -66,6 +91,42 @@ SELECT line FROM (
   SELECT 'role|' || r.rolname || '|super=' || r.rolsuper || '|bypassrls=' || r.rolbypassrls || '|login=' || r.rolcanlogin
          || '|member_of=' || coalesce((SELECT string_agg(b.rolname, ',' ORDER BY b.rolname) FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = r.oid), '')
     FROM pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'rab_secure_owner')
+  UNION ALL
+  -- Phase D: crewflow_worker (the Worker's login) inherits crewflow_app. Pinned as its role line plus ONLY the privileges
+  -- in which it differs from crewflow_app (the Worker-only claim grants) — a grant that reaches the Worker but not the API,
+  -- or the reverse, is a new line; equal privileges stay implicit through the crewflow_app lines.
+  SELECT 'role|' || r.rolname || '|super=' || r.rolsuper || '|bypassrls=' || r.rolbypassrls || '|login=' || r.rolcanlogin
+         || '|inherit=' || r.rolinherit || '|createrole=' || r.rolcreaterole || '|createdb=' || r.rolcreatedb || '|replication=' || r.rolreplication
+         || '|member_of=' || coalesce((SELECT string_agg(b.rolname || ':inherit=' || m.inherit_option || ':set=' || m.set_option || ':admin=' || m.admin_option, ',' ORDER BY b.rolname)
+                                         FROM pg_auth_members m JOIN pg_roles b ON b.oid = m.roleid WHERE m.member = r.oid), '')
+         || '|members=' || (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid)
+    FROM pg_roles r WHERE r.rolname = 'crewflow_worker'
+  UNION ALL
+  -- Phase D, review E-5: the dispatch pointer triggers on core tables (present, enabled state, reviewed function). A dropped
+  -- or DISABLEd trigger (crewflow owns the tables) is a missing / changed line. Workspace copies are the ws|trigger| lines.
+  SELECT 'trigger|' || c.relname || '|' || t.tgname || '|enabled=' || t.tgenabled::text || '|' || replace(t.tgfoid::regprocedure::text, 'core.', '')
+    FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_proc p ON p.oid = t.tgfoid
+   WHERE c.relnamespace = 'core'::regnamespace AND NOT t.tgisinternal AND p.pronamespace = 'core'::regnamespace
+     AND starts_with(p.proname::text, 'worker_dispatch_pointer_')
+  UNION ALL
+  SELECT 'worker-delta|execute|' || replace(p.oid::regprocedure::text, 'core.', '') || '|' || has_function_privilege(w.oid, p.oid, 'EXECUTE')
+    FROM pg_proc p CROSS JOIN pg_roles w CROSS JOIN pg_roles a
+   WHERE p.pronamespace = 'core'::regnamespace AND w.rolname = 'crewflow_worker' AND a.rolname = 'crewflow_app'
+     AND has_function_privilege(w.oid, p.oid, 'EXECUTE') IS DISTINCT FROM has_function_privilege(a.oid, p.oid, 'EXECUTE')
+  UNION ALL
+  SELECT 'worker-delta|table|' || c.relname || '|' || x.priv || '|' || has_table_privilege(w.oid, c.oid, x.priv)
+    FROM pg_class c CROSS JOIN pg_roles w CROSS JOIN pg_roles a
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) x(priv)
+   WHERE c.relnamespace = 'core'::regnamespace AND c.relkind IN ('r', 'p', 'v', 'S') AND w.rolname = 'crewflow_worker' AND a.rolname = 'crewflow_app'
+     AND has_table_privilege(w.oid, c.oid, x.priv) IS DISTINCT FROM has_table_privilege(a.oid, c.oid, x.priv)
+  UNION ALL
+  SELECT 'worker-delta|schema|core|usage=' || has_schema_privilege(w.oid, 'core', 'USAGE') || '|create=' || has_schema_privilege(w.oid, 'core', 'CREATE')
+    FROM pg_roles w CROSS JOIN pg_roles a WHERE w.rolname = 'crewflow_worker' AND a.rolname = 'crewflow_app'
+     AND (has_schema_privilege(w.oid, 'core', 'USAGE') IS DISTINCT FROM has_schema_privilege(a.oid, 'core', 'USAGE')
+          OR has_schema_privilege(w.oid, 'core', 'CREATE') IS DISTINCT FROM has_schema_privilege(a.oid, 'core', 'CREATE'))
+  UNION ALL
+  -- Phase D wave 3: a persistent database- or role-level crewflow.dispatch_notify (never in the golden: always drift).
+  ${DISPATCH_NOTIFY_SETTING_LINES_SQL}
 ) posture
 ORDER BY line`;
 
@@ -148,6 +209,13 @@ SELECT schema, regexp_replace(line, '[[:space:]]+', ' ', 'g') AS line FROM (
   UNION ALL
   SELECT ws.nspname, 'ws|function|' || p.oid::regprocedure::text || '|' || pg_get_userbyid(p.proowner) || '|definer=' || p.prosecdef
     FROM ws JOIN pg_proc p ON p.pronamespace = ws.oid
+  UNION ALL
+  -- Phase D: any workspace privilege in which crewflow_worker differs from crewflow_app (expected: none).
+  SELECT ws.nspname, 'ws|worker-delta|' || c.relname || '|' || x.priv || '|' || has_table_privilege(w.oid, c.oid, x.priv)
+    FROM ws JOIN pg_class c ON c.relnamespace = ws.oid CROSS JOIN pg_roles w CROSS JOIN pg_roles a
+    CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) x(priv)
+   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f') AND w.rolname = 'crewflow_worker' AND a.rolname = 'crewflow_app'
+     AND has_table_privilege(w.oid, c.oid, x.priv) IS DISTINCT FROM has_table_privilege(a.oid, c.oid, x.priv)
 ) w`;
 
 /** The workspace uuid a canonical schema name encodes (`workspace_<32 hex>` → 8-4-4-4-12). */
@@ -236,6 +304,11 @@ export async function compareWithGolden(
  * disagree (it never picks one as "the template"); with no workspace schema it keeps the previous golden's `ws|` section.
  */
 export function goldenLinesFrom(posture: SecurityPosture, previousWorkspaceLines: string[]): { lines: string[]; workspaceSource: string } {
+  // Phase D wave 3: a persistent crewflow.dispatch_notify setting is drift by definition; never bless it into the golden.
+  const notify = posture.core.filter((l) => l.startsWith('setting|'));
+  if (notify.length > 0) {
+    throw new Error(`refusing to write a golden that contains a persistent ${DISPATCH_NOTIFY_SETTING_NAME} setting (${notify.join('; ')}): remove it (ALTER ROLE/DATABASE … RESET) first`);
+  }
   const distinct = new Map<string, string[]>();
   for (const [schema, lines] of posture.workspaces) {
     const key = lines.join('\n');

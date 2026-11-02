@@ -94,18 +94,19 @@ describe('Phase A scan interval settings', () => {
 });
 
 describe('Phase A enable predicate (push-dispatch ⇐ PUSH_ENABLED, realtime-outbox-publish ⇐ REALTIME_ENABLED)', () => {
-  it('only those two scans carry a predicate; no scan has firstRunAfterInterval on by default', () => {
-    expect(SCAN_JOBS.filter((d) => d.enabledBy).map((d) => [d.jobName, d.enabledBy])).toEqual([
+  // Phase D (D3): the predicate set grew (login handoff / outbox retention / AI retention) and three daily scans opt in to
+  // firstRunAfterInterval — the full Phase D expectations live in scheduler-d3.spec.ts.
+  it('push and realtime carry their Phase A predicate (Phase D D3 adds three more: scheduler-d3.spec.ts)', () => {
+    expect(SCAN_JOBS.filter((d) => d.enabledBy === 'PUSH_ENABLED' || d.enabledBy === 'REALTIME_ENABLED').map((d) => [d.jobName, d.enabledBy])).toEqual([
       ['push-dispatch', 'PUSH_ENABLED'],
       ['realtime-outbox-publish', 'REALTIME_ENABLED'],
     ]);
-    expect(SCAN_JOBS.filter((d) => d.firstRunAfterInterval)).toEqual([]);
   });
 
-  it('defaults (both switches false) disable exactly those two; "true" enables; anything not exactly true stays disabled', () => {
+  it('defaults (both switches false) disable those two (+ the Phase D switch-gated retention scans, off by default); "true" enables; anything not exactly true stays disabled', () => {
     const off = envOf();
-    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, off)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish']);
-    const on = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true' });
+    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, off)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention']);
+    const on = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report' });
     expect(SCAN_JOBS.every((d) => isScanJobEnabled(d, on))).toBe(true);
     for (const value of ['true', 1, 'yes', undefined, null]) {
       expect(isScanJobEnabled(byJob('push-dispatch'), { get: () => value as never })).toBe(false);
@@ -122,20 +123,22 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     return { calls, runtime: { every: (o: WorkerLoopOptions) => void calls.push(o) } };
   };
 
-  it('defaults: the 18 enabled scans, in registry order, once each, with their resolved intervals; push/realtime absent', () => {
+  it('defaults: the 17 enabled scans, in registry order, once each, with their resolved intervals; push/realtime (and, Phase D, the off-by-default retention scans) absent', () => {
     const env = envOf();
     const { calls, runtime } = fakeRuntime();
     const result = registerIntervalScans(runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env), (d) => isScanJobEnabled(d, env));
-    expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish']);
-    const expected = SCAN_JOBS.filter((d) => !['push-dispatch', 'realtime-outbox-publish'].includes(d.jobName));
+    const gated = ['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention'];
+    expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention']);
+    const expected = SCAN_JOBS.filter((d) => !gated.includes(d.jobName));
     expect(calls.map((c) => c.metricKey)).toEqual(expected.map((d) => d.jobName));
-    expect(new Set(calls.map((c) => c.name)).size).toBe(19);
+    expect(new Set(calls.map((c) => c.name)).size).toBe(17);
     calls.forEach((c, i) => expect(c.intervalMs).toBe(resolveIntervalMs(expected[i]!, env)));
-    expect(calls.some((c) => c.firstRunAfterInterval)).toBe(false);
+    // Phase D (D3): only the three daily scans start one interval late.
+    expect(calls.filter((c) => c.firstRunAfterInterval).map((c) => c.metricKey)).toEqual(['token-cleanup', 'storage-cleanup', 'workspace-provisioning-health']);
   });
 
-  it('re-enabled (PUSH_ENABLED / REALTIME_ENABLED true): all 21, in the historical order', () => {
-    const env = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true' });
+  it('re-enabled (PUSH_ENABLED / REALTIME_ENABLED true, Phase D: retention switches on): all 21, in the historical order', () => {
+    const env = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report' });
     const { calls, runtime } = fakeRuntime();
     registerIntervalScans(runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env), (d) => isScanJobEnabled(d, env));
     expect(calls.map((c) => c.metricKey)).toEqual(SCAN_JOBS.map((d) => d.jobName));

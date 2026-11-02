@@ -10,6 +10,8 @@
  * state fail CI instead of shipping quietly.
  */
 import { createPgClient, resolvePgEnvironment } from '../packages/rab-server/src/database/postgres';
+import { dispatchTriggerProblems } from '../packages/rab-server/src/database/typeorm/core/worker-dispatch-pointer-sql';
+import { dispatchNotifySettingProblems } from '../packages/rab-server/src/database/typeorm/core/security-posture';
 import type { Client } from 'pg';
 
 // P2/P3 Checkpoint 2 (restricted runtime role): the application login is now `crewflow_app`, a
@@ -153,6 +155,99 @@ const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_hi
  *  - with no tenant context bound, the runtime role reads zero rows from every workspace table (fail closed).
  */
 const WORKSPACE_SCHEMA_PATTERN = '^workspace_[0-9a-f]{32}$';
+
+/**
+ * Phase D (WorkerDispatchPointer1786721300000, owner-approved 2026-11-01): the Worker's own login. Checked whenever the role exists,
+ * and REQUIRED once core.worker_dispatch_pointer exists (the migration refuses to run without it):
+ *  - its shape: LOGIN, no SUPERUSER / BYPASSRLS / CREATEROLE / CREATEDB / REPLICATION, a member of exactly crewflow_app
+ *    (WITH INHERIT TRUE, SET FALSE, no ADMIN), no member of its own (a member — the API login above all — would inherit
+ *    the Worker-only claim grants), owns nothing;
+ *  - the pointer table: no table privilege for crewflow / crewflow_app / crewflow_worker, and the connected runtime role's
+ *    own read of it is refused (fail closed: permission denied, never rows);
+ *  - the claim / release functions: EXECUTE crewflow_worker only.
+ */
+const WORKER_ROLE = 'crewflow_worker';
+const WORKER_CALLABLE = [
+  'core.worker_claim_email_dispatch(integer)',
+  'core.worker_claim_push_dispatch(integer)',
+  'core.worker_claim_realtime_publish(integer)',
+  'core.worker_claim_statement_dispatch(integer)',
+  'core.worker_release_dispatch_claim(text, uuid, uuid, integer)',
+] as const;
+
+/**
+ * Phase D, review finding E-5: the pointer triggers are what keeps global dispatch complete (present, ENABLED, reviewed
+ * function on every source table). The check itself lives in worker-dispatch-pointer-sql.ts (dispatchTriggerProblems) so
+ * the integration suite can run the SAME code inside a rolled-back transaction (a DISABLEd / dropped / re-pointed trigger).
+ */
+async function checkDispatchTriggers(client: Client): Promise<string[]> {
+  return dispatchTriggerProblems(async (sql, params) => (await client.query(sql, params as unknown[] | undefined)).rows);
+}
+
+async function checkWorkerRole(client: Client): Promise<string[]> {
+  const problems: string[] = [];
+  const { rows: roleRows } = await client.query<{
+    super: boolean; bypassrls: boolean; createrole: boolean; createdb: boolean; replication: boolean; login: boolean;
+    member_of: string | null; members: number; owns: number;
+  }>(
+    `SELECT r.rolsuper AS super, r.rolbypassrls AS bypassrls, r.rolcreaterole AS createrole, r.rolcreatedb AS createdb,
+            r.rolreplication AS replication, r.rolcanlogin AS login,
+            (SELECT string_agg(pg_get_userbyid(m.roleid) || ':inherit=' || m.inherit_option || ':set=' || m.set_option || ':admin=' || m.admin_option, ',' ORDER BY pg_get_userbyid(m.roleid))
+               FROM pg_auth_members m WHERE m.member = r.oid) AS member_of,
+            (SELECT count(*)::int FROM pg_auth_members m WHERE m.roleid = r.oid) AS members,
+            (SELECT count(*)::int FROM pg_shdepend d WHERE d.refobjid = r.oid AND d.deptype = 'o') AS owns
+       FROM pg_roles r WHERE r.rolname = $1`,
+    [WORKER_ROLE],
+  );
+  const { rows: tableRows } = await client.query<{ present: boolean }>(`SELECT to_regclass('core.worker_dispatch_pointer') IS NOT NULL AS present`);
+  const pointerTable = Boolean(tableRows[0]?.present);
+  const role = roleRows[0];
+  if (!role) {
+    if (pointerTable) problems.push(`role ${WORKER_ROLE} does not exist, but core.worker_dispatch_pointer does`);
+    return problems;
+  }
+  if (!role.login || role.super || role.bypassrls || role.createrole || role.createdb || role.replication) {
+    problems.push(`${WORKER_ROLE} must be LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION (${JSON.stringify(role)})`);
+  }
+  if (role.member_of !== 'crewflow_app:inherit=true:set=false:admin=false') {
+    problems.push(`${WORKER_ROLE} must be a member of exactly crewflow_app WITH INHERIT TRUE, SET FALSE (found ${role.member_of ?? 'none'})`);
+  }
+  if (role.members !== 0) problems.push(`${role.members} role(s) are members of ${WORKER_ROLE}: they would inherit the Worker-only claim grants`);
+  if (role.owns !== 0) problems.push(`${WORKER_ROLE} owns ${role.owns} object(s); a runtime login owns nothing`);
+  if (!pointerTable) return problems;
+
+  const { rows: privRows } = await client.query<{ line: string }>(
+    `SELECT r.rolname || ' ' || p.priv AS line
+       FROM pg_roles r CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) p(priv)
+      WHERE r.rolname IN ('crewflow', 'crewflow_app', $1) AND has_table_privilege(r.oid, 'core.worker_dispatch_pointer', p.priv)`,
+    [WORKER_ROLE],
+  );
+  for (const r of privRows) problems.push(`core.worker_dispatch_pointer: ${r.line} granted (no login may touch the pointer table directly)`);
+  for (const fn of WORKER_CALLABLE) {
+    const { rows } = await client.query<{ rolname: string; can: boolean }>(
+      `SELECT r.rolname, has_function_privilege(r.oid, to_regprocedure($1), 'EXECUTE') AS can
+         FROM pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', $2) AND to_regprocedure($1) IS NOT NULL`,
+      [fn, WORKER_ROLE],
+    );
+    if (rows.length === 0) problems.push(`${fn} is missing`);
+    for (const r of rows) {
+      if (r.can !== (r.rolname === WORKER_ROLE)) problems.push(`${fn}: EXECUTE for ${r.rolname} is ${r.can}, expected ${r.rolname === WORKER_ROLE}`);
+    }
+  }
+  problems.push(...(await checkDispatchTriggers(client)));
+  // Fail closed for the connected runtime role: a read is refused outright (no privilege), never answered with rows.
+  await client.query('BEGIN READ ONLY');
+  try {
+    await client.query('SELECT count(*) FROM core.worker_dispatch_pointer');
+    problems.push('core.worker_dispatch_pointer: the connected runtime role could read it (expected permission denied)');
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code !== '42501') problems.push(`core.worker_dispatch_pointer: probe failed with ${code ?? 'error'}, expected 42501`);
+  } finally {
+    await client.query('ROLLBACK');
+  }
+  return problems;
+}
 const WORKSPACE_SCHEMA_ACL_ROLES = new Set(['rab_secure_owner', 'crewflow', 'crewflow_app']);
 const WORKSPACE_TABLE_OWNER = 'crewflow';
 const WORKSPACE_SCHEMA_OWNER = 'rab_secure_owner';
@@ -431,6 +526,26 @@ async function main(): Promise<void> {
         `RLS coverage FAILED — role "${APP_ROLE}" has BYPASSRLS. The app must connect as a role ` +
           `with NOBYPASSRLS or every policy above is decoration.\n`,
       );
+    }
+
+    const workerProblems = await checkWorkerRole(client);
+    if (workerProblems.length > 0) {
+      failed = true;
+      console.error(`RLS coverage FAILED — the Worker login / dispatch pointer boundary drifted:
+`);
+      for (const p of workerProblems) console.error(`  ${p}`);
+      console.error('');
+    }
+
+    // Phase D wave 3 (owner-approved): no persistent database- or role-level crewflow.dispatch_notify (event-mode NOTIFY
+    // must come only from the runtime pool's per-session option; in event mode a NOTIFY failure fails the producer's COMMIT).
+    const notifySettings = await dispatchNotifySettingProblems(async (sql) => (await client.query(sql)).rows);
+    if (notifySettings.length > 0) {
+      failed = true;
+      console.error(`RLS coverage FAILED — persistent crewflow.dispatch_notify setting(s):
+`);
+      for (const p of notifySettings) console.error(`  ${p}`);
+      console.error('');
     }
 
     const workspaces = await checkWorkspaceSchemas(client);

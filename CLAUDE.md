@@ -32,12 +32,12 @@ structural changes.
   (identifying *which* organisation a request belongs to — by email, by
   slug, by presented token hash — before any tenant context can exist to
   satisfy a forced policy) skips `FORCE` only, never `ENABLE`, and gets a
-  `SECURITY TRADE-OFF` note explaining which lookup needs it. Fifteen tables
+  `SECURITY TRADE-OFF` note explaining which lookup needs it. Sixteen tables
   carry this exception today — the authoritative list is
   `NOT_FORCED_ALLOWLIST` ∪ `{organisation, platform_admin}` in
   `tools/check-rls-coverage.ts`, which is what CI actually enforces; treat
   that file, not this paragraph, as the source of truth if the two ever
-  disagree. As of 2026-10-23 (209 migrations): `user`, `login_history`,
+  disagree. As of 2026-10-31 (245 migrations): `user`, `login_history`,
   `refresh_token`, `password_reset_token` (pre-auth identity/token lookups,
   IdentitySchema1786665800000); `manager_workspace` (subdomain-uniqueness
   SECURITY DEFINER check, Private Workspace Stage 2A); `worker_due_work`
@@ -49,7 +49,10 @@ structural changes.
   (MemberInvitationSchema1786715000000); `email_change_request`
   (EmailChangeRequest1786717800000); `released_host_label`
   (HostLabelNamespace1786719820000); `login_handoff`
-  (LoginHandoff1786719910000); and `organisation` + `platform_admin` (both
+  (LoginHandoff1786719910000); `organisation_invitation` (pre-auth
+  token-hash lookups `organisation_invitation_peek` / `_complete` for an
+  invited CEO who has no account yet, OrganisationCeoInvitation1786720010000);
+  and `organisation` + `platform_admin` (both
   org-bootstrap/admin-bootstrap SECURITY DEFINER writes that can't satisfy a
   self-referential `WITH CHECK` before the first row exists — these two have
   no `organisation_id` column at all, so `check-rls-coverage.ts` verifies
@@ -57,15 +60,15 @@ structural changes.
   `manager_profile` are **no longer** on the list: they FORCE again since
   `resolve_workspace_for_user()` was retired
   (StaffProfileForceRls1786675800000, ManagerProfileForceRls1786675810000).
-  **NOT FORCE never means RLS is disabled** — every one of these fifteen
+  **NOT FORCE never means RLS is disabled** — every one of these sixteen
   still has `ENABLE ROW LEVEL SECURITY` and real `USING`/`WITH CHECK`
   predicates; only the table *owner* is exempted from those predicates by
-  omitting FORCE. Since the role split the owner of all fifteen is
+  omitting FORCE. Since the role split the owner of all sixteen is
   `rab_secure_owner`, a NOLOGIN role no connection can authenticate as (it
   is reached only through its own SECURITY DEFINER functions); migrations
   run as `crewflow`, and `crewflow_app` — the runtime connection every API
   and Worker request actually uses — owns nothing and is therefore bound by
-  RLS on all fifteen regardless of the FORCE flag. `check-rls-coverage.ts`
+  RLS on all sixteen regardless of the FORCE flag. `check-rls-coverage.ts`
   also asserts the runtime role has `rolbypassrls = false` and connects as
   itself (not the owner) specifically to catch that class of drift. (The
   role names `rab_owner`/`rab_app` used elsewhere in this file are the

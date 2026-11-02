@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { EmailOutboxJobType, EmailOutboxStatus, ShiftStatus } from '@rab/shared';
-import { Job, UnrecoverableError } from 'bullmq';
+import { DelayedError, Job, UnrecoverableError } from 'bullmq';
 import { EntityManager } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, PasswordResetToken } from '@rab/server/modules/identity/entities/index';
@@ -15,6 +15,7 @@ import { FileService } from '@rab/server/engine/core-modules/storage/file.servic
 import { StoredFile } from '@rab/server/engine/core-modules/storage/entities/stored-file.entity';
 import { StorageError, StorageErrorCode } from '@rab/server/engine/core-modules/storage/storage.errors';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceRoutingError } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { EmailQueueJobData } from '@rab/server/engine/core-modules/email/email-queue.constants';
 import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
@@ -28,38 +29,60 @@ import {
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
 /**
- * Network/transport-level failures — worth retrying, since the SAME send
- * attempted a few seconds later has a real chance of succeeding (a blip, a
- * momentary DNS hiccup, a provider rate limit). Matched against the error's
- * own `code` (Node/nodemailer's convention — `ETIMEDOUT`, `ECONNRESET`,
- * etc.) first, falling back to the message for providers (Resend) that
- * don't set `.code` the same way.
+ * D5 (D0-C §4.6) — retry classification, from what the error itself says (nodemailer 10: `code`, `responseCode`,
+ * `permanent`; Resend: EmailProviderError's own `retryable`/`retryAfterMs`; StorageError: its own `retryable`):
+ *  - SMTP 5xx reply (RFC 5321 permanent negative completion; nodemailer sets `permanent`), except 503 → PERMANENT;
+ *  - SMTP 4xx reply (421 service unavailable, 450/451/452 try later — incl. provider throttling) and 503 → RETRYABLE;
+ *  - network / timeout / connection codes → RETRYABLE;
+ *  - local configuration or validation failures nodemailer reports with NO server reply (bad address, missing
+ *    credentials, message too large, REQUIRETLS unsupported) and EMPTY_BODY → PERMANENT;
+ *  - anything unrecognised → RETRYABLE (fail safe toward "try again", never toward silently giving up).
+ * The old rules were inverted: they RETRIED every `responseCode >= 500` and any message containing a 5xx number, and
+ * treated a 4xx with no matching text and every unknown error as permanent.
+ * `false` short-circuits to FAILED via `UnrecoverableError` regardless of how many attempts remain.
  */
-const RETRYABLE_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EAI_AGAIN', 'ESOCKET', 'ETIMEOUT']);
-const RETRYABLE_MESSAGE_PATTERNS = [/rate.?limit/i, /too many requests/i, /\b429\b/, /\b5\d\d\b/, /temporarily/i, /timeout/i];
+const PERMANENT_CODES = new Set(['EMPTY_BODY', 'ECONFIG', 'ENOAUTH', 'EMAXRECIPIENTS', 'EREQUIRETLS', 'EFILEACCESS', 'EURLACCESS']);
+/** nodemailer validates these locally (command 'API', no server reply): retrying sends the same invalid input. */
+const LOCAL_VALIDATION_CODES = new Set(['EENVELOPE', 'EAUTH', 'EMESSAGE']);
 
-/**
- * `false` here means "don't bother retrying — the next attempt would fail
- * for the exact same reason" (a permanently invalid recipient, invalid
- * credentials, a malformed request) — those short-circuit to FAILED via
- * `UnrecoverableError` regardless of how many attempts remain configured.
- * Never guesses beyond what the error itself signals — an unrecognised
- * error is treated as retryable by default (fails safe toward "try again",
- * not toward silently giving up on something transient).
- */
-function isRetryable(error: unknown): boolean {
+export interface EmailSendErrorClass {
+  retryable: boolean;
+  /** Provider-reported throttling (e.g. Resend 429 `retry-after`), in ms. */
+  retryAfterMs?: number;
+}
+
+export function classifyEmailSendError(error: unknown): EmailSendErrorClass {
   // Storage failures know whether a retry could help: a timeout does, a checksum mismatch or missing object never does.
-  if (error instanceof StorageError) return error.retryable;
-  const err = error as { code?: string; message?: string; responseCode?: number };
-  if (err?.code && RETRYABLE_CODES.has(err.code)) return true;
-  if (typeof err?.responseCode === 'number' && err.responseCode >= 500) return true;
-  if (typeof err?.responseCode === 'number' && err.responseCode === 429) return true;
-  // A permanent SMTP rejection (5xx *response code*, not the message text)
-  // is the clearest non-retryable signal nodemailer gives us. Everything
-  // else — unrecognised codes, unrecognised providers — falls through to
-  // the message-pattern check, then to "retryable" by default.
-  const message = err?.message ?? String(error);
-  return RETRYABLE_MESSAGE_PATTERNS.some((pattern) => pattern.test(message));
+  if (error instanceof StorageError) return { retryable: error.retryable };
+  // Fail closed, unchanged: a report email whose workspace cannot be routed ends FAILED (nothing sent), never retried.
+  if (error instanceof WorkspaceRoutingError) return { retryable: false };
+  const err = (error ?? {}) as { code?: unknown; responseCode?: unknown; permanent?: unknown; retryable?: unknown; retryAfterMs?: unknown };
+  const code = typeof err.code === 'string' ? err.code : undefined;
+  if (code && PERMANENT_CODES.has(code)) return { retryable: false };
+  // A provider driver that classified its own failure (ResendDriver → EmailProviderError).
+  if (typeof err.retryable === 'boolean') {
+    const retryAfterMs = typeof err.retryAfterMs === 'number' && Number.isFinite(err.retryAfterMs) && err.retryAfterMs > 0 ? err.retryAfterMs : undefined;
+    return retryAfterMs === undefined ? { retryable: err.retryable } : { retryable: err.retryable, retryAfterMs };
+  }
+  if (typeof err.responseCode === 'number') {
+    if (err.responseCode >= 500 && err.responseCode < 600) return { retryable: err.responseCode === 503 };
+    if (err.responseCode >= 400 && err.responseCode < 500) return { retryable: true };
+  }
+  if (err.permanent === true) return { retryable: false };
+  if (code && LOCAL_VALIDATION_CODES.has(code) && typeof err.responseCode !== 'number') return { retryable: false };
+  return { retryable: true };
+}
+
+/** Bounds for honouring a provider's Retry-After: at least 1 s, at most 2 minutes (the stale-RETRY recovery is 5 min). */
+const THROTTLE_MIN_MS = 1_000;
+const THROTTLE_MAX_MS = 120_000;
+/** A throttled job may be re-delayed (without consuming an attempt) only while it has been started fewer times than this. */
+const THROTTLE_MAX_STARTS = 10;
+
+/** The delay to honour for a retryable, provider-throttled failure, or null (normal jittered backoff). */
+export function throttleDelayMs(verdict: EmailSendErrorClass): number | null {
+  if (!verdict.retryable || verdict.retryAfterMs === undefined) return null;
+  return Math.min(THROTTLE_MAX_MS, Math.max(THROTTLE_MIN_MS, Math.round(verdict.retryAfterMs)));
 }
 
 function sanitizeErrorMessage(error: unknown): string {
@@ -547,7 +570,8 @@ async function revalidateOrganisationInvitation(manager: EntityManager, row: Ema
 async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext, row: EmailOutbox, job: Job<EmailQueueJobData>, processingToken: string, error: unknown): Promise<void> {
   const attemptsMade = job.attemptsMade + 1;
   const maxAttempts = job.opts.attempts ?? row.maxInfrastructureAttempts;
-  const retryable = isRetryable(error);
+  const verdict = classifyEmailSendError(error);
+  const retryable = verdict.retryable;
   const sanitized = sanitizeErrorMessage(error);
   const code = (error as { code?: string })?.code ?? (error as { name?: string })?.name ?? 'UNKNOWN';
   const isFinal = !retryable || attemptsMade >= maxAttempts;
@@ -593,6 +617,15 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
 
   if (isFinal) {
     throw new UnrecoverableError(`Email delivery permanently failed for outbox row ${row.id}: ${code}`);
+  }
+  // D5: provider-reported throttling (Resend 429 retry-after). The row is already RETRY; instead of the generic jittered
+  // backoff, wait what the provider asked for (clamped 1 s .. 2 min) by delaying THIS job (BullMQ DelayedError: no new
+  // add(), so no jobId dedupe; the attempt is not consumed). Bounded by attemptsStarted so a provider that throttles
+  // forever still ends through the normal attempts. Without a lock token (direct calls, tests) the normal path applies.
+  const delayMs = throttleDelayMs(verdict);
+  if (delayMs !== null && job.token && (job.attemptsStarted ?? 0) < THROTTLE_MAX_STARTS) {
+    await job.moveToDelayed(Date.now() + delayMs, job.token);
+    throw new DelayedError(`email outbox row ${row.id} throttled by the provider; retrying in ${delayMs} ms`);
   }
   throw error;
 }

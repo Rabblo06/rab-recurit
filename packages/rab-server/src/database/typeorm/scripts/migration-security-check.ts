@@ -26,6 +26,8 @@
  *            The pre-0b migrations held to the post-0b rules (PRE_PHASE_0B_HELD_TO_POST_0B_RULES) are held back from the
  *            pre-0b base and run right after Phase 0b, the order every database already at main applies them in; the
  *            fresh scenario keeps strict timestamp order, so both orders run.
+ * Phase D: before the first post-0b migration the harness performs the operator bootstrap step for `crewflow_worker`
+ * (ensureWorkerRole) — WorkerDispatchPointer1786721300000 refuses to run without it; no migration creates a role.
  * Every migration after Phase 0b (and, in the upgrade scenario, every held one) runs one at a time with a catalog drift
  * check (migration-privilege-drift.ts). At the end
  * of each scenario: secure-owner invariants, the migrator left nothing behind, the security posture matches the golden
@@ -53,6 +55,8 @@ import {
   prePhase0bMigrationFingerprint,
 } from '../core/migration-source-rules';
 import { compareWithGolden } from '../core/security-posture';
+import { WORKER_ROLE_FACTS_SQL, WorkerRoleFacts, workerRoleProblems } from '../core/worker-dispatch-pointer-sql';
+import { PENDING_FINGERPRINT_VERSIONS } from '../workspace-schema/v1/expected-fingerprints';
 
 export const MIGRATOR = 'rab_ci_migrator';
 const ROLE_SPLIT_TIMESTAMP = 1786682000000;
@@ -151,9 +155,19 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|deployment_identity_history|deployment_identity_history_definer_select|r|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=",
     '+ policy|deployment_identity_history|deployment_identity_history_runtime_deny|*|permissive=false|roles=crewflow,crewflow_app|using=false|check=false',
   ],
+  // Phase D (owner-approved SQL, 2026-11-01): the two RLS policies of core.worker_dispatch_pointer, added only — the owner-only
+  // permissive policy (CURRENT_USER = rab_secure_owner, true only inside the claim / release / trigger definers) and the
+  // RESTRICTIVE deny-all for the three runtime logins. Its table / function grants and FORCE RLS are pinned by the golden
+  // posture snapshot and the migration's own post-condition; no runtime login gains a table privilege, and only
+  // crewflow_worker gains EXECUTE (posture `worker-delta|execute|` lines). 1786721310000 / 1786721320000 / 1786721340000
+  // change no drift line (triggers and functions only; their reach is checked by secure-owner-invariants.ts).
+  '1786721300000-WorkerDispatchPointer': [
+    "+ policy|worker_dispatch_pointer|worker_dispatch_pointer_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
+    '+ policy|worker_dispatch_pointer|worker_dispatch_pointer_runtime_deny|*|permissive=false|roles=crewflow,crewflow_app,crewflow_worker|using=false|check=false',
+  ],
 };
 
-type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app';
+type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
 
 interface MigrationFile {
   ts: number;
@@ -211,7 +225,13 @@ const PASSWORDS = {
   crewflow: requireEnv('CREWFLOW_BOOTSTRAP_PASSWORD'),
   crewflow_app: requireEnv('CREWFLOW_APP_BOOTSTRAP_PASSWORD'),
   migrator: randomBytes(24).toString('hex'),
+  // Phase D: random when this run creates crewflow_worker; CREWFLOW_WORKER_BOOTSTRAP_PASSWORD (its current value) when the
+  // role already exists on a shared disposable cluster; otherwise unknown (then no RLS gate run as it).
+  crewflow_worker: process.env.CREWFLOW_WORKER_BOOTSTRAP_PASSWORD?.trim() || randomBytes(24).toString('hex'),
 };
+let workerPasswordKnown = false;
+/** Set when THIS run created crewflow_worker: the next scenario on the same cluster finds it and must not refuse its own role. */
+let workerRoleCreatedThisRun = false;
 /**
  * Discovery mode (local use only): record unlisted migrations that need privilege instead of stopping on them. The run
  * still FAILS when anything is discovered, and the mode is refused under CI.
@@ -233,7 +253,7 @@ function url(db: string, identity: Identity | 'admin'): string {
     u.username = MIGRATOR;
     u.password = PASSWORDS.migrator;
     if (identity === 'phaseA') u.searchParams.set('options', '-c role=rab_owner');
-  } else if (identity === 'crewflow' || identity === 'crewflow_app') {
+  } else if (identity === 'crewflow' || identity === 'crewflow_app' || identity === 'crewflow_worker') {
     u.username = identity;
     u.password = encodeURIComponent(PASSWORDS[identity]);
   }
@@ -302,6 +322,39 @@ async function ensureMigratorRole(): Promise<void> {
       JSON.stringify({ rolsuper: false, rolbypassrls: false, rolcreatedb: false, rolcreaterole: false, rolreplication: false, rolcanlogin: true }),
     `migrator role is LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION`,
   );
+}
+
+/**
+ * Phase D: the operator bootstrap step for the Worker's login, exactly as the reviewed runbook does it (docs/plans/PHASE-D-SQL-GATE.md),
+ * BEFORE the first post-0b migration: WorkerDispatchPointer1786721300000 refuses to run without it, and no migration ever
+ * creates a role. Needs crewflow_app, so it runs once a scenario has passed the role split. Cluster-wide; created at most
+ * once per run. On a shared disposable cluster where it already exists: MIGRATION_SECURITY_ALLOW_EXISTING_ROLES=true is
+ * required, its shape is verified (never altered), and CREWFLOW_WORKER_BOOTSTRAP_PASSWORD (its current value) enables the
+ * RLS gate run as crewflow_worker.
+ */
+async function ensureWorkerRole(): Promise<void> {
+  const facts = async () => (await rowsOf('postgres')(WORKER_ROLE_FACTS_SQL))[0] as unknown as WorkerRoleFacts;
+  let f = await facts();
+  if (!f.present) {
+    await admin('postgres', async (c) => {
+      await c.query(
+        `CREATE ROLE crewflow_worker LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT PASSWORD '${PASSWORDS.crewflow_worker}'`,
+      );
+      await c.query('GRANT crewflow_app TO crewflow_worker WITH INHERIT TRUE, SET FALSE');
+    });
+    workerPasswordKnown = true;
+    workerRoleCreatedThisRun = true;
+    log('created crewflow_worker (operator bootstrap step; random password, never printed)');
+    f = await facts();
+  } else {
+    // Only a role this run did NOT create needs the explicit opt-in; ours (fresh scenario, then upgrade) is re-verified below.
+    if (!workerRoleCreatedThisRun && !EXISTING_ROLES_OK) {
+      throw new CheckFailure('crewflow_worker already exists on this cluster. Refusing unless MIGRATION_SECURITY_ALLOW_EXISTING_ROLES=true.');
+    }
+    workerPasswordKnown = workerPasswordKnown || Boolean(process.env.CREWFLOW_WORKER_BOOTSTRAP_PASSWORD?.trim());
+  }
+  const problems = workerRoleProblems(f);
+  check(problems.length === 0, 'crewflow_worker has the reviewed shape (LOGIN, member of exactly crewflow_app WITH INHERIT TRUE / SET FALSE, owns nothing)', problems);
 }
 
 /** A new database prepared exactly like packages/rab-docker/postgres-init/01-roles.sql, marked disposable. */
@@ -411,6 +464,8 @@ async function laterMigrationsWithDriftCheck(
   heldFirst: readonly MigrationFile[] = [],
 ): Promise<number> {
   const later = [...heldFirst, ...MIGRATIONS.filter((m) => m.ts > PHASE_0B_MIGRATION_TIMESTAMP)];
+  // Before the first drift snapshot, so creating the role is never attributed to a migration.
+  await ensureWorkerRole();
   for (const m of later) {
     const before = await privilegeDriftSnapshot(rowsOf(db));
     const ran = await migrate(db, identity, m.ts);
@@ -474,6 +529,17 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   });
   const tail = sanitise(`${rls.stdout ?? ''}${rls.stderr ?? ''}`).trim().split('\n').slice(-8);
   check(rls.status === 0, `${db}: RLS coverage gate passes as crewflow_app`, tail);
+
+  // Phase D: the same gate as the Worker's login (zero rows with no tenant context in every workspace table, the pointer
+  // table refused) — only when this run knows its password.
+  if (workerPasswordKnown) {
+    const workerEnv: NodeJS.ProcessEnv = { ...childEnv, DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
+    const asWorker = spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: workerEnv, encoding: 'utf8', shell: process.platform === 'win32' });
+    const workerTail = sanitise(`${asWorker.stdout ?? ''}${asWorker.stderr ?? ''}`).trim().split('\n').slice(-8);
+    check(asWorker.status === 0, `${db}: RLS coverage gate passes as crewflow_worker`, workerTail);
+  } else {
+    log(`${db}: RLS coverage gate as crewflow_worker skipped (password unknown on this shared cluster)`);
+  }
 }
 
 /**
@@ -560,6 +626,13 @@ async function lifecycleChecks(db: string): Promise<void> {
 
 /** The frozen pre-0b chain and an exact privileged list: both must hold before any database is touched. */
 function staticChecks(): void {
+  // Phase D, review E-10 — RELEASE GUARD: a workspace module whose expected fingerprint is still pending must never ship
+  // (the migrator and the TypeScript provisioner skip the comparison when the expected value is undefined).
+  check(
+    PENDING_FINGERPRINT_VERSIONS.length === 0,
+    `no workspace module is waiting for its expected fingerprint (pending: ${PENDING_FINGERPRINT_VERSIONS.join(', ') || 'none'})`,
+    PENDING_FINGERPRINT_VERSIONS.map((v) => `module ${v}: generate EXPECTED_WORKSPACE_FINGERPRINTS[${v}] after SQL approval (v1/expected-fingerprints.ts)`),
+  );
   const fp = prePhase0bMigrationFingerprint(MIGRATIONS.map((m) => m.name));
   check(
     fp.count === PRE_PHASE_0B_MIGRATIONS.count && fp.sha256 === PRE_PHASE_0B_MIGRATIONS.sha256,

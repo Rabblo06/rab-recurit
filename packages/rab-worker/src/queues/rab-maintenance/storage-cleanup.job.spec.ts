@@ -50,13 +50,17 @@ describe('storage-cleanup job (Phase A)', () => {
   });
 
   describe('runStorageCleanupCycle', () => {
-    const fakeCommand = (behaviour: { skipped?: boolean }) => {
+    // Like the real command (it is also the `storage:reconcile` CLI), the fake reports through process.exitCode too:
+    // 1 = integrity problems, 3 = lock held elsewhere.
+    const fakeCommand = (behaviour: { skipped?: boolean; throws?: boolean }) => {
       const command = {
         lastReport: undefined as unknown,
         lastSkipped: undefined as unknown,
         run: jest.fn(async () => {
           command.lastReport = undefined;
           command.lastSkipped = undefined;
+          process.exitCode = behaviour.skipped ? 3 : 1;
+          if (behaviour.throws) throw new Error('simulated storage outage');
           if (behaviour.skipped) command.lastSkipped = 'locked';
           else
             command.lastReport = {
@@ -78,11 +82,60 @@ describe('storage-cleanup job (Phase A)', () => {
         orphans: 2,
         actionsTaken: 1,
       });
-      expect(command.run).toHaveBeenCalledWith([], { failStalePending: true, purgeDeletedImagesOlderThanDays: 30, lockWaitSeconds: 0 });
+      expect(command.run).toHaveBeenCalledWith([], {
+        failStalePending: true,
+        purgeDeletedImagesOlderThanDays: 30,
+        lockWaitSeconds: 0,
+        runtimeIdentity: { process: 'worker', claimMode: 'per_scope' },
+      });
+    });
+
+    it("asserts the command's connections as the Worker identity of WORKER_CLAIM_MODE (global ⇒ crewflow_worker only)", async () => {
+      const saved = process.env.WORKER_CLAIM_MODE;
+      try {
+        for (const [mode, claimMode] of [[undefined, 'per_scope'], ['per_scope', 'per_scope'], ['global', 'global']] as const) {
+          if (mode === undefined) delete process.env.WORKER_CLAIM_MODE;
+          else process.env.WORKER_CLAIM_MODE = mode;
+          const command = fakeCommand({});
+          await runStorageCleanupCycle(command as never, 30);
+          expect(command.run.mock.calls[0]).toEqual([[], expect.objectContaining({ runtimeIdentity: { process: 'worker', claimMode } })]);
+        }
+      } finally {
+        if (saved === undefined) delete process.env.WORKER_CLAIM_MODE;
+        else process.env.WORKER_CLAIM_MODE = saved;
+        process.exitCode = undefined;
+      }
     });
 
     it('lock held elsewhere → ran: false (the processor returns false, so it is never stamped)', async () => {
       await expect(runStorageCleanupCycle(fakeCommand({ skipped: true }) as never, 30)).resolves.toEqual({ ran: false, skipped: 'locked' });
+    });
+
+    describe("never changes the Worker process's exit code (the CLI's exit code means nothing in a long-running process)", () => {
+      let saved: typeof process.exitCode;
+      beforeEach(() => {
+        saved = process.exitCode;
+      });
+      afterEach(() => {
+        process.exitCode = saved;
+      });
+
+      it.each([
+        ['integrity problems (CLI exit 1)', {}],
+        ['lock held elsewhere (CLI exit 3)', { skipped: true }],
+      ])('%s → exit code unchanged', async (_name, behaviour) => {
+        for (const before of [undefined, 0, 7]) {
+          process.exitCode = before;
+          await runStorageCleanupCycle(fakeCommand(behaviour) as never, 30);
+          expect(process.exitCode).toBe(before);
+        }
+      });
+
+      it('a run that throws still propagates the error and leaves the exit code unchanged', async () => {
+        process.exitCode = undefined;
+        await expect(runStorageCleanupCycle(fakeCommand({ throws: true }) as never, 30)).rejects.toThrow('simulated storage outage');
+        expect(process.exitCode).toBeUndefined();
+      });
     });
   });
 });

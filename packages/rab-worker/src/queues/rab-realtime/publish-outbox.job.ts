@@ -100,22 +100,70 @@ export async function runRealtimeOutboxPublishCycle(
 ): Promise<RealtimeOutboxPublishResult> {
   const perScopeLimit = opts.perScopeLimit ?? DEFAULT_PER_SCOPE_LIMIT;
   const leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
-  const result: RealtimeOutboxPublishResult = { claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0 };
+  const result: RealtimeOutboxPublishResult = emptyResult();
 
-  async function claimAndProcess(organisationId: string, workspaceId: string | null): Promise<void> {
-    const claimToken = randomUUID();
-    const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
-      claimRealtimeEvents(manager, { limit: perScopeLimit, claimToken, leaseSeconds }),
-    );
-    if (claimed.length === 0) return;
-    result.claimed += claimed.length;
-    for (const event of claimed) {
-      // eslint-disable-next-line no-await-in-loop
-      await processOne(organisationId, workspaceId, event);
+  const scopeSource = opts.scopes ?? storageScopes(runtime);
+  for await (const scope of scopeSource) {
+    try {
+      addResult(result, await publishRealtimeScope(tenantContext, publish, env, scope, { perScopeLimit, leaseSeconds }));
+    } catch (error) {
+      // W6-E2E-07: a workspace listed before its schema is READY cannot be routed yet. Skip it (nothing was claimed in it;
+      // its rows are published on a later cycle) instead of failing the publish for every other tenant.
+      if (scope.workspaceId !== null && isNotYetRoutableWorkspace(error)) {
+        result.skippedNotReady += 1;
+        continue;
+      }
+      throw error;
     }
   }
 
-  async function processOne(organisationId: string, workspaceId: string | null, event: ClaimedRealtimeEvent): Promise<void> {
+  return result;
+}
+
+const emptyResult = (): RealtimeOutboxPublishResult => ({ claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0 });
+
+function addResult(into: RealtimeOutboxPublishResult, add: RealtimeOutboxPublishResult): void {
+  into.claimed += add.claimed;
+  into.published += add.published;
+  into.invalid += add.invalid;
+  into.retried += add.retried;
+  into.failed += add.failed;
+  into.skippedNotReady += add.skippedNotReady;
+}
+
+/**
+ * ONE scope's claim + publish (the former per-scope body of the cycle, unchanged): claim in the scope's own worker
+ * transaction (`runScopedForOrg`), then validate → publish → complete (fenced on the claim token) per event, each write in
+ * its own scoped transaction. `opts.ids === undefined` → the per_scope claim, byte-for-byte; `opts.ids` (Phase D, global
+ * mode) → the same claim restricted to those ids, `limit` = their count. Throws a `WorkspaceRoutingError` for a
+ * workspace that is not routable yet — the caller decides (per_scope: skip the scope; global: release the claims).
+ */
+export async function publishRealtimeScope(
+  tenantContext: TenantContextService,
+  publish: RealtimePublishFn,
+  env: string,
+  scope: MaintenanceScope,
+  opts: { perScopeLimit?: number; leaseSeconds?: number; ids?: readonly string[] } = {},
+): Promise<RealtimeOutboxPublishResult> {
+  const result = emptyResult();
+  const { organisationId, workspaceId } = scope;
+  const leaseSeconds = opts.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
+  if (opts.ids !== undefined && opts.ids.length === 0) return result;
+  const limit = opts.ids !== undefined ? opts.ids.length : (opts.perScopeLimit ?? DEFAULT_PER_SCOPE_LIMIT);
+
+  const claimToken = randomUUID();
+  const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
+    claimRealtimeEvents(manager, { limit, claimToken, leaseSeconds, ...(opts.ids !== undefined ? { ids: opts.ids } : {}) }),
+  );
+  if (claimed.length === 0) return result;
+  result.claimed += claimed.length;
+  for (const event of claimed) {
+    // eslint-disable-next-line no-await-in-loop
+    await processOne(event);
+  }
+  return result;
+
+  async function processOne(event: ClaimedRealtimeEvent): Promise<void> {
     const validation = validateAndBuildEnvelope(event, env);
     if (!validation.ok) {
       await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) => cancelRealtimeEvent(manager, event.id, `invalid:${validation.reason}`));
@@ -140,23 +188,6 @@ export async function runRealtimeOutboxPublishCycle(
     if (completed) result.published++;
     else result.failed++;
   }
-
-  const scopeSource = opts.scopes ?? storageScopes(runtime);
-  for await (const scope of scopeSource) {
-    try {
-      await claimAndProcess(scope.organisationId, scope.workspaceId);
-    } catch (error) {
-      // W6-E2E-07: a workspace listed before its schema is READY cannot be routed yet. Skip it (nothing was claimed in it;
-      // its rows are published on a later cycle) instead of failing the publish for every other tenant.
-      if (scope.workspaceId !== null && isNotYetRoutableWorkspace(error)) {
-        result.skippedNotReady += 1;
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  return result;
 }
 
 function errorCode(error: unknown): string {

@@ -13,7 +13,7 @@ import {
   storageScopes,
 } from '../engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
-import { assertRuntimeDbRole } from '../engine/utils/assert-runtime-db-role';
+import { assertRuntimeDbRole, RuntimeDbIdentity } from '../engine/utils/assert-runtime-db-role';
 import { createPgClient, detectTransactionPooler, resolvePgEnvironmentCached } from '../database/postgres';
 
 interface Options {
@@ -28,6 +28,12 @@ interface Options {
    * the Worker passes 0 (one non-blocking attempt: a replica that loses skips, the winner is already doing the work).
    */
   lockWaitSeconds?: number;
+  /**
+   * Phase D: the identity both connections are asserted as. Not a CLI flag — the CLI never sets it, so an operator run stays
+   * crewflow_app only and refuses the Worker's credential. The Worker's scheduled run passes its own identity
+   * (`runtimeDbIdentityFor('worker')`), so a Worker on crewflow_worker (required by WORKER_CLAIM_MODE=global) can reconcile.
+   */
+  runtimeIdentity?: RuntimeDbIdentity;
 }
 
 /**
@@ -248,9 +254,9 @@ export class StorageReconcileCommand extends CommandRunner {
     this.lastReport = undefined;
     this.lastSkipped = undefined;
     // Role check first, before any lock or storage access (unchanged order: a misconfigured owner connection is refused outright).
-    await assertRuntimeDbRole(this.dataSource, 'storage reconciliation');
+    await assertRuntimeDbRole(this.dataSource, 'storage reconciliation', options.runtimeIdentity);
     const waitSeconds = options.lockWaitSeconds ?? DEFAULT_CLI_LOCK_WAIT_SECONDS;
-    const lock = await this.acquireReconcileLock(waitSeconds * 1000);
+    const lock = await this.acquireReconcileLock(waitSeconds * 1000, options.runtimeIdentity);
     if (!lock) {
       this.lastSkipped = 'locked';
       // eslint-disable-next-line no-console
@@ -272,7 +278,7 @@ export class StorageReconcileCommand extends CommandRunner {
    * `waitMs` elapses. The lock connection is verified to be the restricted runtime role before it is used, with the same
    * guard as every other runtime connection. Returns the connection holding the lock, or null when the wait ran out.
    */
-  private async acquireReconcileLock(waitMs: number): Promise<Client | null> {
+  private async acquireReconcileLock(waitMs: number, runtimeIdentity?: RuntimeDbIdentity): Promise<Client | null> {
     // Phase B: the factory's lock connection (PG_DATABASE_URL; legacy DATABASE_DIRECT_URL / DATABASE_URL outside
     // production), with explicit TLS and the pooler denylist (session affinity). Short timeouts as before: lock calls
     // are instantaneous.
@@ -291,7 +297,7 @@ export class StorageReconcileCommand extends CommandRunner {
     await client.connect();
     try {
       const shim = { query: async (sql: string, params?: unknown[]) => (await client.query(sql, params)).rows } as unknown as DataSource;
-      await assertRuntimeDbRole(shim, 'storage reconciliation lock');
+      await assertRuntimeDbRole(shim, 'storage reconciliation lock', runtimeIdentity);
       const deadline = Date.now() + Math.max(0, waitMs);
       for (;;) {
         const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [

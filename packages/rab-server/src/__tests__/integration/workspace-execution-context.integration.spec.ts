@@ -44,6 +44,44 @@ const USER_B = 'b2b2b2b2-0000-4000-8000-00000000000b';
 const SCHEMA_A = workspaceSchemaName(WS_A);
 const SCHEMA_B = workspaceSchemaName(WS_B);
 
+const FIXTURE_WORKSPACES = [WS_A, WS_B, WS_PENDING];
+const FIXTURE_SCHEMAS = [SCHEMA_A, SCHEMA_B];
+
+/**
+ * Test hygiene (Phase D wave 5): removes this suite's workspace fixtures, as the owner (bootstrap superuser) connection, in
+ * one transaction: the probe schemas, the registry rows (READY at a FORGED module_version with no ledger at all — the real
+ * workspace migrator rightly refuses such a workspace with LEDGER_GAP, so it must never outlive the suite) and the
+ * manager_workspace rows (their host_label_claim cascades). Matched by the fixed ids AND the `reg-ws-` subdomains.
+ * Left in place, inert and protected by design (never bypassed): released_host_label quarantine rows (append-only; the
+ * same fixed workspace ids re-claim their labels on the next run) and the fixture organisations/users (upserted by id on
+ * every run; nothing routes or migrates them without a workspace). Called in beforeAll (a killed earlier run) and afterAll.
+ */
+async function removeWorkspaceFixtures(owner: DataSource): Promise<void> {
+  await owner.transaction(async (m) => {
+    const rows: Array<{ id: string }> = await m.query(
+      `SELECT id FROM core.manager_workspace WHERE id = ANY ($1::uuid[]) OR subdomain::text LIKE 'reg-ws-%'`,
+      [FIXTURE_WORKSPACES],
+    );
+    const ids = [...new Set([...FIXTURE_WORKSPACES, ...rows.map((r) => r.id)])];
+    for (const schema of FIXTURE_SCHEMAS) await m.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await m.query(`DELETE FROM core.workspace_schema_registry WHERE workspace_id = ANY ($1::uuid[])`, [ids]);
+    await m.query(`DELETE FROM core.manager_workspace WHERE id = ANY ($1::uuid[])`, [ids]);
+  });
+}
+
+/** Fails (throws) when any fixture workspace, registry row or probe schema is still present. */
+async function assertNoWorkspaceFixtures(owner: DataSource): Promise<void> {
+  const [left] = await owner.query(
+    `SELECT (SELECT count(*) FROM core.manager_workspace WHERE id = ANY ($1::uuid[]) OR subdomain::text LIKE 'reg-ws-%')::int AS workspaces,
+            (SELECT count(*) FROM core.workspace_schema_registry WHERE workspace_id = ANY ($1::uuid[]))::int AS registry,
+            (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname = ANY ($2::text[]))::int AS schemas`,
+    [FIXTURE_WORKSPACES, FIXTURE_SCHEMAS],
+  );
+  if (left.workspaces || left.registry || left.schemas) {
+    throw new Error(`workspace-execution-context fixtures left behind: ${JSON.stringify(left)}`);
+  }
+}
+
 const ctxOf = (org: string, ws: string, user: string): AuthContext => ({
   organisationId: org, workspaceId: ws, userId: user, role: 'manager',
 });
@@ -65,6 +103,8 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
     app = appSource(1);
     await app.initialize();
     execCtx = new WorkspaceExecutionContext(app, new SchemaResolverService(noCacheStub()));
+    // Leftovers of a killed earlier run (or of the pre-fix suite, which never removed them) go first.
+    await removeWorkspaceFixtures(owner);
 
     // Backing organisation/user/manager_workspace rows for ORG_A/ORG_B/WS_A/WS_B/USER_A/USER_B — required by
     // manager_workspace's FKs (organisation_id -> organisation, owner_user_id -> user) and by
@@ -140,6 +180,7 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
     await owner.query(`SELECT core.mark_workspace_schema_ready($1, 1)`, [WS_B]);
     // Phase B: routing refuses a READY workspace below MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION (503). A real provisioner
     // records the module version it built; this fixture records LATEST the same way (owner identity, organisation bound).
+    // That value is FORGED (these probe schemas have no ledger): removeWorkspaceFixtures deletes the rows in afterAll.
     for (const [org, ws] of [[ORG_A, WS_A], [ORG_B, WS_B]] as const) {
       await owner.transaction(async (m) => {
         await m.query(`SELECT set_config('rab.organisation_id',$1,true)`, [org]);
@@ -156,11 +197,18 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
 
   afterAll(async () => {
     await app?.destroy();
-    // Test hygiene (F4, Wave 1 lane S): the two probe schemas match ^workspace_[0-9a-f]{32}$ but are not V1 workspaces (one
-    // rab_owner-owned probe table). Left behind they are real drift for the workspace-aware posture snapshot and
-    // check-rls-coverage. beforeAll recreates them (IF NOT EXISTS) on every run.
-    for (const schema of [SCHEMA_A, SCHEMA_B]) await owner?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
-    await owner?.destroy();
+    // Test hygiene (F4, Wave 1 lane S; Phase D wave 5): the two probe schemas match ^workspace_[0-9a-f]{32}$ but are not V1
+    // workspaces, and their registry rows are READY at a forged module_version with no ledger. Left behind they are drift
+    // for the posture snapshot / check-rls-coverage AND a LEDGER_GAP refusal for the next workspace migration run.
+    // Everything is removed, and the suite FAILS if anything remains.
+    try {
+      if (owner?.isInitialized) {
+        await removeWorkspaceFixtures(owner);
+        await assertNoWorkspaceFixtures(owner);
+      }
+    } finally {
+      await owner?.destroy();
+    }
   });
 
   it('A context routes to its own schema and sees only its own probe row', async () => {

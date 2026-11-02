@@ -8,6 +8,13 @@ const BATCH_SIZE = 50;
 // is never wrongly reclaimed, short enough that a dead worker's claim doesn't stall a delivery long.
 const PROCESSING_LEASE_MINUTES = 10;
 const RETRY_STALE_MINUTES = 5;
+/**
+ * Lead follow-up (C-report §6.2, mirrors email's QUEUED rule): a PENDING row whose first publish (`queued_at`) is older
+ * than this has evidently not been consumed — its `.attempt.<gen>` job is lost, or retained in a terminal state (e.g. an
+ * E8 not-visible job that exhausted its attempts), and BullMQ silently drops a re-add of a retained jobId. Such a row is
+ * recovered with a generation bump so its re-publish gets a fresh jobId. Same 2 minutes as email.
+ */
+const PENDING_STALE_MINUTES = 2;
 
 interface ClaimedRow {
   id: string;
@@ -16,6 +23,10 @@ interface ClaimedRow {
   attempt_count: number;
   max_attempts: number;
   provider_call_started_at: Date | null;
+  dispatch_generation: number;
+  queued_at: Date | null;
+  /** Computed by the database clock in the claim: PENDING and first published more than PENDING_STALE_MINUTES ago. */
+  stale_pending: boolean;
 }
 
 export interface PushDispatchResult {
@@ -48,9 +59,54 @@ export async function runPushDispatchCycle(
   const total: PushDispatchResult = { claimed: 0, published: 0, recovered: 0, failedExhausted: 0, deliveryUncertain: 0 };
 
   for await (const organisationId of organisationIds(dataSource)) {
+    const scope = await dispatchPushScope(tenant, organisationId, undefined, publish, republish, ambiguousDeliverySafeToRetry);
+    total.claimed += scope.claimed;
+    total.published += scope.published;
+    total.recovered += scope.recovered;
+    total.failedExhausted += scope.failedExhausted;
+    total.deliveryUncertain += scope.deliveryUncertain;
+  }
+
+  return total;
+}
+
+/**
+ * Phase D (D1): `WORKER_CLAIM_MODE=global` claim — the per_scope eligibility predicate, unchanged (asserted by
+ * push-dispatch.job.spec.ts), restricted to the ids the global pointer claim returned for this organisation.
+ */
+const GLOBAL_CLAIM_SQL = `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
+                  dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
+           FROM core.push_delivery
+          WHERE (status = 'PENDING'
+             OR (status = 'PROCESSING' AND processing_at < now() - interval '${PROCESSING_LEASE_MINUTES} minutes')
+             OR (status = 'RETRY' AND updated_at < now() - interval '${RETRY_STALE_MINUTES} minutes')
+          ) AND id = ANY($2::uuid[])
+          ORDER BY created_at
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED`;
+
+/**
+ * ONE organisation's push dispatch (claim transaction, then publication after its commit). `ids === undefined` → the
+ * per_scope claim, byte-for-byte; `ids` → the global-mode claim restricted to them. Everything after the claim is shared.
+ */
+export async function dispatchPushScope(
+  tenant: TenantContextService,
+  organisationId: string,
+  ids: readonly string[] | undefined,
+  publish: (pushDeliveryId: string, organisationId: string) => Promise<void>,
+  republish: (pushDeliveryId: string, organisationId: string, generation: number) => Promise<void>,
+  ambiguousDeliverySafeToRetry: boolean,
+): Promise<PushDispatchResult> {
+  const total: PushDispatchResult = { claimed: 0, published: 0, recovered: 0, failedExhausted: 0, deliveryUncertain: 0 };
+  if (ids !== undefined && ids.length === 0) return total;
+  {
+    // The former per-organisation loop body of runPushDispatchCycle, unchanged apart from the claim statement choice.
     const claim = await tenant.runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, async (manager) => {
-      const claimed = await manager.query<ClaimedRow[]>(
-        `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at
+      const claimed = ids !== undefined
+        ? await manager.query<ClaimedRow[]>(GLOBAL_CLAIM_SQL, [ids.length, [...ids]])
+        : await manager.query<ClaimedRow[]>(
+        `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
+                  dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
            FROM core.push_delivery
           WHERE status = 'PENDING'
              OR (status = 'PROCESSING' AND processing_at < now() - interval '${PROCESSING_LEASE_MINUTES} minutes')
@@ -60,15 +116,35 @@ export async function runPushDispatchCycle(
           FOR UPDATE SKIP LOCKED`,
         [BATCH_SIZE],
       );
-      if (claimed.length === 0) return { toPublish: [] as ClaimedRow[], recoveredGenerations: new Map<string, number>(), exhaustedCount: 0, uncertainCount: 0 };
+      if (claimed.length === 0) return { toPublish: [] as ClaimedRow[], recoveredGenerations: new Map<string, number>(), recovered: new Set<string>(), exhaustedCount: 0, uncertainCount: 0 };
 
       const toPublish: ClaimedRow[] = [];
       const recoveredGenerations = new Map<string, number>();
+      const recovered = new Set<string>();
       let exhaustedCount = 0;
       let uncertainCount = 0;
 
+      const firstPublish: string[] = [];
       for (const row of claimed) {
         const hadPriorAttempt = row.status !== 'PENDING';
+        if (!hadPriorAttempt) {
+          if (row.stale_pending) {
+            // Stale PENDING: never consumed since its first publish — fresh generation ⇒ fresh jobId (stays PENDING).
+            const [[{ dispatch_generation: generation }]] = (await manager.query(
+              `UPDATE core.push_delivery SET dispatch_generation = dispatch_generation + 1, queued_at = now(), status = 'PENDING' WHERE id = $1 RETURNING dispatch_generation`,
+              [row.id],
+            )) as [Array<{ dispatch_generation: number }>, number];
+            recoveredGenerations.set(row.id, generation);
+            recovered.add(row.id);
+          } else {
+            if (row.queued_at === null || row.queued_at === undefined) firstPublish.push(row.id);
+            // A PENDING row that already has a generation (> 0) is always published under it, never `.attempt.0`.
+            const generation = Number(row.dispatch_generation ?? 0);
+            if (generation > 0) recoveredGenerations.set(row.id, generation);
+          }
+          toPublish.push(row);
+          continue;
+        }
         if (hadPriorAttempt && row.attempt_count >= row.max_attempts) {
           await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' WHERE id = $1`, [row.id]);
           exhaustedCount++;
@@ -83,14 +159,20 @@ export async function runPushDispatchCycle(
           // manager.query() returns a [rows, rowCount] TUPLE for UPDATE, not the bare rows
           // array a SELECT returns (same gotcha documented in account-invite-cleanup.job.ts).
           const [[{ dispatch_generation: generation }]] = (await manager.query(
-            `UPDATE core.push_delivery SET dispatch_generation = dispatch_generation + 1, status = 'PENDING' WHERE id = $1 RETURNING dispatch_generation`,
+            `UPDATE core.push_delivery SET dispatch_generation = dispatch_generation + 1, queued_at = now(), status = 'PENDING' WHERE id = $1 RETURNING dispatch_generation`,
             [row.id],
           )) as [Array<{ dispatch_generation: number }>, number];
           recoveredGenerations.set(row.id, generation);
+          recovered.add(row.id);
         }
         toPublish.push(row);
       }
-      return { toPublish, recoveredGenerations, exhaustedCount, uncertainCount };
+      // First publish: stamp queued_at (the start of the 2-minute PENDING staleness clock). Only rows never stamped, so a
+      // re-visit inside the window writes nothing.
+      if (firstPublish.length > 0) {
+        await manager.query(`UPDATE core.push_delivery SET queued_at = now() WHERE id = ANY($1::uuid[]) AND queued_at IS NULL`, [firstPublish]);
+      }
+      return { toPublish, recoveredGenerations, recovered, exhaustedCount, uncertainCount };
     });
 
     total.claimed += claim.toPublish.length + claim.exhaustedCount + claim.uncertainCount;
@@ -102,7 +184,7 @@ export async function runPushDispatchCycle(
       if (generation !== undefined) {
         // eslint-disable-next-line no-await-in-loop
         await republish(row.id, organisationId, generation);
-        total.recovered++;
+        if (claim.recovered.has(row.id)) total.recovered++;
       } else {
         // eslint-disable-next-line no-await-in-loop
         await publish(row.id, organisationId);

@@ -9,9 +9,13 @@
  *              privileged provisioning connection (the elevated endpoint when one is configured), expecting `crewflow`
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
- *   1. role      current_user AND session_user are the expected login (API/Worker: crewflow_app; provisioner: crewflow;
- *                CLI: per command, see CLI_COMMAND_ROLES), neither is SUPERUSER or BYPASSRLS, and the login is not a member (any membership, with
- *                or without INHERIT/SET) of rab_secure_owner, crewflow (unless it IS crewflow) or rab_owner.
+ *   1. role      current_user AND session_user are the expected login (API: crewflow_app, never crewflow_worker; Worker:
+ *                crewflow_app or crewflow_worker with WORKER_CLAIM_MODE=per_scope, crewflow_worker only with global;
+ *                provisioner: crewflow; CLI: per command, see CLI_COMMAND_ROLES, never crewflow_worker) — code constants,
+ *                never env; neither is SUPERUSER or BYPASSRLS, and the login is not a member (any membership, with
+ *                or without INHERIT/SET — pg_has_role MEMBER, PG16) of rab_secure_owner, crewflow (unless it IS crewflow) or rab_owner;
+ *                a non-Worker login is not a member of crewflow_worker. A crewflow_worker login must also have the reviewed
+ *                shape (member of crewflow_app WITH INHERIT TRUE, SET FALSE only; no CREATEROLE/CREATEDB/REPLICATION; owns nothing).
  *   2. version   server_version_num >= 160000 (PostgreSQL 16; PG16 role-membership semantics are relied on).
  *   3. extensions  the extensions the migrations create are installed: btree_gist, citext, pg_trgm, pgcrypto, unaccent.
  *                (uuid-ossp is NOT required: no column default uses it — verified on a migrations-only database.)
@@ -30,6 +34,12 @@
  *                API/Worker/CLI and refuses the provisioner; the core.provision_workspace body is checked against the code's
  *                workspace module (API/Worker: unknown refuses in production, behind refuses, ahead warns; provisioner:
  *                anything but equal refuses) and the provisioner also refuses a READY workspace above its module.
+ *   1c. dispatch-notify  (Phase D wave 3) no PERSISTENT crewflow.dispatch_notify in pg_db_role_setting (this database or
+ *                all; every role or a role the login is a member of), and the gate session's own value is 'on' for an
+ *                event-mode API/Worker (its startup option) and absent for every other process/mode. Runs after gate 1.
+ *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions (refused otherwise: after the D5 cutover only
+ *                crewflow_worker can — a mixed-version rollout is visible, not silently broken) and, in global mode, the
+ *                dispatch-claim functions; every other process can EXECUTE none of the dispatch-claim functions.
  *
  * Connection: a short-lived DataSource from the connection factory (src/database/postgres: createPgDataSource for the
  * process's primary endpoint (the provisioner: its privileged endpoint), one session, the process's own role, pool max 1, application_name `crewflow-<process>-boot-gates`), so
@@ -143,7 +153,8 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
   log(
     `[db-boot-gates] process=${processName}${options.cliCommand ? ` command=${options.cliCommand}` : ''} role=${report.role} ` +
       `server=${report.serverVersionNum} database=${report.database} identity=${report.identity} tls=${report.tls === true ? 'on' : 'off'} ` +
-      `force-rls=ok(${report.forceRlsTables}) extensions=ok pending=0 schema=compatible gates=ok`,
+      `force-rls=ok(${report.forceRlsTables}) extensions=ok pending=0 schema=compatible` +
+      `${report.claimMode ? ` claim-mode=${report.claimMode}` : ''} due-work-exec=${report.grants.dueWork} dispatch-claim-exec=${report.grants.dispatchClaims} dispatch-notify=${report.dispatchNotify} gates=ok`,
   );
   return report;
 }

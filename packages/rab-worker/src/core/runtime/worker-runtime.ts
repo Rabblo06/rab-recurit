@@ -30,6 +30,12 @@ export interface WorkerLoopOptions {
    * runs one `intervalMs` after registration. Ignored by `runOnce` (bullmq mode delays the scheduler's first job instead).
    */
   firstRunAfterInterval?: boolean;
+  /**
+   * Phase D (D3): with `firstRunAfterInterval`, interval mode's first run happens after THIS many ms instead of one full
+   * interval (registerIntervalScans derives it from the persisted cluster stamp, so a restart neither re-runs a daily scan
+   * nor postpones an overdue one). 0 = at once. Ignored without `firstRunAfterInterval` and by `runOnce`.
+   */
+  firstRunDelayMs?: number;
 }
 
 /** Per-instance progress snapshot (see `progress()`): process-local, never written to Redis. */
@@ -52,6 +58,8 @@ export interface WorkerRuntimeProgress {
   mode?: 'bullmq';
   consumersReadyAt?: number | null;
   reconcileOkAt?: number | null;
+  /** Phase D wave 2 (OD-2): process-level gauges (event mode: the NOTIFY queue usage). Absent until one is set. */
+  gauges?: Record<string, string | number>;
 }
 
 export interface WorkerRuntimeOptions {
@@ -163,6 +171,9 @@ export class WorkerRuntime {
   private lastCycleSucceededAt: number | null = null;
   private readonly inFlightStartedAt = new Map<Promise<CycleOutcome>, { name: string; startedAt: number }>();
   private bullmq: { consumersReadyAt: number | null; reconcileOkAt: number | null } | null = null;
+  // Phase D wave 2 (OD-2): process-level gauges (e.g. the NOTIFY queue usage sampled in event mode). Fixed field names,
+  // numbers / short level words only. Absent from progress() until the first gauge is set (heartbeat file shape unchanged).
+  private readonly gauges: Record<string, string | number> = {};
   private readonly statsKey: string;
   private readonly statsWrite: 'whole' | 'fields';
   private readonly instance = `${os.hostname()}:${process.pid}`;
@@ -220,8 +231,19 @@ export class WorkerRuntime {
       oldestInFlight: oldestInFlight ? { ...oldestInFlight } : null,
       shuttingDown: this.shuttingDown,
     };
-    if (!this.bullmq) return base;
-    return { ...base, mode: 'bullmq', consumersReadyAt: this.bullmq.consumersReadyAt, reconcileOkAt: this.bullmq.reconcileOkAt };
+    const withGauges = Object.keys(this.gauges).length ? { ...base, gauges: { ...this.gauges } } : base;
+    if (!this.bullmq) return withGauges;
+    return { ...withGauges, mode: 'bullmq', consumersReadyAt: this.bullmq.consumersReadyAt, reconcileOkAt: this.bullmq.reconcileOkAt };
+  }
+
+  /**
+   * OD-2: sets process-level gauges — written to the stats hash (`rab:worker:stats`, read by Admin Health) like a cycle's
+   * extra stats, and exposed in progress().gauges (the per-instance heartbeat file). Best-effort, never throws.
+   */
+  setGauges(fields: Record<string, string | number>): void {
+    Object.assign(this.gauges, fields);
+    Object.assign(this.stats, fields);
+    this.writeChanged({ ...fields });
   }
 
   /** Whole-object write — the interval-mode contract (unchanged). */
@@ -331,8 +353,25 @@ export class WorkerRuntime {
       }
       void this.execute(options);
     };
-    if (!options.firstRunAfterInterval) tick();
-    this.timers.push(setInterval(tick, options.intervalMs));
+    if (!options.firstRunAfterInterval) {
+      tick();
+      this.timers.push(setInterval(tick, options.intervalMs));
+      return;
+    }
+    const delay = options.firstRunDelayMs;
+    if (delay === undefined || !Number.isFinite(delay) || delay >= options.intervalMs) {
+      // Unchanged Phase A behaviour: first run one interval after registration.
+      this.timers.push(setInterval(tick, options.intervalMs));
+      return;
+    }
+    // First run after `delay` (≥ 0), then on the interval from there. The pending first-run timer is tracked so
+    // beginShutdown() cancels it like every interval timer (Node's clearInterval also clears a setTimeout handle).
+    const first = setTimeout(() => {
+      if (this.shuttingDown) return;
+      tick();
+      this.timers.push(setInterval(tick, options.intervalMs));
+    }, Math.max(0, delay));
+    this.timers.push(first);
   }
 
   /**
@@ -389,7 +428,8 @@ export class WorkerRuntime {
       if (!s || (s.n === 0 && s.skipped === 0)) continue;
       this.logger.log(
         `cycle durations ${key}: n=${s.n} p50=${s.p50 ?? '-'}ms p95=${s.p95 ?? '-'}ms p99=${s.p99 ?? '-'}ms max=${s.max ?? '-'}ms ` +
-          `ok=${s.succeeded} idle=${s.idle} failed=${s.failed} skipped=${s.skipped}`,
+          `ok=${s.succeeded} idle=${s.idle} failed=${s.failed} skipped=${s.skipped}` +
+          (s.counters ? ` ${Object.entries(s.counters).map(([name, value]) => `${name}=${value}`).join(' ')}` : ''),
       );
     }
   }

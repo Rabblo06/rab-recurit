@@ -115,6 +115,69 @@ export async function runEmailDispatchCycle(
     deliveryUncertain: 0,
   };
   for await (const organisationId of organisationIds(dataSource)) {
+    const scope = await dispatchEmailScope(
+      tenant,
+      organisationId,
+      undefined,
+      publish,
+      republish,
+      ambiguousDeliverySafeToRetry,
+    );
+    total.claimed += scope.claimed;
+    total.published += scope.published;
+    total.recovered += scope.recovered;
+    total.failedExhausted += scope.failedExhausted;
+    total.deliveryUncertain += scope.deliveryUncertain;
+  }
+  return total;
+}
+
+/**
+ * Phase D (D1): `WORKER_CLAIM_MODE=global` claim — the per_scope claim's eligibility predicate, unchanged, restricted to
+ * the ids the global pointer claim returned for this organisation. The predicate text is asserted equal to the per_scope
+ * SQL's by `email-dispatch.job.spec.ts`. Same row locks (FOR UPDATE SKIP LOCKED), same order.
+ */
+const GLOBAL_CLAIM_SQL = `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at,
+                  dispatch_generation
+           FROM core.email_outbox
+          WHERE (status = 'PENDING'
+             OR (status = 'QUEUED' AND queued_at < now() - interval '2 minutes')
+             OR (status = 'PROCESSING' AND processing_at < now() - interval '${PROCESSING_LEASE_MINUTES} minutes')
+             OR (status = 'RETRY' AND updated_at < now() - interval '${RETRY_STALE_MINUTES} minutes')
+          ) AND id = ANY($2::uuid[])
+          ORDER BY created_at
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED`;
+
+/**
+ * ONE organisation's dispatch: the claim transaction (bound to the organisation, workspace null — exactly the per_scope
+ * context) followed by publication after its commit. `ids === undefined` → the per_scope claim (byte-for-byte the
+ * pre-Phase-D SQL, batch 50); `ids` → the global-mode claim restricted to those ids. Everything after the claim — the
+ * exhausted / uncertain / first-attempt / recovered split, generation bumps, audit rows, jobIds, publish error handling —
+ * is the same code for both modes.
+ */
+export async function dispatchEmailScope(
+  tenant: TenantContextService,
+  organisationId: string,
+  ids: readonly string[] | undefined,
+  publish: (emailOutboxId: string, organisationId: string) => Promise<void>,
+  republish: (
+    emailOutboxId: string,
+    organisationId: string,
+    generation: number,
+  ) => Promise<void>,
+  ambiguousDeliverySafeToRetry: boolean,
+): Promise<EmailDispatchResult> {
+  const total: EmailDispatchResult = {
+    claimed: 0,
+    published: 0,
+    recovered: 0,
+    failedExhausted: 0,
+    deliveryUncertain: 0,
+  };
+  if (ids !== undefined && ids.length === 0) return total;
+  {
+    // The former per-organisation loop body of runEmailDispatchCycle, unchanged apart from the claim statement choice.
     const claim = await tenant.runInTenantContext(
       { organisationId, workspaceId: null, userId: '', role: '' },
       async (manager) => {
@@ -123,7 +186,9 @@ export async function runEmailDispatchCycle(
         // SELECT-then-UPDATE (no RETURNING), same documented reason as the
         // cleanup job: `manager.query()` returns a `[rows, rowCount]` TUPLE
         // for UPDATE, not the bare rows array a SELECT returns.
-        const claimed = await manager.query<ClaimedRow[]>(
+        const claimed = ids !== undefined
+          ? await manager.query<ClaimedRow[]>(GLOBAL_CLAIM_SQL, [ids.length, [...ids]])
+          : await manager.query<ClaimedRow[]>(
           `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at,
                   dispatch_generation
            FROM core.email_outbox
