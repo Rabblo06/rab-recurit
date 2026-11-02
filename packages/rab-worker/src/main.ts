@@ -44,7 +44,7 @@ import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { resolveScanPrefix } from './core/scheduler/queue-registry';
+import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
@@ -308,7 +308,14 @@ async function bootstrap(): Promise<void> {
     refuseStartup(error);
   }
 
-  // The three existing consumers — one Worker each, both modes, legacy `bull` prefix, concurrency 5 / 10 / 2.
+  // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
+  // any consumer exists — fail closed.
+  try {
+    assertQueueRegistryValid();
+  } catch (error) {
+    refuseStartup(error);
+  }
+  // The four consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4).
   const consumers = createConsumerWorkers(registry, redis, logger);
 
   const runtime = new WorkerRuntime(redis, {
