@@ -216,6 +216,23 @@ describe('WorkerRuntime (BullMQ migration M1/M5)', () => {
       expect(writes.filter((w) => w.key === TICKS && w.op === 'hset')).toHaveLength(1);
     });
 
+    it('ticks go through ticksRedis when given (the fail-fast client), never the runtime main client', async () => {
+      const main = fakeRedis();
+      const ticks = fakeRedis();
+      const runtime = new WorkerRuntime(main.redis, { metricsLogMs: 0, ticksKey: TICKS, ticksRedis: ticks.redis });
+      await runtime.runOnce(loop());
+      await flush();
+      expect(main.writes.some((w) => w.key === TICKS)).toBe(false);
+      expect(Number(ticks.hashes.get(TICKS)!['email-dispatch'])).toBeGreaterThan(0);
+    });
+
+    it('a rejected tick write (Redis down on the fail-fast client) never affects the cycle', async () => {
+      const { redis } = fakeRedis();
+      const failing = { multi: () => ({ hset() { return this; }, expire() { return this; }, exec: async () => Promise.reject(new Error('Connection is closed.')) }) };
+      const runtime = new WorkerRuntime(redis, { metricsLogMs: 0, ticksKey: TICKS, ticksRedis: failing as never });
+      await expect(runtime.runOnce(loop())).resolves.toBe('succeeded');
+    });
+
     it('without ticksKey (default; the provisioner) nothing is written', async () => {
       const { redis, writes } = fakeRedis();
       const runtime = new WorkerRuntime(redis, { metricsLogMs: 0 });

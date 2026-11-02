@@ -104,6 +104,12 @@ export interface WorkerRuntimeOptions {
   ticksKey?: string;
   /** TTL of `ticksKey` (refreshed on each write). Default 7 days. */
   ticksTtlSeconds?: number;
+  /**
+   * Client for the `ticksKey` writes. main.ts passes a FAIL-FAST client (QUEUE_PRODUCER_REDIS_OPTIONS: no offline queue,
+   * bounded commands) so tick writes during a Redis outage are rejected at once instead of piling up in the blocking main
+   * client's offline queue (`maxRetriesPerRequest: null`). Default: the runtime's own client.
+   */
+  ticksRedis?: Pick<Redis, 'multi'>;
 }
 
 /** Phase B (P6, owner-approved): the scan-concurrency cap of the Worker jobs process. */
@@ -359,7 +365,7 @@ export class WorkerRuntime {
     const key = this.options.ticksKey;
     if (!key) return;
     try {
-      this.redis
+      (this.options.ticksRedis ?? this.redis)
         .multi()
         .hset(key, options.metricKey ?? options.name, Date.now())
         .expire(key, this.options.ticksTtlSeconds ?? 7 * 24 * 60 * 60)
