@@ -270,17 +270,21 @@ same scan slot, metrics and shutdown drain as a wake-up. They are:
   the consumer is behind, push drains at the consumer's pace, never through repeated re-walks.
 - **Fair:** every sweep still takes at most one batch from every organisation and scope, so a large backlog in one
   organisation never delays a small one elsewhere.
-- **Idle-neutral:** with no full batch nothing extra runs. Measured A/B on the disposable test stack (20 organisations,
-  four queues, 2 s poll ticks, 60 s): 244 transactions before and after #24.
+- **Idle-neutral:** with no full batch nothing extra runs. Measured A/B on the disposable test stack (four queues, 2 s
+  poll ticks, 60 s idle, global mode): 244 transactions before and after #24 at 20 organisations; 797 after and 897
+  before at 200 organisations (within run-to-run noise; the idle path is unchanged). Global idle SQL stays 97 % below
+  per_scope at 200 organisations in both builds (per_scope about 29,700 transactions per minute).
 
 Recovery bound: a queue-and-scope pointerless backlog of up to 31 batches (email 1,550 rows per organisation, realtime
 775 per scope, statements 6,200 per workspace; push at the consumer's pace) is reached within one reconcile window,
 provided each sweep takes well under about 24 s (31 sweeps plus 30 × 5 s within 900 s). Measured on the disposable test
 stack with the production defaults (5 s follow-up spacing, 900 s window, 2 s poll ticks; measurement harness, not a CI
-test): 500 pointerless email rows in one organisation drained in 46 s, where before #24 a single sweep per window took 50
-rows (about 2.5 hours for 500). The CI integration test uses 20 ms spacing to prove the same sweep sequence quickly. The
-31-batch bound is the configured limit, not a measurement at production scale: re-measure sweep duration on the staging
-rehearsal (§5.3). A larger backlog drains 31 batches per window. That is a delay, not a loss.
+test): 500 pointerless email rows in one organisation drained in 46 s at 20 organisations and in 53 s at 200
+organisations (every sweep still walks all 200; about 2,400 transactions and 1.6 s of Worker CPU for the whole drain,
+peak RSS 552 MB in the Jest harness). Before #24 the same 200-organisation run moved 50 rows in 61 s and left 450 for
+later windows, one sweep of 50 per window (about 2.5 hours for 500). The CI integration test uses 20 ms spacing to prove
+the same sweep sequence quickly. The 31-batch bound is the configured limit, not a measurement at production data
+volume: re-measure sweep duration on the staging rehearsal (§5.3). A larger backlog drains 31 batches per window. That is a delay, not a loss.
 
 ### 5.3 What to watch in the first sweep
 
