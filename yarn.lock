@@ -12735,6 +12735,7 @@ __metadata:
     tsx: "npm:^4.17.0"
     typescript: "npm:5.9.2"
     wait-on: "npm:^7.2.0"
+    yaml: "npm:2.9.0"
   languageName: unknown
   linkType: soft
 
