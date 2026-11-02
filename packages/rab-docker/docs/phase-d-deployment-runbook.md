@@ -457,6 +457,12 @@ claiming there, unless a separately approved exception is documented (owner deci
   less idle SQL, and PostgreSQL CPU down from 71.6 % to 4.7 % of a core (realtime and push on). The owner accepted the
   write cost unchanged (Option A) on the condition that no environment stays indefinitely on the migrated schema in
   per_scope mode.
+- **F2 (1786721350000) re-measurement: provisional.** Re-measured on the shared development host: email −5.2 %, payroll
+  about 0 %, notification −3.6 % / −15.9 % across two runs (paired median −11.5 % / −12.2 %), with run-to-run noise
+  (TPS cv up to 28 %) larger than the effect. The deterministic counters match the accepted gate (pointer writes per
+  transaction unchanged; pointer index blocks per transaction about +3 %, from the wider key). Accepted provisionally for
+  PR review only. **Before any deployment, repeat the write-cost benchmark on an uncontended staging rehearsal host**
+  and compare it with the accepted envelope.
 - **Preferred path:** prepare and test the whole coordinated rollout in staging; deploy compatible API and Worker images;
   verify the restricted Worker credential; activate global polling as soon as the readiness checks pass; monitor; only
   then consider event mode, separately.
@@ -509,6 +515,7 @@ Environment-independent decisions:
 - [ ] F3: a database-side switch (and in-definer audit) for the invite-cleanup definers. Today the flag and the audit
   live only in the Worker.
 - [ ] Send-time realtime recipient re-authorisation (§10).
+- [ ] F2 write-cost benchmark repeated on an uncontended staging rehearsal host and within the accepted envelope (§9).
 - [ ] Any exception to the 14-day maximum, documented before it is relied on (§9).
 - [ ] Any production jobs-only Worker image rollback: an owner exception that suspends workspace provisioning for its
   duration (§8.3).
