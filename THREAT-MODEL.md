@@ -4609,3 +4609,27 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase X1.5 — fixture seeds refuse staging and production (cleanup audit NC-04)
+
+- **Asset:** a production or staging tenant set and its accounts. **Actor:** an operator holding production command
+  authority (DB_TARGET=production + ALLOW_PRODUCTION_DB_COMMANDS + the deployment identity, legitimately present for
+  bootstrap-admin) who runs, by mistake or on a bad instruction, `seed` (organisation "acme", super-admin
+  `admin@acme.test`) or `seed-qa` ("ADOLPHUS QA", one Internal Manager, one Venue Manager, five Staff). Both ship in the
+  production image's CLI. **Before:** neither command checked its target (`seed.command.ts` none; `seed-qa.command.ts`
+  only in comments); the generic command gate was the only control, and it allows production when the authority is
+  present. Reproduced as a unit test: with production command authority both commands went straight to the database.
+- **Control (`command/seed-target-guard.ts`, called first in both `run()` methods, before any read or write):**
+  DB_TARGET must be `local` or `test`; ALLOW_PRODUCTION_DB_COMMANDS and CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP must be
+  absent; NODE_ENV, RAB_RUNTIME_ENV and CREWFLOW_DEPLOYMENT_ENVIRONMENT must not say production or staging; the primary URL
+  must be loopback or a listed compose database service; and, live and read-only, the database must not be bound to
+  production or staging (`core.deployment_identity_check()`). Modelled on `seed-ai-demo`'s refusal; the Worker-bundle image
+  test's `cli` service (compose host `pg`, DB_TARGET=local, development) still passes. Messages carry no URL, credential or
+  unrecognised value.
+- **Regression tests:** `seed-target-guard.spec.ts`: production with full command authority, staging, unset / unknown
+  DB_TARGET, the authority flags, deployed declarations, a remote host, a bound production / staging database → refused;
+  local, `test` and the bundle-test environment → allowed; both commands refuse before touching the DataSource (fails
+  against the previous commands).
+- **Residual / pre-existing (not changed here):** on main, `seed-qa` run as `crewflow` fails on the `core.organisation`
+  RLS insert, and the CLI boot gate refuses the superuser that `run-integration.cjs` passes, so the manual Worker-bundle
+  test's seed step does not pass today regardless of this guard. Reported for its owner; the guard is not the cause.
