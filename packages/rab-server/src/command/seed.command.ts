@@ -15,6 +15,7 @@ import { PasswordHashingService } from '../engine/core-modules/auth/services/pas
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { seedSuccessMessage } from './seed-success-message';
+import { assertSeedCommandTarget, assertSeedDatabaseNotDeployed } from './seed-target-guard';
 
 /** No real user exists yet while the seed is creating one — a fixed, unambiguous placeholder for `rab.user_id`. */
 const SEED_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
@@ -43,6 +44,11 @@ export class SeedCommand extends CommandRunner {
   }
 
   async run(): Promise<void> {
+    // X1.5 (cleanup audit NC-04): a fixture seed, for local and disposable test databases only. Refused before any read
+    // or write: DB_TARGET local|test, no production authority or declaration, a loopback / compose database host, and a
+    // database not bound to production or staging (seed-target-guard.ts).
+    assertSeedCommandTarget('seed', process.env);
+    await assertSeedDatabaseNotDeployed('seed', (sql, params) => this.dataSource.query(sql, params));
     await this.dataSource.transaction(async (manager) => {
       for (const key of Object.values(PermissionFlag)) {
         const existing = await manager.findOne(Permission, { where: { key } });

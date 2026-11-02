@@ -16,6 +16,7 @@ import { TenantContextService } from '../engine/core-modules/tenant/tenant-conte
 import { ManagerWorkspace } from '../modules/manager-workspace/entities/manager-workspace.entity';
 import { ROLE_DEFS } from '../modules/manager/services/manager.service';
 import { STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS } from '../modules/staff/services/staff.service';
+import { assertSeedCommandTarget, assertSeedDatabaseNotDeployed } from './seed-target-guard';
 import { JobRole } from '../modules/scheduling/entities/job-role.entity';
 import { Venue } from '../modules/venue/entities/venue.entity';
 
@@ -65,6 +66,11 @@ export class SeedQaCommand extends CommandRunner {
   }
 
   async run(): Promise<void> {
+    // X1.5 (cleanup audit NC-04): a fixture seed, for local and disposable test databases only. Refused before any read
+    // or write: DB_TARGET local|test, no production authority or declaration, a loopback / compose database host, and a
+    // database not bound to production or staging (seed-target-guard.ts).
+    assertSeedCommandTarget('seed-qa', process.env);
+    await assertSeedDatabaseNotDeployed('seed-qa', (sql, params) => this.dataSource.query(sql, params));
     for (const key of Object.values(PermissionFlag)) {
       const existing = await this.dataSource.manager.findOne(Permission, { where: { key } });
       if (existing) continue;
