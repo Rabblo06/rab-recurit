@@ -4609,3 +4609,23 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase X1.7 — attendance per-user throttle: atomic window (cleanup audit DUP-02)
+
+- **Asset:** a staff member's ability to clock in / out (attendance feeds payroll). **Actor:** not an attacker: a Redis
+  command timeout, dropped connection or process crash between two commands.
+- **Before (reproduced 2026-11-02 against a disposable `redis:7-alpine`):** `AttendancePerUserThrottleGuard` ran `INCR`
+  and then, separately, `EXPIRE` when the count was 1. With `INCR` succeeding and `EXPIRE` failing, the guard failed open
+  (correct, CF-17) but left `attendance-clock-throttle:<userId>` with no TTL (`PTTL = -1`); every later request
+  incremented it, so from the 11th on that user got 429 on Clock In / Clock Out / geofence exit permanently, until someone
+  deleted the key.
+- **Control:** one Lua script (`ATTENDANCE_THROTTLE_SCRIPT`): `INCR`, then `PEXPIRE 60 s` whenever the key has no TTL,
+  atomically. The window stays fixed from its first request (never extended); a key already stuck without a TTL is healed
+  on its next request. Unchanged: key name (no namespace added, so live counters and the heal both apply), 10 per user per
+  60 s, `ThrottlerException` (429) contract, the throttler Redis client, and the fail-OPEN policy on any store error or an
+  unexpected reply (owner decision CF-17).
+- **Regression tests:** `attendance-per-user-throttle.guard.spec.ts` against real Redis (CI's service; skipped without
+  `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
+  10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
+- **Not done here (Phase R):** a shared rate-limit primitive (the audit's "Track R" `TokenBucketService`). No Phase R plan
+  document exists in the repository or the local `docs/`; this change is local to the guard and does not conflict with one.
