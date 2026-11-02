@@ -13,18 +13,25 @@
  * variables; anyone who controls a service's environment can set them. So:
  *   1. the bypass needs RAB_DISABLE_RATE_LIMIT to be exactly 'true' AND JEST_WORKER_ID to be non-empty (an unset flag no
  *      longer counts, unlike the old `!== 'false'` copies);
- *   2. it is never active in a production runtime (NODE_ENV or RAB_RUNTIME_ENV says production, trimmed, any case);
+ *   2. it is never active in a production runtime (NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says production, trimmed, any
+ *      case: at least everything pg-config's isPgProductionEnvironment counts, X1.9);
  *   3. a production process refuses to boot while either variable is present at all (env.validation.ts,
  *      testRateLimitBypassProductionProblem), so a production deployment cannot carry the switch even dormant.
  * Pure: reads only the env object it is given.
  */
+import { isPgProductionEnvironment } from '../../../database/postgres/pg-config';
+
 export const RATE_LIMIT_BYPASS_ENV_NAMES = ['JEST_WORKER_ID', 'RAB_DISABLE_RATE_LIMIT'] as const;
 
 type Env = Record<string, string | undefined>;
 
-/** Production for this rule: either declaration says so (trimmed, case-insensitive), so a half-declared production counts. */
+/**
+ * Production for this rule: any declaration says so (trimmed, case-insensitive), so a half-declared production counts. A
+ * superset of pg-config's isPgProductionEnvironment (exact NODE_ENV / RAB_RUNTIME_ENV / DB_TARGET), which is also consulted
+ * so the two can never disagree (X1.9 review).
+ */
 function looksLikeProductionRuntime(env: Env): boolean {
-  return ['NODE_ENV', 'RAB_RUNTIME_ENV'].some((name) => env[name]?.trim().toLowerCase() === 'production');
+  return isPgProductionEnvironment(env) || ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'].some((name) => env[name]?.trim().toLowerCase() === 'production');
 }
 
 /** True only inside the Jest suite with the bypass flag on, and never in a production runtime. */

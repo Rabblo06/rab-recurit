@@ -4625,8 +4625,8 @@ Root cause:   the bypass treated an environment variable as proof of a Jest run,
               nothing refused either variable at boot. The comments (jest-setup.ts:8-10, throttler.module.ts:56-60) claimed
               it "can never be true outside an actual Jest run".
 Fix:          one predicate, engine/core-modules/throttler/rate-limit-test-bypass.ts isTestRateLimitBypassActive: needs
-              RAB_DISABLE_RATE_LIMIT exactly 'true' AND a non-empty JEST_WORKER_ID, and is never active when NODE_ENV or
-              RAB_RUNTIME_ENV says production. env.validation.ts refuses to boot a production process (NODE_ENV or
+              RAB_DISABLE_RATE_LIMIT exactly 'true' AND a non-empty JEST_WORKER_ID, and is never active when NODE_ENV, DB_TARGET (X1.9) or
+              RAB_RUNTIME_ENV says production. env.validation.ts refuses to boot a production process (NODE_ENV, DB_TARGET or
               RAB_RUNTIME_ENV production) while either variable is present, even blank or 'false' (names only). The
               three call sites use the predicate; rab-worker's jest-setup now sets the flag explicitly. Comments corrected.
 Regression:   rate-limit-test-bypass.spec.ts (truth table incl. the old-copy abuse cases, production refusal, and a source

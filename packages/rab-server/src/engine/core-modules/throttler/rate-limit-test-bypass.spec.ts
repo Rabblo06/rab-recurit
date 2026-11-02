@@ -15,6 +15,9 @@ describe('Jest rate-limit bypass predicate (X1.4, audit DUP-03)', () => {
     ['the flag without JEST_WORKER_ID', { NODE_ENV: 'test', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
     ['NODE_ENV=production with both set', { NODE_ENV: 'production', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
     ['RAB_RUNTIME_ENV=production with both set', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'production', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
+    ['DB_TARGET=production with both set (pg-config counts it as production, X1.9)', { NODE_ENV: 'test', DB_TARGET: 'production', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
+    ['a padded, mis-cased DB_TARGET production with both set', { NODE_ENV: 'test', DB_TARGET: ' PRODUCTION ', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
+    ['DB_TARGET=local in the Jest suite keeps the bypass', { NODE_ENV: 'test', DB_TARGET: 'local', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, true],
     ['a mis-cased, padded production with both set', { NODE_ENV: ' Production ', JEST_WORKER_ID: '1', RAB_DISABLE_RATE_LIMIT: 'true' }, false],
     ['nothing set', {}, false],
   ])('%s -> bypass %s', (_name, env, expected) => {
@@ -32,6 +35,7 @@ describe('Jest rate-limit bypass predicate (X1.4, audit DUP-03)', () => {
       ['RAB_DISABLE_RATE_LIMIT', { NODE_ENV: 'production', RAB_DISABLE_RATE_LIMIT: 'true' }, /^RAB_DISABLE_RATE_LIMIT must not be present/],
       ['RAB_DISABLE_RATE_LIMIT=false (dormant)', { NODE_ENV: 'production', RAB_DISABLE_RATE_LIMIT: 'false' }, /RAB_DISABLE_RATE_LIMIT must not be present/],
       ['a blank JEST_WORKER_ID', { NODE_ENV: 'production', JEST_WORKER_ID: '' }, /JEST_WORKER_ID must not be present/],
+      ['JEST_WORKER_ID under DB_TARGET=production', { DB_TARGET: 'production', JEST_WORKER_ID: '1' }, /^JEST_WORKER_ID must not be present in production/],
       ['both, under RAB_RUNTIME_ENV=production', { RAB_RUNTIME_ENV: 'production', JEST_WORKER_ID: '7', RAB_DISABLE_RATE_LIMIT: 'true' }, /^JEST_WORKER_ID, RAB_DISABLE_RATE_LIMIT must not be present/],
     ])('refuses %s', (_name, env, pattern) => {
       const problem = testRateLimitBypassProductionProblem(env);
