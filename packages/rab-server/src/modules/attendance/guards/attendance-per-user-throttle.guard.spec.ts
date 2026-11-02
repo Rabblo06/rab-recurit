@@ -54,7 +54,8 @@ describeIfRedis('AttendancePerUserThrottleGuard: atomic window (X1.7, audit DUP-
   });
 
   afterAll(async () => {
-    process.env.RAB_DISABLE_RATE_LIMIT = previousFlag;
+    if (previousFlag === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+    else process.env.RAB_DISABLE_RATE_LIMIT = previousFlag;
     if (keys.length) await redis.del(...keys);
     await redis.quit();
   });
