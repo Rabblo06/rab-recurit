@@ -12,8 +12,11 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * #24 — bounded, fair follow-up reconciliation against the REAL per_scope email cycle (batch 50 per organisation) as the
- * restricted `crewflow_worker` login, on a disposable test database.
+ * #24 — bounded, fair follow-up reconciliation against the REAL per_scope email cycle (batch 50 per organisation), on a
+ * disposable test database. The organisation catalogue and the pointer claim run as the restricted `crewflow_worker`
+ * login; the scoped claim transactions run through the test app's TenantContextService (its `crewflow_app` pool) — in
+ * production the Worker's own tenant context uses its `crewflow_worker` pool. The sweep claims EVERY organisation's due
+ * email rows, as production does, so run this suite on its own fresh database (the CI worker job and backlog24.sh do).
  *
  * Pointerless pending work (rows written before the pointer triggers existed, or whose pointer was lost) is found only by
  * the legacy sweep. Before #24 a global-mode Worker swept once per reconcile window, so a backlog above one batch per

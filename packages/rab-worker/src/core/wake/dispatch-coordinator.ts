@@ -110,8 +110,9 @@ interface QueueState {
   /** #24: start of the current reconcile window (the regular sweep that opened it), and its follow-up budget left. */
   windowStartedAt: number;
   followUpsLeft: number;
-  /** #24: the pending follow-up sweep timer. */
+  /** #24: the pending follow-up sweep timer, and whether a follow-up sweep is owed (honoured even if the timer fires early). */
   followUp: ReturnType<typeof setTimeout> | null;
+  followUpArmed: boolean;
   debounce: ReturnType<typeof setTimeout> | null;
   wakeInFlight: boolean;
   wakeAgain: boolean;
@@ -144,6 +145,7 @@ export class DispatchCoordinator {
         windowStartedAt: Number.NEGATIVE_INFINITY,
         followUpsLeft: 0,
         followUp: null,
+        followUpArmed: false,
         debounce: null,
         wakeInFlight: false,
         wakeAgain: false,
@@ -192,6 +194,7 @@ export class DispatchCoordinator {
       state.debounce = null;
       if (state.followUp) this.clearTimer(state.followUp);
       state.followUp = null;
+      state.followUpArmed = false;
       state.runner.stop();
     }
   }
@@ -235,12 +238,15 @@ export class DispatchCoordinator {
   }
 
   /**
-   * #24: one follow-up sweep, `delayMs` from now. A tick that comes first and finds it due runs it instead; a still
-   * pending earlier timer is replaced, so the follow-up never fires before `reconcileDueAt`.
+   * #24: one follow-up sweep, `delayMs` from now (armed at the END of the run that asked for it, after its global claim,
+   * so the run's own `executeWake` slot is free when the timer fires). A tick that comes first and finds it due runs it
+   * instead; any sweep clears a pending timer and the armed flag.
    */
   private scheduleFollowUp(state: QueueState, delayMs: number): void {
     if (this.stopped) return;
     if (state.followUp) this.clearTimer(state.followUp);
+    state.reconcileDueAt = this.now() + delayMs;
+    state.followUpArmed = true;
     state.followUp = this.setTimer(() => {
       state.followUp = null;
       if (this.stopped) return;
@@ -260,8 +266,14 @@ export class DispatchCoordinator {
     const { binding } = state;
     let didWork = false;
     let sweepError: unknown = null;
-    if ((reasons.has('tick') || reasons.has('reconcile')) && this.now() >= state.reconcileDueAt) {
+    let followUpDelayMs: number | null = null;
+    const due = this.now() >= state.reconcileDueAt;
+    if ((reasons.has('tick') && due) || (reasons.has('reconcile') && (due || state.followUpArmed))) {
       const startedAt = this.now();
+      // Any sweep consumes an owed follow-up: clear its timer and flag (a later one is armed below if still needed).
+      if (state.followUp) this.clearTimer(state.followUp);
+      state.followUp = null;
+      state.followUpArmed = false;
       if (startedAt >= state.windowStartedAt + this.options.reconcileMs) {
         // A regular sweep opens a new reconcile window with a fresh follow-up budget.
         state.windowStartedAt = startedAt;
@@ -271,10 +283,10 @@ export class DispatchCoordinator {
         const sweep = await captureLegacyBatchLimit(() => binding.legacy(...state.legacyArgs));
         didWork = sweep.value === true;
         if (sweep.scopesAtLimit > 0 && state.followUpsLeft > 0 && !this.stopped) {
-          const delayMs = this.options.followUpDelayMs ?? DEFAULT_RECONCILE_FOLLOW_UP_DELAY_MS;
           state.followUpsLeft -= 1;
-          state.reconcileDueAt = this.now() + delayMs;
-          this.scheduleFollowUp(state, delayMs);
+          followUpDelayMs = this.options.followUpDelayMs ?? DEFAULT_RECONCILE_FOLLOW_UP_DELAY_MS;
+          // Due again with the follow-up (its timer is armed after this run's global claim, below — also when that throws).
+          state.reconcileDueAt = this.now() + followUpDelayMs;
         } else {
           if (sweep.scopesAtLimit > 0) {
             this.options.logger.warn(
@@ -313,6 +325,7 @@ export class DispatchCoordinator {
         onHighClaimCount: (claim) => state.alerter.note(binding.queue, claim),
       });
     } finally {
+      if (followUpDelayMs !== null) this.scheduleFollowUp(state, followUpDelayMs);
       state.alerter.endRun(binding.queue);
       if (claimStats.claimed > 0) {
         try {

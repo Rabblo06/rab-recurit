@@ -79,14 +79,17 @@ describe('email per_scope cycle: one note per organisation whose 50-row batch ca
   });
 });
 
-describe('push per_scope cycle: one note per organisation whose 50-row batch came back full', () => {
-  const pushRow = (i: number) => ({ id: id(i), organisation_id: ORG_A, status: 'PENDING', attempt_count: 0, max_attempts: 5, provider_call_started_at: null, dispatch_generation: 0, queued_at: new Date(), stale_pending: false });
-  const run = async (n: number, ids?: string[]) => {
+describe('push per_scope cycle: one note per organisation whose 50-row batch came back full AND moved something', () => {
+  // A never-published PENDING row (queued_at NULL): the pass stamps it — progress.
+  const pushRow = (i: number) => ({ id: id(i), organisation_id: ORG_A, status: 'PENDING', attempt_count: 0, max_attempts: 5, provider_call_started_at: null, dispatch_generation: 0, queued_at: null, stale_pending: false });
+  // Already published, consumer not caught up yet (PENDING, queued_at set, not stale): a re-visit moves nothing.
+  const queuedRow = (i: number) => ({ ...pushRow(i), queued_at: new Date() });
+  const run = async (n: number, ids?: string[], make: (i: number) => Record<string, unknown> = pushRow) => {
     const orgs = catalogue([ORG_A]);
     const { tenant, dataSource, statements } = fakeTenant((sql, params) => {
       const page = orgs(sql, params);
       if (page !== undefined) return page;
-      if (sql.includes('FROM core.push_delivery')) return rows(n, pushRow);
+      if (sql.includes('FROM core.push_delivery')) return rows(n, make);
       return [];
     });
     const sweep = await captureLegacyBatchLimit(() => (ids
@@ -103,6 +106,27 @@ describe('push per_scope cycle: one note per organisation whose 50-row batch cam
 
   it('the global-mode (ids) claim never signals', async () => {
     expect((await run(50, rows(50, pushRow).map((r) => r.id as string))).scopesAtLimit).toBe(0);
+  });
+
+  it('a full batch of already-queued rows (the consumer is behind) does NOT signal: push drain is consumer-paced, never a re-walk loop', async () => {
+    expect((await run(50, undefined, queuedRow)).scopesAtLimit).toBe(0);
+  });
+
+  it('a full batch with at least one row it actually moved (first publish) signals', async () => {
+    expect((await run(50, undefined, (i) => (i === 50 ? pushRow(i) : queuedRow(i)))).scopesAtLimit).toBe(1);
+  });
+
+  it('a full batch whose rows are stale (re-published under a new generation) signals', async () => {
+    const orgs = catalogue([ORG_A]);
+    const { tenant, dataSource } = fakeTenant((sql, params) => {
+      const page = orgs(sql, params);
+      if (page !== undefined) return page;
+      if (sql.includes('FROM core.push_delivery')) return rows(50, (i) => ({ ...queuedRow(i), stale_pending: true }));
+      if (sql.includes('dispatch_generation = dispatch_generation + 1')) return [[{ dispatch_generation: 1 }], 1];
+      return [];
+    });
+    const sweep = await captureLegacyBatchLimit(() => runPushDispatchCycle(dataSource as never, tenant as never, jest.fn(async () => undefined), jest.fn(async () => undefined), false));
+    expect(sweep.scopesAtLimit).toBe(1);
   });
 });
 

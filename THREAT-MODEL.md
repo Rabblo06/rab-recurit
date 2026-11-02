@@ -4525,8 +4525,10 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode,
   for a queue-and-scope pointerless backlog of up to 31 batches. #24 (follow-up sweeps when a legacy sweep returns a full
   batch; bounded to 30 per window and queue per Worker, fair one-batch-per-scope sweeps, idle-neutral) closes the earlier
-  gap where a backlog above ONE batch drained a single batch per 15 min. A larger backlog (an availability concern only:
-  delay, never loss or cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
+  gap where a backlog above ONE batch drained a single batch per 15 min. The bound holds while each sweep takes well under
+  about 24 s (re-measure at production scale); push drains at its consumer's pace (a published push row stays PENDING, so
+  only a batch that moved rows asks for a follow-up). A larger backlog (an availability concern only: delay, never loss or
+  cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
   Tests: `legacy-batch-limit.spec.ts`, `dispatch-coordinator.spec.ts` (#24 block),
   `phase-d-backlog-reconciliation.integration.spec.ts`.
 

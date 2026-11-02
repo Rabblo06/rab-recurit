@@ -259,20 +259,28 @@ sweep comes back FULL, more pointerless work may remain, so the Worker runs a fo
 waiting for the next interval. Follow-ups use the same per-queue loop (never two loops for one queue in a process) and the
 same scan slot, metrics and shutdown drain as a wake-up. They are:
 
-- **Bounded:** at most 30 follow-ups per reconcile window, per queue and Worker process, so at most 31 sweeps per window.
-  When the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. A
-  failed sweep schedules no follow-up and keeps the existing 60 s retry.
+- **Bounded:** at most 30 follow-ups per reconcile window, per queue and Worker process, so at most 31 sweeps per window
+  and process. Follow-ups do not take the scan's cross-replica lock, so N replicas can run up to N × 31 sweeps per window;
+  that is safe (row locks with SKIP LOCKED and the state-machine claims, as in per_scope mode) and only costs load. When
+  the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. A failed
+  sweep, or a failed global claim after it, never stalls the chain: the follow-up is armed after the run's global claim
+  either way, and a failed sweep keeps the existing 60 s retry.
+- **Push is consumer-paced:** a published push row stays PENDING until the push consumer takes it, so a push sweep asks
+  for a follow-up only when its full batch actually moved rows (first publish, stale re-publish or a terminal state). While
+  the consumer is behind, push drains at the consumer's pace, never through repeated re-walks.
 - **Fair:** every sweep still takes at most one batch from every organisation and scope, so a large backlog in one
   organisation never delays a small one elsewhere.
 - **Idle-neutral:** with no full batch nothing extra runs. Measured A/B on the disposable test stack (20 organisations,
   four queues, 2 s poll ticks, 60 s): 244 transactions before and after #24.
 
-Recovery bound: a queue-and-scope pointerless backlog of up to 31 batches (email or push 1,550 rows per organisation,
-realtime 775 per scope, statements 6,200 per workspace) is reached within one reconcile window, provided each sweep takes
-well under about 24 s. Measured: 500 pointerless email rows in one organisation drained in 46 s at the production defaults
-(before #24: 50 rows per 900 s window, about 2.5 hours). The 31-batch bound is the configured limit; it has not yet been
-measured at 200 organisations, so re-measure sweep duration on the staging rehearsal (§5.3). A larger backlog drains 31
-batches per window. That is a delay, not a loss.
+Recovery bound: a queue-and-scope pointerless backlog of up to 31 batches (email 1,550 rows per organisation, realtime
+775 per scope, statements 6,200 per workspace; push at the consumer's pace) is reached within one reconcile window,
+provided each sweep takes well under about 24 s (31 sweeps plus 30 × 5 s within 900 s). Measured on the disposable test
+stack with the production defaults (5 s follow-up spacing, 900 s window, 2 s poll ticks; measurement harness, not a CI
+test): 500 pointerless email rows in one organisation drained in 46 s, where before #24 a single sweep per window took 50
+rows (about 2.5 hours for 500). The CI integration test uses 20 ms spacing to prove the same sweep sequence quickly. The
+31-batch bound is the configured limit, not a measurement at production scale: re-measure sweep duration on the staging
+rehearsal (§5.3). A larger backlog drains 31 batches per window. That is a delay, not a loss.
 
 ### 5.3 What to watch in the first sweep
 
