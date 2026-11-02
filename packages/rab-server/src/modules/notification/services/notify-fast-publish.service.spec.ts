@@ -1,4 +1,5 @@
 import {
+  NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT,
   NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION,
   NotifyFastPublishService,
 } from './notify-fast-publish.service';
@@ -196,5 +197,27 @@ describe('NotifyFastPublishService (after-commit only)', () => {
     await flush();
     expect(h.email.publish).toHaveBeenCalledWith('e1', ORG);
     expect(h.email.publish.mock.calls[0]).toHaveLength(2);
+  });
+
+  it('process-wide in-flight bound: while publishes hang (Redis stalled), further ones are skipped (dispatcher publishes), never queued in memory', async () => {
+    const h = harness();
+    h.email.publish.mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    // Several committed transactions on one service instance: 3 × 200 registrations.
+    for (let t = 0; t < 3; t++) {
+      h.runner.isTransactionActive = true;
+      for (let i = 0; i < NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION; i++)
+        h.service.afterCommitEmail(h.manager, {
+          id: `e${t}-${i}`,
+          organisationId: ORG,
+        });
+      h.commit();
+    }
+    await flush();
+    expect(h.service.inFlightCount).toBe(NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT);
+    expect(h.email.publish).toHaveBeenCalledTimes(
+      NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT,
+    );
   });
 });

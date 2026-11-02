@@ -9,6 +9,12 @@ type PublishTask = () => Promise<void>;
 
 /** Bound on deferred publishes held for ONE transaction (a notify() fan-out never comes near it; beyond it the dispatcher publishes). */
 export const NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION = 200;
+/**
+ * Process-wide bound on fast publishes in flight at once. Beyond it a publish is simply not attempted (the dispatcher
+ * publishes the row), so a Redis outage or a slow producer can never pile up pending publishes in memory however much
+ * notification traffic commits meanwhile (CodeRabbit on #35; each publish is also bounded by the producer's own 3 s cap).
+ */
+export const NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT = 500;
 
 /** The ids a fast publish needs — the row's own committed id and organisation, nothing from a client. */
 export interface FastPublishRow {
@@ -54,6 +60,7 @@ export interface FastPublishRow {
 export class NotifyFastPublishService {
   private readonly logger = new Logger('NotifyFastPublish');
   private readonly pending = new WeakMap<QueryRunner, PublishTask[]>();
+  private inFlight = 0;
   private readonly subscriber = {
     afterTransactionCommit: (event: { queryRunner: QueryRunner }): void =>
       this.onCommit(event.queryRunner),
@@ -133,15 +140,31 @@ export class NotifyFastPublishService {
     this.pending.delete(runner);
   }
 
-  /** Concurrently: one slow or hanging publish (each is bounded by the producer) never holds back the others. */
+  /**
+   * Concurrently: one slow or hanging publish (each is bounded by the producer) never holds back the others. A publish
+   * beyond the process-wide in-flight bound is skipped — the row stays PENDING for the dispatcher.
+   */
   private async flush(tasks: readonly PublishTask[]): Promise<void> {
     await Promise.all(
-      tasks.map((task) =>
-        task().catch((error: unknown) => {
+      tasks.map(async (task) => {
+        if (this.inFlight >= NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT) return;
+        this.inFlight++;
+        try {
+          await task();
+        } catch (error) {
           // Best effort only: the row is durably PENDING; the dispatcher publishes it on its next pass.
-          this.logger.warn(`fast publish failed (${(error as Error)?.name ?? 'Error'}); the dispatcher will publish the row`);
-        }),
-      ),
+          this.logger.warn(
+            `fast publish failed (${(error as Error)?.name ?? 'Error'}); the dispatcher will publish the row`,
+          );
+        } finally {
+          this.inFlight--;
+        }
+      }),
     );
+  }
+
+  /** Fast publishes currently in flight (tests / diagnostics). */
+  get inFlightCount(): number {
+    return this.inFlight;
   }
 }
