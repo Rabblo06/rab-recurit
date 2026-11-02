@@ -1,8 +1,10 @@
+import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 
 const BATCH_SIZE = 50;
+const logger = new Logger('PushDispatch');
 // A push send (one HTTP call to FCM) completes in low single-digit seconds — same reasoning as
 // email's own PROCESSING_LEASE_MINUTES: generous enough that a genuinely slow-but-alive attempt
 // is never wrongly reclaimed, short enough that a dead worker's claim doesn't stall a delivery long.
@@ -35,6 +37,12 @@ export interface PushDispatchResult {
   recovered: number;
   failedExhausted: number;
   deliveryUncertain: number;
+  /**
+   * Phase D-Q3 (audit §13 #5): publishes that threw (Redis down/slow). Caught PER ROW — the rest of the cycle carries on.
+   * The row keeps its committed state (PENDING, `queued_at` stamped) and is recovered exactly as before by the 2-minute
+   * stale-PENDING rule (generation bump, fresh jobId).
+   */
+  publishFailed?: number;
 }
 
 /**
@@ -65,6 +73,7 @@ export async function runPushDispatchCycle(
     total.recovered += scope.recovered;
     total.failedExhausted += scope.failedExhausted;
     total.deliveryUncertain += scope.deliveryUncertain;
+    if (scope.publishFailed) total.publishFailed = (total.publishFailed ?? 0) + scope.publishFailed;
   }
 
   return total;
@@ -137,7 +146,11 @@ export async function dispatchPushScope(
             recoveredGenerations.set(row.id, generation);
             recovered.add(row.id);
           } else {
-            if (row.queued_at === null || row.queued_at === undefined) firstPublish.push(row.id);
+            // Phase D-Q3 (audit §13 #5): a PENDING row already published (queued_at stamped) whose 2-minute window has not
+            // run out is NOT re-added. Before, every tick re-added the same deduplicated jobId while the consumer lagged:
+            // no effect on delivery, only Redis traffic. Its recovery is unchanged — the stale-PENDING branch above.
+            if (row.queued_at !== null && row.queued_at !== undefined) continue;
+            firstPublish.push(row.id);
             // A PENDING row that already has a generation (> 0) is always published under it, never `.attempt.0`.
             const generation = Number(row.dispatch_generation ?? 0);
             if (generation > 0) recoveredGenerations.set(row.id, generation);
@@ -181,15 +194,22 @@ export async function dispatchPushScope(
 
     for (const row of claim.toPublish) {
       const generation = claim.recoveredGenerations.get(row.id);
-      if (generation !== undefined) {
-        // eslint-disable-next-line no-await-in-loop
-        await republish(row.id, organisationId, generation);
-        if (claim.recovered.has(row.id)) total.recovered++;
-      } else {
-        // eslint-disable-next-line no-await-in-loop
-        await publish(row.id, organisationId);
+      // Phase D-Q3 (audit §13 #5): caught per row, like email — one failed publish no longer aborts the rest of the cycle.
+      // The claim is committed: the row is re-published by the stale-PENDING rule after 2 minutes, as before.
+      try {
+        if (generation !== undefined) {
+          // eslint-disable-next-line no-await-in-loop
+          await republish(row.id, organisationId, generation);
+          if (claim.recovered.has(row.id)) total.recovered++;
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await publish(row.id, organisationId);
+        }
+        total.published++;
+      } catch (error) {
+        total.publishFailed = (total.publishFailed ?? 0) + 1;
+        logger.warn(`push delivery ${row.id}: publish failed, re-published after the 2-minute stale window: ${(error as Error)?.name ?? 'Error'}`);
       }
-      total.published++;
     }
   }
 
