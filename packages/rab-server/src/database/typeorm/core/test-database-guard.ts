@@ -23,17 +23,31 @@
  *     DEVDB_URL is present, by being the same database on the same endpoint as DEVDB_URL. The catalog disposable marker
  *     (globalSetup) remains the positive proof; this is the explicit negative one.
  *   - An inherited database URL that would redirect a connection away from the TEST database is refused, never silently
- *     kept: PG_DATABASE_URL (the factory's primary name prefers it over DATABASE_URL), the legacy DATABASE_DIRECT_URL (lock
- *     connection), PG_DATABASE_REPLICA_URL (read routing), and the operations / migration / provisioner names. An empty
- *     value counts as unset; a value naming the TEST database and endpoint is allowed. DATABASE_URL and
- *     DATABASE_URL_UNPOOLED are overwritten with the validated pair (below), so an inherited value of either cannot redirect.
+ *     kept: PG_DATABASE_URL (the factory's primary name prefers it over DATABASE_URL), the operations / migration /
+ *     provisioner names (allowed only when they name the TEST database, endpoint AND the TEST application login), and the
+ *     legacy DATABASE_DIRECT_URL (lock connection) and PG_DATABASE_REPLICA_URL (read routing), which a test process never
+ *     needs and which are refused whenever non-empty (X1.9: pg-config compares DATABASE_DIRECT_URL by database name only
+ *     and refuses a replica only when it is the very same target, so a superuser login on the TEST database slipped through).
+ *     An empty value counts as unset. DATABASE_URL and DATABASE_URL_UNPOOLED are overwritten with the validated pair
+ *     (below), so an inherited value of either cannot redirect.
+ *   - The same inherited-URL and libpq rules also read the working directory's `.env` (and DOTENV_CONFIG_PATH), as data
+ *     only (X1.9): @nestjs/config and `dotenv/config` load that file into process.env LATER (when AppModule or a script is
+ *     imported), after this guard ran, so a name present only there would otherwise escape it on a direct `npx jest -c` run.
  *   - libpq environment variables that change WHERE node-postgres connects (PGHOST, PGPORT, PGUSER, PGDATABASE, ...) are
  *     refused: they fill any part a URL leaves out, so the target this guard checks would not be the target the driver uses.
+ *   - Hosts are compared the way the driver resolves them (X1.9): a percent-encoded host is refused (pg-connection-string
+ *     decodes it, the WHATWG parser here does not), and the loopback aliases (localhost, 127.0.0.0/8, ::1, 0.0.0.0, ::,
+ *     ::ffff:127.x) are one endpoint for the development-database and same-database comparisons.
  *   - Error messages never contain a URL, password or username. Only variable names, host, port and database name are shown.
  *
- * This file has no runtime dependencies beyond `pg` (used only by the live identity probe), so it is safe to load from Jest
- * setup, global setup, the admin test helper, and the worker package (which imports the compiled copy of rab-server).
+ * Runtime dependencies: `pg` (only the live identity probe) and `dotenv` (parse only, never loads into process.env), so it is
+ * safe to load from Jest setup, global setup, the admin test helper, and the worker package (which imports the compiled copy
+ * of rab-server).
  */
+import * as fs from 'fs';
+import * as path from 'path';
+
+import { parse as parseDotenv } from 'dotenv';
 import { Client } from 'pg';
 
 export const TEST_DATABASE_URL = 'TEST_DATABASE_URL';
@@ -64,13 +78,17 @@ export const DEVDB_URL = 'DEVDB_URL';
  */
 export const INHERITED_DATABASE_URL_NAMES: readonly string[] = [
   'PG_DATABASE_URL',
-  'DATABASE_DIRECT_URL',
-  'PG_DATABASE_REPLICA_URL',
   'PG_OPS_APP_DATABASE_URL',
   'CREWFLOW_MIGRATION_DATABASE_URL',
   'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL',
   'CREWFLOW_PROVISIONER_DATABASE_URL',
 ];
+
+/**
+ * Connection names a test process never needs (no spec or CI workflow sets them for Jest): refused whenever non-empty, even
+ * when they name the TEST database (X1.9 finding 1).
+ */
+export const FORBIDDEN_IN_TEST_DATABASE_URL_NAMES: readonly string[] = ['DATABASE_DIRECT_URL', 'PG_DATABASE_REPLICA_URL'];
 
 /** libpq variables node-postgres reads as defaults for any connection part a URL leaves out (target-changing ones only). */
 export const TARGET_CHANGING_LIBPQ_ENV_NAMES: readonly string[] = [
@@ -103,6 +121,13 @@ export interface TestDatabaseIdentity {
   remote: boolean;
   /** True when the URL names its login. Never the login itself. */
   hasUser: boolean;
+  /**
+   * Comparison key for "the same server": loopback aliases collapse to `loopback:<port>`; Neon pooled / direct share the
+   * endpoint id; anything else is `host:port`. Safe to print.
+   */
+  serverKey: string;
+  /** The decoded login, for equality checks ONLY. Never printed, logged or put in a message. */
+  login: string;
 }
 
 export interface ResolvedTestDatabase {
@@ -135,6 +160,11 @@ export function describeDatabaseUrl(raw: string, label: string): TestDatabaseIde
     }
   }
   const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  // X1.9 finding 3: pg-connection-string percent-decodes the host (`local%68ost` connects to localhost); the WHATWG parser
+  // does not. Refused rather than decoded, so no comparison below can be fooled by an encoding.
+  if (host.includes('%')) {
+    throw new TestDatabaseConfigError(`${label} has a percent-encoded host, which the driver decodes differently from this check. Write the host plainly. Refusing.`);
+  }
   const port = url.port || '5432';
   const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
   if (!host || !database) {
@@ -144,7 +174,27 @@ export function describeDatabaseUrl(raw: string, label: string): TestDatabaseIde
   const pooled = /-pooler$/.test(firstLabel);
   const isNeon = host.endsWith('.neon.tech');
   const endpointKey = isNeon ? `neon:${firstLabel.replace(/-pooler$/, '')}` : `${host}:${port}`;
-  return { label, host, port, database, endpointKey, pooled, remote: !LOOPBACK_HOSTS.has(host), hasUser: url.username !== '' };
+  let login = '';
+  try {
+    login = decodeURIComponent(url.username);
+  } catch {
+    throw new TestDatabaseConfigError(`${label} has an undecodable login (value not shown). Refusing.`);
+  }
+  const serverKey = isLoopbackAlias(host) ? `loopback:${port}` : endpointKey;
+  return { label, host, port, database, endpointKey, pooled, remote: !LOOPBACK_HOSTS.has(host), hasUser: url.username !== '', serverKey, login };
+}
+
+/**
+ * Every spelling that reaches this machine's own PostgreSQL (X1.9 finding 3): localhost (and *.localhost), 127.0.0.0/8,
+ * 0.0.0.0, ::1, ::, and IPv4-mapped loopback. Used only to COMPARE endpoints, never to relax the remote-host rule.
+ */
+export function isLoopbackAlias(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (/^127(\.\d{1,3}){3}$/.test(h) || h === '0.0.0.0') return true;
+  if (h === '::1' || h === '::' || /^(0{1,4}:){7}0{0,3}1$/.test(h) || /^(0{1,4}:){7}0{1,4}$/.test(h)) return true;
+  if (/^::ffff:127(\.\d{1,3}){3}$/.test(h) || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(h)) return true;
+  return false;
 }
 
 const present = (env: Record<string, string | undefined>, name: string): string | undefined => {
@@ -153,12 +203,12 @@ const present = (env: Record<string, string | undefined>, name: string): string 
 };
 
 const sameDatabase = (a: TestDatabaseIdentity, b: TestDatabaseIdentity): boolean =>
-  a.database === b.database && a.endpointKey === b.endpointKey;
+  a.database === b.database && a.serverKey === b.serverKey;
 
 /** The development database by endpoint (rab-devdb) or, when DEVDB_URL is present, by being that same database. */
 function developmentDatabaseRefusal(id: TestDatabaseIdentity, env: Record<string, string | undefined>): string | null {
   if (DEVELOPMENT_DATABASE_HOSTS.includes(id.host)) return `${id.label} names the development database host "${id.host}".`;
-  if (!id.remote && DEVELOPMENT_DATABASE_LOOPBACK_PORTS.includes(id.port)) {
+  if (isLoopbackAlias(id.host) && DEVELOPMENT_DATABASE_LOOPBACK_PORTS.includes(id.port)) {
     return `${id.label} names ${id.host}:${id.port}, the development database (rab-devdb).`;
   }
   const devdb = present(env, DEVDB_URL);
@@ -264,6 +314,13 @@ export function assertNoRedirectingDatabaseEnv(env: Record<string, string | unde
       `libpq variable(s) ${libpq.join(', ')} are set: node-postgres uses them for any connection part a URL leaves out, so the target checked here would not be the target used. Unset them for test runs. Refusing to start.`,
     );
   }
+  for (const name of FORBIDDEN_IN_TEST_DATABASE_URL_NAMES) {
+    if (present(env, name)) {
+      throw new TestDatabaseConfigError(
+        `${name} is set (inherited, e.g. from a developer .env). A test process never uses it, and it would open a connection the TEST pair does not control. Unset it (or leave it empty) for test runs. Refusing to start.`,
+      );
+    }
+  }
   for (const name of INHERITED_DATABASE_URL_NAMES) {
     const raw = present(env, name);
     if (!raw) continue;
@@ -273,6 +330,14 @@ export function assertNoRedirectingDatabaseEnv(env: Record<string, string | unde
     } catch {
       throw new TestDatabaseConfigError(`${name} is set and is not a valid postgres URL (value not shown). Unset it for test runs. Refusing to start.`);
     }
+    // X1.9 finding 1: the same database is not enough; the login must be the TEST application login too (an inherited
+    // superuser URL on the TEST database would otherwise be accepted). The login is compared, never shown.
+    if (sameDatabase(inherited, resolved.app) && inherited.login !== resolved.app.login) {
+      throw new TestDatabaseConfigError(
+        `${name} is set (inherited, e.g. from a developer .env loaded by Nx) and names the test database "${resolved.app.database}" with a different login than ${TEST_DATABASE_URL}. ` +
+          'Unset it (or leave it empty) for test runs. Refusing to start.',
+      );
+    }
     if (!sameDatabase(inherited, resolved.app)) {
       throw new TestDatabaseConfigError(
         `${name} is set (inherited, e.g. from a developer .env loaded by Nx) and names "${inherited.database}" on ${inherited.host}:${inherited.port}, not the test database "${resolved.app.database}" on ${resolved.app.host}:${resolved.app.port}. ` +
@@ -280,6 +345,45 @@ export function assertNoRedirectingDatabaseEnv(env: Record<string, string | unde
       );
     }
   }
+}
+
+/**
+ * X1.9 finding 2: the values a LATER dotenv load would add to process.env — the working directory's `.env` (the default of
+ * @nestjs/config and `dotenv/config`) and DOTENV_CONFIG_PATH's file — for the names the inherited-environment rules check,
+ * keeping only names process.env does not already hold (dotenv never overrides those). Read as data, never loaded, never
+ * printed. `read` is the test seam.
+ */
+export function laterDotenvValues(
+  env: Record<string, string | undefined>,
+  cwd: string = process.cwd(),
+  read: (file: string) => string | null = readFileIfExists,
+): Record<string, string> {
+  const files = [path.resolve(cwd, '.env')];
+  const configured = env.DOTENV_CONFIG_PATH?.trim();
+  if (configured) files.push(path.resolve(cwd, configured));
+  const names = new Set([...INHERITED_DATABASE_URL_NAMES, ...FORBIDDEN_IN_TEST_DATABASE_URL_NAMES, ...TARGET_CHANGING_LIBPQ_ENV_NAMES]);
+  const out: Record<string, string> = {};
+  for (const file of files) {
+    const content = read(file);
+    if (content === null) continue;
+    for (const [key, value] of Object.entries(parseDotenv(content))) {
+      if (names.has(key) && env[key] === undefined && !(key in out)) out[key] = value;
+    }
+  }
+  return out;
+}
+
+function readFileIfExists(file: string): string | null {
+  try {
+    return fs.statSync(file).isFile() ? fs.readFileSync(file, 'utf8') : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The inherited-environment rules over process.env plus what a later dotenv load would add to it. */
+function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, resolved: ResolvedTestDatabase): void {
+  assertNoRedirectingDatabaseEnv({ ...laterDotenvValues(env), ...env }, resolved);
 }
 
 /**
@@ -297,7 +401,7 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
     assertJestNodeEnv(env);
   }
   const resolved = resolveIntegrationTestDatabase(env);
-  assertNoRedirectingDatabaseEnv(env, resolved);
+  assertNoRedirectingProcessEnv(env, resolved);
   env.DATABASE_URL = resolved.appUrl;
   env.DATABASE_URL_UNPOOLED = resolved.adminUrl;
   return resolved;
@@ -310,7 +414,7 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
 export function resolveForJestGlobalSetup(env: Record<string, string | undefined>): ResolvedTestDatabase {
   assertJestNodeEnv(env);
   const resolved = resolveIntegrationTestDatabase(env);
-  assertNoRedirectingDatabaseEnv(env, resolved);
+  assertNoRedirectingProcessEnv(env, resolved);
   return resolved;
 }
 

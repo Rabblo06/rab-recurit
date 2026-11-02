@@ -4637,6 +4637,14 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Regression tests:** `test-database-guard.spec.ts` (24 new cases; 21 fail against the previous guard, the other 3 pin
   behaviour that is kept); `run-ai-e2e-env.test.cjs` (runs the harness's own launch functions and checks the real child
   environment by NAME, with a no-wrapper control; fails against the previous harness), wired into `ci-e2e` spec-coverage.
+- **X1.9 review follow-ups (same PR):** an inherited `DATABASE_DIRECT_URL` / `PG_DATABASE_REPLICA_URL` is refused whenever
+  non-empty (a test process never uses them; a superuser login on the TEST database used to pass), and the other inherited
+  names must also carry the TEST application login (compared, never printed); the working directory's `.env` and
+  `DOTENV_CONFIG_PATH` are read as data so a name present only there (loaded later by @nestjs/config) is checked too; a
+  percent-encoded host is refused, and loopback aliases (localhost, 127.0.0.0/8, ::1, 0.0.0.0, ::, IPv4-mapped) are one
+  endpoint for the development-database and same-database comparisons. 19 new spec cases, 13 failing against the X1.2 guard.
 - **Residual:** a developer who sets `NODE_ENV=test` and points `TEST_DATABASE_URL` at a real database that also carries
   `crewflow.disposable_test_database = 'true'` is not stopped (the marker is the positive opt-in, by design). The devdb
   endpoint list is the repository's own compose shape; another local dev cluster on another port relies on the marker.
+  `runtime-env.sh` is a deny-list: a NEW credential variable added to the AI e2e env file later reaches the API / Worker
+  unless it is added to `AI_E2E_STRIPPED_NAMES` (its test pins the current list, not future names).

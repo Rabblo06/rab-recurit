@@ -5,6 +5,8 @@ import {
   TEST_DATABASE_WORKER_URL,
   TestDatabaseConfigError,
   applyIntegrationTestDatabaseEnv,
+  isLoopbackAlias,
+  laterDotenvValues,
   resolveForJestGlobalSetup,
   resolveIntegrationTestDatabase,
 } from './test-database-guard';
@@ -258,6 +260,109 @@ describe('integration test database guard', () => {
           [TEST_DATABASE_WORKER_URL]: `postgres://crewflow_worker:${SECRET}@127.0.0.1:55462/rab_test_a`,
         }).app.database,
       ).toBe('rab_test_a');
+    });
+
+    // ---- X1.9 independent review follow-ups (findings 1-3). Written failing-first against the X1.2 guard.
+    describe('X1.9 review follow-ups', () => {
+      const SUPERUSER_ON_TEST_DB = `postgres://rab_owner:${SECRET}@127.0.0.1:55462/rab_test_a`;
+
+      it.each(['DATABASE_DIRECT_URL', 'PG_DATABASE_REPLICA_URL'])(
+        'finding 1: an inherited %s is refused even when it names the test database (a test process never uses it)',
+        (name) => {
+          expectApplyRefused(jestEnv({ [name]: LOCAL_APP }), new RegExp(`${name} is set \\(inherited.*never uses it`));
+          expectApplyRefused(jestEnv({ [name]: SUPERUSER_ON_TEST_DB }), new RegExp(`${name} is set`));
+        },
+      );
+
+      it.each(['PG_DATABASE_URL', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL'])(
+        'finding 1: an inherited %s on the test database with ANOTHER login (e.g. the bootstrap superuser) is refused, without naming the login',
+        (name) => {
+          let message = '';
+          try {
+            applyIntegrationTestDatabaseEnv(jestEnv({ [name]: SUPERUSER_ON_TEST_DB }));
+          } catch (error) {
+            message = (error as Error).message;
+          }
+          expect(message).toMatch(new RegExp(`${name} is set .*names the test database "rab_test_a" with a different login`));
+          expect(message).not.toContain('rab_owner');
+          expect(message).not.toContain(SECRET);
+        },
+      );
+
+      it('finding 2: names present only in the working directory .env (loaded later by @nestjs/config) are checked too', () => {
+        const files: Record<string, string> = {
+          [require('path').resolve('/w', '.env')]: `PG_DATABASE_REPLICA_URL=${DEV_DB}\nPGHOST=elsewhere\nPG_DATABASE_URL=${LOCAL_APP}\nUNRELATED=1\n`,
+        };
+        const read = (file: string) => files[file] ?? null;
+        // Only checked names, only those process.env does not already hold (dotenv never overrides them).
+        expect(laterDotenvValues({ PGHOST: '' }, '/w', read)).toEqual({ PG_DATABASE_REPLICA_URL: DEV_DB, PG_DATABASE_URL: LOCAL_APP });
+        expect(laterDotenvValues({}, '/w', read)).toEqual({ PG_DATABASE_REPLICA_URL: DEV_DB, PGHOST: 'elsewhere', PG_DATABASE_URL: LOCAL_APP });
+        // DOTENV_CONFIG_PATH's file is read too.
+        files[require('path').resolve('/w', 'custom.env')] = 'DATABASE_DIRECT_URL=x\n';
+        expect(laterDotenvValues({ DOTENV_CONFIG_PATH: 'custom.env' }, '/w', read)).toMatchObject({ DATABASE_DIRECT_URL: 'x' });
+        expect(laterDotenvValues({}, '/nowhere', () => null)).toEqual({});
+      });
+
+      it('finding 2: a real .env in the working directory is refused through applyIntegrationTestDatabaseEnv (value not echoed)', () => {
+        const fs = require('fs') as typeof import('fs');
+        const os = require('os') as typeof import('os');
+        const path = require('path') as typeof import('path');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'x1-guard-dotenv-'));
+        const cwd = process.cwd();
+        try {
+          fs.writeFileSync(path.join(dir, '.env'), `PG_DATABASE_REPLICA_URL=${DEV_DB}\n`);
+          process.chdir(dir);
+          expectApplyRefused(jestEnv(), /PG_DATABASE_REPLICA_URL is set/);
+          fs.writeFileSync(path.join(dir, '.env'), 'PGPORT=15432\n');
+          expectApplyRefused(jestEnv(), /libpq variable\(s\) PGPORT are set/);
+          // An empty process.env value wins over .env (dotenv never overrides): not refused.
+          fs.writeFileSync(path.join(dir, '.env'), `PG_DATABASE_REPLICA_URL=${DEV_DB}\n`);
+          expect(applyIntegrationTestDatabaseEnv(jestEnv({ PG_DATABASE_REPLICA_URL: '' }))?.app.database).toBe('rab_test_a');
+        } finally {
+          process.chdir(cwd);
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
+
+      it.each(['localhost', '127.0.0.1', '127.1.2.3', '[::1]', '[0:0:0:0:0:0:0:1]', '0.0.0.0', '[::]', '[::ffff:127.0.0.1]', 'LOCALHOST'])(
+        'finding 3: loopback alias %s on port 15432 is the development database',
+        (host) => {
+          expectRefused(
+            {
+              [TEST_DATABASE_URL]: `postgres://crewflow_app:${SECRET}@${host}:15432/rab`,
+              [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@${host}:15432/rab`,
+              [ALLOW_REMOTE_TEST_DATABASE]: 'true',
+            },
+            /the development database \(rab-devdb\)/,
+          );
+        },
+      );
+
+      it('finding 3: DEVDB_URL on 127.0.0.1 matches a TEST URL on localhost (same port and database)', () => {
+        expectRefused(
+          {
+            [TEST_DATABASE_URL]: `postgres://crewflow_app:${SECRET}@localhost:5433/rab`,
+            [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@localhost:5433/rab`,
+            DEVDB_URL: `postgres://crewflow_app:${SECRET}@127.0.0.1:5433/rab`,
+          },
+          /same database and endpoint as DEVDB_URL/,
+        );
+      });
+
+      it('finding 3: a percent-encoded host is refused (the driver decodes it, this parser does not)', () => {
+        expectRefused(
+          {
+            [TEST_DATABASE_URL]: `postgres://crewflow_app:${SECRET}@local%68ost:15432/rab`,
+            [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@local%68ost:15432/rab`,
+            [ALLOW_REMOTE_TEST_DATABASE]: 'true',
+          },
+          /percent-encoded host/,
+        );
+      });
+
+      it('finding 3: the alias list is not over-broad', () => {
+        for (const host of ['10.0.0.1', '128.0.0.1', 'localhost.example.com', 'db', '::2', 'ep-x.neon.tech']) expect(isLoopbackAlias(host)).toBe(false);
+      });
     });
   });
 });

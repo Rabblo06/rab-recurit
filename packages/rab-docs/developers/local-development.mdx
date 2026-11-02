@@ -87,7 +87,7 @@ flutter run --dart-define=API_URL=http://10.0.2.2:3000/rest/v1   # Android emula
 | --- | --- |
 | `yarn build` | Build every package |
 | `yarn lint` | Lint and typecheck every package |
-| `yarn test` | Run Jest suites across the monorepo |
+| `yarn test` | Run Jest suites across the monorepo. Jest refuses to start unless `NODE_ENV=test`, and refuses an inherited `PG_DATABASE_URL` (or `.env` value) that names another database, so run it as `NODE_ENV=test PG_DATABASE_URL= npx nx test rab-server` with the `TEST_DATABASE_URL` pair set (see [Testing](./testing)) |
 | `yarn check-rls` | Fail if any tenant table lacks Row-Level Security |
 | `npx nx run rab-server:command -- <name>` | Run a CLI command (see below) |
 
