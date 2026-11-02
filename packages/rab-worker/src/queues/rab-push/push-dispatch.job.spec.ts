@@ -188,17 +188,20 @@ describe('push dispatch — D-Q3 re-publish fix and per-row publish catch', () =
   });
 
   it('one row\'s publish error does not abort the cycle: later rows are still published, the cycle resolves, the failure is counted', async () => {
-    const { tenant, statements } = fakeTenant(rowsResponder([pendingRow(R1, {}), pendingRow(R2, {}), pendingRow(R3, {})]));
+    const { tenant, statements, contexts } = fakeTenant(rowsResponder([pendingRow(R1, {}), pendingRow(R2, {}), pendingRow(R3, {})]));
     const publish = jest.fn(async (id: string) => {
       if (id === R1) throw Object.assign(new Error('Connection is closed.'), { name: 'Error' });
     });
     const result = await dispatchPushScope(tenant as never, ORG_A, undefined, publish, jest.fn(), false); // old code: rejects
     expect(publish.mock.calls.map((c) => c[0])).toEqual([R1, R2, R3]);
     expect(result).toMatchObject({ published: 2, publishFailed: 1 });
-    // The failed row keeps exactly what the claim committed (queued_at stamped for all three): no FAILED / uncertain
-    // write — it is recovered by the unchanged 2-minute stale-PENDING rule.
-    expect(statements.some((s) => /SET queued_at = now\(\)/.test(s.sql) && /queued_at IS NULL/.test(s.sql))).toBe(true);
+    // No FAILED / uncertain write. The failed row's queued_at stamp is withdrawn, fenced on status + generation and under
+    // its own organisation, so the NEXT tick publishes it again (the old every-tick re-add's prompt retry is preserved).
     expect(statements.some((s) => s.sql.includes("status = 'FAILED'"))).toBe(false);
+    const resets = statements.filter((s) => s.sql.includes('SET queued_at = NULL'));
+    expect(resets.map((s) => s.params)).toEqual([[R1, 0]]);
+    expect(resets[0]!.sql).toContain("status = 'PENDING' AND dispatch_generation = $2");
+    expect(contexts.every((c) => c.organisationId === ORG_A)).toBe(true);
   });
 
   it('a republish error on a recovered row is caught too (per_scope walk continues to the next organisation)', async () => {
@@ -216,6 +219,13 @@ describe('push dispatch — D-Q3 re-publish fix and per-row publish catch', () =
     });
     const result = await runPushDispatchCycle(dataSource as never, tenant as never, jest.fn(), republish, false);
     expect(republish).toHaveBeenCalledTimes(2); // both organisations reached (old code stopped at the first)
-    expect(result).toMatchObject({ published: 0 });
+    expect(result).toMatchObject({ published: 0, publishFailed: 2 });
+  });
+
+  it('after a failed publish the un-stamped row is published again on the very next tick (no 2-minute wait)', async () => {
+    const { tenant } = fakeTenant(rowsResponder([pendingRow(R1, { queued_at: null })])); // what the reset leaves behind
+    const publish = jest.fn(async () => undefined);
+    await dispatchPushScope(tenant as never, ORG_A, undefined, publish, jest.fn(), false);
+    expect(publish).toHaveBeenCalledWith(R1, ORG_A);
   });
 });

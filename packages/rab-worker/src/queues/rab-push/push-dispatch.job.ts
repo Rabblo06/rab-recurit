@@ -39,8 +39,7 @@ export interface PushDispatchResult {
   deliveryUncertain: number;
   /**
    * Phase D-Q3 (audit §13 #5): publishes that threw (Redis down/slow). Caught PER ROW — the rest of the cycle carries on.
-   * The row keeps its committed state (PENDING, `queued_at` stamped) and is recovered exactly as before by the 2-minute
-   * stale-PENDING rule (generation bump, fresh jobId).
+   * The row's `queued_at` stamp is withdrawn (fenced) so the next tick publishes it again, as before the fix.
    */
   publishFailed?: number;
 }
@@ -195,7 +194,6 @@ export async function dispatchPushScope(
     for (const row of claim.toPublish) {
       const generation = claim.recoveredGenerations.get(row.id);
       // Phase D-Q3 (audit §13 #5): caught per row, like email — one failed publish no longer aborts the rest of the cycle.
-      // The claim is committed: the row is re-published by the stale-PENDING rule after 2 minutes, as before.
       try {
         if (generation !== undefined) {
           // eslint-disable-next-line no-await-in-loop
@@ -208,7 +206,20 @@ export async function dispatchPushScope(
         total.published++;
       } catch (error) {
         total.publishFailed = (total.publishFailed ?? 0) + 1;
-        logger.warn(`push delivery ${row.id}: publish failed, re-published after the 2-minute stale window: ${(error as Error)?.name ?? 'Error'}`);
+        // Keep today's prompt retry: the claim already stamped queued_at, and a stamped row inside its 2-minute window is
+        // no longer re-added. Un-stamp it (fenced on status + generation, so a consumer claim or another replica's
+        // recovery is never undone) and the NEXT tick publishes it again under the same jobId — as the old every-tick
+        // re-add did. If this write fails too (database trouble), the 2-minute stale-PENDING rule still recovers the row.
+        const fence = generation ?? Number(row.dispatch_generation ?? 0);
+        await tenant
+          .runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, (manager) =>
+            manager.query(
+              `UPDATE core.push_delivery SET queued_at = NULL WHERE id = $1 AND status = 'PENDING' AND dispatch_generation = $2 AND queued_at IS NOT NULL`,
+              [row.id, fence],
+            ),
+          )
+          .catch(() => undefined);
+        logger.warn(`push delivery ${row.id}: publish failed, retried on the next tick: ${(error as Error)?.name ?? 'Error'}`);
       }
     }
   }
