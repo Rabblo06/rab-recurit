@@ -65,6 +65,9 @@ describe('seed / seed-qa target guard (X1.5, audit NC-04)', () => {
     ['a remote (managed) database host', { ...LOCAL, PG_DATABASE_URL: `postgres://crewflow:${SECRET}@ep-x.eu-west-2.aws.neon.tech/neondb` }, /must be a loopback or docker-service database/],
     ['an unparseable URL (not echoed)', { ...LOCAL, PG_DATABASE_URL: `nope ${SECRET}` }, /not a parseable postgres URL \(value not shown\)/],
     ['no database URL', { ...LOCAL, PG_DATABASE_URL: undefined }, /PG_DATABASE_URL is required/],
+    // X1.9 review: a target override in the query string is named as such (still refused, still no URL echo).
+    ['a ?host= override of a loopback URL', { ...LOCAL, PG_DATABASE_URL: `postgres://crewflow:${SECRET}@127.0.0.1:15499/rab?host=db.prod.example.com` }, /PG_DATABASE_URL sets "host" as a query parameter, which would override the connection target/],
+    ['a ?hostaddr= override', { ...LOCAL, PG_DATABASE_URL: `postgres://crewflow:${SECRET}@127.0.0.1:15499/rab?hostaddr=10.0.0.9` }, /sets "hostaddr" as a query parameter/],
   ])('refuses %s', (_name, env, pattern) => {
     let message = '';
     try {

@@ -1,6 +1,6 @@
 import { isRemoteDatabaseHost, Query, readDeploymentMarker } from '../database/deployment-identity/deployment-identity';
 import { readPrimaryDatabaseUrl } from '../database/postgres/pg-config';
-import { describeDatabaseUrl } from '../database/typeorm/core/test-database-guard';
+import { describeDatabaseUrl, TestDatabaseConfigError } from '../database/typeorm/core/test-database-guard';
 
 /**
  * X1.5 (cleanup audit NC-04): the fixture seeds `seed` (acme / admin@acme.test) and `seed-qa` ("ADOLPHUS QA") ship in the
@@ -60,8 +60,10 @@ export function seedCommandTargetProblems(env: Record<string, string | undefined
     try {
       const id = describeDatabaseUrl(primary.value, primary.name);
       if (isRemoteDatabaseHost(id.host)) problems.push(`${primary.name} must be a loopback or docker-service database (got host "${id.host}").`);
-    } catch {
-      problems.push(`${primary.name} is not a parseable postgres URL (value not shown).`);
+    } catch (error) {
+      // describeDatabaseUrl's refusals are value-free by construction (variable name and the offending query-parameter
+      // NAME only), so the precise reason is kept, e.g. a `?host=` / `?hostaddr=` target override (X1.9 review).
+      problems.push(error instanceof TestDatabaseConfigError ? error.message : `${primary.name} is not a parseable postgres URL (value not shown).`);
     }
   }
   return problems;
