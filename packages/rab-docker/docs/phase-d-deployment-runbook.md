@@ -230,8 +230,10 @@ the Worker, then check every item:
 - [ ] At least one full reconcile interval (≤ 900 s) has passed since the migrations were applied. Recommended: run
   per_scope for at least one full reconcile interval before switching.
 - [ ] **HARD BLOCKER (owner decision 2026-11-02):** the bounded, fair follow-up reconciliation for legacy sweeps that
-  reach their batch limit ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)) is merged and verified. Until it
-  is, `WORKER_CLAIM_MODE=global` must not be enabled in staging or production, whatever the other items show.
+  reach their batch limit ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)) is merged, deployed in this
+  environment's Worker image, and verified there (§5.3: a backlog above one batch drains through follow-up sweeps; idle
+  SQL unchanged). Until it is, `WORKER_CLAIM_MODE=global` must not be enabled in staging or production, whatever the
+  other items show.
 
 Rollback for this step: §8.2.
 
@@ -252,16 +254,34 @@ pointers. It then repeats every reconcile interval. Each pass handles at most on
 | Realtime | each scope: the organisation's core scope and each of its workspaces | 25 rows |
 | Statement | each workspace | 200 rows |
 
-So today a row whose pointer is missing is found within 15 minutes **only while its queue-and-scope pointerless
-backlog fits in one batch**. A larger backlog drains one batch per queue and scope per interval. That is a delay, not a
-loss. It is the §5.1 hard blocker, tracked in [#24](https://github.com/Rabblo06/rab-recurit/issues/24).
+**Follow-up sweeps ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)).** When any queue-and-scope batch of a
+sweep comes back FULL, more pointerless work may remain, so the Worker runs a follow-up sweep about 5 s later instead of
+waiting for the next interval. Follow-ups use the same per-queue loop (never two loops for one queue in a process) and the
+same scan slot, metrics and shutdown drain as a wake-up. They are:
+
+- **Bounded:** at most 30 follow-ups per reconcile window, per queue and Worker process, so at most 31 sweeps per window.
+  When the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. A
+  failed sweep schedules no follow-up and keeps the existing 60 s retry.
+- **Fair:** every sweep still takes at most one batch from every organisation and scope, so a large backlog in one
+  organisation never delays a small one elsewhere.
+- **Idle-neutral:** with no full batch nothing extra runs. Measured A/B on the disposable test stack (20 organisations,
+  four queues, 2 s poll ticks, 60 s): 244 transactions before and after #24.
+
+Recovery bound: a queue-and-scope pointerless backlog of up to 31 batches (email or push 1,550 rows per organisation,
+realtime 775 per scope, statements 6,200 per workspace) is reached within one reconcile window, provided each sweep takes
+well under about 24 s. Measured: 500 pointerless email rows in one organisation drained in 46 s at the production defaults
+(before #24: 50 rows per 900 s window, about 2.5 hours). The 31-batch bound is the configured limit; it has not yet been
+measured at 200 organisations, so re-measure sweep duration on the staging rehearsal (§5.3). A larger backlog drains 31
+batches per window. That is a delay, not a loss.
 
 ### 5.3 What to watch in the first sweep
 
 - The first legacy sweep completes on each replica (Worker stats in `rab:worker:stats`).
-- No pending email / push / realtime / statement row is older than the reconcile interval. Exception, until #24 is
-  fixed: while a queue-and-scope backlog larger than one batch (§5.2 table) drains, its rows can be older, up to about
-  ceil(backlog / batch) intervals. Investigate any older row outside such a drain.
+- No pending email / push / realtime / statement row is older than the reconcile interval. Exception: a queue-and-scope
+  backlog larger than 31 batches (§5.2), which the Worker reports with `follow-up budget exhausted`. Its rows can be
+  older, up to about ceil(backlog / (31 × batch)) intervals. Investigate any older row outside such a drain.
+- A backlog above one batch drains through follow-up sweeps about 5 s apart (cycle metrics under
+  `<scan>:reconcile`, e.g. `email-dispatch:reconcile`), and sweep duration stays well under 24 s.
 - No `dispatch claim-count alert` log lines (any claim with `claim_count > 20`), and `claimsOver20` stays 0.
 - Delivery latency stays at about the poll interval (measured p50 / p95 about 1.1 s / 2.0 s).
 - Idle SQL and PostgreSQL CPU fall in line with the measured figures.
@@ -345,7 +365,7 @@ move to steady state.
 | Signal | Source | Threshold / expectation | On breach |
 |---|---|---|---|
 | Repeated claims | Worker log `dispatch claim-count alert`; `claimsOver20` in `rab:worker:stats` | Alert on any claim with `claim_count > 20` (`claimsOver20 > 0`). Starvation, excessive SQL or material delivery delay from repeated claims is a release blocker. | Global-mode rollback (§8.1), then investigate. |
-| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). Until #24 is fixed, a documented drain of a queue-and-scope backlog larger than one batch (§5.2, §5.3) may run to about ceil(backlog / batch) intervals; that alone is not a breach. | Outside such a drain: global-mode rollback, then investigate. |
+| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). A queue-and-scope backlog above 31 batches (§5.2, logged as `follow-up budget exhausted`) may take about ceil(backlog / (31 × batch)) intervals; that alone is not a breach. | Outside such a drain: global-mode rollback, then investigate. |
 | Delivery failures | `DELIVERY_UNCERTAIN` and failed counts (email, push) | No rise against the pre-change baseline. | Investigate; roll back if caused by the change. |
 | Worker restarts | Platform restart count, bundle exit lines | No unexplained restarts. | Investigate; check the boot gate messages. |
 | PostgreSQL load | CPU, statements per minute | Should fall after global activation (measured −86 to −95 % idle SQL at 200 organisations). | A rise is a breach: roll back, investigate. |
@@ -508,10 +528,10 @@ Further limits:
 
 - **Crashed Worker:** its claimed work waits for its lease to expire (15 s realtime, 30 s email/push), then another
   claim picks it up.
-- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s), but only while the queue-and-scope
-  pointerless backlog fits in one batch (email and push 50 per organisation, realtime 25 per scope, statements 200 per
-  workspace; §5.2). A larger backlog drains one batch per interval until
-  [#24](https://github.com/Rabblo06/rab-recurit/issues/24) is fixed (a §5.1 hard blocker for global activation).
+- **Missing pointer:** found by the reconcile sweep and its follow-up sweeps within one interval (≤ 900 s) for a
+  queue-and-scope pointerless backlog of up to 31 batches (email and push 50 per organisation, realtime 25 per scope,
+  statements 200 per workspace; §5.2, [#24](https://github.com/Rabblo06/rab-recurit/issues/24)). A larger backlog drains
+  31 batches per interval.
 - **Event mode:** a full notification queue fails the producer's COMMIT (§5.4).
 
 **Known limitation: send-time realtime authorisation.** A realtime event is not re-authorised against its recipient at
@@ -526,18 +546,21 @@ Each item is a separate owner decision. Nothing on this list is approved by this
 |---|---|---|---|
 | 1 | `crewflow_worker` creation (§3) | [ ] | [ ] |
 | 2 | Migration release: 1786721300000, 1786721310000, 1786721320000, 1786721340000, 1786721350000 (§4) | [ ] | [ ] |
-| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9). **Blocked until #24 is fixed.** | [ ] | [ ] |
+| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9). **Blocked until #24 is merged and verified in that environment (§5.1).** | [ ] | [ ] |
 
 **HARD BLOCKER before item 3 in any environment:** [#24](https://github.com/Rabblo06/rab-recurit/issues/24), bounded and
-fair follow-up reconciliation when a legacy sweep reaches its batch limit. The fix must preserve Phase D's measured
-idle-load improvements. Owner decision 2026-11-02: a tracked follow-up, not a blocker for merging #23. Because of §9,
-apply the item 2 migrations to an environment only once #24 is ready, so the 14-day clock does not start while
+fair follow-up reconciliation when a legacy sweep reaches its batch limit (§5.2). The fix must preserve Phase D's
+measured idle-load improvements. Owner decision 2026-11-02: a tracked follow-up, not a blocker for merging #23. The
+implementation PR needs its own owner approval to merge; then the §5.1 verification in each environment. Because of §9,
+apply the item 2 migrations to an environment only once #24 is merged, so the 14-day clock does not start while
 activation is blocked.
 
 Environment-independent decisions:
 
 - [ ] [#24](https://github.com/Rabblo06/rab-recurit/issues/24): legacy-sweep batch-limit follow-up reconciliation,
-  merged and verified (hard blocker for item 3).
+  merged (owner approval) and verified per environment (§5.1; hard blocker for item 3).
+- [ ] #24 sweep duration and drain re-measured at production scale (about 200 organisations) on the staging rehearsal
+  (§5.2).
 
 - [ ] Event mode (`WORKER_DISPATCH_MODE=event`), with its OD-2 prerequisites (§5.4).
 - [ ] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: gated, outside the migration glob.
