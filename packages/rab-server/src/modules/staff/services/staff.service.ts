@@ -725,19 +725,23 @@ export class StaffService {
         profile.user = await manager.findOneByOrFail(User, { id: userId });
 
         // Account creation must never depend on, or fail because of, email
-        // deliverability — checked synchronously (a cheap Redis read, never
-        // a live SMTP round-trip) before deciding whether to create an
-        // invite at all. If unavailable, skip cleanly: no AccountInvite row,
-        // no EmailOutbox row — nothing durable that could fire a stale
-        // invite later once the worker comes back. A Manager can send a
-        // fresh one at any time via the existing "Resend invitation" action.
-        const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
-        const invite = emailAvailable
+        // deliverability. Owner decision (Phase D-Q §12.1 #3, "always
+        // queue"): the invite is written to the durable outbox whenever email
+        // delivery is CONFIGURED on — Worker health (the Redis heartbeat) no
+        // longer decides it. If the Worker is down the row waits and is sent
+        // when it returns; the Worker's pre-delivery revalidation cancels it
+        // instead if by then it was revoked, superseded by a resend, accepted
+        // or expired. EMAIL_DELIVERY_ENABLED=false (operator kill switch)
+        // still skips it: no AccountInvite row, no EmailOutbox row, and a
+        // Manager can send one later via "Resend invitation".
+        const emailEnabled = this.accountLifecycle.isEmailDeliveryEnabled();
+        const invite = emailEnabled
           ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
           : null;
         await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
           targetUserId: userId,
-          metadata: { emailQueued: emailAvailable },
+          // What actually happened: true only when an invite outbox row was written in this transaction.
+          metadata: { emailQueued: invite !== null },
         });
         const createdByNames = await this.resolveCreatedByNames(manager, [profile]);
 
@@ -745,13 +749,13 @@ export class StaffService {
           ...this.toSummary(profile, null, null, (profile.createdBy && createdByNames.get(profile.createdBy)) ?? null),
           // The invite row is now always durably committed before this
           // returns (A8) — delivery outcome is no longer known synchronously.
-          // Null throughout when email was skipped at creation time.
+          // Null throughout when email delivery is configured off.
           pendingInvite: invite
             ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
             : null,
           invitationStatus: invite ? ('queued' as const) : null,
           invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
-          emailQueued: emailAvailable,
+          emailQueued: invite !== null,
         };
       });
     } catch (e) {

@@ -567,15 +567,15 @@ export class ManagerService {
 
     // Account creation must never depend on, or fail because of, email
     // deliverability — see StaffService.create()'s identical comment for
-    // the full reasoning. Skipping cleanly here means no AccountInvite/
-    // EmailOutbox row is ever created that could fire stale once the
-    // worker comes back online.
-    const emailAvailable = opts.sendInvite === false ? false : await this.accountLifecycle.isEmailDeliveryAvailable();
+    // the full reasoning (owner decision "always queue": only the
+    // EMAIL_DELIVERY_ENABLED configuration, never Worker health, decides
+    // whether the invite is queued; the Worker revalidates before sending).
+    const emailEnabled = opts.sendInvite === false ? false : this.accountLifecycle.isEmailDeliveryEnabled();
     // P2.9B/C — an explicit override (Initial Manager invitation) wins; otherwise a CEO invite
     // gets its own subject line (same body, see templates.ts's own doc comment on why), and every
     // other type keeps the original generic template unchanged.
     const templateRenderer = opts.templateRenderer ?? (dto.type === ManagerType.CEO ? renderCeoInvitationEmail : undefined);
-    const invite = emailAvailable
+    const invite = emailEnabled
       ? await this.accountLifecycle.sendAccountInvite(
           manager,
           ctx,
@@ -585,7 +585,8 @@ export class ManagerService {
       : null;
     await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
       targetUserId: userId,
-      metadata: { emailQueued: emailAvailable },
+      // What actually happened: true only when an invite outbox row was written in this transaction.
+      metadata: { emailQueued: invite !== null },
     });
 
     if (dto.type === ManagerType.CEO) {
@@ -600,13 +601,13 @@ export class ManagerService {
       // The invite row is now always durably committed before this
       // returns (A8) — delivery outcome is no longer known synchronously,
       // so this always reflects "queued", never a guess at delivered.
-      // Null throughout when email was skipped at creation time.
+      // Null throughout when no invite was queued (sendInvite: false, or email delivery configured off).
       pendingInvite: invite
         ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
         : null,
       invitationStatus: invite ? ('queued' as const) : null,
       invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
-      emailQueued: emailAvailable,
+      emailQueued: invite !== null,
     };
   }
 

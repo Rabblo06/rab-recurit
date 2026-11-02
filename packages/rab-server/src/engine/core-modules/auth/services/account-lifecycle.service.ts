@@ -8,13 +8,11 @@ import { EnvironmentService } from '../../environment/environment.service';
 import { EmailOutboxService } from '../../email/email-outbox.service';
 import { EmailQueueService } from '../../email/email-queue.service';
 import { renderAccountActivationEmail, renderAccountSuspendedEmail, renderPasswordResetEmail } from '../../email/templates';
-import { ThrottlerRedisClientProvider } from '../../throttler/throttler-redis-client.provider';
 import { AuthContext } from '../../tenant/auth-context.interface';
 import { AccountInviteService } from './account-invite.service';
 import { PasswordResetTokenService } from '../token/services/password-reset-token.service';
 import { RefreshTokenService } from '../token/services/refresh-token.service';
 import { SecurityVersionService } from './security-version.service';
-import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../worker-shared/heartbeat.constants';
 
 /**
  * Shared by every place a Staff/Internal Manager/Venue Manager account gets
@@ -42,32 +40,30 @@ export class AccountLifecycleService {
     private readonly emailQueue: EmailQueueService,
     private readonly auditService: AuditService,
     private readonly env: EnvironmentService,
-    private readonly redisClient: ThrottlerRedisClientProvider,
     private readonly securityVersion: SecurityVersionService,
   ) {}
 
   /**
-   * Synchronous "can an invite/welcome email actually be delivered right
-   * now" check — called by StaffService/ManagerService.create() before
-   * deciding whether to call sendAccountInvite() at all. Deliberately reuses
-   * ONLY the worker-heartbeat-read pattern AdminPanelService.checkWorker()
-   * already uses (a plain Redis GET + age-vs-TTL compare) — never
-   * AdminPanelService.checkEmail()'s live SMTP `transport.verify()` round
-   * trip, which has a real, recently-fixed hang history in this codebase
-   * (see git history: "Fail fast on a blocked SMTP path instead of hanging
-   * for 2 minutes"). Any Redis error fails closed to `false` — this only
-   * ever causes a send to be skipped, never fails the caller's request.
+   * Whether a Staff/Manager account invite may be QUEUED at creation — called by StaffService/ManagerService.create()
+   * before deciding whether to call sendAccountInvite() at all.
+   *
+   * Owner decision (Phase D-Q plan §12.1, decision 3, 2026-11-02): "always queue". The invite is written to the durable
+   * outbox in the creating transaction whenever email delivery is CONFIGURED on, regardless of whether a Worker is
+   * running right now; if the Worker is down, stalled, or Redis lost its heartbeat key, the row waits in PostgreSQL and
+   * is delivered when the Worker returns (the dispatcher re-publishes it). Before this decision the queue choice also
+   * read the Worker heartbeat key from Redis and silently skipped the invite (`emailQueued:false`, manual "Resend")
+   * whenever that key was missing or stale — so a Redis wipe decided whether a durable row was written.
+   *
+   * What still stops a queued invite from going out late with a dead or unwanted link is the Worker's pre-delivery
+   * revalidation (email-send.processor.ts `revalidate`): a revoked, accepted, superseded (resent) or EXPIRED invite is
+   * cancelled, never sent; a deleted target user is cancelled too.
+   *
+   * ASSUMPTION (flagged for the owner, unchanged behaviour): `EMAIL_DELIVERY_ENABLED=false` still means "do not queue
+   * an invite" — that is operator configuration (a deliberate kill switch), not Worker health. Purely synchronous and
+   * Redis-free: it can neither fail nor slow the caller's request.
    */
-  async isEmailDeliveryAvailable(): Promise<boolean> {
-    if (!this.env.get('EMAIL_DELIVERY_ENABLED')) return false;
-    try {
-      const value = await this.redisClient.client.get(WORKER_HEARTBEAT_KEY);
-      if (!value) return false;
-      const ageSeconds = (Date.now() - Number(value)) / 1000;
-      return ageSeconds <= WORKER_HEARTBEAT_TTL_SECONDS;
-    } catch {
-      return false;
-    }
+  isEmailDeliveryEnabled(): boolean {
+    return this.env.get('EMAIL_DELIVERY_ENABLED') === true;
   }
 
   /** Publishes to BullMQ right after the caller's transaction commits — see `EmailOutboxService.tryFastPublish`'s own doc comment for why this is best-effort only. */

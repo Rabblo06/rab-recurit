@@ -322,10 +322,12 @@ export class EnvironmentVariables {
   EMAIL_DRIVER: string = 'LOGGER';
 
   /**
-   * Operator kill-switch, independent of the worker heartbeat check
-   * AccountLifecycleService.isEmailDeliveryAvailable() also performs — lets
-   * an operator disable all outbound invite/welcome email (e.g. during a
-   * maintenance window) even while the worker itself is technically up.
+   * Operator kill-switch — lets an operator disable all outbound
+   * invite/welcome email (e.g. during a maintenance window). Since the owner's
+   * "always queue" decision (Phase D-Q §12.1 #3) this, and no longer the
+   * Worker's Redis heartbeat, is the only thing that stops
+   * StaffService/ManagerService.create() from queueing an account invite
+   * (AccountLifecycleService.isEmailDeliveryEnabled()).
    * Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS below — see its
    * comment for why @Type(() => String) is required here too.
    */
