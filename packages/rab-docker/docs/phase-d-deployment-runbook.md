@@ -243,15 +243,25 @@ restart. The API is unchanged in poll mode.
 Switching to global is itself the supervised initial reconciliation. On each Worker process's **first** scan tick for
 each queue (immediately at start with `WORKER_SCHEDULER=interval`), the legacy per-scope sweep runs. It is the same
 bounded, idempotent, tenant-scoped code as per_scope mode, dispatches pre-cutover work directly, and creates no
-pointers. It then repeats every reconcile interval. Each pass claims one batch (50) per organisation, so today a row
-whose pointer is missing is found within 15 minutes **only while its organisation's pointerless backlog fits in one
-batch**. A larger backlog drains about 50 rows per organisation per interval. That is a delay, not a loss. It is the
-§5.1 hard blocker, tracked in [#24](https://github.com/Rabblo06/rab-recurit/issues/24).
+pointers. It then repeats every reconcile interval. Each pass handles at most one batch per queue and scope:
+
+| Queue | Legacy sweep | Batch per pass |
+|---|---|---|
+| Email | each organisation | 50 rows |
+| Push | each organisation | 50 rows |
+| Realtime | each scope: the organisation's core scope and each of its workspaces | 25 rows |
+| Statement | each workspace | 200 rows |
+
+So today a row whose pointer is missing is found within 15 minutes **only while its queue-and-scope pointerless
+backlog fits in one batch**. A larger backlog drains one batch per queue and scope per interval. That is a delay, not a
+loss. It is the §5.1 hard blocker, tracked in [#24](https://github.com/Rabblo06/rab-recurit/issues/24).
 
 ### 5.3 What to watch in the first sweep
 
 - The first legacy sweep completes on each replica (Worker stats in `rab:worker:stats`).
-- No pending email / push / realtime / statement row is older than the reconcile interval.
+- No pending email / push / realtime / statement row is older than the reconcile interval. Exception, until #24 is
+  fixed: while a queue-and-scope backlog larger than one batch (§5.2 table) drains, its rows can be older, up to about
+  ceil(backlog / batch) intervals. Investigate any older row outside such a drain.
 - No `dispatch claim-count alert` log lines (any claim with `claim_count > 20`), and `claimsOver20` stays 0.
 - Delivery latency stays at about the poll interval (measured p50 / p95 about 1.1 s / 2.0 s).
 - Idle SQL and PostgreSQL CPU fall in line with the measured figures.
@@ -498,8 +508,9 @@ Further limits:
 
 - **Crashed Worker:** its claimed work waits for its lease to expire (15 s realtime, 30 s email/push), then another
   claim picks it up.
-- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s), but only while the organisation's
-  pointerless backlog fits in one batch (50). A larger backlog drains one batch per interval until
+- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s), but only while the queue-and-scope
+  pointerless backlog fits in one batch (email and push 50 per organisation, realtime 25 per scope, statements 200 per
+  workspace; §5.2). A larger backlog drains one batch per interval until
   [#24](https://github.com/Rabblo06/rab-recurit/issues/24) is fixed (a §5.1 hard blocker for global activation).
 - **Event mode:** a full notification queue fails the producer's COMMIT (§5.4).
 
