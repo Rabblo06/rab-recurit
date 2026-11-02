@@ -511,6 +511,25 @@ describe('DispatchCoordinator — #24 bounded, fair follow-up reconciliation', (
     expect(backlog.total).toBe(500 - 8 * 50);
   });
 
+  it('slow sweeps: a follow-up that starts after the window has ended spends the old budget and never opens a new window (no back-to-back chain)', async () => {
+    const clock = { now: 0 };
+    const backlog = new PointerlessBacklog(50, clock).add(ORG, 1_000_000);
+    const slowSweep = async () => {
+      clock.now += 40_000; // 31 × (40 s + 5 s) outlasts the 900 s window
+      return backlog.sweep();
+    };
+    const { coordinator, timers, warn, drain } = backlogCoordinator(backlog, clock, manualTimers(), {}, slowSweep);
+    await coordinator.tick('email');
+    await drain(200);
+    expect(clock.now).toBeGreaterThan(WINDOW);
+    expect(backlog.passes).toHaveLength(31); // 1 regular + the window's 30 follow-ups, even though most started after it ended
+    expect(timers.size).toBe(0);
+    expect(warn.mock.calls.map((c) => c[0] as string).filter((m) => m.includes('follow-up budget exhausted'))).toHaveLength(1);
+    await coordinator.tick('email'); // only a regular sweep opens the next window
+    expect(backlog.passes).toHaveLength(32);
+    expect(timers.size).toBe(1);
+  });
+
   it('maxFollowUpsPerInterval = 0 keeps the pre-#24 behaviour: one sweep per window', async () => {
     const clock = { now: 0 };
     const backlog = new PointerlessBacklog(50, clock).add(ORG, 500);

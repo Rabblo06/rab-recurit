@@ -270,12 +270,15 @@ export class DispatchCoordinator {
     const due = this.now() >= state.reconcileDueAt;
     if ((reasons.has('tick') && due) || (reasons.has('reconcile') && (due || state.followUpArmed))) {
       const startedAt = this.now();
+      const isFollowUp = state.followUpArmed;
       // Any sweep consumes an owed follow-up: clear its timer and flag (a later one is armed below if still needed).
       if (state.followUp) this.clearTimer(state.followUp);
       state.followUp = null;
       state.followUpArmed = false;
-      if (startedAt >= state.windowStartedAt + this.options.reconcileMs) {
-        // A regular sweep opens a new reconcile window with a fresh follow-up budget.
+      if (!isFollowUp && startedAt >= state.windowStartedAt + this.options.reconcileMs) {
+        // Only a regular sweep opens a new reconcile window with a fresh follow-up budget. A follow-up that starts after
+        // the window has ended (slow sweeps) spends what is left of its window's budget, so a window never exceeds
+        // 1 + maxFollowUpsPerInterval sweeps and the chain cannot renew itself.
         state.windowStartedAt = startedAt;
         state.followUpsLeft = this.options.maxFollowUpsPerInterval ?? DEFAULT_MAX_RECONCILE_FOLLOW_UPS;
       }

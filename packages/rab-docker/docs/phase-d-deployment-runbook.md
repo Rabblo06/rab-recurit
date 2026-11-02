@@ -262,7 +262,9 @@ same scan slot, metrics and shutdown drain as a wake-up. They are:
 - **Bounded:** at most 30 follow-ups per reconcile window, per queue and Worker process, so at most 31 sweeps per window
   and process. Follow-ups do not take the scan's cross-replica lock, so N replicas can run up to N × 31 sweeps per window;
   that is safe (row locks with SKIP LOCKED and the state-machine claims, as in per_scope mode) and only costs load. When
-  the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. A failed
+  the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. Only a
+  regular sweep opens a window: if sweeps are so slow that the 31 outlast the 900 s window, the follow-ups still spend the
+  old window's budget, and the next regular tick opens the next window (no self-renewing chain). A failed
   sweep, or a failed global claim after it, never stalls the chain: the follow-up is armed after the run's global claim
   either way, and a failed sweep keeps the existing 60 s retry.
 - **Push is consumer-paced:** a published push row stays PENDING until the push consumer takes it, so a push sweep asks
