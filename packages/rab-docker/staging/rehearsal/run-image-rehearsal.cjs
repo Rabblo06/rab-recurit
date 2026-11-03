@@ -88,7 +88,7 @@ fs.writeFileSync(path.join(SECRETS_DIR, 'redis-users.acl'), [
   'user healthcheck on nopass resetkeys resetchannels -@all +ping',
   'user ops off resetpass resetkeys ~* resetchannels -@all +ping +info',
   '',
-].join('\n'), { mode: 0o600 });
+].join('\n'), { mode: 0o644 }); // read by the redis user (uid 999) through the bind mount; the directory is private
 
 const [, apiRepo, apiDigest] = DIGEST_REF.exec(process.env.S_API_IMAGE);
 const [, workerRepo, workerDigest] = DIGEST_REF.exec(process.env.S_WORKER_IMAGE);
