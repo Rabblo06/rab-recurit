@@ -228,4 +228,16 @@ describe('push dispatch — D-Q3 re-publish fix and per-row publish catch', () =
     await dispatchPushScope(tenant as never, ORG_A, undefined, publish, jest.fn(), false);
     expect(publish).toHaveBeenCalledWith(R1, ORG_A);
   });
+
+  it('GLOBAL claim mode: a publish error propagates exactly as before (runGlobalDispatch releases with its 15 s retry) — no per-row catch, no queued_at withdrawal', async () => {
+    const { tenant, statements } = fakeTenant(rowsResponder([pendingRow(R1, {}), pendingRow(R2, {})]));
+    const publish = jest.fn(async (id: string) => {
+      if (id === R1) throw Object.assign(new Error('Connection is closed.'), { name: 'QueuePublishUnavailableError' });
+    });
+    await expect(dispatchPushScope(tenant as never, ORG_A, [R1, R2], publish, jest.fn(), false)).rejects.toThrow('Connection is closed.');
+    // Withdrawing the stamp would fire the pointer trigger (due now, claim cleared) and the same run would re-claim it.
+    expect(statements.some((s) => s.sql.includes('SET queued_at = NULL'))).toBe(false);
+    expect(publish.mock.calls.map((c) => c[0])).toEqual([R1]); // stops at the first failure, as before
+  });
+
 });

@@ -39,9 +39,12 @@ export interface PushDispatchResult {
   deliveryUncertain: number;
   /**
    * Phase D-Q3 (audit §13 #5): publishes that threw (Redis down/slow). Caught PER ROW — the rest of the cycle carries on.
-   * The row's `queued_at` stamp is withdrawn (fenced) so the next tick publishes it again, as before the fix.
+   * The row's `queued_at` stamp is withdrawn (fenced) so the next tick publishes it again, as before the fix. per_scope
+   * only: in global claim mode a publish error propagates exactly as before (release with the 15 s retry).
    */
   publishFailed?: number;
+  /** The first publish error's name this cycle (for the one summary warning). */
+  lastPublishError?: string;
 }
 
 /**
@@ -73,7 +76,10 @@ export async function runPushDispatchCycle(
     total.failedExhausted += scope.failedExhausted;
     total.deliveryUncertain += scope.deliveryUncertain;
     if (scope.publishFailed) total.publishFailed = (total.publishFailed ?? 0) + scope.publishFailed;
+    if (scope.lastPublishError && !total.lastPublishError) total.lastPublishError = scope.lastPublishError;
   }
+  // One summary per cycle (not one line per row during an outage).
+  if (total.publishFailed) logger.warn(`push dispatch: ${total.publishFailed} publish(es) failed this cycle (${total.lastPublishError}); each is retried on the next tick`);
 
   return total;
 }
@@ -205,8 +211,12 @@ export async function dispatchPushScope(
         }
         total.published++;
       } catch (error) {
+        // Global claim mode (ids given): unchanged behaviour — the error propagates, so runGlobalDispatch releases this and
+        // every remaining scope with its 15 s retry and ends the run. Withdrawing queued_at here would make the pointer
+        // trigger re-time the pointer to "due now" and the SAME run would re-claim it every batch (independent review R1).
+        if (ids !== undefined) throw error;
         total.publishFailed = (total.publishFailed ?? 0) + 1;
-        // Keep today's prompt retry: the claim already stamped queued_at, and a stamped row inside its 2-minute window is
+        // per_scope only. Keep today's prompt retry: the claim already stamped queued_at, and a stamped row inside its 2-minute window is
         // no longer re-added. Un-stamp it (fenced on status + generation, so a consumer claim or another replica's
         // recovery is never undone) and the NEXT tick publishes it again under the same jobId — as the old every-tick
         // re-add did. If this write fails too (database trouble), the 2-minute stale-PENDING rule still recovers the row.
@@ -219,7 +229,7 @@ export async function dispatchPushScope(
             ),
           )
           .catch(() => undefined);
-        logger.warn(`push delivery ${row.id}: publish failed, retried on the next tick: ${(error as Error)?.name ?? 'Error'}`);
+        if (!total.lastPublishError) total.lastPublishError = (error as Error)?.name ?? 'Error';
       }
     }
   }
