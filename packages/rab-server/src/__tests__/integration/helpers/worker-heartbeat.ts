@@ -2,13 +2,12 @@ import { ThrottlerRedisClientProvider } from '../../../engine/core-modules/throt
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../../engine/worker-shared/heartbeat.constants';
 
 /**
- * The API decides whether an account invite can be emailed by checking a live
- * `rab-worker` heartbeat in Redis (`AccountLifecycleService.isEmailDeliveryAvailable`).
- * Jest runs no separate worker process, so any suite that creates Staff/Manager
- * accounts through the real API must publish that heartbeat first — otherwise
- * `POST /staff` / `POST /managers` legitimately return `invite: null` and the
- * suite fails on an unrelated fixture gap. This is the fixture, not a bypass:
- * the production check itself is untouched.
+ * Publishes a fresh `rab-worker` heartbeat in Redis so a suite's stack looks like
+ * a normal running one (Jest runs no separate worker process). Since the Phase
+ * D-Q "always queue" owner decision the heartbeat NO LONGER decides whether a
+ * Staff/Manager account invite is queued (`AccountLifecycleService
+ * .isEmailDeliveryEnabled()` reads only EMAIL_DELIVERY_ENABLED); suites that
+ * still call this keep working unchanged. Fixture only, never a bypass.
  */
 export async function simulateWorkerHeartbeat(redis: ThrottlerRedisClientProvider): Promise<void> {
   await redis.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', Math.max(30, WORKER_HEARTBEAT_TTL_SECONDS));
