@@ -36,3 +36,13 @@ export const PROVISIONER_CYCLE_DURATIONS_KEY = 'rab:workspace-provisioner:cycle-
  * its own after a rollback to interval mode; its absence means "interval mode (or no bullmq replica alive)".
  */
 export const WORKER_SCHEDULER_STATUS_KEY = 'rab:worker:scheduler';
+
+/**
+ * Phase D-Q1 missed-tick record of the jobs process: one hash field per scan (`<jobName>`, and `<jobName>:wake` for a
+ * Phase D wake run) = epoch ms of the last time its TRIGGER fired on any Worker (interval timer or BullMQ scheduler job),
+ * whatever the outcome. `last<Loop>At` in WORKER_STATS_KEY only moves when a cycle did real work, so it cannot tell an idle
+ * scan from one whose scheduler is gone; this key can: a field older than a few intervals means the scan is no longer
+ * being triggered. Timestamps only (no ids, no configuration). 7-day TTL, refreshed on write. No reader in the app yet:
+ * meant for an external alert (see the Phase D-Q plan, missed-tick alert).
+ */
+export const WORKER_SCAN_TICKS_KEY = 'rab:worker:scan-ticks';

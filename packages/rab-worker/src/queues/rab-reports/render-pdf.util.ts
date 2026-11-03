@@ -83,12 +83,43 @@ function isAllowedUrl(url: string): boolean {
   return url.startsWith('data:') || url === 'about:blank';
 }
 
+/**
+ * Docker hardening H6: the ONLY environment variables the browser process receives. Playwright's default is the whole
+ * `process.env` — in the Worker that is the jobs child's PG_DATABASE_URL, REDIS_URL, APP_SECRET, S3 / SMTP / push
+ * credentials — and Chromium runs without its OS sandbox as the same uid, so a renderer bug would land next to them.
+ * This is an ALLOWLIST (never a denylist): process location, temp/profile/cache directories, locale, time zone and
+ * fontconfig. Nothing here is a credential. Windows names are for local development only (Chromium needs them there).
+ * Residual (THREAT-MODEL.md, Docker hardening H6): a same-uid renderer can still read the jobs process's own
+ * /proc/<pid>/environ while the OS sandbox is off.
+ */
+export const CHROMIUM_ENV_KEYS: readonly string[] = Object.freeze([
+  'PATH', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR',
+  'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ', 'FONTCONFIG_PATH', 'FONTCONFIG_FILE',
+]);
+const CHROMIUM_WINDOWS_ENV_KEYS: readonly string[] = Object.freeze([
+  'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'PROGRAMFILES',
+  'PROGRAMFILES(X86)', 'COMMONPROGRAMFILES', 'SYSTEMDRIVE', 'PATHEXT', 'COMSPEC', 'NUMBER_OF_PROCESSORS',
+]);
+
+/** The browser's environment: `source` filtered through the allowlist (exact names; case-insensitive on Windows). */
+export function chromiumLaunchEnv(source: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const env: Record<string, string> = {};
+  const windows = platform === 'win32';
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== 'string') continue;
+    const allowed = CHROMIUM_ENV_KEYS.includes(key) || (windows && [...CHROMIUM_ENV_KEYS, ...CHROMIUM_WINDOWS_ENV_KEYS].includes(key.toUpperCase()));
+    if (allowed) env[key] = value;
+  }
+  return env;
+}
+
 export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = {}): Promise<Buffer> {
   const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
   const args = ['--disable-dev-shm-usage'];
   if (process.env.CHROMIUM_NO_SANDBOX === 'true') args.push('--no-sandbox', '--disable-setuid-sandbox');
   // chromiumSandbox: Playwright's own default, stated (see "OS sandbox" above): never read as a sandbox being on.
-  const browser = await chromium.launch({ executablePath, args, chromiumSandbox: false });
+  // env: the allowlisted environment only (chromiumLaunchEnv) — never the Worker's credentials.
+  const browser = await chromium.launch({ executablePath, args, chromiumSandbox: false, env: chromiumLaunchEnv() });
   let blockedRequests = 0;
   let navigationAttempted = false;
   try {

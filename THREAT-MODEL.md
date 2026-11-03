@@ -4522,7 +4522,15 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   (`pg_db_role_setting`, this or all databases, own or inherited role) or a session value that does not match its mode;
   the security posture and the CI RLS gate also fail. Residual: `postgresql.conf` / `ALTER SYSTEM` (superuser) is only
   caught by poll-mode processes.
-- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode.
+- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode,
+  for a queue-and-scope pointerless backlog of up to 31 batches. #24 (follow-up sweeps when a legacy sweep returns a full
+  batch; bounded to 30 per window and queue per Worker, fair one-batch-per-scope sweeps, idle-neutral) closes the earlier
+  gap where a backlog above ONE batch drained a single batch per 15 min. The bound holds while each sweep takes well under
+  about 24 s (re-measure at production scale); push drains at its consumer's pace (a published push row stays PENDING, so
+  only a batch that moved rows asks for a follow-up). A larger backlog (an availability concern only: delay, never loss or
+  cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
+  Tests: `legacy-batch-limit.spec.ts`, `dispatch-coordinator.spec.ts` (#24 block),
+  `phase-d-backlog-reconciliation.integration.spec.ts`.
 
 ### D-e: account-invite cleanup (F-1) and automatic deletion
 - Redemption refuses expired, revoked and consumed links whether or not cleanup runs (tested). Today's cleanup is a no-op
@@ -4609,6 +4617,171 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase D-Q1 — one complete queue registry, a required tenant scope on every enqueue (branch phase-d/dq1-queue-registry, not merged)
+
+Structural change; no option value, job name, jobId format, prefix, payload or business rule changed (pinned by
+`queue-registry.spec.ts` and `queue-enqueue.spec.ts` against the pre-D-Q1 literals). No migration, role, grant, RLS or
+posture change.
+
+- **Tenant scope at enqueue (new control, producer side).** Every BullMQ job is built by `registeredJob` /
+  `scanJobTemplate` (`engine/worker-shared/queue-enqueue.ts`) with a REQUIRED scope: `{ kind: 'organisation',
+  organisationId }` (a UUID, equal to the payload's `organisationId`) for the four consumer queues, `{ kind: 'system' }`
+  for the seven scan queues. Missing, malformed or wrong-kind scopes, a scope naming another organisation than the
+  payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
+  with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
+  (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+  **This is not a new tenant boundary.** For every current producer, the scope's `organisationId` and the payload's
+  `organisationId` come from the same argument, so "scope must equal payload" cannot fail today. What the check adds is
+  validation of shape, UUID format and payload keys, plus a guard for future producers that might build the two
+  separately. Tenant isolation is still enforced by the consumers: `SET LOCAL` plus the RLS re-read, described next.
+- **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
+  (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
+  `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
+  `shift-statement.job.ts processShiftStatementJob` (`payroll_record ... FOR UPDATE` in `workerCtx(org, workspace)`),
+  `AiTurnRunnerService` / `AiTitleService` (turn / conversation rows under the job's org + workspace). A forged id
+  combination matches no row.
+- **Unknown job name on an existing queue — finding, FIXED (Low, integrity).** Actor → action → consequence: anything
+  able to add a job to `rab-email` / `rab-push` / `rab-shift-statements` (only Crewflow processes hold the Redis
+  credentials; production Redis is unauthenticated, see Phase D-Q plan §7) under ANY job name → the consumer handed it
+  to the one send / generate handler → the email/push/statement for the id in the payload was processed as if it had
+  been published under the registered name. `rab-ai` completed an unknown name silently. Where:
+  `rab-worker/src/core/scheduler/bullmq-scheduler.ts` `createConsumerWorkers` (`(job) => handler(job)`). Fix: a job
+  whose name the registry does not list for the queue is failed closed (`UnrecoverableError`: failed set after one
+  attempt, a warning naming the queue and job id only, the handler never runs). Regression tests:
+  `queue-registry-worker.spec.ts` (all four queues) and `queue-registry-consumers.integration.spec.ts` (real Redis:
+  a `bogus-job` with `attempts: 5` ends failed after one attempt, handler not called; registered names still handled).
+  The tenant re-read above already bounded the impact to the job's own organisation's rows.
+- **Unknown queue name:** `queueSettingsOf` throws `UnknownQueueError`; the Worker refuses to start on an invalid or
+  incomplete registry (`assertQueueRegistryValid`), on a `@Processor` naming an unregistered queue (unchanged) and, in
+  bullmq mode, on scan settings that drifted from `SCAN_JOBS` (`assertScanQueueSettings`). No queue name is read from the
+  environment (`BULLMQ_PREFIX` is a validated prefix, not a queue name); the Admin queue view answers 404 for an
+  unregistered queue name (unchanged).
+- **Missed-tick record:** `rab:worker:scan-ticks` (one epoch-ms field per scan, 7-day TTL) — timestamps only, no ids,
+  no configuration, no tenant data.
+- **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
+  decision); the producer-side checks are defence in depth, not an authentication boundary.
+
+## Phase D-Q3b — account invites always queued (branch phase-d/dq3-invites-always-queued, not merged)
+
+Owner decision (2026-11-02, D-Q plan §12.1 #3): Staff and Manager account invites are always written to the outbox at
+creation; the Worker heartbeat key in Redis no longer decides it. No migration, no role, grant, RLS or posture change.
+
+- **Asset:** a person's account-activation link (a bearer token that sets their first password) and the timing of the
+  email that carries it. **Actor:** a Manager creating, cancelling or resending an invite; anyone able to wipe or stall
+  Redis or the Worker.
+- **Before:** `StaffService.create` / `ManagerService.create` queued the invite only if `EMAIL_DELIVERY_ENABLED` was true
+  **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
+  silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
+- **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  written), not a Redis read.
+- **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
+  returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,
+  `email-send.processor.ts` `revalidate`):** the target user must still exist; the invite must not be revoked
+  ("Cancel invitation"), accepted, or superseded by a newer invite (a resend rotates the token and revokes the older one,
+  and the latest-invite check catches an un-revoked older row); **new in this PR: the invite must not be expired** — an
+  expired invite is cancelled, never sent (before, the consumer did not check `expires_at`; the activation endpoint already
+  refused an expired link, so the risk was a confusing dead-link email, not account takeover). Redemption keeps refusing
+  expired, revoked and consumed links independently of delivery.
+- **Organisation suspension:** unchanged. `sendAccountInvite` refuses to mint an invite for a suspended organisation; an
+  invite queued before a suspension is still governed by the same revalidation (no new behaviour in this PR).
+- **Tenant isolation:** the job payload is `{emailOutboxId, organisationId}` taken from the committed row; the consumer
+  re-reads the row under that organisation's RLS context. A job naming another organisation sees no row and sends nothing
+  (tested, `account-invite-delivery` I5); with no tenant context the outbox returns zero rows (tested).
+- **Tests:** `account-invite-abuse-cases` (heartbeat missing ⇒ invite queued; heartbeat stale ⇒ queued for staff and
+  managers; `EMAIL_DELIVERY_ENABLED=false` ⇒ nothing queued; RLS isolation), `account-invite-delivery` (Worker-side: a
+  current invite queued while the Worker was down is delivered once; cancelled, superseded and expired invites are never
+  delivered; cross-tenant job sends nothing), `account-lifecycle-email-enabled.spec` (unit).
+- **Residual:** an invite queued during a long Worker outage may arrive after the Manager has already chased the person by
+  other means; the email is still valid (or is cancelled if expired/revoked/superseded). The informational "Worker
+  offline" signal in the admin panel (`AdminPanelService.checkWorker`) is unchanged and does not block queueing.
+
+## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
+
+Flag `WORKER_FAST_PUBLISH_NOTIFY` (default false = today). No migration, no role, grant, RLS or posture change; no
+payroll, attendance or staffing rule change; email preferences untouched (notify() email stays default-off).
+
+- **Asset:** delivery of another person's notification email/push (the `email_outbox` / `push_delivery` rows notify()
+  writes in a business transaction). **Actor:** the API process acting on a committed business change; anyone able to
+  make the transaction roll back, stall Redis, or forge a job.
+- **Change:** with the flag on, `NotifyFastPublishService` adds the SAME BullMQ jobs the dispatcher's first publish adds
+  (`email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0`, existing producers, same options) right after the
+  transaction's OUTERMOST commit (TypeORM `AfterTransactionCommit`; savepoint releases ignored). Any rollback — of the
+  transaction or a savepoint in it — discards everything registered on it. Outside a transaction nothing is registered.
+- **Controls:** never published before commit (a rolled-back business change publishes nothing — tested). The fast path
+  writes nothing to the database: no status, `queued_at` or generation; the dispatcher's later add of the same jobId is
+  deduplicated by BullMQ and the consumers' fenced compare-and-set allows one delivery (tested: one job, one send).
+  `provider_call_started_at`, `DELIVERY_UNCERTAIN`, the idempotency key, attempts, backoff and leases are untouched.
+  Redis down or slow: publishes run detached from the request and are bounded by the producers' fail-fast connection;
+  failures are swallowed and the row is published later by the dispatcher (tested). Job payload = the committed row's id
+  and its `organisation_id` only (server values); consumers re-read the row under that organisation's RLS context and
+  revalidate before sending (tested: other organisation's context and no context see zero rows; a job naming another
+  organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
+- **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
+  publish error is caught per row instead of aborting the cycle; the failed row's `queued_at` stamp is withdrawn (fenced
+  on status + generation, in its organisation's context) so it is retried on the next tick, as before. per_scope only:
+  in global claim mode a publish error propagates exactly as before (the run releases the remaining claims and ends) —
+  withdrawing the stamp there would re-time the pointer to "due now" and the same run would re-claim it every batch. The claim SQL is byte-identical; FAILED /
+  DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
+  only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
+- **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
+  dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
+  lease instead of the 5 s dispatcher, a lease-outcome change.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
+  to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
+
+## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
+
+No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
+policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+**One delivery-policy change, for class-A realtime hints only — NEEDS OWNER APPROVAL (independent review F47-1):** a
+reclaim after claimant death now counts toward the existing `max_attempts` (10); a hint whose claimant dies (or stalls
+past the 60 s lease) 10 times is dropped (`failed`, `LEASE_RECLAIM_EXHAUSTED`) instead of being re-claimed forever.
+Before, redelivery after claimant death was unbounded; only publish failures were capped. Impact: every realtime event
+type is an ids-only UI hint (`attendance.changed`, `notification.created`, `offer.*`, `payroll.record_changed`,
+`shift.*`, `shift_request.*`, `navigation_layout.saved`); clients refetch, none is a security signal (authorisation is
+resolved server-side per request), and dropping one takes about 10 consecutive claimant deaths at 60 s each (≥ ~10
+minutes of crash-looping while that row is held). It removes an availability risk: one tenant's poison row could be
+re-claimed every cycle on every replica. `WORKER_CLAIM_MODE=per_scope` no longer reproduces the pre-Phase-D realtime
+claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2).
+
+- **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
+  (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
+  `processing` with an expired lease (its claimant died or hung) counts as an attempt; when `attempt_count + 1 >=
+  max_attempts` (the existing column, default 10, the same arithmetic `markRealtimeEventRetry` already used for a failed
+  publish) the row ends `failed` / `LEASE_RECLAIM_EXHAUSTED` with its claim and lease cleared and is not returned or
+  published. Before, a poison row whose publisher crashed every time was re-claimed forever — every cycle, every replica
+  — an availability risk one tenant's bad row could impose on the shared Worker. Actor → action → consequence after the
+  fix: a realtime hint (ids only; clients refetch) for a row whose publisher keeps dying is dropped after `max_attempts`
+  claims; no business record is touched. **Tenant isolation unchanged:** the same RLS-bound statement under the scope's
+  `SET LOCAL` (FORCE RLS on `core.realtime_event`); the MATERIALIZED CTE (eligibility, order, LIMIT, `FOR UPDATE SKIP
+  LOCKED`) is byte-identical to before (pinned by sha256 in `publish-outbox.job.spec.ts`). Abuse cases, real PostgreSQL
+  (`dq5-realtime-lease-reclaim.integration.spec.ts`): another organisation's context neither sees nor counts the row (per
+  scope and global); a claim with no tenant context bound returns zero rows and counts nothing; three concurrent
+  reclaimers of one row → exactly one wins, counted once. The global-mode pointer of a `failed` row is deleted by the
+  existing trigger (`failed` is terminal for realtime; tested). So that a LIVE claimant is never counted against (a batch
+  of up to 25 sequential publishes, 3 s each, can outlast the 60 s lease), `publishRealtimeScope` renews the lease of
+  the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
+  AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
+  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant,
+  and counted as `lostLease` in the cycle log (not `failed`: the other claimant holds and publishes it).
+- **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
+  `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
+  interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token
+  cleanup, storage cleanup and the provisioning-health alert run within one interval of the first boot instead of never
+  (when restarts are more frequent than the interval). A present stamp always decides exactly as before; Redis failing or
+  hanging (2 s bound) → one full interval, as before. The key holds a stat-key name and an epoch-ms number — no tenant
+  data — and is deliberately outside `rab:worker:stats`, which Admin Health lists as "last runs". **Residual:** production
+  Redis is unauthenticated (§13 #11): a party able to write Redis could plant an old first-seen value and make these
+  three idempotent housekeeping scans run at the next boot instead of a day later (a future or malformed value is
+  ignored), or delete it — the same reach it already has over the stamps themselves. bullmq scheduler mode is unchanged.
+- **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
+  Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
+  `crewflow_worker` only under global). Comment-only.
 
 ## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
 
@@ -4745,3 +4918,17 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
   `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
   own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.

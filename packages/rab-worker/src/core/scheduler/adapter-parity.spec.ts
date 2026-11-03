@@ -67,7 +67,8 @@ const ENV: Record<string, unknown> = {
 };
 const emailQueue = { publish: jest.fn(), republish: jest.fn() };
 const pushQueue = { publish: jest.fn(), republish: jest.fn() };
-const shiftStatementQueue = { add: jest.fn() };
+// D-Q1: the producer queue carries its registry name (checked before add), like the real BoundedProducerQueue.
+const shiftStatementQueue = { name: 'rab-shift-statements', add: jest.fn() };
 const deps = {
   logger: { log: jest.fn() },
   runtimeDataSource: tag('runtime'), directDataSource: tag('direct'), tenantContext: tag('tenant'), auditService: tag('audit'),
@@ -154,9 +155,11 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((finalTs.runFinalTimesheetCycle as jest.Mock).mock.calls[0]).toEqual([d.directDataSource, d.tenantContext, d.emailOutboxService, d.fileService, { audit: d.auditService }]);
     expect((payroll.runPayrollPeriodAttentionCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
     const publish = (statement.runShiftStatementDispatchCycle as jest.Mock).mock.calls[0][2];
-    await publish({ payrollRecordId: 'r1', generation: 4, organisationId: 'o', workspaceId: 'w' });
-    expect(shiftStatementQueue.add).toHaveBeenCalledWith('generate-shift-statement', { payrollRecordId: 'r1', generation: 4, organisationId: 'o', workspaceId: 'w' }, {
-      jobId: 'shift-statement.r1.gen.4', attempts: 1, removeOnComplete: { age: 604800 }, removeOnFail: { age: 2592000 },
+    // D-Q1: organisation ids are UUIDs (the declared tenant scope is validated); the add() itself is unchanged.
+    const [r1, o, w] = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-0000000000a1'];
+    await publish({ payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w });
+    expect(shiftStatementQueue.add).toHaveBeenCalledWith('generate-shift-statement', { payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w }, {
+      jobId: `shift-statement.${r1}.gen.4`, attempts: 1, removeOnComplete: { age: 604800 }, removeOnFail: { age: 2592000 },
     });
   });
 

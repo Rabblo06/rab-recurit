@@ -27,7 +27,15 @@ export interface CreatePushDeliveryParams {
 export class PushDeliveryService {
   constructor(private readonly env: EnvironmentService) {}
 
-  async createForNotification(manager: EntityManager, params: CreatePushDeliveryParams): Promise<number> {
+  /**
+   * `onCreated` (Phase D-Q3, optional): told the ids of the rows just saved, in this transaction — NotificationService
+   * uses it to register an after-commit fast publish. The return value (a count) is unchanged.
+   */
+  async createForNotification(
+    manager: EntityManager,
+    params: CreatePushDeliveryParams,
+    onCreated?: (rows: Array<{ id: string; organisationId: string }>) => void,
+  ): Promise<number> {
     if (!this.env.get('PUSH_ENABLED')) return 0;
 
     const devices = await manager.find(PushDevice, {
@@ -46,6 +54,7 @@ export class PushDeliveryService {
       }),
     );
     await manager.save(rows);
+    onCreated?.(rows.map((r) => ({ id: r.id, organisationId: r.organisationId })));
     return rows.length;
   }
 }

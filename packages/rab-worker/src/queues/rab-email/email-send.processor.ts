@@ -432,6 +432,12 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<Rev
     if (!invite) return { ok: false, reason: 'Invitation no longer exists.' };
     if (invite.revokedAt) return { ok: false, reason: 'Invitation was cancelled or superseded before delivery.' };
     if (invite.acceptedAt) return { ok: false, reason: 'Invitation was already accepted before delivery.' };
+    // Phase D-Q (owner decision "always queue"): an invite queued while the Worker was down can reach this point long
+    // after it was issued. An expired invite carries a link the activation endpoint would refuse anyway — never send it
+    // (fail closed: cancelled, like the member/organisation invitations and the reset token below).
+    if (!(invite.expiresAt instanceof Date) || Number.isNaN(invite.expiresAt.getTime()) || invite.expiresAt.getTime() <= Date.now()) {
+      return { ok: false, reason: 'Invitation expired before delivery.' };
+    }
     // Still the user's CURRENT invite — a stale queued job for a
     // since-superseded row must never send even if nobody explicitly
     // revoked it (defense in depth alongside AccountInviteService.commit's

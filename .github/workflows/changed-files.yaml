@@ -60,8 +60,15 @@ jobs:
               - *shared
               - *ui
               - 'packages/rab-mobile/**'
+            # Root dependency manifests are copied into the image's install stage: a change there must also build and
+            # gate linux/arm64 on the PR (CodeRabbit, PR #41).
             docker:
               - 'packages/rab-docker/**'
+              - 'package.json'
+              - 'yarn.lock'
+              - '.yarnrc.yml'
+              - '.yarn/**'
+              - '.dockerignore'
               - 'packages/rab-server/**'
               - 'packages/rab-worker/**'
               - 'packages/rab-shared/**'

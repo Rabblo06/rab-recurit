@@ -145,6 +145,8 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Phase D (D1/D2): dispatch claim mode, wake-up mode, backstop, legacy reconciliation and claim batch (validated by the
   // shared EnvironmentVariables class; defaults per_scope / poll / 30 / 900 / 100; event without global refuses to boot).
   'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH',
+  // Phase D-Q3: after-commit fast publish of notify() email/push rows written by Worker jobs (default false).
+  'WORKER_FAST_PUBLISH_NOTIFY',
   // Phase D wave 2: may the account-invite cleanup delete expired-invite user accounts — default false; true in production
   // refuses to boot until the owner approves a retention policy (env.validation.ts). Forwarded verbatim, never invented.
   'WORKER_INVITE_AUTO_DELETE_ENABLED',
