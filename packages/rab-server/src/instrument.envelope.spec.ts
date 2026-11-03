@@ -150,6 +150,8 @@ const S = JSON.parse(process.env.ENVELOPE_TEST_SECRETS);
       tracesSampleRate: o.tracesSampleRate,
       profilesSampleRate: o.profilesSampleRate === undefined ? null : o.profilesSampleRate,
       release: o.release === undefined ? null : o.release,
+      spotlight: o.spotlight === undefined ? null : o.spotlight,
+      debug: o.debug === undefined ? null : o.debug,
     },
     dataCollection: client.getDataCollectionOptions(),
   }));
@@ -266,12 +268,19 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
   let childOutput = '';
   let childExitCode: number | null = null;
   let report: Record<string, any> = {};
+  // Requests that reached the Spotlight sidecar path (SENTRY_SPOTLIGHT points at this stub): must stay 0.
+  let spotlightRequests = 0;
 
   beforeAll(async () => {
     ingest = createServer((req: IncomingMessage, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
+        if ((req.url ?? '').startsWith('/spotlight')) {
+          spotlightRequests += 1;
+          res.end('{}');
+          return;
+        }
         let body = Buffer.concat(chunks);
         if (req.headers['content-encoding'] === 'gzip') body = gunzipSync(body);
         envelopes.push(parseEnvelope(body.toString('utf8')));
@@ -294,6 +303,9 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       SENTRY_TRACES_SAMPLE_RATE: '1',
       ENVELOPE_TEST_SECRETS: JSON.stringify(SECRETS),
       ENVELOPE_TEST_REPORT: reportFile,
+      // F5: an operator or platform env asking for Spotlight / SDK debug logging must change nothing.
+      SENTRY_SPOTLIGHT: `http://127.0.0.1:${port}/spotlight/stream`,
+      SENTRY_DEBUG: 'true',
       ENVELOPE_TEST_INTEGRATION_CANDIDATES: JSON.stringify(
         INTEGRATION_CANDIDATES,
       ),
@@ -438,6 +450,8 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       tracesSampleRate: 1, // forced by this test through SENTRY_TRACES_SAMPLE_RATE; production default is 0.01
       profilesSampleRate: null,
       release: null, // see RELEASE_ENV_VARS: a new inferred-release variable fails here, not in the item-type check
+      spotlight: false, // despite SENTRY_SPOTLIGHT in the child's environment
+      debug: false, // despite SENTRY_DEBUG=true
     });
     // Sentry 10 derives its data-collection categories from sendDefaultPii: false (the restrictive legacy mapping).
     expect(report.dataCollection).toMatchObject({
@@ -453,6 +467,11 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
     expect(all).not.toContain(SECRETS.headerProbe);
     expect(all).not.toContain(SECRETS.refererToken);
     expect(all).not.toContain('http.request.header.');
+  });
+
+  it('SENTRY_SPOTLIGHT adds no Spotlight integration and sends nothing to its sidecar URL (H4b, review F5)', () => {
+    expect(report.installedAll as string[]).not.toContain('Spotlight');
+    expect(spotlightRequests).toBe(0);
   });
 
   // Sessions: like Sentry 8, the allowed Http integration records request sessions, which Sentry sends only when a

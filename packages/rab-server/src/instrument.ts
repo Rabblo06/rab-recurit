@@ -476,6 +476,11 @@ export function buildSentryOptions(
     tracesSampler: undefined,
     profilesSampleRate: undefined,
     profilesSampler: undefined,
+    // `spotlight` adds the Spotlight integration AFTER the `integrations` function runs and POSTs every envelope over
+    // plain HTTP to its sidecar URL; `false` also stops Sentry reading SENTRY_SPOTLIGHT. `debug: false` likewise wins
+    // over SENTRY_DEBUG (SDK debug logging prints SDK internals to the console).
+    spotlight: false,
+    debug: false,
     // A function, not an array: an array is merged with Sentry's defaults, so every new default integration would run.
     // See ALLOWED_DEFAULT_INTEGRATIONS. (`include.user` is gone: Sentry 9 stopped reading `request.user` entirely.)
     integrations: (defaults) => selectIntegrations(defaults),

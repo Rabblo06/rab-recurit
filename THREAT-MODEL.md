@@ -4627,7 +4627,10 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   `ProcessAndThreadBreadcrumbs`) plus the restricted `RequestData`; anything a later 10.x minor adds is dropped (fail
   closed). `enableLogs: false` and `enableMetrics: false` explicitly (Sentry 10 defaults both to on; neither channel
   has a scrubber here). `dataCollection`, `defaultIntegrations`, `openTelemetryInstrumentations`, `tracesSampler` and
-  profiling are pinned after the test-only `overrides`, so no override can widen collection or sampling. The SDK is
+  profiling are pinned after the test-only `overrides`, so no override can widen collection or sampling. `spotlight:
+  false` and `debug: false` are pinned the same way: Spotlight is added after the `integrations` function and POSTs every
+  envelope over plain HTTP to its sidecar URL, and `false` also stops Sentry reading `SENTRY_SPOTLIGHT` / `SENTRY_DEBUG`
+  from the environment (review F5; Sentry 8.55 behaved the same, so this closes a pre-existing path). The SDK is
   pinned to exactly 10.78.0: the name allow-list cannot catch a new default-on option in a later minor. `db.user` is
   added to the dropped span attributes (the only scrubber change; stricter). Sentry 10's `http.server` span now copies
   request headers that its own deny lists keep (referer with its query string, custom headers) into
@@ -4653,4 +4656,5 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   variable). With tracing sampled, `baggage`/`sentry-trace` still go to every outgoing host (`tracePropagationTargets`
   unset, as before); Sentry 10 adds the Sentry `org_id` to that baggage. `@opentelemetry/sdk-trace-base` 2.x carries
   an npm deprecation notice (not an advisory). Independent review (2026-11-03, read-only): no Critical / High / Medium;
-  Low items 1-4 fixed here, 5-6 documented above.
+  Low items 1-4 fixed here, 5-6 documented above. Programme review F5 (Low, Spotlight / debug via
+  environment or override) fixed: proven by a child process with `SENTRY_SPOTLIGHT` pointing at the stub ingest.

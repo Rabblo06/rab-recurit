@@ -255,6 +255,8 @@ describe('instrument.ts — Sentry privacy options', () => {
         openTelemetryInstrumentations: [{}],
         tracesSampler: () => 1,
         profilesSampleRate: 1,
+        spotlight: 'http://127.0.0.1:8969/stream',
+        debug: true,
         beforeSend: (event: ErrorEvent) => event,
         integrations: [],
       } as unknown as Partial<NodeOptions>);
@@ -262,6 +264,8 @@ describe('instrument.ts — Sentry privacy options', () => {
       expect(built?.includeLocalVariables).toBe(false);
       expect(built?.enableLogs).toBe(false);
       expect(built?.enableMetrics).toBe(false);
+      expect(built?.spotlight).toBe(false); // F5: Spotlight would be added after the integrations function
+      expect(built?.debug).toBe(false);
       for (const key of [
         'dataCollection',
         'defaultIntegrations',
