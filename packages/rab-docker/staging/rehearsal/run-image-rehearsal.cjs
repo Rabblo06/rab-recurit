@@ -253,7 +253,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   }
 
   await step('R01', 'Throwaway infrastructure up; Redis from the variant (reviewed config, per-run ACL)', async () => {
-    const r = compose(['up', '-d', '--wait', '--pull', 'never', 'pg', 'rab-redis', 'smtp', 'minio', 'minio-init'], { timeout: 300_000 });
+    // minio-init is a one-shot: `up --wait` reports an exited container as a failure, so it runs as rab-api's dependency.
+    const r = compose(['up', '-d', '--wait', '--pull', 'never', 'pg', 'rab-redis', 'smtp', 'minio'], { timeout: 300_000 });
     assert(r.code === 0, 'infrastructure did not start');
     const redisImage = inspectId(containerId('rab-redis'), '{{.Config.Image}}');
     write(`rab-redis image: ${redisImage}`);
@@ -289,7 +290,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       write(`== ${name}: exit ${r.code}, pending ${pending}, token ${token ? token.slice(0, 20) + '…' : '-'}`);
       return { ...r, token, pending };
     };
-    const ledger = () => Number(sql1("SELECT CASE WHEN to_regclass('core.migrations') IS NULL THEN 0 ELSE (SELECT count(*) FROM core.migrations) END") || 0);
+    // Two statements: a CASE with a subquery on a missing table fails at planning time, before the CASE is evaluated.
+    const ledger = () => (sql1("SELECT to_regclass('core.migrations') IS NOT NULL") === 't' ? Number(sql1('SELECT count(*) FROM core.migrations')) : 0);
     const ownerUrl = 'postgres://rab_owner:rab_owner_dev_only@pg:5432/rab';
     const superUrl = `postgres://rab:${SECRETS.S_SUPERUSER_PASSWORD}@pg:5432/rab`;
     const aCheck = run('phaseA-check', { PG_DATABASE_URL: ownerUrl, CREWFLOW_MIGRATION_PHASE: 'A' });
