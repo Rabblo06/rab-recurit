@@ -4,30 +4,41 @@
 #
 #   bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh [file...]   (default: every tracked Dockerfile)
 #
-# Backslash-continued lines are joined and split into commands at && || ; | and every command that runs `apk` is
-# checked for: -X with a separate or attached argument (-X url, -Xurl), any --rep… prefix (--repository,
-# --repositories-file and their unambiguous abbreviations), any --allow-u… prefix (--allow-untrusted) and --keys-dir
-# (alternative signing keys). Arguments of other commands (e.g. `curl -X POST`) are not checked.
-# Exit 1 on any hit or if no file is checked.
+# Like Docker, comment lines are dropped (also inside a continued instruction) and backslash-continued lines are joined.
+# Each instruction is split into commands at && || ; | and every command in which `apk` appears as a word (also after
+# `if`, `then`, `!`, `$(`, a backtick, `=` or a path such as /sbin/apk) is checked for: -X with a separate or attached
+# argument (-X url, -Xurl), any --rep… prefix (--repository, --repositories-file and their unambiguous abbreviations),
+# any --allow-u… prefix (--allow-untrusted) and --keys-dir (alternative signing keys). Other commands' arguments
+# (e.g. `curl -X POST`) are not checked. Exit 1 on any hit, on an unreadable file, or if no file is checked.
 set -euo pipefail
+fail() {
+  echo "::error::$*"
+  exit 1
+}
 if [ "$#" -gt 0 ]; then
   files=("$@")
 else
   mapfile -t files < <(git ls-files 'packages/rab-docker/*Dockerfile*')
 fi
-[ "${#files[@]}" -gt 0 ] || { echo "::error::no Dockerfile found under packages/rab-docker"; exit 1; }
-hits="$(
-  for f in "${files[@]}"; do
-    awk -v F="$f" '
-      function emit(text,   n, i, parts) { n = split(text, parts, /&&|\|\||;|\|/); for (i = 1; i <= n; i++) print F ": " parts[i] }
-      { line = $0; if (sub(/\\[[:space:]]*$/, "", line)) { buf = buf line " "; next } emit(buf line); buf = "" }
-      END { if (buf != "") emit(buf) }' "$f"
-  done | grep -E ': [[:space:]]*(RUN[[:space:]]+)?(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*/)?apk[[:space:]]' \
-       | grep -E -- '[[:space:]](-X|--rep|--allow-u|--keys-dir)' || true
-)"
+[ "${#files[@]}" -gt 0 ] || fail "no Dockerfile found under packages/rab-docker"
+commands=""
+for f in "${files[@]}"; do
+  { [ -f "$f" ] && [ -r "$f" ]; } || fail "cannot read $f"
+  out="$(awk -v F="$f" '
+    function emit(text,   n, i, parts) { n = split(text, parts, /&&|\|\||;|\|/); for (i = 1; i <= n; i++) print F ": " parts[i] }
+    /^[[:space:]]*#/ { next }
+    { line = $0; if (sub(/\\[[:space:]]*$/, "", line)) { buf = buf line " "; next } emit(buf line); buf = "" }
+    END { if (buf != "") emit(buf) }' "$f")" || fail "could not parse $f"
+  commands+="$out"$'\n'
+done
+rc=0
+apk_commands="$(printf '%s' "$commands" | grep -E '(^|[[:space:]/(`=!])apk([[:space:]]|$)')" || rc=$?
+[ "$rc" -le 1 ] || fail "apk command scan failed (grep exit $rc)"
+rc=0
+hits="$(printf '%s' "$apk_commands" | grep -E -- '[[:space:]](-X|--rep|--allow-u|--keys-dir)')" || rc=$?
+[ "$rc" -le 1 ] || fail "apk option scan failed (grep exit $rc)"
 if [ -n "$hits" ]; then
   printf '%s\n' "$hits"
-  echo "::error::apk repository override, alternative keys or --allow-untrusted in a Dockerfile (see above)"
-  exit 1
+  fail "apk repository override, alternative keys or --allow-untrusted in a Dockerfile (see above)"
 fi
 echo "checked: ${files[*]}"
