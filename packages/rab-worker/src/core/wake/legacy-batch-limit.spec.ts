@@ -174,3 +174,16 @@ describe('statement per_scope discovery: one note per workspace whose 200-record
     expect(sha256(scans[0]!.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
   });
 });
+
+describe('D-Q5a: realtime rows the claim ended failed (lease-reclaim cap) still count toward a full batch', () => {
+  it('24 returned + 1 exhausted = 25 rows taken by the LIMIT → one note (more due events may remain)', async () => {
+    const make = (i: number, status: string) => ({
+      id: id(i), organisation_id: ORG_A, workspace_id: WS, target_user_id: id(900), event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id(i),
+      payload: {}, schema_version: 1, attempt_count: 0, max_attempts: 5, claim_token: 't', created_at: new Date(0), status,
+    });
+    const claimRows = [...rows(24, (i) => make(i, 'processing')), make(25, 'failed')];
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 25] : [[{ id: id(1) }], 1]));
+    const sweep = await captureLegacyBatchLimit(() => publishRealtimeScope(tenant as never, jest.fn(async () => 1), 'test', { organisationId: ORG_A, workspaceId: WS }, {}));
+    expect(sweep.scopesAtLimit).toBe(1);
+  });
+});

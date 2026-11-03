@@ -153,11 +153,24 @@ export async function publishRealtimeScope(
   const limit = opts.ids !== undefined ? opts.ids.length : (opts.perScopeLimit ?? DEFAULT_PER_SCOPE_LIMIT);
 
   const claimToken = randomUUID();
+  // D-Q5a: rows the claim itself ended `failed` (a lease reclaim that exhausted max_attempts) are not returned; they count
+  // as `failed` here (attempts exhausted, the same bucket as markRealtimeEventRetry's 'failed') and are never published.
+  let reclaimExhausted = 0;
   const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
-    claimRealtimeEvents(manager, { limit, claimToken, leaseSeconds, ...(opts.ids !== undefined ? { ids: opts.ids } : {}) }),
+    claimRealtimeEvents(manager, {
+      limit,
+      claimToken,
+      leaseSeconds,
+      ...(opts.ids !== undefined ? { ids: opts.ids } : {}),
+      onReclaimExhausted: (count) => {
+        reclaimExhausted = count;
+      },
+    }),
   );
-  // #24: a full per_scope batch means more due events may remain in this scope (global-mode follow-up sweep).
-  if (opts.ids === undefined && claimed.length >= limit) noteLegacyBatchLimitReached();
+  result.failed += reclaimExhausted;
+  // #24: a full per_scope batch means more due events may remain in this scope (global-mode follow-up sweep). An
+  // exhausted row was still taken by the LIMIT, so it counts toward "full" exactly as before D-Q5a.
+  if (opts.ids === undefined && claimed.length + reclaimExhausted >= limit) noteLegacyBatchLimitReached();
   if (claimed.length === 0) return result;
   result.claimed += claimed.length;
   for (const event of claimed) {

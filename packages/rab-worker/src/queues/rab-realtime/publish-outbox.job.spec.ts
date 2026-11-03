@@ -187,3 +187,60 @@ describe('realtime publisher — global mode scope', () => {
     expect(table.rows.get(E1)!.status).toBe('pending');
   });
 });
+
+/**
+ * D-Q5a (§5.2, audit §13 #6 realtime half): a lease reclaim counts as an attempt and is capped. Only the UPDATE's SET /
+ * RETURNING changed; the MATERIALIZED CTE (eligibility, order, LIMIT, FOR UPDATE SKIP LOCKED) is byte-identical to the
+ * pre-Phase-D per_scope claim and to the D1 global claim. The real-PostgreSQL proof is
+ * dq5-realtime-lease-reclaim.integration.spec.ts.
+ */
+describe('D-Q5a realtime lease-reclaim cap', () => {
+  /** sha256 of the claim SQL up to (not including) `UPDATE core.realtime_event`, from the sources before D-Q5a. */
+  const PRE_DQ5A_CTE_SHA256 = {
+    perScope: '8f04334f6c70f8200ed3a542e3c171fd80760c32d041073794e260622964b5ea',
+    global: '5228ed1c92d57abad5d68828a9f4bade18597de35bf5385f37182222e129d9ca',
+  };
+  const cte = (sql: string) => sql.slice(0, sql.indexOf('UPDATE core.realtime_event'));
+  const claimRow = (id: string, status: string, attempt = 0) => ({
+    id, organisation_id: ORG, workspace_id: WS, target_user_id: USER, event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id,
+    payload: {}, schema_version: 1, attempt_count: attempt, max_attempts: 10, claim_token: 't', created_at: new Date(0), status,
+  });
+
+  it.each([
+    ['per_scope', undefined, PRE_DQ5A_CTE_SHA256.perScope],
+    ['global', [E1], PRE_DQ5A_CTE_SHA256.global],
+  ] as const)('%s: the CTE (eligibility, order, limit, locking) is byte-identical to before D-Q5a', async (_mode, ids, expected) => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
+    await publishRealtimeScope(tenant as never, jest.fn(), 'test', { organisationId: ORG, workspaceId: WS }, ids ? { ids: [...ids] } : {});
+    expect(sha256(cte(statements[0]!.sql))).toBe(expected);
+  });
+
+  it.each([['per_scope', undefined], ['global', [E1]]] as const)('%s: the UPDATE counts a reclaim and fails it at max_attempts (same arithmetic as markRealtimeEventRetry)', async (_mode, ids) => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
+    await publishRealtimeScope(tenant as never, jest.fn(), 'test', { organisationId: ORG, workspaceId: WS }, ids ? { ids: [...ids] } : {});
+    const update = statements[0]!.sql.slice(statements[0]!.sql.indexOf('UPDATE core.realtime_event')).replace(/\s+/g, ' ');
+    expect(update).toContain("WHEN status = 'processing' THEN attempt_count + 1 ELSE attempt_count END");
+    expect(update).toContain("status = 'processing' AND attempt_count + 1 >= max_attempts");
+    expect(update).toContain("'LEASE_RECLAIM_EXHAUSTED'");
+    expect(update).toContain('WHERE id IN (SELECT id FROM claimable)');
+    expect(update).toMatch(/RETURNING .*\bstatus$/);
+  });
+
+  it('a row the claim ended failed (exhausted) is not published, is counted as failed, and is not a claimed row', async () => {
+    const E2 = '00000000-0000-4000-8000-000000000002';
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[claimRow(E1, 'failed', 10), claimRow(E2, 'processing')], 2] : [[{ id: E2 }], 1]));
+    const publish = jest.fn(async () => 1);
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, { ids: [E1, E2] });
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((publish.mock.calls[0] as unknown as [string, string])[1]).eventId).toBe(E2);
+    expect(result).toMatchObject({ claimed: 1, published: 1, failed: 1 });
+    // No write is issued for the exhausted row: the claim statement already ended it.
+    expect(statements.filter((s) => s.params.includes(E1) && !s.sql.includes('WITH claimable'))).toEqual([]);
+  });
+
+  it('rows from a responder without a status column (pre-D-Q5a shape) are all returned — only an explicit failed row is withheld', async () => {
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[{ ...claimRow(E1, 'processing'), status: undefined }], 1] : [[{ id: E1 }], 1]));
+    const result = await publishRealtimeScope(tenant as never, jest.fn(async () => 1), 'test', { organisationId: ORG, workspaceId: WS }, { ids: [E1] });
+    expect(result).toMatchObject({ claimed: 1, published: 1, failed: 0 });
+  });
+});

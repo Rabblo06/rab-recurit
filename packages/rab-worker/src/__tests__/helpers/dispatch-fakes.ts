@@ -70,7 +70,13 @@ export const PRE_PHASE_D_SQL_SHA256 = Object.freeze({
    * LIMIT / locking unchanged) — see push-dispatch.job.ts PENDING_STALE_MINUTES.
    */
   pushClaim: '806c1be49970cbe12910849ab21629f7bad33bb8f66b08869bccc4cddc7f12c2',
-  realtimeClaim: 'b49c95061a63adb2cfc1238e62e5a298643614acb6499b8b882af05601822292',
+  /**
+   * Realtime claim: 3654d0b8 was b49c95061a63adb2cfc1238e62e5a298643614acb6499b8b882af05601822292. Changed ON PURPOSE by
+   * D-Q5a (audit §13 #6, realtime half): the UPDATE's SET / RETURNING count a lease reclaim and cap it at max_attempts. The
+   * MATERIALIZED CTE (WHERE / ORDER / LIMIT / locking) is unchanged — pinned separately, byte for byte, in
+   * publish-outbox.job.spec.ts ('D-Q5a realtime lease-reclaim cap').
+   */
+  realtimeClaim: '01a931fdb457a3f25877c3c34515372e98a5d6c72113378653b6e27ed61b2bd4',
   statementScan: '13fda1b75bbfd058220d2935b2d714598f6fe7f56a2b9a2e7a31f4589a17466c',
   statementCas: '53b4ec6e8767d72927523b8102a4b7eb72cb3f631244c72f779988e81c441f82',
 });
