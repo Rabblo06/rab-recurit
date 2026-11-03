@@ -4623,6 +4623,10 @@ posture change.
   payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
   with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
   (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+  **This is not a new tenant boundary.** For every current producer, the scope's `organisationId` and the payload's
+  `organisationId` come from the same argument, so "scope must equal payload" cannot fail today. What the check adds is
+  validation of shape, UUID format and payload keys, plus a guard for future producers that might build the two
+  separately. Tenant isolation is still enforced by the consumers: `SET LOCAL` plus the RLS re-read, described next.
 - **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
   (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
   `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
