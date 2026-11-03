@@ -228,6 +228,25 @@ export async function completeRealtimeEvent(manager: EntityManager, eventId: str
 }
 
 /**
+ * D-Q5a (CodeRabbit on #47): extends the lease of rows a LIVE claimant still holds, so a slow batch (up to 25 sequential
+ * publishes, each bounded at 3 s, plus retry writes) is never reclaimed — and, since D-Q5a, counted as an attempt — while
+ * its claimant is still working through it. Fenced exactly like completion: only rows still `processing` under THIS
+ * `claimToken` are touched; a row already reclaimed by someone else is silently skipped. Changes nothing but
+ * `lease_expires_at`. Returns how many rows were renewed. Callers renew only once half the lease has elapsed, so a normal
+ * batch never issues this statement.
+ */
+export async function renewRealtimeEventLeases(manager: EntityManager, eventIds: readonly string[], claimToken: string, leaseSeconds: number): Promise<number> {
+  if (eventIds.length === 0) return 0;
+  const [rows] = await manager.query<[Array<{ id: string }>, number]>(
+    `UPDATE core.realtime_event SET lease_expires_at = now() + ($3 || ' seconds')::interval
+     WHERE id = ANY($1::uuid[]) AND status = 'processing' AND claim_token = $2
+     RETURNING id`,
+    [[...eventIds], claimToken, String(leaseSeconds)],
+  );
+  return rows.length;
+}
+
+/**
  * The delivery attempt failed in a way that's worth retrying (e.g. Redis
  * was briefly unreachable). Bounded: once `attempt_count + 1` would reach
  * `max_attempts`, this transitions to `failed` instead of scheduling

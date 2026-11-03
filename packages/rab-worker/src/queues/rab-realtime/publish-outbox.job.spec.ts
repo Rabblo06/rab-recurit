@@ -244,3 +244,58 @@ describe('D-Q5a realtime lease-reclaim cap', () => {
     expect(result).toMatchObject({ claimed: 1, published: 1, failed: 0 });
   });
 });
+
+/** D-Q5a (CodeRabbit on #47): a live claimant renews its lease once half of it has elapsed; a normal batch never does. */
+describe('D-Q5a realtime lease renewal during a slow batch', () => {
+  const ids = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000013', '00000000-0000-4000-8000-000000000014'];
+  const claimRows = ids.map((id) => ({
+    id, organisation_id: ORG, workspace_id: WS, target_user_id: USER, event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id,
+    payload: {}, schema_version: 1, attempt_count: 0, max_attempts: 10, claim_token: 't', created_at: new Date(0), status: 'processing',
+  }));
+  const isRenew = (sql: string) => sql.includes('SET lease_expires_at = now()') && !sql.includes('WITH claimable');
+  let clock = 0;
+  beforeEach(() => {
+    clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a batch that finishes inside half the lease issues NO renewal (identical statements to before)', async () => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 1_000;
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    expect(result).toMatchObject({ claimed: 4, published: 4 });
+    expect(statements.filter((s) => isRenew(s.sql))).toEqual([]);
+  });
+
+  it('once half the 60 s lease has elapsed, ONE fenced renewal covers exactly the rows still to do', async () => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : isRenew(sql) ? [[{ id: ids[2] }, { id: ids[3] }], 2] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 20_000; // a slow (but alive) publisher
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    expect(result).toMatchObject({ claimed: 4, published: 4 });
+    const renewals = statements.filter((s) => isRenew(s.sql));
+    expect(renewals).toHaveLength(1);
+    const claimToken = statements.find((s) => s.sql.includes('WITH claimable'))!.params[0];
+    expect(renewals[0]!.params).toEqual([[ids[2], ids[3]], claimToken, '60']);
+    expect(renewals[0]!.sql).toContain("status = 'processing' AND claim_token = $2");
+  });
+
+  it('NEGATIVE: a renewal that throws does not stop the batch (falls back to the pre-renewal behaviour)', async () => {
+    const { tenant } = fakeTenant((sql) => {
+      if (sql.includes('WITH claimable')) return [claimRows, 4];
+      if (isRenew(sql)) throw new Error('connection reset');
+      return [[{ id: 'x' }], 1];
+    });
+    const publish = jest.fn(async () => {
+      clock += 20_000;
+      return 1;
+    });
+    await expect(publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {})).resolves.toMatchObject({ claimed: 4, published: 4 });
+  });
+});

@@ -6,7 +6,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AppModule } from '@rab/server/app.module';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
-import { claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry } from '../../core/database/realtime-event';
+import { claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, renewRealtimeEventLeases } from '../../core/database/realtime-event';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
@@ -250,5 +250,37 @@ describeIfDb('D-Q5a §13 #6: a realtime lease reclaim counts as an attempt and i
     const noneGlobal = await dataSource.transaction((m) => claimRealtimeEvents(m, { limit: 25, claimToken: randomUUID(), ids: [id] }));
     expect(noneGlobal).toEqual([]);
     expect(await row(identity, id)).toMatchObject({ status: 'processing', attempt_count: 0 });
+  });
+  it("lease renewal (CodeRabbit on #47): only the live claimant's token renews, only under its own organisation", async () => {
+    const a = await newIdentity('dq5aRenA');
+    const b = await newIdentity('dq5aRenB');
+    const id = await seedEvent(a, 10);
+    const [c] = await withContext(a, (m) => claimRealtimeEvents(m, { limit: 25, claimToken: randomUUID(), leaseSeconds: 1 }));
+    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], randomUUID(), 300))).toBe(0); // wrong token
+    expect(await withContext(b, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(0); // other organisation (RLS)
+    expect(await dataSource.transaction((m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(0); // no tenant context
+    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(1);
+    const after = await row(a, id);
+    expect(after.lease_expires_at!.getTime()).toBeGreaterThan(Date.now() + 250_000);
+    expect(after).toMatchObject({ status: 'processing', attempt_count: 0, claim_token: c!.claimToken });
+  });
+
+  it('a slow but live publisher keeps its batch: a competing claim during the batch gets nothing and nothing is counted', async () => {
+    const identity = await newIdentity('dq5aSlow');
+    const ids = [await seedEvent(identity, 10), await seedEvent(identity, 10), await seedEvent(identity, 10)];
+    const competitor: string[] = [];
+    let n = 0;
+    const result = await publishRealtimeScope(tenantContext, async () => {
+      n += 1;
+      await new Promise((r) => setTimeout(r, 1_200)); // lease 2 s: without renewal, row 3 is past its lease here
+      if (n === 3) {
+        const got = await withContext(identity, (m) => claimRealtimeEvents(m, { limit: 25, claimToken: randomUUID(), leaseSeconds: 60 }));
+        competitor.push(...got.map((g) => g.id));
+      }
+      return 1;
+    }, 'test', { organisationId: identity.organisationId, workspaceId: identity.workspaceId }, { leaseSeconds: 2 });
+    expect(competitor).toEqual([]);
+    expect(result).toMatchObject({ claimed: 3, published: 3, failed: 0 });
+    for (const id of ids) expect(await row(identity, id)).toMatchObject({ status: 'completed', attempt_count: 0 });
   });
 });

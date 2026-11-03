@@ -6,7 +6,7 @@ import { validateAndBuildEnvelope } from '@rab/server/engine/core-modules/realti
 import { storageScopes, MaintenanceScope } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { runScopedForOrg } from '../../core/database/scoped-job';
 import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
-import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent } from '../../core/database/realtime-event';
+import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent, renewRealtimeEventLeases } from '../../core/database/realtime-event';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 /**
@@ -156,6 +156,7 @@ export async function publishRealtimeScope(
   // D-Q5a: rows the claim itself ended `failed` (a lease reclaim that exhausted max_attempts) are not returned; they count
   // as `failed` here (attempts exhausted, the same bucket as markRealtimeEventRetry's 'failed') and are never published.
   let reclaimExhausted = 0;
+  let leaseFrom = Date.now(); // taken BEFORE the claim: the lease can only be later than this, never earlier
   const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
     claimRealtimeEvents(manager, {
       limit,
@@ -173,9 +174,25 @@ export async function publishRealtimeScope(
   if (opts.ids === undefined && claimed.length + reclaimExhausted >= limit) noteLegacyBatchLimitReached();
   if (claimed.length === 0) return result;
   result.claimed += claimed.length;
-  for (const event of claimed) {
+  // D-Q5a (CodeRabbit on #47): the batch is processed sequentially (each publish bounded at 3 s, plus retry writes), so a
+  // slow batch can outlast the lease. Once half the lease has elapsed, renew it for the rows still to do, so another
+  // claimant never reclaims (and, since D-Q5a, counts an attempt against) a row this live claimant still holds. A normal
+  // batch finishes long before that and issues no extra statement. A failed renewal is not fatal (pre-renewal behaviour).
+  const renewAfterMs = (leaseSeconds * 1000) / 2;
+  for (let i = 0; i < claimed.length; i += 1) {
+    if (Date.now() - leaseFrom >= renewAfterMs) {
+      const remaining = claimed.slice(i).map((e) => e.id);
+      const renewFrom = Date.now();
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) => renewRealtimeEventLeases(manager, remaining, claimToken, leaseSeconds));
+        leaseFrom = renewFrom;
+      } catch {
+        // keep going: the rows keep their current lease, exactly as before this renewal existed
+      }
+    }
     // eslint-disable-next-line no-await-in-loop
-    await processOne(event);
+    await processOne(claimed[i]!);
   }
   return result;
 
