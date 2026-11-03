@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
 // A push send (one HTTP call to FCM) completes in low single-digit seconds — same reasoning as
@@ -171,6 +172,13 @@ export async function dispatchPushScope(
       // re-visit inside the window writes nothing.
       if (firstPublish.length > 0) {
         await manager.query(`UPDATE core.push_delivery SET queued_at = now() WHERE id = ANY($1::uuid[]) AND queued_at IS NULL`, [firstPublish]);
+      }
+      // #24: a full per_scope batch means more due rows may remain in this organisation (global-mode follow-up sweep) — but
+      // only when this pass MOVED something. Unlike email, a published push row stays PENDING until the consumer takes it,
+      // so while the consumer is behind every pass re-selects the same oldest 50 already-queued rows; signalling then would
+      // only re-walk every organisation to re-publish deduplicated jobIds. Push backlog drain is therefore consumer-paced.
+      if (ids === undefined && claimed.length >= BATCH_SIZE && firstPublish.length + recovered.size + exhaustedCount + uncertainCount > 0) {
+        noteLegacyBatchLimitReached();
       }
       return { toPublish, recoveredGenerations, recovered, exhaustedCount, uncertainCount };
     });
