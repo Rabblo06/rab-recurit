@@ -1,4 +1,4 @@
-import { catalogue, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
+import { catalogue, DQ5A_SQL_SHA256, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { dispatchEmailScope, runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope, runPushDispatchCycle } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
@@ -143,7 +143,7 @@ describe('realtime per_scope scope: one note per scope whose 25-event batch came
   it.each([[0, 0], [24, 0], [25, 1]])('%i claimed → %i; the claim SQL is unchanged', async (n, expected) => {
     const { scopesAtLimit, claims } = await run(n);
     expect(scopesAtLimit).toBe(expected);
-    expect(sha256(claims[0]!.sql)).toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
+    expect(sha256(claims[0]!.sql)).toBe(DQ5A_SQL_SHA256.realtimeClaim);
   });
 
   it('the global-mode (ids) claim never signals', async () => {
@@ -172,5 +172,18 @@ describe('statement per_scope discovery: one note per workspace whose 200-record
     const { scopesAtLimit, scans } = await run(n);
     expect(scopesAtLimit).toBe(expected);
     expect(sha256(scans[0]!.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
+  });
+});
+
+describe('D-Q5a: realtime rows the claim ended failed (lease-reclaim cap) still count toward a full batch', () => {
+  it('24 returned + 1 exhausted = 25 rows taken by the LIMIT → one note (more due events may remain)', async () => {
+    const make = (i: number, status: string) => ({
+      id: id(i), organisation_id: ORG_A, workspace_id: WS, target_user_id: id(900), event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id(i),
+      payload: {}, schema_version: 1, attempt_count: 0, max_attempts: 5, claim_token: 't', created_at: new Date(0), status,
+    });
+    const claimRows = [...rows(24, (i) => make(i, 'processing')), make(25, 'failed')];
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 25] : [[{ id: id(1) }], 1]));
+    const sweep = await captureLegacyBatchLimit(() => publishRealtimeScope(tenant as never, jest.fn(async () => 1), 'test', { organisationId: ORG_A, workspaceId: WS }, {}));
+    expect(sweep.scopesAtLimit).toBe(1);
   });
 });
