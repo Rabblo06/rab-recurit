@@ -95,10 +95,11 @@ jobs:
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "tags: $tags"
+      # docker login: skopeo and actions/attest-build-provenance (push-to-registry) both read Docker's credential store.
       - name: Log in to GHCR (GITHUB_TOKEN, never printed)
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Refuse to overwrite an immutable tag
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
@@ -146,4 +147,4 @@ jobs:
           push-to-registry: true
       - name: Log out of GHCR
         if: always()
-        run: skopeo logout ghcr.io || true
+        run: docker logout ghcr.io || true
