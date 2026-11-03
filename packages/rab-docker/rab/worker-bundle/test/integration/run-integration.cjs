@@ -606,8 +606,11 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
     const ra = compose(['--profile', 'mismatch', 'run', '--rm', '--no-deps', 'worker-mismatch'], { timeout: 180_000 });
     RAW_SERVICE_OUTPUTS.push(ra.raw);
     write(`--- 27a unmigrated other cluster: exit=${ra.code}\n${ra.out.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|db-boot-gates|workspace-provisioner\] started/.test(l)).join('\n')}`);
-    assert(ra.code === 1 && new RegExp(`\\[provisioner\\] \\[runtime-db-guard\\] process=provisioner .* cluster=${otherCluster} role=crewflow`).test(ra.out), '27a: provisioner did not probe the other cluster');
-    assert(/\[provisioner\] \[db-boot-gates\] Database boot gate "\S+" refused/.test(ra.out), '27a: unmigrated other cluster not refused by the provisioner boot gates');
+    // Which per-process gate refuses depends on how far the other cluster is set up (an init-only `core` schema the
+    // crewflow login cannot read fails the deployment-identity check with 42501; a readable but unmigrated one fails the
+    // required-extensions boot gate). Either way: the provisioner itself refuses, the service exits 1, nothing provisions.
+    assert(ra.code === 1, '27a: the bundle did not fail on an unmigrated other cluster');
+    assert(/\[provisioner\] \[(runtime-db-guard\] refused|db-boot-gates\] Database boot gate "\S+" refused)/.test(ra.out), "27a: unmigrated other cluster not refused by the provisioner's own guards");
     assert(!/\[workspace-provisioner\] started/.test(ra.out), '27a: the provisioner started working on an unmigrated other cluster');
     // 27b: migrate pg-other with the SAME guarded runner and bootstrap secrets as case 10 (a throwaway cluster of this
     // project only), so every per-process gate passes on BOTH clusters and only the launcher's comparison of the two
