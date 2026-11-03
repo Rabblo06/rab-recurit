@@ -546,11 +546,19 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
 
 /**
  * H6: the container-level isolation this launcher actually received, compared with what docker-compose.production.yml
- * declares (cap_drop ALL + SETUID/SETGID/KILL, no-new-privileges, read-only root, the four per-child tmpfs mounts).
- * REPORT ONLY — it never refuses: some platforms drop these keys (OpenShip's compose import does not model cap_*,
- * security_opt, read_only, tmpfs or pids_limit), and refusing there is an owner decision (THREAT-MODEL.md, Docker hardening
- * H6). The child identity split, the env allowlists and preflight() above do not depend on any of these keys.
- * Pure: takes the text of /proc/self/status and /proc/self/mounts, and the cgroup v2 pids.max / memory.max values.
+ * declares (cap_drop ALL + SETUID/SETGID/KILL, no-new-privileges, read-only root, the four per-child tmpfs mounts, PID and
+ * memory limits). The launcher's own identity (root, needed to start each child under its own UID/GID) is checked by
+ * preflight() above.
+ *
+ * CREWFLOW_RUNTIME_ISOLATION (owner decision "never drop a security setting silently"; strict values):
+ *   unset / empty / "warn"  report: one line, "runtime isolation as declared" or a WARNING naming each gap; starts anyway
+ *                           (the default: some platforms drop these keys — OpenShip's compose import does not model cap_*,
+ *                           security_opt, read_only, tmpfs or pids_limit — and the current production setup must keep
+ *                           starting);
+ *   "enforce"               the same check, but ANY gap (an unreadable value included) refuses to start;
+ *   anything else           refuses to start (no silent mode choice).
+ * The child identity split, the env allowlists and preflight() do not depend on these keys. Never forwarded to a child.
+ * runtimeIsolation() is pure: it takes the text of /proc/self/status and /proc/self/mounts and the cgroup v2 limits.
  */
 const LAUNCHER_CAPS = 0xe0n; // CAP_KILL (5) | CAP_SETGID (6) | CAP_SETUID (7)
 function runtimeIsolation(statusText, mountsText, { pidsMax, memoryMax } = {}, layout = DEFAULT_LAYOUT) {
@@ -566,7 +574,7 @@ function runtimeIsolation(statusText, mountsText, { pidsMax, memoryMax } = {}, l
   if (!/^[0-9a-f]{16}$/.test(capBnd ?? '')) gaps.push('capability bounding set unreadable');
   else if ((BigInt(`0x${capBnd}`) & ~LAUNCHER_CAPS) !== 0n) gaps.push(`capabilities beyond SETUID/SETGID/KILL (CapBnd=${capBnd})`);
   if (noNewPrivs !== '1') gaps.push('no-new-privileges is off');
-  if (rootReadOnly !== true) gaps.push('root filesystem is writable');
+  if (rootReadOnly !== true) gaps.push(rootReadOnly === null ? 'root filesystem state unreadable' : 'root filesystem is writable');
   if (tmpfs !== dirs.length) gaps.push(`${dirs.length - tmpfs} of ${dirs.length} per-child temp/health directories are not tmpfs`);
   const limit = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
   const pids = limit(pidsMax);
@@ -578,7 +586,21 @@ function runtimeIsolation(statusText, mountsText, { pidsMax, memoryMax } = {}, l
   return { capBnd: capBnd ?? '?', noNewPrivs: noNewPrivs ?? '?', rootReadOnly, tmpfs: `${tmpfs}/${dirs.length}`, pidsMax: pids ?? '?', memoryMax: memory ?? '?', gaps };
 }
 
-function reportRuntimeIsolation(log = (s) => console.error(`[worker-bundle] ${s}`)) {
+/** Strict CREWFLOW_RUNTIME_ISOLATION: 'warn' (unset/empty too) or 'enforce'; null for anything else (fail closed). */
+function runtimeIsolationMode(env) {
+  const raw = env.CREWFLOW_RUNTIME_ISOLATION;
+  if (raw === undefined || raw === '' || raw === 'warn') return 'warn';
+  if (raw === 'enforce') return 'enforce';
+  return null;
+}
+
+/**
+ * Reports the isolation and, in enforce mode, refuses (BundleConfigError, names and flags only) when any control is
+ * missing. `probe` is injectable for tests; by default it reads this process's /proc and cgroup files.
+ */
+function checkRuntimeIsolation(env, { log = (s) => console.error(`[worker-bundle] ${s}`), probe } = {}) {
+  const mode = runtimeIsolationMode(env);
+  if (mode === null) throw new BundleConfigError('CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce" (unset or empty = warn)');
   const read = (p) => {
     try {
       return fs.readFileSync(p, 'utf8');
@@ -586,11 +608,17 @@ function reportRuntimeIsolation(log = (s) => console.error(`[worker-bundle] ${s}
       return ''; // reported as a gap below
     }
   };
-  const r = runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  const r = probe ? probe() : runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
   const root = r.rootReadOnly === null ? 'unknown' : r.rootReadOnly ? 'read-only' : 'writable';
-  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax}`;
-  if (r.gaps.length === 0) log(`runtime isolation as declared: ${summary}`);
-  else log(`WARNING runtime isolation weaker than docker-compose.production.yml declares (${r.gaps.join('; ')}): ${summary} — starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)`);
+  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax} mode=${mode}`;
+  if (r.gaps.length === 0) {
+    log(`runtime isolation as declared: ${summary}`);
+    return r;
+  }
+  if (mode === 'enforce') {
+    throw new BundleConfigError(`runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce (${r.gaps.join('; ')}): ${summary}`);
+  }
+  log(`WARNING runtime isolation weaker than docker-compose.production.yml declares (${r.gaps.join('; ')}): ${summary} — starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)`);
   return r;
 }
 
@@ -851,6 +879,8 @@ async function main(env = process.env) {
   try {
     plan = makePlan(env);
     preflight(plan);
+    // H6: report (warn, the default) or refuse (enforce) when a declared container control is missing.
+    checkRuntimeIsolation(env);
   } catch (error) {
     // BundleConfigError messages name variables and paths only, never values.
     const message = error instanceof BundleConfigError ? error.message : 'unexpected launcher error';
@@ -858,7 +888,6 @@ async function main(env = process.env) {
     await failureDelay(delayMs);
     return 1;
   }
-  reportRuntimeIsolation();
   // Must exceed the jobs process's own deadline (WORKER_SHUTDOWN_TIMEOUT_MS drain, default 30 s, + its 10 s hard exit),
   // so its drain finishes before any SIGKILL. The platform's stop timeout must in turn exceed this (compose: 55 s).
   const workerDrainMs = boundedInt(env.WORKER_SHUTDOWN_TIMEOUT_MS, 30_000, 1_000, 600_000);
@@ -907,5 +936,7 @@ module.exports = {
   supervise,
   processesOwnedBy,
   runtimeIsolation,
+  runtimeIsolationMode,
+  checkRuntimeIsolation,
   GUARD_LINE,
 };

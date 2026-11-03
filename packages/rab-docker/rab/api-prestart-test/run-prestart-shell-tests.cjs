@@ -123,6 +123,48 @@ check('6b the production rab-api settings -> "runtime isolation as declared", no
   r.out.includes('api-prestart: runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=256 memory.max=805306368') && !/WARNING/.test(r.out), r.out);
 check('6c the report prints no environment value', !r.out.includes(BASE.APP_SECRET) && !r.out.includes(BASE.PG_DATABASE_URL), r.out);
 
+// 7. Owner decision "never drop a security setting silently": CREWFLOW_RUNTIME_ISOLATION=enforce refuses (64) when any
+// declared control is missing, before the schema check or main.js. Each case removes exactly one control.
+const PROD = ['--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256', '--memory', '768m'];
+const without = (...drop) => {
+  const out = [];
+  for (let i = 0; i < PROD.length; i += 1) {
+    if (drop.includes(PROD[i])) { if (PROD[i] !== '--read-only') i += 1; continue; }
+    out.push(PROD[i]);
+  }
+  return out;
+};
+const ENFORCE = { ...BASE, CREWFLOW_RUNTIME_ISOLATION: 'enforce' };
+const refusedBy = (out, re) => /api-prestart: REFUSED - runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce \(/.test(out) && re.test(out);
+r = run('enforce-full', ENFORCE, { dockerArgs: PROD });
+check('7a enforce + every declared control -> starts, "as declared ... mode=enforce"', r.code === 0 && line(r.out, 'check') && line(r.out, 'main') &&
+  r.out.includes('api-prestart: runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=256 memory.max=805306368 mode=enforce'), r.out);
+for (const [label, args, re] of [
+  ['root user', ['--user', '0:0', ...without('--user')], /running as root/],
+  ['another uid', ['--user', '1234:1234', ...without('--user')], /uid 1234, expected 1000/],
+  ['capabilities kept (no cap_drop)', without('--cap-drop'), /capabilities in the bounding set \(CapBnd=[0-9a-f]{16}\)/],
+  ['no-new-privileges off', without('--security-opt'), /no-new-privileges is off/],
+  ['writable root (no read_only)', without('--read-only'), /root filesystem is writable/],
+  ['no memory limit', without('--memory'), /no memory limit/],
+]) {
+  r = run(`enforce-${label.replace(/[^a-z]+/g, '-')}`, ENFORCE, { dockerArgs: args });
+  check(`7b enforce + ${label} -> refused (64) naming the control; neither the schema check nor main ran`, r.code === 64 && refusedBy(r.out, re) && !line(r.out, 'check') && !line(r.out, 'main'), r.out);
+}
+// PID limit: Docker Desktop leaves pids.max "max" with --pids-limit -1; hosts whose systemd caps every container (GitHub
+// runners: TasksMax) DO limit PIDs, so there the control is genuinely present and enforce must start.
+r = run('enforce-no-pids', ENFORCE, { dockerArgs: [...without('--pids-limit'), '--pids-limit', '-1'] });
+if (/pids\.max=max /.test(r.out)) {
+  check('7c enforce + no PID limit -> refused (64) naming it', r.code === 64 && refusedBy(r.out, /no PID limit/) && !line(r.out, 'main'), r.out);
+} else {
+  check('7c enforce + no compose PID limit on a host that caps PIDs itself -> the host limit is reported and the API starts', r.code === 0 && /pids\.max=\d+ /.test(r.out) && line(r.out, 'main'), r.out);
+}
+for (const [n, value] of ['ENFORCE', 'Enforce', 'yes', 'true', 'strict'].entries()) {
+  r = run(`isolation-invalid-${n}`, { ...BASE, CREWFLOW_RUNTIME_ISOLATION: value }, { dockerArgs: PROD });
+  check(`7d CREWFLOW_RUNTIME_ISOLATION=${value} -> refused (64), nothing ran`, r.code === 64 && /api-prestart: REFUSED - CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce"/.test(r.out) && !line(r.out, 'check') && !line(r.out, 'main'), r.out);
+}
+r = run('isolation-warn-explicit', { ...BASE, CREWFLOW_RUNTIME_ISOLATION: 'warn' }, { dockerArgs: without('--read-only') });
+check('7e warn (explicit) + a missing control -> starts and warns, naming it', r.code === 0 && line(r.out, 'main') && /api-prestart: WARNING runtime isolation weaker than docker-compose\.production\.yml declares \(root filesystem is writable\): .* mode=warn /.test(r.out), r.out);
+
 fs.rmSync(work, { recursive: true, force: true });
 console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

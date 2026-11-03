@@ -251,6 +251,10 @@ services:
     #     smaller host set CREWFLOW_API_CPUS / CREWFLOW_WORKER_CPUS lower.
     # api-prestart.sh logs what was actually applied at every start ("runtime
     # isolation as declared", or a WARNING naming each control a platform dropped).
+    # CREWFLOW_RUNTIME_ISOLATION=enforce makes it REFUSE to start instead (exit 64)
+    # when any of these controls is missing; strict: only warn|enforce. This file
+    # leaves it unset (= warn) so a platform that drops these keys still starts
+    # and says so; a deployment definition that must never run degraded sets enforce.
     # No Docker socket, host namespace or host mount is ever added here.
     user: "1000:1000"
     read_only: true
@@ -300,6 +304,8 @@ services:
   # "[worker-bundle] runtime isolation as declared: CapBnd=00000000000000e0
   # NoNewPrivs=1 root=read-only tmpfs=4/4", or a WARNING naming each control
   # the platform dropped (it still starts; report it, THREAT-MODEL.md H6).
+  # CREWFLOW_RUNTIME_ISOLATION=enforce (strict: warn|enforce; unset = warn, as
+  # here) makes the launcher refuse to start instead when any control is missing.
   #
   # ENTER IN OPENSHIP (rab-worker): everything listed for rab-api (same values;
   # the jobs process validates the same production config, including

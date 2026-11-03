@@ -54,11 +54,20 @@ for name in CREWFLOW_OPS_RUN PG_OPS_APP_DATABASE_URL CREWFLOW_OPS_ACTOR_SOURCE C
   if [ -n "$value" ]; then refuse "$name must never be set on the api service (it belongs to the one-off ops container only)."; fi
 done
 
-# Docker hardening H6: report the container isolation this process actually received, compared with what
+# Docker hardening H6: the container isolation this process actually received, compared with what
 # docker-compose.production.yml declares for rab-api (uid 1000, no capability at all, no-new-privileges, read-only root, PID
-# and memory limits). REPORT ONLY, never a refusal: some platforms drop these compose keys (OpenShip's compose import does
-# not model user/read_only/cap_*/security_opt/pids_limit; THREAT-MODEL.md, Docker hardening H6), and refusing there is an
-# owner decision. Names and flags only; no value from the environment is printed.
+# and memory limits). Names and flags only; no value from the environment is printed.
+# CREWFLOW_RUNTIME_ISOLATION (owner decision "never drop a security setting silently"; strict values):
+#   unset / empty / warn   report one line ("as declared", or a WARNING naming each gap) and start anyway — the default,
+#                          because some platforms drop these compose keys (OpenShip's compose import does not model
+#                          user/read_only/cap_*/security_opt/pids_limit; THREAT-MODEL.md, Docker hardening H6);
+#   enforce                any gap (an unreadable value included) REFUSES to start (exit 64);
+#   anything else          refuses to start (exit 64).
+case "${CREWFLOW_RUNTIME_ISOLATION:-warn}" in
+  warn) isolation_mode=warn ;;
+  enforce) isolation_mode=enforce ;;
+  *) refuse 'CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce" (unset or empty = warn).' ;;
+esac
 isolation_report() {
   capbnd=$(sed -n 's/^CapBnd:[[:space:]]*//p' /proc/self/status 2>/dev/null || true)
   nnp=$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' /proc/self/status 2>/dev/null || true)
@@ -72,15 +81,17 @@ isolation_report() {
   mem=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)
   uid=$(id -u 2>/dev/null || echo unknown)
   gaps=""
-  [ "$uid" != 0 ] || gaps="$gaps; running as root"
+  if [ "$uid" = 0 ]; then gaps="$gaps; running as root"; elif [ "$uid" != 1000 ]; then gaps="$gaps; uid $uid, expected 1000"; fi
   [ "$capbnd" = 0000000000000000 ] || gaps="$gaps; capabilities in the bounding set (CapBnd=${capbnd:-unknown})"
   [ "$nnp" = 1 ] || gaps="$gaps; no-new-privileges is off"
   [ "$root" = read-only ] || gaps="$gaps; root filesystem is $root"
   case "$pids" in max) gaps="$gaps; no PID limit" ;; '') gaps="$gaps; PID limit unreadable" ;; esac
   case "$mem" in max) gaps="$gaps; no memory limit" ;; '') gaps="$gaps; memory limit unreadable" ;; esac
-  summary="uid=$uid CapBnd=${capbnd:-unknown} NoNewPrivs=${nnp:-unknown} root=$root pids.max=${pids:-unknown} memory.max=${mem:-unknown}"
+  summary="uid=$uid CapBnd=${capbnd:-unknown} NoNewPrivs=${nnp:-unknown} root=$root pids.max=${pids:-unknown} memory.max=${mem:-unknown} mode=$isolation_mode"
   if [ -z "$gaps" ]; then
     echo "api-prestart: runtime isolation as declared: $summary"
+  elif [ "$isolation_mode" = enforce ]; then
+    refuse "runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce (${gaps#; }): $summary"
   else
     echo "api-prestart: WARNING runtime isolation weaker than docker-compose.production.yml declares (${gaps#; }): $summary - starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)" >&2
   fi

@@ -4700,7 +4700,12 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
   declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
   `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
-  controls a platform applied (CPU limits are not reported). It never refuses (that would stop today's OpenShip Worker; owner decision).
+  controls a platform applied (CPU limits are not reported). Owner decision "never drop a security setting silently":
+  `CREWFLOW_RUNTIME_ISOLATION=enforce` makes both REFUSE to start when any declared control is missing (uid, bounding set,
+  no_new_privs, read-only root, PID/memory limits, the Worker's per-child tmpfs; an unreadable value counts as missing);
+  the value is strict (`warn` | `enforce`, unset = `warn`, anything else refuses) and never reaches a Worker child. The
+  production file leaves it unset (warn) so today's OpenShip deployment still starts and reports; a deployment definition
+  that must never run degraded (the staging/OpenShip variant) sets `enforce`. Tests: prestart 7a–7e, launcher H6-4..7.
   What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
   files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
 - **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:

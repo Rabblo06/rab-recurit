@@ -1173,3 +1173,68 @@ test('H6-3 runtime isolation of the live test container matches the kernel (evid
   assert.equal(live.capBnd, /^CapBnd:\s*(\S+)/m.exec(status)[1]);
   assert.equal(live.noNewPrivs, /^NoNewPrivs:\s*(\S+)/m.exec(status)[1]);
 });
+
+// ---------------------------------------------------------------- H6: CREWFLOW_RUNTIME_ISOLATION=enforce (owner decision)
+
+const H6_FULL = () => ({ capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', pidsMax: '1024', memoryMax: '1610612736', gaps: [] });
+const H6_STATUS_FULL = 'CapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n';
+const H6_LIMITS_FULL = { pidsMax: '1024\n', memoryMax: '1610612736\n' };
+
+test('H6-4 CREWFLOW_RUNTIME_ISOLATION is strict: unset/empty/"warn" = warn, "enforce" = enforce, anything else refuses', () => {
+  assert.equal(launcher.runtimeIsolationMode({}), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: '' }), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: 'warn' }), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }), 'enforce');
+  for (const v of ['ENFORCE', 'Enforce', ' enforce', 'true', '1', 'strict', 'off']) {
+    assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: v }), null, v);
+    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: v }, { log: () => {}, probe: H6_FULL }), /CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce"/, v);
+  }
+});
+
+test('H6-5 enforce + every declared control present → starts (no refusal), reported "as declared ... mode=enforce"', () => {
+  const lines = [];
+  launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: (s) => lines.push(s), probe: () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL) });
+  assert.deepEqual(lines, ['runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4/4 pids.max=1024 memory.max=1610612736 mode=enforce']);
+});
+
+test('H6-6 enforce + EACH missing control → refused, naming that control; warn → starts with a WARNING naming it', () => {
+  const rwRoot = H6_MOUNTS_DECLARED.replace('overlay / overlay ro,', 'overlay / overlay rw,');
+  const noTmpfs = H6_MOUNTS_DECLARED.split('\n').filter((l) => !l.includes('/tmp/crewflow-jobs')).join('\n');
+  const cases = [
+    ['extra capability in the bounding set', 'CapBnd:\t00000000000000e1\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, H6_LIMITS_FULL, /capabilities beyond SETUID\/SETGID\/KILL \(CapBnd=00000000000000e1\)/],
+    ['no-new-privileges off', 'CapBnd:\t00000000000000e0\nNoNewPrivs:\t0\n', H6_MOUNTS_DECLARED, H6_LIMITS_FULL, /no-new-privileges is off/],
+    ['writable root', H6_STATUS_FULL, rwRoot, H6_LIMITS_FULL, /root filesystem is writable/],
+    ['a per-child tmpfs missing', H6_STATUS_FULL, noTmpfs, H6_LIMITS_FULL, /1 of 4 per-child temp\/health directories are not tmpfs/],
+    ['unlimited PIDs', H6_STATUS_FULL, H6_MOUNTS_DECLARED, { ...H6_LIMITS_FULL, pidsMax: 'max\n' }, /no PID limit/],
+    ['unlimited memory', H6_STATUS_FULL, H6_MOUNTS_DECLARED, { ...H6_LIMITS_FULL, memoryMax: 'max\n' }, /no memory limit/],
+    ['unreadable /proc (fail closed)', '', '', H6_LIMITS_FULL, /capability bounding set unreadable/],
+  ];
+  for (const [label, status, mounts, limits, re] of cases) {
+    const probe = () => launcher.runtimeIsolation(status, mounts, limits);
+    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: () => {}, probe }), (e) => e instanceof launcher.BundleConfigError && re.test(e.message) && /CREWFLOW_RUNTIME_ISOLATION=enforce/.test(e.message), label);
+    for (const env of [{}, { CREWFLOW_RUNTIME_ISOLATION: 'warn' }]) {
+      const lines = [];
+      assert.doesNotThrow(() => launcher.checkRuntimeIsolation(env, { log: (s) => lines.push(s), probe }), label);
+      assert.ok(lines.length === 1 && /^WARNING runtime isolation weaker/.test(lines[0]) && re.test(lines[0]) && /mode=warn/.test(lines[0]), `${label}: ${lines}`);
+    }
+  }
+});
+
+test('H6-7 main() in enforce mode refuses with exit 1 BEFORE starting any child when a control is missing (live, in the image)', { skip: !linuxRoot && 'needs root on Linux' }, async () => {
+  const lines = [];
+  const original = console.error;
+  console.error = (...a) => lines.push(a.join(' '));
+  let code;
+  try {
+    // The image test run grants the fixture-only CHOWN/FOWNER/DAC_OVERRIDE, so the bounding set is wider than declared.
+    code = await launcher.main({ ...env(), CREWFLOW_RUNTIME_ISOLATION: 'enforce', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' });
+  } finally {
+    console.error = original;
+  }
+  const out = lines.join('\n');
+  console.log(`# evidence enforce refusal: ${lines.find((l) => /refused/.test(l)) || '(none)'}`);
+  assert.equal(code, 1);
+  assert.match(out, /\[worker-bundle\] refused: runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce \(capabilities beyond SETUID\/SETGID\/KILL/);
+  assert.doesNotMatch(out, /started pid=/);
+  for (const marker of SECRET_MARKERS) assert.ok(!out.includes(marker), `leaked ${marker}`);
+});

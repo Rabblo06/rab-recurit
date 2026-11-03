@@ -456,3 +456,13 @@ test('H6 production file: nothing but rab-api publishes a port, and no PostgreSQ
     assert.ok(!/postgres/i.test(String(svc.image ?? '')), `${name} runs PostgreSQL inside this stack`);
   }
 });
+
+test('H6 CREWFLOW_RUNTIME_ISOLATION in the production file: unset (= warn) or a strict value on rab-api / rab-worker', { skip }, () => {
+  for (const service of ['rab-api', 'rab-worker']) {
+    const { env } = serviceEnv('packages/rab-docker/docker-compose.production.yml', service);
+    const v = env.CREWFLOW_RUNTIME_ISOLATION;
+    assert.ok(v === undefined || v === 'warn' || v === 'enforce', `${service}: CREWFLOW_RUNTIME_ISOLATION=${v}`);
+    // The launcher never forwards it to a child (explicit allowlists).
+    assert.ok(!launcher.JOBS_ENV_KEYS.includes('CREWFLOW_RUNTIME_ISOLATION') && !launcher.PROVISIONER_ENV_KEYS.includes('CREWFLOW_RUNTIME_ISOLATION'));
+  }
+});
