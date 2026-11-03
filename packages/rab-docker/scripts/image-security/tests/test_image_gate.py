@@ -69,7 +69,8 @@ class Decisions(unittest.TestCase):
             with open(path, 'w') as f:
                 json.dump({'schema': 1, 'decisions': entries}, f)
             c = g.Check('t', 'pr', None)
-            with mock.patch.object(g, 'DECISIONS_FILE', path), mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': today}):
+            with mock.patch.object(g, 'DECISIONS_FILE', path), \
+                    mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': today, 'GITHUB_ACTIONS': ''}):
                 valid = g.validate_decisions(c)
             return valid, c
 
@@ -95,6 +96,21 @@ class Decisions(unittest.TestCase):
             valid, c = self.check([bad])
             self.assertEqual(valid, [], bad)
             self.assertTrue(c.fails, bad)
+
+    def test_today_override_refused_in_release_mode_and_in_ci(self):
+        # review F4: the self-test date override can never move an expiry in a real gate run
+        with mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': '2030-01-01', 'GITHUB_ACTIONS': ''}):
+            with self.assertRaises(RuntimeError):
+                g.today('release')
+            self.assertEqual(g.today('pr'), g.dt.date(2030, 1, 1))
+        with mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': '2030-01-01', 'GITHUB_ACTIONS': 'true'}):
+            with self.assertRaises(RuntimeError):
+                g.today('pr')
+        d = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': '2030-01-01', 'GITHUB_ACTIONS': ''}):
+            rc, out = run(['--mode', 'release', '--results', d, 'static'])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('refused' in m for m in result(d, 'static')['fails']))
 
     def test_committed_register_is_valid(self):
         c = g.Check('t', 'release', None)
@@ -131,7 +147,7 @@ class Vulns(unittest.TestCase):
         with open(wl, 'w') as f:
             json.dump({'schema': 1, 'advisories': watch or []}, f)
         with mock.patch.object(g, 'DECISIONS_FILE', dec), mock.patch.object(g, 'WATCHLIST_FILE', wl), \
-                mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': today, 'GITHUB_ACTIONS': ''}):
+                mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': today if mode == 'pr' else '', 'GITHUB_ACTIONS': ''}):
             rc, out = run((['--mode', mode] if mode else []) + ['--results', d, 'vulns', 'worker'])
         return rc, result(d, 'worker-vulns'), out
 
@@ -151,17 +167,36 @@ class Vulns(unittest.TestCase):
         rc, r, _ = self.evaluate('release', grype=[self.unfixed_grype])
         self.assertEqual((rc, r['status']), (1, 'FAIL'))
 
+    @staticmethod
+    def decision(cve, pkg, decided_days_ago=10, valid_days=60, kind='accepted-risk'):
+        now = g.dt.date.today()
+        return {'id': cve, 'packages': [pkg], 'images': ['worker'], 'decision': kind, 'owner_decision_ref': 'OWNER-1',
+                'decided_by': 'owner', 'decided_on': (now - g.dt.timedelta(days=decided_days_ago)).isoformat(),
+                'expires': (now - g.dt.timedelta(days=decided_days_ago) + g.dt.timedelta(days=valid_days)).isoformat(),
+                'justification': 'x'}
+
     def test_owner_decision_covers_one_advisory_and_package_only(self):
-        dec = {'id': 'CVE-2026-20002', 'packages': ['glib'], 'images': ['worker'], 'decision': 'accepted-risk',
-               'owner_decision_ref': 'OWNER-1', 'decided_by': 'owner', 'decided_on': '2026-11-10',
-               'expires': '2027-01-10', 'justification': 'x'}
+        dec = self.decision('CVE-2026-20002', 'glib')
         rc, r, _ = self.evaluate('release', grype=[self.unfixed_grype], decisions=[dec])
         self.assertEqual((rc, r['status']), (0, 'PASS'))
         other = dict(self.unfixed_grype, artifact={'name': 'glib-dev', 'version': '1', 'type': 'apk'})
         rc, r, _ = self.evaluate('release', grype=[self.unfixed_grype, other], decisions=[dec])
         self.assertEqual(r['status'], 'FAIL')
-        rc, r, _ = self.evaluate('release', grype=[self.unfixed_grype], decisions=[dec], today='2027-01-11')
+        expired = self.decision('CVE-2026-20002', 'glib', decided_days_ago=100, valid_days=90)
+        rc, r, _ = self.evaluate('release', grype=[self.unfixed_grype], decisions=[expired])
         self.assertEqual(r['status'], 'FAIL')  # expired decision: finding undecided again + register failure
+
+    def test_fixable_high_fails_even_with_a_valid_decision(self):
+        # review F3: a register entry can never clear a finding that has a fixed version
+        for kind in ('accepted-risk', 'not-affected', 'false-positive'):
+            dec = self.decision('CVE-2026-10001', 'libexpat', kind=kind)
+            finding = dict(self.fixable_high, VulnerabilityID='CVE-2026-10001')
+            for mode in ('pr', 'release'):
+                rc, r, _ = self.evaluate(mode, trivy=[finding], decisions=[dec])
+                self.assertEqual((rc, r['status']), (1, 'FAIL'), (kind, mode))
+                self.assertTrue(any('1 valid owner risk decision' in m for m in r['infos']), r['infos'])
+                self.assertTrue(any('fixable HIGH CVE-2026-10001' in m for m in r['fails']), r['fails'])
+                self.assertTrue(any('IGNORED' in m for m in r['infos']), r['infos'])
 
     def test_default_mode_is_release(self):
         rc, r, _ = self.evaluate(None, grype=[self.unfixed_grype])

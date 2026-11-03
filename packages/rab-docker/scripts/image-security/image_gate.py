@@ -197,9 +197,15 @@ def name_matches(name: str, patterns: list[str]) -> bool:
     return any(name == p or (p.endswith('/*') and name.startswith(p[:-1])) for p in patterns)
 
 
-def today() -> dt.date:
-    override = os.environ.get('IMAGE_GATE_TODAY')  # tests only: pin "today" for expiry checks
-    return dt.date.fromisoformat(override) if override else dt.datetime.now(dt.timezone.utc).date()
+def today(mode: str = 'release') -> dt.date:
+    """Real UTC date. IMAGE_GATE_TODAY pins it for self-tests only: it is refused in release mode and in GitHub Actions
+    (review F4), so it can never move a decision's expiry in a real gate run."""
+    override = os.environ.get('IMAGE_GATE_TODAY')
+    if override:
+        if mode == 'release' or os.environ.get('GITHUB_ACTIONS') == 'true':
+            raise RuntimeError('IMAGE_GATE_TODAY is a self-test override and is refused in release mode and in CI')
+        return dt.date.fromisoformat(override)
+    return dt.datetime.now(dt.timezone.utc).date()
 
 
 # ----------------------------------------------------------------------------------------------------------- static
@@ -237,11 +243,11 @@ def validate_decisions(c: Check) -> list[dict]:
         except ValueError:
             c.fail(f'{where}: decided_on / expires must be YYYY-MM-DD')
             continue
-        if expires < today():
+        if expires < today(c.mode):
             c.fail(f'{where}: decision {d["owner_decision_ref"]} for {d["id"]} ({", ".join(d["packages"])}) EXPIRED on {expires}; '
                    're-review it (the finding is treated as undecided)')
             continue
-        if decided > today():
+        if decided > today(c.mode):
             c.fail(f'{where}: decided_on {decided} is in the future (the {MAX_DECISION_DAYS}-day limit counts from the '
                    'actual decision)')
             continue
@@ -877,14 +883,21 @@ def cmd_vulns(a, c: Check) -> None:
         if SEVERITY_RANK[sev] >= SEVERITY_RANK['HIGH']:
             dec = next((d for d in decisions if pkg in d['packages'] and (d['id'] == aid or d['id'] in f['aliases'])),
                        None)
-            if dec:
+            if f['fixable']:
+                # Review F3: a FIXABLE High/Critical always fails, whatever the register says. A decision can only
+                # cover a finding that cannot be fixed by upgrading.
+                row['verdict'] = 'FAIL: fixable'
+                if dec:
+                    used.add((dec['id'], pkg))
+                    row['decision'] = dec['owner_decision_ref']
+                    c.info(f'{sev} {aid} {pkg} {ver}: owner decision {dec["owner_decision_ref"]} is IGNORED because a '
+                           'fixed version exists')
+            elif dec:
                 used.add((dec['id'], pkg))
                 row['decision'] = dec['owner_decision_ref']
                 row['verdict'] = f'decided ({dec["decision"]}, expires {dec["expires"]})'
                 c.info(f'{sev} {aid} {pkg} {ver}: owner decision {dec["owner_decision_ref"]} ({dec["decision"]}) '
                        f'until {dec["expires"]}')
-            elif f['fixable']:
-                row['verdict'] = 'FAIL: fixable'
             else:
                 row['verdict'] = 'HOLD: unfixed, needs owner decision'
         rows.append(row)
@@ -1604,6 +1617,11 @@ def main(argv: list[str]) -> int:
         return cmd_summary(a)
     name = a.name or (f'{a.role}-{a.cmd}' if hasattr(a, 'role') else a.cmd)
     c = Check(name, a.mode, a.results)
+    try:
+        today(a.mode)  # review F4: the self-test date override is refused outright in release mode and in CI
+    except RuntimeError as e:
+        c.fail(str(e))
+        return c.finish()
     handler = {'static': cmd_static, 'config': cmd_config, 'container': cmd_container, 'fs': cmd_fs,
                'worker-base': cmd_worker_base, 'scan': cmd_scan, 'vulns': cmd_vulns, 'secrets': cmd_secrets,
                'attest': cmd_attest, 'manifest': cmd_manifest, 'pdf': cmd_pdf}[a.cmd]

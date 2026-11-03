@@ -60,23 +60,27 @@ jobs:
     name: release environment is protected
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - name: Environment `release` exists and requires a reviewer
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ env.PUBLISH == 'true' }}
+        with:
+          persist-credentials: false
+      # Review F2: required reviewers AND a deployment-branch policy limited to main (branch) + rab/v* (tag); the run
+      # itself must be a dispatch from main, or a release on a rab/vX.Y.Z tag whose commit is on origin/main. A branch
+      # could edit this check out of its own copy of the workflow, so the environment's server-side branch policy (owner
+      # setting) is the real control; this job makes its absence fail closed.
+      - name: Environment `release` is protected and this ref may publish
         if: ${{ env.PUBLISH == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
         run: |
-          set -euo pipefail
-          if ! env_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/release" 2> "$RUNNER_TEMP/env.err")"; then
-            echo "::error::GitHub environment 'release' does not exist. The owner must create it with required reviewers and the DOCKERHUB_PUSH_TOKEN secret before publishing; nothing was built or pushed."
-            exit 1
-          fi
-          reviewers="$(printf '%s' "$env_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(r.get("reviewers") or []) for r in d.get("protection_rules") or [] if r.get("type")=="required_reviewers"))')"
-          if [ "${reviewers:-0}" -lt 1 ]; then
-            echo "::error::GitHub environment 'release' has no required reviewers: publishing would need no approval. Add required reviewers first."
-            exit 1
-          fi
-          echo "environment 'release': $reviewers required reviewer(s)"
+          gh --version | head -n 1
+          python3 packages/rab-docker/scripts/image-security/release_guard.py environment \
+            --repo "$GITHUB_REPOSITORY" --event "$EVENT" --ref "$GITHUB_REF" --sha "$GITHUB_SHA"
       - name: Candidate verify only (never publishes)
         if: ${{ env.PUBLISH != 'true' }}
         run: echo "mode=candidate-verify; the publish job will not run"
@@ -112,6 +116,7 @@ jobs:
     # credential is the environment secret below.
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     env:
@@ -129,6 +134,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # Review F1, repeated at the point of use: a candidate from another run is published only if that run proves its
+      # origin (our gate/publish workflow, this repository, this commit, main or a release tag, concluded success).
+      - name: Candidate origin (re-checked before anything is downloaded or pushed)
+        if: ${{ inputs.candidate-run-id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate-run-id }}
+        run: |
+          python3 packages/rab-docker/scripts/image-security/release_guard.py candidate \
+            --repo "$GITHUB_REPOSITORY" --run-id "$CANDIDATE_RUN" --sha "$GITHUB_SHA"
       - name: Download the gated API layout
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -185,6 +200,13 @@ jobs:
               m['images'][role]['published_tag'] = f"{os.environ['REGISTRY_REPO']}:{role}-{commit}"
               m['images'][role]['github_attestation'] = os.environ[f'{role.upper()}_ATTESTATION']
           m['status'] = 'published'
+          def version(cmd):
+              try:
+                  return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()[0].strip()
+              except Exception as e:  # recorded, never fatal: the push already happened and was verified
+                  return f'unavailable ({type(e).__name__})'
+          m['publish_tools'] = {'skopeo': version(['skopeo', '--version']), 'gh': version(['gh', '--version']),
+                                'python': version(['python3', '--version'])}
           m['publish_run'] = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           json.dump(m, open(p, 'w'), indent=2)
           print(json.dumps({r: m['images'][r]['reference'] for r in m['images']}, indent=1))

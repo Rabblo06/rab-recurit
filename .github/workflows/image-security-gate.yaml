@@ -108,8 +108,36 @@ jobs:
         if: always()
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected static --title "Image gate - static"
 
+  # Review F1: a candidate is trusted only if its RUN proves where it came from. Image labels and provenance are written
+  # by whoever builds the image, so they cannot. Every job that downloads candidate artifacts depends on this one.
+  candidate-origin:
+    name: candidate origin
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        with:
+          persist-credentials: false
+      - name: The candidate run is a successful gate/publish run of this repository, for this commit, from main or a release
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh --version | head -n 1
+          python3 packages/rab-docker/scripts/image-security/release_guard.py candidate \
+            --repo "$GITHUB_REPOSITORY" --run-id "$CANDIDATE_RUN" --sha "$GITHUB_SHA"
+      - name: No candidate (this run builds its own images)
+        if: ${{ env.CANDIDATE_RUN == '' }}
+        run: echo "build mode"
+
   image:
     name: image ${{ matrix.platform }}
+    needs: candidate-origin
+    if: ${{ !cancelled() && needs.candidate-origin.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -263,8 +291,8 @@ jobs:
 
   manifest:
     name: multi-platform manifest
-    needs: image
-    if: ${{ !cancelled() }}
+    needs: [candidate-origin, image]
+    if: ${{ !cancelled() && needs.candidate-origin.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -390,7 +418,7 @@ jobs:
 
   gate:
     name: image security gate
-    needs: [static, image, manifest]
+    needs: [static, candidate-origin, image, manifest]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -399,21 +427,23 @@ jobs:
       - name: All required image checks succeeded
         env:
           STATIC: ${{ needs.static.result }}
+          ORIGIN: ${{ needs.candidate-origin.result }}
           IMAGE: ${{ needs.image.result }}
           MANIFEST: ${{ needs.manifest.result }}
         run: |
-          echo "mode=$MODE platforms=$PLATFORMS candidate=${CANDIDATE_RUN:-none} static=$STATIC image=$IMAGE manifest=$MANIFEST"
+          echo "mode=$MODE platforms=$PLATFORMS candidate=${CANDIDATE_RUN:-none} static=$STATIC origin=$ORIGIN image=$IMAGE manifest=$MANIFEST"
           {
             echo "### Image security gate ($MODE${CANDIDATE_RUN:+, candidate from run $CANDIDATE_RUN})"
             echo "| Job | Result |"
             echo "|---|---|"
             echo "| static | $STATIC |"
+            echo "| candidate origin | $ORIGIN |"
             echo "| image ($PLATFORMS) | $IMAGE |"
             echo "| manifest | $MANIFEST |"
           } >> "$GITHUB_STEP_SUMMARY"
-          for r in "$STATIC" "$IMAGE" "$MANIFEST"; do
+          for r in "$STATIC" "$ORIGIN" "$IMAGE" "$MANIFEST"; do
             if [ "$r" != success ]; then
-              echo "::error::image security gate: a required job did not succeed (static=$STATIC image=$IMAGE manifest=$MANIFEST)"
+              echo "::error::image security gate: a required job did not succeed (static=$STATIC origin=$ORIGIN image=$IMAGE manifest=$MANIFEST)"
               exit 1
             fi
           done

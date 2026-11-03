@@ -119,8 +119,11 @@ Rules, all enforced by `image_gate.py static` / `vulns`:
   - `false-positive`: the scanner matched the wrong thing.
 - `expires` is at most **180 days** after `decided_on`. After it expires, the entry fails the gate and the finding counts
   as undecided again. Renewing an entry needs a new decision.
-- A decision changes only the verdict on a matching High or Critical finding (it is shown as "decided" in the summary).
-  It never hides the finding from the evidence. An unused decision is reported so it can be removed.
+- A decision changes only the verdict on a matching **unfixed** High or Critical finding (it is shown as "decided" in
+  the summary). It never hides the finding from the evidence. An unused decision is reported so it can be removed.
+- **A decision never covers a FIXABLE finding** (review F3). If either scanner knows a fixed version, the finding fails
+  in every mode whatever the register says (the summary notes the decision as "IGNORED"). Fix it by upgrading.
+- `IMAGE_GATE_TODAY` (a self-test date override) is refused in release mode and in CI, so it can never move an expiry.
 - Entries are added in a PR that links the owner's written decision. An agent or a CI job never adds one on its own
   initiative.
 
@@ -183,14 +186,38 @@ and update `verified_on`.
      - verifies that the tag, the index digest and every per-platform manifest are served with exactly the gated
        digests.
 - **Approval.** The `publish` job runs in the GitHub environment `release`, which must have required reviewers.
-  `environment-check` fails the run before anything is built if the environment is missing or unprotected. The reviewer
-  approves after the gate's results are visible, including the native ARM64 PDF render of the exact candidate.
+  The reviewer approves after the gate's results are visible, including the native ARM64 PDF render of the exact
+  candidate.
+- **Ref restriction** (review F2). `environment-check` (`release_guard.py environment`) fails the run before anything is
+  built unless:
+  - the environment exists with at least one required reviewer;
+  - the environment has a deployment-branch policy of **custom** branch/tag rules that allow only `main` (branch) and
+    `rab/v*` (tag);
+  - the run is a dispatch from `refs/heads/main`, or a release on `refs/tags/rab/vX.Y.Z` whose commit is on
+    `origin/main`.
+
+  A branch could edit this check out of its own copy of the workflow, so the environment's server-side branch policy
+  and branch protection on `main` (owner settings, below) are the real controls; this job makes their absence fail
+  closed.
 - **Candidate verify.** `publish-image.yaml` -> Run workflow -> `mode: candidate-verify`, with an optional
   `candidate-run-id` plus both index digests (from that run's `release-manifest-candidate` artifact):
   - re-runs every gate against exactly that candidate, including the native PDF render on both architectures;
   - never publishes;
   - to publish a verified candidate, dispatch again with `mode: publish` and the same three inputs;
   - dispatch on the candidate's commit, because the revision checks compare the images with the checked-out commit.
+  - **Candidate origin** (review F1). Image labels and provenance are written by whoever builds the image, so they
+    cannot prove where a candidate came from. Before any candidate artifact is downloaded (the gate's
+    `candidate-origin` job, repeated in the publish job), `release_guard.py candidate` requires the candidate run to
+    be:
+    - in this repository, with the head repository equal to it (no fork);
+    - a run of `image-security-gate.yaml` or `publish-image.yaml`;
+    - started by `workflow_dispatch` or `release`, the only events that export complete gated layouts (pull-request
+      and push runs never do);
+    - for exactly this commit (`head_sha` = the current run's commit);
+    - `completed` / `success`;
+    - on `main` (dispatch) or a `rab/vX.Y.Z` tag (release).
+
+    Any API error fails closed.
 - **Release manifest.** The gate's manifest job writes `release-manifest-candidate` with:
   - the commit;
   - both index digests and references, and the per-platform manifest digests;
@@ -230,12 +257,22 @@ and update `verified_on`.
   - add required reviewers (at least one; preferably not the person who publishes the release);
   - add the environment **secret `DOCKERHUB_PUSH_TOKEN`** (the PAT);
   - add the environment **variable `DOCKERHUB_USERNAME`** (the account that owns the PAT);
-  - optionally restrict deployment branches/tags to `main` and `rab/v*`.
+  - **required:** Deployment branches and tags = **Selected branches and tags**, with exactly `main` (branch) and
+    `rab/v*` (tag). `environment-check` refuses to publish without this policy.
 
   Do not create them as repository-wide secrets.
+- **Other owner settings** (not changed by any workflow or agent):
+  - **Branch protection on `main`** (or a ruleset), requiring pull-request review and the `ci-security gate` status
+    check. Without it, the environment's `main` restriction only limits *which branch*, not *what reaches it*.
+  - Optionally, CODEOWNERS for `packages/rab-docker/scripts/image-security/**` and `.github/workflows/**`, so that
+    decision-register and gate changes need owner review.
+  - **Docker Hub immutable tags** on `adhin007/adolphus` (repository settings), so even a holder of the PAT cannot
+    move `api-<sha>` / `worker-<sha>`. The workflow's own tag-existence check is serialised only within this
+    workflow.
 - **Fail closed.**
   - If either value is absent, the publish job stops with an explicit error before any registry call.
-  - If the environment is missing or has no required reviewers, `environment-check` stops the run before the gate.
+  - If the environment is missing, has no required reviewers or has no `main` / `rab/v*` deployment policy, or the run
+    is not on `main` or a release tag, `environment-check` stops the run before the gate.
 - **Usage.** The token is used only by `publish-gated.sh`, via `skopeo login --password-stdin` into a temporary auth
   file that is deleted at the end. It is never echoed, and it is not exposed to the gate, PR workflows or forks.
 
