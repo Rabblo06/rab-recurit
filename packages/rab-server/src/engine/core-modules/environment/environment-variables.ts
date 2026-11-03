@@ -1031,8 +1031,8 @@ export class EnvironmentVariables {
    * `failed` / AI_WORKER_INTERRUPTED (the user asks again) — never re-run or requeued (owner rule 2026-11-02).
    */
   @IsOptional()
-  @Type(() => String)
-  @Transform(({ value }) => value === 'true')
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value)) // 'true' / 'false' only; TRUE, 1, yes, ' true' refuse to boot (review F46-1)
   @IsBoolean()
   AI_STALE_TURN_SWEEP: boolean = false;
 
