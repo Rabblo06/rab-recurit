@@ -75,6 +75,51 @@ const INTEGRATION_CANDIDATES = [
   ...FORBIDDEN_INTEGRATIONS,
 ];
 
+/** Every variable @sentry/node-core 10.78 `getSentryRelease()` reads to infer a release. */
+const RELEASE_ENV_VARS = [
+  'SENTRY_RELEASE',
+  'GITHUB_SHA',
+  'CI_MERGE_REQUEST_SOURCE_BRANCH_SHA',
+  'CI_BUILD_REF',
+  'CI_COMMIT_SHA',
+  'BITBUCKET_COMMIT',
+  'APPVEYOR_PULL_REQUEST_HEAD_COMMIT',
+  'APPVEYOR_REPO_COMMIT',
+  'CODEBUILD_RESOLVED_SOURCE_VERSION',
+  'AWS_COMMIT_ID',
+  'BUILD_SOURCEVERSION',
+  'GIT_CLONE_COMMIT_HASH',
+  'BUDDY_EXECUTION_REVISION',
+  'BUILDKITE_COMMIT',
+  'CIRCLE_SHA1',
+  'CIRRUS_CHANGE_IN_REPO',
+  'CF_REVISION',
+  'CM_COMMIT',
+  'CF_PAGES_COMMIT_SHA',
+  'DRONE_COMMIT_SHA',
+  'FC_GIT_COMMIT_SHA',
+  'HEROKU_TEST_RUN_COMMIT_VERSION',
+  'HEROKU_SLUG_COMMIT',
+  'HEROKU_BUILD_COMMIT',
+  'RAILWAY_GIT_COMMIT_SHA',
+  'RENDER_GIT_COMMIT',
+  'SEMAPHORE_GIT_SHA',
+  'TRAVIS_PULL_REQUEST_SHA',
+  'VERCEL_GIT_COMMIT_SHA',
+  'VERCEL_GITHUB_COMMIT_SHA',
+  'VERCEL_GITLAB_COMMIT_SHA',
+  'VERCEL_BITBUCKET_COMMIT_SHA',
+  'ZEIT_GITHUB_COMMIT_SHA',
+  'ZEIT_GITLAB_COMMIT_SHA',
+  'ZEIT_BITBUCKET_COMMIT_SHA',
+  'CI_COMMIT_ID',
+  'SOURCE_COMMIT',
+  'SOURCE_VERSION',
+  'GIT_COMMIT',
+  'COMMIT_REF',
+  'BUILD_VCS_NUMBER',
+];
+
 /** The child program (CommonJS). `instrument.ts` is required before `http`, exactly like the real entrypoints. */
 function childProgram(): string {
   return `
@@ -104,6 +149,7 @@ const S = JSON.parse(process.env.ENVELOPE_TEST_SECRETS);
       enableMetrics: o.enableMetrics,
       tracesSampleRate: o.tracesSampleRate,
       profilesSampleRate: o.profilesSampleRate === undefined ? null : o.profilesSampleRate,
+      release: o.release === undefined ? null : o.release,
     },
     dataCollection: client.getDataCollectionOptions(),
   }));
@@ -253,6 +299,10 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       ),
     };
     delete env.JEST_WORKER_ID;
+    // No release: Sentry infers one from CI/platform commit variables (GITHUB_SHA on Actions), and with a release the
+    // allowed Http integration also sends request-session counts, exactly as Sentry 8 did (THREAT-MODEL.md, H4b). This
+    // run asserts the release-less item set; the list is @sentry/node-core 10.78's getSentryRelease() lookup.
+    for (const name of RELEASE_ENV_VARS) delete env[name];
 
     childExitCode = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(process.execPath, ['-e', childProgram()], {
@@ -387,6 +437,7 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       enableMetrics: false,
       tracesSampleRate: 1, // forced by this test through SENTRY_TRACES_SAMPLE_RATE; production default is 0.01
       profilesSampleRate: null,
+      release: null, // see RELEASE_ENV_VARS: a new inferred-release variable fails here, not in the item-type check
     });
     // Sentry 10 derives its data-collection categories from sendDefaultPii: false (the restrictive legacy mapping).
     expect(report.dataCollection).toMatchObject({
