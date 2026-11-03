@@ -1,0 +1,253 @@
+# Crewflow production stack, IMAGE-BASED and DIGEST-PINNED (owner decisions R1, R4, R5; 2026-11-03).
+#
+# Same topology and the same runtime isolation as docker-compose.production.yml (Docker hardening H6), but every
+# application service runs a prebuilt image by IMMUTABLE DIGEST. Nothing is built on the host: this file has no `build:`
+# section anywhere, so a host can never rebuild the release from whatever commit it happens to have checked out.
+#
+#   rab-api, rab-migrate, rab-ops  ${CREWFLOW_API_IMAGE_REPOSITORY}@${CREWFLOW_API_IMAGE_DIGEST}
+#   rab-worker                     ${CREWFLOW_WORKER_IMAGE_REPOSITORY}@${CREWFLOW_WORKER_IMAGE_DIGEST}
+#   rab-redis                      ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
+#
+# The repositories default to the private registry the owner chose (R1: adhin007/adolphus). The digests are the
+# multi-platform INDEX digests (amd64 + arm64, R2) of the approved release, never a tag. They are REQUIRED: compose
+# refuses to render without them. packages/rab-docker/staging/verify-image-compose.cjs checks the values have the
+# `sha256:<64 hex>` shape and that nothing in this file drifted from the production file's runtime keys.
+# Nothing is published yet; until the release images exist this file is a template (runbook:
+# packages/rab-docker/docs/release/STAGING-ENVIRONMENT-RUNBOOK.md).
+#
+# EVERYTHING ELSE IS docker-compose.production.yml's CONTRACT, unchanged: read that file's header and per-service
+# comments for the database identities (crewflow_app / crewflow / crewflow_migrator, later crewflow_worker), the
+# "enter in the platform" / "must not be entered" variable lists, storage, HWS (off), the provisioning path, the
+# production configuration refusals and the Phase D settings (not enabled here either). The API and the Worker never
+# migrate; rab-migrate (deploy-prepare.js, per-release approval token) is the only schema change path.
+#
+# DIFFERENCES FROM docker-compose.production.yml (each deliberate):
+#   1. image@digest instead of build (above).
+#   2. CREWFLOW_RUNTIME_ISOLATION=enforce on rab-api and rab-worker: the container REFUSES TO START when any declared
+#      control is missing at runtime (uid, capability bounding set, no-new-privileges, read-only root, PID and memory
+#      limits; the Worker also its four per-child tmpfs mounts). The production file runs in the default "warn" mode.
+#      DEPENDENCY: the mode is the H6 follow-up (commit 09286aef) in rab/api-prestart.sh and
+#      rab/worker-bundle/start-worker-bundle.cjs (strict values warn|enforce; anything else refuses). An image built
+#      BEFORE that change ignores the variable and only reports (warn). Use this file only with release images that
+#      contain the enforce mode.
+#   3. The Infrastructure agent's pending hardening (docs/hosting/11-owner-decisions.md, decision D3), included here as
+#      the same variable names so the two stay consistent:
+#        - rab-redis: reviewed config file (AOF everysec, noeviction, bounded maxmemory) + ACL file from the host secret
+#          directory; no published port; memory limit; PING-only health user;
+#        - rab-api `ports` bound to ${CREWFLOW_API_BIND} (loopback by default), never all interfaces;
+#        - REDIS_URL is NOT committed: enter redis://crewflow:<password>@rab-redis:6379 from the secret store on rab-api
+#          and rab-worker (the ACL refuses unauthenticated clients).
+#      The Redis config file comes from packages/rab-docker/hosting/redis/ (Infrastructure agent's templates, pending
+#      owner approval) unless CREWFLOW_REDIS_CONF names another reviewed copy.
+#   4. rab-migrate also runs read-only, with no capabilities and no-new-privileges, and its /tmp is a LONG-FORM tmpfs
+#      mount. Docker Compose applies it normally. OpenShip (v0.9.8 and main 1d0cb17d, packages/core/src/compose-spec.ts
+#      composeMountIssues) REFUSES to import a file with a `type: tmpfs` volume ("blocking"), so this file cannot be
+#      imported there and deployed with the security keys silently dropped. See
+#      packages/rab-docker/docs/release/OPENSHIP-COMPATIBILITY.md.
+#
+# WHERE IT RUNS: plain `docker compose` (v2.24+) on a VM the operator controls. The staging override
+# (staging/docker-compose.staging.yml) adds the per-service env files from the host secret directory. Never import this
+# file into a platform that does not apply user / read_only / tmpfs / cap_drop / cap_add / security_opt / pids_limit;
+# with CREWFLOW_RUNTIME_ISOLATION=enforce the containers would refuse to start there anyway (fail closed).
+
+name: rab-production
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # rab-redis — BullMQ, rate limits, caches, realtime Pub/Sub. Infrastructure agent's proposed hardening (D3).
+  # Never published. The ACL file (users: default disabled with the app's permissions, crewflow, healthcheck, ops) lives
+  # in the host secret directory, never in the repository (template: hosting/redis/users.acl.example).
+  # ---------------------------------------------------------------------------
+  rab-redis:
+    image: ${CREWFLOW_REDIS_IMAGE:?CREWFLOW_REDIS_IMAGE must be a redis image pinned by digest (repository@sha256:<digest>)}
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - rab-redis-data:/data
+      - ${CREWFLOW_REDIS_CONF:-./hosting/redis/redis.production.conf}:/usr/local/etc/redis/redis.conf:ro
+      - ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/redis-users.acl:/run/secrets/redis-users.acl:ro
+    mem_limit: 1600m
+    healthcheck:
+      # PING-only ACL user; answers LOADING (unhealthy) until the AOF is loaded.
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning --user healthcheck --pass healthcheck ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # rab-api — the HTTP API. Runtime only: never migrates. Enter the variables listed for rab-api in
+  # docker-compose.production.yml (PG_DATABASE_URL = crewflow_app at the DIRECT host, verify-full; the deployment
+  # identity; APP_SECRET; URLs; TRUSTED_PROXY_CIDRS; email; S3_*), PLUS REDIS_URL (authenticated, see header).
+  # MUST NOT be entered: everything that file lists, and any override of CREWFLOW_RUNTIME_ISOLATION.
+  # ---------------------------------------------------------------------------
+  rab-api:
+    image: ${CREWFLOW_API_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_API_IMAGE_DIGEST:?CREWFLOW_API_IMAGE_DIGEST must be the API index digest (sha256:<64 hex>)}
+
+    # The image's default command, stated explicitly (api-prestart.sh: refuses migration credentials, checks the runtime
+    # isolation, read-only "no pending migrations" check as crewflow_app, then main.js).
+    command: ["./api-prestart.sh"]
+
+    # Never on every interface: the address the edge proxy connects to (127.0.0.1 when the proxy runs on the host).
+    # TRUSTED_PROXY_CIDRS names that proxy. With an edge proxy on a shared Docker network, remove `ports:` entirely.
+    ports:
+      - "${CREWFLOW_API_BIND:-127.0.0.1}:3000:3000"
+
+    environment:
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+      AI_ENABLED: 'false'
+      # REDIS_URL is entered from the secret store (authenticated ACL user), never committed.
+      HWS_RUNTIME_ENABLED: "false"
+      STORAGE_DRIVER: S3
+      STORAGE_KEY_PREFIX: production
+      S3_FORCE_PATH_STYLE: "true"
+      S3_SERVER_SIDE_ENCRYPTION: NONE
+      # Refuse to start when the platform did not apply the runtime isolation below (H6 enforce mode). Never override.
+      CREWFLOW_RUNTIME_ISOLATION: enforce
+
+    depends_on:
+      rab-redis:
+        condition: service_healthy
+      rab-migrate:
+        condition: service_completed_successfully
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+    restart: unless-stopped
+
+    # Runtime isolation (Docker hardening H6) — identical to docker-compose.production.yml (the verifier compares them).
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: ${CREWFLOW_API_MEM_LIMIT:-768m}
+    cpus: ${CREWFLOW_API_CPUS:-2}
+    stop_grace_period: 35s
+
+  # ---------------------------------------------------------------------------
+  # rab-worker — ONE container, TWO supervised processes (jobs uid 1000 as crewflow_app; provisioner uid 10001 as
+  # crewflow). Root is only the dependency-free launcher (tini → start-worker-bundle.cjs), which keeps SETUID/SETGID/KILL
+  # to start each child under its own identity. Enter everything listed for rab-worker in docker-compose.production.yml
+  # (incl. CREWFLOW_PROVISIONER_DATABASE_URL), PLUS REDIS_URL. MUST NOT be entered: everything that file lists, and any
+  # override of CREWFLOW_RUNTIME_ISOLATION.
+  # ---------------------------------------------------------------------------
+  rab-worker:
+    image: ${CREWFLOW_WORKER_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_WORKER_IMAGE_DIGEST:?CREWFLOW_WORKER_IMAGE_DIGEST must be the Worker index digest (sha256:<64 hex>)}
+
+    command: ["node", "/opt/crewflow-bundle/start-worker-bundle.cjs"]
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, KILL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
+      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
+      - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
+      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
+    stop_grace_period: 55s
+    pids_limit: 1024
+    mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
+    cpus: ${CREWFLOW_WORKER_CPUS:-2}
+
+    environment:
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+      AI_ENABLED: 'false'
+      # REDIS_URL is entered from the secret store (authenticated ACL user), never committed.
+      HWS_RUNTIME_ENABLED: "false"
+      CREWFLOW_PROVISIONER_ENABLED: "true"
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: "5"
+      STORAGE_DRIVER: S3
+      STORAGE_KEY_PREFIX: production
+      S3_FORCE_PATH_STYLE: "true"
+      S3_SERVER_SIDE_ENCRYPTION: NONE
+      PG_POOL_MAX_CONNECTIONS: "12"
+      WORKER_SCHEDULER: interval
+      # Refuse to start when the platform did not apply the runtime isolation above (H6 enforce mode). Never override.
+      CREWFLOW_RUNTIME_ISOLATION: enforce
+
+    healthcheck:
+      test: ["CMD", "node", "/opt/crewflow-bundle/worker-bundle-health.cjs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+    depends_on:
+      rab-redis:
+        condition: service_healthy
+      rab-migrate:
+        condition: service_completed_successfully
+      rab-api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # rab-migrate — the one-off release step (deploy-prepare.js), run to completion BEFORE rab-api and rab-worker start.
+  # Same image (by digest) as rab-api: the migrations ship inside the image. Credential ONLY from .env.migrate (chmod
+  # 600, git-ignored, never in an image) as in docker-compose.production.yml; rab-api / rab-worker never see it.
+  # Exit codes: 0 nothing pending (or applied with the token), 3 pending and not approved (prints the list and the
+  # approval token), 1 refused/failed. Approval: `run --rm -e CREWFLOW_MIGRATION_APPROVED=pending-<n>-<sha256>`.
+  # ---------------------------------------------------------------------------
+  rab-migrate:
+    image: ${CREWFLOW_API_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_API_IMAGE_DIGEST:?CREWFLOW_API_IMAGE_DIGEST must be the API index digest (sha256:<64 hex>)}
+
+    env_file:
+      - .env.migrate
+
+    environment:
+      NODE_ENV: production
+      DB_TARGET: production
+
+    command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
+
+    restart: "no"
+
+    # Not in docker-compose.production.yml (difference 4): the release step needs no capability and writes nothing to
+    # its own filesystem. The long-form tmpfs is also the OpenShip import guard (header).
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+
+  # ---------------------------------------------------------------------------
+  # rab-ops — the one-off owner operations container (profile "ops", never started by `up`). Same contract as in
+  # docker-compose.production.yml: environment ONLY from .env.ops, created for one approved run and deleted after it.
+  # ---------------------------------------------------------------------------
+  rab-ops:
+    image: ${CREWFLOW_API_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_API_IMAGE_DIGEST:?CREWFLOW_API_IMAGE_DIGEST must be the API index digest (sha256:<64 hex>)}
+    profiles: ["ops"]
+    env_file:
+      - .env.ops
+    environment:
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+      DB_TARGET: production
+      AI_ENABLED: 'false'
+      HWS_RUNTIME_ENABLED: "false"
+    entrypoint: ["node", "packages/rab-server/dist/command/main.js"]
+    command: ["--help"]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp
+
+volumes:
+  rab-redis-data:

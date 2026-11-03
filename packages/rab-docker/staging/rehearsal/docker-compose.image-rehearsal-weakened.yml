@@ -1,0 +1,10 @@
+# NEGATIVE TEST ONLY (run-image-rehearsal.cjs, case R08). Removes ONE declared runtime control from each runtime service
+# so the rehearsal can prove that CREWFLOW_RUNTIME_ISOLATION=enforce refuses to start without it:
+#   rab-api     the read-only root filesystem;
+#   rab-worker  no-new-privileges.
+# Never layered onto a deployment.
+services:
+  rab-api:
+    read_only: false
+  rab-worker:
+    security_opt: !reset []
