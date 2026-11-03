@@ -1,7 +1,8 @@
 import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
 
-import { SCAN_JOB_DATA, SCAN_JOB_OPTIONS, ScanQueueName } from './queue-registry';
+import { scanJobTemplate } from '@rab/server/engine/worker-shared/queue-enqueue';
+import { JobNameOf, SCAN_JOB_DATA, ScanQueueName } from './queue-registry';
 import { crewflowSchedulerPrefixOf, ScanJobDefinition, schedulerIdOf } from './scan-jobs';
 
 /**
@@ -138,7 +139,10 @@ export class CrewflowSchedulerManager {
       } else if (def.firstRunAfterInterval) {
         repeat.startDate = now() + every;
       }
-      await this.queue(def.queue).upsertJobScheduler(id, repeat, { name: def.jobName, data: { ...SCAN_JOB_DATA }, opts: { ...SCAN_JOB_OPTIONS } });
+      // D-Q1: the template is built and checked by the registry (system scope, a registered scan job name, the
+      // metadata-only payload, the scan job options) — same name, data and options as before.
+      const template = scanJobTemplate(def.queue, def.jobName as JobNameOf<ScanQueueName>, { kind: 'system' }, { ...SCAN_JOB_DATA });
+      await this.queue(def.queue).upsertJobScheduler(id, repeat, { name: template.name, data: template.data, opts: { ...template.opts } });
       report.upserted.push(id);
     }
     if (report.removedStale.length) this.options.logger.warn(`scheduler reconcile removed stale Crewflow schedulers: ${report.removedStale.join(', ')}`);

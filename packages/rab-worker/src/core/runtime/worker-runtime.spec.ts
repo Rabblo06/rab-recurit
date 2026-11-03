@@ -179,4 +179,65 @@ describe('WorkerRuntime (BullMQ migration M1/M5)', () => {
     expect(hashes.get(WORKER_STATS_KEY)).toMatchObject({ notificationQueueUsage: '0.000000', notificationQueueLevel: 'ok', notificationQueueSampledAt: '7' });
     expect(runtime.progress()).toMatchObject({ gauges: { notificationQueueUsage: '0.000000', notificationQueueLevel: 'ok', notificationQueueSampledAt: 7 } });
   });
+
+  describe('D-Q1 missed-tick record (ticksKey)', () => {
+    const TICKS = 'rab:worker:scan-ticks';
+
+    it('every trigger of a scan stamps its field — idle, failed and skipped-running ticks included — and never touches the stats hash contract', async () => {
+      const { redis, hashes, writes } = fakeRedis();
+      const runtime = new WorkerRuntime(redis, { metricsLogMs: 0, ticksKey: TICKS });
+      await runtime.runOnce(loop({ run: async () => false })); // idle: lastEmailDispatchAt is NOT stamped
+      expect(hashes.get(WORKER_STATS_KEY)?.lastEmailDispatchAt).toBeUndefined();
+      const first = Number(hashes.get(TICKS)!['email-dispatch']);
+      expect(first).toBeGreaterThan(0);
+      await runtime.runOnce(loop({ run: async () => Promise.reject(new Error('boom')) })); // failed
+      let release!: () => void;
+      const slow = runtime.runOnce(loop({ run: () => new Promise<boolean>((r) => (release = () => r(true))) }));
+      await flush();
+      await expect(runtime.runOnce(loop())).resolves.toBe('skipped-running');
+      release();
+      await slow;
+      await flush();
+      expect(writes.filter((w) => w.key === TICKS && w.op === 'hset')).toHaveLength(4);
+      expect(writes.some((w) => w.key === TICKS && w.op === 'expire')).toBe(true);
+      expect(Object.keys(hashes.get(TICKS)!)).toEqual(['email-dispatch']);
+      // The stats hash never receives a tick field (its shape is the Admin Health / interval-mode contract).
+      expect(Object.keys(hashes.get(WORKER_STATS_KEY)!).every((k) => !/tick/i.test(k))).toBe(true);
+    });
+
+    it('interval mode stamps each timer tick; after shutdown begins nothing more is stamped', async () => {
+      const { redis, writes } = fakeRedis();
+      const runtime = new WorkerRuntime(redis, { metricsLogMs: 0, ticksKey: TICKS });
+      runtime.every(loop({ intervalMs: 60_000 }));
+      await flush();
+      runtime.beginShutdown();
+      await runtime.runOnce(loop());
+      await runtime.drain(1000);
+      expect(writes.filter((w) => w.key === TICKS && w.op === 'hset')).toHaveLength(1);
+    });
+
+    it('ticks go through ticksRedis when given (the fail-fast client), never the runtime main client', async () => {
+      const main = fakeRedis();
+      const ticks = fakeRedis();
+      const runtime = new WorkerRuntime(main.redis, { metricsLogMs: 0, ticksKey: TICKS, ticksRedis: ticks.redis });
+      await runtime.runOnce(loop());
+      await flush();
+      expect(main.writes.some((w) => w.key === TICKS)).toBe(false);
+      expect(Number(ticks.hashes.get(TICKS)!['email-dispatch'])).toBeGreaterThan(0);
+    });
+
+    it('a rejected tick write (Redis down on the fail-fast client) never affects the cycle', async () => {
+      const { redis } = fakeRedis();
+      const failing = { multi: () => ({ hset() { return this; }, expire() { return this; }, exec: async () => Promise.reject(new Error('Connection is closed.')) }) };
+      const runtime = new WorkerRuntime(redis, { metricsLogMs: 0, ticksKey: TICKS, ticksRedis: failing as never });
+      await expect(runtime.runOnce(loop())).resolves.toBe('succeeded');
+    });
+
+    it('without ticksKey (default; the provisioner) nothing is written', async () => {
+      const { redis, writes } = fakeRedis();
+      const runtime = new WorkerRuntime(redis, { metricsLogMs: 0 });
+      await runtime.runOnce(loop());
+      expect(writes.some((w) => w.key === TICKS)).toBe(false);
+    });
+  });
 });
