@@ -1,0 +1,277 @@
+name: image-security-gate
+
+# Docker hardening H5: the image security gate. Builds the API image and the Worker bundle image FROM it (per platform,
+# on a native runner, --pull --no-cache, with SBOM + provenance attestations), then gates the EXACT built images:
+# security floors (Node, Chromium, libexpat, Alpine repositories) re-run inside the image, the Chromium binary version,
+# runtime user/entrypoint/revision label, setuid/setgid and file capabilities, world-writable and non-root-owned code,
+# writable Node module paths and HOME, test/env/.git files, development packages, Trivy + Grype (pinned by digest, fresh
+# DBs) with the owner-decision register and the scanner-blind watch list, layer secrets, SBOM/provenance contents, and the
+# multi-platform manifest. Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
+#
+# Callers: ci-security.yaml (mode pr; amd64, plus arm64 when Docker inputs change) and publish-image.yaml (mode release,
+# both platforms, before anything is pushed). workflow_dispatch = a release-mode dry run of both platforms. This workflow
+# never logs in to a registry and never pushes: it only has `contents: read` (+ `security-events: write` for SARIF).
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "pr: release-only findings are reported as HOLD (NEEDS OWNER APPROVAL); release: they fail"
+        type: string
+        required: true
+      platforms:
+        description: JSON array of platforms to build and gate
+        type: string
+        default: '["linux/amd64"]'
+      export-layouts:
+        description: Upload the gated multi-platform API layout (complete, for publishing)
+        type: boolean
+        default: false
+    outputs:
+      api-index-digest:
+        description: Digest of the gated multi-platform API index
+        value: ${{ jobs.manifest.outputs.api-index-digest }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MODE: ${{ inputs.mode || 'release' }}
+  PLATFORMS: ${{ inputs.platforms || '["linux/amd64","linux/arm64"]' }}
+  GATE: packages/rab-docker/scripts/image-security/image_gate.py
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  static:
+    name: static (Dockerfile pins, floors, decision register)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Gate self-tests (policy logic, version comparison, decision register)
+        run: python3 -m unittest discover -s packages/rab-docker/scripts/image-security/tests -v
+      - name: Dockerfile base-image pins, security-floors.env, decision register, watch list
+        if: ${{ !cancelled() }}
+        run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" static
+      # Docker hardening review H1-L1 (reused): no Dockerfile adds an apk repository, alternative keys or --allow-untrusted.
+      - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
+        if: ${{ !cancelled() }}
+        run: bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh
+      - name: Summary
+        if: always()
+        run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected static --title "Image gate - static"
+
+  image:
+    name: image ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platforms || '["linux/amd64","linux/arm64"]') }}
+    # Native runners for both architectures (no emulation): one architecture never stands in for the other.
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      EXPORT_LAYOUTS: ${{ inputs.export-layouts }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Paths
+        run: |
+          arch="${PLATFORM#linux/}"
+          {
+            echo "ARCH=$arch"
+            echo "RESULTS=$RUNNER_TEMP/results-$arch"
+            echo "OUT=$RUNNER_TEMP/out-$arch"
+            echo "TRIVY_CACHE=$RUNNER_TEMP/trivy-cache"
+            echo "GRYPE_CACHE=$RUNNER_TEMP/grype-cache"
+            echo "SOURCE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/results-$arch" "$RUNNER_TEMP/trivy-cache" "$RUNNER_TEMP/grype-cache"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit itself pinned by digest (v0.34.1), not the moving buildx-stable-1 tag.
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+      - name: Build API + Worker (no cache, SBOM + provenance; nothing is pushed)
+        id: build
+        run: bash packages/rab-docker/scripts/image-security/build-gate-images.sh "$PLATFORM" "$OUT"
+      # A gate runs only on an image that was actually built: a build failure leaves its checks without a result, and the
+      # summary counts a missing result as FAILED, never as passed.
+      - name: API image gates
+        id: api
+        if: ${{ !cancelled() && steps.build.outputs.api-id != '' }}
+        run: bash packages/rab-docker/scripts/image-security/run-role-gates.sh api
+        env:
+          REVISION: ${{ steps.build.outputs.revision }}
+          IMAGE: ${{ steps.build.outputs.api-image }}
+          IMAGE_ID: ${{ steps.build.outputs.api-id }}
+          LAYOUT: ${{ steps.build.outputs.api-layout }}
+      - name: Worker image gates
+        id: worker
+        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        run: bash packages/rab-docker/scripts/image-security/run-role-gates.sh worker
+        env:
+          REVISION: ${{ steps.build.outputs.revision }}
+          IMAGE: ${{ steps.build.outputs.worker-image }}
+          IMAGE_ID: ${{ steps.build.outputs.worker-id }}
+          LAYOUT: ${{ steps.build.outputs.worker-layout }}
+      - name: Worker is layered on the gated API image
+        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        env:
+          API_IMAGE: ${{ steps.build.outputs.api-image }}
+          WORKER_IMAGE: ${{ steps.build.outputs.worker-image }}
+        run: python3 "$GATE" --mode "$MODE" --results "$RESULTS" worker-base "$API_IMAGE" "$WORKER_IMAGE"
+      - name: Layout metadata for the multi-platform manifest check
+        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        run: |
+          python3 "$GATE" slim "$OUT/api-layout" "$RUNNER_TEMP/meta/api"
+          python3 "$GATE" slim "$OUT/worker-layout" "$RUNNER_TEMP/meta/worker"
+      - name: Upload layout metadata
+        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-layout-meta-${{ env.ARCH }}
+          path: ${{ runner.temp }}/meta
+          retention-days: 7
+          if-no-files-found: error
+      - name: Upload the complete API layout (release only; input to publishing)
+        if: ${{ !cancelled() && inputs.export-layouts && steps.api.outcome == 'success' && steps.worker.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-layout-api-${{ env.ARCH }}
+          path: ${{ steps.build.outputs.api-layout }}
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      # Code scanning upload is reporting only (fork PRs get a read-only token); the gate decision is the summary below.
+      - name: Upload API Trivy SARIF
+        if: ${{ !cancelled() && steps.api.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        with:
+          sarif_file: ${{ env.RESULTS }}/api-trivy.sarif
+          category: trivy-api-${{ env.ARCH }}
+      - name: Upload Worker Trivy SARIF
+        if: ${{ !cancelled() && steps.worker.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        with:
+          sarif_file: ${{ env.RESULTS }}/worker-trivy.sarif
+          category: trivy-worker-${{ env.ARCH }}
+      - name: Summary (a check that did not run counts as FAILED)
+        if: always()
+        run: |
+          python3 "$GATE" --mode "$MODE" --results "$RESULTS" summary \
+            --title "Image gate - $PLATFORM" --markdown "$RESULTS/summary.md" \
+            --expected api-config,api-container,api-fs,api-attest,api-scan,api-vulns,api-secrets,worker-config,worker-container,worker-fs,worker-attest,worker-scan,worker-vulns,worker-secrets,worker-base
+      - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-gate-evidence-${{ env.ARCH }}
+          path: |
+            ${{ env.RESULTS }}
+            ${{ env.OUT }}/*.json
+            ${{ env.OUT }}/images.env
+          retention-days: 30
+          if-no-files-found: warn
+
+  manifest:
+    name: multi-platform manifest
+    needs: image
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      api-index-digest: ${{ steps.merge.outputs.api-index-digest }}
+    env:
+      EXPORT_LAYOUTS: ${{ inputs.export-layouts }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download layout metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: image-layout-meta-*
+          path: ${{ runner.temp }}/meta
+      - name: Download complete API layouts (release only)
+        if: ${{ inputs.export-layouts }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: image-layout-api-*
+          path: ${{ runner.temp }}/full
+      # Every EXPECTED platform is an input, whether or not its artifact arrived: a missing platform fails here.
+      - name: Merge per-platform layouts and verify the index (platforms, configs, attestations, revision, Worker base)
+        id: merge
+        run: |
+          set -euo pipefail
+          rev="$(git rev-parse HEAD)"
+          plats="$(python3 -c 'import json,os; print(",".join(json.loads(os.environ["PLATFORMS"])))')"
+          inputs=()
+          for p in ${plats//,/ }; do
+            arch="${p#linux/}"
+            api="$RUNNER_TEMP/meta/image-layout-meta-$arch/api"
+            if [ "$EXPORT_LAYOUTS" = true ]; then api="$RUNNER_TEMP/full/image-layout-api-$arch"; fi
+            inputs+=("api=$p=$api" "worker=$p=$RUNNER_TEMP/meta/image-layout-meta-$arch/worker")
+          done
+          python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" --name manifest manifest \
+            --expect-platforms "$plats" --revision "$rev" --out "$RUNNER_TEMP/merged" "${inputs[@]}"
+      - name: Summary
+        if: always()
+        run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected manifest --title "Image gate - multi-platform manifest"
+      - name: Upload the gated multi-platform API layout (release only; what publish-image pushes)
+        if: ${{ inputs.export-layouts && steps.merge.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gated-api-layout
+          path: ${{ runner.temp }}/merged/api-layout
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload manifest evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-gate-evidence-manifest
+          path: |
+            ${{ runner.temp }}/results
+            ${{ runner.temp }}/merged/digests.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  gate:
+    name: image security gate
+    needs: [static, image, manifest]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # Fails unless EVERY required job succeeded: a failed, cancelled or skipped job never reads as passed.
+      - name: All required image checks succeeded
+        env:
+          STATIC: ${{ needs.static.result }}
+          IMAGE: ${{ needs.image.result }}
+          MANIFEST: ${{ needs.manifest.result }}
+        run: |
+          echo "mode=$MODE platforms=$PLATFORMS static=$STATIC image=$IMAGE manifest=$MANIFEST"
+          {
+            echo "### Image security gate ($MODE)"
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| static | $STATIC |"
+            echo "| image ($PLATFORMS) | $IMAGE |"
+            echo "| manifest | $MANIFEST |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for r in "$STATIC" "$IMAGE" "$MANIFEST"; do
+            if [ "$r" != success ]; then
+              echo "::error::image security gate: a required job did not succeed (static=$STATIC image=$IMAGE manifest=$MANIFEST)"
+              exit 1
+            fi
+          done

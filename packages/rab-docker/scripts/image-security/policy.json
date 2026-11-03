@@ -1,0 +1,108 @@
+{
+  "_comment": "Crewflow image release-gate policy (H5). Read by image_gate.py; never shipped in an image. Every rule here is enforced fail-closed: 'block' items fail in every mode, 'release' items fail a release-mode run and are shown as NEEDS OWNER APPROVAL (HOLD) on pull requests. How to change this file: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.",
+  "schema": 1,
+  "scanners": {
+    "trivy": {
+      "image": "aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c",
+      "version": "0.76.1"
+    },
+    "grype": {
+      "image": "anchore/grype:v0.121.0@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea",
+      "version": "0.121.0"
+    },
+    "max_db_age_hours": 72
+  },
+  "dockerfiles": {
+    "_comment": "FROM references that are neither a digest-pinned image nor an earlier stage. Each needs a reason; the gate checks the result instead (worker-base: the Worker's lower layers must be exactly the gated API image's layers).",
+    "arg_base_images": {
+      "packages/rab-docker/rab/Dockerfile.worker-bundle": {
+        "ref": "${CREWFLOW_BASE_IMAGE}",
+        "reason": "Built FROM the API image of the same commit, which CI passes as an OCI-layout build context pinned by digest; the worker-base check proves the layer chain."
+      }
+    }
+  },
+  "roles": {
+    "api": {
+      "dockerfile": "packages/rab-docker/rab/Dockerfile",
+      "target": "rab",
+      "user": "node",
+      "entrypoint": ["docker-entrypoint.sh"],
+      "cmd": ["./api-prestart.sh"],
+      "exposed_ports": ["3000/tcp"],
+      "healthcheck_required": false,
+      "floors_checks": ["node", "alpine", "apk-absent:chromium", "apk-if-installed:libexpat"],
+      "chromium_binary": null,
+      "module_path_identities": [{ "user": "node", "home": null }],
+      "accounts": { "node": 1000 },
+      "home_dirs_root_owned": ["/home/node"],
+      "writable_dirs": { "/app/storage": 1000 },
+      "required_files": ["/app/packages/rab-server/dist/main.js", "/app/api-prestart.sh"],
+      "sbom_must_include": ["musl", "@nestjs/core", "typeorm"],
+      "min_sbom_packages": 100
+    },
+    "worker": {
+      "dockerfile": "packages/rab-docker/rab/Dockerfile.worker-bundle",
+      "target": null,
+      "user": "root",
+      "entrypoint": ["/sbin/tini", "-s", "--"],
+      "cmd": ["node", "/opt/crewflow-bundle/start-worker-bundle.cjs"],
+      "exposed_ports": [],
+      "healthcheck_required": true,
+      "floors_checks": ["node", "alpine", "apk-required:chromium", "apk-required:libexpat"],
+      "chromium_binary": "/usr/bin/chromium",
+      "module_path_identities": [
+        { "user": "1000:1000", "home": "/nonexistent" },
+        { "user": "10001:10001", "home": "/nonexistent" }
+      ],
+      "accounts": { "node": 1000, "crewflow-provisioner": 10001 },
+      "home_dirs_root_owned": ["/home/node"],
+      "writable_dirs": {
+        "/app/storage": 1000,
+        "/tmp/crewflow-jobs": 1000,
+        "/tmp/crewflow-provisioner": 10001,
+        "/run/crewflow-health/jobs": 1000,
+        "/run/crewflow-health/provisioner": 10001
+      },
+      "required_files": [
+        "/app/packages/rab-worker/dist/main.js",
+        "/app/packages/rab-worker/dist/workspace-provisioner.main.js",
+        "/opt/crewflow-bundle/start-worker-bundle.cjs"
+      ],
+      "sbom_must_include": ["musl", "chromium", "@nestjs/core", "typeorm"],
+      "min_sbom_packages": 300
+    }
+  },
+  "filesystem": {
+    "_comment": "Code-loading paths: every non-symlink entry must be owned by 0:0 and not group/other-writable, except the listed runtime data directories (writable_dirs per role).",
+    "code_paths": ["/app", "/opt/crewflow-bundle", "/usr/local", "/usr/lib/chromium"],
+    "sticky_world_writable_dirs": ["/tmp", "/var/tmp", "/dev/shm", "/run/lock", "/var/lock"],
+    "ignore_prefixes": ["/proc/", "/sys/", "/dev/"],
+    "test_dir_names": ["__tests__", "__mocks__", "__fixtures__"],
+    "test_file_pattern": "\\.(spec|test)\\.(c|m)?(js|ts)$|(^|/)test-helpers\\.(c|m)?js$|(^|/)jest-[^/]*\\.(c|m)?js$",
+    "test_scan_roots": ["/app/packages", "/opt/crewflow-bundle"]
+  },
+  "packages": {
+    "_comment": "'block' = never in a runtime image (H1 already removes them). 'h3_target' = development-only packages H3 removes (production-only node_modules); release-blocking until then. 'h3_target_by_role' adds role-specific ones. Names ending in /* match a whole scope.",
+    "block": ["esbuild", "@esbuild/*", "vite"],
+    "h3_target": [
+      "jest", "ts-jest", "jest-environment-node", "jest-environment-jsdom", "@jest/*",
+      "nx", "@nx/*", "typescript", "ts-node", "ts-node-dev", "tsx", "concurrently", "wait-on", "prettier", "eslint",
+      "@typescript-eslint/*", "react-email", "supertest", "aws-sdk-client-mock", "@nestjs/testing", "@yarnpkg/types",
+      "@testing-library/*", "@vitejs/*",
+      "@tabler/icons-react", "lucide-react", "react-router-dom", "recharts", "framer-motion", "react-phone-number-input",
+      "country-flag-icons", "@tanstack/react-query"
+    ],
+    "h3_target_by_role": {
+      "api": ["playwright", "playwright-core"],
+      "worker": []
+    }
+  },
+  "provenance": {
+    "_comment": "BuildKit provenance (mode=max) records build arguments; only these may appear, so no runner environment or credential can leak into a published attestation.",
+    "allowed_build_args": [
+      "MIN_NODE_VERSION", "MIN_CHROMIUM_VERSION", "MIN_LIBEXPAT_VERSION", "CREWFLOW_BASE_IMAGE",
+      "BUILDKIT_SBOM_SCAN_CONTEXT", "BUILDKIT_SBOM_SCAN_STAGE"
+    ]
+  },
+  "secret_env_name_pattern": "(SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|API_?KEY|ACCESS_?KEY|CREDENTIAL|DATABASE_URL|_DSN$|^DSN$)"
+}
