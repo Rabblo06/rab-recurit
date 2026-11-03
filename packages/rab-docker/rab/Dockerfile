@@ -119,8 +119,14 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/
 # ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
 # API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
 # it), so the final stage drops the npm CLI. The Worker bundle image is built FROM this stage and inherits it.
+# H3: the other package managers the node image ships go too: Yarn 1 (/opt/yarn-v*, the yarn/yarnpkg links) and Corepack
+# (the yarn/pnpm launcher). Dependencies are installed in the build stages only; nothing at runtime installs, resolves or
+# downloads a package, so a package manager in the runtime image is unused build tooling.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
-  && test ! -e /usr/local/lib/node_modules/npm
+      /usr/local/lib/node_modules/corepack /usr/local/bin/corepack /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+  && test ! -e /usr/local/lib/node_modules/npm && test ! -e /usr/local/lib/node_modules/corepack \
+  && test -z "$(ls -d /opt/yarn-v* 2>/dev/null)" \
+  && for b in npm npx corepack yarn yarnpkg pnpm pnpx; do if command -v "$b" >/dev/null 2>&1; then echo "FATAL: package manager $b in the runtime image"; exit 1; fi; done
 # H1: application code and dependencies are ROOT-owned and not group/other-writable (COPY's default owner is 0:0). The
 # runtime user `node` (uid/gid 1000, shipped by node:24-alpine) can read and execute them but never rewrite them, so a
 # compromised process cannot persist by editing code it later re-imports. Only /app/storage (below) is writable by it.
