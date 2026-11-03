@@ -4522,7 +4522,15 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   (`pg_db_role_setting`, this or all databases, own or inherited role) or a session value that does not match its mode;
   the security posture and the CI RLS gate also fail. Residual: `postgresql.conf` / `ALTER SYSTEM` (superuser) is only
   caught by poll-mode processes.
-- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode.
+- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode,
+  for a queue-and-scope pointerless backlog of up to 31 batches. #24 (follow-up sweeps when a legacy sweep returns a full
+  batch; bounded to 30 per window and queue per Worker, fair one-batch-per-scope sweeps, idle-neutral) closes the earlier
+  gap where a backlog above ONE batch drained a single batch per 15 min. The bound holds while each sweep takes well under
+  about 24 s (re-measure at production scale); push drains at its consumer's pace (a published push row stays PENDING, so
+  only a batch that moved rows asks for a follow-up). A larger backlog (an availability concern only: delay, never loss or
+  cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
+  Tests: `legacy-batch-limit.spec.ts`, `dispatch-coordinator.spec.ts` (#24 block),
+  `phase-d-backlog-reconciliation.integration.spec.ts`.
 
 ### D-e: account-invite cleanup (F-1) and automatic deletion
 - Redemption refuses expired, revoked and consumed links whether or not cleanup runs (tested). Today's cleanup is a no-op
@@ -4609,6 +4617,87 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase D-Q1 — one complete queue registry, a required tenant scope on every enqueue (branch phase-d/dq1-queue-registry, not merged)
+
+Structural change; no option value, job name, jobId format, prefix, payload or business rule changed (pinned by
+`queue-registry.spec.ts` and `queue-enqueue.spec.ts` against the pre-D-Q1 literals). No migration, role, grant, RLS or
+posture change.
+
+- **Tenant scope at enqueue (new control, producer side).** Every BullMQ job is built by `registeredJob` /
+  `scanJobTemplate` (`engine/worker-shared/queue-enqueue.ts`) with a REQUIRED scope: `{ kind: 'organisation',
+  organisationId }` (a UUID, equal to the payload's `organisationId`) for the four consumer queues, `{ kind: 'system' }`
+  for the seven scan queues. Missing, malformed or wrong-kind scopes, a scope naming another organisation than the
+  payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
+  with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
+  (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+  **This is not a new tenant boundary.** For every current producer, the scope's `organisationId` and the payload's
+  `organisationId` come from the same argument, so "scope must equal payload" cannot fail today. What the check adds is
+  validation of shape, UUID format and payload keys, plus a guard for future producers that might build the two
+  separately. Tenant isolation is still enforced by the consumers: `SET LOCAL` plus the RLS re-read, described next.
+- **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
+  (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
+  `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
+  `shift-statement.job.ts processShiftStatementJob` (`payroll_record ... FOR UPDATE` in `workerCtx(org, workspace)`),
+  `AiTurnRunnerService` / `AiTitleService` (turn / conversation rows under the job's org + workspace). A forged id
+  combination matches no row.
+- **Unknown job name on an existing queue — finding, FIXED (Low, integrity).** Actor → action → consequence: anything
+  able to add a job to `rab-email` / `rab-push` / `rab-shift-statements` (only Crewflow processes hold the Redis
+  credentials; production Redis is unauthenticated, see Phase D-Q plan §7) under ANY job name → the consumer handed it
+  to the one send / generate handler → the email/push/statement for the id in the payload was processed as if it had
+  been published under the registered name. `rab-ai` completed an unknown name silently. Where:
+  `rab-worker/src/core/scheduler/bullmq-scheduler.ts` `createConsumerWorkers` (`(job) => handler(job)`). Fix: a job
+  whose name the registry does not list for the queue is failed closed (`UnrecoverableError`: failed set after one
+  attempt, a warning naming the queue and job id only, the handler never runs). Regression tests:
+  `queue-registry-worker.spec.ts` (all four queues) and `queue-registry-consumers.integration.spec.ts` (real Redis:
+  a `bogus-job` with `attempts: 5` ends failed after one attempt, handler not called; registered names still handled).
+  The tenant re-read above already bounded the impact to the job's own organisation's rows.
+- **Unknown queue name:** `queueSettingsOf` throws `UnknownQueueError`; the Worker refuses to start on an invalid or
+  incomplete registry (`assertQueueRegistryValid`), on a `@Processor` naming an unregistered queue (unchanged) and, in
+  bullmq mode, on scan settings that drifted from `SCAN_JOBS` (`assertScanQueueSettings`). No queue name is read from the
+  environment (`BULLMQ_PREFIX` is a validated prefix, not a queue name); the Admin queue view answers 404 for an
+  unregistered queue name (unchanged).
+- **Missed-tick record:** `rab:worker:scan-ticks` (one epoch-ms field per scan, 7-day TTL) — timestamps only, no ids,
+  no configuration, no tenant data.
+- **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
+  decision); the producer-side checks are defence in depth, not an authentication boundary.
+
+## Phase D-Q3b — account invites always queued (branch phase-d/dq3-invites-always-queued, not merged)
+
+Owner decision (2026-11-02, D-Q plan §12.1 #3): Staff and Manager account invites are always written to the outbox at
+creation; the Worker heartbeat key in Redis no longer decides it. No migration, no role, grant, RLS or posture change.
+
+- **Asset:** a person's account-activation link (a bearer token that sets their first password) and the timing of the
+  email that carries it. **Actor:** a Manager creating, cancelling or resending an invite; anyone able to wipe or stall
+  Redis or the Worker.
+- **Before:** `StaffService.create` / `ManagerService.create` queued the invite only if `EMAIL_DELIVERY_ENABLED` was true
+  **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
+  silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
+- **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  written), not a Redis read.
+- **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
+  returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,
+  `email-send.processor.ts` `revalidate`):** the target user must still exist; the invite must not be revoked
+  ("Cancel invitation"), accepted, or superseded by a newer invite (a resend rotates the token and revokes the older one,
+  and the latest-invite check catches an un-revoked older row); **new in this PR: the invite must not be expired** — an
+  expired invite is cancelled, never sent (before, the consumer did not check `expires_at`; the activation endpoint already
+  refused an expired link, so the risk was a confusing dead-link email, not account takeover). Redemption keeps refusing
+  expired, revoked and consumed links independently of delivery.
+- **Organisation suspension:** unchanged. `sendAccountInvite` refuses to mint an invite for a suspended organisation; an
+  invite queued before a suspension is still governed by the same revalidation (no new behaviour in this PR).
+- **Tenant isolation:** the job payload is `{emailOutboxId, organisationId}` taken from the committed row; the consumer
+  re-reads the row under that organisation's RLS context. A job naming another organisation sees no row and sends nothing
+  (tested, `account-invite-delivery` I5); with no tenant context the outbox returns zero rows (tested).
+- **Tests:** `account-invite-abuse-cases` (heartbeat missing ⇒ invite queued; heartbeat stale ⇒ queued for staff and
+  managers; `EMAIL_DELIVERY_ENABLED=false` ⇒ nothing queued; RLS isolation), `account-invite-delivery` (Worker-side: a
+  current invite queued while the Worker was down is delivered once; cancelled, superseded and expired invites are never
+  delivered; cross-tenant job sends nothing), `account-lifecycle-email-enabled.spec` (unit).
+- **Residual:** an invite queued during a long Worker outage may arrive after the Manager has already chased the person by
+  other means; the email is still valid (or is cancelled if expired/revoked/superseded). The informational "Worker
+  offline" signal in the admin panel (`AdminPanelService.checkWorker`) is unchanged and does not block queueing.
 
 ## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
 

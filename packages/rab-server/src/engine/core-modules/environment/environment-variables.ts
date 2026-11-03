@@ -322,10 +322,15 @@ export class EnvironmentVariables {
   EMAIL_DRIVER: string = 'LOGGER';
 
   /**
-   * Operator kill-switch, independent of the worker heartbeat check
-   * AccountLifecycleService.isEmailDeliveryAvailable() also performs — lets
-   * an operator disable all outbound invite/welcome email (e.g. during a
-   * maintenance window) even while the worker itself is technically up.
+   * Gates ONE thing: whether StaffService/ManagerService.create() queues a
+   * Staff/Manager account invite at creation
+   * (AccountLifecycleService.isEmailDeliveryEnabled()); `false` creates the
+   * account with no invite (a Manager can send one later). It is NOT a global
+   * email kill switch: Resend invite, change-pending-email, password reset,
+   * welcome, MFA notices, member/organisation invitations and notify() emails
+   * do not read it (the Admin Panel only displays it). Since the owner's
+   * "always queue" decision (Phase D-Q §12.1 #3) the Worker's Redis heartbeat
+   * no longer takes part in that creation-time decision.
    * Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS below — see its
    * comment for why @Type(() => String) is required here too.
    */
