@@ -43,11 +43,11 @@ const STUBS = {
 };
 for (const name of Object.keys(STUBS)) fs.writeFileSync(path.join(stubs, `${name}.js`), stub(name));
 
-function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true } = {}) {
+function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [] } = {}) {
   const ctlDir = path.join(work, `ctl-${name}`);
   fs.mkdirSync(ctlDir);
   for (const [k, v] of Object.entries(ctl)) fs.writeFileSync(path.join(ctlDir, k), String(v));
-  const args = ['run', '--rm', '--network', 'none', '-w', '/app', '-v', `${START}:/app/start.sh:ro`];
+  const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`];
   if (withPrestart) args.push('-v', `${PRESTART}:/app/api-prestart.sh:ro`);
   for (const [stubName, target] of Object.entries(STUBS)) args.push('-v', `${path.join(stubs, `${stubName}.js`)}:${target}:ro`);
   args.push('-v', `${ctlDir}:/ctl:ro`);
@@ -110,6 +110,16 @@ r = run('start-sh-forbidden', { ...BASE, DATABASE_URL_UNPOOLED: 'postgres://crew
 check('5b start.sh with a migration credential -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'main') && noMigration(r.out), r.out);
 r = run('start-sh-missing', BASE, { entry: 'start.sh', withPrestart: false });
 check('5c start.sh without api-prestart.sh in the image -> refused (64), never falls back to migrating', r.code === 64 && !line(r.out, 'main') && noMigration(r.out), r.out);
+
+// 6. Docker hardening H6: the isolation report. Never a refusal — it names each control the platform did not apply.
+r = run('isolation-default', BASE);
+check('6a Docker defaults (root, 14 capabilities, writable root, no limits) -> WARNING naming each gap, still starts', r.code === 0 && line(r.out, 'main') &&
+  r.out.includes('api-prestart: WARNING runtime isolation weaker than docker-compose.production.yml declares (running as root; capabilities in the bounding set (CapBnd=') &&
+  /\(CapBnd=[0-9a-f]{16}\); no-new-privileges is off; root filesystem is writable; no PID limit; no memory limit\): uid=0 /.test(r.out), r.out);
+r = run('isolation-declared', BASE, { dockerArgs: ['--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256', '--memory', '768m'] });
+check('6b the production rab-api settings -> "runtime isolation as declared", no warning, starts', r.code === 0 && line(r.out, 'main') &&
+  r.out.includes('api-prestart: runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=256 memory.max=805306368') && !/WARNING/.test(r.out), r.out);
+check('6c the report prints no environment value', !r.out.includes(BASE.APP_SECRET) && !r.out.includes(BASE.PG_DATABASE_URL), r.out);
 
 fs.rmSync(work, { recursive: true, force: true });
 console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);

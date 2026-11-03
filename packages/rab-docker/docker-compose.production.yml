@@ -242,9 +242,15 @@ services:
     #   - a READ-ONLY root filesystem and NO tmpfs: the API writes nothing to its
     #     own filesystem in production (uploads are buffered in memory and stored
     #     in R2/S3; production refuses STORAGE_DRIVER=LOCAL, so /app/storage is
-    #     unused; logs go to stdout). A write anywhere fails with EROFS;
+    #     unused; logs go to stdout). Any write fails with EROFS, except in
+    #     Docker's default /dev/shm (64 MiB, noexec), which the API never uses;
     #   - a PID/thread cap and memory/CPU limits above the measured peak, and a
     #     stop grace above the measured SIGTERM drain (Nest shutdown hooks).
+    #     `cpus` may not exceed the host's CPU count (Docker refuses to start the
+    #     container): the planned hosts have >= 2 vCPUs (docs/hosting/07); on a
+    #     smaller host set CREWFLOW_API_CPUS / CREWFLOW_WORKER_CPUS lower.
+    # api-prestart.sh logs what was actually applied at every start ("runtime
+    # isolation as declared", or a WARNING naming each control a platform dropped).
     # No Docker socket, host namespace or host mount is ever added here.
     user: "1000:1000"
     read_only: true
@@ -364,9 +370,11 @@ services:
       - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
     # > launcher grace (42 s = 30 s jobs drain + margin) so no drain is cut short.
     stop_grace_period: 55s
-    # H6: limits above the measured peak (tini + launcher + both children + a
-    # Chromium render; see the H6 runtime matrix). pids_limit counts threads.
-    pids_limit: 512
+    # H6: limits above the measured worst case. pids_limit counts threads: one
+    # Chromium render peaks at ~130 tasks and up to 4 can run at once (shift
+    # reports, final timesheets, 2 statement consumers) = 551 tasks measured,
+    # plus tini, the launcher and both children; 512 made renders fail.
+    pids_limit: 1024
     mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
     cpus: ${CREWFLOW_WORKER_CPUS:-2}
 

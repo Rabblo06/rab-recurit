@@ -54,6 +54,39 @@ for name in CREWFLOW_OPS_RUN PG_OPS_APP_DATABASE_URL CREWFLOW_OPS_ACTOR_SOURCE C
   if [ -n "$value" ]; then refuse "$name must never be set on the api service (it belongs to the one-off ops container only)."; fi
 done
 
+# Docker hardening H6: report the container isolation this process actually received, compared with what
+# docker-compose.production.yml declares for rab-api (uid 1000, no capability at all, no-new-privileges, read-only root, PID
+# and memory limits). REPORT ONLY, never a refusal: some platforms drop these compose keys (OpenShip's compose import does
+# not model user/read_only/cap_*/security_opt/pids_limit; THREAT-MODEL.md, Docker hardening H6), and refusing there is an
+# owner decision. Names and flags only; no value from the environment is printed.
+isolation_report() {
+  capbnd=$(sed -n 's/^CapBnd:[[:space:]]*//p' /proc/self/status 2>/dev/null || true)
+  nnp=$(sed -n 's/^NoNewPrivs:[[:space:]]*//p' /proc/self/status 2>/dev/null || true)
+  rootopts=$(awk '$2 == "/" { o = $4 } END { print o }' /proc/self/mounts 2>/dev/null || true)
+  case ",$rootopts," in
+    ,,) root=unknown ;;
+    *,ro,*) root=read-only ;;
+    *) root=writable ;;
+  esac
+  pids=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || true)
+  mem=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)
+  uid=$(id -u 2>/dev/null || echo unknown)
+  gaps=""
+  [ "$uid" != 0 ] || gaps="$gaps; running as root"
+  [ "$capbnd" = 0000000000000000 ] || gaps="$gaps; capabilities in the bounding set (CapBnd=${capbnd:-unknown})"
+  [ "$nnp" = 1 ] || gaps="$gaps; no-new-privileges is off"
+  [ "$root" = read-only ] || gaps="$gaps; root filesystem is $root"
+  case "$pids" in max) gaps="$gaps; no PID limit" ;; '') gaps="$gaps; PID limit unreadable" ;; esac
+  case "$mem" in max) gaps="$gaps; no memory limit" ;; '') gaps="$gaps; memory limit unreadable" ;; esac
+  summary="uid=$uid CapBnd=${capbnd:-unknown} NoNewPrivs=${nnp:-unknown} root=$root pids.max=${pids:-unknown} memory.max=${mem:-unknown}"
+  if [ -z "$gaps" ]; then
+    echo "api-prestart: runtime isolation as declared: $summary"
+  else
+    echo "api-prestart: WARNING runtime isolation weaker than docker-compose.production.yml declares (${gaps#; }): $summary - starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)" >&2
+  fi
+}
+isolation_report
+
 echo "api-prestart: checking the schema is current (restricted runtime role, read-only)"
 if ! run_step node "$SCRIPTS/check-pending-migrations.js"; then
   echo "api-prestart: REFUSED - the schema is behind this code (or the runtime role is wrong). Run rab-migrate (deploy:prepare) for this release first." >&2

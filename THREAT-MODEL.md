@@ -4676,8 +4676,10 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
   future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
   rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
-  `no-new-privileges:true`, `read_only: true` with NO tmpfs (measured: the API writes nothing to its filesystem in
-  production — uploads are buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (the API writes nothing to its filesystem: uploads are
+  buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production; measured by the runtime matrix
+  in `development` mode with push, Sentry, OIDC and AI off — those paths are covered by the code review only. Docker's
+  default 64 MiB noexec `/dev/shm` stays writable; the API never uses it),
   `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
   `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
 - **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
@@ -4686,16 +4688,19 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
   watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
   the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
-  `pids_limit` (Chromium ≈ 130 tasks per render), `mem_limit` and `cpus`. Regression: "H6 rab-worker" test, launcher tests,
+  `pids_limit: 1024` (one Chromium render ≈ 130 tasks; up to 4 renders run at once — shift reports, final timesheets,
+  two statement consumers — measured 551 tasks; with 512, 4 of 12 concurrent renders failed), `mem_limit` and `cpus`
+  (`cpus` above the host's CPU count stops the container from starting: planned hosts have ≥ 2 vCPUs). Regression: "H6 rab-worker" test, launcher tests,
   runtime matrix.
 - **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
   OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
   2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
   modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
   `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
-  verified. Control: the Worker launcher now logs one line at start — `runtime isolation as declared: CapBnd=… NoNewPrivs=…
-  root=… tmpfs=…` or a `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the
-  logs which controls a platform applied. It never refuses (that would stop today's OpenShip Worker; owner decision).
+  verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
+  declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
+  `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
+  controls a platform applied (CPU limits are not reported). It never refuses (that would stop today's OpenShip Worker; owner decision).
   What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
   files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
 - **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:

@@ -550,10 +550,10 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
  * REPORT ONLY — it never refuses: some platforms drop these keys (OpenShip's compose import does not model cap_*,
  * security_opt, read_only, tmpfs or pids_limit), and refusing there is an owner decision (THREAT-MODEL.md, Docker hardening
  * H6). The child identity split, the env allowlists and preflight() above do not depend on any of these keys.
- * Pure: takes the text of /proc/self/status and /proc/self/mounts.
+ * Pure: takes the text of /proc/self/status and /proc/self/mounts, and the cgroup v2 pids.max / memory.max values.
  */
 const LAUNCHER_CAPS = 0xe0n; // CAP_KILL (5) | CAP_SETGID (6) | CAP_SETUID (7)
-function runtimeIsolation(statusText, mountsText, layout = DEFAULT_LAYOUT) {
+function runtimeIsolation(statusText, mountsText, { pidsMax, memoryMax } = {}, layout = DEFAULT_LAYOUT) {
   const field = (k) => (new RegExp(`^${k}:\\s*(\\S+)`, 'm').exec(String(statusText ?? '')) || [])[1];
   const capBnd = field('CapBnd');
   const noNewPrivs = field('NoNewPrivs');
@@ -568,20 +568,27 @@ function runtimeIsolation(statusText, mountsText, layout = DEFAULT_LAYOUT) {
   if (noNewPrivs !== '1') gaps.push('no-new-privileges is off');
   if (rootReadOnly !== true) gaps.push('root filesystem is writable');
   if (tmpfs !== dirs.length) gaps.push(`${dirs.length - tmpfs} of ${dirs.length} per-child temp/health directories are not tmpfs`);
-  return { capBnd: capBnd ?? '?', noNewPrivs: noNewPrivs ?? '?', rootReadOnly, tmpfs: `${tmpfs}/${dirs.length}`, gaps };
+  const limit = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const pids = limit(pidsMax);
+  const memory = limit(memoryMax);
+  if (pids === 'max') gaps.push('no PID limit');
+  else if (pids === null) gaps.push('PID limit unreadable');
+  if (memory === 'max') gaps.push('no memory limit');
+  else if (memory === null) gaps.push('memory limit unreadable');
+  return { capBnd: capBnd ?? '?', noNewPrivs: noNewPrivs ?? '?', rootReadOnly, tmpfs: `${tmpfs}/${dirs.length}`, pidsMax: pids ?? '?', memoryMax: memory ?? '?', gaps };
 }
 
 function reportRuntimeIsolation(log = (s) => console.error(`[worker-bundle] ${s}`)) {
-  let status = '';
-  let mounts = '';
-  try {
-    status = fs.readFileSync('/proc/self/status', 'utf8');
-    mounts = fs.readFileSync('/proc/self/mounts', 'utf8');
-  } catch {
-    // reported as gaps below
-  }
-  const r = runtimeIsolation(status, mounts);
-  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${r.rootReadOnly ? 'read-only' : 'writable'} tmpfs=${r.tmpfs}`;
+  const read = (p) => {
+    try {
+      return fs.readFileSync(p, 'utf8');
+    } catch {
+      return ''; // reported as a gap below
+    }
+  };
+  const r = runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  const root = r.rootReadOnly === null ? 'unknown' : r.rootReadOnly ? 'read-only' : 'writable';
+  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax}`;
   if (r.gaps.length === 0) log(`runtime isolation as declared: ${summary}`);
   else log(`WARNING runtime isolation weaker than docker-compose.production.yml declares (${r.gaps.join('; ')}): ${summary} — starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)`);
   return r;

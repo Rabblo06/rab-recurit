@@ -1137,16 +1137,18 @@ const H6_MOUNTS_DECLARED = [
   'tmpfs /run/crewflow-health/provisioner tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=10001,gid=10001 0 0',
 ].join('\n');
 
-test('H6-1 runtime isolation: the declared production settings (SETUID/SETGID/KILL, NNP, read-only root, 4 tmpfs) report no gap', () => {
-  const r = launcher.runtimeIsolation('Name:\tnode\nCapEff:\t00000000000000e0\nCapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED);
-  assert.deepEqual(r, { capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', gaps: [] });
+test('H6-1 runtime isolation: the declared production settings (SETUID/SETGID/KILL, NNP, read-only root, 4 tmpfs, limits) report no gap', () => {
+  const limits = { pidsMax: '512\n', memoryMax: '1610612736\n' };
+  const r = launcher.runtimeIsolation('Name:\tnode\nCapEff:\t00000000000000e0\nCapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, limits);
+  assert.deepEqual(r, { capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', pidsMax: '512', memoryMax: '1610612736', gaps: [] });
   // Fewer capabilities than declared is not a gap (only MORE would be).
-  assert.deepEqual(launcher.runtimeIsolation('CapBnd:\t00000000000000c0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED).gaps, []);
+  assert.deepEqual(launcher.runtimeIsolation('CapBnd:\t00000000000000c0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, limits).gaps, []);
 });
 
 test('H6-2 runtime isolation: a platform that drops the compose security keys (Docker defaults) is named gap by gap', () => {
   const dockerDefault = 'CapEff:\t00000000a80425fb\nCapBnd:\t00000000a80425fb\nNoNewPrivs:\t0\n';
-  const r = launcher.runtimeIsolation(dockerDefault, 'overlay / overlay rw,relatime 0 0\nproc /proc proc rw 0 0');
+  // OpenShip honours mem_limit but not pids_limit.
+  const r = launcher.runtimeIsolation(dockerDefault, 'overlay / overlay rw,relatime 0 0\nproc /proc proc rw 0 0', { pidsMax: 'max\n', memoryMax: '1610612736\n' });
   assert.equal(r.rootReadOnly, false);
   assert.equal(r.tmpfs, '0/4');
   assert.deepEqual(r.gaps, [
@@ -1154,14 +1156,20 @@ test('H6-2 runtime isolation: a platform that drops the compose security keys (D
     'no-new-privileges is off',
     'root filesystem is writable',
     '4 of 4 per-child temp/health directories are not tmpfs',
+    'no PID limit',
   ]);
-  // Unreadable /proc: every check is a gap, nothing throws.
-  assert.equal(launcher.runtimeIsolation('', '').gaps.length, 4);
+  // Unreadable /proc and cgroup files: every check is a gap, root is unknown (null, never "read-only"), nothing throws.
+  const none = launcher.runtimeIsolation('', '', {});
+  assert.equal(none.rootReadOnly, null);
+  assert.deepEqual(none.gaps.slice(-2), ['PID limit unreadable', 'memory limit unreadable']);
+  assert.equal(none.gaps.length, 6);
 });
 
-test('H6-3 runtime isolation of the live test container is readable and reported (evidence line; the image run applies the production capability set)', { skip: !linuxRoot && 'needs root on Linux' }, () => {
-  // Live values of THIS test process (the image test run applies the production capability set).
-  const live = launcher.runtimeIsolation(fs.readFileSync('/proc/self/status', 'utf8'), fs.readFileSync('/proc/self/mounts', 'utf8'));
-  console.log(`# evidence runtime isolation (this test container): CapBnd=${live.capBnd} NoNewPrivs=${live.noNewPrivs} rootReadOnly=${live.rootReadOnly} tmpfs=${live.tmpfs} gaps=${JSON.stringify(live.gaps)}`);
-  assert.ok(Array.isArray(live.gaps));
+test('H6-3 runtime isolation of the live test container matches the kernel (evidence line; the image run applies the production capability set)', { skip: !linuxRoot && 'needs root on Linux' }, () => {
+  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+  const status = read('/proc/self/status');
+  const live = launcher.runtimeIsolation(status, read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  console.log(`# evidence runtime isolation (this test container): CapBnd=${live.capBnd} NoNewPrivs=${live.noNewPrivs} rootReadOnly=${live.rootReadOnly} tmpfs=${live.tmpfs} pids.max=${live.pidsMax} memory.max=${live.memoryMax} gaps=${JSON.stringify(live.gaps)}`);
+  assert.equal(live.capBnd, /^CapBnd:\s*(\S+)/m.exec(status)[1]);
+  assert.equal(live.noNewPrivs, /^NoNewPrivs:\s*(\S+)/m.exec(status)[1]);
 });

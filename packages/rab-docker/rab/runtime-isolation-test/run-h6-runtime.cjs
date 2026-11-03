@@ -227,8 +227,9 @@ const wsStatus = (id) => sql1(`SELECT coalesce(mw.schema_status,'NULL') || '|' |
 /** One HTTP call from INSIDE the API container (node fetch, uid 1000, no redirect following). JSON result. */
 function apiFetch(url, { method = 'GET', headers = {}, body } = {}) {
   const js = `fetch(process.env.U,{method:process.env.M,redirect:'manual',headers:JSON.parse(process.env.H),body:process.env.B||undefined}).then(async r=>{const b=Buffer.from(await r.arrayBuffer());console.log(JSON.stringify({status:r.status,location:r.headers.get('location'),type:r.headers.get('content-type'),len:b.length,sha256:require('crypto').createHash('sha256').update(b).digest('hex'),magic:b.subarray(0,5).toString('latin1'),text:/json|text/.test(r.headers.get('content-type')||'')?b.toString('utf8').slice(0,4000):''}))},e=>{console.log(JSON.stringify({error:String(e.cause?.code||e.message)}))})`;
-  const env = { U: url, M: method, H: JSON.stringify(headers), B: body ?? '' };
-  const r = execAs('rab-api', '1000:1000', `node -e "${js.replace(/"/g, '\\"')}"`, { env, quiet: true });
+  // The script travels as an environment variable like the inputs: nothing is spliced into the shell command line.
+  const env = { J: js, U: url, M: method, H: JSON.stringify(headers), B: body ?? '' };
+  const r = execAs('rab-api', '1000:1000', 'node -e "$J"', { env, quiet: true });
   const line = r.out.trim().split('\n').pop();
   try {
     return JSON.parse(line);
