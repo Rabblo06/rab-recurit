@@ -369,8 +369,8 @@ split exists for the OpenShip/Docker-Compose production target
 must never compete with API request handling for CPU. Since Docker hardening
 H2 the shared image has **no Chromium**: only the Worker bundle image
 (`packages/rab-docker/rab/Dockerfile.worker-bundle`, built on the shared
-image) can render PDFs, so a Worker started from the shared image with
-`start-worker.sh` cannot run the PDF jobs.
+image) can render PDFs; `start-worker.sh` in the shared image is retired
+and refuses to start (exit 1), pointing to the Worker bundle image.
 
 ---
 

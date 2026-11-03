@@ -128,7 +128,8 @@ COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
-# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either).
+# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either). start-worker.sh is
+# retired (H2): this image has no Chromium, so it only prints where the Worker image is and exits 1 (fail closed).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
 COPY --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh

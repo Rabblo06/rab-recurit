@@ -4662,6 +4662,6 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
   runs the Chromium/libexpat/Node floors there. CI builds the Worker image too, so the gates stay exercised.
 - **Unchanged:** tenant isolation, database identities and the Worker's privilege model (root launcher under tini,
   jobs uid 1000, provisioner uid 10001, renderer still `--no-sandbox` with JavaScript, network and navigation off).
-- **Residual:** a Worker started from the shared image with the legacy `start-worker.sh` (Render-style deployment, not
-  used by any committed compose file) has no Chromium and its PDF jobs fail at render time; the supported Worker is the
-  bundle image.
+- **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
+  shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
+  jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
