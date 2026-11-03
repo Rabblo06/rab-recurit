@@ -615,6 +615,9 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
     // 27b: migrate pg-other with the SAME guarded runner and bootstrap secrets as case 10 (a throwaway cluster of this
     // project only), so every per-process gate passes on BOTH clusters and only the launcher's comparison of the two
     // children's live probes can refuse. The gated migration 1786721330000 must not be applied by this runner.
+    // Exactly case 10's two phases: phase A as the init script's owner role up to the role split, then phase B.
+    const moA = compose(['--profile', 'migrate', '--profile', 'mismatch', 'run', '--rm', '--no-deps', 'migrate'], { env: { BT_MIGRATION_URL: 'postgres://rab_owner:rab_owner_dev_only@pg-other:5432/rab' } });
+    assert(/refuses to run as 'rab_owner'/.test(moA.out), '27b: pg-other phase A did not stop at the role split');
     const mo = compose(['--profile', 'migrate', '--profile', 'mismatch', 'run', '--rm', '--no-deps', 'migrate'], {
       env: { BT_MIGRATION_URL: `postgres://rab:${SECRETS.BT_SUPERUSER_PASSWORD}@pg-other:5432/rab`, BT_BOOTSTRAP_CREWFLOW: SECRETS.BT_CREWFLOW_PASSWORD, BT_BOOTSTRAP_APP: SECRETS.BT_APP_PASSWORD },
     });
