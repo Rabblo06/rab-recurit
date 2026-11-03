@@ -1012,9 +1012,11 @@ def cmd_attest(a, c: Check) -> None:
     for layer in am.get('layers') or []:
         pt = (layer.get('annotations') or {}).get('in-toto.io/predicate-type', '')
         stmt = json.loads(blob(a.layout, layer['digest']))
+        # BuildKit leaves the in-toto subject empty inside an attestation manifest: the binding to the image is the
+        # manifest's vnd.docker.reference.digest annotation (checked above). A subject that IS present must name it.
         subjects = {s.get('digest', {}).get('sha256') for s in stmt.get('subject') or []}
-        if img['digest'].split(':', 1)[1] not in subjects:
-            c.fail(f'attestation {pt} does not name the image manifest {img["digest"]} as its subject')
+        if subjects and img['digest'].split(':', 1)[1] not in subjects:
+            c.fail(f'attestation {pt} names subject(s) {sorted(subjects)}, not the image manifest {img["digest"]}')
         if pt.startswith('https://spdx.dev/Document') or pt.startswith('https://cyclonedx.org/bom'):
             sboms.append(stmt)
         elif pt.startswith('https://slsa.dev/provenance/'):
