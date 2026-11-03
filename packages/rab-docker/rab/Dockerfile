@@ -1,6 +1,21 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# The Dockerfile frontend is pinned by its OCI index digest (H5 release gate refuses an unpinned frontend). Verified
+# 2026-11-03 with `docker buildx imagetools inspect docker/dockerfile:1` (the :1 tag resolves to this digest).
 
-FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS base
+# Security floors (H1): the minimum Node, Chromium and libexpat versions, and the only Alpine branch apk may resolve from,
+# live in ONE place: packages/rab-docker/rab/security-floors.env. The stages below run security-floors.sh against it
+# through a build-time bind mount (nothing is copied into an image); a version below a floor FAILS the build, there is no
+# warn-only mode. A build argument of the same name can only RAISE a floor, never lower it.
+#
+# node:24-alpine = Node 24.22.2 on Alpine 3.24.3, pinned by its multi-arch OCI INDEX digest (linux/amd64 + linux/arm64/v8;
+# verified 2026-11-02 with `docker buildx imagetools inspect node:24-alpine` and `node -v` on both platforms). The final
+# stage uses the SAME digest: keep the two FROM lines in step.
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS base
+ARG MIN_NODE_VERSION
+# The Node that compiles the native modules (argon2) in `deps` is held to the same floor as the runtime.
+RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
+    --mount=type=bind,source=packages/rab-docker/rab/security-floors.env,target=/tmp/security-floors.env \
+    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine
 # python3/make/g++: fallback native build toolchain for deps that ship no
 # prebuilt musl binary (e.g. bcrypt, landing in M1).
 RUN apk add --no-cache python3 make g++ \
@@ -35,70 +50,148 @@ RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared,rab-ui
 # failure a clean checkout of a stale commit reproduced.
 RUN test -f packages/rab-worker/dist/main.js || (echo "FATAL: packages/rab-worker/dist/main.js was not produced by the build above — rab-worker build is incomplete or missing from the workspace." && exit 1)
 RUN test -f packages/rab-server/dist/main.js || (echo "FATAL: packages/rab-server/dist/main.js was not produced by the build above." && exit 1)
+# H1: compiled tests never reach a runtime image. tsc already skips *.spec.ts/*.test.ts, but rab-worker compiles its
+# src/__tests__/** helpers (fixtures, a fake SMTP sink, test identities) into dist. Delete every __tests__/__mocks__/
+# __fixtures__ directory and spec/test/jest/test-helper file from the dist folders the runtime stage copies (the source
+# tree is untouched), prove nothing left there imports a deleted path, and clear any group/other write bit.
+# H3: type declarations (*.d.ts), source maps and TypeScript build-info files are build-only output as well: nothing loads
+# them at runtime, and a source map can embed original source. They are deleted from the same dist folders (only .d.ts is
+# emitted today, about 4.9 MB; the final stage refuses any source map that comes back). packages/rab-ui is no longer in
+# the list: no runtime file imports @rab/ui (it is a front-end library), so the runtime stage does not copy it.
+RUN set -eu; \
+    dists="packages/rab-server/dist packages/rab-worker/dist packages/rab-shared/dist-cjs packages/rab-emails/dist"; \
+    for d in $dists; do test -d "$d"; done; \
+    find $dists -type d \( -name __tests__ -o -name __mocks__ -o -name __fixtures__ \) -prune -exec rm -rf {} +; \
+    find $dists -type f \( -name '*.spec.*' -o -name '*.test.*' -o -name 'jest-*' -o -name 'test-helpers.*' \) -delete; \
+    find $dists -type f \( -name '*.d.ts' -o -name '*.d.cts' -o -name '*.d.mts' -o -name '*.map' -o -name '*.tsbuildinfo' \) -delete; \
+    left="$(find $dists \( -name __tests__ -o -name __mocks__ -o -name __fixtures__ -o -name '*.spec.*' -o -name '*.test.*' -o -name 'jest-*' -o -name 'test-helpers.*' \) -print)"; \
+    if [ -n "$left" ]; then echo "FATAL: test files remain in runtime dist folders:"; echo "$left"; exit 1; fi; \
+    rc=0; refs="$(grep -rlE "(require\(|from |import\()[[:space:]]*['\"][^'\"]*(/__tests__/|/__mocks__/|/__fixtures__/|\.spec(\.js)?['\"]|\.test(\.js)?['\"]|/test-helpers(\.js)?['\"]|/jest-[A-Za-z0-9-]+(\.js)?['\"])" $dists)" || rc=$?; \
+    if [ "$rc" -gt 1 ]; then echo "FATAL: the import scan itself failed (grep exit $rc)"; exit 1; fi; \
+    if [ -n "$refs" ]; then echo "FATAL: runtime code imports a removed test file:"; echo "$refs"; exit 1; fi; \
+    find $dists ! -type l -perm /022 -exec chmod go-w {} +
 
-# Runtime node_modules = the build stage's tree minus the build-only native toolchains (image scan 2026-10-30): the esbuild
-# binaries (Vite's nested 0.25 copy embeds Go stdlib 1.23.12: 1 CRITICAL + ~25 HIGH) and Vite itself. Nothing the runtime
-# starts needs them — server, Worker, shared, ui and emails dist never import esbuild, vite or tsx; only build/dev CLIs do
-# (tsx, the react-email preview, Vite), and none of those runs in this image.
-FROM build AS runtime-modules
-RUN rm -rf node_modules/esbuild node_modules/@esbuild node_modules/vite node_modules/.bin/esbuild node_modules/.bin/vite \
-      node_modules/*/node_modules/esbuild node_modules/*/node_modules/@esbuild \
-      node_modules/@*/*/node_modules/esbuild node_modules/@*/*/node_modules/@esbuild \
-  && test -z "$(find node_modules -type f -path '*esbuild*/bin/esbuild' -print -quit)"
+# H3: the runtime node_modules is the PRODUCTION dependency closure of @rab/server alone, not the deps stage's whole
+# workspace install (which also holds the front end's, the e2e suite's and every test and build package: Nx, TypeScript,
+# Jest, Vite/esbuild — whose nested Go binaries were 1 CRITICAL + ~25 HIGH in the 2026-10-30 scan — react-email's preview
+# server, the Playwright test runner, ...). `yarn workspaces focus @rab/server --production` prunes the deps stage's install
+# in place, from the same lockfile and the yarn cache already in that layer, keeping only @rab/server's `dependencies` and,
+# transitively, those of the workspaces it depends on (@rab/shared, @rab/emails); the lockfile is verified unchanged.
+# The Worker-only browser driver (playwright) is NOT in it: Dockerfile.worker-bundle adds the Worker's extra packages on
+# top of this image. The final stage proves the closure (runtime-deps.cjs: every compiled import resolves, no build or test
+# tool is present), so a package the runtime needs but the manifests misclassify fails the BUILD.
+# H1: any group/other write bit a package tarball shipped with is cleared here (only the offending entries are touched,
+# so this stage does not rewrite the whole tree); the final stage then re-verifies the whole of /app.
+FROM deps AS runtime-modules
+RUN set -eu; \
+    lock="$(sha256sum yarn.lock)"; \
+    yarn workspaces focus @rab/server --production; \
+    test "$(sha256sum yarn.lock)" = "$lock"; \
+    nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
+    if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace, which the runtime stage does not copy:"; echo "$nested"; exit 1; fi; \
+    find node_modules ! -type l -perm /022 -exec chmod go-w {} +
 
-# Final stage — this is also the Dockerfile's last stage, which Render
-# builds by default (see dockerfilePath in render.yaml).
+# Final stage = the API image (rab-api, and the one-off rab-migrate / rab-ops). It is also the Dockerfile's last stage,
+# which Docker builds by default when no `--target` is given (OpenShip and Render cannot pass one): keep it last.
 # The same pinned Node image as `base`, WITHOUT base's native build toolchain (python3/make/g++/gcc): those are build-only
 # (image scan 2026-10-30: python3 3.14.8 = 4 CRITICAL) and the runtime compiles nothing. Keep the digest in step with `base`.
-FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS rab
+#
+# H2: NO Chromium, fonts or PDF settings here. The only code that launches a browser is the Worker's PDF renderer
+# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts); rab-server imports neither Playwright nor that file,
+# and the API only serves PDFs the Worker already stored. Chromium (with its fonts, the CHROMIUM_* settings and the
+# Chromium/libexpat floors) is installed by packages/rab-docker/rab/Dockerfile.worker-bundle, on top of this image, so
+# the Worker reuses every layer below and the API image carries none of Chromium's dependency tree (ffmpeg, libxml2,
+# cups, pulse, …) or its unfixable advisories.
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS rab
+ARG MIN_NODE_VERSION
+ARG MIN_LIBEXPAT_VERSION
 WORKDIR /app
 ENV NODE_ENV=production
-# Alpine security updates for the pinned base's OS packages (image scan 2026-10-30: libssl3/libcrypto3 3.5.7 -> 3.5.8), then
-# fail the build if the toolchain is somehow present.
+# Alpine security updates, resolved from the base image's own stable v3.24 main/community repositories at build time
+# (no edge repository is ever added; the floors gate below refuses any other repository line), then fail the build if the
+# toolchain is somehow present.
 RUN apk upgrade --no-cache \
   && test -z "$(apk info -e python3 make g++ gcc)"
-# System Chromium for the worker's PDF jobs (shift roster + final timesheet).
-# Playwright's own downloaded Chromium is glibc-only and does not run on
-# Alpine/musl, so the image ships Alpine's Chromium and the renderer
-# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts) is pointed
-# at it via env. One image, two commands: the API container carries it too
-# but never loads it — clock-in/out never imports the renderer. Fonts:
-# without them Chromium renders blank text.
-RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
+# Security floors, after the last apk transaction: Node, the Alpine branch/repositories, Chromium ABSENT (fail closed if a
+# future change pulls it back into the API image), and libexpat at or above its floor if anything installs it.
+RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
+    --mount=type=bind,source=packages/rab-docker/rab/security-floors.env,target=/tmp/security-floors.env \
+    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine apk-absent:chromium apk-if-installed:libexpat
 # Dependency scan (2026-10-30): every library finding Trivy reports for the base image (undici 6.27.0, tar, brace-expansion,
 # ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
 # API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
 # it), so the final stage drops the npm CLI. The Worker bundle image is built FROM this stage and inherits it.
+# H3: the other package managers the node image ships go too: Yarn 1 (/opt/yarn-v*, the yarn/yarnpkg links) and Corepack
+# (the yarn/pnpm launcher). Dependencies are installed in the build stages only; nothing at runtime installs, resolves or
+# downloads a package, so a package manager in the runtime image is unused build tooling.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
-  && test ! -e /usr/local/lib/node_modules/npm
-ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-# node:24-alpine ships a non-root `node` user/group (uid/gid 1000) out of the
-# box — reuse it rather than inventing one. --chown on every COPY avoids a
-# separate `chown -R` layer (cheaper, and no root-owned intermediate layer).
-COPY --from=runtime-modules --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/package.json ./package.json
-COPY --from=build --chown=node:node /app/packages/rab-server/package.json ./packages/rab-server/package.json
-COPY --from=build --chown=node:node /app/packages/rab-server/dist ./packages/rab-server/dist
-COPY --from=build --chown=node:node /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
-COPY --from=build --chown=node:node /app/packages/rab-worker/dist ./packages/rab-worker/dist
-COPY --from=build --chown=node:node /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
-COPY --from=build --chown=node:node /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
-COPY --from=build --chown=node:node /app/packages/rab-ui/package.json ./packages/rab-ui/package.json
-COPY --from=build --chown=node:node /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
-COPY --from=build --chown=node:node /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
-COPY --from=build --chown=node:node /app/packages/rab-emails/dist ./packages/rab-emails/dist
+      /usr/local/lib/node_modules/corepack /usr/local/bin/corepack /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+  && test ! -e /usr/local/lib/node_modules/npm && test ! -e /usr/local/lib/node_modules/corepack \
+  && test -z "$(ls -d /opt/yarn-v* 2>/dev/null)" \
+  && for b in npm npx corepack yarn yarnpkg pnpm pnpx; do if command -v "$b" >/dev/null 2>&1; then echo "FATAL: package manager $b in the runtime image"; exit 1; fi; done
+# H1: application code and dependencies are ROOT-owned and not group/other-writable (COPY's default owner is 0:0). The
+# runtime user `node` (uid/gid 1000, shipped by node:24-alpine) can read and execute them but never rewrite them, so a
+# compromised process cannot persist by editing code it later re-imports. Only /app/storage (below) is writable by it.
+# packages/rab-worker/dist stays in this image although the API never loads it: the Worker bundle image is built FROM
+# this one (Dockerfile.worker-bundle builds no application code of its own), so this is where the Worker gets its code. It
+# is about 0.8 MB, and none of it runs in the API process; it cannot even start here, because its browser driver
+# (playwright) is a Worker-only dependency that this image does not contain (H3).
+COPY --from=runtime-modules /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
+COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist
+COPY --from=build /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
+COPY --from=build /app/packages/rab-worker/dist ./packages/rab-worker/dist
+COPY --from=build /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
+COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
+COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
+COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
-# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either).
-COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
-COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
-COPY --chown=node:node --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh
-# STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at
-# runtime, not copied in at build time — /app itself stays root-owned (only
-# the files explicitly --chown'd above aren't), so the non-root `node` user
-# below can't mkdir a new directory directly under it without this.
-RUN mkdir -p /app/storage && chown node:node /app/storage
+# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either). start-worker.sh is
+# retired (H2): this image has no Chromium, so it only prints where the Worker image is and exits 1 (fail closed).
+COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
+COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
+COPY --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh
+# STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at runtime, not copied in at build time: the one
+# directory under /app the runtime user owns (0750). Then fail the build unless everything else under /app is root-owned,
+# not group/other-writable, and free of compiled tests (symlinks are skipped: their own mode bits are meaningless).
+# Security review H1-M1: Node's CommonJS loader also searches $HOME/.node_modules and $HOME/.node_libraries
+# (require('module').globalPaths), and node:24-alpine ships /home/node owned by node (2755). A process running as node
+# could plant e.g. $HOME/.node_modules/pg-native, which TypeORM's Postgres driver tries to load on every start: persistent
+# code execution after a restart. /home/node therefore becomes root-owned 0555 (nothing at runtime writes HOME: no npm or
+# yarn, no browser in the API; the Worker's children get HOME=/nonexistent from the launcher). The module-paths gate
+# after `USER node` below proves no module search path is writable by the runtime user. No setuid/setgid file may remain.
+RUN set -eu; \
+    mkdir -p /app/storage && chown node:node /app/storage && chmod 0750 /app/storage; \
+    chown root:root /home/node && chmod 0555 /home/node; \
+    suid="$(find / -xdev -type f -perm /6000 -print | head -n 20)"; \
+    if [ -n "$suid" ]; then echo "FATAL: setuid/setgid files in the runtime image:"; echo "$suid"; exit 1; fi; \
+    test "$(stat -c '%u:%g' /app)" = 0:0; \
+    bad="$(find /app -path /app/storage -prune -o ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
+    if [ -n "$bad" ]; then echo "FATAL: application files not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi; \
+    tests="$(find /app/packages \( -name __tests__ -o -name '*.spec.js' -o -name '*.test.js' \) -print | head -n 20)"; \
+    if [ -n "$tests" ]; then echo "FATAL: compiled tests in the runtime image:"; echo "$tests"; exit 1; fi; \
+    maps="$(find /app/packages \( -name '*.map' -o -name '*.tsbuildinfo' \) -print | head -n 20)"; \
+    if [ -n "$maps" ]; then echo "FATAL: source maps or TypeScript build-info in the runtime image:"; echo "$maps"; exit 1; fi
+# H3 runtime-dependency gate (packages/rab-docker/rab/runtime-deps.cjs, bind-mounted, never shipped): every bare import in
+# the code this image runs (server, shared and emails dist; the Worker dist is checked by the Worker image) resolves with
+# Node's own resolver, and no build, test or Worker-only package is anywhere in node_modules. A package the runtime needs
+# but the production install dropped, or a dev tool that comes back, fails the build here. (prettier is NOT on the list: it
+# is a declared runtime dependency of @react-email/render and of nest-commander's completion helper, so it is in the
+# production closure by design.)
+RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
+    node /tmp/runtime-deps.cjs check /app/node_modules \
+      --scan /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint '@swc/*' \
+        webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
+        playwright playwright-core
 
 USER node
+# Security review H1-M1 gate, run as the runtime user itself: no Node module search path (globalPaths including
+# $HOME/.node_modules and $HOME/.node_libraries, NODE_PATH, and the node_modules lookup chain of every entry point) may be
+# writable, and planting $HOME/.node_modules/pg-native must fail.
+RUN --mount=type=bind,source=packages/rab-docker/rab/module-paths-gate.cjs,target=/tmp/module-paths-gate.cjs \
+    node /tmp/module-paths-gate.cjs
 EXPOSE 3000
 # THE API NEVER MIGRATES (Phase B P7). api-prestart.sh refuses any migration/bootstrap credential in the API's
 # environment, runs a read-only "no pending migrations" check as the restricted runtime role (PG_DATABASE_URL =

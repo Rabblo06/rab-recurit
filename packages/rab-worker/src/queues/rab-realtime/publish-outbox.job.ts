@@ -6,7 +6,8 @@ import { validateAndBuildEnvelope } from '@rab/server/engine/core-modules/realti
 import { storageScopes, MaintenanceScope } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { runScopedForOrg } from '../../core/database/scoped-job';
 import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
-import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent } from '../../core/database/realtime-event';
+import { ClaimedRealtimeEvent, claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent, renewRealtimeEventLeases } from '../../core/database/realtime-event';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 /**
  * Stage 2 — the Redis Pub/Sub publisher for `core.realtime_event`
@@ -72,6 +73,11 @@ export interface RealtimeOutboxPublishResult {
   failed: number;
   /** Workspace scopes skipped because the workspace's schema is not routable yet (still provisioning) — W6-E2E-07. */
   skippedNotReady: number;
+  /**
+   * D-Q5a: claimed rows this claimant skipped because a mid-batch lease renewal showed another claimant had already
+   * reclaimed them. NOT a failure: the other claimant holds the row and publishes it (review F47-3).
+   */
+  lostLease: number;
 }
 
 /** A Redis `PUBLISH` call — the caller owns the connection and its lifecycle; this function only calls it. Returns the subscriber count ioredis itself returns (0 is a normal, expected outcome, never treated as failure here). */
@@ -120,7 +126,7 @@ export async function runRealtimeOutboxPublishCycle(
   return result;
 }
 
-const emptyResult = (): RealtimeOutboxPublishResult => ({ claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0 });
+const emptyResult = (): RealtimeOutboxPublishResult => ({ claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0, lostLease: 0 });
 
 function addResult(into: RealtimeOutboxPublishResult, add: RealtimeOutboxPublishResult): void {
   into.claimed += add.claimed;
@@ -129,6 +135,7 @@ function addResult(into: RealtimeOutboxPublishResult, add: RealtimeOutboxPublish
   into.retried += add.retried;
   into.failed += add.failed;
   into.skippedNotReady += add.skippedNotReady;
+  into.lostLease += add.lostLease;
 }
 
 /**
@@ -152,12 +159,54 @@ export async function publishRealtimeScope(
   const limit = opts.ids !== undefined ? opts.ids.length : (opts.perScopeLimit ?? DEFAULT_PER_SCOPE_LIMIT);
 
   const claimToken = randomUUID();
+  // D-Q5a: rows the claim itself ended `failed` (a lease reclaim that exhausted max_attempts) are not returned; they count
+  // as `failed` here (attempts exhausted, the same bucket as markRealtimeEventRetry's 'failed') and are never published.
+  let reclaimExhausted = 0;
+  let leaseFrom = Date.now(); // taken BEFORE the claim: the lease can only be later than this, never earlier
   const claimed = await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) =>
-    claimRealtimeEvents(manager, { limit, claimToken, leaseSeconds, ...(opts.ids !== undefined ? { ids: opts.ids } : {}) }),
+    claimRealtimeEvents(manager, {
+      limit,
+      claimToken,
+      leaseSeconds,
+      ...(opts.ids !== undefined ? { ids: opts.ids } : {}),
+      onReclaimExhausted: (count) => {
+        reclaimExhausted = count;
+      },
+    }),
   );
+  result.failed += reclaimExhausted;
+  // #24: a full per_scope batch means more due events may remain in this scope (global-mode follow-up sweep). An
+  // exhausted row was still taken by the LIMIT, so it counts toward "full" exactly as before D-Q5a.
+  if (opts.ids === undefined && claimed.length + reclaimExhausted >= limit) noteLegacyBatchLimitReached();
   if (claimed.length === 0) return result;
   result.claimed += claimed.length;
-  for (const event of claimed) {
+  // D-Q5a (CodeRabbit on #47): the batch is processed sequentially (each publish bounded at 3 s, plus retry writes), so a
+  // slow batch can outlast the lease. Once half the lease has elapsed, renew it for the rows still to do, so another
+  // claimant never reclaims (and, since D-Q5a, counts an attempt against) a row this live claimant still holds. A normal
+  // batch finishes long before that and issues no extra statement. A failed renewal is not fatal (pre-renewal behaviour).
+  // A row the renewal did NOT keep was already reclaimed by another claimant (its lease lapsed first): it is skipped — not
+  // published a second time — and counted as `lostLease` (not a failure: the other claimant has it), while the rows still
+  // held carry on.
+  const renewAfterMs = (leaseSeconds * 1000) / 2;
+  const lost = new Set<string>();
+  for (let i = 0; i < claimed.length; i += 1) {
+    if (Date.now() - leaseFrom >= renewAfterMs) {
+      const remaining = claimed.slice(i).map((e) => e.id).filter((id) => !lost.has(id));
+      const renewFrom = Date.now();
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const kept = new Set(await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) => renewRealtimeEventLeases(manager, remaining, claimToken, leaseSeconds)));
+        for (const id of remaining) if (!kept.has(id)) lost.add(id);
+        leaseFrom = renewFrom;
+      } catch {
+        // keep going: the rows keep their current lease, exactly as before this renewal existed
+      }
+    }
+    const event = claimed[i]!;
+    if (lost.has(event.id)) {
+      result.lostLease++;
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop
     await processOne(event);
   }

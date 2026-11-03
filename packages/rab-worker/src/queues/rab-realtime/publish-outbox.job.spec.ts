@@ -1,4 +1,4 @@
-import { fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
+import { DQ5A_SQL_SHA256, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { publishRealtimeScope, runRealtimeOutboxPublishCycle } from './publish-outbox.job';
 
 /**
@@ -16,7 +16,7 @@ const E1 = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-0000000000f1';
 
 describe('realtime publisher — per_scope mode (unchanged)', () => {
-  it('claims every scope with exactly the pre-Phase-D SQL (limit 25, lease 60 s)', async () => {
+  it('claims every scope with exactly the D-Q5a SQL (limit 25, lease 60 s) — the pre-Phase-D statement plus the reclaim cap, nothing else', async () => {
     const { tenant, dataSource, statements, contexts } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
     await runRealtimeOutboxPublishCycle(dataSource as never, tenant as never, jest.fn(), 'test', {
       scopes: [{ organisationId: ORG, workspaceId: null }, { organisationId: ORG, workspaceId: WS }],
@@ -24,7 +24,9 @@ describe('realtime publisher — per_scope mode (unchanged)', () => {
     const claims = statements.filter((s) => s.sql.includes('WITH claimable'));
     expect(claims).toHaveLength(2);
     for (const c of claims) {
-      expect(sha256(c.sql)).toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
+      expect(sha256(c.sql)).toBe(DQ5A_SQL_SHA256.realtimeClaim);
+      // Review F47-2: per_scope is no longer byte-identical to the pre-Phase-D statement (undoing D-Q5a = image rollback).
+      expect(sha256(c.sql)).not.toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
       expect(c.params).toEqual([expect.any(String), '60', 25]);
     }
     expect(contexts).toEqual([
@@ -185,5 +187,129 @@ describe('realtime publisher — global mode scope', () => {
     expect(result.claimed).toBe(0);
     expect(publish).not.toHaveBeenCalled();
     expect(table.rows.get(E1)!.status).toBe('pending');
+  });
+});
+
+/**
+ * D-Q5a (§5.2, audit §13 #6 realtime half): a lease reclaim counts as an attempt and is capped. Only the UPDATE's SET /
+ * RETURNING changed; the MATERIALIZED CTE (eligibility, order, LIMIT, FOR UPDATE SKIP LOCKED) is byte-identical to the
+ * pre-Phase-D per_scope claim and to the D1 global claim. The real-PostgreSQL proof is
+ * dq5-realtime-lease-reclaim.integration.spec.ts.
+ */
+describe('D-Q5a realtime lease-reclaim cap', () => {
+  /** sha256 of the claim SQL up to (not including) `UPDATE core.realtime_event`, from the sources before D-Q5a. */
+  const PRE_DQ5A_CTE_SHA256 = {
+    perScope: '8f04334f6c70f8200ed3a542e3c171fd80760c32d041073794e260622964b5ea',
+    global: '5228ed1c92d57abad5d68828a9f4bade18597de35bf5385f37182222e129d9ca',
+  };
+  const cte = (sql: string) => sql.slice(0, sql.indexOf('UPDATE core.realtime_event'));
+  const claimRow = (id: string, status: string, attempt = 0) => ({
+    id, organisation_id: ORG, workspace_id: WS, target_user_id: USER, event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id,
+    payload: {}, schema_version: 1, attempt_count: attempt, max_attempts: 10, claim_token: 't', created_at: new Date(0), status,
+  });
+
+  it.each([
+    ['per_scope', undefined, PRE_DQ5A_CTE_SHA256.perScope],
+    ['global', [E1], PRE_DQ5A_CTE_SHA256.global],
+  ] as const)('%s: the CTE (eligibility, order, limit, locking) is byte-identical to before D-Q5a', async (_mode, ids, expected) => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
+    await publishRealtimeScope(tenant as never, jest.fn(), 'test', { organisationId: ORG, workspaceId: WS }, ids ? { ids: [...ids] } : {});
+    expect(sha256(cte(statements[0]!.sql))).toBe(expected);
+  });
+
+  it.each([['per_scope', undefined], ['global', [E1]]] as const)('%s: the UPDATE counts a reclaim and fails it at max_attempts (same arithmetic as markRealtimeEventRetry)', async (_mode, ids) => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
+    await publishRealtimeScope(tenant as never, jest.fn(), 'test', { organisationId: ORG, workspaceId: WS }, ids ? { ids: [...ids] } : {});
+    const update = statements[0]!.sql.slice(statements[0]!.sql.indexOf('UPDATE core.realtime_event')).replace(/\s+/g, ' ');
+    expect(update).toContain("WHEN status = 'processing' THEN attempt_count + 1 ELSE attempt_count END");
+    expect(update).toContain("status = 'processing' AND attempt_count + 1 >= max_attempts");
+    expect(update).toContain("'LEASE_RECLAIM_EXHAUSTED'");
+    expect(update).toContain('WHERE id IN (SELECT id FROM claimable)');
+    expect(update).toMatch(/RETURNING .*\bstatus$/);
+  });
+
+  it('a row the claim ended failed (exhausted) is not published, is counted as failed, and is not a claimed row', async () => {
+    const E2 = '00000000-0000-4000-8000-000000000002';
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[claimRow(E1, 'failed', 10), claimRow(E2, 'processing')], 2] : [[{ id: E2 }], 1]));
+    const publish = jest.fn(async () => 1);
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, { ids: [E1, E2] });
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((publish.mock.calls[0] as unknown as [string, string])[1]).eventId).toBe(E2);
+    expect(result).toMatchObject({ claimed: 1, published: 1, failed: 1 });
+    // No write is issued for the exhausted row: the claim statement already ended it.
+    expect(statements.filter((s) => s.params.includes(E1) && !s.sql.includes('WITH claimable'))).toEqual([]);
+  });
+
+  it('rows from a responder without a status column (pre-D-Q5a shape) are all returned — only an explicit failed row is withheld', async () => {
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[{ ...claimRow(E1, 'processing'), status: undefined }], 1] : [[{ id: E1 }], 1]));
+    const result = await publishRealtimeScope(tenant as never, jest.fn(async () => 1), 'test', { organisationId: ORG, workspaceId: WS }, { ids: [E1] });
+    expect(result).toMatchObject({ claimed: 1, published: 1, failed: 0 });
+  });
+});
+
+/** D-Q5a (CodeRabbit on #47): a live claimant renews its lease once half of it has elapsed; a normal batch never does. */
+describe('D-Q5a realtime lease renewal during a slow batch', () => {
+  const ids = ['00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000012', '00000000-0000-4000-8000-000000000013', '00000000-0000-4000-8000-000000000014'];
+  const claimRows = ids.map((id) => ({
+    id, organisation_id: ORG, workspace_id: WS, target_user_id: USER, event_type: 'offer.sent', entity_type: 'job_offer', entity_id: id,
+    payload: {}, schema_version: 1, attempt_count: 0, max_attempts: 10, claim_token: 't', created_at: new Date(0), status: 'processing',
+  }));
+  const isRenew = (sql: string) => sql.includes('SET lease_expires_at = now()') && !sql.includes('WITH claimable');
+  let clock = 0;
+  beforeEach(() => {
+    clock = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a batch that finishes inside half the lease issues NO renewal (identical statements to before)', async () => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 1_000;
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    expect(result).toMatchObject({ claimed: 4, published: 4 });
+    expect(statements.filter((s) => isRenew(s.sql))).toEqual([]);
+  });
+
+  it('once half the 60 s lease has elapsed, ONE fenced renewal covers exactly the rows still to do', async () => {
+    const { tenant, statements } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : isRenew(sql) ? [[{ id: ids[2] }, { id: ids[3] }], 2] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 20_000; // a slow (but alive) publisher
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    expect(result).toMatchObject({ claimed: 4, published: 4 });
+    const renewals = statements.filter((s) => isRenew(s.sql));
+    expect(renewals).toHaveLength(1);
+    const claimToken = statements.find((s) => s.sql.includes('WITH claimable'))!.params[0];
+    expect(renewals[0]!.params).toEqual([[ids[2], ids[3]], claimToken, '60']);
+    expect(renewals[0]!.sql).toContain("status = 'processing' AND claim_token = $2");
+  });
+
+  it('a row the renewal did not keep (reclaimed elsewhere) is skipped and counted as lostLease (not failed); the rows still held are published', async () => {
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : isRenew(sql) ? [[{ id: ids[3] }], 1] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 20_000;
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    const publishedIds = (publish.mock.calls as unknown as Array<[string, string]>).map(([, m]) => JSON.parse(m).eventId);
+    expect(publishedIds).toEqual([ids[0], ids[1], ids[3]]);
+    expect(result).toMatchObject({ claimed: 4, published: 3, failed: 0, lostLease: 1 });
+  });
+
+  it('NEGATIVE: a renewal that throws does not stop the batch (falls back to the pre-renewal behaviour)', async () => {
+    const { tenant } = fakeTenant((sql) => {
+      if (sql.includes('WITH claimable')) return [claimRows, 4];
+      if (isRenew(sql)) throw new Error('connection reset');
+      return [[{ id: 'x' }], 1];
+    });
+    const publish = jest.fn(async () => {
+      clock += 20_000;
+      return 1;
+    });
+    await expect(publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {})).resolves.toMatchObject({ claimed: 4, published: 4 });
   });
 });

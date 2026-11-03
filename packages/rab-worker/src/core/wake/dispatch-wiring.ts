@@ -5,7 +5,8 @@ import { DispatchQueue } from '../database/dispatch-claims';
 import { dispatchEmailScope } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
-import { dispatchStatementScope, shiftStatementJobOptions } from '../../queues/rab-reports/shift-statement.job';
+import { enqueueShiftStatement } from '../../queues/rab-reports/shift-statement-enqueue';
+import { dispatchStatementScope } from '../../queues/rab-reports/shift-statement.job';
 import type { DispatchCoordinator, DispatchQueueBinding } from './dispatch-coordinator';
 
 /**
@@ -146,7 +147,8 @@ export function buildDispatchBindings(
         processScope = async (scope) => {
           if (!environmentService.get('REALTIME_ENABLED')) return 0; // defence in depth, as the processor
           const r = await publishRealtimeScope(tenantContext, realtimePublish, environmentService.get('NODE_ENV'), scope, { ids: scope.subjectIds });
-          if (r.claimed) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed}`);
+          // D-Q5a: also log a cycle whose only outcome was a lease reclaim that exhausted max_attempts (failed, none claimed).
+          if (r.claimed || r.failed || r.lostLease) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed} lostLease=${r.lostLease}`);
           return r.claimed;
         };
         break;
@@ -154,7 +156,7 @@ export function buildDispatchBindings(
         processScope = async (scope) => {
           if (scope.workspaceId === null) return 0; // statements are per workspace (runGlobalDispatch already filters these)
           const r = await dispatchStatementScope(tenantContext, scope.organisationId, scope.workspaceId, scope.subjectIds, async (data) => {
-            await shiftStatementQueue.add(...shiftStatementJobOptions(data));
+            await enqueueShiftStatement(shiftStatementQueue, data); // D-Q1: the same registered builder as per_scope
           });
           if (r.claimed) {
             logger.log(`shift statement dispatch (global): claimed=${r.claimed} published=${r.published} reconciledMissing=${r.reconciledMissing} requeued=${r.requeued} publishFailed=${r.publishFailed}`);

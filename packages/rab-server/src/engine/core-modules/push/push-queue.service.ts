@@ -2,7 +2,9 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 
+import { enqueueRegisteredJob, registeredJob } from '../../worker-shared/queue-enqueue';
 import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+import { bullmqJobOptionsOf, OutboxJobOptions } from '../../worker-shared/queue-registry';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { PUSH_QUEUE_JOB_NAME, PUSH_QUEUE_NAME, PushQueueJobData } from './push-queue.constants';
@@ -10,15 +12,9 @@ import { PUSH_QUEUE_JOB_NAME, PUSH_QUEUE_NAME, PushQueueJobData } from './push-q
 /**
  * D5: the same 5 attempts and 5 s exponential base, now with JITTER — each retry waits a random 50–100 % of its
  * exponential step (BullMQ 5.81 `backoff.jitter`), so the retries of many jobs that failed together (a provider or network
- * outage) do not all hit the provider again in the same second.
+ * outage) do not all hit the provider again in the same second. D-Q1: read from the queue registry (values unchanged).
  */
-export const PUSH_QUEUE_JOB_OPTIONS = {
-  attempts: 5,
-  backoff: { type: 'exponential' as const, delay: 5_000, jitter: 0.5 },
-  removeOnComplete: { age: 7 * 24 * 60 * 60 },
-  removeOnFail: { age: 30 * 24 * 60 * 60 },
-};
-const QUEUE_OPTIONS = PUSH_QUEUE_JOB_OPTIONS;
+export const PUSH_QUEUE_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(PUSH_QUEUE_NAME) as OutboxJobOptions);
 
 /**
  * API-process side of the queue — publish only, never consumes. Mirrors `EmailQueueService`
@@ -40,11 +36,20 @@ export class PushQueueService implements OnModuleDestroy {
   }
 
   async publish(pushDeliveryId: string, organisationId: string): Promise<void> {
-    await boundedPublish(this.connection, 'push-delivery publish', () => this.queue.add(PUSH_QUEUE_JOB_NAME, { pushDeliveryId, organisationId }, { jobId: `push-delivery.${pushDeliveryId}.attempt.0`, ...QUEUE_OPTIONS }));
+    await this.add(pushDeliveryId, organisationId, 0);
   }
 
   async republish(pushDeliveryId: string, organisationId: string, generation: number): Promise<void> {
-    await boundedPublish(this.connection, 'push-delivery publish', () => this.queue.add(PUSH_QUEUE_JOB_NAME, { pushDeliveryId, organisationId }, { jobId: `push-delivery.${pushDeliveryId}.attempt.${generation}`, ...QUEUE_OPTIONS }));
+    await this.add(pushDeliveryId, organisationId, generation);
+  }
+
+  /** D-Q1: the delivery row's own organisation as the declared tenant scope; validated before the bounded publish. */
+  private async add(pushDeliveryId: string, organisationId: string, generation: number): Promise<void> {
+    const data: PushQueueJobData = { pushDeliveryId, organisationId };
+    const job = registeredJob(PUSH_QUEUE_NAME, PUSH_QUEUE_JOB_NAME, { kind: 'organisation', organisationId }, data, {
+      jobId: `push-delivery.${pushDeliveryId}.attempt.${generation}`,
+    });
+    await boundedPublish(this.connection, 'push-delivery publish', () => enqueueRegisteredJob(this.queue, job));
   }
 
   async onModuleDestroy(): Promise<void> {

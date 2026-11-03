@@ -22,6 +22,8 @@ delete process.env.SENTRY_DSN; // importing instrument.ts must never initialise 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const instrument = require('./instrument') as typeof import('./instrument');
 const {
+  ALLOWED_DEFAULT_INTEGRATIONS,
+  selectIntegrations,
   buildSentryOptions,
   parseSampleRate,
   redactString,
@@ -177,6 +179,46 @@ function syntheticErrorEvent(url = URL_WITH_SECRETS): ErrorEvent {
   };
 }
 
+/** What Sentry would run: `integrations` is a function of Sentry's real default list (H4b). */
+function resolvedIntegrations(built: NodeOptions | undefined): Integration[] {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Sentry = require('@sentry/node') as typeof import('@sentry/node');
+  const integrations = built?.integrations;
+  if (typeof integrations !== 'function')
+    throw new Error(
+      'integrations must be a function (see ALLOWED_DEFAULT_INTEGRATIONS)',
+    );
+  return integrations(
+    Sentry.getDefaultIntegrations(built ?? {}),
+  ) as Integration[];
+}
+
+/** A Sentry 10 client stub for RequestData.processEvent: the given data-collection categories. */
+function clientWith(dataCollection: Record<string, unknown>): never {
+  return { getDataCollectionOptions: () => dataCollection } as never;
+}
+
+/** Sentry 10's own mapping of sendDefaultPii: false, and its most permissive mapping (sendDefaultPii: true). */
+const RESTRICTIVE_COLLECTION = {
+  userInfo: false,
+  cookies: { deny: ['auth', 'token', 'secret', 'session', 'password'] },
+  httpHeaders: { request: { deny: ['auth'] }, response: { deny: ['auth'] } },
+  httpBodies: [],
+  urlQueryParams: { deny: ['token'] },
+};
+const PERMISSIVE_COLLECTION = {
+  userInfo: true,
+  cookies: true,
+  httpHeaders: { request: true, response: true },
+  httpBodies: [
+    'incomingRequest',
+    'outgoingRequest',
+    'incomingResponse',
+    'outgoingResponse',
+  ],
+  urlQueryParams: true,
+};
+
 describe('instrument.ts — Sentry privacy options', () => {
   describe('buildSentryOptions', () => {
     it('returns undefined (no init) when SENTRY_DSN is unset or empty', () => {
@@ -189,7 +231,9 @@ describe('instrument.ts — Sentry privacy options', () => {
       const built = options();
       expect(built.sendDefaultPii).toBe(false);
       expect(built.includeLocalVariables).not.toBe(true);
-      const names = (built.integrations as Integration[]).map(
+      expect(built.enableLogs).toBe(false);
+      expect(built.enableMetrics).toBe(false);
+      const names = resolvedIntegrations(built).map(
         (integration) => integration.name,
       );
       expect(names).toContain('RequestData');
@@ -203,63 +247,153 @@ describe('instrument.ts — Sentry privacy options', () => {
     it('overrides cannot re-enable PII or replace the scrubbers', () => {
       const built = buildSentryOptions(ENV, {
         sendDefaultPii: true,
-        beforeSend: (event) => event,
+        includeLocalVariables: true,
+        enableLogs: true,
+        enableMetrics: true,
+        dataCollection: { cookies: true },
+        defaultIntegrations: [{ name: 'Http' }],
+        openTelemetryInstrumentations: [{}],
+        tracesSampler: () => 1,
+        profilesSampleRate: 1,
+        spotlight: 'http://127.0.0.1:8969/stream',
+        debug: true,
+        beforeSend: (event: ErrorEvent) => event,
         integrations: [],
-      } as Partial<NodeOptions>);
+      } as unknown as Partial<NodeOptions>);
       expect(built?.sendDefaultPii).toBe(false);
+      expect(built?.includeLocalVariables).toBe(false);
+      expect(built?.enableLogs).toBe(false);
+      expect(built?.enableMetrics).toBe(false);
+      expect(built?.spotlight).toBe(false); // F5: Spotlight would be added after the integrations function
+      expect(built?.debug).toBe(false);
+      for (const key of [
+        'dataCollection',
+        'defaultIntegrations',
+        'openTelemetryInstrumentations',
+        'tracesSampler',
+        'profilesSampleRate',
+        'profilesSampler',
+      ] as const) {
+        expect(built?.[key as keyof NodeOptions]).toBeUndefined();
+      }
       const event = built?.beforeSend?.(
         syntheticErrorEvent(),
         {},
       ) as ErrorEvent;
       expectNoSecrets(event);
-      expect(
-        (built?.integrations as Integration[]).map((i) => i.name),
-      ).toContain('RequestData');
+      expect(resolvedIntegrations(built).map((i) => i.name)).toContain(
+        'RequestData',
+      );
     });
 
-    it('the RequestData integration attaches no cookies, headers, body, query string, IP or user', () => {
-      const requestData = (options().integrations as Integration[]).find(
-        (i) => i.name === 'RequestData',
-      );
-      const event: Event = {
-        sdkProcessingMetadata: {
-          normalizedRequest: {
-            method: 'POST',
-            url: `http://localhost:3000/rest/v1/auth/login?token=${QUERY_TOKEN}#${FRAGMENT}`,
-            query_string: `token=${QUERY_TOKEN}`,
-            headers: {
-              authorization: `Bearer ${JWT}`,
-              cookie: COOKIE,
-              host: 'localhost:3000',
+    it.each([
+      [
+        'a restrictive collection (the shape Sentry 10 derives from sendDefaultPii: false)',
+        RESTRICTIVE_COLLECTION,
+      ],
+      ['the most permissive data collection', PERMISSIVE_COLLECTION],
+    ])(
+      'the RequestData integration attaches no cookies, headers, body, query string, IP or user — %s',
+      (_label, collection) => {
+        const requestData = resolvedIntegrations(options()).find(
+          (i) => i.name === 'RequestData',
+        );
+        const event: Event = {
+          sdkProcessingMetadata: {
+            normalizedRequest: {
+              method: 'POST',
+              url: `http://localhost:3000/rest/v1/auth/login?token=${QUERY_TOKEN}#${FRAGMENT}`,
+              query_string: `token=${QUERY_TOKEN}`,
+              headers: {
+                authorization: `Bearer ${JWT}`,
+                cookie: COOKIE,
+                host: 'localhost:3000',
+              },
+              cookies: { rab_session: COOKIE_VALUE },
+              data: JSON.stringify({ password: PASSWORD, token: BODY_TOKEN }),
             },
-            cookies: { rab_session: COOKIE_VALUE },
-            data: JSON.stringify({ password: PASSWORD, token: BODY_TOKEN }),
+            request: { ip: '203.0.113.9', user: { id: 'u1', email: EMAIL } },
           },
-          request: { ip: '203.0.113.9', user: { id: 'u1', email: EMAIL } },
-        },
-      };
-      const processed = requestData?.processEvent?.(
-        event,
-        {},
-        {} as never,
-      ) as Event;
-      const { sdkProcessingMetadata: _metadata, ...egress } = processed;
-      expect(egress.request?.headers).toBeUndefined();
-      expect(egress.request?.cookies).toBeUndefined();
-      expect(egress.request?.data).toBeUndefined();
-      expect(egress.request?.query_string).toBeUndefined();
-      expect(egress.user?.email).toBeUndefined();
-      expect(egress.user?.ip_address).toBeUndefined();
-      expect(egress.request?.method).toBe('POST');
-      // The integration keeps the URL; `beforeSend` then strips the query string and fragment from it.
-      const sent = options().beforeSend?.(
-        egress as ErrorEvent,
-        {},
-      ) as ErrorEvent;
-      expect(sent.request?.url).toBe(
-        'http://localhost:3000/rest/v1/auth/login',
+        };
+        const processed = requestData?.processEvent?.(
+          event,
+          {},
+          clientWith(collection),
+        ) as Event;
+        const { sdkProcessingMetadata: _metadata, ...egress } = processed;
+        expect(egress.request?.headers).toBeUndefined();
+        expect(egress.request?.cookies).toBeUndefined();
+        expect(egress.request?.data).toBeUndefined();
+        expect(egress.request?.query_string).toBeUndefined();
+        expect(egress.user?.email).toBeUndefined();
+        expect(egress.user?.ip_address).toBeUndefined();
+        expect(egress.request?.method).toBe('POST');
+        // The integration keeps the URL; `beforeSend` then strips the query string and fragment from it.
+        const sent = options().beforeSend?.(
+          egress as ErrorEvent,
+          {},
+        ) as ErrorEvent;
+        expect(sent.request?.url).toBe(
+          'http://localhost:3000/rest/v1/auth/login',
+        );
+        expectNoSecrets(sent);
+      },
+    );
+  });
+
+  describe('default integrations (H4b: no new telemetry from the Sentry 10 upgrade)', () => {
+    const NEVER = [
+      'Anthropic_AI',
+      'ConversationId',
+      'ExtraErrorData',
+      'Firebase',
+      'Google_GenAI',
+      'Hono',
+      'LangChain',
+      'LangGraph',
+      'LocalVariables',
+      'NodeSystemError',
+      'OpenAI',
+      'PostgresJs',
+      'Prisma',
+      'ProcessSession',
+      'VercelAI',
+    ];
+
+    it('runs exactly the reviewed Sentry 8.55 default set (Sentry 10 names) plus one restricted RequestData', () => {
+      const names = resolvedIntegrations(options()).map((i) => i.name);
+      expect([...names].sort()).toEqual(
+        [...ALLOWED_DEFAULT_INTEGRATIONS, 'RequestData'].sort(),
       );
-      expectNoSecrets(sent);
+      expect(names.filter((name) => name === 'RequestData')).toHaveLength(1);
+      for (const name of NEVER) expect(names).not.toContain(name);
+    });
+
+    it('the reviewed set itself never lists a forbidden integration or the default RequestData', () => {
+      for (const name of [...NEVER, 'RequestData']) {
+        expect(ALLOWED_DEFAULT_INTEGRATIONS.has(name)).toBe(false);
+      }
+    });
+
+    it('fails closed: an unknown default integration (a future minor) is dropped, the default RequestData replaced', () => {
+      const permissiveRequestData = { name: 'RequestData', marker: 'default' };
+      const selected = selectIntegrations([
+        { name: 'SomeFutureIntegration' },
+        { name: 'Http' },
+        permissiveRequestData,
+        { name: 'ProcessSession' },
+      ]);
+      expect(selected.map((i) => i.name)).toEqual(['Http', 'RequestData']);
+      expect(selected).not.toContain(permissiveRequestData);
+    });
+
+    it('an override cannot add integrations back', () => {
+      const built = buildSentryOptions(ENV, {
+        integrations: (defaults: Integration[]) => defaults,
+      } as unknown as Partial<NodeOptions>);
+      expect(resolvedIntegrations(built).map((i) => i.name)).not.toContain(
+        'ProcessSession',
+      );
     });
   });
 
@@ -464,6 +598,32 @@ describe('instrument.ts — Sentry privacy options', () => {
       expect(span.data?.['db.statement']).toBeUndefined();
       expect(span.data?.['db.system']).toBe('postgresql');
       expect(span.description).toBe('SELECT [Filtered]');
+      expectNoSecrets(span);
+    });
+
+    it('drops the database login name (db.user, GHSA-qqmp-wf37-98f9) and masks connection-string userinfo', () => {
+      // The attribute set Sentry 10's vendored pg instrumentation puts on a query span.
+      const span = options().beforeSendSpan?.({
+        span_id: '1',
+        trace_id: '2',
+        start_timestamp: 1,
+        op: 'db',
+        description: 'SELECT 1',
+        data: {
+          'db.system': 'postgresql',
+          'db.name': 'rab',
+          'db.user': 'crewflow_app',
+          'db.connection_string': `postgresql://crewflow_app:${PASSWORD}@127.0.0.1:5432/rab`,
+          'net.peer.name': '127.0.0.1',
+          'net.peer.port': 5432,
+        },
+      } as SpanJSON) as SpanJSON;
+      expect(span.data).not.toHaveProperty('db.user');
+      expect(span.data?.['db.connection_string']).toBe(
+        'postgresql://127.0.0.1:5432/rab',
+      );
+      expect(JSON.stringify(span)).not.toContain('crewflow_app');
+      expect(span.data?.['db.system']).toBe('postgresql');
       expectNoSecrets(span);
     });
 
