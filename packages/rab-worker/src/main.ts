@@ -78,14 +78,18 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  * every business rule lives in the shared services the API also uses
  * (`WorkerModule` imports them; nothing here re-implements one).
  *
- * Worker credential isolation checkpoint (P2/P3): this process authenticates to PostgreSQL ONLY as
- * the restricted `crewflow_app` login — the exact same identity the API uses, same as `DATABASE_URL`.
- * It never reads, requires or initialises `DATABASE_URL_UNPOOLED`. Two `crewflow_app` connections,
- * not two identities: `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
+ * Worker credential isolation checkpoint (P2/P3, updated for Phase D): this process authenticates to
+ * PostgreSQL only as a restricted, RLS-bound runtime login — `crewflow_app` (the API's identity) or
+ * `crewflow_worker` (Phase D: a member of `crewflow_app` WITH INHERIT TRUE, SET FALSE, and the only
+ * holder of the dispatch-claim grants). `assertRuntimeDbRole` accepts either under
+ * `WORKER_CLAIM_MODE=per_scope` and ONLY `crewflow_worker` under `global` (assert-runtime-db-role.ts);
+ * neither is an owner or BYPASSRLS role. It never reads, requires or initialises
+ * `DATABASE_URL_UNPOOLED`. Two connections, one identity (whichever of the two it is):
+ * `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
  * scans and most cycles; `directDataSource` (a direct connection) only where a session advisory
  * lock needs connection affinity (final timesheet, shift-report scheduler). Workspace discovery
  * reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate
- * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`); token cleanup runs through
+ * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`, which `crewflow_worker` inherits); token cleanup runs through
  * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff,
  * business or identity row. Account-invite cleanup and storage reconciliation's catalogue
  * enumeration also now run on `runtimeDataSource` — both were audited and found to need only
@@ -100,7 +104,7 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  *
  * Business mutations (an email send, a shift reminder, a no-show flag, an offer
  * expiry, a report, a replacement request, a cancellation follow-up) run
- * through `TenantContextService` as `crewflow_app`, bound to that SPECIFIC row's
+ * through `TenantContextService` as the runtime login (above), bound to that SPECIFIC row's
  * real organisation/workspace — see `core/database/scoped-job.ts`. A job's
  * Redis/queue payload is never treated as authorisation: every job reloads
  * the authoritative row first.
@@ -204,11 +208,13 @@ async function bootstrap(): Promise<void> {
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
-  // Worker credential isolation checkpoint: the worker authenticates as `crewflow_app`, like the API. Two pools, one identity,
-  // NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED` identity — see this file's own top doc comment.
-  //   runtimeDataSource — pooled crewflow_app (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token/invite
+  // Worker credential isolation checkpoint: the worker authenticates as a restricted runtime login — `crewflow_app` (like the
+  // API) or, since Phase D, `crewflow_worker` (inherits crewflow_app; REQUIRED under WORKER_CLAIM_MODE=global) — checked by
+  // assertRuntimeDbRole below. Two pools, one identity, NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED`
+  // identity — see this file's own top doc comment.
+  //   runtimeDataSource — pooled runtime login (via the shared TypeORM module). Discovery, scans, token/invite
   //                       cleanup, storage-catalogue enumeration, email.
-  //   directDataSource  — direct crewflow_app connection (the factory's lock endpoint: PG_DATABASE_URL; legacy
+  //   directDataSource  — direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL; legacy
   //                       DATABASE_DIRECT_URL / DATABASE_URL outside production). Used ONLY where a session advisory lock
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
@@ -520,7 +526,7 @@ async function bootstrap(): Promise<void> {
         await scheduler.manager.close();
         await scheduler.scanLock.close(); // releases every scan lock this replica held (session-scoped)
       }
-      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, runtime pool
       await directDataSource.destroy();
       await realtimePublisherRedis.quit().catch(() => realtimePublisherRedis.disconnect());
       await scanTicksRedis.quit().catch(() => scanTicksRedis.disconnect());
