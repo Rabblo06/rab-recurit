@@ -211,23 +211,32 @@ export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = 
           throw err;
         }
         assertStillOwnDocument();
-        const pdf = await withRenderStepTimeout(
-          'pdf',
-          PDF_RENDER_STEP_TIMEOUT_MS,
-          page.pdf({
-            format: 'A4',
-            landscape: options.landscape ?? false,
-            printBackground: true,
-            ...(options.footerTemplate
-              ? {
-                  displayHeaderFooter: true,
-                  headerTemplate: '<span></span>',
-                  footerTemplate: options.footerTemplate,
-                  margin: { top: '12mm', bottom: '16mm', left: '12mm', right: '12mm' },
-                }
-              : {}),
-          }),
-        );
+        let pdf: Buffer;
+        try {
+          pdf = await withRenderStepTimeout(
+            'pdf',
+            PDF_RENDER_STEP_TIMEOUT_MS,
+            page.pdf({
+              format: 'A4',
+              landscape: options.landscape ?? false,
+              printBackground: true,
+              ...(options.footerTemplate
+                ? {
+                    displayHeaderFooter: true,
+                    headerTemplate: '<span></span>',
+                    footerTemplate: options.footerTemplate,
+                    margin: { top: '12mm', bottom: '16mm', left: '12mm', right: '12mm' },
+                  }
+                : {}),
+            }),
+          );
+        } catch (err) {
+          // A navigation the route handler refused can still be in flight when printing starts (measured with the OS
+          // sandbox: Chromium then reports "Printing failed"). Classify that as the navigation refusal it is; any other
+          // failure is rethrown unchanged. Either way no PDF is produced.
+          assertStillOwnDocument();
+          throw err;
+        }
         assertStillOwnDocument();
         return pdf;
       } finally {
