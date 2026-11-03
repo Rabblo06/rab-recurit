@@ -1,12 +1,13 @@
 import { Job } from 'bullmq';
 
-import { SHIFT_STATEMENT_JOB_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
+import { ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { CONSUMER_QUEUES, SCAN_QUEUES } from '../../core/scheduler/queue-registry';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runFinalTimesheetCycle } from './final-timesheet.job';
 import { runPayrollPeriodAttentionCycle } from './payroll-period-attention.job';
 import { runShiftReportSchedulerCycle } from './shift-report-scheduler.job';
+import { enqueueShiftStatement } from './shift-statement-enqueue';
 import { processShiftStatementJob, runShiftStatementDispatchCycle } from './shift-statement.job';
 
 /** Thin adapters — the pre-migration main.ts loop bodies, verbatim (see rab-email/email.processors.ts). */
@@ -49,10 +50,9 @@ export class ReportScanProcessor {
   async shiftStatementDispatch(): Promise<boolean> {
     const { runtimeDataSource, tenantContext, shiftStatementQueue, logger } = this.deps.get();
     const result = await runShiftStatementDispatchCycle(runtimeDataSource, tenantContext, async (data) => {
-      await shiftStatementQueue.add(SHIFT_STATEMENT_JOB_NAME, data, {
-        jobId: `shift-statement.${data.payrollRecordId}.gen.${data.generation}`, attempts: 1,
-        removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 },
-      });
+      // D-Q1: one registered builder for both claim modes (scope = the claimed row's organisation; options and jobId
+      // format from / checked by the queue registry — values unchanged).
+      await enqueueShiftStatement(shiftStatementQueue, data);
     });
     if (result.claimed) {
       logger.log(`shift statement dispatch: claimed=${result.claimed} published=${result.published} reconciledMissing=${result.reconciledMissing} requeued=${result.requeued} publishFailed=${result.publishFailed}`);

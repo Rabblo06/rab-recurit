@@ -88,7 +88,7 @@ describe('buildDispatchBindings', () => {
       pushQueue: { publish: jest.fn(), republish: jest.fn() },
       pushService: { ambiguousDeliverySafeToRetry: false },
       realtimePublish: jest.fn(),
-      shiftStatementQueue: { add: jest.fn() },
+      shiftStatementQueue: { name: 'rab-shift-statements', add: jest.fn() },
       environmentService: { get: (k: string) => ({ ...flags, NODE_ENV: 'test' } as Record<string, unknown>)[k] },
       logger: { log: jest.fn(), warn: jest.fn() },
     };
