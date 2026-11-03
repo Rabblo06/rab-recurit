@@ -4661,3 +4661,38 @@ posture change.
   no configuration, no tenant data.
 - **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
   decision); the producer-side checks are defence in depth, not an authentication boundary.
+
+## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
+
+Recovery and idempotency only; no business rule, payroll / attendance / staffing / permission rule, retry policy or
+delivery policy changed. No migration, role, grant, RLS policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md`
+§5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+
+- **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
+  (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
+  `processing` with an expired lease (its claimant died or hung) counts as an attempt; when `attempt_count + 1 >=
+  max_attempts` (the existing column, default 10, the same arithmetic `markRealtimeEventRetry` already used for a failed
+  publish) the row ends `failed` / `LEASE_RECLAIM_EXHAUSTED` with its claim and lease cleared and is not returned or
+  published. Before, a poison row whose publisher crashed every time was re-claimed forever — every cycle, every replica
+  — an availability risk one tenant's bad row could impose on the shared Worker. Actor → action → consequence after the
+  fix: a realtime hint (ids only; clients refetch) for a row whose publisher keeps dying is dropped after `max_attempts`
+  claims; no business record is touched. **Tenant isolation unchanged:** the same RLS-bound statement under the scope's
+  `SET LOCAL` (FORCE RLS on `core.realtime_event`); the MATERIALIZED CTE (eligibility, order, LIMIT, `FOR UPDATE SKIP
+  LOCKED`) is byte-identical to before (pinned by sha256 in `publish-outbox.job.spec.ts`). Abuse cases, real PostgreSQL
+  (`dq5-realtime-lease-reclaim.integration.spec.ts`): another organisation's context neither sees nor counts the row (per
+  scope and global); a claim with no tenant context bound returns zero rows and counts nothing; three concurrent
+  reclaimers of one row → exactly one wins, counted once. The global-mode pointer of a `failed` row is deleted by the
+  existing trigger (`failed` is terminal for realtime; tested).
+- **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
+  `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
+  interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token
+  cleanup, storage cleanup and the provisioning-health alert run within one interval of the first boot instead of never
+  (when restarts are more frequent than the interval). A present stamp always decides exactly as before; Redis failing or
+  hanging (2 s bound) → one full interval, as before. The key holds a stat-key name and an epoch-ms number — no tenant
+  data — and is deliberately outside `rab:worker:stats`, which Admin Health lists as "last runs". **Residual:** production
+  Redis is unauthenticated (§13 #11): a party able to write Redis could plant an old first-seen value and make these
+  three idempotent housekeeping scans run at the next boot instead of a day later (a future or malformed value is
+  ignored), or delete it — the same reach it already has over the stamps themselves. bullmq scheduler mode is unchanged.
+- **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
+  Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
+  `crewflow_worker` only under global). Comment-only.
