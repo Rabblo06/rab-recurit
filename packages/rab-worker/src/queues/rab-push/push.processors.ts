@@ -29,7 +29,7 @@ export class PushScanProcessor {
       (id, orgId, generation) => pushQueue.republish(id, orgId, generation),
       pushService.ambiguousDeliverySafeToRetry,
     );
-    if (result.claimed) logger.log(`push dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain}`);
+    if (result.claimed) logger.log(`push dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain} publishFailed=${result.publishFailed ?? 0}`);
     return Boolean(result.claimed);
   }
 }
