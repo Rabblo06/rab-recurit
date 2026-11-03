@@ -5,7 +5,7 @@ import { Logger } from '@nestjs/common';
 import * as playwright from 'playwright';
 import { chromium } from 'playwright';
 
-import { renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
+import { PDF_RENDER_STEP_TIMEOUT_MS, renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
 import { inspectPdf } from '../helpers/pdf-inspect';
 
 /**
@@ -218,11 +218,17 @@ describe('S-9: external references inside the FOOTER template (measured, not cha
     expect(server.hits).toEqual([]);
   });
 
-  it.each(FOOTER_KINDS)('%s in the footer pointed at a CLOSED local port: the render does not stall', async (kind, make) => {
+  // Measured: without the OS sandbox Chromium fails these prints fast. WITH the (now required) sandbox, Playwright's bundled
+  // Chromium on the CI host waits until the renderer's own `pdf` step bound (PDF_RENDER_STEP_TIMEOUT_MS) ends it (~30.6 s),
+  // while the production Worker image's Alpine Chromium still fails them in 0.6–3.3 s. The property that matters is that
+  // the render can never hang beyond the renderer's step bounds and produces NO PDF — asserted here (earlier version:
+  // `ms < 15 000`, an observation of one Chromium build's timing).
+  it.each(FOOTER_KINDS)('%s in the footer pointed at a CLOSED local port: no PDF, and the render ends within the renderer step bound', async (kind, make) => {
     const port = await closedLocalPort();
     const r = await renderFooter(make(`http://127.0.0.1:${port}`));
     // eslint-disable-next-line no-console
     console.log(`[S-9 closed-port] kind=${kind} outcome=${r.outcome} ms=${r.ms}`);
-    expect(r.ms).toBeLessThan(15_000);
+    expect(r.outcome).not.toBe('rendered');
+    expect(r.ms).toBeLessThan(PDF_RENDER_STEP_TIMEOUT_MS + 10_000);
   });
 });

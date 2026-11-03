@@ -5041,3 +5041,7 @@ Supersedes the H6 "keep Chromium unsandboxed" trade-off above (the owner approve
 - **Residual.** The browser process itself is not inside the sandbox (as in Chrome); a renderer escape that also defeats
   the namespace sandbox lands as uid 1000. The non-production opt-out exists for host-level tests on hosts that cannot
   create user namespaces.
+  Measured behaviour change: a footer template referencing an unreachable stylesheet/font (only possible through a
+  template escaping bug) no longer always fails fast — with the sandbox, Playwright's bundled Chromium on the CI host waits
+  until the renderer's 30 s `pdf` step bound refuses it (~30.6 s); the Worker image's Alpine Chromium still fails it in
+  0.6–3.3 s. The bound, not Chromium, is the control; no PDF is produced either way (S-9 spec).
