@@ -4737,3 +4737,11 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
               chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
               native arm64.
   ```
+- **The API's PID 1 does not reap orphaned processes (finding, LOW, pre-existing, not fixed in H6).** `api-prestart.sh`
+  execs `node` as PID 1 with no init. The API itself spawns no child process, but anything orphaned inside the container
+  (a `docker exec` shell's background jobs, or code run by an attacker) stays a zombie: measured 5 of 5 orphans left as
+  zombies under the production flags. Each holds a PID slot, and H6 now caps the API at 256, so a compromised process
+  could exhaust the cap and stop the API from creating threads (denial of service of that container only). Fix options for
+  the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
+  `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
+  own children and asserts no zombie is left.
