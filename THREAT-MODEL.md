@@ -4634,3 +4634,18 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
   sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
   code imports one.
+- **Security review fixes (2026-11-03).**
+  - *H1-M1 (Medium, confirmed by a planted-file proof):* Node's CommonJS `globalPaths` include `$HOME/.node_modules` and
+    `$HOME/.node_libraries`; `/home/node` was node-owned (2755), so uid 1000 in the API could plant
+    `$HOME/.node_modules/pg-native/index.js`, which TypeORM's Postgres driver try-loads on every start (reproduced: the
+    planted file executes as uid 1000). Control: `/home/node` is root-owned 0555 in the image; the Worker launcher gives
+    both children `HOME=/nonexistent` (with Chromium's `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` inside the child's own 0700
+    TMPDIR) and refuses to start if that HOME or its parent is child-writable; `module-paths-gate.cjs` runs at build time as
+    `node` (API) and as uid 1000 and 10001 (Worker) and fails the build if any module search path is writable or the
+    pg-native plant succeeds. Regression: `launcher.test.cjs` 3b and the image gate (CI `trivy` job builds it).
+  - *H1-L1:* the Alpine gate also refuses `repositories.d` drop-ins, `/etc/apk/config`, `name@tag` pins in
+    `/etc/apk/world`, and any repository host other than `dl-cdn.alpinelinux.org`; CI rejects `-X`, `--repository`,
+    `--repositories-file` and `--allow-untrusted` in `packages/rab-docker/**/Dockerfile*`. `publish-image.yaml` builds the
+    runtime stage with `no-cache-filters: rab` so a release never reuses an old `apk upgrade` layer.
+  - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
+    setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.

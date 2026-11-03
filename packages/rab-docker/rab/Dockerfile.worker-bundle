@@ -59,7 +59,20 @@ RUN set -eux; \
 COPY --chown=root:root --chmod=0444 packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs /opt/crewflow-bundle/
 # COPY --chmod also applied 0444 to the new directory; root in this container has no CAP_DAC_* capabilities, so the
 # directory itself must be traversable (0755) for the launcher and the health check to be readable at all.
-RUN chmod 0755 /opt/crewflow-bundle && test "$(stat -c %a /opt/crewflow-bundle/start-worker-bundle.cjs)" = 444
+RUN chmod 0755 /opt/crewflow-bundle && test "$(stat -c %a /opt/crewflow-bundle/start-worker-bundle.cjs)" = 444 \
+  && suid="$(find / -xdev -type f -perm /6000 -print | head -n 20)" \
+  && if [ -n "$suid" ]; then echo "FATAL: setuid/setgid files in the Worker image:"; echo "$suid"; exit 1; fi
+
+# Security review H1-M1 gate, as each child identity with the HOME the launcher gives it (/nonexistent): no Node module
+# search path may be writable or creatable, and planting $HOME/.node_modules/pg-native must fail. The launcher's TMPDIR /
+# XDG_* directories are not module search paths. Back to root afterwards: the launcher must start as root (see above).
+USER 1000:1000
+RUN --mount=type=bind,source=packages/rab-docker/rab/module-paths-gate.cjs,target=/tmp/module-paths-gate.cjs \
+    HOME=/nonexistent node /tmp/module-paths-gate.cjs
+USER 10001:10001
+RUN --mount=type=bind,source=packages/rab-docker/rab/module-paths-gate.cjs,target=/tmp/module-paths-gate.cjs \
+    HOME=/nonexistent node /tmp/module-paths-gate.cjs
+USER root
 
 WORKDIR /app
 # No EXPOSE: neither child listens. No debugger/inspector port (NODE_OPTIONS is never forwarded to a child).

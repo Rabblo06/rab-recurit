@@ -99,7 +99,10 @@ RUN apk upgrade --no-cache \
 # at it via env. One image, two commands: the API container carries it too
 # but never loads it — clock-in/out never imports the renderer. Fonts:
 # without them Chromium renders blank text.
-RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto
+# The renderer always runs Chromium with --no-sandbox (CHROMIUM_NO_SANDBOX=true below), so the setuid-root sandbox helper
+# is never used: drop its setuid bit (the final gate refuses any setuid/setgid file in the image).
+RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto \
+  && chmod u-s /usr/lib/chromium/chrome-sandbox
 # H1 security floors, after the last apk transaction: Node, the Alpine branch/repositories, Chromium and libexpat.
 RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
     --mount=type=bind,source=packages/rab-docker/rab/security-floors.env,target=/tmp/security-floors.env \
@@ -134,8 +137,17 @@ COPY --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh
 # STORAGE_LOCAL_ROOT (default ./storage, i.e. /app/storage) is written at runtime, not copied in at build time: the one
 # directory under /app the runtime user owns (0750). Then fail the build unless everything else under /app is root-owned,
 # not group/other-writable, and free of compiled tests (symlinks are skipped: their own mode bits are meaningless).
+# Security review H1-M1: Node's CommonJS loader also searches $HOME/.node_modules and $HOME/.node_libraries
+# (require('module').globalPaths), and node:24-alpine ships /home/node owned by node (2755). A process running as node
+# could plant e.g. $HOME/.node_modules/pg-native, which TypeORM's Postgres driver tries to load on every start: persistent
+# code execution after a restart. /home/node therefore becomes root-owned 0555 (nothing at runtime writes HOME: no npm or
+# yarn, no browser in the API; the Worker's children get HOME=/nonexistent from the launcher). The module-paths gate
+# after `USER node` below proves no module search path is writable by the runtime user. No setuid/setgid file may remain.
 RUN set -eu; \
     mkdir -p /app/storage && chown node:node /app/storage && chmod 0750 /app/storage; \
+    chown root:root /home/node && chmod 0555 /home/node; \
+    suid="$(find / -xdev -type f -perm /6000 -print | head -n 20)"; \
+    if [ -n "$suid" ]; then echo "FATAL: setuid/setgid files in the runtime image:"; echo "$suid"; exit 1; fi; \
     test "$(stat -c '%u:%g' /app)" = 0:0; \
     bad="$(find /app -path /app/storage -prune -o ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
     if [ -n "$bad" ]; then echo "FATAL: application files not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi; \
@@ -143,6 +155,11 @@ RUN set -eu; \
     if [ -n "$tests" ]; then echo "FATAL: compiled tests in the runtime image:"; echo "$tests"; exit 1; fi
 
 USER node
+# Security review H1-M1 gate, run as the runtime user itself: no Node module search path (globalPaths including
+# $HOME/.node_modules and $HOME/.node_libraries, NODE_PATH, and the node_modules lookup chain of every entry point) may be
+# writable, and planting $HOME/.node_modules/pg-native must fail.
+RUN --mount=type=bind,source=packages/rab-docker/rab/module-paths-gate.cjs,target=/tmp/module-paths-gate.cjs \
+    node /tmp/module-paths-gate.cjs
 EXPOSE 3000
 # THE API NEVER MIGRATES (Phase B P7). api-prestart.sh refuses any migration/bootstrap credential in the API's
 # environment, runs a read-only "no pending migrations" check as the restricted runtime role (PG_DATABASE_URL =
