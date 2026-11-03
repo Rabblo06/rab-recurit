@@ -84,10 +84,11 @@
   },
   "packages": {
     "_comment": "'block' = never in a runtime image (H1 already removes them). 'h3_target' = development-only packages H3 removes (production-only node_modules); release-blocking until then. 'h3_target_by_role' adds role-specific ones. Names ending in /* match a whole scope.",
+    "_prettier": "NOT a development-only package here, so it is not listed: @rab/server's email templates import @react-email/render, and both installed copies of it (1.4.0, and 1.0.4 under @react-email/components) declare prettier in dependencies and require('prettier/standalone') and 'prettier/plugins/html' at module top level; @fig/complete-commander (nest-commander, rab-ops / rab-migrate CLI) also depends on it. Verified 2026-11-03 in crewflow-h3h6/api:h3-9990a07b-amd64: loading the compiled email templates module loads 4 prettier modules from both copies (H3 #42, NEEDS-C).",
     "block": ["esbuild", "@esbuild/*", "vite"],
     "h3_target": [
       "jest", "ts-jest", "jest-environment-node", "jest-environment-jsdom", "@jest/*",
-      "nx", "@nx/*", "typescript", "ts-node", "ts-node-dev", "tsx", "concurrently", "wait-on", "prettier", "eslint",
+      "nx", "@nx/*", "typescript", "ts-node", "ts-node-dev", "tsx", "concurrently", "wait-on", "eslint",
       "@typescript-eslint/*", "react-email", "supertest", "aws-sdk-client-mock", "@nestjs/testing", "@yarnpkg/types",
       "@testing-library/*", "@vitejs/*",
       "@tabler/icons-react", "lucide-react", "react-router-dom", "recharts", "framer-motion", "react-phone-number-input",
