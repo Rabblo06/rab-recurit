@@ -58,7 +58,9 @@ try {
   }
   // The concrete attack: plant a module the API loads on start.
   const home = process.env.HOME;
+  let plantTested = false;
   if (home) {
+    plantTested = true;
     const plant = path.join(home, '.node_modules', 'pg-native');
     let planted = false;
     try {
@@ -77,7 +79,8 @@ try {
     console.error(`module-paths-gate: FATAL (${who}) - writable Node module search path(s):\n  ${bad.join('\n  ')}`);
     process.exit(1);
   }
-  console.log(`module-paths-gate: OK (${who}) - ${searchPaths.size} module search paths, none writable; pg-native plant refused`);
+  const plantResult = plantTested ? 'pg-native plant refused' : 'pg-native plant not tested (HOME unset, so no $HOME module path exists)';
+  console.log(`module-paths-gate: OK (${who}) - ${searchPaths.size} module search paths, none writable; ${plantResult}`);
 } catch (error) {
   console.error(`module-paths-gate: FATAL - ${error && error.message}`);
   process.exit(1);

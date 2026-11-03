@@ -91,6 +91,7 @@ check_alpine() {
   # Security review H1-L1: apk also reads repositories from repositories.d drop-ins and options from an apk config file,
   # and a world entry pinned to a tagged repository (name@tag) would pull from it. None of these may exist.
   for d in /etc/apk/repositories.d /lib/apk/repositories.d; do
+    [ ! -L "$d" ] || die "apk repository drop-in directory is a symlink: $d"
     if [ -e "$d" ]; then
       extra="$(find "$d" -mindepth 1 -print | head -n 5)"
       [ -z "$extra" ] || die "apk repository drop-ins present in $d: $extra"

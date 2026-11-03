@@ -114,15 +114,9 @@ jobs:
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
       # Docker hardening review H1-L1: no Dockerfile may add an apk repository on the command line or skip signature checks
-      # (the security-floors.sh gate covers /etc/apk/*; this covers `apk ... -X/--repository/--allow-untrusted`).
-      - name: No ad-hoc apk repositories or unsigned packages in Dockerfiles
-        run: |
-          files="$(git ls-files 'packages/rab-docker/*Dockerfile*')"
-          test -n "$files" || { echo "::error::no Dockerfile found under packages/rab-docker"; exit 1; }
-          if grep -nE -- '(^|[[:space:]])(-X[[:space:]]|--repository|--repositories-file|--allow-untrusted)' $files; then
-            echo "::error::apk repository override or --allow-untrusted in a Dockerfile (see above)"; exit 1
-          fi
-          echo "checked: $files"
+      # (the security-floors.sh gate covers /etc/apk/*; this covers `apk -X…/--rep…/--allow-u…/--keys-dir` in commands).
+      - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
+        run: bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh
 
   trivy:
     runs-on: ubuntu-latest
