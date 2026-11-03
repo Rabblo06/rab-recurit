@@ -174,11 +174,13 @@ RUN set -eu; \
 # H3 runtime-dependency gate (packages/rab-docker/rab/runtime-deps.cjs, bind-mounted, never shipped): every bare import in
 # the code this image runs (server, shared and emails dist; the Worker dist is checked by the Worker image) resolves with
 # Node's own resolver, and no build, test or Worker-only package is anywhere in node_modules. A package the runtime needs
-# but the production install dropped, or a dev tool that comes back, fails the build here.
+# but the production install dropped, or a dev tool that comes back, fails the build here. (prettier is NOT on the list: it
+# is a declared runtime dependency of @react-email/render and of nest-commander's completion helper, so it is in the
+# production closure by design.)
 RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
     node /tmp/runtime-deps.cjs check /app/node_modules \
       --scan /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
-      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' prettier eslint '@swc/*' \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint '@swc/*' \
         webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
         playwright playwright-core
 

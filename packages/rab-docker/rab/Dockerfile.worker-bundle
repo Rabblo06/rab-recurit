@@ -129,7 +129,7 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
     set -eu; \
     node /tmp/runtime-deps.cjs check /app/node_modules \
       --scan /app/packages/rab-worker/dist /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
-      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' prettier eslint '@swc/*' \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint '@swc/*' \
         webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on; \
     test -f /app/node_modules/playwright-core/package.json; \
     bad="$(find /app/node_modules ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
