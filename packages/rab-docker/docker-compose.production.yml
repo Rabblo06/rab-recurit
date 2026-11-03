@@ -307,6 +307,21 @@ services:
   # CREWFLOW_RUNTIME_ISOLATION=enforce (strict: warn|enforce; unset = warn, as
   # here) makes the launcher refuse to start instead when any control is missing.
   #
+  # CHROMIUM OS SANDBOX — REQUIRED (owner decision 2026-11-03). The PDF renderer
+  # launches Chromium with its namespace sandbox and FAILS the render if it
+  # cannot start (no fallback to --no-sandbox). In this container that needs the
+  # seccomp profile in security_opt below: rab/seccomp/chromium-worker.json
+  # (Docker's default + user/PID/net/IPC namespaces + chroot; generated and
+  # checked by rab/seccomp/build-chromium-worker-profile.cjs). The path is
+  # relative to this file: deploy the profile next to it. The launcher probes
+  # the prerequisite at every start ("chromium-sandbox=available|UNAVAILABLE");
+  # with enforce an unavailable sandbox refuses to start. A platform that drops
+  # security_opt (OpenShip's compose import does) therefore cannot render PDFs:
+  # warn mode starts and every render fails; enforce mode refuses to start. A
+  # host whose kernel/AppArmor forbids unprivileged user namespaces (Ubuntu
+  # 24.04: kernel.apparmor_restrict_unprivileged_userns) can block it too — the
+  # launcher's probe reports that the same way.
+  #
   # ENTER IN OPENSHIP (rab-worker): everything listed for rab-api (same values;
   # the jobs process validates the same production config, including
   # CORS_ORIGINS, APP_URL, ACCOUNTS_URL and TRUSTED_PROXY_CIDRS), PLUS:
@@ -368,7 +383,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
-    security_opt: ["no-new-privileges:true"]
+    security_opt: ["no-new-privileges:true", "seccomp=./rab/seccomp/chromium-worker.json"]
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
       - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700

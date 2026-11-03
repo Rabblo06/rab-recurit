@@ -14,14 +14,16 @@ import { chromium, errors, Route } from 'playwright';
  * renderer launches that system Chromium instead. Unset in local development,
  * where Playwright's own downloaded browser is used.
  *
- * OS sandbox (Docker hardening H6, measured): Chromium runs WITHOUT its OS sandbox in every environment. Playwright adds
- * `--no-sandbox` itself unless `chromiumSandbox: true` is passed, so `CHROMIUM_NO_SANDBOX` (whose `true` only repeats
- * the flag) has never switched the sandbox on — unset and `false` were verified to launch with `--no-sandbox` too.
- * `chromiumSandbox: false` below states that explicitly. In the production Worker container the sandbox cannot start
- * anyway: Docker's default seccomp profile refuses the user namespace it needs and the setuid helper has no setuid bit
- * (H1-L2), so `chromiumSandbox: true` aborts the launch. Enabling it is an owner decision (a reviewed seccomp delta for
- * the Worker container; see THREAT-MODEL.md "Docker hardening H6"). The in-page controls below are what contain a
- * hostile document today.
+ * OS sandbox — REQUIRED (owner decision 2026-11-03, "require the Chromium OS sandbox"; THREAT-MODEL.md "Chromium OS
+ * sandbox"). Chromium is launched with `chromiumSandbox: true` (its namespace sandbox: renderers in their own user, PID
+ * and network namespaces under its seccomp-BPF policy) and `--disable-gpu-sandbox` on Linux (the GPU process's own
+ * seccomp policy kills it on musl's pwritev2, which takes the whole browser down; renderers stay sandboxed). In the
+ * Worker container this needs the seccomp profile packages/rab-docker/rab/seccomp/chromium-worker.json (Docker's default
+ * + user/PID/net/IPC namespaces + chroot); the setuid helper is NOT used (no setuid bit since H1-L2).
+ * Fail-safe: if the sandbox cannot start, the launch fails and so does the render (`PdfRenderSandboxError`) — there is
+ * no retry without the sandbox. `CHROMIUM_NO_SANDBOX` is IGNORED (it can no longer turn the sandbox off). The only
+ * opt-out is the explicit `CHROMIUM_SANDBOX=disabled-outside-production`, for hosts that cannot create user namespaces
+ * in local development or host-level tests; it is REFUSED when NODE_ENV or RAB_RUNTIME_ENV is production.
  *
  * Hardening (Phase 0). Every template is self-contained, server-generated HTML whose values are escaped and whose
  * images (logo, shift QR) are `data:` URIs, so the renderer needs neither script nor any fetch. It therefore renders in
@@ -56,6 +58,18 @@ export class PdfRenderTimeoutError extends Error {
   }
 }
 
+export class PdfRenderSandboxError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'PDF render refused: Chromium could not start with its OS sandbox (in the Worker container the seccomp profile ' +
+        'packages/rab-docker/rab/seccomp/chromium-worker.json must be applied). There is no fallback to --no-sandbox.',
+    );
+    this.name = 'PdfRenderSandboxError';
+    // The launch error is kept for logs; it names Chromium's sandbox failure, never a credential (env is allowlisted).
+    (this as { cause?: unknown }).cause = cause;
+  }
+}
+
 export class PdfRenderNavigationError extends Error {
   constructor() {
     super('PDF render refused: the document tried to navigate away from its own content');
@@ -86,11 +100,12 @@ function isAllowedUrl(url: string): boolean {
 /**
  * Docker hardening H6: the ONLY environment variables the browser process receives. Playwright's default is the whole
  * `process.env` — in the Worker that is the jobs child's PG_DATABASE_URL, REDIS_URL, APP_SECRET, S3 / SMTP / push
- * credentials — and Chromium runs without its OS sandbox as the same uid, so a renderer bug would land next to them.
+ * credentials — and the browser process (which is never itself inside the sandbox) runs as the same uid.
  * This is an ALLOWLIST (never a denylist): process location, temp/profile/cache directories, locale, time zone and
  * fontconfig. Nothing here is a credential. Windows names are for local development only (Chromium needs them there).
- * Residual (THREAT-MODEL.md, Docker hardening H6): a same-uid renderer can still read the jobs process's own
- * /proc/<pid>/environ while the OS sandbox is off.
+ * With the OS sandbox (below) a compromised renderer is in its own user/PID/network namespaces under seccomp-BPF and
+ * cannot open another process's /proc entries; without it (the non-production opt-out) a same-uid renderer could still
+ * read the jobs process's own /proc/<pid>/environ.
  */
 export const CHROMIUM_ENV_KEYS: readonly string[] = Object.freeze([
   'PATH', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR',
@@ -113,13 +128,55 @@ export function chromiumLaunchEnv(source: NodeJS.ProcessEnv = process.env, platf
   return env;
 }
 
+export type ChromiumSandboxMode = 'required' | 'disabled-outside-production';
+
+/**
+ * Strict CHROMIUM_SANDBOX: unset/empty/"required" → required; "disabled-outside-production" → only outside production;
+ * anything else, or the opt-out in production, throws (fail closed — never a silent mode choice).
+ */
+export function chromiumSandboxMode(env: NodeJS.ProcessEnv = process.env): ChromiumSandboxMode {
+  const raw = env.CHROMIUM_SANDBOX;
+  if (raw === undefined || raw === '' || raw === 'required') return 'required';
+  if (raw === 'disabled-outside-production') {
+    if (env.NODE_ENV === 'production' || env.RAB_RUNTIME_ENV === 'production') {
+      throw new Error('CHROMIUM_SANDBOX=disabled-outside-production is refused in production: the Chromium OS sandbox is required');
+    }
+    return raw;
+  }
+  throw new Error('CHROMIUM_SANDBOX must be "required" (the default) or "disabled-outside-production"');
+}
+
+/** The launch options' sandbox part: required → sandbox on (+ GPU-process exemption on Linux), never `--no-sandbox`. */
+export function chromiumSandboxLaunch(mode: ChromiumSandboxMode, platform: NodeJS.Platform = process.platform): { chromiumSandbox: boolean; args: string[] } {
+  if (mode === 'required') return { chromiumSandbox: true, args: platform === 'linux' ? ['--disable-gpu-sandbox'] : [] };
+  return { chromiumSandbox: false, args: [] }; // Playwright then adds --no-sandbox itself; never reachable in production
+}
+
+let warnedSandboxOff = false;
+let warnedIgnoredNoSandbox = false;
+
 export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = {}): Promise<Buffer> {
   const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
-  const args = ['--disable-dev-shm-usage'];
-  if (process.env.CHROMIUM_NO_SANDBOX === 'true') args.push('--no-sandbox', '--disable-setuid-sandbox');
-  // chromiumSandbox: Playwright's own default, stated (see "OS sandbox" above): never read as a sandbox being on.
+  const mode = chromiumSandboxMode();
+  const sandbox = chromiumSandboxLaunch(mode);
+  if (process.env.CHROMIUM_NO_SANDBOX === 'true' && !warnedIgnoredNoSandbox) {
+    warnedIgnoredNoSandbox = true;
+    logger.warn('CHROMIUM_NO_SANDBOX=true is ignored: the Chromium OS sandbox is required (CHROMIUM_SANDBOX)');
+  }
+  if (mode !== 'required' && !warnedSandboxOff) {
+    warnedSandboxOff = true;
+    logger.warn('CHROMIUM_SANDBOX=disabled-outside-production: Chromium runs WITHOUT its OS sandbox (never allowed in production)');
+  }
+  const args = ['--disable-dev-shm-usage', ...sandbox.args];
   // env: the allowlisted environment only (chromiumLaunchEnv) — never the Worker's credentials.
-  const browser = await chromium.launch({ executablePath, args, chromiumSandbox: false, env: chromiumLaunchEnv() });
+  let browser: Awaited<ReturnType<typeof chromium.launch>>;
+  try {
+    browser = await chromium.launch({ executablePath, args, chromiumSandbox: sandbox.chromiumSandbox, env: chromiumLaunchEnv() });
+  } catch (error) {
+    // Fail-safe: no second attempt without the sandbox.
+    if (mode === 'required') throw new PdfRenderSandboxError(error);
+    throw error;
+  }
   let blockedRequests = 0;
   let navigationAttempted = false;
   try {

@@ -49,6 +49,8 @@ RAB = os.path.join(REPO, 'packages', 'rab-docker', 'rab')
 FLOORS_ENV = os.path.join(RAB, 'security-floors.env')
 FLOORS_SH = os.path.join(RAB, 'security-floors.sh')
 MODULE_GATE = os.path.join(RAB, 'module-paths-gate.cjs')
+# Chromium OS sandbox REQUIRED (owner decision 2026-11-03): the Worker container's seccomp profile.
+WORKER_SECCOMP = os.path.join(RAB, 'seccomp', 'chromium-worker.json')
 POLICY_FILE = os.path.join(HERE, 'policy.json')
 DECISIONS_FILE = os.path.join(HERE, 'vulnerability-decisions.json')
 WATCHLIST_FILE = os.path.join(HERE, 'scanner-blind-advisories.json')
@@ -1139,16 +1141,29 @@ def cmd_pdf(a, c: Check) -> None:
     if not native:
         c.fail(f'the {img.get("Architecture")} image ran on a {host!r} Docker host (emulated): not a native render')
     # 3. The render, as that child, with the production compose runtime settings (read-only root, per-child tmpfs,
-    #    no capabilities, no-new-privileges, no network).
+    #    no capabilities, no-new-privileges, no network) AND the Worker seccomp profile: the Chromium OS sandbox is
+    #    REQUIRED (owner decision 2026-11-03), and that profile is its only container prerequisite.
     envargs = [x for k, v in env.items() for x in ('-e', f'{k}={v}')]
-    p = docker(*hard, '--user', f'{uid}:{gid}', '--workdir', plan.get('cwd') or '/app',
-               '--tmpfs', f'/tmp/crewflow-jobs:uid={uid},gid={gid},mode=0700',
-               '--tmpfs', f'/run/crewflow-health/jobs:uid={uid},gid={gid},mode=0755',
-               *envargs, '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'render',
-               check=False, timeout=600)
+    child = ['--user', f'{uid}:{gid}', '--workdir', plan.get('cwd') or '/app',
+             '--tmpfs', f'/tmp/crewflow-jobs:uid={uid},gid={gid},mode=0700',
+             '--tmpfs', f'/run/crewflow-health/jobs:uid={uid},gid={gid},mode=0755',
+             *envargs, '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'render']
+    # 3a. Fail-safe: WITHOUT the profile (Docker's default seccomp) the sandbox cannot start, so the render must FAIL —
+    #     a success here would mean the renderer fell back to --no-sandbox.
+    nop = docker(*hard, *child, check=False, timeout=600)
+    if nop.returncode == 0:
+        c.fail('the PDF rendered WITHOUT the Worker seccomp profile: the Chromium OS sandbox is not enforced (fallback?)')
+    elif 'PdfRenderSandboxError' not in (nop.stderr or ''):
+        c.fail(f'without the Worker seccomp profile the render failed for another reason: {(nop.stderr or nop.stdout)[-400:]}')
+    else:
+        c.info('without the Worker seccomp profile the render is refused (PdfRenderSandboxError): no --no-sandbox fallback')
+    p = docker(*hard, '--security-opt', f'seccomp={WORKER_SECCOMP}', *child, check=False, timeout=600)
     try:
-        run = json.loads(p.stdout)
-    except ValueError:
+        # The smoke prints its JSON as the LAST stdout line; the renderer may log (Nest Logger, stdout) before it.
+        if p.returncode != 0:
+            raise ValueError('non-zero exit')
+        run = json.loads((p.stdout or '').strip().splitlines()[-1])
+    except (ValueError, IndexError):
         c.fail(f'PDF render failed (exit {p.returncode}) on {u} ({"native" if native else "EMULATED"}): '
                f'{(p.stderr or p.stdout)[-800:]}')
         with open(os.path.join(a.results, f'{a.role}-pdf-run.json'), 'w', encoding='utf-8') as f:
@@ -1180,6 +1195,17 @@ def cmd_pdf(a, c: Check) -> None:
             c.fail(f'expected text not found in the PDF: {needle!r}')
     if info['images'] < 1:
         c.fail('no embedded image (logo / QR) in the PDF')
+    # Chromium OS sandbox: every renderer seen during the render was in its own PID namespace under Chromium's
+    # seccomp-BPF (more NSpid levels and more seccomp filters than the render process itself).
+    sb = run.get('sandbox') or {}
+    if not sb.get('renderers_seen'):
+        c.fail('no renderer process was observed during the render: the sandbox could not be verified')
+    elif sb.get('renderers_sandboxed') != sb.get('renderers_seen'):
+        c.fail(f'renderers NOT sandboxed: {sb.get("renderers_sandboxed")} of {sb.get("renderers_seen")} '
+               f'(self {sb.get("self")}, renderers {sb.get("renderers")})')
+    else:
+        c.info(f'Chromium OS sandbox: {sb["renderers_sandboxed"]}/{sb["renderers_seen"]} renderer(s) in their own PID namespace '
+               f'under seccomp-BPF (self NSpid levels {sb["self"]["nspid"]}, filters {sb["self"]["filters"]})')
     c.info(f'{u}: {cv}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
            f'{run["render_ms"]} ms as uid {run["uid"]} (HOME={run["home"]}, TMPDIR={run["tmpdir"]}); markup in the '
            'synthetic names came out as literal text')

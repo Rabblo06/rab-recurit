@@ -196,6 +196,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   'MEMBER_INVITE_RATE_ORGANISATION_PER_DAY', 'MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR',
   // PDF rendering (system Chromium; the image sets these)
   'CHROMIUM_EXECUTABLE_PATH', 'CHROMIUM_NO_SANDBOX', 'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD',
+  // Owner decision 2026-11-03 (Chromium OS sandbox required): the renderer's strict switch. Only the explicit
+  // non-production opt-out changes anything, and makePlan refuses it on a production service.
+  'CHROMIUM_SANDBOX',
 ]);
 
 /**
@@ -428,6 +431,12 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   if (provisioner && isPoolerHost(provisioner)) throw new BundleConfigError('CREWFLOW_PROVISIONER_DATABASE_URL is a pooled (-pooler) host; use the direct host');
   // Validated only where it is used; a disabled provisioner ignores it (it is never forwarded to the jobs child).
   const intervalSeconds = withProvisioner ? provisionerIntervalSeconds(env, mode) : null;
+  // Owner decision 2026-11-03: the Chromium OS sandbox is required; its switch is strict and its opt-out never production.
+  const chromiumSandbox = chromiumSandboxSetting(env);
+  if (chromiumSandbox === null) throw new BundleConfigError('CHROMIUM_SANDBOX must be "required" (the default) or "disabled-outside-production"');
+  if (production && chromiumSandbox !== 'required') {
+    throw new BundleConfigError('CHROMIUM_SANDBOX=disabled-outside-production is refused on a production Worker service: the Chromium OS sandbox is required');
+  }
   if (production) {
     if (env.NODE_ENV !== 'production' || env.RAB_RUNTIME_ENV !== 'production') {
       throw new BundleConfigError('NODE_ENV=production and RAB_RUNTIME_ENV=production must be set together');
@@ -597,10 +606,43 @@ function runtimeIsolationMode(env) {
 }
 
 /**
- * Reports the isolation and, in enforce mode, refuses (BundleConfigError, names and flags only) when any control is
- * missing. `probe` is injectable for tests; by default it reads this process's /proc and cgroup files.
+ * Owner decision 2026-11-03: the Chromium OS sandbox is REQUIRED (render-pdf.util.ts fails a render rather than run
+ * Chromium without it). Its prerequisite in this container is the Worker seccomp profile
+ * (packages/rab-docker/rab/seccomp/chromium-worker.json: user/PID/net/IPC namespaces + chroot). This probe runs, as the
+ * jobs identity, exactly what Chromium's namespace sandbox needs — create a user namespace, then chroot inside it — with
+ * busybox applets, no shell and an empty environment. true = the sandbox can start here. Under Docker's default profile
+ * unshare(CLONE_NEWUSER) is refused (EPERM). Never throws.
  */
-function checkRuntimeIsolation(env, { log = (s) => console.error(`[worker-bundle] ${s}`), probe } = {}) {
+function chromiumSandboxProbe(layout = DEFAULT_LAYOUT) {
+  try {
+    const r = require('node:child_process').spawnSync('/usr/bin/unshare', ['-U', '-r', '/usr/sbin/chroot', '/', '/bin/busybox', 'true'], {
+      uid: layout.jobs.uid,
+      gid: layout.jobs.gid,
+      env: { PATH: SAFE_PATH },
+      stdio: 'ignore',
+      timeout: 10_000,
+    });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Strict CHROMIUM_SANDBOX (same values as render-pdf.util.ts): 'required' (unset/empty too), the non-production opt-out, or null. */
+function chromiumSandboxSetting(env) {
+  const raw = env.CHROMIUM_SANDBOX;
+  if (raw === undefined || raw === '' || raw === 'required') return 'required';
+  if (raw === 'disabled-outside-production') return raw;
+  return null;
+}
+
+/**
+ * Reports the isolation and, in enforce mode, refuses (BundleConfigError, names and flags only) when any control is
+ * missing — including the Chromium OS sandbox prerequisites (unless the explicit non-production opt-out is set, which
+ * makePlan refuses in production). `probe` / `sandboxProbe` are injectable for tests; by default they read this process's
+ * /proc and cgroup files and run chromiumSandboxProbe().
+ */
+function checkRuntimeIsolation(env, { log = (s) => console.error(`[worker-bundle] ${s}`), probe, sandboxProbe = chromiumSandboxProbe } = {}) {
   const mode = runtimeIsolationMode(env);
   if (mode === null) throw new BundleConfigError('CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce" (unset or empty = warn)');
   const read = (p) => {
@@ -610,9 +652,16 @@ function checkRuntimeIsolation(env, { log = (s) => console.error(`[worker-bundle
       return ''; // reported as a gap below
     }
   };
-  const r = probe ? probe() : runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  const base = probe ? probe() : runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  const sandboxRequired = chromiumSandboxSetting(env) !== 'disabled-outside-production';
+  const sandboxOk = sandboxRequired ? sandboxProbe() === true : null;
+  const r = { ...base, gaps: [...base.gaps] };
+  if (sandboxRequired && !sandboxOk) {
+    r.gaps.push('Chromium OS sandbox unavailable (user namespace + chroot refused: the Worker seccomp profile rab/seccomp/chromium-worker.json is not applied; every PDF render will fail)');
+  }
   const root = r.rootReadOnly === null ? 'unknown' : r.rootReadOnly ? 'read-only' : 'writable';
-  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax} mode=${mode}`;
+  const sandbox = sandboxOk === null ? 'disabled-outside-production' : sandboxOk ? 'available' : 'UNAVAILABLE';
+  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax} chromium-sandbox=${sandbox} mode=${mode}`;
   if (r.gaps.length === 0) {
     log(`runtime isolation as declared: ${summary}`);
     return r;
@@ -939,6 +988,8 @@ module.exports = {
   processesOwnedBy,
   runtimeIsolation,
   runtimeIsolationMode,
+  chromiumSandboxProbe,
+  chromiumSandboxSetting,
   checkRuntimeIsolation,
   GUARD_LINE,
 };

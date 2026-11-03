@@ -59,6 +59,15 @@ jobs:
       # the same way. Without it reports stay pending and the report-email suites fail.
       - name: Install Playwright Chromium for the PDF renderer
         run: npx playwright install --with-deps chromium
+      # The renderer REQUIRES Chromium's OS sandbox (owner decision 2026-11-03; render-pdf.util.ts), which needs
+      # unprivileged user namespaces. Ubuntu 24.04 restricts them for unconfined processes through AppArmor; this
+      # disposable runner lifts that host restriction so the tests exercise the real sandbox (render-pdf-os-sandbox and
+      # S-7 prove it), instead of the explicit CHROMIUM_SANDBOX=disabled-outside-production opt-out.
+      - name: Allow unprivileged user namespaces on this runner (Chromium OS sandbox)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Worker tests
         run: |
           set -euo pipefail

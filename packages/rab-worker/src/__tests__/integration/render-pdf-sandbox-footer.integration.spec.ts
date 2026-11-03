@@ -11,12 +11,9 @@ import { inspectPdf } from '../helpers/pdf-inspect';
 /**
  * S-7 and S-9 (Phase 0 review) — MEASUREMENT ONLY, nothing here changes the renderer.
  *
- * S-7: `CHROMIUM_NO_SANDBOX=true` (set by the production Worker image, packages/rab-docker/rab/Dockerfile.worker-bundle)
- *      adds `--no-sandbox --disable-setuid-sandbox` to the arguments handed to Playwright. Docker hardening H6 measured that
- *      the variable never controlled the OS sandbox: Playwright itself adds `--no-sandbox` unless `chromiumSandbox: true`,
- *      and the renderer passes `chromiumSandbox: false` explicitly, so Chromium runs WITHOUT its OS sandbox for every value
- *      (unset and "false" included). Pinned here: the arguments each value produces, that `chromiumSandbox` is false in
- *      every case, and that the in-page hardening (no JavaScript, no network, no navigation) holds with the sandbox off.
+ * S-7: the Chromium OS sandbox is REQUIRED (owner decision 2026-11-03): `chromiumSandbox: true` (+ `--disable-gpu-sandbox`
+ *      on Linux), never `--no-sandbox`, whatever `CHROMIUM_NO_SANDBOX` says (it is ignored). Pinned here: the launch
+ *      options, and that the in-page hardening (no JavaScript, no network, no navigation) holds in a real sandboxed render.
  * S-9: the PDF footer template is rendered by Chromium's print pipeline, outside the page whose requests `page.route`
  *      intercepts. A synthetic footer referencing resources on a LOCAL loopback test server (and a closed local port) is
  *      rendered; the local server records whether any request actually arrives. No real external host is ever used.
@@ -109,29 +106,23 @@ afterEach(async () => {
 
 // ─── S-7 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed) — the OS sandbox is OFF for every value', () => {
-  it('unset: only --disable-dev-shm-usage is added, and the sandbox is still OFF (chromiumSandbox: false)', async () => {
+describe('S-7: the Chromium OS sandbox is REQUIRED (owner decision 2026-11-03); CHROMIUM_NO_SANDBOX is ignored', () => {
+  const sandboxArgs = process.platform === 'linux' ? ['--disable-dev-shm-usage', '--disable-gpu-sandbox'] : ['--disable-dev-shm-usage'];
+
+  it('unset: chromiumSandbox: true, never --no-sandbox (Linux: the GPU process alone is exempted)', async () => {
     await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
-    expect(launchSandbox).toEqual([false]);
+    expect(launchArgs).toEqual([sandboxArgs]);
+    expect(launchSandbox).toEqual([true]);
   });
 
-  it('"true" (the production image value): --no-sandbox and --disable-setuid-sandbox are added', async () => {
-    process.env.CHROMIUM_NO_SANDBOX = 'true';
-    await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox']]);
-    expect(launchSandbox).toEqual([false]);
-  });
-
-  it.each(['TRUE', '1', 'yes', 'True', ' true', 'false'])('any other value (%p) adds no flag (exact match only), and the sandbox is still OFF', async (value) => {
+  it.each(['true', 'TRUE', '1', 'yes', 'false'])('CHROMIUM_NO_SANDBOX=%p is ignored: the sandbox stays ON', async (value) => {
     process.env.CHROMIUM_NO_SANDBOX = value;
     await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
-    expect(launchSandbox).toEqual([false]);
+    expect(launchArgs).toEqual([sandboxArgs]);
+    expect(launchSandbox).toEqual([true]);
   });
 
-  it('with the sandbox OFF, page JavaScript still does not run and no request reaches the network', async () => {
-    process.env.CHROMIUM_NO_SANDBOX = 'true';
+  it('with the sandbox ON, page JavaScript still does not run and no request reaches the network', async () => {
     const html = `<html><body>
       <p id="t">ORIGINAL-TEXT</p>
       <script>document.getElementById('t').textContent = 'SCRIPT-RAN'; fetch('${server.base}/from-script');</script>
@@ -140,7 +131,8 @@ describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed) — the OS sandbox is
     const pdf = await renderHtmlToPdf(html);
     await settle();
     const text = inspectPdf(pdf).text;
-    expect(launchArgs[0]).toContain('--no-sandbox');
+    expect(launchSandbox).toEqual([true]);
+    expect(launchArgs[0]).not.toContain('--no-sandbox');
     expect(text).toContain('ORIGINAL-TEXT');
     expect(text).not.toContain('SCRIPT-RAN');
     expect(server.hits).toEqual([]);

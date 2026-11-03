@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 
-import { CHROMIUM_ENV_KEYS, chromiumLaunchEnv, renderHtmlToPdf } from './render-pdf.util';
+import { CHROMIUM_ENV_KEYS, chromiumLaunchEnv, chromiumSandboxLaunch, chromiumSandboxMode, PdfRenderSandboxError, renderHtmlToPdf } from './render-pdf.util';
 
 /**
  * Docker hardening H6: the browser process gets an ALLOWLISTED environment, never the Worker's credentials. Playwright's
@@ -51,14 +51,14 @@ describe('render-pdf browser environment (H6 allowlist)', () => {
   });
 
   it('passes an explicit env to chromium.launch (never the inherited process.env)', async () => {
-    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow('launch intercepted');
+    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow(PdfRenderSandboxError);
     expect(captured).toHaveLength(1);
     expect(captured[0]?.env).toBeDefined();
     expect(captured[0]?.env).not.toBe(process.env);
   });
 
   it('the launch env holds only allowlisted names and nothing credential-shaped (URL/SECRET/KEY/TOKEN/PASSWORD)', async () => {
-    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow('launch intercepted');
+    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow(PdfRenderSandboxError);
     const env = captured[0]?.env ?? {};
     const names = Object.keys(env);
     const allowed = process.platform === 'win32' ? null : new Set(CHROMIUM_ENV_KEYS);
@@ -77,5 +77,79 @@ describe('render-pdf browser environment (H6 allowlist)', () => {
   it('on Windows (local development only) it also keeps the system directories Chromium needs, case-insensitively, and still no credential', () => {
     const env = chromiumLaunchEnv({ ...CREDENTIALS, SystemRoot: 'C:\\Windows', Path: 'C:\\Windows', LOCALAPPDATA: 'C:\\x', TEMP: 'C:\\t' }, 'win32');
     expect(Object.keys(env).sort()).toEqual(['LOCALAPPDATA', 'Path', 'SystemRoot', 'TEMP']);
+  });
+});
+
+/**
+ * Owner decision 2026-11-03: the Chromium OS sandbox is REQUIRED. No browser is started: `chromium.launch` is intercepted.
+ */
+describe('render-pdf OS sandbox (required, fail-safe)', () => {
+  const keys = ['CHROMIUM_SANDBOX', 'CHROMIUM_NO_SANDBOX', 'NODE_ENV', 'RAB_RUNTIME_ENV'] as const;
+  const saved: Record<string, string | undefined> = {};
+  let launches: Array<{ chromiumSandbox?: boolean; args?: string[] }> = [];
+
+  beforeEach(() => {
+    launches = [];
+    for (const k of keys) saved[k] = process.env[k];
+    for (const k of keys) delete process.env[k];
+    jest.spyOn(chromium, 'launch').mockImplementation(async (opts) => {
+      launches.push({ chromiumSandbox: opts?.chromiumSandbox, args: [...(opts?.args ?? [])] });
+      throw new Error('No usable sandbox! (simulated)');
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('launches with chromiumSandbox: true and never --no-sandbox — CHROMIUM_NO_SANDBOX=true is ignored', async () => {
+    for (const v of [undefined, 'true', 'false']) {
+      if (v === undefined) delete process.env.CHROMIUM_NO_SANDBOX;
+      else process.env.CHROMIUM_NO_SANDBOX = v;
+      await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow(PdfRenderSandboxError);
+    }
+    expect(launches).toHaveLength(3);
+    for (const l of launches) {
+      expect(l.chromiumSandbox).toBe(true);
+      expect(l.args).not.toContain('--no-sandbox');
+      expect(l.args).not.toContain('--disable-setuid-sandbox');
+    }
+  });
+
+  it('a sandbox launch failure FAILS the render: exactly one launch attempt, no retry without the sandbox', async () => {
+    const error = await renderHtmlToPdf('<p>x</p>').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PdfRenderSandboxError);
+    expect(String((error as Error).message)).toMatch(/no fallback to --no-sandbox/);
+    expect(launches).toEqual([expect.objectContaining({ chromiumSandbox: true })]);
+  });
+
+  it('Linux adds --disable-gpu-sandbox only (renderers stay sandboxed); other platforms add nothing', () => {
+    expect(chromiumSandboxLaunch('required', 'linux')).toEqual({ chromiumSandbox: true, args: ['--disable-gpu-sandbox'] });
+    expect(chromiumSandboxLaunch('required', 'win32')).toEqual({ chromiumSandbox: true, args: [] });
+    expect(chromiumSandboxLaunch('disabled-outside-production', 'linux')).toEqual({ chromiumSandbox: false, args: [] });
+  });
+
+  it('CHROMIUM_SANDBOX is strict: unset/empty/"required" → required; the opt-out only outside production; anything else throws', () => {
+    expect(chromiumSandboxMode({})).toBe('required');
+    expect(chromiumSandboxMode({ CHROMIUM_SANDBOX: '' })).toBe('required');
+    expect(chromiumSandboxMode({ CHROMIUM_SANDBOX: 'required' })).toBe('required');
+    expect(chromiumSandboxMode({ CHROMIUM_SANDBOX: 'disabled-outside-production', NODE_ENV: 'test' })).toBe('disabled-outside-production');
+    expect(() => chromiumSandboxMode({ CHROMIUM_SANDBOX: 'disabled-outside-production', NODE_ENV: 'production' })).toThrow(/refused in production/);
+    expect(() => chromiumSandboxMode({ CHROMIUM_SANDBOX: 'disabled-outside-production', RAB_RUNTIME_ENV: 'production' })).toThrow(/refused in production/);
+    for (const v of ['off', 'false', 'disabled', 'DISABLED-OUTSIDE-PRODUCTION', 'no']) expect(() => chromiumSandboxMode({ CHROMIUM_SANDBOX: v })).toThrow(/must be "required"/);
+  });
+
+  it('the explicit non-production opt-out is the only way to launch without the sandbox', async () => {
+    process.env.CHROMIUM_SANDBOX = 'disabled-outside-production';
+    process.env.NODE_ENV = 'test';
+    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow('No usable sandbox! (simulated)');
+    expect(launches).toEqual([{ chromiumSandbox: false, args: ['--disable-dev-shm-usage'] }]);
+    process.env.RAB_RUNTIME_ENV = 'production';
+    await expect(renderHtmlToPdf('<p>x</p>')).rejects.toThrow(/refused in production/);
+    expect(launches).toHaveLength(1);
   });
 });
