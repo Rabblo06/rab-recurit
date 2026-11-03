@@ -241,6 +241,10 @@ def validate_decisions(c: Check) -> list[dict]:
             c.fail(f'{where}: decision {d["owner_decision_ref"]} for {d["id"]} ({", ".join(d["packages"])}) EXPIRED on {expires}; '
                    're-review it (the finding is treated as undecided)')
             continue
+        if decided > today():
+            c.fail(f'{where}: decided_on {decided} is in the future (the {MAX_DECISION_DAYS}-day limit counts from the '
+                   'actual decision)')
+            continue
         if (expires - decided).days > MAX_DECISION_DAYS or expires < decided:
             c.fail(f'{where}: expires must be within {MAX_DECISION_DAYS} days after decided_on')
             continue
@@ -509,7 +513,8 @@ def cmd_fs(a, c: Check) -> None:
     writable = rp['writable_dirs']
     test_re = re.compile(fsp['test_file_pattern'])
     h3 = pk['h3_target'] + pk['h3_target_by_role'].get(a.role, [])
-    pkg_re = re.compile(r'^/app/(?:.*/)?node_modules/((?:@[^/]+/)?[^/@][^/]*)/package\.json$')
+    # every installed npm package anywhere in the image (/app, /usr/local/lib/node_modules, /opt/crewflow-bundle, ...)
+    pkg_re = re.compile(r'^(?:/.*)?/node_modules/((?:@[^/]+/)?[^/@][^/]*)/package\.json$')
     stats = {'files': 0, 'bytes': 0, 'node_modules_bytes': 0}
     seen_paths: dict[str, tarfile.TarInfo] = {}
     capture = {'/etc/passwd', '/etc/apk/repositories', '/etc/apk/world', '/etc/alpine-release', '/lib/apk/db/installed'}

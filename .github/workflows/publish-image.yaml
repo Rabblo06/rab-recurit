@@ -39,6 +39,11 @@ jobs:
   publish:
     needs: gate
     if: ${{ needs.gate.result == 'success' }}
+    # One publication at a time across ALL refs (two releases of the same commit share sha-<commit>): the immutable-tag
+    # check and the push below can never interleave with another run's. The gate builds still run in parallel.
+    concurrency:
+      group: publish-image-ghcr-rab-recurit-server
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # GITHUB_TOKEN only (no stored secret): packages:write to push to GHCR; id-token + attestations to sign and store the

@@ -139,7 +139,8 @@ jobs:
   # One required status for the whole workflow: fails if any job above failed, was cancelled or was skipped.
   ci-security-gate:
     name: ci-security gate
-    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, deployment-config, image-gate]
+    # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, deployment-config, changes, image-gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

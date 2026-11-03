@@ -96,10 +96,15 @@ class Decisions(unittest.TestCase):
             self.assertEqual(valid, [], bad)
             self.assertTrue(c.fails, bad)
 
-    def test_committed_register_is_empty_and_valid(self):
+    def test_committed_register_is_valid(self):
         c = g.Check('t', 'release', None)
-        self.assertEqual(g.validate_decisions(c), [])
+        g.validate_decisions(c)
         self.assertEqual(c.fails, [])
+
+    def test_future_decision_date_fails(self):
+        valid, c = self.check([dict(self.base, decided_on='2030-01-01', expires='2030-06-30')])
+        self.assertEqual(valid, [])
+        self.assertTrue(any('in the future' in m for m in c.fails))
 
 
 def trivy_doc(vulns):
