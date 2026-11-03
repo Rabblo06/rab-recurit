@@ -4662,6 +4662,77 @@ posture change.
 - **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
   decision); the producer-side checks are defence in depth, not an authentication boundary.
 
+## Phase D-Q3b — account invites always queued (branch phase-d/dq3-invites-always-queued, not merged)
+
+Owner decision (2026-11-02, D-Q plan §12.1 #3): Staff and Manager account invites are always written to the outbox at
+creation; the Worker heartbeat key in Redis no longer decides it. No migration, no role, grant, RLS or posture change.
+
+- **Asset:** a person's account-activation link (a bearer token that sets their first password) and the timing of the
+  email that carries it. **Actor:** a Manager creating, cancelling or resending an invite; anyone able to wipe or stall
+  Redis or the Worker.
+- **Before:** `StaffService.create` / `ManagerService.create` queued the invite only if `EMAIL_DELIVERY_ENABLED` was true
+  **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
+  silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
+- **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  written), not a Redis read.
+- **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
+  returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,
+  `email-send.processor.ts` `revalidate`):** the target user must still exist; the invite must not be revoked
+  ("Cancel invitation"), accepted, or superseded by a newer invite (a resend rotates the token and revokes the older one,
+  and the latest-invite check catches an un-revoked older row); **new in this PR: the invite must not be expired** — an
+  expired invite is cancelled, never sent (before, the consumer did not check `expires_at`; the activation endpoint already
+  refused an expired link, so the risk was a confusing dead-link email, not account takeover). Redemption keeps refusing
+  expired, revoked and consumed links independently of delivery.
+- **Organisation suspension:** unchanged. `sendAccountInvite` refuses to mint an invite for a suspended organisation; an
+  invite queued before a suspension is still governed by the same revalidation (no new behaviour in this PR).
+- **Tenant isolation:** the job payload is `{emailOutboxId, organisationId}` taken from the committed row; the consumer
+  re-reads the row under that organisation's RLS context. A job naming another organisation sees no row and sends nothing
+  (tested, `account-invite-delivery` I5); with no tenant context the outbox returns zero rows (tested).
+- **Tests:** `account-invite-abuse-cases` (heartbeat missing ⇒ invite queued; heartbeat stale ⇒ queued for staff and
+  managers; `EMAIL_DELIVERY_ENABLED=false` ⇒ nothing queued; RLS isolation), `account-invite-delivery` (Worker-side: a
+  current invite queued while the Worker was down is delivered once; cancelled, superseded and expired invites are never
+  delivered; cross-tenant job sends nothing), `account-lifecycle-email-enabled.spec` (unit).
+- **Residual:** an invite queued during a long Worker outage may arrive after the Manager has already chased the person by
+  other means; the email is still valid (or is cancelled if expired/revoked/superseded). The informational "Worker
+  offline" signal in the admin panel (`AdminPanelService.checkWorker`) is unchanged and does not block queueing.
+
+## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
+
+Flag `WORKER_FAST_PUBLISH_NOTIFY` (default false = today). No migration, no role, grant, RLS or posture change; no
+payroll, attendance or staffing rule change; email preferences untouched (notify() email stays default-off).
+
+- **Asset:** delivery of another person's notification email/push (the `email_outbox` / `push_delivery` rows notify()
+  writes in a business transaction). **Actor:** the API process acting on a committed business change; anyone able to
+  make the transaction roll back, stall Redis, or forge a job.
+- **Change:** with the flag on, `NotifyFastPublishService` adds the SAME BullMQ jobs the dispatcher's first publish adds
+  (`email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0`, existing producers, same options) right after the
+  transaction's OUTERMOST commit (TypeORM `AfterTransactionCommit`; savepoint releases ignored). Any rollback — of the
+  transaction or a savepoint in it — discards everything registered on it. Outside a transaction nothing is registered.
+- **Controls:** never published before commit (a rolled-back business change publishes nothing — tested). The fast path
+  writes nothing to the database: no status, `queued_at` or generation; the dispatcher's later add of the same jobId is
+  deduplicated by BullMQ and the consumers' fenced compare-and-set allows one delivery (tested: one job, one send).
+  `provider_call_started_at`, `DELIVERY_UNCERTAIN`, the idempotency key, attempts, backoff and leases are untouched.
+  Redis down or slow: publishes run detached from the request and are bounded by the producers' fail-fast connection;
+  failures are swallowed and the row is published later by the dispatcher (tested). Job payload = the committed row's id
+  and its `organisation_id` only (server values); consumers re-read the row under that organisation's RLS context and
+  revalidate before sending (tested: other organisation's context and no context see zero rows; a job naming another
+  organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
+- **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
+  publish error is caught per row instead of aborting the cycle; the failed row's `queued_at` stamp is withdrawn (fenced
+  on status + generation, in its organisation's context) so it is retried on the next tick, as before. per_scope only:
+  in global claim mode a publish error propagates exactly as before (the run releases the remaining claims and ends) —
+  withdrawing the stamp there would re-time the pointer to "due now" and the same run would re-claim it every batch. The claim SQL is byte-identical; FAILED /
+  DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
+  only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
+- **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
+  dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
+  lease instead of the 5 s dispatcher, a lease-outcome change.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
+  to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
+
 ## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
 
 No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
