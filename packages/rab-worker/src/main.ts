@@ -34,6 +34,7 @@ import {
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
+  WORKER_SCAN_TICKS_KEY,
   WORKER_STATS_KEY,
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
@@ -43,8 +44,9 @@ import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { resolveScanPrefix } from './core/scheduler/queue-registry';
+import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
@@ -77,14 +79,18 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  * every business rule lives in the shared services the API also uses
  * (`WorkerModule` imports them; nothing here re-implements one).
  *
- * Worker credential isolation checkpoint (P2/P3): this process authenticates to PostgreSQL ONLY as
- * the restricted `crewflow_app` login — the exact same identity the API uses, same as `DATABASE_URL`.
- * It never reads, requires or initialises `DATABASE_URL_UNPOOLED`. Two `crewflow_app` connections,
- * not two identities: `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
+ * Worker credential isolation checkpoint (P2/P3, updated for Phase D): this process authenticates to
+ * PostgreSQL only as a restricted, RLS-bound runtime login — `crewflow_app` (the API's identity) or
+ * `crewflow_worker` (Phase D: a member of `crewflow_app` WITH INHERIT TRUE, SET FALSE, and the only
+ * holder of the dispatch-claim grants). `assertRuntimeDbRole` accepts either under
+ * `WORKER_CLAIM_MODE=per_scope` and ONLY `crewflow_worker` under `global` (assert-runtime-db-role.ts);
+ * neither is an owner or BYPASSRLS role. It never reads, requires or initialises
+ * `DATABASE_URL_UNPOOLED`. Two connections, one identity (whichever of the two it is):
+ * `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
  * scans and most cycles; `directDataSource` (a direct connection) only where a session advisory
  * lock needs connection affinity (final timesheet, shift-report scheduler). Workspace discovery
  * reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate
- * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`); token cleanup runs through
+ * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`, which `crewflow_worker` inherits); token cleanup runs through
  * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff,
  * business or identity row. Account-invite cleanup and storage reconciliation's catalogue
  * enumeration also now run on `runtimeDataSource` — both were audited and found to need only
@@ -99,7 +105,7 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  *
  * Business mutations (an email send, a shift reminder, a no-show flag, an offer
  * expiry, a report, a replacement request, a cancellation follow-up) run
- * through `TenantContextService` as `crewflow_app`, bound to that SPECIFIC row's
+ * through `TenantContextService` as the runtime login (above), bound to that SPECIFIC row's
  * real organisation/workspace — see `core/database/scoped-job.ts`. A job's
  * Redis/queue payload is never treated as authorisation: every job reloads
  * the authoritative row first.
@@ -197,14 +203,19 @@ async function bootstrap(): Promise<void> {
   // ioredis reconnects on its own; without a listener every failed reconnect during a Redis outage printed
   // "[ioredis] Unhandled error event" (found by the Lane A outage harness). A failed PUBLISH still fails its cycle.
   realtimePublisherRedis.on('error', () => undefined);
+  // D-Q1 missed-tick record (rab:worker:scan-ticks): best-effort writes on their own fail-fast client (same options).
+  const scanTicksRedis = new Redis(redisUrl, { ...QUEUE_PRODUCER_REDIS_OPTIONS });
+  scanTicksRedis.on('error', () => undefined);
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
-  // Worker credential isolation checkpoint: the worker authenticates as `crewflow_app`, like the API. Two pools, one identity,
-  // NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED` identity — see this file's own top doc comment.
-  //   runtimeDataSource — pooled crewflow_app (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token/invite
+  // Worker credential isolation checkpoint: the worker authenticates as a restricted runtime login — `crewflow_app` (like the
+  // API) or, since Phase D, `crewflow_worker` (inherits crewflow_app; REQUIRED under WORKER_CLAIM_MODE=global) — checked by
+  // assertRuntimeDbRole below. Two pools, one identity, NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED`
+  // identity — see this file's own top doc comment.
+  //   runtimeDataSource — pooled runtime login (via the shared TypeORM module). Discovery, scans, token/invite
   //                       cleanup, storage-catalogue enumeration, email.
-  //   directDataSource  — direct crewflow_app connection (the factory's lock endpoint: PG_DATABASE_URL; legacy
+  //   directDataSource  — direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL; legacy
   //                       DATABASE_DIRECT_URL / DATABASE_URL outside production). Used ONLY where a session advisory lock
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
@@ -308,13 +319,25 @@ async function bootstrap(): Promise<void> {
     refuseStartup(error);
   }
 
-  // The three existing consumers — one Worker each, both modes, legacy `bull` prefix, concurrency 5 / 10 / 2.
+  // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
+  // any consumer exists — fail closed.
+  try {
+    assertQueueRegistryValid();
+  } catch (error) {
+    refuseStartup(error);
+  }
+  // The four consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4).
   const consumers = createConsumerWorkers(registry, redis, logger);
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
     statsWrite: schedulerMode === 'bullmq' ? 'fields' : 'whole',
     durationsKey: WORKER_CYCLE_DURATIONS_KEY,
+    // D-Q1 missed-tick record: when each scan's trigger last fired, whatever the outcome (rab:worker:scan-ticks).
+    ticksKey: WORKER_SCAN_TICKS_KEY,
+    // Its own fail-fast client: during a Redis outage a tick write is rejected at once, never queued in the blocking
+    // main client's offline queue (CodeRabbit on #34).
+    ticksRedis: scanTicksRedis,
   });
   // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
@@ -342,13 +365,14 @@ async function bootstrap(): Promise<void> {
         runtime.metrics.increment(jobName, 'claimsRepeated', stats.repeatedClaims);
         runtime.metrics.increment(jobName, 'claimsOver20', stats.highClaimCount);
       },
-      executeWake: (queue, run) => {
+      // `trigger`: 'wake' (NOTIFY hint, claim follow-up) or 'reconcile' (#24 follow-up reconciliation sweep).
+      executeWake: (queue, run, trigger) => {
         const def = defByQueue.get(queue)!;
         return runtime.runOnce({
-          name: `${def.name} (wake)`,
+          name: `${def.name} (${trigger})`,
           intervalMs: 0,
           statKeys: { lastRunAt: def.statKeys.lastRunAt, failures: def.statKeys.failures },
-          metricKey: `${def.jobName}:wake`,
+          metricKey: `${def.jobName}:${trigger}`,
           run: () => run(),
         });
       },
@@ -397,8 +421,16 @@ async function bootstrap(): Promise<void> {
     // order, registered exactly once.
     // Phase D (D3): the daily scans (firstRunAfterInterval) are timed from their persisted cluster stamp — a restart neither
     // re-runs them nor postpones an overdue one. An unreadable stats hash → one full interval (never an extra run).
-    const stamps: Record<string, string> = await redis.hgetall(WORKER_STATS_KEY).catch(() => ({}));
-    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) => firstRunDelayFromStamp(stamps[def.statKeys.lastRunAt], intervalMs);
+    // D-Q5a (audit §13 #9): a daily scan whose stamp is MISSING (Redis lost its data) is timed from the first boot that
+    // found it missing (recordDailyFirstSeen: SET NX, one value for every replica, expires after two intervals), not from
+    // each restart — so a Worker restarting more often than daily still runs it within one interval of that boot. A present
+    // stamp always wins; an unreadable stats hash, or Redis failing / hanging on the record, → one full interval as before.
+    const stamps: Record<string, string> | null = await redis.hgetall(WORKER_STATS_KEY).catch(() => null);
+    const firstSeen = stamps
+      ? await recordDailyFirstSeen(redis, dailyScansMissingStamp(SCAN_JOBS, stamps, intervalOf, isEnabled), Date.now())
+      : new Map<string, number>();
+    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) =>
+      firstRunDelayFromStamp(stamps?.[def.statKeys.lastRunAt], intervalMs, Date.now(), firstSeen.get(def.statKeys.lastRunAt));
     const { disabled } = registerIntervalScans(runtime, scanRegistry, SCAN_JOBS, intervalOf, isEnabled, firstRunDelayOf);
     if (disabled.length) logger.log(`interval scheduler: not registered (disabled by their enable switch): ${disabled.join(', ')}`);
   }
@@ -503,9 +535,10 @@ async function bootstrap(): Promise<void> {
         await scheduler.manager.close();
         await scheduler.scanLock.close(); // releases every scan lock this replica held (session-scoped)
       }
-      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, runtime pool
       await directDataSource.destroy();
       await realtimePublisherRedis.quit().catch(() => realtimePublisherRedis.disconnect());
+      await scanTicksRedis.quit().catch(() => scanTicksRedis.disconnect());
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');

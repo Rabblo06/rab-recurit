@@ -1,5 +1,5 @@
 import { EmailOutboxJobType, NotificationTypeType } from '@rab/shared';
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
@@ -11,6 +11,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { escapeHtml } from '../../../engine/utils/escape-html';
 import { NotificationPreference } from '../../identity/entities';
 import { Notification } from '../entities/notification.entity';
+import { NotifyFastPublishService } from './notify-fast-publish.service';
 
 export interface NotifyParams {
   organisationId: string;
@@ -49,11 +50,12 @@ export interface NotifyParams {
  * this app already uses) and relies on the dispatcher's ~2s poll loop
  * rather than a request-time fast-publish — `notify()` is called from deep
  * inside other services' own transactions (`OfferService`), which don't
- * hand back a commit hook this method could use to fire a fast-publish
- * itself, and a couple of seconds' added latency for an in-app-first
- * notification email is an acceptable trade for not re-plumbing 6 call
- * sites. The actual SMTP/API call now always happens in the worker
- * process, never in this request.
+ * hand back a commit hook. Phase D-Q3 adds an OPT-IN after-commit fast
+ * publish (`NotifyFastPublishService`, WORKER_FAST_PUBLISH_NOTIFY, default
+ * off) that hooks the transaction's own commit instead of re-plumbing the
+ * call sites; with it off, the dispatcher's poll is the only publisher, as
+ * before. The actual SMTP/API call always happens in the worker process,
+ * never in this request.
  */
 @Injectable()
 export class NotificationService {
@@ -67,6 +69,15 @@ export class NotificationService {
   /** C1b realtime outbox — property-injected so the constructor signature (and every existing construction) is unchanged. */
   @Inject(RealtimeEventService)
   private readonly realtimeEvents!: RealtimeEventService;
+
+  /**
+   * Phase D-Q3 (WORKER_FAST_PUBLISH_NOTIFY, default off): registers an AFTER-COMMIT publish of the email/push rows written
+   * below, on this same transaction. Property-injected and optional so every existing construction is unchanged; absent
+   * or off ⇒ exactly today's behaviour (the dispatcher publishes).
+   */
+  @Optional()
+  @Inject(NotifyFastPublishService)
+  private readonly fastPublish?: NotifyFastPublishService;
 
   /**
    * Consults `notification_preference` before doing anything — both
@@ -113,11 +124,15 @@ export class NotificationService {
       // Stage 6 — same transaction as the Notification row above, same atomic-outbox pattern
       // every other durable row in this method already uses. A no-op (0 rows) when PUSH_ENABLED
       // is false or the user has no active registered device — never a second notification path.
-      await this.pushDelivery.createForNotification(manager, {
-        organisationId: params.organisationId,
-        userId: params.userId,
-        notificationId: entry.id,
-      });
+      await this.pushDelivery.createForNotification(
+        manager,
+        {
+          organisationId: params.organisationId,
+          userId: params.userId,
+          notificationId: entry.id,
+        },
+        (rows) => this.fastPublish?.afterCommitPush(manager, rows),
+      );
       // C1b realtime (same transaction as the in-app row): notification.created → exactly this notification's
       // recipient, nobody else. Ids only — never the title/message. The bell/list refetch it over REST.
       await this.realtimeEvents.recordForRecipients(manager, {
@@ -145,13 +160,15 @@ export class NotificationService {
         // (`text:`) is left exactly as `params.message` was written —
         // escaping is an HTML-only concern (§33: plain text must never
         // contain HTML entities as user-visible text).
-        await this.emailOutbox.enqueue(manager, {
+        const row = await this.emailOutbox.enqueue(manager, {
           organisationId: params.organisationId,
           jobType: EmailOutboxJobType.NOTIFICATION,
           recipientEmail: user.email,
           targetUserId: params.userId,
           rendered: { subject: params.title, html: `<p>${escapeHtml(params.message)}</p>`, text: params.message },
         });
+        // Phase D-Q3: after commit only (never inside this transaction); off by default.
+        this.fastPublish?.afterCommitEmail(manager, { id: row.id, organisationId: row.organisationId });
       }
     }
   }
