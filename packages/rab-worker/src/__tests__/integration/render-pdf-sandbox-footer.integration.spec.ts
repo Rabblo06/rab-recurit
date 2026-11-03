@@ -5,18 +5,15 @@ import { Logger } from '@nestjs/common';
 import * as playwright from 'playwright';
 import { chromium } from 'playwright';
 
-import { renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
+import { PDF_RENDER_STEP_TIMEOUT_MS, renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
 import { inspectPdf } from '../helpers/pdf-inspect';
 
 /**
  * S-7 and S-9 (Phase 0 review) — MEASUREMENT ONLY, nothing here changes the renderer.
  *
- * S-7: `CHROMIUM_NO_SANDBOX=true` (set by the production Worker image, packages/rab-docker/rab/Dockerfile.worker-bundle)
- *      adds `--no-sandbox --disable-setuid-sandbox` to the arguments handed to Playwright. Docker hardening H6 measured that
- *      the variable never controlled the OS sandbox: Playwright itself adds `--no-sandbox` unless `chromiumSandbox: true`,
- *      and the renderer passes `chromiumSandbox: false` explicitly, so Chromium runs WITHOUT its OS sandbox for every value
- *      (unset and "false" included). Pinned here: the arguments each value produces, that `chromiumSandbox` is false in
- *      every case, and that the in-page hardening (no JavaScript, no network, no navigation) holds with the sandbox off.
+ * S-7: the Chromium OS sandbox is REQUIRED (owner decision 2026-11-03): `chromiumSandbox: true` (+ `--disable-gpu-sandbox`
+ *      on Linux), never `--no-sandbox`, whatever `CHROMIUM_NO_SANDBOX` says (it is ignored). Pinned here: the launch
+ *      options, and that the in-page hardening (no JavaScript, no network, no navigation) holds in a real sandboxed render.
  * S-9: the PDF footer template is rendered by Chromium's print pipeline, outside the page whose requests `page.route`
  *      intercepts. A synthetic footer referencing resources on a LOCAL loopback test server (and a closed local port) is
  *      rendered; the local server records whether any request actually arrives. No real external host is ever used.
@@ -109,29 +106,23 @@ afterEach(async () => {
 
 // ─── S-7 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed) — the OS sandbox is OFF for every value', () => {
-  it('unset: only --disable-dev-shm-usage is added, and the sandbox is still OFF (chromiumSandbox: false)', async () => {
+describe('S-7: the Chromium OS sandbox is REQUIRED (owner decision 2026-11-03); CHROMIUM_NO_SANDBOX is ignored', () => {
+  const sandboxArgs = process.platform === 'linux' ? ['--disable-dev-shm-usage', '--disable-gpu-sandbox'] : ['--disable-dev-shm-usage'];
+
+  it('unset: chromiumSandbox: true, never --no-sandbox (Linux: the GPU process alone is exempted)', async () => {
     await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
-    expect(launchSandbox).toEqual([false]);
+    expect(launchArgs).toEqual([sandboxArgs]);
+    expect(launchSandbox).toEqual([true]);
   });
 
-  it('"true" (the production image value): --no-sandbox and --disable-setuid-sandbox are added', async () => {
-    process.env.CHROMIUM_NO_SANDBOX = 'true';
-    await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox']]);
-    expect(launchSandbox).toEqual([false]);
-  });
-
-  it.each(['TRUE', '1', 'yes', 'True', ' true', 'false'])('any other value (%p) adds no flag (exact match only), and the sandbox is still OFF', async (value) => {
+  it.each(['true', 'TRUE', '1', 'yes', 'false'])('CHROMIUM_NO_SANDBOX=%p is ignored: the sandbox stays ON', async (value) => {
     process.env.CHROMIUM_NO_SANDBOX = value;
     await renderHtmlToPdf('<p>plain</p>');
-    expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
-    expect(launchSandbox).toEqual([false]);
+    expect(launchArgs).toEqual([sandboxArgs]);
+    expect(launchSandbox).toEqual([true]);
   });
 
-  it('with the sandbox OFF, page JavaScript still does not run and no request reaches the network', async () => {
-    process.env.CHROMIUM_NO_SANDBOX = 'true';
+  it('with the sandbox ON, page JavaScript still does not run and no request reaches the network', async () => {
     const html = `<html><body>
       <p id="t">ORIGINAL-TEXT</p>
       <script>document.getElementById('t').textContent = 'SCRIPT-RAN'; fetch('${server.base}/from-script');</script>
@@ -140,7 +131,8 @@ describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed) — the OS sandbox is
     const pdf = await renderHtmlToPdf(html);
     await settle();
     const text = inspectPdf(pdf).text;
-    expect(launchArgs[0]).toContain('--no-sandbox');
+    expect(launchSandbox).toEqual([true]);
+    expect(launchArgs[0]).not.toContain('--no-sandbox');
     expect(text).toContain('ORIGINAL-TEXT');
     expect(text).not.toContain('SCRIPT-RAN');
     expect(server.hits).toEqual([]);
@@ -226,11 +218,17 @@ describe('S-9: external references inside the FOOTER template (measured, not cha
     expect(server.hits).toEqual([]);
   });
 
-  it.each(FOOTER_KINDS)('%s in the footer pointed at a CLOSED local port: the render does not stall', async (kind, make) => {
+  // Measured: without the OS sandbox Chromium fails these prints fast. WITH the (now required) sandbox, Playwright's bundled
+  // Chromium on the CI host waits until the renderer's own `pdf` step bound (PDF_RENDER_STEP_TIMEOUT_MS) ends it (~30.6 s),
+  // while the production Worker image's Alpine Chromium still fails them in 0.6–3.3 s. The property that matters is that
+  // the render can never hang beyond the renderer's step bounds and produces NO PDF — asserted here (earlier version:
+  // `ms < 15 000`, an observation of one Chromium build's timing).
+  it.each(FOOTER_KINDS)('%s in the footer pointed at a CLOSED local port: no PDF, and the render ends within the renderer step bound', async (kind, make) => {
     const port = await closedLocalPort();
     const r = await renderFooter(make(`http://127.0.0.1:${port}`));
     // eslint-disable-next-line no-console
     console.log(`[S-9 closed-port] kind=${kind} outcome=${r.outcome} ms=${r.ms}`);
-    expect(r.ms).toBeLessThan(15_000);
+    expect(r.outcome).not.toBe('rendered');
+    expect(r.ms).toBeLessThan(PDF_RENDER_STEP_TIMEOUT_MS + 10_000);
   });
 });

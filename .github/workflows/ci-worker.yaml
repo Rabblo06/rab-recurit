@@ -59,6 +59,15 @@ jobs:
       # the same way. Without it reports stay pending and the report-email suites fail.
       - name: Install Playwright Chromium for the PDF renderer
         run: npx playwright install --with-deps chromium
+      # The renderer REQUIRES Chromium's OS sandbox (owner decision 2026-11-03; render-pdf.util.ts), which needs
+      # unprivileged user namespaces. Ubuntu 24.04 restricts them for unconfined processes through AppArmor; this
+      # disposable runner lifts that host restriction so the tests exercise the real sandbox (render-pdf-os-sandbox and
+      # S-7 prove it), instead of the explicit CHROMIUM_SANDBOX=disabled-outside-production opt-out.
+      - name: Allow unprivileged user namespaces on this runner (Chromium OS sandbox)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Worker tests
         run: |
           set -euo pipefail
@@ -76,7 +85,15 @@ jobs:
           # run excludes it with a path regex, NOT --testPathIgnorePatterns (that CLI flag replaces jest.config's list and
           # would start running the __tests__/load suites).
           npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=worker-scan-adapters\.integration'
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=^(?!.*worker-scan-adapters\.integration)'
+          # --json/--outputFile: Nx truncates a long task's terminal output in this log, which can hide WHICH suite failed;
+          # the step below prints the failing tests from Jest's own JSON report instead.
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=^(?!.*worker-scan-adapters\.integration)' --json "--outputFile=${RUNNER_TEMP}/jest-worker.json"
+      - name: Failing Worker tests (from Jest's JSON report)
+        if: ${{ failure() }}
+        run: |
+          f="${RUNNER_TEMP}/jest-worker.json"
+          [ -f "$f" ] || { echo "no Jest JSON report at $f"; exit 0; }
+          node -e 'const r=require(process.argv[1]); console.log(`suites failed ${r.numFailedTestSuites}, tests failed ${r.numFailedTests}`); for (const s of r.testResults) { if (s.status !== "passed") { console.log(`FAILED SUITE ${s.name}: ${String(s.message).slice(0, 3000)}`); for (const t of s.assertionResults) if (t.status === "failed") console.log(`  FAILED: ${t.fullName}\n    ${String(t.failureMessages.join("\n")).slice(0, 2000)}`); } }' "$f"
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()

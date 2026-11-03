@@ -281,7 +281,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
-    security_opt: ['no-new-privileges:true']
+    security_opt: ['no-new-privileges:true', 'seccomp=./rab/seccomp/chromium-worker.json']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
       - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700

@@ -14,6 +14,7 @@
  * The synthetic staff names include markup (`<script>`, `<img src=http://…>`): the template's escaping must turn them into
  * literal text, which image_gate.py then finds in the PDF's extracted text. Nothing here relaxes a renderer flag.
  */
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -34,10 +35,39 @@ function plan() {
   const jobs = plans.find((p) => p.name === 'jobs');
   if (!jobs) throw new Error('launcher plan has no jobs child');
   const keep = ['HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PATH', 'CHROMIUM_EXECUTABLE_PATH',
-    'CHROMIUM_NO_SANDBOX', 'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD'];
+    'CHROMIUM_NO_SANDBOX', 'CHROMIUM_SANDBOX', 'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD'];
   const childEnv = {};
   for (const k of keep) if (jobs.env[k] !== undefined) childEnv[k] = jobs.env[k];
   process.stdout.write(JSON.stringify({ uid: jobs.uid, gid: jobs.gid, cwd: jobs.cwd, env: childEnv }));
+}
+
+/**
+ * Chromium OS sandbox evidence (owner decision 2026-11-03: required). While the render runs, every renderer process's
+ * /proc/<pid>/status is sampled: a sandboxed renderer lists MORE NSpid levels than this process (its own nested PID
+ * namespace) and MORE seccomp filters (Chromium's seccomp-BPF on top of the container's). Read-only; never changes a flag.
+ */
+function procStatus(pid) {
+  try {
+    const s = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+    const field = (k) => ((new RegExp(`^${k}:\\s*(.*)$`, 'm').exec(s) || [])[1] || '').trim();
+    return { nspid: field('NSpid').split(/\s+/).filter(Boolean).length, seccomp: Number(field('Seccomp') || 0), filters: Number(field('Seccomp_filters') || 0) };
+  } catch {
+    return null;
+  }
+}
+function sampleRenderers(into) {
+  for (const entry of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue;
+    let cmd = '';
+    try {
+      cmd = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+    } catch {
+      continue;
+    }
+    if (!/--type=renderer/.test(cmd)) continue;
+    const st = procStatus(entry);
+    if (st) into.set(Number(entry), st);
+  }
 }
 
 async function render() {
@@ -72,7 +102,17 @@ async function render() {
   const html = renderPreShiftReportHtml(data);
   const started = process.hrtime.bigint();
   // The same options the shift-report scheduler passes (footer template, landscape).
-  const pdf = await renderHtmlToPdf(html, { footerTemplate: documentFooterTemplate(data), landscape: true });
+  const seen = new Map();
+  const sampler = setInterval(() => sampleRenderers(seen), 10);
+  let pdf;
+  try {
+    pdf = await renderHtmlToPdf(html, { footerTemplate: documentFooterTemplate(data), landscape: true });
+  } finally {
+    clearInterval(sampler);
+  }
+  const self = procStatus('self');
+  const renderers = [...seen.values()];
+  const sandboxed = renderers.filter((r) => r.nspid > self.nspid && r.seccomp === 2 && r.filters > self.filters);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   process.stdout.write(JSON.stringify({
     marker: MARKER,
@@ -85,6 +125,7 @@ async function render() {
     gid: process.getgid(),
     home: process.env.HOME,
     tmpdir: process.env.TMPDIR,
+    sandbox: { self, renderers_seen: renderers.length, renderers_sandboxed: sandboxed.length, renderers },
     pdf_b64: pdf.toString('base64'),
   }));
 }
