@@ -4634,3 +4634,19 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
   sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
   code imports one.
+
+## Docker hardening H2 — Chromium only in the Worker image (branch build/docker-hardening-h2, stacked on H1, not merged)
+
+- **Browser attack surface in the API.** Threat: the API image carried Alpine Chromium and its whole dependency tree
+  (ffmpeg, libxml2, cjson, libsndfile, cups-libs, pulse, …) although no API code path launches a browser; every
+  Chromium/library advisory therefore applied to the internet-facing service too. Evidence: the only launcher is
+  `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts`; rab-server has no Playwright import, no dynamic
+  require of the renderer, and its report endpoints only serve PDFs the Worker already stored. Control: the API stage of
+  `packages/rab-docker/rab/Dockerfile` installs no browser, fonts or CHROMIUM_* settings and FAILS the build if
+  `chromium` is installed (`apk-absent:chromium`); `Dockerfile.worker-bundle` adds Chromium on top of the API image and
+  runs the Chromium/libexpat/Node floors there. CI builds the Worker image too, so the gates stay exercised.
+- **Unchanged:** tenant isolation, database identities and the Worker's privilege model (root launcher under tini,
+  jobs uid 1000, provisioner uid 10001, renderer still `--no-sandbox` with JavaScript, network and navigation off).
+- **Residual:** a Worker started from the shared image with the legacy `start-worker.sh` (Render-style deployment, not
+  used by any committed compose file) has no Chromium and its PDF jobs fail at render time; the supported Worker is the
+  bundle image.

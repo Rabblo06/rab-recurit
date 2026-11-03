@@ -6,7 +6,7 @@ icon: "cloud-arrow-up"
 
 ## Images and processes
 
-`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, with Chromium for PDF rendering) builds the shared application image. `packages/rab-docker/rab/Dockerfile.worker-bundle` builds the Worker image on top of it.
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds the shared application image, which the API, `rab-migrate` and `rab-ops` run. `packages/rab-docker/rab/Dockerfile.worker-bundle` builds the Worker image on top of it and adds Chromium for PDF rendering; it is the only image with a browser. Both builds fail if Node, Chromium or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
 
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |

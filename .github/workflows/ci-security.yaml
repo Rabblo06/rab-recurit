@@ -133,3 +133,19 @@ jobs:
         if: always()
         with:
           sarif_file: trivy-results.sarif
+      # Docker hardening H2: Chromium is installed only in the Worker bundle image (on top of the API image above), so the
+      # Worker build is where the Chromium/libexpat security floors run (packages/rab-docker/rab/security-floors.env; the
+      # build fails closed below a floor). Built and scanned here so CI keeps exercising those gates and the browser tree.
+      - name: Build Worker bundle image (Chromium + security floors)
+        run: docker build -f packages/rab-docker/rab/Dockerfile.worker-bundle --build-arg CREWFLOW_BASE_IMAGE=rab-server:ci -t rab-worker-bundle:ci .
+      - uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
+        with:
+          image-ref: rab-worker-bundle:ci
+          format: sarif
+          output: trivy-worker-results.sarif
+          severity: HIGH,CRITICAL
+      - uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        if: always()
+        with:
+          sarif_file: trivy-worker-results.sarif
+          category: trivy-worker-bundle

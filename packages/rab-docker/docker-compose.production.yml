@@ -253,8 +253,10 @@ services:
   #
   # Image: packages/rab-docker/rab/Dockerfile.worker-bundle, built FROM the same
   # shared image as rab-api (passed as the named build context `crewflow-app`).
-  # It makes /app root-owned, removes the API entry scripts, adds the
-  # provisioner identity and tini. OPENSHIP: if its compose import cannot honour
+  # It adds Chromium + fonts (the only image with a browser since Docker
+  # hardening H2; the build fails below the security-floors.env minimums),
+  # verifies /app is root-owned (true since H1), removes the API entry scripts,
+  # adds the provisioner identity and tini. OPENSHIP: if its compose import cannot honour
   # `additional_contexts: service:`, build the shared image once, push it to a
   # registry pinned by digest, and set CREWFLOW_BASE_IMAGE to that reference —
   # see docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md section 12.
