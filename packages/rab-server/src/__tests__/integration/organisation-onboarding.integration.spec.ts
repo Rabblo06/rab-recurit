@@ -97,10 +97,10 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
     await adminDataSource.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing });
 
-    // `AccountLifecycleService.isEmailDeliveryAvailable()` (consulted by `ManagerService
-    // .createWithin()` before ever creating an invite) reads this heartbeat — without it, every
-    // invite in this suite would silently be skipped, same requirement
-    // account-invite-abuse-cases.integration.spec.ts's own setup already documents.
+    // Fixture only: since the Phase D-Q "always queue" decision the Worker
+    // heartbeat no longer gates invite creation (AccountLifecycleService.
+    // isEmailDeliveryEnabled() reads only EMAIL_DELIVERY_ENABLED); kept so the
+    // stack looks like a normal running one.
     const redisClient = moduleRef.get(ThrottlerRedisClientProvider);
     await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 300);
   });

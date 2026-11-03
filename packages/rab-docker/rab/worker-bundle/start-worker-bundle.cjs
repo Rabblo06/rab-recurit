@@ -62,6 +62,15 @@ const APP_ROOT = '/app';
 /** Phase D: the logins the jobs child's PG_DATABASE_URL may name (code constants; the live boot gate is the authority). */
 const JOBS_LOGINS = Object.freeze(['crewflow_app', 'crewflow_worker']);
 const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+/**
+ * Security review H1-M1: each child's HOME is a path it cannot create or write. Node's CommonJS loader searches
+ * $HOME/.node_modules and $HOME/.node_libraries (require('module').globalPaths), so a writable HOME would let a child plant
+ * a module (e.g. pg-native, which TypeORM tries to load at start) that runs again after a restart. Chromium's per-user
+ * config/cache (crashpad database, fontconfig cache) go to XDG_* directories inside the child's own 0700 TMPDIR instead;
+ * those are not module search paths.
+ */
+const CHILD_HOME = '/nonexistent';
+const xdgDirs = (tmp) => ({ XDG_CONFIG_HOME: path.join(tmp, '.config'), XDG_CACHE_HOME: path.join(tmp, '.cache') });
 
 /**
  * Reviewed allowlist for the ordinary jobs child, reconciled 2026-10-22 against
@@ -136,6 +145,8 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Phase D (D1/D2): dispatch claim mode, wake-up mode, backstop, legacy reconciliation and claim batch (validated by the
   // shared EnvironmentVariables class; defaults per_scope / poll / 30 / 900 / 100; event without global refuses to boot).
   'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH',
+  // Phase D-Q3: after-commit fast publish of notify() email/push rows written by Worker jobs (default false).
+  'WORKER_FAST_PUBLISH_NOTIFY',
   // Phase D wave 2: may the account-invite cleanup delete expired-invite user accounts — default false; true in production
   // refuses to boot until the owner approves a retention policy (env.validation.ts). Forwarded verbatim, never invented.
   'WORKER_INVITE_AUTO_DELETE_ENABLED',
@@ -433,8 +444,9 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   const jobsEnv = {
     ...own(env, JOBS_ENV_KEYS),
     PATH: SAFE_PATH,
-    HOME: layout.jobs.home,
+    HOME: CHILD_HOME,
     TMPDIR: layout.jobs.home,
+    ...xdgDirs(layout.jobs.home),
     CREWFLOW_INSTANCE_HEALTH_FILE: layout.jobs.healthFile,
   };
   const jobs = {
@@ -460,8 +472,9 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
     CREWFLOW_PROVISIONER_ENABLED: 'true',
     WORKSPACE_PROVISIONER_INTERVAL_SECONDS: String(intervalSeconds),
     PATH: SAFE_PATH,
-    HOME: layout.provisioner.home,
+    HOME: CHILD_HOME,
     TMPDIR: layout.provisioner.home,
+    ...xdgDirs(layout.provisioner.home),
     CREWFLOW_INSTANCE_HEALTH_FILE: layout.provisioner.healthFile,
   };
   return [
@@ -511,6 +524,13 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
   for (const rel of DOTENV_PATHS) {
     if (statOrNull(path.join(layout.root, rel))) throw new BundleConfigError(`packaged dotenv file present: ${rel} (remove it from the image)`);
   }
+  // H1-M1: the children's HOME (a Node module search root) must be neither writable nor creatable by either child.
+  for (const p of [CHILD_HOME, path.dirname(CHILD_HOME)]) {
+    const s = statOrNull(p);
+    if (s && (childUids.has(s.uid) || (s.mode & 0o022) !== 0)) {
+      throw new BundleConfigError(`child HOME ${CHILD_HOME} must not be writable or creatable by a child identity (${p})`);
+    }
+  }
   // Only the roles that will actually start (Phase A: a disabled provisioner needs no temp/health directory).
   const roles = new Set(plan.map((s) => s.name));
   for (const [name, spec] of Object.entries({ jobs: layout.jobs, provisioner: layout.provisioner })) {
@@ -524,6 +544,84 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
       throw new BundleConfigError(`${name} health directory ${path.dirname(spec.healthFile)} must exist, be owned by uid ${spec.uid} and not be group/other-writable`);
     }
   }
+}
+
+/**
+ * H6: the container-level isolation this launcher actually received, compared with what docker-compose.production.yml
+ * declares (cap_drop ALL + SETUID/SETGID/KILL, no-new-privileges, read-only root, the four per-child tmpfs mounts, PID and
+ * memory limits). The launcher's own identity (root, needed to start each child under its own UID/GID) is checked by
+ * preflight() above.
+ *
+ * CREWFLOW_RUNTIME_ISOLATION (owner decision "never drop a security setting silently"; strict values):
+ *   unset / empty / "warn"  report: one line, "runtime isolation as declared" or a WARNING naming each gap; starts anyway
+ *                           (the default: some platforms drop these keys — OpenShip's compose import does not model cap_*,
+ *                           security_opt, read_only, tmpfs or pids_limit — and the current production setup must keep
+ *                           starting);
+ *   "enforce"               the same check, but ANY gap (an unreadable value included) refuses to start;
+ *   anything else           refuses to start (no silent mode choice).
+ * The child identity split, the env allowlists and preflight() do not depend on these keys. Never forwarded to a child.
+ * runtimeIsolation() is pure: it takes the text of /proc/self/status and /proc/self/mounts and the cgroup v2 limits.
+ */
+const LAUNCHER_CAPS = 0xe0n; // CAP_KILL (5) | CAP_SETGID (6) | CAP_SETUID (7)
+function runtimeIsolation(statusText, mountsText, { pidsMax, memoryMax } = {}, layout = DEFAULT_LAYOUT) {
+  const field = (k) => (new RegExp(`^${k}:\\s*(\\S+)`, 'm').exec(String(statusText ?? '')) || [])[1];
+  const capBnd = field('CapBnd');
+  const noNewPrivs = field('NoNewPrivs');
+  const mounts = String(mountsText ?? '').split('\n').map((l) => l.split(' ')).filter((p) => p.length >= 4);
+  const root = mounts.filter((p) => p[1] === '/').pop();
+  const rootReadOnly = root ? root[3].split(',').includes('ro') : null;
+  const dirs = [layout.jobs.home, layout.provisioner.home, path.dirname(layout.jobs.healthFile), path.dirname(layout.provisioner.healthFile)];
+  const tmpfs = dirs.filter((d) => mounts.some((p) => p[1] === d && p[2] === 'tmpfs')).length;
+  const gaps = [];
+  if (!/^[0-9a-f]{16}$/.test(capBnd ?? '')) gaps.push('capability bounding set unreadable');
+  else if ((BigInt(`0x${capBnd}`) & ~LAUNCHER_CAPS) !== 0n) gaps.push(`capabilities beyond SETUID/SETGID/KILL (CapBnd=${capBnd})`);
+  if (noNewPrivs !== '1') gaps.push('no-new-privileges is off');
+  if (rootReadOnly !== true) gaps.push(rootReadOnly === null ? 'root filesystem state unreadable' : 'root filesystem is writable');
+  if (tmpfs !== dirs.length) gaps.push(`${dirs.length - tmpfs} of ${dirs.length} per-child temp/health directories are not tmpfs`);
+  const limit = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const pids = limit(pidsMax);
+  const memory = limit(memoryMax);
+  if (pids === 'max') gaps.push('no PID limit');
+  else if (pids === null) gaps.push('PID limit unreadable');
+  if (memory === 'max') gaps.push('no memory limit');
+  else if (memory === null) gaps.push('memory limit unreadable');
+  return { capBnd: capBnd ?? '?', noNewPrivs: noNewPrivs ?? '?', rootReadOnly, tmpfs: `${tmpfs}/${dirs.length}`, pidsMax: pids ?? '?', memoryMax: memory ?? '?', gaps };
+}
+
+/** Strict CREWFLOW_RUNTIME_ISOLATION: 'warn' (unset/empty too) or 'enforce'; null for anything else (fail closed). */
+function runtimeIsolationMode(env) {
+  const raw = env.CREWFLOW_RUNTIME_ISOLATION;
+  if (raw === undefined || raw === '' || raw === 'warn') return 'warn';
+  if (raw === 'enforce') return 'enforce';
+  return null;
+}
+
+/**
+ * Reports the isolation and, in enforce mode, refuses (BundleConfigError, names and flags only) when any control is
+ * missing. `probe` is injectable for tests; by default it reads this process's /proc and cgroup files.
+ */
+function checkRuntimeIsolation(env, { log = (s) => console.error(`[worker-bundle] ${s}`), probe } = {}) {
+  const mode = runtimeIsolationMode(env);
+  if (mode === null) throw new BundleConfigError('CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce" (unset or empty = warn)');
+  const read = (p) => {
+    try {
+      return fs.readFileSync(p, 'utf8');
+    } catch {
+      return ''; // reported as a gap below
+    }
+  };
+  const r = probe ? probe() : runtimeIsolation(read('/proc/self/status'), read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  const root = r.rootReadOnly === null ? 'unknown' : r.rootReadOnly ? 'read-only' : 'writable';
+  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${root} tmpfs=${r.tmpfs} pids.max=${r.pidsMax} memory.max=${r.memoryMax} mode=${mode}`;
+  if (r.gaps.length === 0) {
+    log(`runtime isolation as declared: ${summary}`);
+    return r;
+  }
+  if (mode === 'enforce') {
+    throw new BundleConfigError(`runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce (${r.gaps.join('; ')}): ${summary}`);
+  }
+  log(`WARNING runtime isolation weaker than docker-compose.production.yml declares (${r.gaps.join('; ')}): ${summary} — starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)`);
+  return r;
 }
 
 const GUARD_LINE = /^\[runtime-db-guard\] process=(\S+) runtime=\S+ classification=\S+ endpoint=\S+ database=(\S+) cluster=(\S+) role=(\S+) probe=read-only-ok/;
@@ -783,6 +881,8 @@ async function main(env = process.env) {
   try {
     plan = makePlan(env);
     preflight(plan);
+    // H6: report (warn, the default) or refuse (enforce) when a declared container control is missing.
+    checkRuntimeIsolation(env);
   } catch (error) {
     // BundleConfigError messages name variables and paths only, never values.
     const message = error instanceof BundleConfigError ? error.message : 'unexpected launcher error';
@@ -837,5 +937,8 @@ module.exports = {
   main,
   supervise,
   processesOwnedBy,
+  runtimeIsolation,
+  runtimeIsolationMode,
+  checkRuntimeIsolation,
   GUARD_LINE,
 };

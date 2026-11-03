@@ -5,7 +5,7 @@
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "dependencies": {
-    "@react-email/components": "^0.0.32",
+    "@react-email/components": "^0.0.36",
     "react": "18.3.1"
   },
   "devDependencies": {

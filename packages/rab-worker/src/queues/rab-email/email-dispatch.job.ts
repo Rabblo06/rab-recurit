@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
 
@@ -201,6 +202,8 @@ export async function dispatchEmailScope(
           FOR UPDATE SKIP LOCKED`,
           [BATCH_SIZE],
         );
+        // #24: a full per_scope batch means more due rows may remain in this organisation (global-mode follow-up sweep).
+        if (ids === undefined && claimed.length >= BATCH_SIZE) noteLegacyBatchLimitReached();
         if (claimed.length === 0)
           return {
             toPublish: [] as ClaimedRow[],

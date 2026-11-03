@@ -178,13 +178,10 @@ describeIfDb('account invitation abuse cases (integration)', () => {
   });
 
   beforeEach(async () => {
-    // No separate worker process runs during Jest — AccountLifecycleService.
-    // isEmailDeliveryAvailable() would otherwise see no heartbeat and skip
-    // every invite send, breaking every test that expects one queued.
-    // Refreshed before each test (not just once in beforeAll) since it has
-    // a real TTL and a slow individual test could otherwise let it expire
-    // mid-run. Tests exercising the "unavailable" branch explicitly clear
-    // this key themselves afterward.
+    // Since the Phase D-Q "always queue" decision the heartbeat no longer
+    // gates invite creation; it is still published before each test so the
+    // fixtures look like a normal running stack. Tests exercising a missing
+    // or stale heartbeat clear/overwrite this key themselves.
     await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
   });
 
@@ -280,7 +277,11 @@ describeIfDb('account invitation abuse cases (integration)', () => {
       expect(invite.tokenHash).not.toContain(' ');
     });
 
-    it('when the worker heartbeat is stale, creation still succeeds but skips the invite cleanly — no AccountInvite/EmailOutbox row, emailQueued:false', async () => {
+    // Phase D-Q owner decision (2026-11-02, "always queue"): these two cases USED to assert that a missing or stale
+    // Worker heartbeat skipped the invite (no AccountInvite/EmailOutbox row, emailQueued:false). The heartbeat no longer
+    // decides anything: the invite is queued durably and is delivered when the Worker returns. They now assert the
+    // opposite, and fail on the old code.
+    it('when the worker heartbeat is MISSING (Worker down / Redis wiped), creation still queues the invite durably — AccountInvite + EmailOutbox rows, emailQueued:true', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
       // Simulate the worker being down — no heartbeat at all.
@@ -292,57 +293,128 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         .set('Authorization', `Bearer ${ownerToken}`)
         .send({ email, firstName: 'A', lastName: 'B' });
       expect(res.status).toBe(201);
-      expect(res.body.emailQueued).toBe(false);
-      expect(res.body.invite).toBeNull();
-      expect(res.body.pendingInvite).toBeNull();
-      expect(res.body.invitationStatus).toBeNull();
-      // Account creation itself must never fail or block on this.
+      expect(res.body.emailQueued).toBe(true);
+      expect(res.body.invite).toMatchObject({ sendNumber: 1, queued: true });
+      expect(res.body.pendingInvite?.sendNumber).toBe(1);
+      expect(res.body.invitationStatus).toBe('queued');
       expect(res.body.accountStatus).toBe('invited');
 
       const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email });
-      // Nothing durable was created that could fire stale once the worker
-      // comes back — this is the actual point of the check, not just the
-      // response shape.
       const inviteRows = await adminDataSource.manager.find(AccountInvite, { where: { userId: userRow.id } });
-      expect(inviteRows).toHaveLength(0);
+      expect(inviteRows).toHaveLength(1);
       const outboxRows = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
-        (manager) => manager.query(`SELECT id FROM core.email_outbox WHERE organisation_id = $1 AND recipient_email = $2`, [organisation.id, email]),
+        (manager) =>
+          manager.query<Array<{ job_type: string; account_invite_id: string; status: string }>>(
+            `SELECT job_type, account_invite_id, status FROM core.email_outbox WHERE organisation_id = $1 AND recipient_email = $2`,
+            [organisation.id, email],
+          ),
       );
-      expect(outboxRows).toHaveLength(0);
+      expect(outboxRows).toHaveLength(1);
+      expect(outboxRows[0]).toMatchObject({ job_type: 'ACCOUNT_INVITATION', account_invite_id: inviteRows[0]!.id });
+      // Never marked delivered just because it was queued: it waits for a Worker.
+      expect(['PENDING', 'QUEUED']).toContain(outboxRows[0]!.status);
 
+      // The audit records what actually happened.
       const auditRows = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' },
         (manager) => manager.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 AND action = 'user.created'`, [organisation.id, userRow.id]),
       );
-      expect(auditRows[0].metadata.emailQueued).toBe(false);
-
-      // Manager can still send a fresh invite once email is back — restore
-      // the heartbeat and confirm Resend Invitation works normally.
-      await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
-      const resend = await request(app.getHttpServer())
-        .post(`/rest/v1/staff/${res.body.id}/resend-invite`)
-        .set('Authorization', `Bearer ${ownerToken}`);
-      expect(resend.status).toBe(201);
-      const inviteAfterResend = await adminDataSource.manager.find(AccountInvite, { where: { userId: userRow.id } });
-      expect(inviteAfterResend).toHaveLength(1);
+      expect(auditRows[0].metadata.emailQueued).toBe(true);
     });
 
-    it('when EMAIL_DELIVERY_ENABLED-equivalent conditions are fine but the heartbeat is merely old (past TTL), creation still skips the invite', async () => {
+    it('when the heartbeat is merely old (past TTL), creation still queues the invite (staff AND managers)', async () => {
       const { organisation, ownerEmail } = await seedOrgWithOwner();
       const ownerToken = await loginOwner(ownerEmail);
-      // A heartbeat value old enough to be past WORKER_HEARTBEAT_TTL_SECONDS
-      // (30s) — simulates a worker that died without deregistering, not one
-      // that was cleanly stopped (the DEL case above).
+      // A heartbeat value past WORKER_HEARTBEAT_TTL_SECONDS (30s) — a worker that died without deregistering.
       await redisClient.client.set(WORKER_HEARTBEAT_KEY, (Date.now() - 60_000).toString(), 'EX', 30);
 
-      const email = `staff-${randomUUID()}@example.test`;
-      const res = await request(app.getHttpServer())
+      const staffEmail = `staff-${randomUUID()}@example.test`;
+      const staff = await request(app.getHttpServer())
         .post('/rest/v1/staff')
         .set('Authorization', `Bearer ${ownerToken}`)
-        .send({ email, firstName: 'A', lastName: 'B' });
-      expect(res.status).toBe(201);
-      expect(res.body.emailQueued).toBe(false);
+        .send({ email: staffEmail, firstName: 'A', lastName: 'B' });
+      expect(staff.status).toBe(201);
+      expect(staff.body.emailQueued).toBe(true);
+
+      const mgrEmail = `mgr-${randomUUID()}@example.test`;
+      const mgr = await request(app.getHttpServer())
+        .post('/rest/v1/managers')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: mgrEmail, firstName: 'A', lastName: 'B', type: 'internal' });
+      expect(mgr.status).toBe(201);
+      expect(mgr.body.emailQueued).toBe(true);
+      expect(mgr.body.invite).toMatchObject({ sendNumber: 1, queued: true });
+
+      for (const address of [staffEmail, mgrEmail]) {
+        const user = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: address });
+        expect(await adminDataSource.manager.count(AccountInvite, { where: { userId: user.id } })).toBe(1);
+      }
+    });
+
+    it('EMAIL_DELIVERY_ENABLED=false still skips the invite (operator configuration, unchanged) — no AccountInvite/EmailOutbox row, emailQueued:false, even with a fresh heartbeat', async () => {
+      const { organisation, ownerEmail } = await seedOrgWithOwner();
+      const ownerToken = await loginOwner(ownerEmail);
+      const realGet = environmentService.get.bind(environmentService) as (key: string) => unknown;
+      const spy = jest
+        .spyOn(environmentService, 'get')
+        .mockImplementation(((key: string) => (key === 'EMAIL_DELIVERY_ENABLED' ? false : realGet(key))) as unknown as typeof environmentService.get);
+      try {
+        const email = `staff-${randomUUID()}@example.test`;
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/staff')
+          .set('Authorization', `Bearer ${ownerToken}`)
+          .send({ email, firstName: 'A', lastName: 'B' });
+        expect(res.status).toBe(201);
+        expect(res.body.emailQueued).toBe(false);
+        expect(res.body.invite).toBeNull();
+        expect(res.body.pendingInvite).toBeNull();
+        expect(res.body.invitationStatus).toBeNull();
+        expect(res.body.accountStatus).toBe('invited');
+
+        const mgrEmail = `mgr-${randomUUID()}@example.test`;
+        const mgr = await request(app.getHttpServer())
+          .post('/rest/v1/managers')
+          .set('Authorization', `Bearer ${ownerToken}`)
+          .send({ email: mgrEmail, firstName: 'A', lastName: 'B', type: 'internal' });
+        expect(mgr.status).toBe(201);
+        expect(mgr.body.emailQueued).toBe(false);
+        expect(mgr.body.invite).toBeNull();
+
+        for (const address of [email, mgrEmail]) {
+          const user = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: address });
+          expect(await adminDataSource.manager.count(AccountInvite, { where: { userId: user.id } })).toBe(0);
+          const outbox = await tenantContext.runInTenantContext(
+            { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+            (manager) => manager.query(`SELECT id FROM core.email_outbox WHERE organisation_id = $1 AND recipient_email = $2`, [organisation.id, address]),
+          );
+          expect(outbox).toHaveLength(0);
+          const audit = await tenantContext.runInTenantContext(
+            { organisationId: organisation.id, workspaceId: null, userId: user.id, role: '' },
+            (manager) => manager.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND target_user_id = $2 AND action = 'user.created'`, [organisation.id, user.id]),
+          );
+          expect(audit[0].metadata.emailQueued).toBe(false);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('tenant isolation: an invite queued while the Worker is down is visible only under its own organisation (RLS); no context ⇒ zero rows', async () => {
+      const a = await seedOrgWithOwner();
+      const b = await seedOrgWithOwner();
+      const tokenA = await loginOwner(a.ownerEmail);
+      await redisClient.client.del(WORKER_HEARTBEAT_KEY);
+      const email = `staff-${randomUUID()}@example.test`;
+      await request(app.getHttpServer()).post('/rest/v1/staff').set('Authorization', `Bearer ${tokenA}`).send({ email, firstName: 'A', lastName: 'B' }).expect(201);
+      const read = (organisationId: string) =>
+        tenantContext.runInTenantContext({ organisationId, workspaceId: null, userId: randomUUID(), role: '' }, (manager) =>
+          manager.query(`SELECT id FROM core.email_outbox WHERE recipient_email = $1`, [email]),
+        );
+      expect(await read(a.organisation.id)).toHaveLength(1);
+      expect(await read(b.organisation.id)).toHaveLength(0);
+      const unbound = await dataSource.transaction((m) => m.query(`SELECT id FROM core.email_outbox WHERE recipient_email = $1`, [email]));
+      expect(unbound).toHaveLength(0);
     });
 
     it('email normalization: whitespace/case variants collide as the same identity', async () => {
