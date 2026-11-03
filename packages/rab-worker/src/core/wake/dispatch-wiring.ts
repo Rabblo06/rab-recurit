@@ -5,7 +5,8 @@ import { DispatchQueue } from '../database/dispatch-claims';
 import { dispatchEmailScope } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
-import { dispatchStatementScope, shiftStatementJobOptions } from '../../queues/rab-reports/shift-statement.job';
+import { enqueueShiftStatement } from '../../queues/rab-reports/shift-statement-enqueue';
+import { dispatchStatementScope } from '../../queues/rab-reports/shift-statement.job';
 import type { DispatchCoordinator, DispatchQueueBinding } from './dispatch-coordinator';
 
 /**
@@ -154,7 +155,7 @@ export function buildDispatchBindings(
         processScope = async (scope) => {
           if (scope.workspaceId === null) return 0; // statements are per workspace (runGlobalDispatch already filters these)
           const r = await dispatchStatementScope(tenantContext, scope.organisationId, scope.workspaceId, scope.subjectIds, async (data) => {
-            await shiftStatementQueue.add(...shiftStatementJobOptions(data));
+            await enqueueShiftStatement(shiftStatementQueue, data); // D-Q1: the same registered builder as per_scope
           });
           if (r.claimed) {
             logger.log(`shift statement dispatch (global): claimed=${r.claimed} published=${r.published} reconciledMissing=${r.reconciledMissing} requeued=${r.requeued} publishFailed=${r.publishFailed}`);
