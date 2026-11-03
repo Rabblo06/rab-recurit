@@ -50,7 +50,7 @@ function docker(args, { input, timeout = 300_000, env = {}, quiet = false } = {}
   const out = redact(raw);
   if (!quiet) write(`$ docker ${redact(args.join(' ')).slice(0, 400)}\n${out.trimEnd()}\n[exit ${res.status}]`);
   // Raw (unredacted) output is kept ONLY in memory, for the secret-leak check (case 32); it is never written anywhere.
-  return { code: res.status, out, raw };
+  return { code: res.status, out, raw, stdout: res.stdout ?? '' };
 }
 /** Raw outputs of every bundle/API start attempt, for the end-of-run leak check. Never persisted. */
 const RAW_SERVICE_OUTPUTS = [];
@@ -253,17 +253,39 @@ function schemaFacts(schema) {
 
   await step('13', 'Child environments match the reviewed manifests (real /proc/<pid>/environ, key names only)', async () => {
     const { jobs, provisioner } = fx.pids;
-    const j = execAs('worker-a', '1000:1000', `tr '\\0' '\\n' < /proc/${jobs}/environ | cut -d= -f1 | sort | tr '\\n' ' '`);
-    const p = execAs('worker-a', '10001:10001', `tr '\\0' '\\n' < /proc/${provisioner}/environ | cut -d= -f1 | sort | tr '\\n' ' '; echo; tr '\\0' '\\n' < /proc/${provisioner}/environ | sed -n 's#^DATABASE_URL=postgres://\\([^:]*\\):.*@\\([^/]*\\)/\\(.*\\)#DATABASE_URL user=\\1 host=\\2 db=\\3#p'`);
-    const jobsKeys = j.out.trim().split(/\s+/);
-    const provKeys = p.out.trim().split('\n')[0].trim().split(/\s+/);
+    // Key names, then ONLY the non-secret path values (HOME/TMPDIR/XDG_*), then the provisioner credential's user/host/db
+    // (never its password). Phase B (aa855a88): the launcher hands the provisioning credential to the child under the one
+    // name every process reads, PG_DATABASE_URL — never DATABASE_URL / DATABASE_URL_UNPOOLED (launcher.test.cjs test 2).
+    const paths = (pid) => `tr '\\0' '\\n' < /proc/${pid}/environ | grep -E '^(HOME|TMPDIR|XDG_CONFIG_HOME|XDG_CACHE_HOME)=' | sort | tr '\\n' ' '`;
+    const j = execAs('worker-a', '1000:1000', `tr '\\0' '\\n' < /proc/${jobs}/environ | cut -d= -f1 | sort | tr '\\n' ' '; echo; ${paths(jobs)}`);
+    const p = execAs('worker-a', '10001:10001', `tr '\\0' '\\n' < /proc/${provisioner}/environ | cut -d= -f1 | sort | tr '\\n' ' '; echo; ${paths(provisioner)}; echo; tr '\\0' '\\n' < /proc/${provisioner}/environ | sed -n 's#^PG_DATABASE_URL=postgres://\\([^:]*\\):.*@\\([^/]*\\)/\\(.*\\)#PG_DATABASE_URL user=\\1 host=\\2 db=\\3#p'`);
+    const jobsLines = j.out.trim().split('\n');
+    const provLines = p.out.trim().split('\n');
+    const jobsKeys = jobsLines[0].trim().split(/\s+/);
+    const provKeys = provLines[0].trim().split(/\s+/);
+    const pathsOf = (line) => Object.fromEntries((line || '').trim().split(/\s+/).filter(Boolean).map((kv) => kv.split('=')));
     for (const forbidden of ['DATABASE_URL_UNPOOLED', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'NODE_OPTIONS', 'DB_TARGET']) assert(!jobsKeys.includes(forbidden), `jobs has ${forbidden}`);
     assert(jobsKeys.includes('DATABASE_DIRECT_URL') && jobsKeys.includes('APP_SECRET'), 'jobs missing required keys');
+    // Which reviewed manifest applies is decided by the launcher SOURCE shipped in the image under test, never by the
+    // environ being checked: Docker hardening H2 (security review H1-M1) adds XDG_CONFIG_HOME / XDG_CACHE_HOME inside each
+    // child's own TMPDIR and sets HOME to a path no child can create.
+    const h2 = compose(['exec', '-T', '-u', '0:0', 'worker-a', 'grep', '-c', 'XDG_CONFIG_HOME', '/opt/crewflow-bundle/start-worker-bundle.cjs'], { quiet: true }).out.trim() !== '0';
     // Phase A: HWS_RUNTIME_ENABLED is passed through only when the service sets it (this stack does not); the launcher sets the
     // explicit opt-in and the validated interval.
-    assert(provKeys.join(' ') === 'CREWFLOW_INSTANCE_HEALTH_FILE CREWFLOW_PROVISIONER_ENABLED DATABASE_URL DATABASE_URL_UNPOOLED HOME NODE_ENV PATH RAB_RUNTIME_ENV REDIS_URL TMPDIR WORKSPACE_PROVISIONER_INTERVAL_SECONDS', `provisioner keys: ${provKeys.join(' ')}`);
+    const manifest = ['CREWFLOW_INSTANCE_HEALTH_FILE', 'CREWFLOW_PROVISIONER_ENABLED', 'HOME', 'NODE_ENV', 'PATH', 'PG_DATABASE_URL', 'RAB_RUNTIME_ENV', 'REDIS_URL', 'TMPDIR', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS', ...(h2 ? ['XDG_CACHE_HOME', 'XDG_CONFIG_HOME'] : [])].sort();
+    write(`reviewed provisioner manifest (${h2 ? 'H2 launcher: XDG dirs in TMPDIR' : 'pre-H2 launcher'}): ${manifest.join(' ')}`);
+    assert(provKeys.join(' ') === manifest.join(' '), `provisioner keys: ${provKeys.join(' ')}`);
+    for (const key of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'APP_SECRET']) assert(!provKeys.includes(key), `provisioner has ${key}`);
     for (const key of ['CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS']) assert(!jobsKeys.includes(key), `jobs has ${key}`);
-    assert(/DATABASE_URL user=crewflow host=pg:5432 db=rab/.test(p.out), 'provisioner DB identity');
+    if (h2) {
+      for (const [name, line] of [['jobs', jobsLines[1]], ['provisioner', provLines[1]]]) {
+        const v = pathsOf(line);
+        write(`${name} paths: ${line.trim()}`);
+        assert(v.HOME === '/nonexistent', `${name}: HOME=${v.HOME} (H1-M1: must be a path the child cannot create)`);
+        assert(v.XDG_CONFIG_HOME === `${v.TMPDIR}/.config` && v.XDG_CACHE_HOME === `${v.TMPDIR}/.cache`, `${name}: XDG dirs not inside its own TMPDIR`);
+      }
+    }
+    assert(/^PG_DATABASE_URL user=crewflow host=pg:5432 db=rab$/m.test(p.out), 'provisioner DB identity');
   });
 
   await step('14', 'Jobs identity cannot read, signal, rewrite or discover the provisioner (read-only root)', async () => isolationProbe('worker-a', /Read-only file system|Permission denied/, /Read-only file system/));
@@ -520,7 +542,9 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
       ['jobs configured with the privileged role', { DATABASE_URL: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL and DATABASE_DIRECT_URL must log in as crewflow_app/],
       ['DATABASE_URL_UNPOOLED on the service', { DATABASE_URL_UNPOOLED: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL_UNPOOLED must not be configured/],
       ['migration approval on the service', { CREWFLOW_MIGRATION_APPROVED: `pending-1-${'0'.repeat(64)}` }, /refused: CREWFLOW_MIGRATION_APPROVED must not be configured/],
-      ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: 'postgres://crewflow:wrong-password@pg:5432/rab' }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the DATABASE_URL database .*driver code 28P01/],
+      // Phase B (aa855a88): the provisioner child reads its credential as PG_DATABASE_URL, so its live probe names that
+      // variable. A random 48-hex wrong password, so the leak check below also covers this refusal.
+      ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow:${hex(24)}@pg:5432/rab` }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the PG_DATABASE_URL database .*driver code 28P01/],
       // Phase A (pa-provisioner): the opt-in switch and the interval bounds.
       ['provisioner disabled but its URL still present', { CREWFLOW_PROVISIONER_ENABLED: 'false' }, /refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/],
       ['invalid provisioner switch', { CREWFLOW_PROVISIONER_ENABLED: 'yes' }, /refused: CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"/],
@@ -570,10 +594,44 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
 
   await step('27', 'Live guards inside the bundle: different cluster, and a privileged role posing as crewflow_app', async () => {
     assert(compose(['--profile', 'mismatch', 'up', '-d', '--wait', 'pg-other']).code === 0, 'pg-other');
-    compose(['exec', '-T', 'pg-other', 'psql', '-U', 'rab', '-d', 'rab', '-v', 'ON_ERROR_STOP=1'], { input: `CREATE ROLE crewflow LOGIN PASSWORD '${SECRETS.BT_CREWFLOW_PASSWORD}'; CREATE ROLE crewflow_app LOGIN SUPERUSER PASSWORD '${SECRETS.BT_APP_PASSWORD}';` });
+    const otherSql = (sql) => compose(['exec', '-T', 'pg-other', 'psql', '-U', 'rab', '-d', 'rab', '-v', 'ON_ERROR_STOP=1', '-qAt'], { input: sql, quiet: true }).out.trim();
+    const mainCluster = sql1('SELECT system_identifier FROM pg_control_system()');
+    const otherCluster = otherSql('SELECT system_identifier FROM pg_control_system()');
+    write(`clusters: pg=${mainCluster} pg-other=${otherCluster}`);
+    assert(/^\d+$/.test(otherCluster) && otherCluster !== mainCluster, 'pg-other is not a distinct cluster');
+    // 27a: an UNMIGRATED other cluster the provisioner credential can log in to. Since Phase B the provisioner's own boot
+    // gates (deployment identity, then required extensions/schema) run right after its live probe, so it refuses here before
+    // the slower jobs child has reported — the service fails closed, but NOT through the cross-check, which 27b proves.
+    compose(['exec', '-T', 'pg-other', 'psql', '-U', 'rab', '-d', 'rab', '-v', 'ON_ERROR_STOP=1'], { input: `CREATE ROLE crewflow LOGIN PASSWORD '${SECRETS.BT_CREWFLOW_PASSWORD}';` });
+    const ra = compose(['--profile', 'mismatch', 'run', '--rm', '--no-deps', 'worker-mismatch'], { timeout: 180_000 });
+    RAW_SERVICE_OUTPUTS.push(ra.raw);
+    write(`--- 27a unmigrated other cluster: exit=${ra.code}\n${ra.out.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|db-boot-gates|workspace-provisioner\] started/.test(l)).join('\n')}`);
+    assert(ra.code === 1 && new RegExp(`\\[provisioner\\] \\[runtime-db-guard\\] process=provisioner .* cluster=${otherCluster} role=crewflow`).test(ra.out), '27a: provisioner did not probe the other cluster');
+    assert(/\[provisioner\] \[db-boot-gates\] Database boot gate "\S+" refused/.test(ra.out), '27a: unmigrated other cluster not refused by the provisioner boot gates');
+    assert(!/\[workspace-provisioner\] started/.test(ra.out), '27a: the provisioner started working on an unmigrated other cluster');
+    // 27b: migrate pg-other with the SAME guarded runner and bootstrap secrets as case 10 (a throwaway cluster of this
+    // project only), so every per-process gate passes on BOTH clusters and only the launcher's comparison of the two
+    // children's live probes can refuse. The gated migration 1786721330000 must not be applied by this runner.
+    const mo = compose(['--profile', 'migrate', '--profile', 'mismatch', 'run', '--rm', '--no-deps', 'migrate'], {
+      env: { BT_MIGRATION_URL: `postgres://rab:${SECRETS.BT_SUPERUSER_PASSWORD}@pg-other:5432/rab`, BT_BOOTSTRAP_CREWFLOW: SECRETS.BT_CREWFLOW_PASSWORD, BT_BOOTSTRAP_APP: SECRETS.BT_APP_PASSWORD },
+    });
+    assert(mo.code === 0 && /Migrations applied/.test(mo.out), '27b: migrating pg-other failed');
+    const otherMigrations = otherSql('SELECT count(*) FROM core.migrations');
+    const gated = `${sql1(`SELECT count(*) FROM core.migrations WHERE name LIKE '%1786721330000'`)}|${otherSql(`SELECT count(*) FROM core.migrations WHERE name LIKE '%1786721330000'`)}`;
+    write(`pg-other migrated: ${otherMigrations} migrations (pg: ${fx.migrationsBefore}); gated 1786721330000 recorded on pg|pg-other: ${gated}`);
+    assert(otherMigrations === fx.migrationsBefore, '27b: pg-other is not at the same migration level as pg');
+    assert(gated === '0|0', '27b: the gated migration 1786721330000 was applied');
     const r = compose(['--profile', 'mismatch', 'run', '--rm', '--no-deps', 'worker-mismatch'], { timeout: 180_000 });
-    write(r.out.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard/.test(l)).join('\n'));
-    assert(r.code === 1 && /live identity probes disagree: .*cluster=\d+.*cluster=\d+/.test(r.out), 'cluster mismatch not refused');
+    RAW_SERVICE_OUTPUTS.push(r.raw);
+    write(`--- 27b migrated other cluster: exit=${r.code}\n${r.out.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|db-boot-gates|workspace-provisioner\]/.test(l)).join('\n')}`);
+    assert(!/\[provisioner\] \[db-boot-gates\] .*refused/.test(r.out), '27b: a provisioner boot gate refused, so the cross-check was not reached');
+    assert(r.code === 1 && new RegExp(`live identity probes disagree: \\S+ reached database=rab cluster=(${mainCluster}|${otherCluster}), \\S+ reached database=rab cluster=(${mainCluster}|${otherCluster})`).test(r.out), 'cluster mismatch not refused');
+    const crossed = /live identity probes disagree: .*cluster=(\d+).*cluster=(\d+)/.exec(r.out);
+    assert(crossed && crossed[1] !== crossed[2], '27b: disagreement line does not name two different clusters');
+    // Record (not assert) whether the provisioner ran a cycle on the wrong cluster before the cross-check fired: the
+    // cross-check is reactive (THREAT-MODEL / launcher header); in production the deployment-identity marker is the gate.
+    const otherProvisioned = otherSql(`SELECT count(*) FROM core.workspace_schema_registry`);
+    write(`provisioner cycle on pg-other before the cross-check: ${/workspace provisioning: attempted=/.test(r.out) ? 'yes' : 'no'}; pg-other workspace_schema_registry rows: ${otherProvisioned}`);
     compose(['--profile', 'mismatch', 'rm', '-sf', 'pg-other']);
     // Live role guard: on the THROWAWAY database only, give crewflow_app BYPASSRLS for one start attempt. The launcher's
     // string checks pass (the login name is right); assert-runtime-db-role.ts inside the jobs child must refuse.
@@ -703,8 +761,13 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
   await step('33', 'Native PostgreSQL/Redis health checks in the compose files', async () => {
     const lines = [];
     for (const [label, file, extraEnv] of [['dev', path.join(__dirname, '../../../../docker-compose.yml'), { DEVDB_SUPERUSER_PASSWORD: 'x' }], ['production', path.join(__dirname, '../../../../docker-compose.production.yml'), {}], ['bundle-test', FILE, {}]]) {
-      const r = docker(['compose', '-p', 'crewflow-config-check', '-f', file, '--profile', '*', 'config', '--format', 'json'], { quiet: true, env: extraEnv });
-      const cfg = JSON.parse(r.raw.slice(r.raw.indexOf('{')));
+      // --no-env-resolution: do not read the services' env_file entries. They hold container environment only (never a
+      // health check), and they are git-ignored local files (packages/rab-server/.env, packages/rab-docker/.env.migrate,
+      // .env.ops) that a clean checkout or worktree does not have — `config` then exits 1 with no JSON at all, which is
+      // what "Unexpected end of JSON input" was. Only stdout is parsed; a failure reports compose's (redacted) stderr.
+      const r = docker(['compose', '-p', 'crewflow-config-check', '-f', file, '--profile', '*', 'config', '--no-env-resolution', '--format', 'json'], { quiet: true, env: extraEnv });
+      assert(r.code === 0, `${label}: docker compose config failed: ${r.out.trim().split('\n').slice(-3).join(' / ')}`);
+      const cfg = JSON.parse(r.stdout);
       for (const [name, svc] of Object.entries(cfg.services)) {
         const img = String(svc.image || '');
         if (/postgres|redis/.test(img)) lines.push(`${label}: ${name} (${img}) healthcheck=${JSON.stringify(svc.healthcheck?.test ?? null)}`);

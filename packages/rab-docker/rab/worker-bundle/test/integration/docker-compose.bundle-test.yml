@@ -78,7 +78,9 @@ services:
       retries: 30
 
   # A second, unrelated PostgreSQL cluster — used only to prove the launcher's live cross-check refuses a provisioner
-  # that reached a different cluster than the jobs process.
+  # that reached a different cluster than the jobs process. Initialised like `pg` so case 27 can also migrate it with the
+  # guarded runner: since Phase B the provisioner's own boot gates refuse an UNMIGRATED cluster before the jobs child has
+  # reported, so only a fully migrated second cluster leaves the cross-check as the one control that can catch it.
   pg-other:
     image: postgres:16-alpine
     profiles: ['mismatch']
@@ -86,6 +88,8 @@ services:
       POSTGRES_USER: rab
       POSTGRES_PASSWORD: ${BT_SUPERUSER_PASSWORD:?}
       POSTGRES_DB: rab
+    volumes:
+      - ../../../../postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
       interval: 2s
