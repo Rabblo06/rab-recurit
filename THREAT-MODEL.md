@@ -5002,3 +5002,46 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
+## Chromium OS sandbox REQUIRED for PDF rendering (owner decision 2026-11-03, R-H2/S4; branch build/chromium-sandbox)
+
+Supersedes the H6 "keep Chromium unsandboxed" trade-off above (the owner approved the Chromium/CVE recommendations).
+
+- **Hostile document escapes the renderer.** Threat: a memory-safety bug in Chromium's renderer or its image/font/media
+  decoders (reachable through a crafted organisation logo or any future escaping bug in a template) gives code
+  execution. Before: `--no-sandbox` — that code ran as the jobs uid (1000) with the jobs process, the browser process and
+  their `/proc` entries (database, Redis, object-storage credentials in the jobs environment) one step away. Control:
+  `render-pdf.util.ts` launches Chromium with `chromiumSandbox: true` (namespace sandbox: each renderer in its own user,
+  PID and network namespace under Chromium's seccomp-BPF policy) and `--disable-gpu-sandbox` on Linux (only the GPU
+  process; its seccomp policy kills it on musl's pwritev2, which takes the browser down). MEASURED in the Worker image
+  (amd64): `chrome://sandbox` "You are adequately sandboxed" (Namespace layer 1, PID + network namespaces, seccomp-BPF);
+  every renderer in a nested PID namespace (NSpid 3 levels vs 1) with one more seccomp filter (3 vs 2); PDF output
+  identical to the unsandboxed renderer apart from timestamps.
+- **The sandbox silently not starting.** Control (fail-safe): no fallback. A launch failure fails the render
+  (`PdfRenderSandboxError`, one attempt only); `CHROMIUM_NO_SANDBOX` is ignored; the only opt-out,
+  `CHROMIUM_SANDBOX=disabled-outside-production`, is refused in production by the renderer AND by the Worker launcher
+  (strict values; anything else refuses). The launcher probes the container prerequisite at every start (as uid 1000:
+  user namespace + chroot) and reports `chromium-sandbox=available|UNAVAILABLE`; with `CREWFLOW_RUNTIME_ISOLATION=enforce`
+  an unavailable sandbox refuses to start. The image release gate renders the real report sandboxed, checks every
+  renderer's namespaces/filters, and proves the same render FAILS without the profile.
+- **Container prerequisite = a wider seccomp profile (accepted trade-off).** `packages/rab-docker/rab/seccomp/chromium-worker.json`
+  is Docker's default profile (moby/profiles 6fe7deb1, sha256-pinned) plus exactly: clone/unshare with
+  CLONE_NEWUSER/NEWPID/NEWNET/NEWIPC for processes without CAP_SYS_ADMIN (CLONE_NEWNS/NEWCGROUP/NEWUTS stay refused), and
+  the chroot syscall (the kernel still requires CAP_SYS_CHROOT in the caller's own user namespace). Generated and
+  CI-checked by `build-chromium-worker-profile.cjs`; applied to the Worker service only (`security_opt: seccomp=…` in every
+  compose file that runs the Worker bundle). Risk: every process in the Worker container (jobs, provisioner, root launcher)
+  can now create unprivileged user namespaces — kernel attack surface (user-namespace LPEs). Mitigation: mount, cgroup
+  and UTS namespaces stay refused; no capabilities in the children, NoNewPrivs, read-only root-owned code; the API
+  container keeps Docker's default profile.
+- **Deployment implications.** OpenShip's compose import drops `security_opt`: there the sandbox cannot start, so every
+  PDF render fails (warn mode) or the Worker refuses to start (enforce mode) — intended: never render unsandboxed.
+  Ubuntu 24.04 hosts can forbid unprivileged user namespaces through AppArmor
+  (`kernel.apparmor_restrict_unprivileged_userns`); the launcher probe and the release gate report it the same way.
+  Native ARM64: proven only by the release gate's arm64 job (see the PR).
+- **Residual.** The browser process itself is not inside the sandbox (as in Chrome); a renderer escape that also defeats
+  the namespace sandbox lands as uid 1000. The non-production opt-out exists for host-level tests on hosts that cannot
+  create user namespaces.
+  Measured behaviour change: a footer template referencing an unreachable stylesheet/font (only possible through a
+  template escaping bug) no longer always fails fast — with the sandbox, Playwright's bundled Chromium on the CI host waits
+  until the renderer's 30 s `pdf` step bound refuses it (~30.6 s); the Worker image's Alpine Chromium still fails it in
+  0.6–3.3 s. The bound, not Chromium, is the control; no PDF is produced either way (S-9 spec).

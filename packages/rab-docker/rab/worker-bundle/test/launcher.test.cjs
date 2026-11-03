@@ -1193,8 +1193,8 @@ test('H6-4 CREWFLOW_RUNTIME_ISOLATION is strict: unset/empty/"warn" = warn, "enf
 
 test('H6-5 enforce + every declared control present → starts (no refusal), reported "as declared ... mode=enforce"', () => {
   const lines = [];
-  launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: (s) => lines.push(s), probe: () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL) });
-  assert.deepEqual(lines, ['runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4/4 pids.max=1024 memory.max=1610612736 mode=enforce']);
+  launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: (s) => lines.push(s), probe: () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL), sandboxProbe: () => true });
+  assert.deepEqual(lines, ['runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4/4 pids.max=1024 memory.max=1610612736 chromium-sandbox=available mode=enforce']);
 });
 
 test('H6-6 enforce + EACH missing control → refused, naming that control; warn → starts with a WARNING naming it', () => {
@@ -1211,10 +1211,10 @@ test('H6-6 enforce + EACH missing control → refused, naming that control; warn
   ];
   for (const [label, status, mounts, limits, re] of cases) {
     const probe = () => launcher.runtimeIsolation(status, mounts, limits);
-    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: () => {}, probe }), (e) => e instanceof launcher.BundleConfigError && re.test(e.message) && /CREWFLOW_RUNTIME_ISOLATION=enforce/.test(e.message), label);
+    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: () => {}, probe, sandboxProbe: () => true }), (e) => e instanceof launcher.BundleConfigError && re.test(e.message) && /CREWFLOW_RUNTIME_ISOLATION=enforce/.test(e.message), label);
     for (const env of [{}, { CREWFLOW_RUNTIME_ISOLATION: 'warn' }]) {
       const lines = [];
-      assert.doesNotThrow(() => launcher.checkRuntimeIsolation(env, { log: (s) => lines.push(s), probe }), label);
+      assert.doesNotThrow(() => launcher.checkRuntimeIsolation(env, { log: (s) => lines.push(s), probe, sandboxProbe: () => true }), label);
       assert.ok(lines.length === 1 && /^WARNING runtime isolation weaker/.test(lines[0]) && re.test(lines[0]) && /mode=warn/.test(lines[0]), `${label}: ${lines}`);
     }
   }
@@ -1237,4 +1237,43 @@ test('H6-7 main() in enforce mode refuses with exit 1 BEFORE starting any child 
   assert.match(out, /\[worker-bundle\] refused: runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce \(capabilities beyond SETUID\/SETGID\/KILL/);
   assert.doesNotMatch(out, /started pid=/);
   for (const marker of SECRET_MARKERS) assert.ok(!out.includes(marker), `leaked ${marker}`);
+});
+
+// ---------------------------------------------------------------- Chromium OS sandbox required (owner decision 2026-11-03)
+
+test('S-1 enforce + the Chromium sandbox prerequisites missing (no Worker seccomp profile) → refused, naming it; warn → starts and says every PDF render will fail', () => {
+  const probe = () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL);
+  assert.throws(
+    () => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: () => {}, probe, sandboxProbe: () => false }),
+    (e) => e instanceof launcher.BundleConfigError && /Chromium OS sandbox unavailable .*chromium-worker\.json is not applied/.test(e.message) && /chromium-sandbox=UNAVAILABLE/.test(e.message),
+  );
+  const lines = [];
+  launcher.checkRuntimeIsolation({}, { log: (s) => lines.push(s), probe, sandboxProbe: () => false });
+  assert.ok(lines.length === 1 && /^WARNING .*every PDF render will fail.*chromium-sandbox=UNAVAILABLE mode=warn/.test(lines[0]), lines.join('\n'));
+});
+
+test('S-2 the explicit non-production opt-out skips the sandbox probe; the switch is strict', () => {
+  const probe = () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL);
+  const lines = [];
+  let probed = false;
+  launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce', CHROMIUM_SANDBOX: 'disabled-outside-production' }, { log: (s) => lines.push(s), probe, sandboxProbe: () => { probed = true; return false; } });
+  assert.equal(probed, false);
+  assert.match(lines[0], /as declared: .*chromium-sandbox=disabled-outside-production mode=enforce/);
+  assert.equal(launcher.chromiumSandboxSetting({}), 'required');
+  assert.equal(launcher.chromiumSandboxSetting({ CHROMIUM_SANDBOX: 'required' }), 'required');
+  for (const v of ['off', 'false', 'disabled', 'DISABLED-OUTSIDE-PRODUCTION']) assert.equal(launcher.chromiumSandboxSetting({ CHROMIUM_SANDBOX: v }), null, v);
+});
+
+test('S-3 a production Worker service refuses the opt-out and any invalid CHROMIUM_SANDBOX (by name only); CHROMIUM_SANDBOX reaches the jobs child only', () => {
+  assert.match(refusal({ CHROMIUM_SANDBOX: 'disabled-outside-production' })?.message ?? '', /CHROMIUM_SANDBOX=disabled-outside-production is refused on a production Worker service/);
+  assert.match(refusal({ CHROMIUM_SANDBOX: 'off' })?.message ?? '', /CHROMIUM_SANDBOX must be "required"/);
+  const plan = makePlan({ ...env(), CHROMIUM_SANDBOX: 'required' });
+  assert.equal(plan[0].env.CHROMIUM_SANDBOX, 'required');
+  assert.equal(plan[1].env.CHROMIUM_SANDBOX, undefined);
+});
+
+test('S-4 the real sandbox probe in this container (evidence; the image run has Docker\'s default seccomp → unavailable)', { skip: !linuxRoot && 'needs root on Linux' }, () => {
+  const ok = launcher.chromiumSandboxProbe();
+  console.log(`# evidence chromium sandbox probe (this test container): ${ok ? 'available' : 'UNAVAILABLE'}`);
+  assert.equal(typeof ok, 'boolean');
 });

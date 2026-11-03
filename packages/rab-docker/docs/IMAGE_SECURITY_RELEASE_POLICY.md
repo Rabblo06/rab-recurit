@@ -126,10 +126,20 @@ Rules, all enforced by `image_gate.py static` / `vulns`:
 - `IMAGE_GATE_TODAY` (a self-test date override) is refused in release mode and in CI, so it can never move an expiry.
 - Entries are added in a PR that links the owner's written decision. An agent or a CI job never adds one on its own
   initiative.
+- Optional, unvalidated fields: `evidence` (where the analysis lives) and `review_triggers` (events that require
+  re-review before the expiry).
 
-**Current state (2026-11-03): the register is empty.** The Worker's unfixed High/Critical findings (the seven
-Chromium-dependency CVEs from the 2026-11-02 report, plus those Grype reports through NVD CPE matching) appear as HOLD on
-every PR and block a release until the owner decides on each one.
+**Current state (owner decision 2026-11-03, "approve the Chromium/CVE recommendations").** The register holds the 15
+Worker High/Critical findings of the Chromium CVE decision pack, all expiring **2026-12-31**:
+- 6 `false-positive`: FFmpeg CVE-2026-70628, -70632, -52296, -52297 and -96611 (fixed in the 8.1.x source Alpine
+  builds), and CVE-2018-6553 (Ubuntu AppArmor);
+- 3 `not-affected`: cJSON CVE-2026-67215, -67216 and -16554;
+- 6 `accepted-risk`, time-boxed to Alpine 3.24 community EOL or 2026-12-31, whichever is first: libsndfile
+  CVE-2025-52194 and CVE-2026-37555, libxml2 CVE-2026-86140, glib CVE-2026-58016, ffmpeg CVE-2026-107696 and alsa-lib
+  CVE-2026-56109.
+
+The acceptance is conditional on the H6 Chromium sandbox and a minimal browser environment (pack items S4, S5). Any new
+High/Critical finding, or any of these becoming fixable, blocks a release again.
 
 ## 6. Scanner-blind watch list (`scanner-blind-advisories.json`)
 
