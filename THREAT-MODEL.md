@@ -4609,3 +4609,28 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
+
+Owner-approved plan (Docker consolidated plan 2026-11-02, R1/R2/R5 + compiled tests). Dockerfile-level only: no source,
+`package.json` or `yarn.lock` change; the application JavaScript and `node_modules` in the image are byte-identical to the
+unchanged Dockerfile's (only the compiled test helpers are gone).
+
+- **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
+  Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
+  2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
+  any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
+  v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
+  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  of that file (H5 release scanning re-checks against Chrome/Node releases).
+- **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
+  `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
+  execution bug could persist by editing code the process later loads. Control: application code is copied root-owned
+  and not group/other-writable; the build fails if anything under `/app` other than `/app/storage` (node, 0750) is not
+  root-owned or is group/other-writable. The Worker bundle no longer needs its recursive `chown -R`/`chmod -R` (−1.08 GB
+  layer) and refuses a base image that does not meet the rule; the launcher's start-time check is unchanged.
+- **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
+  sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
+  code imports one.
