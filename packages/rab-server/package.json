@@ -27,7 +27,7 @@
     "@rab/emails": "workspace:*",
     "@rab/shared": "workspace:*",
     "@react-email/render": "^1.0.0",
-    "@sentry/node": "^8.54.0",
+    "@sentry/node": "^10.78.0",
     "ai": "6.0.303",
     "argon2": "^0.41.1",
     "bullmq": "^5.34.6",

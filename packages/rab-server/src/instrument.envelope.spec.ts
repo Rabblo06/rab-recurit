@@ -8,10 +8,17 @@
  * error and flushes. Every envelope the real Sentry transport delivers is captured here and searched for each secret.
  */
 import { spawn } from 'child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { createServer, type IncomingMessage, type Server } from 'http';
 import type { AddressInfo } from 'net';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { gunzipSync } from 'zlib';
+
+delete process.env.SENTRY_DSN; // importing instrument.ts must never initialise Sentry in this (parent) process
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { ALLOWED_DEFAULT_INTEGRATIONS } =
+  require('./instrument') as typeof import('./instrument');
 
 const SERVER_DIR = join(__dirname, '..');
 const INSTRUMENT = join(__dirname, 'instrument.ts');
@@ -34,6 +41,36 @@ const SECRETS = {
   failClosed: 'envelope-FAILCLOSED-SECRET-fc',
 };
 
+/**
+ * Every integration name Sentry 8.55 or 10.x installs by default, plus the ones this file must never see. The child
+ * reports which of them its real client has installed.
+ */
+const FORBIDDEN_INTEGRATIONS = [
+  'Anthropic_AI',
+  'ConversationId',
+  'ExtraErrorData',
+  'Firebase',
+  'Google_GenAI',
+  'Hono',
+  'LangChain',
+  'LangGraph',
+  'LocalVariables',
+  'Nest',
+  'NodeSystemError',
+  'OpenAI',
+  'PostgresJs',
+  'Prisma',
+  'ProcessAndThreadBreadcrumbs',
+  'ProcessSession',
+  'VercelAI',
+  'vercelAI',
+];
+const INTEGRATION_CANDIDATES = [
+  ...ALLOWED_DEFAULT_INTEGRATIONS,
+  'RequestData',
+  ...FORBIDDEN_INTEGRATIONS,
+];
+
 /** The child program (CommonJS). `instrument.ts` is required before `http`, exactly like the real entrypoints. */
 function childProgram(): string {
   return `
@@ -45,6 +82,25 @@ require(${JSON.stringify(INSTRUMENT)});
 const Sentry = require(${JSON.stringify(require.resolve('@sentry/node', { paths: [SERVER_DIR] }))});
 const http = require('http');
 const S = JSON.parse(process.env.ENVELOPE_TEST_SECRETS);
+
+// H4b: what the real Sentry.init (not just buildSentryOptions) ended up with, for the parent to assert.
+{
+  const client = Sentry.getClient();
+  const o = client.getOptions();
+  const candidates = JSON.parse(process.env.ENVELOPE_TEST_INTEGRATION_CANDIDATES);
+  require('fs').writeFileSync(process.env.ENVELOPE_TEST_REPORT, JSON.stringify({
+    sdkVersion: Sentry.SDK_VERSION,
+    installed: candidates.filter((name) => client.getIntegrationByName(name) !== undefined),
+    options: {
+      sendDefaultPii: o.sendDefaultPii,
+      includeLocalVariables: o.includeLocalVariables,
+      enableLogs: o.enableLogs,
+      tracesSampleRate: o.tracesSampleRate,
+      profilesSampleRate: o.profilesSampleRate === undefined ? null : o.profilesSampleRate,
+    },
+    dataCollection: client.getDataCollectionOptions(),
+  }));
+}
 
 const server = http.createServer((req, res) => {
   let body = '';
@@ -154,6 +210,7 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
   const envelopes: Envelope[] = [];
   let childOutput = '';
   let childExitCode: number | null = null;
+  let report: Record<string, any> = {};
 
   beforeAll(async () => {
     ingest = createServer((req: IncomingMessage, res) => {
@@ -171,6 +228,8 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       ingest.listen(0, '127.0.0.1', resolve),
     );
     const { port } = ingest.address() as AddressInfo;
+    const reportDir = mkdtempSync(join(tmpdir(), 'sentry-envelope-'));
+    const reportFile = join(reportDir, 'report.json');
 
     // A local stub DSN, not a real one: the public key is a placeholder and the host is this test's own server.
     const env: NodeJS.ProcessEnv = {
@@ -179,6 +238,10 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       NODE_ENV: 'production',
       SENTRY_TRACES_SAMPLE_RATE: '1',
       ENVELOPE_TEST_SECRETS: JSON.stringify(SECRETS),
+      ENVELOPE_TEST_REPORT: reportFile,
+      ENVELOPE_TEST_INTEGRATION_CANDIDATES: JSON.stringify(
+        INTEGRATION_CANDIDATES,
+      ),
     };
     delete env.JEST_WORKER_ID;
 
@@ -206,6 +269,14 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
         resolve(code);
       });
     });
+    try {
+      report = JSON.parse(readFileSync(reportFile, 'utf8')) as Record<
+        string,
+        any
+      >;
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
   }, 90_000);
 
   afterAll(async () => {
@@ -287,5 +358,39 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       expect(span.data?.['db.statement']).toBeUndefined();
       expect(span.description).toBe('SELECT [Filtered]');
     }
+  });
+
+  it('the real client runs exactly the allowed default integrations plus the restricted RequestData (H4b)', () => {
+    expect([...(report.installed as string[])].sort()).toEqual(
+      [...ALLOWED_DEFAULT_INTEGRATIONS, 'RequestData'].sort(),
+    );
+  });
+
+  it('the real client keeps PII, local variables, logs and profiling off; tracing only as configured (H4b)', () => {
+    expect(report.sdkVersion).toMatch(/^10\./);
+    expect(report.options).toEqual({
+      sendDefaultPii: false,
+      includeLocalVariables: false,
+      enableLogs: false,
+      tracesSampleRate: 1, // forced by this test through SENTRY_TRACES_SAMPLE_RATE; production default is 0.01
+      profilesSampleRate: null,
+    });
+    // Sentry 10 derives its data-collection categories from sendDefaultPii: false (the restrictive legacy mapping).
+    expect(report.dataCollection).toMatchObject({
+      userInfo: false,
+      httpBodies: [],
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+    });
+  });
+
+  it('only error events, transactions and client reports leave the process: no sessions, logs or profiles (H4b)', () => {
+    const types = new Set(
+      envelopes.flatMap((envelope) =>
+        envelope.items.map((item) => String(item.header.type)),
+      ),
+    );
+    for (const type of types)
+      expect(['event', 'transaction', 'client_report']).toContain(type);
   });
 });

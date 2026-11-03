@@ -4609,3 +4609,37 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## H4b — Sentry 8 → 10 (supported major; removes the OpenTelemetry advisories) (branch deps/h4b-sentry, not merged)
+
+### H4b-sentry: the SDK upgrade adds no telemetry source and keeps every P0-sentry control
+- **Actor → action → consequence considered:** an SDK major upgrade silently widens what leaves the process to the
+  third-party Sentry project. Measured on 10.78.0 before any code change: `enableLogs` now defaults to `true`, and 13
+  default integrations appear that 8.55 did not run, among them `VercelAI` (Sentry 10 patches `ai` < 7, so it would
+  switch on telemetry for every model call of the server's `ai` 6; Sentry 8 only patched `ai` < 5), `Anthropic_AI`,
+  `OpenAI`, `Google_GenAI`, `LangChain`, `LangGraph`, `Firebase`, `Prisma`, `PostgresJs`, `NodeSystemError` and
+  `ProcessSession` (release-health session envelopes). Separately, the advisory GHSA-qqmp-wf37-98f9 (DB login name in
+  a `db.user` span attribute) is **not** fixed by the upgrade: Sentry 10 vendors copies of the older DB
+  instrumentations, so scanners stop matching the `@opentelemetry/instrumentation-*` packages while the pg span still
+  carries `db.user` (measured against a disposable PostgreSQL: present on 8.55.2 and on unpatched 10.78.0).
+- **Control:** `packages/rab-server/src/instrument.ts`. `integrations` is a function over Sentry's defaults that keeps
+  only `ALLOWED_DEFAULT_INTEGRATIONS` (the 8.55 default set under 10.x names, `ChildProcess` being the renamed
+  `ProcessAndThreadBreadcrumbs`) plus the restricted `RequestData`; anything a later 10.x minor adds is dropped (fail
+  closed). `enableLogs: false` explicitly. `db.user` is added to the dropped span attributes (the only scrubber change;
+  stricter). Unchanged: `sendDefaultPii: false` (Sentry 10 maps it to its restrictive data-collection mapping:
+  `userInfo: false`, `httpBodies: []`, `genAI` inputs/outputs off, `databaseQueryData: false`), `includeLocalVariables:
+  false` (Sentry 10's local-variables integration still returns early on it), the RequestData include list, the four
+  fail-closed scrubbing hooks, and `tracesSampleRate` (0.01 in production, 0 elsewhere, `SENTRY_TRACES_SAMPLE_RATE`
+  override). No DSN: no client, no module, `http` or `require` patching (measured identical on 8.55.2 and 10.78.0).
+- **Not chosen:** Sentry 11. It replaces `sendDefaultPii` with a `dataCollection` option whose unset default collects
+  user/IP, cookies, headers, bodies, query strings and stack-frame locals, and streams spans by default so
+  `beforeSendTransaction` no longer runs. Moving there is a separate privacy review.
+- **Tests:** `instrument.spec.ts` (exact integration set against the real Sentry 10 defaults, fail-closed for an
+  unknown default, overrides cannot re-add integrations or enable logs/local variables, RequestData attaches nothing
+  even under the most permissive data-collection mapping, `db.user` dropped and connection-string userinfo masked) and
+  `instrument.envelope.spec.ts` (real `Sentry.init` in a child: installed integrations, effective options and resolved
+  data collection; only `event`, `transaction` and `client_report` envelope items leave the process).
+- **Residual:** API request exceptions handled by Nest's exception layer are not reported to Sentry (pre-existing: the
+  server never called `setupNestErrorHandler`, and Sentry 8's `Nest` integration only produced spans); uncaught
+  exceptions, unhandled rejections and the Worker's explicit `captureMessage` are. Sentry 8's `Nest` spans are gone
+  (fewer spans, no new data). `@opentelemetry/sdk-trace-base` 2.x carries an npm deprecation notice (not an advisory).

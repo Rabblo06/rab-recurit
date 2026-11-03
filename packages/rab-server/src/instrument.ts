@@ -13,6 +13,8 @@
  *      integration (HTTP/OTel span attributes, outgoing-request breadcrumbs, console breadcrumbs, `extra`) still adds.
  * Error types and stack frames are kept so Sentry stays useful. `includeLocalVariables` and
  * `extraErrorDataIntegration` must stay off: both copy arbitrary in-memory values into events.
+ * A third rule since the Sentry 10 upgrade (H4b): only the reviewed default integrations run
+ * (ALLOWED_DEFAULT_INTEGRATIONS) and Logs stay off, so an SDK upgrade can never add a telemetry source silently.
  *
  * The scrubbers run on the main thread over attacker-influenced text (URL paths, headers echoed in messages), so:
  *   - every string is capped at MAX_STRING_LENGTH before any regex runs, and every regex is linear-time (left-anchored
@@ -132,9 +134,13 @@ export function stripUrlQueryAndFragment(url: string): string {
 const SENSITIVE_KEY_RE =
   /pass(word|wd|phrase)|^pwd$|^pass$|secret|token|authori[sz]ation|cookie|api[-_]?key|private[-_]?key|credential|^otp$|^mfa[-_]?code$|^session([-_]?(id|token))?$|^jwt$|^signature$/i;
 
-/** Attributes that are dropped: SQL text, raw query strings/fragments, request/response headers and bodies, client IPs. */
+/**
+ * Attributes that are dropped: SQL text, raw query strings/fragments, request/response headers and bodies, client IPs,
+ * and the database login name. `db.user` (GHSA-qqmp-wf37-98f9): Sentry 10 vendors copies of the older OpenTelemetry
+ * DB instrumentations, so its pg spans still carry the login role although the advisory's packages are gone.
+ */
 const DROPPED_KEY_RE =
-  /^(db\.statement|db\.query\.text|db\.query\.parameter\..*|http\.query|http\.fragment|url\.query|url\.fragment|http\.request\.header\..*|http\.response\.header\..*|http\.request\.body.*|http\.response\.body.*|net\.peer\.ip|net\.sock\.peer\.addr|http\.client_ip|client\.address|network\.peer\.address|user\.email|user\.ip_address|ip_address)$/i;
+  /^(db\.statement|db\.query\.text|db\.user|db\.query\.parameter\..*|http\.query|http\.fragment|url\.query|url\.fragment|http\.request\.header\..*|http\.response\.header\..*|http\.request\.body.*|http\.response\.body.*|net\.peer\.ip|net\.sock\.peer\.addr|http\.client_ip|client\.address|network\.peer\.address|user\.email|user\.ip_address|ip_address)$/i;
 
 /** Keys holding a URL or request target: kept, minus query string and fragment. */
 const URL_KEY_RE =
@@ -277,7 +283,7 @@ export function scrubTransactionEvent<E extends TransactionEvent | Event>(
   return event;
 }
 
-/** `beforeSendSpan`: each child span of a transaction. Never drops a span (v8 only warns on `null`). Idempotent. */
+/** `beforeSendSpan`: every span, root included (Sentry 9+). Never drops a span (Sentry 9+ cannot). Idempotent. */
 export function scrubSpan(span: SpanJSON): SpanJSON {
   const data = span.data as Record<string, unknown> | undefined;
   const db = isDbSpan(span.op, data);
@@ -353,6 +359,81 @@ export function resolveTracesSampleRate(
   return fallback;
 }
 
+/**
+ * The only default integrations allowed to run (H4b, Sentry 8 → 10). This is exactly the Sentry 8.55 default set this
+ * file's privacy contract was reviewed against, under its Sentry 10 names, so the upgrade adds no telemetry:
+ *   - renamed in 9: `ProcessAndThreadBreadcrumbs` → `ChildProcess`;
+ *   - `RequestData` is not listed: the default one is always replaced by the restricted one below;
+ *   - `Nest` is gone from @sentry/node (moved to @sentry/nestjs in 9) and is not re-added (fewer spans, no new data);
+ *   - `VercelAI` is not allowed: Sentry 8 only patched `ai` < 5, so with the server's `ai` 6 it never ran, whereas
+ *     Sentry 10 patches `ai` < 7 and would switch on AI-call telemetry for every model call.
+ * Everything else Sentry 10 (or a later 10.x minor) installs by default is dropped — fail closed, so a minor bump can
+ * never add an integration silently: today that is Anthropic_AI, OpenAI, Google_GenAI, LangChain, LangGraph,
+ * ConversationId, VercelAI, Firebase, Hono, PostgresJs, Prisma, NodeSystemError and ProcessSession (release-health
+ * sessions). Adding a name here is a privacy review, not a refactor.
+ */
+export const ALLOWED_DEFAULT_INTEGRATIONS: ReadonlySet<string> = new Set([
+  'Amqplib',
+  'ChildProcess',
+  'Connect',
+  'Console',
+  'Context',
+  'ContextLines',
+  'Express',
+  'Fastify',
+  'FunctionToString',
+  'GenericPool',
+  'Graphql',
+  'Hapi',
+  'Http',
+  'InboundFilters',
+  'Kafka',
+  'Koa',
+  'LinkedErrors',
+  'LocalVariablesAsync', // installed but inert: it returns early unless includeLocalVariables is true (it never is)
+  'LruMemoizer',
+  'Modules',
+  'Mongo',
+  'Mongoose',
+  'Mysql',
+  'Mysql2',
+  'NodeFetch',
+  'OnUncaughtException',
+  'OnUnhandledRejection',
+  'Postgres',
+  'Redis',
+  'Tedious',
+]);
+
+type SentryIntegration = ReturnType<typeof Sentry.requestDataIntegration>;
+
+/**
+ * The integration list Sentry runs: the allowed defaults, plus a RequestData that attaches method + URL only (it
+ * replaces the default RequestData, which would attach cookies, body, headers incl. Authorization, query string and
+ * user/IP); the scrubbers then strip the URL's query string and fragment.
+ */
+export function selectIntegrations(
+  defaults: readonly { name: string }[],
+): SentryIntegration[] {
+  return [
+    ...(defaults.filter(
+      (integration) =>
+        integration.name !== 'RequestData' &&
+        ALLOWED_DEFAULT_INTEGRATIONS.has(integration.name),
+    ) as SentryIntegration[]),
+    Sentry.requestDataIntegration({
+      include: {
+        cookies: false,
+        data: false,
+        headers: false,
+        query_string: false,
+        ip: false,
+        url: true,
+      },
+    }),
+  ];
+}
+
 function defaultBootWarning(message: string): void {
   // eslint-disable-next-line no-console
   console.warn(message);
@@ -382,22 +463,11 @@ export function buildSentryOptions(
     tracesSampleRate,
     sendDefaultPii: false,
     includeLocalVariables: false,
-    // Merged with the default integrations by name: this replaces the default RequestData integration (which attaches
-    // cookies, body, headers incl. Authorization, query string and user email) with one that attaches method + URL
-    // only; the scrubbers then strip the URL's query string and fragment.
-    integrations: [
-      Sentry.requestDataIntegration({
-        include: {
-          cookies: false,
-          data: false,
-          headers: false,
-          query_string: false,
-          ip: false,
-          user: false,
-          url: true,
-        },
-      }),
-    ],
+    // Sentry 10 turns Logs on by default; nothing here sends logs, and Sentry 8 sent none. Kept off explicitly.
+    enableLogs: false,
+    // A function, not an array: an array is merged with Sentry's defaults, so every new default integration would run.
+    // See ALLOWED_DEFAULT_INTEGRATIONS. (`include.user` is gone: Sentry 9 stopped reading `request.user` entirely.)
+    integrations: (defaults) => selectIntegrations(defaults),
     // The AI Phase 1 rule (no body, query string or cookies on /rest/v1/(admin/)ai/ routes) is a subset of this.
     // Every hook fails closed (see the file header for why a throwing beforeSend would leak).
     beforeSend: (event) => {
