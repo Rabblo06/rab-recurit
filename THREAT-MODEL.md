@@ -4633,7 +4633,9 @@ payroll, attendance or staffing rule change; email preferences untouched (notify
   organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
 - **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
   publish error is caught per row instead of aborting the cycle; the failed row's `queued_at` stamp is withdrawn (fenced
-  on status + generation, in its organisation's context) so it is retried on the next tick, as before. The claim SQL is byte-identical; FAILED /
+  on status + generation, in its organisation's context) so it is retried on the next tick, as before. per_scope only:
+  in global claim mode a publish error propagates exactly as before (the run releases the remaining claims and ends) —
+  withdrawing the stamp there would re-time the pointer to "due now" and the same run would re-claim it every batch. The claim SQL is byte-identical; FAILED /
   DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
   only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
 - **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
