@@ -259,10 +259,40 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
   const migrate = services['rab-migrate'];
   if (!migrate || !migrate.read_only || stable(migrate.cap_drop) !== stable(['ALL']) || !(migrate.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-migrate: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
   if (migrate && !(migrate.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) fail('rab-migrate: the long-form tmpfs /tmp (OpenShip import guard) is missing');
+  const fileNames = (svc) => (svc?.env_file ?? []).map((e) => baseName(typeof e === 'string' ? e : e.path));
+  if (migrate) {
+    if (migrate.image !== services['rab-api']?.image) fail('rab-migrate: image differs from rab-api\'s in the deployed model');
+    if (envOf(migrate).DB_TARGET !== 'production') fail('rab-migrate: DB_TARGET is not production in the deployed model');
+    if (!fileNames(migrate).includes('.env.migrate')) fail('rab-migrate: does not read .env.migrate in the deployed model');
+    if (migrate.restart !== 'no' || (migrate.profiles ?? []).length) fail('rab-migrate: restart is not "no" or it has a profile in the deployed model');
+  }
+  const ops = services['rab-ops'];
+  if (ops) {
+    if (ops.image !== services['rab-api']?.image) fail('rab-ops: image differs from rab-api\'s in the deployed model');
+    if (stable(ops.profiles) !== stable(['ops'])) fail('rab-ops: not in (only) the "ops" profile in the deployed model');
+    if (stable(fileNames(ops)) !== stable(['.env.ops'])) fail('rab-ops: must read .env.ops only in the deployed model');
+    if (!ops.read_only || stable(ops.cap_drop) !== stable(['ALL']) || !(ops.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-ops: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
+    if ((ops.ports ?? []).length) fail('rab-ops: publishes a port');
+  }
   const redis = services['rab-redis'];
   if (redis) {
     if ((redis.ports ?? []).length) fail('rab-redis: publishes a port');
     if (!(redis.volumes ?? []).some((v) => v.target === '/run/secrets/redis-users.acl' && v.read_only)) fail('rab-redis: ACL file not mounted read-only');
+    if (!(redis.volumes ?? []).some((v) => v.target === '/usr/local/etc/redis/redis.conf' && v.read_only)) fail('rab-redis: config file not mounted read-only in the deployed model');
+    if (stable(redis.command) !== stable(['redis-server', '/usr/local/etc/redis/redis.conf'])) fail('rab-redis: not started from the reviewed config file in the deployed model');
+    if (!redis.mem_limit) fail('rab-redis: no memory limit in the deployed model');
+  }
+  // Service-wide, as in the static mode: no privileged container, no host namespace, no Docker socket, no build.
+  for (const [name, svc] of Object.entries(services)) {
+    if (svc.privileged) fail(`${name}: privileged in the deployed model`);
+    if (svc.network_mode === 'host' || svc.pid === 'host' || svc.ipc === 'host' || svc.userns_mode === 'host') fail(`${name}: host namespace in the deployed model`);
+    if (svc.build !== undefined) fail(`${name}: has a build section in the deployed model`);
+    for (const v of svc.volumes ?? []) {
+      if (/docker\.sock/.test(String(v.source ?? '')) || /docker\.sock/.test(String(v.target ?? ''))) fail(`${name}: mounts the Docker socket in the deployed model`);
+    }
+    if ((svc.devices ?? []).length || (svc.cap_add ?? []).some((c) => !['SETUID', 'SETGID', 'KILL'].includes(String(c).replace(/^CAP_/, '')))) {
+      fail(`${name}: adds devices or capabilities beyond the Worker launcher's SETUID/SETGID/KILL in the deployed model`);
+    }
   }
   if (redisConf === null) {
     fail('rab-redis: the mounted config file cannot be read on this host');
@@ -349,9 +379,14 @@ function environmentMode(argv) {
   }
   // The runtime services' env files: variable NAMES, unfilled placeholders, and the login part of database URLs only.
   const envFileKeys = {};
+  const skippedEnvFiles = [];
   for (const name of ['rab-api', 'rab-worker']) {
     const paths = (model.services?.[name]?.env_file ?? []).map((e) => (typeof e === 'string' ? e : e.path));
-    if (!paths.length) continue;
+    if (!paths.length) {
+      // G7: never skip these checks silently. Without an env file the service would also start without credentials.
+      skippedEnvFiles.push(`${name}: no env_file in the deployed model, so its credential checks cannot run (pass --compose staging/docker-compose.staging.yml)`);
+      continue;
+    }
     const entry = { names: [], unfilled: [], dbUsers: {} };
     for (const p of paths) {
       let text;
@@ -377,7 +412,7 @@ function environmentMode(argv) {
     }
     envFileKeys[name] = entry;
   }
-  return { problems: [...images.problems, ...checkDeployment(model, production, redisConf, envFileKeys)], lines: images.lines };
+  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, redisConf, envFileKeys)], lines: images.lines };
 }
 
 if (require.main === module) {

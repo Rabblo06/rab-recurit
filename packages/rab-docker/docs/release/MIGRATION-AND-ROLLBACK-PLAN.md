@@ -377,12 +377,27 @@ Use the least invasive rollback that fixes the problem. The order of preference 
 | R-6 | Schema rollback | `down()` through the approved migration path only, with the migration identity (or one that can `SET ROLE rab_secure_owner`), after a fresh backup, in a window. **Phase D order: 1786721350000 → 1786721340000 → 1786721320000 → 1786721310000 → 1786721300000** (§8.4). Phase B: 1786721230000 → 1786721220000 → 1786721210000 (rehearsed) | DROP TRIGGER / DROP TABLE take ACCESS EXCLUSIVE on the outbox tables. After the Phase D `down()`s **only the previous API + the previous Worker jobs-only can run**: the Phase D images refuse the then-pending migrations, and workspaces stay at module 19. Every other post-marker `down()` is listed in §3. No production `down()` chain beyond these is recommended |
 | R-7 | Bad data migration, corruption, or the release must be undone entirely | Restore into a **new** database from the pre-release dump or PITR, rebind the identity (new deployment id, audited), and switch `PG_DATABASE_URL` everywhere in one change | Lost writes, security reversals and side effects outside the database are as listed in the Phase B procedure (§e.4): revoke all sessions and flush the entity cache and Redis namespaces after any restore |
 
+**Rollback target rule (R-3 / R-4).** A previous digest is an acceptable rollback target ONLY if:
+- it was itself deployed with this variant; and
+- its start lines showed `mode=enforce`:
+  - `api-prestart: runtime isolation as declared: ... mode=enforce`;
+  - `[worker-bundle] runtime isolation as declared: ... mode=enforce`.
+
+Otherwise **STOP**. An image built before the enforce mode (H6 commit 09286aef) ignores
+`CREWFLOW_RUNTIME_ISOLATION=enforce` and would start in "warn", so a dropped control would no longer be refused. The
+first release on this variant has no such predecessor: roll forward instead.
+
+Record the result next to every digest in `compose.env`'s history comments (`# <date> api=<digest> worker=<digest>
+enforce=yes`).
+
 **Image rollback commands** (staging):
 
 ```bash
-# compose.env keeps the previous digests in comments with the date; swap them back, then:
-$C config --quiet && node staging/verify-image-compose.cjs --environment --env-file /etc/crewflow-staging/compose.env
+# compose.env keeps the previous digests in comments with the date and enforce=yes|no; swap back only an enforce=yes pair:
+$C config --quiet --no-env-resolution && sudo node staging/verify-image-compose.cjs --environment \
+  --env-file /etc/crewflow-staging/compose.env --compose staging/docker-compose.staging.yml
 $C up -d --no-deps rab-api && $C up -d --no-deps rab-worker    # never run rab-migrate against an older image
+$C logs rab-api rab-worker | grep -E 'runtime isolation as declared.*mode=enforce'   # both lines, or roll forward
 ```
 
 ## 7. Approvals this plan needs, in order
@@ -415,7 +430,7 @@ databases. **10 passed, 0 failed, 0 blocked.**
 | Phase B apply with the right token | exit **0**, "post-checks passed", **12.6 s** on an empty database |
 | Final check | exit **0** ("schema is current"); ledger **250**, max 1786721350000, **1786721330000 absent**, 64 after the marker |
 | rab-migrate container | the API image by digest, `user 1000:1000`, read-only root, `CapDrop [ALL]`, no-new-privileges, tmpfs `/tmp` |
-| A dependency run before phase A | `rab-api` did **not** start: the dependency check refused (superuser in phase A), and `service_completed_successfully` held |
+| A dependency run before phase A (earlier run 2, harness defect; not counted as a pass) | `rab-api` did **not** start: the dependency check refused (superuser in phase A), and `service_completed_successfully` held |
 | Generated inventory, read-only session | `applied 250`, nothing pending, unknown or gated; `crewflow_worker` shape as reviewed |
 | Roles after phase B | `crewflow`, `crewflow_app`, `crewflow_worker`: LOGIN, NOSUPERUSER, NOBYPASSRLS; `rab_secure_owner`: NOLOGIN |
 
@@ -428,3 +443,15 @@ The same run also showed the following, under `CREWFLOW_RUNTIME_ISOLATION=enforc
 - enforce refused a writable API root (exit 64) and a Worker without no-new-privileges (exit 1).
 
 Not measured: any production-sized duration (§4.4).
+
+**What this rehearsal did NOT exercise (scope).** It ran rab-migrate with `DB_TARGET=local` and the API and Worker with
+`NODE_ENV` / `RAB_RUNTIME_ENV=development`, against a database with **no TLS** and **no deployment-identity bind**.
+These parts of the production-classified staging procedure (§4.1) were therefore **not rehearsed**:
+- the N1 approval refusal and approval (they also need the not-yet-written N1 code change);
+- `sslmode=verify-full` with the staging CA;
+- `CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP` and `db:bind-identity`, and the bound-marker checks of every process;
+- the production configuration refusals (https URLs, email driver, S3, `TRUSTED_PROXY_CIDRS`);
+- the exit codes the staging runbook §5 steps 3–4 predict under `DB_TARGET=production`.
+
+Those runbook steps are marked **unrehearsed** there. The first real staging window is their rehearsal, and it needs
+its own approval.

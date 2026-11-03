@@ -146,6 +146,15 @@ $C config --quiet --no-env-resolution                 # renders without reading 
    - `--user healthcheck` PING returns `PONG`;
    - `--user crewflow` `CONFIG GET` returns `NOPERM`;
    - `INFO` shows `maxmemory_policy:noeviction` and `aof_enabled:1`.
+> **UNREHEARSED (steps 3–5 and the identity, TLS and production-refusal parts of 7).** The local rehearsal
+> (MIGRATION-AND-ROLLBACK-PLAN.md §8) proved the exit codes, the token flow and the phase split only with
+> `DB_TARGET=local`, no TLS and no identity bind. Under `DB_TARGET=production` the following are untested until the
+> first approved staging window, which is their rehearsal:
+> - N1 (it also needs the N1 code change);
+> - `verify-full`;
+> - the bootstrap flag and `db:bind-identity`;
+> - the production configuration refusals.
+
 3. **Phase A**: create `.env.migrate` with `rab_owner` and `CREWFLOW_MIGRATION_PHASE=A` (template
    `staging/env/migrate.env.example`, 0600).
    - `$C run --rm rab-migrate` returns exit 3, the list of **all 250**, and a token.

@@ -149,3 +149,22 @@ test('environment mode refuses migration/ops authority, foreign logins and unfil
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }), /rab-api: names \.env\.migrate/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
 });
+
+// Review G1: overrides on rab-redis, rab-migrate and rab-ops are re-checked in the deployed model.
+const otherWeakenings = [
+  ['rab-redis privileged', (v) => { v.services['rab-redis'].privileged = true; }, /rab-redis: privileged/],
+  ['rab-redis on the host network', (v) => { v.services['rab-redis'].network_mode = 'host'; }, /rab-redis: host namespace/],
+  ['rab-redis started without the reviewed config', (v) => { v.services['rab-redis'].command = ['redis-server', '--appendonly', 'yes']; }, /rab-redis: not started from the reviewed config/],
+  ['rab-redis without a memory limit', (v) => { delete v.services['rab-redis'].mem_limit; }, /rab-redis: no memory limit/],
+  ['the Docker socket in rab-migrate', (v) => { v.services['rab-migrate'].volumes.push({ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' }); }, /rab-migrate: mounts the Docker socket/],
+  ['rab-migrate on another image', (v) => { v.services['rab-migrate'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-migrate: image differs/],
+  ['rab-migrate with DB_TARGET=local', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'local'; }, /rab-migrate: DB_TARGET/],
+  ['rab-migrate without .env.migrate', (v) => { v.services['rab-migrate'].env_file = []; }, /rab-migrate: does not read \.env\.migrate/],
+  ['rab-ops without its profile', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
+  ['rab-ops with a writable root', (v) => { v.services['rab-ops'].read_only = false; }, /rab-ops: not read-only/],
+  ['rab-ops privileged', (v) => { v.services['rab-ops'].privileged = true; }, /rab-ops: privileged/],
+  ['an extra capability on rab-redis', (v) => { v.services['rab-redis'].cap_add = ['SYS_ADMIN']; }, /rab-redis: adds devices or capabilities/],
+];
+for (const [name, mutate, pattern] of otherWeakenings) {
+  test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
+}
