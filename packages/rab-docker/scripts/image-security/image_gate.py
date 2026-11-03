@@ -1201,11 +1201,13 @@ def cmd_attest(a, c: Check) -> None:
         c.fail(f'cannot read the OCI layout: {e}')
         return
     images = [d for d in entries if not is_attestation(d)]
-    if len(images) != 1 or plat(images[0]) not in ('', a.platform):
+    # A per-platform build output holds one image; a gated multi-platform candidate holds one per platform.
+    mine = [d for d in images if plat(d) == a.platform] if len(images) > 1 else images
+    if len(mine) != 1 or plat(mine[0]) not in ('', a.platform):
         c.fail(f'expected exactly one {a.platform} image manifest in the build output, found '
                f'{[plat(d) for d in images]}')
         return
-    img = images[0]
+    img = mine[0]
     manifest = json.loads(blob(a.layout, img['digest']))
     config_digest = manifest['config']['digest']
     cfg = json.loads(blob(a.layout, config_digest))
@@ -1291,8 +1293,37 @@ def cmd_attest(a, c: Check) -> None:
         c.fail(f'provenance source revision {vcs.get("revision")!r} != commit {a.revision}')
     else:
         c.info(f'provenance ({pt}): revision {vcs.get("revision")}, source {vcs.get("source")}')
+    if a.base_api_layout:
+        check_worker_base(c, pred, a.base_api_layout, a.platform)
     with open(os.path.join(out, f'{a.role}-provenance.json'), 'w', encoding='utf-8') as f:
         json.dump(stmt, f, indent=1)
+
+
+def check_worker_base(c: Check, pred: dict, api_layout: str, platform: str) -> None:
+    """The Worker's provenance must name, as its base, the API image of the same gated run (by digest)."""
+    deps = ((pred.get('buildDefinition') or {}).get('resolvedDependencies') or []) or (pred.get('materials') or [])
+    base = [d for d in deps if str(d.get('uri', '')).startswith('pkg:oci/crewflow-gate-api-base')]
+    if len(base) != 1 or not (base[0].get('digest') or {}).get('sha256'):
+        c.fail(f'Worker provenance does not record exactly one crewflow-gate-api-base dependency: {base}')
+        return
+    dep = 'sha256:' + base[0]['digest']['sha256']
+    try:
+        top, entries = layout_entries(api_layout)
+        api_images = {d['digest'] for d in entries if not is_attestation(d) and plat(d) == platform}
+        if dep == top and api_images:
+            ok = True  # per-platform API build output: its own index is the base
+        else:
+            # gated multi-platform candidate: the per-platform API index blob is kept in the layout; its image must be
+            # the API image of this platform in the gated API index
+            sub = json.loads(blob(api_layout, dep))
+            ok = any(m['digest'] in api_images for m in sub.get('manifests') or [] if not is_attestation(m))
+    except (OSError, ValueError, KeyError) as e:
+        c.fail(f'Worker base {dep} cannot be resolved in the gated API layout: {e}')
+        return
+    if not ok:
+        c.fail(f'the Worker was built FROM {dep}, which is not the gated {platform} API image of this run')
+    else:
+        c.info(f'Worker built FROM the gated API image {dep} (provenance)')
 
 
 def cmd_manifest(a, c: Check) -> None:
@@ -1303,12 +1334,17 @@ def cmd_manifest(a, c: Check) -> None:
         by_role.setdefault(role, []).append((platform, layout))
     digests = {}
     diff_ids: dict[tuple[str, str], list[str]] = {}
+    want_digest = dict(x.split('=', 1) for x in (a.expect_digest or []))
     for role, items in sorted(by_role.items()):
-        dest = os.path.join(a.out, f'{role}-layout')
-        if os.path.exists(dest):
+        candidate = len(items) == 1 and items[0][0] == 'multi'  # an already-gated multi-platform layout: verify in place
+        dest = items[0][1] if candidate else os.path.join(a.out, f'{role}-layout')
+        if candidate:
+            pass
+        elif os.path.exists(dest):
             c.fail(f'{dest} already exists; refusing to overwrite')
             continue
-        os.makedirs(os.path.join(dest, 'blobs', 'sha256'))
+        else:
+            os.makedirs(os.path.join(dest, 'blobs', 'sha256'))
         merged, plats = [], []
         for platform, layout in items:
             try:
@@ -1320,7 +1356,7 @@ def cmd_manifest(a, c: Check) -> None:
             for d in imgs:
                 p = plat(d)
                 plats.append(p)
-                if p != platform:
+                if p != platform and not candidate:
                     c.fail(f'{role}: layout for {platform} contains an image for {p}')
                 man = json.loads(blob(layout, d['digest']))
                 cfg = json.loads(blob(layout, man['config']['digest']))
@@ -1334,12 +1370,30 @@ def cmd_manifest(a, c: Check) -> None:
                            == d['digest'] for x in entries):
                     c.fail(f'{role} {p}: no attestation manifest (SBOM/provenance) for {d["digest"]}')
             merged.extend(entries)
+            if candidate:
+                continue
             for b in os.listdir(os.path.join(layout, 'blobs', 'sha256')):
                 dst = os.path.join(dest, 'blobs', 'sha256', b)
                 if not os.path.exists(dst):
                     shutil.copyfile(os.path.join(layout, 'blobs', 'sha256', b), dst)
         if sorted(plats) != expected:
             c.fail(f'{role}: image platforms {sorted(plats)} != expected {expected}')
+        if candidate:
+            try:
+                top = load_json(os.path.join(dest, 'index.json'))['manifests']
+                idx_digest = top[0]['digest']
+                if len(top) != 1 or (top[0].get('annotations') or {}).get('org.opencontainers.image.ref.name') != 'gated':
+                    c.fail(f'{role}: candidate layout is not a single index named "gated"')
+                blob(dest, idx_digest)  # hash-verified
+            except (OSError, ValueError, KeyError, IndexError) as e:
+                c.fail(f'{role}: unreadable candidate index: {e}')
+                continue
+            if role in want_digest and want_digest[role] != idx_digest:
+                c.fail(f'{role}: candidate index is {idx_digest}, not the requested {want_digest[role]}')
+            digests[role] = {'index_digest': idx_digest, 'layout': dest,
+                             'platforms': {plat(d): d['digest'] for d in merged if not is_attestation(d)}}
+            c.info(f'{role}: candidate index {idx_digest} = {digests[role]["platforms"]}')
+            continue
         index = json.dumps({'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.index.v1+json',
                             'manifests': merged}, separators=(',', ':')).encode()
         idx_digest = 'sha256:' + hashlib.sha256(index).hexdigest()
@@ -1352,15 +1406,19 @@ def cmd_manifest(a, c: Check) -> None:
                                           'org.opencontainers.image.ref.name': 'gated'}}]}, f)
         with open(os.path.join(dest, 'oci-layout'), 'w', encoding='utf-8') as f:
             json.dump({'imageLayoutVersion': '1.0.0'}, f)
-        digests[role] = {'index_digest': idx_digest, 'platforms': {plat(d): d['digest'] for d in merged
-                                                                   if not is_attestation(d)}}
+        digests[role] = {'index_digest': idx_digest, 'layout': dest,
+                         'platforms': {plat(d): d['digest'] for d in merged if not is_attestation(d)}}
         c.info(f'{role}: multi-platform index {idx_digest} = {digests[role]["platforms"]}')
     if 'api' in by_role and 'worker' in by_role:
         for p in expected:
             api, wk = diff_ids.get(('api', p), []), diff_ids.get(('worker', p), [])
             if not api or wk[:len(api)] != api or len(wk) <= len(api):
                 c.fail(f'{p}: the Worker image is not layered on the gated API image')
+    for role, d in digests.items():
+        if role in want_digest and want_digest[role] != d['index_digest']:
+            c.fail(f'{role}: index is {d["index_digest"]}, not the requested {want_digest[role]}')
     c.data['digests'] = digests
+    os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(a.out, 'digests.json'), 'w', encoding='utf-8') as f:
         json.dump(digests, f, indent=2)
     gh_out = os.environ.get('GITHUB_OUTPUT')
@@ -1368,6 +1426,50 @@ def cmd_manifest(a, c: Check) -> None:
         with open(gh_out, 'a', encoding='utf-8') as f:
             for role, d in digests.items():
                 f.write(f'{role}-index-digest={d["index_digest"]}\n')
+
+
+def cmd_release_manifest(a) -> int:
+    """The release manifest: commit, both index digests, per-platform digests, SBOM/provenance references, the Worker's
+    base, scanner versions and DB timestamps, and the native PDF results, from the gated layouts and the gate evidence."""
+    digests = load_json(a.digests)
+    out = {'schema': 1, 'status': a.status, 'commit': a.commit, 'repository': a.repo, 'gate_run': a.run_url,
+           'images': {}}
+    for role in ('api', 'worker'):
+        d = digests[role]
+        top, entries = layout_entries(d['layout'])
+        platforms = {}
+        for img in [e for e in entries if not is_attestation(e)]:
+            p = plat(img)
+            att = [e for e in entries if is_attestation(e)
+                   and (e.get('annotations') or {}).get('vnd.docker.reference.digest') == img['digest']]
+            refs = []
+            for e in att:
+                am = json.loads(blob(d['layout'], e['digest']))
+                refs += [{'attestation_manifest': e['digest'], 'predicate_type':
+                          (l.get('annotations') or {}).get('in-toto.io/predicate-type'), 'blob': l['digest']}
+                         for l in am.get('layers') or []]
+            arch = p.split('/')[1]
+            ev = os.path.join(a.evidence, f'image-gate-evidence-{arch}', f'results-{arch}')
+            scan = load_json(os.path.join(ev, f'{role}-scan.json'))['data'].get('scanners')                 if os.path.exists(os.path.join(ev, f'{role}-scan.json')) else None
+            entry = {'manifest_digest': img['digest'], 'reference': f'{a.repo}@{img["digest"]}',
+                     'attestations': refs, 'scanners': scan}
+            prov = os.path.join(ev, f'{role}-provenance.json')
+            if role == 'worker' and os.path.exists(prov):
+                deps = ((load_json(prov).get('predicate') or {}).get('buildDefinition') or {}).get(
+                    'resolvedDependencies') or []
+                entry['built_from'] = [x.get('uri') for x in deps if 'crewflow-gate-api-base' in str(x.get('uri'))]
+            pdf = os.path.join(ev, 'worker-pdf-run.json')
+            if role == 'worker' and os.path.exists(pdf):
+                r = load_json(pdf)
+                entry['native_pdf_render'] = {k: r.get(k) for k in (
+                    'native', 'uname_m', 'docker_host_arch', 'chromium', 'render_ms', 'pdf_pages', 'pdf_sha256')}
+            platforms[p] = entry
+        out['images'][role] = {'tag': f'{role}-{a.commit}', 'index_digest': d['index_digest'],
+                               'reference': f'{a.repo}@{d["index_digest"]}', 'platforms': platforms}
+    with open(a.output, 'w', encoding='utf-8') as f:
+        json.dump(out, f, indent=2)
+    print(json.dumps({r: v['reference'] for r, v in out['images'].items()}, indent=1))
+    return 0
 
 
 def cmd_slim(a) -> int:
@@ -1476,18 +1578,27 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser('attest')
     p.add_argument('role'), p.add_argument('layout'), p.add_argument('--image-id', required=True)
     p.add_argument('--image', help='the loaded image; its ID and layer chain must match the build output')
+    p.add_argument('--base-api-layout', help='Worker only: the gated API layout its provenance must name as base')
     p.add_argument('--revision', required=True), p.add_argument('--platform', required=True)
     p = sub.add_parser('manifest')
     p.add_argument('--expect-platforms', required=True), p.add_argument('--revision', required=True)
     p.add_argument('--out', required=True), p.add_argument('inputs', nargs='+')
+    p.add_argument('--expect-digest', action='append', help='role=sha256:... the index must have this digest')
     p = sub.add_parser('summary')
     p.add_argument('--expected', required=True), p.add_argument('--markdown'), p.add_argument('--title',
                                                                                              default='Image gate')
+    p = sub.add_parser('release-manifest')
+    p.add_argument('--digests', required=True), p.add_argument('--evidence', required=True)
+    p.add_argument('--commit', required=True), p.add_argument('--repo', default='docker.io/adhin007/adolphus')
+    p.add_argument('--run-url', default=''), p.add_argument('--status', default='gated (not published)')
+    p.add_argument('--output', required=True)
     p = sub.add_parser('slim')
     p.add_argument('layout'), p.add_argument('dest')
     a = ap.parse_args(argv)
     if a.cmd == 'slim':
         return cmd_slim(a)
+    if a.cmd == 'release-manifest':
+        return cmd_release_manifest(a)
     os.makedirs(a.results, exist_ok=True)
     if a.cmd == 'summary':
         return cmd_summary(a)

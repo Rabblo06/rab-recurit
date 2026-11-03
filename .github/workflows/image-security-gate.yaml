@@ -6,12 +6,17 @@ name: image-security-gate
 # runtime user/entrypoint/revision label, setuid/setgid and file capabilities, world-writable and non-root-owned code,
 # writable Node module paths and HOME, test/env/.git files, development packages, Trivy + Grype (pinned by digest, fresh
 # DBs) with the owner-decision register and the scanner-blind watch list, credential leaks in any layer, the SBOM and
-# provenance attestations, the multi-platform manifest, and a NATIVE PDF render (the owner's mandatory ARM64 release
-# gate): a real report through the production renderer inside the gated Worker image, as the launcher's jobs child. Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
+# provenance attestations (the Worker's must name this run's API image as its base), the multi-platform manifest, and a
+# NATIVE PDF render (the owner's mandatory ARM64 release gate). Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
+#
+# CANDIDATE mode (candidate-run-id + both index digests): nothing is built. The gated multi-platform API and Worker
+# layouts a previous run exported are verified against the given digests, and every check above, including the native
+# amd64 + arm64 PDF render, runs against exactly those images. Dispatch it on the candidate's commit (the revision checks
+# compare the images with the checked-out commit).
 #
 # Callers: ci-security.yaml (mode pr; amd64, plus arm64 when Docker inputs change) and publish-image.yaml (mode release,
-# both platforms, before anything is pushed). workflow_dispatch = a release-mode dry run of both platforms. This workflow
-# never logs in to a registry and never pushes: it only has `contents: read` (+ `security-events: write` for SARIF).
+# both platforms, before anything is pushed). workflow_dispatch = a release-mode run of both platforms (build, or verify a
+# candidate) that exports the gated layouts as a candidate. This workflow never logs in to a registry and never pushes.
 on:
   workflow_call:
     inputs:
@@ -24,14 +29,42 @@ on:
         type: string
         default: '["linux/amd64"]'
       export-layouts:
-        description: Upload the gated multi-platform API layout (complete, for publishing)
+        description: Upload the gated multi-platform API and Worker layouts (complete, for publishing or later verification)
         type: boolean
         default: false
+      candidate-run-id:
+        description: Verify the candidate exported by this workflow run instead of building
+        type: string
+        default: ''
+      candidate-api-digest:
+        description: Candidate API index digest (required with candidate-run-id)
+        type: string
+        default: ''
+      candidate-worker-digest:
+        description: Candidate Worker index digest (required with candidate-run-id)
+        type: string
+        default: ''
     outputs:
       api-index-digest:
         description: Digest of the gated multi-platform API index
         value: ${{ jobs.manifest.outputs.api-index-digest }}
+      worker-index-digest:
+        description: Digest of the gated multi-platform Worker index
+        value: ${{ jobs.manifest.outputs.worker-index-digest }}
   workflow_dispatch:
+    inputs:
+      candidate-run-id:
+        description: Optional. Verify the candidate exported by this run (gated-api-layout / gated-worker-layout) instead of building
+        type: string
+        default: ''
+      candidate-api-digest:
+        description: Candidate API index digest (sha256:...)
+        type: string
+        default: ''
+      candidate-worker-digest:
+        description: Candidate Worker index digest (sha256:...)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -39,6 +72,10 @@ permissions:
 env:
   MODE: ${{ inputs.mode || 'release' }}
   PLATFORMS: ${{ inputs.platforms || '["linux/amd64","linux/arm64"]' }}
+  EXPORT_LAYOUTS: ${{ inputs.export-layouts || github.event_name == 'workflow_dispatch' }}
+  CANDIDATE_RUN: ${{ inputs.candidate-run-id }}
+  CANDIDATE_API: ${{ inputs.candidate-api-digest }}
+  CANDIDATE_WORKER: ${{ inputs.candidate-worker-digest }}
   GATE: packages/rab-docker/scripts/image-security/image_gate.py
   PYTHONDONTWRITEBYTECODE: "1"
 
@@ -51,7 +88,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Gate self-tests (policy logic, version comparison, decision register)
+      - name: Gate self-tests (policy logic, PDF oracle, publish fail-closed paths with a fake registry client)
         run: python3 -m unittest discover -s packages/rab-docker/scripts/image-security/tests -v
       - name: Dockerfile base-image pins, security-floors.env, decision register, watch list
         if: ${{ !cancelled() }}
@@ -60,6 +97,13 @@ jobs:
       - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
         if: ${{ !cancelled() }}
         run: bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh
+      - name: Candidate inputs are complete
+        if: ${{ !cancelled() && env.CANDIDATE_RUN != '' }}
+        run: |
+          [[ "$CANDIDATE_RUN" =~ ^[0-9]+$ ]] || { echo "::error::candidate-run-id must be a workflow run id"; exit 1; }
+          for d in "$CANDIDATE_API" "$CANDIDATE_WORKER"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::candidate digests must both be sha256:<64 hex>"; exit 1; }
+          done
       - name: Summary
         if: always()
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected static --title "Image gate - static"
@@ -76,9 +120,9 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read # candidate mode: download the candidate's artifacts from its run
     env:
       PLATFORM: ${{ matrix.platform }}
-      EXPORT_LAYOUTS: ${{ inputs.export-layouts }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -96,14 +140,36 @@ jobs:
           } >> "$GITHUB_ENV"
           mkdir -p "$RUNNER_TEMP/results-$arch" "$RUNNER_TEMP/trivy-cache" "$RUNNER_TEMP/grype-cache"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: ${{ env.CANDIDATE_RUN == '' }}
         with:
           # BuildKit itself pinned by digest (v0.34.1), not the moving buildx-stable-1 tag.
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
-      - name: skopeo (loads the built OCI layout into Docker unchanged)
+      - name: skopeo (loads OCI layouts into Docker unchanged)
         run: command -v skopeo || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends skopeo; }
-      - name: Build API + Worker (no cache, SBOM + provenance; nothing is pushed)
+      - name: Download the candidate API layout
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gated-api-layout
+          path: ${{ runner.temp }}/candidate/api-layout
+          run-id: ${{ inputs.candidate-run-id }}
+          github-token: ${{ github.token }}
+      - name: Download the candidate Worker layout
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gated-worker-layout
+          path: ${{ runner.temp }}/candidate/worker-layout
+          run-id: ${{ inputs.candidate-run-id }}
+          github-token: ${{ github.token }}
+      - name: Build API + Worker (no cache, SBOM + provenance), or load the candidate; nothing is pushed
         id: build
-        run: bash packages/rab-docker/scripts/image-security/build-gate-images.sh "$PLATFORM" "$OUT"
+        run: |
+          if [ -n "$CANDIDATE_RUN" ]; then
+            bash packages/rab-docker/scripts/image-security/load-candidate.sh "$PLATFORM" "$OUT" "$RUNNER_TEMP/candidate" "$CANDIDATE_API" "$CANDIDATE_WORKER"
+          else
+            bash packages/rab-docker/scripts/image-security/build-gate-images.sh "$PLATFORM" "$OUT"
+          fi
       # A gate runs only on an image that was actually built: a build failure leaves its checks without a result, and the
       # summary counts a missing result as FAILED, never as passed.
       - name: API image gates
@@ -115,7 +181,7 @@ jobs:
           IMAGE: ${{ steps.build.outputs.api-image }}
           IMAGE_ID: ${{ steps.build.outputs.api-id }}
           LAYOUT: ${{ steps.build.outputs.api-layout }}
-      - name: Worker image gates
+      - name: Worker image gates (including the native PDF render)
         id: worker
         if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
         run: bash packages/rab-docker/scripts/image-security/run-role-gates.sh worker
@@ -124,6 +190,7 @@ jobs:
           IMAGE: ${{ steps.build.outputs.worker-image }}
           IMAGE_ID: ${{ steps.build.outputs.worker-id }}
           LAYOUT: ${{ steps.build.outputs.worker-layout }}
+          API_LAYOUT: ${{ steps.build.outputs.api-layout }}
       - name: Worker is layered on the gated API image
         if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
         env:
@@ -131,24 +198,33 @@ jobs:
           WORKER_IMAGE: ${{ steps.build.outputs.worker-image }}
         run: python3 "$GATE" --mode "$MODE" --results "$RESULTS" worker-base "$API_IMAGE" "$WORKER_IMAGE"
       - name: Layout metadata for the multi-platform manifest check
-        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        if: ${{ !cancelled() && env.CANDIDATE_RUN == '' && steps.build.outputs.worker-id != '' }}
         run: |
           python3 "$GATE" slim "$OUT/api-layout" "$RUNNER_TEMP/meta/api"
           python3 "$GATE" slim "$OUT/worker-layout" "$RUNNER_TEMP/meta/worker"
       - name: Upload layout metadata
-        if: ${{ !cancelled() && steps.build.outputs.worker-id != '' }}
+        if: ${{ !cancelled() && env.CANDIDATE_RUN == '' && steps.build.outputs.worker-id != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: image-layout-meta-${{ env.ARCH }}
           path: ${{ runner.temp }}/meta
           retention-days: 7
           if-no-files-found: error
-      - name: Upload the complete API layout (release only; input to publishing)
-        if: ${{ !cancelled() && inputs.export-layouts && steps.api.outcome == 'success' && steps.worker.outcome == 'success' }}
+      - name: Upload the complete API layout (export only; input to the gated index)
+        if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && env.CANDIDATE_RUN == '' && steps.api.outcome == 'success' && steps.worker.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: image-layout-api-${{ env.ARCH }}
           path: ${{ steps.build.outputs.api-layout }}
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload the complete Worker layout (export only; input to the gated index)
+        if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && env.CANDIDATE_RUN == '' && steps.api.outcome == 'success' && steps.worker.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-layout-worker-${{ env.ARCH }}
+          path: ${{ steps.build.outputs.worker-layout }}
           retention-days: 3
           compression-level: 0
           if-no-files-found: error
@@ -173,7 +249,7 @@ jobs:
           python3 "$GATE" --mode "$MODE" --results "$RESULTS" summary \
             --title "Image gate - $PLATFORM" --markdown "$RESULTS/summary.md" \
             --expected api-config,api-container,api-fs,api-attest,api-scan,api-vulns,api-secrets,worker-config,worker-container,worker-fs,worker-attest,worker-scan,worker-vulns,worker-secrets,worker-pdf,worker-base
-      - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps)
+      - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps, PDF)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -190,53 +266,116 @@ jobs:
     needs: image
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
     outputs:
       api-index-digest: ${{ steps.merge.outputs.api-index-digest }}
-    env:
-      EXPORT_LAYOUTS: ${{ inputs.export-layouts }}
+      worker-index-digest: ${{ steps.merge.outputs.worker-index-digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - name: Download layout metadata
+        if: ${{ env.CANDIDATE_RUN == '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: image-layout-meta-*
           path: ${{ runner.temp }}/meta
-      - name: Download complete API layouts (release only)
-        if: ${{ inputs.export-layouts }}
+      - name: Download complete per-platform layouts (export only)
+        if: ${{ env.CANDIDATE_RUN == '' && env.EXPORT_LAYOUTS == 'true' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: image-layout-api-*
+          pattern: image-layout-*-*64
           path: ${{ runner.temp }}/full
+      - name: Download the candidate API layout
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gated-api-layout
+          path: ${{ runner.temp }}/candidate/api-layout
+          run-id: ${{ inputs.candidate-run-id }}
+          github-token: ${{ github.token }}
+      - name: Download the candidate Worker layout
+        if: ${{ env.CANDIDATE_RUN != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gated-worker-layout
+          path: ${{ runner.temp }}/candidate/worker-layout
+          run-id: ${{ inputs.candidate-run-id }}
+          github-token: ${{ github.token }}
+      - name: Download per-platform evidence (release manifest)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: image-gate-evidence-*64
+          path: ${{ runner.temp }}/evidence
       # Every EXPECTED platform is an input, whether or not its artifact arrived: a missing platform fails here.
-      - name: Merge per-platform layouts and verify the index (platforms, configs, attestations, revision, Worker base)
+      - name: Merge (or verify the candidate) and check the index (platforms, configs, attestations, revision, Worker base)
         id: merge
         run: |
           set -euo pipefail
           rev="$(git rev-parse HEAD)"
           plats="$(python3 -c 'import json,os; print(",".join(json.loads(os.environ["PLATFORMS"])))')"
           inputs=()
-          for p in ${plats//,/ }; do
-            arch="${p#linux/}"
-            api="$RUNNER_TEMP/meta/image-layout-meta-$arch/api"
-            if [ "$EXPORT_LAYOUTS" = true ]; then api="$RUNNER_TEMP/full/image-layout-api-$arch"; fi
-            inputs+=("api=$p=$api" "worker=$p=$RUNNER_TEMP/meta/image-layout-meta-$arch/worker")
-          done
+          expect=()
+          if [ -n "$CANDIDATE_RUN" ]; then
+            inputs=("api=multi=$RUNNER_TEMP/candidate/api-layout" "worker=multi=$RUNNER_TEMP/candidate/worker-layout")
+            expect=(--expect-digest "api=$CANDIDATE_API" --expect-digest "worker=$CANDIDATE_WORKER")
+          else
+            for p in ${plats//,/ }; do
+              arch="${p#linux/}"
+              api="$RUNNER_TEMP/meta/image-layout-meta-$arch/api"
+              worker="$RUNNER_TEMP/meta/image-layout-meta-$arch/worker"
+              if [ "$EXPORT_LAYOUTS" = true ]; then
+                api="$RUNNER_TEMP/full/image-layout-api-$arch"
+                worker="$RUNNER_TEMP/full/image-layout-worker-$arch"
+              fi
+              inputs+=("api=$p=$api" "worker=$p=$worker")
+            done
+          fi
           python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" --name manifest manifest \
-            --expect-platforms "$plats" --revision "$rev" --out "$RUNNER_TEMP/merged" "${inputs[@]}"
+            --expect-platforms "$plats" --revision "$rev" --out "$RUNNER_TEMP/merged" "${expect[@]}" "${inputs[@]}"
+          python3 - "$RUNNER_TEMP/merged/digests.json" << 'EOF' >> "$GITHUB_ENV"
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          print(f"API_GATED_LAYOUT={d['api']['layout']}")
+          print(f"WORKER_GATED_LAYOUT={d['worker']['layout']}")
+          EOF
+      - name: Release manifest (commit, index and per-platform digests, SBOM/provenance, Worker base, scanner DBs, PDF)
+        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
+        run: |
+          python3 "$GATE" release-manifest --digests "$RUNNER_TEMP/merged/digests.json" --evidence "$RUNNER_TEMP/evidence" \
+            --commit "$(git rev-parse HEAD)" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --output "$RUNNER_TEMP/merged/release-manifest.json"
       - name: Summary
         if: always()
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected manifest --title "Image gate - multi-platform manifest"
-      - name: Upload the gated multi-platform API layout (release only; what publish-image pushes)
-        if: ${{ inputs.export-layouts && steps.merge.outcome == 'success' }}
+      - name: Upload the gated multi-platform API layout (what publish-image pushes, or a later candidate verify reads)
+        if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && steps.merge.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gated-api-layout
-          path: ${{ runner.temp }}/merged/api-layout
-          retention-days: 3
+          path: ${{ env.API_GATED_LAYOUT }}
+          retention-days: 7
           compression-level: 0
+          if-no-files-found: error
+      - name: Upload the gated multi-platform Worker layout
+        if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && steps.merge.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gated-worker-layout
+          path: ${{ env.WORKER_GATED_LAYOUT }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload the release manifest (candidate, not published)
+        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest-candidate
+          path: ${{ runner.temp }}/merged/release-manifest.json
+          retention-days: 30
           if-no-files-found: error
       - name: Upload manifest evidence
         if: always()
@@ -263,9 +402,9 @@ jobs:
           IMAGE: ${{ needs.image.result }}
           MANIFEST: ${{ needs.manifest.result }}
         run: |
-          echo "mode=$MODE platforms=$PLATFORMS static=$STATIC image=$IMAGE manifest=$MANIFEST"
+          echo "mode=$MODE platforms=$PLATFORMS candidate=${CANDIDATE_RUN:-none} static=$STATIC image=$IMAGE manifest=$MANIFEST"
           {
-            echo "### Image security gate ($MODE)"
+            echo "### Image security gate ($MODE${CANDIDATE_RUN:+, candidate from run $CANDIDATE_RUN})"
             echo "| Job | Result |"
             echo "|---|---|"
             echo "| static | $STATIC |"

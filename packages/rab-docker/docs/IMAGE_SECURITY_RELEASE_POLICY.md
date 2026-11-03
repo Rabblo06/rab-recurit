@@ -8,7 +8,8 @@ release, how the version floors are raised, and how a finding that cannot be fix
 |---|---|
 | `.github/workflows/image-security-gate.yaml` | The gate: builds both images per platform and checks them |
 | `.github/workflows/ci-security.yaml` (`image-gate`, `ci-security-gate`) | Runs the gate on every PR and every push to `main`, in PR mode |
-| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then pushes the exact gated index |
+| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated API and Worker indexes to `docker.io/adhin007/adolphus` |
+| `packages/rab-docker/scripts/image-security/publish-gated.sh` | The only push path: one gated index, one immutable tag, existing tags refused, served digests verified |
 | `packages/rab-docker/rab/security-floors.env` | Minimum Node, Chromium and libexpat versions, the Alpine branch, npm floors |
 | `packages/rab-docker/rab/security-floors.sh`, `module-paths-gate.cjs` | H1 build-time gates, re-run by the gate against the finished image |
 | `packages/rab-docker/scripts/image-security/policy.json` | Expected users, entrypoints, writable dirs, code paths, package lists, scanner pins |
@@ -21,8 +22,9 @@ release, how the version floors are raised, and how a finding that cannot be fix
 | Trigger | Mode | Platforms | Pushes an image? |
 |---|---|---|---|
 | Pull request, push to `main` (`ci-security.yaml`) | `pr` | linux/amd64; linux/arm64 too when Docker inputs change (`changed-files.yaml` `docker` filter) | **No.** The gate workflow only has `contents: read` (+ `security-events: write` for SARIF) and never logs in to a registry |
-| `workflow_dispatch` of `image-security-gate.yaml` | `release` | both | No (dry run) |
-| GitHub release published, or `workflow_dispatch` of `publish-image.yaml` | `release` | both | Only after the gate passes, and only the gated digest |
+| `workflow_dispatch` of `image-security-gate.yaml` | `release` | both | No. It builds (or verifies a candidate) and exports the gated layouts as a candidate |
+| `workflow_dispatch` of `publish-image.yaml`, `mode: candidate-verify` (default) | `release` | both | **No.** It runs the full gate, including the native amd64 + arm64 PDF render, against a fresh build or an earlier candidate given by run id and index digests |
+| GitHub release published, or `workflow_dispatch` of `publish-image.yaml` with `mode: publish` | `release` | both | Only after the gate passes **and** a required reviewer approves the `release` environment, and only the gated digests |
 
 A merge to `main` never publishes or deploys anything through these workflows. Each platform is built on a native
 runner (`ubuntu-24.04`, `ubuntu-24.04-arm`) with `--pull --no-cache`, so no cached apk layer can skip a newer package.
@@ -159,30 +161,85 @@ and update `verified_on`.
 
 ## 8. Publishing and tags
 
-- `publish-image.yaml` pushes only the merged multi-platform API index that the gate produced. It verifies every blob
-  hash, copies the index with `skopeo copy --all --preserve-digests` (no rebuild), and checks that the registry then
-  serves the gated digest.
-- **Immutable tags:**
-  - `sha-<12 hex>` on every publish;
-  - `X.Y.Z` from a `rab/vX.Y.Z` release.
+- **Target.** The private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer published to: a
+  second registry would need its own tag policy, verification and cleanup, so it does not come for free. Both images
+  come from the same commit and are multi-arch indexes (linux/amd64 + linux/arm64).
+- **Exactly two immutable tags per release:**
+  - `api-<full commit sha>` and `worker-<full commit sha>`;
+  - no `latest`, no version or per-architecture tags, nothing that moves;
+  - the push refuses any existing tag, whatever digest it points at.
 
-  If either tag already exists at another digest, the job fails. If it exists at the same digest, the run is treated as a
-  re-run.
-- `latest` (non-prerelease releases only) is the only moving tag.
-- The Worker image is built and gated but **not published** (unchanged behaviour). Publishing it would be a new GHCR
-  package and needs an owner decision.
+  **Deploy only by index digest:** `docker.io/adhin007/adolphus@sha256:...`, taken from the release manifest. The tags
+  are labels, not references.
+- **What is pushed.**
+  1. The Worker is built FROM the API image of the same run, through an OCI-layout build context pinned by digest. The
+     gate proves this from the Worker's provenance (its `crewflow-gate-api-base` dependency must resolve to the gated
+     API image for that platform) and from its layer chain.
+  2. The publish job pushes exactly the two gated layouts with `publish-gated.sh`, which:
+     - checks every blob hash and the expected index digest;
+     - logs in with the environment secret;
+     - fails if the tag exists, or if the registry's answer is anything but "not found";
+     - copies with `skopeo copy --all --preserve-digests` (no rebuild);
+     - verifies that the tag, the index digest and every per-platform manifest are served with exactly the gated
+       digests.
+- **Approval.** The `publish` job runs in the GitHub environment `release`, which must have required reviewers.
+  `environment-check` fails the run before anything is built if the environment is missing or unprotected. The reviewer
+  approves after the gate's results are visible, including the native ARM64 PDF render of the exact candidate.
+- **Candidate verify.** `publish-image.yaml` -> Run workflow -> `mode: candidate-verify`, with an optional
+  `candidate-run-id` plus both index digests (from that run's `release-manifest-candidate` artifact):
+  - re-runs every gate against exactly that candidate, including the native PDF render on both architectures;
+  - never publishes;
+  - to publish a verified candidate, dispatch again with `mode: publish` and the same three inputs;
+  - dispatch on the candidate's commit, because the revision checks compare the images with the checked-out commit.
+- **Release manifest.** The gate's manifest job writes `release-manifest-candidate` with:
+  - the commit;
+  - both index digests and references, and the per-platform manifest digests;
+  - the SBOM (SPDX) and provenance (SLSA v1) attestation-manifest and blob digests;
+  - the Worker's recorded base;
+  - the scanner versions and DB timestamps per image and platform;
+  - the native PDF render results.
+
+  After the push, the publish job adds the published tags and the GitHub attestation URLs, and uploads it as
+  `release-manifest` (retained 90 days).
 
 ## 9. Credentials
 
-| Need | Credential | Status |
+| Need | Credential | Where it is available |
 |---|---|---|
-| Build, gate, Trivy, Grype, DB downloads, SBOM, BuildKit provenance | none | works with the default read-only `GITHUB_TOKEN` |
-| SARIF upload to code scanning | `GITHUB_TOKEN` `security-events: write` (gate image job) | existing |
-| Push to GHCR | `GITHUB_TOKEN` `packages: write` (publish job only) | existing |
-| GitHub build-provenance attestation | `GITHUB_TOKEN` `id-token: write` + `attestations: write` (publish job only) | permission change, no secret |
-| Docker Scout | A Docker Hub account token | **not used, not requested** |
+| Build, gate, Trivy, Grype, DB downloads, SBOM, BuildKit provenance, candidate download | none (`GITHUB_TOKEN` `contents: read`, `actions: read`) | gate jobs |
+| SARIF upload to code scanning | `GITHUB_TOKEN` `security-events: write` | gate image job |
+| Push to `docker.io/adhin007/adolphus` | **secret `DOCKERHUB_PUSH_TOKEN`** + **variable `DOCKERHUB_USERNAME`** | **only** the `publish` job, through the protected environment `release` |
+| GitHub build-provenance attestation | `GITHUB_TOKEN` `id-token: write` + `attestations: write` | `publish` job only |
+| Read `release` environment protection | `GITHUB_TOKEN` (public repository) | `environment-check` |
 
-No stored secret is needed or referenced.
+**Docker Hub token: what the owner creates, by hand, once.**
+
+- **Account type.** `adhin007` is a **personal** Docker account (Docker Hub API `type: User`). Docker's repository-scoped
+  *organization access tokens* (Image Push scope on chosen repositories) exist only for organizations on a Docker Team or
+  Business plan. For this account, the minimum is a **personal access token**.
+- **Token.** A personal access token with permission **"Repo Read & Write"**:
+  - never "Read, Write, Delete";
+  - an expiry date (for example 90 days) and a description naming this repository and workflow.
+
+  A PAT cannot be limited to one repository: Read & Write applies to every repository the account can access.
+- **Recommended mitigation.** Create a dedicated Docker account used only for CI, give it access to `adhin007/adolphus`
+  only, and issue the PAT from that account. Then the token can reach nothing else. Check that the owner's Docker plan
+  allows collaborators on private repositories. The stricter alternative is moving the repository into a Docker
+  organization (Team plan) and using an organization access token with **Image Push** on `adolphus` only.
+- **Where to put it.** GitHub -> Settings -> Environments -> **`release`**:
+  - add required reviewers (at least one; preferably not the person who publishes the release);
+  - add the environment **secret `DOCKERHUB_PUSH_TOKEN`** (the PAT);
+  - add the environment **variable `DOCKERHUB_USERNAME`** (the account that owns the PAT);
+  - optionally restrict deployment branches/tags to `main` and `rab/v*`.
+
+  Do not create them as repository-wide secrets.
+- **Fail closed.**
+  - If either value is absent, the publish job stops with an explicit error before any registry call.
+  - If the environment is missing or has no required reviewers, `environment-check` stops the run before the gate.
+- **Usage.** The token is used only by `publish-gated.sh`, via `skopeo login --password-stdin` into a temporary auth
+  file that is deleted at the end. It is never echoed, and it is not exposed to the gate, PR workflows or forks.
+
+Docker Scout is not used.
 
 ## 10. Development dependencies (H3)
 

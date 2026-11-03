@@ -1,19 +1,48 @@
 name: publish-image
 
-# Publishes the shared backend image (packages/rab-docker/rab/Dockerfile, final stage `rab` = the API / rab-migrate /
-# rab-ops image) to GitHub Container Registry. Runs ONLY when a GitHub release is published or on manual dispatch: never on
-# a push or a merge. Since Docker hardening H2 this image has NO Chromium: the Worker image (PDF rendering) is
-# packages/rab-docker/rab/Dockerfile.worker-bundle built FROM it; it is built and gated here but not published.
+# Publishes the gated API and Worker images to the PRIVATE Docker Hub repository docker.io/adhin007/adolphus (owner
+# decision, Docker hardening H5). Runs ONLY when a GitHub release is published or on manual dispatch: never on a push or
+# a merge. GHCR is no longer a target.
 #
-# Docker hardening H5: nothing is pushed unless the release-mode image security gate (image-security-gate.yaml) passed
-# for linux/amd64 AND linux/arm64 (native runners, no cache). The publish job then pushes THE EXACT gated multi-platform
-# index (digests preserved; no rebuild), verifies the registry serves that digest, and attaches a GitHub build-provenance
-# attestation. Immutable tags (the release version, sha-<commit>) are never overwritten: if one already points at a
-# different digest the job fails. `latest` is the only moving tag (non-prerelease releases only).
+#   1. environment-check  The protected GitHub environment `release` must exist with required reviewers (fails closed:
+#                         an unprotected or auto-created environment would publish without approval).
+#   2. gate               image-security-gate.yaml in RELEASE mode on native linux/amd64 + linux/arm64. It builds the API,
+#                         then the Worker FROM that exact API image digest, with SBOM + provenance, and runs every check
+#                         including the native PDF render on both architectures. With `candidate-run-id` it builds
+#                         nothing and re-verifies that earlier candidate by digest instead.
+#   3. publish            Only for a release or `mode: publish`, only after the gate passed, and only after a required
+#                         reviewer approves the `release` environment, having seen the gate's results (native ARM64 render
+#                         included). It pushes the two EXACT gated indexes, with digests preserved and no rebuild, under the
+#                         two immutable tags api-<commit> and worker-<commit>. It refuses an existing tag, verifies that
+#                         the registry serves the gated digests, attests provenance, and emits the release manifest.
+#                         No `latest`, no per-architecture tags, no moving tags.
+#
+# Credentials (created by hand by the owner; see packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 9):
+#   secret   DOCKERHUB_PUSH_TOKEN  Docker Hub PAT, "Repo Read & Write" (no Delete), environment `release` only
+#   variable DOCKERHUB_USERNAME    the account that owns the PAT, environment `release`
+# Missing either one: the publish job fails before any registry call.
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "candidate-verify: gate only, never publishes. publish: gate, then push after environment approval."
+        type: choice
+        options: [candidate-verify, publish]
+        default: candidate-verify
+      candidate-run-id:
+        description: Optional. Re-verify (and, in publish mode, publish) the candidate exported by this run instead of building
+        type: string
+        default: ''
+      candidate-api-digest:
+        description: Candidate API index digest (sha256:...), required with candidate-run-id
+        type: string
+        default: ''
+      candidate-worker-digest:
+        description: Candidate Worker index digest (sha256:...), required with candidate-run-id
+        type: string
+        default: ''
 
 concurrency:
   group: publish-image-${{ github.ref }}
@@ -23,133 +52,153 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/rabblo06/rab-recurit-server
+  REGISTRY_REPO: docker.io/adhin007/adolphus
+  PUBLISH: ${{ github.event_name == 'release' || inputs.mode == 'publish' }}
 
 jobs:
+  environment-check:
+    name: release environment is protected
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Environment `release` exists and requires a reviewer
+        if: ${{ env.PUBLISH == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! env_json="$(gh api "repos/$GITHUB_REPOSITORY/environments/release" 2> "$RUNNER_TEMP/env.err")"; then
+            echo "::error::GitHub environment 'release' does not exist. The owner must create it with required reviewers and the DOCKERHUB_PUSH_TOKEN secret before publishing; nothing was built or pushed."
+            exit 1
+          fi
+          reviewers="$(printf '%s' "$env_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(r.get("reviewers") or []) for r in d.get("protection_rules") or [] if r.get("type")=="required_reviewers"))')"
+          if [ "${reviewers:-0}" -lt 1 ]; then
+            echo "::error::GitHub environment 'release' has no required reviewers: publishing would need no approval. Add required reviewers first."
+            exit 1
+          fi
+          echo "environment 'release': $reviewers required reviewer(s)"
+      - name: Candidate verify only (never publishes)
+        if: ${{ env.PUBLISH != 'true' }}
+        run: echo "mode=candidate-verify; the publish job will not run"
+
   gate:
+    needs: environment-check
     uses: ./.github/workflows/image-security-gate.yaml
     permissions:
       contents: read
       security-events: write
+      actions: read
     with:
       mode: release
       platforms: '["linux/amd64","linux/arm64"]'
       export-layouts: true
+      candidate-run-id: ${{ inputs.candidate-run-id || '' }}
+      candidate-api-digest: ${{ inputs.candidate-api-digest || '' }}
+      candidate-worker-digest: ${{ inputs.candidate-worker-digest || '' }}
 
   publish:
-    needs: gate
-    if: ${{ needs.gate.result == 'success' }}
-    # One publication at a time across ALL refs (two releases of the same commit share sha-<commit>): the immutable-tag
-    # check and the push below can never interleave with another run's. The gate builds still run in parallel.
-    concurrency:
-      group: publish-image-ghcr-rab-recurit-server
-      cancel-in-progress: false
+    needs: [environment-check, gate]
+    if: ${{ needs.gate.result == 'success' && needs.environment-check.result == 'success' && (github.event_name == 'release' || inputs.mode == 'publish') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    # GITHUB_TOKEN only (no stored secret): packages:write to push to GHCR; id-token + attestations to sign and store the
-    # build-provenance attestation. Scoped to this job; the gate jobs never get them.
+    timeout-minutes: 45
+    # Manual approval: required reviewers of the `release` environment approve this job after the gate has passed.
+    # The Docker Hub credential exists ONLY in this environment, so no other job can read it.
+    environment: release
+    # One publication at a time across ALL refs: the tag-existence check and the push never interleave with another run.
+    concurrency:
+      group: publish-image-docker-hub-adolphus
+      cancel-in-progress: false
+    # GITHUB_TOKEN only needs id-token + attestations for the GitHub build-provenance attestation. The registry
+    # credential is the environment secret below.
     permissions:
       contents: read
-      packages: write
       id-token: write
       attestations: write
     env:
-      GATED_DIGEST: ${{ needs.gate.outputs.api-index-digest }}
-      EVENT: ${{ github.event_name }}
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
-      PRERELEASE: ${{ github.event.release.prerelease }}
+      API_DIGEST: ${{ needs.gate.outputs.api-index-digest }}
+      WORKER_DIGEST: ${{ needs.gate.outputs.worker-index-digest }}
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+      DOCKERHUB_PUSH_TOKEN: ${{ secrets.DOCKERHUB_PUSH_TOKEN }}
     steps:
-      - name: Download the gated multi-platform API layout
+      - name: Credentials present (fail closed before anything else)
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_PUSH_TOKEN" ]; then
+            echo "::error::Docker Hub credentials are missing: create the variable DOCKERHUB_USERNAME and the secret DOCKERHUB_PUSH_TOKEN in the GitHub environment 'release' (policy section 9). Nothing was pushed."
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download the gated API layout
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: gated-api-layout
-          path: ${{ runner.temp }}/gated
-      - name: Verify the layout is exactly what the gate passed
+          path: ${{ runner.temp }}/gated/api
+      - name: Download the gated Worker layout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gated-worker-layout
+          path: ${{ runner.temp }}/gated/worker
+      - name: Download the candidate release manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-manifest-candidate
+          path: ${{ runner.temp }}/release
+      - name: Push the API index (api-<commit>), then the Worker index (worker-<commit>); verify served digests
         run: |
           set -euo pipefail
-          [[ "$GATED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no gated digest from the gate"; exit 1; }
-          python3 - "$RUNNER_TEMP/gated" "$GATED_DIGEST" <<'EOF'
-          import hashlib, json, os, sys
-          layout, want = sys.argv[1], sys.argv[2]
-          top = json.load(open(os.path.join(layout, 'index.json')))['manifests']
-          assert len(top) == 1 and top[0]['digest'] == want, f'layout index {top} != gated {want}'
-          bad = []
-          for name in os.listdir(os.path.join(layout, 'blobs', 'sha256')):
-              h = hashlib.sha256()
-              with open(os.path.join(layout, 'blobs', 'sha256', name), 'rb') as f:
-                  for chunk in iter(lambda: f.read(1 << 20), b''):
-                      h.update(chunk)
-              if h.hexdigest() != name:
-                  bad.append(name)
-          assert not bad, f'corrupt blobs: {bad}'
-          print(f'layout verified: {want}')
-          EOF
-      - name: Tags
-        id: tags
-        run: |
-          set -euo pipefail
-          tags="sha-${GITHUB_SHA::12}"
-          if [ "$EVENT" = release ]; then
-            # Release tags follow the repo's rab/vX.Y.Z naming; anything else is refused rather than guessed.
-            if [[ ! "$RELEASE_TAG" =~ ^rab/v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
-              echo "::error::release tag '$RELEASE_TAG' is not rab/vX.Y.Z"
-              exit 1
-            fi
-            tags="$tags ${BASH_REMATCH[1]}"
-            if [ "$PRERELEASE" != true ]; then tags="$tags latest"; fi
-          fi
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "tags: $tags"
-      # docker login: skopeo and actions/attest-build-provenance (push-to-registry) both read Docker's credential store.
-      - name: Log in to GHCR (GITHUB_TOKEN, never printed)
-        env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Refuse to overwrite an immutable tag
-        env:
-          TAGS: ${{ steps.tags.outputs.tags }}
-        run: |
-          set -euo pipefail
-          for t in $TAGS; do
-            [ "$t" != latest ] || continue
-            if out="$(skopeo inspect --raw "docker://$IMAGE:$t" 2> "$RUNNER_TEMP/inspect.err")"; then
-              have="sha256:$(printf '%s' "$out" | sha256sum | cut -d' ' -f1)"
-              if [ "$have" != "$GATED_DIGEST" ]; then
-                echo "::error::$IMAGE:$t already exists at $have; immutable tags are never overwritten"
-                exit 1
-              fi
-              echo "$IMAGE:$t already points at the gated digest (re-run)"
-            elif grep -qiE 'manifest unknown|not found|name unknown' "$RUNNER_TEMP/inspect.err"; then
-              echo "$IMAGE:$t is new"
-            else
-              echo "::error::cannot tell whether $IMAGE:$t exists: $(tail -c 300 "$RUNNER_TEMP/inspect.err")"
-              exit 1
-            fi
+          COMMIT="$(git rev-parse HEAD)"
+          export COMMIT
+          for d in "$API_DIGEST" "$WORKER_DIGEST"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::the gate returned no index digest"; exit 1; }
           done
-      - name: Push the gated index (digests preserved, no rebuild) and verify the registry serves it
-        env:
-          TAGS: ${{ steps.tags.outputs.tags }}
-        run: |
-          set -euo pipefail
-          for t in $TAGS; do
-            skopeo copy --all --preserve-digests --retry-times 3 "oci:$RUNNER_TEMP/gated:gated" "docker://$IMAGE:$t"
-            have="sha256:$(skopeo inspect --raw "docker://$IMAGE:$t" | sha256sum | cut -d' ' -f1)"
-            if [ "$have" != "$GATED_DIGEST" ]; then
-              echo "::error::$IMAGE:$t serves $have, not the gated $GATED_DIGEST"
-              exit 1
-            fi
-            echo "pushed $IMAGE:$t = $GATED_DIGEST"
-          done
-          {
-            echo "### Published $IMAGE@$GATED_DIGEST"
-            echo "Tags: $TAGS"
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Build-provenance attestation (GitHub, OIDC-signed)
+          s=packages/rab-docker/scripts/image-security/publish-gated.sh
+          bash "$s" "$RUNNER_TEMP/gated/api" "$API_DIGEST" "api-$COMMIT"
+          bash "$s" "$RUNNER_TEMP/gated/worker" "$WORKER_DIGEST" "worker-$COMMIT"
+      - name: Build-provenance attestation for the API index (GitHub, OIDC-signed)
+        id: attest-api
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ env.GATED_DIGEST }}
-          push-to-registry: true
-      - name: Log out of GHCR
-        if: always()
-        run: docker logout ghcr.io || true
+          subject-name: ${{ env.REGISTRY_REPO }}
+          subject-digest: ${{ env.API_DIGEST }}
+          push-to-registry: false
+      - name: Build-provenance attestation for the Worker index (GitHub, OIDC-signed)
+        id: attest-worker
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY_REPO }}
+          subject-digest: ${{ env.WORKER_DIGEST }}
+          push-to-registry: false
+      - name: Release manifest (published)
+        env:
+          API_ATTESTATION: ${{ steps.attest-api.outputs.attestation-url }}
+          WORKER_ATTESTATION: ${{ steps.attest-worker.outputs.attestation-url }}
+        run: |
+          python3 - "$RUNNER_TEMP/release/release-manifest.json" << 'EOF'
+          import json, os, subprocess, sys
+          p = sys.argv[1]
+          m = json.load(open(p))
+          commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+          assert m['commit'] == commit, (m['commit'], commit)
+          for role, digest in (('api', os.environ['API_DIGEST']), ('worker', os.environ['WORKER_DIGEST'])):
+              assert m['images'][role]['index_digest'] == digest, (role, digest)
+              m['images'][role]['published_tag'] = f"{os.environ['REGISTRY_REPO']}:{role}-{commit}"
+              m['images'][role]['github_attestation'] = os.environ[f'{role.upper()}_ATTESTATION']
+          m['status'] = 'published'
+          m['publish_run'] = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          json.dump(m, open(p, 'w'), indent=2)
+          print(json.dumps({r: m['images'][r]['reference'] for r in m['images']}, indent=1))
+          EOF
+          commit="$(git rev-parse HEAD)"
+          {
+            echo "### Published (deploy by digest only)"
+            echo "- API: \`$REGISTRY_REPO@$API_DIGEST\` (tag \`api-$commit\`)"
+            echo "- Worker: \`$REGISTRY_REPO@$WORKER_DIGEST\` (tag \`worker-$commit\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/release/release-manifest.json
+          retention-days: 90
+          if-no-files-found: error
