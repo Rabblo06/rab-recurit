@@ -44,6 +44,7 @@ import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
@@ -420,8 +421,16 @@ async function bootstrap(): Promise<void> {
     // order, registered exactly once.
     // Phase D (D3): the daily scans (firstRunAfterInterval) are timed from their persisted cluster stamp — a restart neither
     // re-runs them nor postpones an overdue one. An unreadable stats hash → one full interval (never an extra run).
-    const stamps: Record<string, string> = await redis.hgetall(WORKER_STATS_KEY).catch(() => ({}));
-    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) => firstRunDelayFromStamp(stamps[def.statKeys.lastRunAt], intervalMs);
+    // D-Q5a (audit §13 #9): a daily scan whose stamp is MISSING (Redis lost its data) is timed from the first boot that
+    // found it missing (recordDailyFirstSeen: SET NX, one value for every replica, expires after two intervals), not from
+    // each restart — so a Worker restarting more often than daily still runs it within one interval of that boot. A present
+    // stamp always wins; an unreadable stats hash, or Redis failing / hanging on the record, → one full interval as before.
+    const stamps: Record<string, string> | null = await redis.hgetall(WORKER_STATS_KEY).catch(() => null);
+    const firstSeen = stamps
+      ? await recordDailyFirstSeen(redis, dailyScansMissingStamp(SCAN_JOBS, stamps, intervalOf, isEnabled), Date.now())
+      : new Map<string, number>();
+    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) =>
+      firstRunDelayFromStamp(stamps?.[def.statKeys.lastRunAt], intervalMs, Date.now(), firstSeen.get(def.statKeys.lastRunAt));
     const { disabled } = registerIntervalScans(runtime, scanRegistry, SCAN_JOBS, intervalOf, isEnabled, firstRunDelayOf);
     if (disabled.length) logger.log(`interval scheduler: not registered (disabled by their enable switch): ${disabled.join(', ')}`);
   }
