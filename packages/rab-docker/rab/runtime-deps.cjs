@@ -65,8 +65,10 @@ function packageTree(root) {
   return out;
 }
 
+/** Package name of a packageTree() value, or null for a workspace link / directory without package.json. */
 const nameOf = (value) => (value.startsWith('link:') || value.startsWith('dir:') ? null : value.slice(0, value.lastIndexOf('@')));
 
+/** Every .js / .cjs file under dir, recursively (the compiled runtime code to scan). */
 function* jsFiles(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
@@ -78,6 +80,10 @@ function* jsFiles(dir) {
 const PACKAGE_NAME = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(\/.*)?$/i;
 const SPECIFIER =/\b(?:require|import)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|^\s*(?:import|export)\s[^'"\n]*?\bfrom\s*(['"])([^'"\n]+)\3/gm;
 
+/**
+ * `check <node_modules> --scan <dir>... [--forbid <name>...]`: fails (exit code 1) on any unresolvable bare import in the
+ * scanned files or any forbidden package anywhere in the tree; prints the package counts. See the file header.
+ */
 function check(args) {
   const nm = path.resolve(args[0]);
   const scan = [];
@@ -137,6 +143,10 @@ function check(args) {
   );
 }
 
+/**
+ * `worker-delta <api node_modules> <worker node_modules> <out dir>`: fails unless the API tree is a same-path, same-version
+ * subset of the Worker tree and every added package needs no install script or native build; copies only the additions.
+ */
 function workerDelta([apiNm, workerNm, outDir]) {
   if (!apiNm || !workerNm || !outDir) throw new Error('usage: worker-delta <api node_modules> <worker node_modules> <out dir>');
   const api = packageTree(path.resolve(apiNm));
