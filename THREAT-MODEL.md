@@ -4745,3 +4745,17 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
   `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
   own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.
