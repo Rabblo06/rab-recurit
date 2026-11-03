@@ -313,12 +313,34 @@ function render(files, { projectDirectory, env, resolveEnvFiles }) {
   return JSON.parse(out);
 }
 
+/**
+ * Marker variables planted in the sentinel env files. Compose versions render env_file differently: v5 keeps the env_file
+ * entries under --no-env-resolution, while v2.38/v2.39 resolve the files even then and omit the key. A marker in the
+ * RESOLVED environment proves which file a service really reads, whatever the Compose version.
+ */
+const ENV_FILE_MARKERS = Object.freeze({ '.env.migrate': 'CREWFLOW_VERIFY_FROM_ENV_MIGRATE', '.env.ops': 'CREWFLOW_VERIFY_FROM_ENV_OPS' });
+
+/**
+ * Normalises `files` (a --no-env-resolution render) in place: a service with no env_file entries, whose resolved
+ * environment (in `resolved`) carries a sentinel file's marker, gets that file as its env_file. A service that does not read
+ * a sentinel file gets nothing, so every "must read" check still fails for it. Entries Compose did report are kept.
+ */
+function attachEnvFilesFromMarkers(files, resolved, dir) {
+  for (const [name, svc] of Object.entries(files?.services ?? {})) {
+    if ((svc.env_file ?? []).length) continue;
+    const env = resolved?.services?.[name]?.environment ?? {};
+    const inferred = Object.entries(ENV_FILE_MARKERS).filter(([, marker]) => env[marker] !== undefined).map(([file]) => ({ path: path.join(dir, file), required: true }));
+    if (inferred.length) svc.env_file = inferred;
+  }
+  return files;
+}
+
 /** Renders the three models checkVariant takes (throw-away project directory with sentinel env files). */
-function renderModels() {
+function renderModels(variantPath = VARIANT) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
   try {
-    fs.writeFileSync(path.join(dir, '.env.migrate'), `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@db-direct.example:5432/rab?sslmode=verify-full\n`);
-    fs.writeFileSync(path.join(dir, '.env.ops'), `CREWFLOW_OPS_RUN=one-off\nPG_OPS_APP_DATABASE_URL=postgresql://crewflow_app:${SENTINEL_OPS_PW}@db-direct.example:5432/rab?sslmode=verify-full\n`);
+    fs.writeFileSync(path.join(dir, '.env.migrate'), `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.migrate']}=1\n`);
+    fs.writeFileSync(path.join(dir, '.env.ops'), `CREWFLOW_OPS_RUN=one-off\nPG_OPS_APP_DATABASE_URL=postgresql://crewflow_app:${SENTINEL_OPS_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.ops']}=1\n`);
     // Only what the files require; nothing inherited from this machine's CREWFLOW_* / DATABASE_* / REDIS_URL.
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
     const env = {
@@ -329,10 +351,13 @@ function renderModels() {
       CREWFLOW_SECRETS_DIR: '/etc/crewflow/secrets',
       CREWFLOW_BOOTSTRAP_PASSWORD: 'dummy',
     };
-    const variant = render([VARIANT], { projectDirectory: dir, env, resolveEnvFiles: true });
-    const variantFiles = render([VARIANT], { projectDirectory: dir, env, resolveEnvFiles: false });
+    const variant = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: true });
+    const rawFiles = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: false });
+    // Whether this Compose reports env_file under --no-env-resolution (rab-migrate declares one in the committed file).
+    const composeReportsEnvFiles = (rawFiles.services?.['rab-migrate']?.env_file ?? []).length > 0;
+    const variantFiles = attachEnvFilesFromMarkers(rawFiles, variant, dir);
     const production = render([PRODUCTION], { projectDirectory: dir, env, resolveEnvFiles: false });
-    return { variant, production, variantFiles };
+    return { variant, production, variantFiles, composeReportsEnvFiles };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -359,17 +384,23 @@ function environmentMode(argv) {
   for (const k of ['CREWFLOW_API_IMAGE_DIGEST', 'CREWFLOW_WORKER_IMAGE_DIGEST']) {
     if (!DIGEST.test(String(env[k] ?? ''))) return { problems: [`${k} is not sha256:<64 hex>`], lines: [] };
   }
+  // The env_file checks below need a Compose that reports env_file under --no-env-resolution (v5 does; v2.38/v2.39
+  // resolve the files and drop the key). Probe it on the committed variant with marker files; refuse rather than skip.
+  const probe = renderModels();
+  if (!probe.composeReportsEnvFiles) {
+    let version = 'unknown';
+    try {
+      version = execFileSync('docker', ['compose', 'version', '--short'], { encoding: 'utf8' }).trim();
+    } catch {
+      // keep "unknown"
+    }
+    return { problems: [`this Docker Compose (${version}) does not report env_file under --no-env-resolution, so the deployed model's credential isolation cannot be verified with it. Run the environment preflight with Docker Compose v5 (verified 5.6.1). Static mode is unaffected.`], lines: [] };
+  }
   // Rendering without env_file resolution: the env files hold secrets and are not needed for these checks (compose gives
   // `environment:` precedence over env_file, so an env file cannot change a committed value such as the enforce mode).
   const model = render(files, { projectDirectory, env, resolveEnvFiles: false });
   const images = checkResolvedImages(model, allowed);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
-  let production;
-  try {
-    production = render([PRODUCTION], { projectDirectory: dir, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }, resolveEnvFiles: false });
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  const production = probe.production;
   const confSource = (model.services?.['rab-redis']?.volumes ?? []).find((v) => v.target === '/usr/local/etc/redis/redis.conf')?.source;
   let redisConf = null;
   try {
