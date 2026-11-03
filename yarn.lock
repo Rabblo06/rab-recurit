@@ -3963,7 +3963,7 @@ __metadata:
     "@rab/emails": "workspace:*"
     "@rab/shared": "workspace:*"
     "@react-email/render": "npm:^1.0.0"
-    "@sentry/node": "npm:^10.78.0"
+    "@sentry/node": "npm:10.78.0"
     "@types/cookie-parser": "npm:^1.4.10"
     "@types/express": "npm:^5.0.0"
     "@types/inquirer": "npm:^9.0.7"
@@ -4037,7 +4037,7 @@ __metadata:
     "@nestjs/typeorm": "npm:^11.0.0"
     "@rab/server": "workspace:*"
     "@rab/shared": "workspace:*"
-    "@sentry/node": "npm:^10.78.0"
+    "@sentry/node": "npm:10.78.0"
     "@types/node": "npm:^22.10.5"
     "@types/pg": "npm:^8.11.10"
     "@types/qrcode": "npm:^1"
@@ -4526,7 +4526,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@sentry/node@npm:^10.78.0":
+"@sentry/node@npm:10.78.0":
   version: 10.78.0
   resolution: "@sentry/node@npm:10.78.0"
   dependencies:

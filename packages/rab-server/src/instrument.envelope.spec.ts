@@ -39,6 +39,10 @@ const SECRETS = {
   email: 'bob.envelope-marker@example.com',
   sqlLiteral: 'envelope-SQL-LITERAL-SECRET',
   failClosed: 'envelope-FAILCLOSED-SECRET-fc',
+  // H4b: headers Sentry 10's own deny lists keep (they only match auth/token/session/cookie-like names), so they reach
+  // its http.server span attributes and only this file's scrubber stands between them and the envelope.
+  headerProbe: 'envelope-CUSTOM-HEADER-SECRET-hp',
+  refererToken: 'envelope-REFERER-TOKEN-SECRET-rt',
 };
 
 /**
@@ -91,10 +95,13 @@ const S = JSON.parse(process.env.ENVELOPE_TEST_SECRETS);
   require('fs').writeFileSync(process.env.ENVELOPE_TEST_REPORT, JSON.stringify({
     sdkVersion: Sentry.SDK_VERSION,
     installed: candidates.filter((name) => client.getIntegrationByName(name) !== undefined),
+    // Every integration the client actually set up, whatever its name (catches one added outside \`integrations\`).
+    installedAll: Object.keys(client._integrations || {}),
     options: {
       sendDefaultPii: o.sendDefaultPii,
       includeLocalVariables: o.includeLocalVariables,
       enableLogs: o.enableLogs,
+      enableMetrics: o.enableMetrics,
       tracesSampleRate: o.tracesSampleRate,
       profilesSampleRate: o.profilesSampleRate === undefined ? null : o.profilesSampleRate,
     },
@@ -166,6 +173,8 @@ server.listen(0, () => {
         authorization: 'Bearer ' + S.jwt,
         cookie: 'rab_session=' + S.cookie,
         'x-forwarded-for': '203.0.113.77',
+        'x-rab-probe': S.headerProbe,
+        referer: 'https://app.example.test/page?invite=' + S.refererToken,
       },
     },
     (res) => {
@@ -361,8 +370,11 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
   });
 
   it('the real client runs exactly the allowed default integrations plus the restricted RequestData (H4b)', () => {
-    expect([...(report.installed as string[])].sort()).toEqual(
-      [...ALLOWED_DEFAULT_INTEGRATIONS, 'RequestData'].sort(),
+    const expected = [...ALLOWED_DEFAULT_INTEGRATIONS, 'RequestData'].sort();
+    expect([...(report.installed as string[])].sort()).toEqual(expected);
+    // The full set the client set up, not just the names this file thought to ask about.
+    expect([...new Set(report.installedAll as string[])].sort()).toEqual(
+      expected,
     );
   });
 
@@ -372,6 +384,7 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       sendDefaultPii: false,
       includeLocalVariables: false,
       enableLogs: false,
+      enableMetrics: false,
       tracesSampleRate: 1, // forced by this test through SENTRY_TRACES_SAMPLE_RATE; production default is 0.01
       profilesSampleRate: null,
     });
@@ -384,7 +397,17 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
     });
   });
 
-  it('only error events, transactions and client reports leave the process: no sessions, logs or profiles (H4b)', () => {
+  it('request headers Sentry 10 itself keeps never reach an envelope (H4b: the http.server span adds them)', () => {
+    const all = envelopes.map((envelope) => envelope.raw).join('\n');
+    expect(all).not.toContain(SECRETS.headerProbe);
+    expect(all).not.toContain(SECRETS.refererToken);
+    expect(all).not.toContain('http.request.header.');
+  });
+
+  // Sessions: like Sentry 8, the allowed Http integration records request sessions, which Sentry sends only when a
+  // release is configured (SENTRY_RELEASE or an auto-detected commit variable). This run sets none; the assertion is
+  // that the upgrade adds no other item type (logs, metrics, profiles, check-ins, replays).
+  it('only error events, transactions and client reports leave the process: no logs, metrics or profiles (H4b)', () => {
     const types = new Set(
       envelopes.flatMap((envelope) =>
         envelope.items.map((item) => String(item.header.type)),

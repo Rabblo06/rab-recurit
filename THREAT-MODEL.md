@@ -4625,8 +4625,13 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Control:** `packages/rab-server/src/instrument.ts`. `integrations` is a function over Sentry's defaults that keeps
   only `ALLOWED_DEFAULT_INTEGRATIONS` (the 8.55 default set under 10.x names, `ChildProcess` being the renamed
   `ProcessAndThreadBreadcrumbs`) plus the restricted `RequestData`; anything a later 10.x minor adds is dropped (fail
-  closed). `enableLogs: false` explicitly. `db.user` is added to the dropped span attributes (the only scrubber change;
-  stricter). Unchanged: `sendDefaultPii: false` (Sentry 10 maps it to its restrictive data-collection mapping:
+  closed). `enableLogs: false` and `enableMetrics: false` explicitly (Sentry 10 defaults both to on; neither channel
+  has a scrubber here). `dataCollection`, `defaultIntegrations`, `openTelemetryInstrumentations`, `tracesSampler` and
+  profiling are pinned after the test-only `overrides`, so no override can widen collection or sampling. The SDK is
+  pinned to exactly 10.78.0: the name allow-list cannot catch a new default-on option in a later minor. `db.user` is
+  added to the dropped span attributes (the only scrubber change; stricter). Sentry 10's `http.server` span now copies
+  request headers that its own deny lists keep (referer with its query string, custom headers) into
+  `http.request.header.*`; the existing `DROPPED_KEY_RE` already drops them, now proven by the envelope test. Unchanged: `sendDefaultPii: false` (Sentry 10 maps it to its restrictive data-collection mapping:
   `userInfo: false`, `httpBodies: []`, `genAI` inputs/outputs off, `databaseQueryData: false`), `includeLocalVariables:
   false` (Sentry 10's local-variables integration still returns early on it), the RequestData include list, the four
   fail-closed scrubbing hooks, and `tracesSampleRate` (0.01 in production, 0 elsewhere, `SENTRY_TRACES_SAMPLE_RATE`
@@ -4638,8 +4643,14 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   unknown default, overrides cannot re-add integrations or enable logs/local variables, RequestData attaches nothing
   even under the most permissive data-collection mapping, `db.user` dropped and connection-string userinfo masked) and
   `instrument.envelope.spec.ts` (real `Sentry.init` in a child: installed integrations, effective options and resolved
-  data collection; only `event`, `transaction` and `client_report` envelope items leave the process).
+  data collection, by name and by the client's full installed set; a custom header and a referer token never reach an
+  envelope; only `event`, `transaction` and `client_report` items leave the process when no release is set).
 - **Residual:** API request exceptions handled by Nest's exception layer are not reported to Sentry (pre-existing: the
   server never called `setupNestErrorHandler`, and Sentry 8's `Nest` integration only produced spans); uncaught
   exceptions, unhandled rejections and the Worker's explicit `captureMessage` are. Sentry 8's `Nest` spans are gone
-  (fewer spans, no new data). `@opentelemetry/sdk-trace-base` 2.x carries an npm deprecation notice (not an advisory).
+  (fewer spans, no new data). As in Sentry 8, the allowed `Http` integration records request sessions (counts,
+  release, environment), sent only when a release is configured (`SENTRY_RELEASE` or an auto-detected commit
+  variable). With tracing sampled, `baggage`/`sentry-trace` still go to every outgoing host (`tracePropagationTargets`
+  unset, as before); Sentry 10 adds the Sentry `org_id` to that baggage. `@opentelemetry/sdk-trace-base` 2.x carries
+  an npm deprecation notice (not an advisory). Independent review (2026-11-03, read-only): no Critical / High / Medium;
+  Low items 1-4 fixed here, 5-6 documented above.

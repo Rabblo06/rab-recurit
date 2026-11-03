@@ -8,7 +8,7 @@
     "@nestjs/typeorm": "^11.0.0",
     "@rab/server": "workspace:*",
     "@rab/shared": "workspace:*",
-    "@sentry/node": "^10.78.0",
+    "@sentry/node": "10.78.0",
     "bullmq": "^5.34.6",
     "dotenv": "^16.4.7",
     "ioredis": "^5.4.2",

@@ -441,8 +441,9 @@ function defaultBootWarning(message: string): void {
 
 /**
  * The `Sentry.init` options for an environment, or `undefined` when `SENTRY_DSN` is unset (Sentry stays off).
- * `overrides` exists for tests (e.g. a capturing `transport`); it can never re-enable PII, change the integrations,
- * the sample rate or replace a scrubber — those keys are applied after it. `warn` receives at most one boot warning
+ * `overrides` exists for tests (e.g. a capturing `transport`); it can never re-enable PII, logs, metrics or local
+ * variables, change the integrations (incl. `defaultIntegrations` / `openTelemetryInstrumentations`), the data-collection
+ * mapping, the sampling (`tracesSampler`, profiling) or replace a scrubber — those keys are applied after it. `warn` receives at most one boot warning
  * (invalid `SENTRY_TRACES_SAMPLE_RATE`), which never contains the configured value.
  */
 export function buildSentryOptions(
@@ -463,8 +464,18 @@ export function buildSentryOptions(
     tracesSampleRate,
     sendDefaultPii: false,
     includeLocalVariables: false,
-    // Sentry 10 turns Logs on by default; nothing here sends logs, and Sentry 8 sent none. Kept off explicitly.
+    // Sentry 10 turns Logs and Metrics on by default; nothing here sends either, Sentry 8 had neither, and neither
+    // channel has a scrubber here. Kept off explicitly.
     enableLogs: false,
+    enableMetrics: false,
+    // Pinned so an override can never widen collection or sampling: any `dataCollection` value (even a partial one)
+    // switches Sentry 10 to its permissive defaults; the rest add spans, samplers or integrations outside `integrations`.
+    dataCollection: undefined,
+    defaultIntegrations: undefined,
+    openTelemetryInstrumentations: undefined,
+    tracesSampler: undefined,
+    profilesSampleRate: undefined,
+    profilesSampler: undefined,
     // A function, not an array: an array is merged with Sentry's defaults, so every new default integration would run.
     // See ALLOWED_DEFAULT_INTEGRATIONS. (`include.user` is gone: Sentry 9 stopped reading `request.user` entirely.)
     integrations: (defaults) => selectIntegrations(defaults),

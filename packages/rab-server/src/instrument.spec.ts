@@ -232,6 +232,7 @@ describe('instrument.ts — Sentry privacy options', () => {
       expect(built.sendDefaultPii).toBe(false);
       expect(built.includeLocalVariables).not.toBe(true);
       expect(built.enableLogs).toBe(false);
+      expect(built.enableMetrics).toBe(false);
       const names = resolvedIntegrations(built).map(
         (integration) => integration.name,
       );
@@ -248,12 +249,29 @@ describe('instrument.ts — Sentry privacy options', () => {
         sendDefaultPii: true,
         includeLocalVariables: true,
         enableLogs: true,
-        beforeSend: (event) => event,
+        enableMetrics: true,
+        dataCollection: { cookies: true },
+        defaultIntegrations: [{ name: 'Http' }],
+        openTelemetryInstrumentations: [{}],
+        tracesSampler: () => 1,
+        profilesSampleRate: 1,
+        beforeSend: (event: ErrorEvent) => event,
         integrations: [],
-      } as Partial<NodeOptions>);
+      } as unknown as Partial<NodeOptions>);
       expect(built?.sendDefaultPii).toBe(false);
       expect(built?.includeLocalVariables).toBe(false);
       expect(built?.enableLogs).toBe(false);
+      expect(built?.enableMetrics).toBe(false);
+      for (const key of [
+        'dataCollection',
+        'defaultIntegrations',
+        'openTelemetryInstrumentations',
+        'tracesSampler',
+        'profilesSampleRate',
+        'profilesSampler',
+      ] as const) {
+        expect(built?.[key as keyof NodeOptions]).toBeUndefined();
+      }
       const event = built?.beforeSend?.(
         syntheticErrorEvent(),
         {},
