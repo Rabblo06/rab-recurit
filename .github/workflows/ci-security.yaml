@@ -111,6 +111,26 @@ jobs:
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
       - name: Worker bundle launcher and committed deployment definitions
         run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+      # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
+      # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
+      # skip itself), fails; any check failure fails the job.
+      - name: Image compose variant matches production (staging/verify-image-compose, when present)
+        run: |
+          set -euo pipefail
+          files=(packages/rab-docker/staging/verify-image-compose.cjs packages/rab-docker/staging/verify-image-compose.test.cjs packages/rab-docker/docker-compose.image.yml)
+          present=0
+          for f in "${files[@]}"; do if [ -e "$f" ]; then present=$((present + 1)); fi; done
+          if [ "$present" -eq 0 ]; then
+            echo "image compose variant not on this branch yet (#44); nothing to verify"
+            exit 0
+          fi
+          if [ "$present" -ne "${#files[@]}" ]; then
+            echo "::error::only $present of ${#files[@]} image-compose files are present: ${files[*]}"
+            exit 1
+          fi
+          docker compose version || { echo "::error::docker compose is required to verify the image compose variant"; exit 1; }
+          node --test packages/rab-docker/staging/verify-image-compose.test.cjs
+          node packages/rab-docker/staging/verify-image-compose.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
       # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
