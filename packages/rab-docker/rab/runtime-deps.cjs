@@ -75,7 +75,8 @@ function* jsFiles(dir) {
   }
 }
 
-const SPECIFIER = /\b(?:require|import)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|^\s*(?:import|export)\s[^'"\n]*?\bfrom\s*(['"])([^'"\n]+)\3/gm;
+const PACKAGE_NAME = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*(\/.*)?$/i;
+const SPECIFIER =/\b(?:require|import)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|^\s*(?:import|export)\s[^'"\n]*?\bfrom\s*(['"])([^'"\n]+)\3/gm;
 
 function check(args) {
   const nm = path.resolve(args[0]);
@@ -102,6 +103,10 @@ function check(args) {
       for (const m of src.matchAll(SPECIFIER)) {
         const spec = m[2] || m[4];
         if (spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue;
+        // Comment text is not code: tsc keeps JSDoc, which may quote a require() ("`require('@nestjs/...')` calls").
+        const lineStart = src.lastIndexOf('\n', m.index) + 1;
+        if (/^\s*(\*|\/\/|\/\*)/.test(src.slice(lineStart, m.index))) continue;
+        if (!PACKAGE_NAME.test(spec)) continue; // not a package name at all (e.g. "@scope/..."), so never a real import
         if (BUILTINS.has(spec) || BUILTINS.has(spec.split('/')[0])) continue;
         specifiers += 1;
         try {
