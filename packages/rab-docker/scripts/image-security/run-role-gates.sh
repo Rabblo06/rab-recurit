@@ -27,7 +27,7 @@ run() { # name, then the image_gate.py command
 run config config "$role" "$IMAGE" --revision "$REVISION" --platform "$PLATFORM" "${source_args[@]}"
 run container container "$role" "$IMAGE"
 run fs fs "$role" "$IMAGE"
-run attest attest "$role" "$LAYOUT" --image-id "$IMAGE_ID" --revision "$REVISION" --platform "$PLATFORM"
+run attest attest "$role" "$LAYOUT" --image "$IMAGE" --image-id "$IMAGE_ID" --revision "$REVISION" --platform "$PLATFORM"
 run scan scan "$role" "$IMAGE" --image-id "$IMAGE_ID" --trivy-cache "$TRIVY_CACHE" --grype-cache "$GRYPE_CACHE"
 run vulns vulns "$role"
 run secrets secrets "$role"

@@ -15,3 +15,8 @@
 # prove the migrator credential never reaches rab-api / rab-worker. Not a credential. The line now carries
 # `gitleaks:allow`; this entry covers the commit that introduced it. Reviewed 2026-10-30.
 aa855a88a82d7473a2ff52ab5e96b238ca72a566:packages/rab-docker/scripts/compose-credential-isolation.cjs:generic-api-key:37
+
+# Docker hardening H5 (PR #41): a workflow header comment ("... layer secrets, SBOM/provenance contents ...") matched
+# generic-api-key on English words; no credential. The comment was reworded in the next commit; this entry covers the
+# commit that introduced it. Reviewed 2026-11-03.
+f12222fcd140be14b7764b4e21d1b2c792bf40ea:.github/workflows/image-security-gate.yaml:generic-api-key:8

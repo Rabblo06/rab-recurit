@@ -985,9 +985,20 @@ def cmd_attest(a, c: Check) -> None:
     img = images[0]
     manifest = json.loads(blob(a.layout, img['digest']))
     config_digest = manifest['config']['digest']
-    if config_digest != a.image_id:
-        c.fail(f'the build output image (config {config_digest}) is not the gated image {a.image_id}')
     cfg = json.loads(blob(a.layout, config_digest))
+    # Identity: Docker's image ID is the config digest (classic store) or the manifest/index digest (containerd store);
+    # either way the loaded image's layer chain must equal the build output's.
+    if a.image_id not in (config_digest, img['digest'], index_digest):
+        c.fail(f'the build output image (config {config_digest}, manifest {img["digest"]}) is not the gated image '
+               f'{a.image_id}')
+    if a.image:
+        loaded = inspect_image(a.image)
+        if loaded['Id'] != a.image_id:
+            c.fail(f'{a.image} is {loaded["Id"]}, not the gated {a.image_id}')
+        if loaded['RootFS']['Layers'] != (cfg.get('rootfs') or {}).get('diff_ids'):
+            c.fail(f'{a.image} has a different layer chain than the build output')
+        else:
+            c.info(f'{a.image} = build output (config {config_digest}, {len(loaded["RootFS"]["Layers"])} layers)')
     if f'{cfg.get("os")}/{cfg.get("architecture")}' != a.platform:
         c.fail(f'image config says {cfg.get("os")}/{cfg.get("architecture")}, expected {a.platform}')
     att = [d for d in entries if is_attestation(d)
@@ -1234,6 +1245,7 @@ def main(argv: list[str]) -> int:
         p.add_argument('role')
     p = sub.add_parser('attest')
     p.add_argument('role'), p.add_argument('layout'), p.add_argument('--image-id', required=True)
+    p.add_argument('--image', help='the loaded image; its ID and layer chain must match the build output')
     p.add_argument('--revision', required=True), p.add_argument('--platform', required=True)
     p = sub.add_parser('manifest')
     p.add_argument('--expect-platforms', required=True), p.add_argument('--revision', required=True)
