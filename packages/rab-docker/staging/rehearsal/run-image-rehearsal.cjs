@@ -76,17 +76,19 @@ const SECRETS = {
   S_S3_SECRET_KEY: hex(24),
   S_FIXTURE_PASSWORD: `Fx${hex(16)}`,
 };
-// The ACL file holds only a SHA-256 of the per-run password; it lives in a private temp directory removed at the end.
+// The per-run ACL file lives in a private temp directory (mkdtemp) removed at the end. It gives the throwaway password in
+// Redis's own `>password` form (Redis stores its SHA-256 itself); a real deployment's file holds only the `#<sha256>` form
+// (the Infrastructure template users.acl.example). The `ops` user stays disabled and passwordless here.
 const SECRETS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-s-rehearsal-'));
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const APP_PERMS = 'resetkeys ~* resetchannels &* +@all -@admin -@dangerous +info +client|setname +client|getname +client|id +client|info +client|list -flushall -flushdb -keys -swapdb';
 fs.writeFileSync(path.join(SECRETS_DIR, 'redis-users.acl'), [
   `user default off resetpass ${APP_PERMS}`,
-  `user crewflow on #${sha(SECRETS.S_REDIS_PASSWORD)} ${APP_PERMS}`,
+  `user crewflow on >${SECRETS.S_REDIS_PASSWORD} ${APP_PERMS}`,
   'user healthcheck on nopass resetkeys resetchannels -@all +ping',
-  `user ops off #${sha(hex(24))} resetkeys ~* resetchannels -@all +ping +info`,
+  'user ops off resetpass resetkeys ~* resetchannels -@all +ping +info',
   '',
-].join('\n'));
+].join('\n'), { mode: 0o600 });
 
 const [, apiRepo, apiDigest] = DIGEST_REF.exec(process.env.S_API_IMAGE);
 const [, workerRepo, workerDigest] = DIGEST_REF.exec(process.env.S_WORKER_IMAGE);
