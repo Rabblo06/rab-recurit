@@ -21,7 +21,7 @@ Placeholders: `<like-this>`. Never paste a real value into this file, a ticket o
 
 | Component | Staging | Never shared with |
 |---|---|---|
-| Compute | One VM, 4 vCPU / 8 GB / 80 GB SSD, Ubuntu LTS, Docker Engine + Compose v2.24+ **[DO]** a Basic or General Purpose Droplet in its own project | production, the temporary deployment |
+| Compute | One VM, 4 vCPU / 8 GB / 80 GB SSD, Ubuntu LTS, Docker Engine + Compose v5 (the environment preflight needs a Compose that reports env_file under --no-env-resolution: verified 5.6.1; v2.38/v2.39 do not, and the preflight refuses them) **[DO]** a Basic or General Purpose Droplet in its own project | production, the temporary deployment |
 | Network | Provider firewall: inbound 443 (and 80 for ACME) to the edge only, SSH from an allow-list or VPN. PostgreSQL and Redis publish no port. rab-api is bound to `127.0.0.1:3000` behind the edge | — |
 | PostgreSQL 16 | Self-hosted on the same VM: the Infrastructure templates, TLS with a private staging CA, the dotted alias `postgres.crewflow-staging.internal`, scram-sha-256 | Its own cluster, roles and passwords |
 | Redis 7 | The variant's `rab-redis`: AOF, noeviction, ACL users `crewflow` / `healthcheck` / `ops` (disabled), `default` disabled | Its own ACL file and password |
@@ -53,7 +53,7 @@ Consequences:
 ```bash
 # 3.1 Engine and Compose; the runtime keys need Compose v2.24+ (!override/!reset are not used here, but tmpfs options are).
 docker version --format '{{.Server.Version}} {{.Server.Arch}}'
-docker compose version
+docker compose version                   # v5 (verified 5.6.1): the --environment preflight refuses v2.38/v2.39
 node --version                            # 20 or later: runs staging/verify-image-compose.cjs (no npm install needed)
 uname -m                                  # x86_64 or aarch64; record it (see §8 for the ARM64 gate)
 
