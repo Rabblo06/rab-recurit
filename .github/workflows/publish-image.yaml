@@ -1,9 +1,12 @@
 name: publish-image
 
-# Publishes the backend image (API + Worker share one image — see
-# packages/rab-docker/rab/Dockerfile) to GitHub Container Registry whenever a
-# GitHub release is published, or on demand. Always built from a clean CI
-# checkout, so no local .env file can ever end up in a layer.
+# Publishes the shared backend image (packages/rab-docker/rab/Dockerfile, final
+# stage `rab` = the API / rab-migrate / rab-ops image) to GitHub Container
+# Registry whenever a GitHub release is published, or on demand. Always built
+# from a clean CI checkout, so no local .env file can ever end up in a layer.
+# Since Docker hardening H2 this image has NO Chromium: the Worker image (PDF
+# rendering) is packages/rab-docker/rab/Dockerfile.worker-bundle built FROM it,
+# which this workflow does not publish. Do not run the Worker from this image.
 on:
   release:
     types: [published]
@@ -45,7 +48,7 @@ jobs:
             type=sha,format=short
           labels: |
             org.opencontainers.image.title=Crewflow server
-            org.opencontainers.image.description=Crewflow API and Worker (one image, two start commands)
+            org.opencontainers.image.description=Crewflow API image (also rab-migrate and rab-ops; no Chromium - the Worker image is Dockerfile.worker-bundle built on top of it)
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

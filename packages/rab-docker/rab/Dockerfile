@@ -77,13 +77,19 @@ RUN rm -rf node_modules/esbuild node_modules/@esbuild node_modules/vite node_mod
   && test -z "$(find node_modules -type f -path '*esbuild*/bin/esbuild' -print -quit)" \
   && find node_modules ! -type l -perm /022 -exec chmod go-w {} +
 
-# Final stage — this is also the Dockerfile's last stage, which Render
-# builds by default (see dockerfilePath in render.yaml).
+# Final stage = the API image (rab-api, and the one-off rab-migrate / rab-ops). It is also the Dockerfile's last stage,
+# which Docker builds by default when no `--target` is given (OpenShip and Render cannot pass one): keep it last.
 # The same pinned Node image as `base`, WITHOUT base's native build toolchain (python3/make/g++/gcc): those are build-only
 # (image scan 2026-10-30: python3 3.14.8 = 4 CRITICAL) and the runtime compiles nothing. Keep the digest in step with `base`.
+#
+# H2: NO Chromium, fonts or PDF settings here. The only code that launches a browser is the Worker's PDF renderer
+# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts); rab-server imports neither Playwright nor that file,
+# and the API only serves PDFs the Worker already stored. Chromium (with its fonts, the CHROMIUM_* settings and the
+# Chromium/libexpat floors) is installed by packages/rab-docker/rab/Dockerfile.worker-bundle, on top of this image, so
+# the Worker reuses every layer below and the API image carries none of Chromium's dependency tree (ffmpeg, libxml2,
+# cups, pulse, …) or its unfixable advisories.
 FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS rab
 ARG MIN_NODE_VERSION
-ARG MIN_CHROMIUM_VERSION
 ARG MIN_LIBEXPAT_VERSION
 WORKDIR /app
 ENV NODE_ENV=production
@@ -92,31 +98,23 @@ ENV NODE_ENV=production
 # toolchain is somehow present.
 RUN apk upgrade --no-cache \
   && test -z "$(apk info -e python3 make g++ gcc)"
-# System Chromium for the worker's PDF jobs (shift roster + final timesheet).
-# Playwright's own downloaded Chromium is glibc-only and does not run on
-# Alpine/musl, so the image ships Alpine's Chromium and the renderer
-# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts) is pointed
-# at it via env. One image, two commands: the API container carries it too
-# but never loads it — clock-in/out never imports the renderer. Fonts:
-# without them Chromium renders blank text.
-# The renderer always runs Chromium with --no-sandbox (CHROMIUM_NO_SANDBOX=true below), so the setuid-root sandbox helper
-# is never used: drop its setuid bit (the final gate refuses any setuid/setgid file in the image).
-RUN apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto \
-  && chmod u-s /usr/lib/chromium/chrome-sandbox
-# H1 security floors, after the last apk transaction: Node, the Alpine branch/repositories, Chromium and libexpat.
+# Security floors, after the last apk transaction: Node, the Alpine branch/repositories, Chromium ABSENT (fail closed if a
+# future change pulls it back into the API image), and libexpat at or above its floor if anything installs it.
 RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
     --mount=type=bind,source=packages/rab-docker/rab/security-floors.env,target=/tmp/security-floors.env \
-    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine apk-required:chromium apk-required:libexpat
+    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine apk-absent:chromium apk-if-installed:libexpat
 # Dependency scan (2026-10-30): every library finding Trivy reports for the base image (undici 6.27.0, tar, brace-expansion,
 # ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
 # API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
 # it), so the final stage drops the npm CLI. The Worker bundle image is built FROM this stage and inherits it.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx \
   && test ! -e /usr/local/lib/node_modules/npm
-ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium     CHROMIUM_NO_SANDBOX=true     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # H1: application code and dependencies are ROOT-owned and not group/other-writable (COPY's default owner is 0:0). The
 # runtime user `node` (uid/gid 1000, shipped by node:24-alpine) can read and execute them but never rewrite them, so a
 # compromised process cannot persist by editing code it later re-imports. Only /app/storage (below) is writable by it.
+# packages/rab-worker/dist stays in this image although the API never loads it: the Worker bundle image is built FROM
+# this one (Dockerfile.worker-bundle has no build stage of its own), so this is where the Worker gets its code. It is
+# about 0.8 MB, and none of it runs in the API process.
 COPY --from=runtime-modules /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
@@ -130,7 +128,8 @@ COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
-# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either).
+# command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either). start-worker.sh is
+# retired (H2): this image has no Chromium, so it only prints where the Worker image is and exits 1 (fail closed).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
 COPY --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh

@@ -11,8 +11,8 @@ import { inspectPdf } from '../helpers/pdf-inspect';
 /**
  * S-7 and S-9 (Phase 0 review) — MEASUREMENT ONLY, nothing here changes the renderer.
  *
- * S-7: `CHROMIUM_NO_SANDBOX=true` (set by the production image, packages/rab-docker/rab/Dockerfile) launches Chromium with
- *      `--no-sandbox --disable-setuid-sandbox`. Pinned here: exactly which flags each env value produces, and that the
+ * S-7: `CHROMIUM_NO_SANDBOX=true` (set by the production Worker image, packages/rab-docker/rab/Dockerfile.worker-bundle)
+ *      launches Chromium with `--no-sandbox --disable-setuid-sandbox`. Pinned here: exactly which flags each env value produces, and that the
  *      in-page hardening (no JavaScript, no network, no navigation) still holds with the OS sandbox turned off.
  * S-9: the PDF footer template is rendered by Chromium's print pipeline, outside the page whose requests `page.route`
  *      intercepts. A synthetic footer referencing resources on a LOCAL loopback test server (and a closed local port) is
