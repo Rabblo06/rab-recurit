@@ -758,7 +758,12 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     const peak = Number(res.peak);
     const max = Number(res.max);
     const started = res.spawned;
-    assert(res.refused > 0 && peak === max && /max \d*[1-9]/.test(res.events), `pids_limit not enforced (spawned ${res.spawned}, refused ${res.refused}, peak ${peak}, max ${max})`);
+    // Enforcement proof = the KERNEL refused forks at the cap: EAGAIN for every refusal, fewer than 400 spawned, and the
+    // cgroup's own "max" event counter is non-zero. pids.peak may exceed pids.max by the processes `docker exec` ATTACHES
+    // to the cgroup (cgroup v2: "organisational operations are not blocked by cgroup policies"), never by forks: the
+    // overshoot is bounded by the 3 exec'd processes of this probe (sh, node, and the concurrent health-check exec).
+    const onlyEagain = Object.keys(res.codes || {}).every((c) => c === 'EAGAIN');
+    assert(res.refused > 0 && onlyEagain && res.spawned < 400 && /max \d*[1-9]/.test(res.events) && peak >= max && peak - max <= 3, `pids_limit not enforced (spawned ${res.spawned}, refused ${res.refused} ${JSON.stringify(res.codes)}, peak ${peak}, max ${max}, events ${res.events})`);
     assert(zombies === '0', `zombies left in the API container: ${zombies}`);
     await waitFor('rab-api healthy after the fork probe', () => healthOf('rab-api') === 'healthy', 60_000);
     assert(a2['memory.max'] !== 'max' && a2['pids.max'] !== 'max' && a2['cpu.max'] && !/^max /.test(a2['cpu.max']), 'API cgroup limits missing');
