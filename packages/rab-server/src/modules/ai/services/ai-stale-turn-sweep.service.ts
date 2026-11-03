@@ -7,8 +7,13 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { storageScopes } from '../../../engine/worker-shared/maintenance-catalogue';
 import { AiTurnRunnerService } from './ai-turn-runner.service';
 
-/** At most this many AI-eligible users are examined per workspace per cycle (a workspace has one owner + a CEO/initial manager). */
-export const AI_STALE_SWEEP_USERS_PER_WORKSPACE = 20;
+/**
+ * AI-eligible users are listed per workspace in keyset pages of this size (`user_id > cursor`), until a short page. The
+ * schema allows several CEO profiles in one workspace, so there is NO per-workspace user cap: every eligible user is
+ * examined on every cycle that reaches the workspace (CodeRabbit on #46). Work per cycle stays bounded by the
+ * finalisation cap below.
+ */
+export const AI_STALE_SWEEP_USER_PAGE_SIZE = 20;
 /** At most this many stale turns are finalised per user per cycle; the rest wait for the next cycle. */
 export const AI_STALE_SWEEP_TURNS_PER_USER = 20;
 /** Hard cap of finalisations per cycle (bounded work per tick). */
@@ -42,8 +47,11 @@ export interface AiStaleTurnSweepResult {
  * user) context — exactly the binding the turn runner uses for a delivered job. Every write is the runner's own
  * compare-and-set (`AiTurnRunnerService.finaliseStaleQueued`).
  *
- * Bounded: users per workspace, turns per user and finalisations per cycle are capped; a failing workspace is skipped and
- * retried next cycle. Two replicas: the compare-and-set makes exactly one of them finalise a turn.
+ * Bounded: users are read in keyset pages, turns per user and finalisations per cycle are capped; a failing workspace is
+ * skipped and retried next cycle. No cursor survives between cycles, and none is needed: only FINALISED turns count
+ * towards the cycle cap, and a finalised turn is no longer `queued`, so the next cycle, restarting from the first page,
+ * no longer sees it and reaches the users after it. Two replicas: the compare-and-set makes exactly one of them finalise
+ * a turn.
  */
 @Injectable()
 export class AiStaleTurnSweepService {
@@ -99,27 +107,7 @@ export class AiStaleTurnSweepService {
       const workspaceId = scope.workspaceId;
       let users: string[];
       try {
-        users = await this.tenantContext.runInTenantContext(
-          this.ctx(scope.organisationId, workspaceId, ''),
-          async (m) => {
-            const rows = await m.query<Array<{ user_id: string }>>(
-              `SELECT user_id FROM (
-                SELECT w.owner_user_id AS user_id FROM core.manager_workspace w WHERE w.id = $1
-                UNION
-                SELECT p.user_id FROM core.manager_profile p
-                 WHERE p.organisation_id = $2 AND p.workspace_id = $1 AND (p.type = 'ceo' OR p.is_initial_manager)
-              ) candidates
-             ORDER BY user_id
-             LIMIT $3`,
-              [
-                workspaceId,
-                scope.organisationId,
-                AI_STALE_SWEEP_USERS_PER_WORKSPACE,
-              ],
-            );
-            return rows.map((r) => r.user_id);
-          },
-        );
+        users = await this.listEligibleUsers(scope.organisationId, workspaceId);
       } catch (error) {
         result.skipped++;
         this.logger.warn(
@@ -174,6 +162,38 @@ export class AiStaleTurnSweepService {
       }
     }
     return result;
+  }
+
+  /**
+   * Every user who can hold AI turns in the workspace (its owner, and CEO / Initial Manager profiles placed in it), read
+   * in that workspace's own tenant context in keyset pages ordered by user_id, until a page comes back short.
+   */
+  private async listEligibleUsers(organisationId: string, workspaceId: string): Promise<string[]> {
+    const users: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page: string[] = await this.tenantContext.runInTenantContext(
+        this.ctx(organisationId, workspaceId, ''),
+        async (m) => {
+          const rows = await m.query<Array<{ user_id: string }>>(
+            `SELECT user_id FROM (
+              SELECT w.owner_user_id AS user_id FROM core.manager_workspace w WHERE w.id = $1
+              UNION
+              SELECT p.user_id FROM core.manager_profile p
+               WHERE p.organisation_id = $2 AND p.workspace_id = $1 AND (p.type = 'ceo' OR p.is_initial_manager)
+            ) candidates
+           WHERE $4::uuid IS NULL OR user_id > $4::uuid
+           ORDER BY user_id
+           LIMIT $3`,
+            [workspaceId, organisationId, AI_STALE_SWEEP_USER_PAGE_SIZE, after],
+          );
+          return rows.map((r) => r.user_id);
+        },
+      );
+      users.push(...page);
+      if (page.length < AI_STALE_SWEEP_USER_PAGE_SIZE) return users;
+      after = page[page.length - 1]!;
+    }
   }
 
   private ctx(

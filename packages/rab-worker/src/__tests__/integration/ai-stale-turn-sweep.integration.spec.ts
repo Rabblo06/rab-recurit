@@ -13,7 +13,7 @@ import { DataSource } from 'typeorm';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
-import { AiStaleTurnSweepService } from '@rab/server/modules/ai/services/ai-stale-turn-sweep.service';
+import { AI_STALE_SWEEP_USER_PAGE_SIZE, AiStaleTurnSweepService } from '@rab/server/modules/ai/services/ai-stale-turn-sweep.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 import { AiQuotaService } from '@rab/server/modules/ai/services/ai-quota.service';
 import { ProcessorExplorer } from '../../core/scheduler/processor-explorer';
@@ -358,5 +358,30 @@ describeIfDb('AI stale-turn sweep (D-Q2, integration)', () => {
         MIN,
       ),
     ).rejects.toThrow(/threshold/);
+  });
+  it('S9 a workspace with more eligible users than one discovery page: the LAST user by user_id is still swept (keyset pagination; CodeRabbit on #46)', async () => {
+    const org = await factory.createOrganisation('ai-stale-many');
+    const owner = await factory.createCeo(org);
+    // The schema allows several CEO profiles in one workspace. Place PAGE_SIZE + 1 more CEOs in the owner's workspace, so
+    // the workspace has PAGE_SIZE + 2 eligible users and the last one by user_id is on the second page.
+    const extra: string[] = [];
+    for (let i = 0; i <= AI_STALE_SWEEP_USER_PAGE_SIZE; i++) {
+      const ceo = await factory.createInternalManager(org, { type: 'ceo', workspace: false, label: `ceo${i}` });
+      extra.push(ceo.userId);
+    }
+    await admin.query(
+      `UPDATE core.manager_profile SET workspace_id = $1 WHERE organisation_id = $2 AND user_id = ANY($3::uuid[])`,
+      [owner.workspaceId, org.id, extra],
+    );
+    const last = [owner.userId, ...extra].sort().at(-1)!;
+    const lastIdentity = { ...owner, userId: last };
+    const { turnId } = await seedTurn(lastIdentity, 'queued', 20 * MIN);
+    const r = await sweep.runCycle(dataSource);
+    expect(r.ran).toBe(true);
+    expect(await turn(turnId)).toMatchObject({
+      status: 'failed',
+      error_code: 'AI_WORKER_INTERRUPTED',
+    });
+    expect((await audits(turnId)).map((x) => x.action)).toEqual(['ai.turn_failed']);
   });
 });

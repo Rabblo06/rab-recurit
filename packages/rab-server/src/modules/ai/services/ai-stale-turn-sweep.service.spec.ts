@@ -1,5 +1,6 @@
 import {
   AI_STALE_SWEEP_MAX_FINALISED_PER_CYCLE,
+  AI_STALE_SWEEP_USER_PAGE_SIZE,
   AiStaleTurnSweepService,
 } from './ai-stale-turn-sweep.service';
 
@@ -20,6 +21,8 @@ function harness(
     safe?: boolean;
     turns?: number;
     failWorkspace?: string;
+    /** Eligible users per workspace, served in keyset pages ($3 = limit, $4 = cursor) like the real query. */
+    users?: string[];
   } = {},
 ) {
   const contexts: Array<{
@@ -59,8 +62,15 @@ function harness(
         if (opts.failWorkspace && ctx.workspaceId === opts.failWorkspace)
           throw new Error('not routable');
         return fn({
-          query: async (sql: string) => {
-            if (sql.includes('manager_workspace')) return [{ user_id: U1 }];
+          query: async (sql: string, params: unknown[] = []) => {
+            if (sql.includes('manager_workspace')) {
+              const all = [...(opts.users ?? [U1])].sort();
+              const after = params[3] as string | null;
+              return all
+                .filter((u) => after === null || u > after)
+                .slice(0, params[2] as number)
+                .map((user_id) => ({ user_id }));
+            }
             if (sql.includes("status = 'queued'"))
               return Array.from({ length: opts.turns ?? 1 }, (_, i) => ({
                 id: `t-${ctx.workspaceId}-${i}`,
@@ -171,6 +181,35 @@ describe('AiStaleTurnSweepService (D-Q2)', () => {
     const r = await h.service.runCycle(h.catalogue as never);
     expect(r.candidates).toBe(6);
     expect(r.finalised).toBe(4);
+  });
+
+  it('every eligible user is examined, past the first page (keyset pagination; CodeRabbit on #46)', async () => {
+    const users = Array.from(
+      { length: 2 * AI_STALE_SWEEP_USER_PAGE_SIZE + 5 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    const h = harness({ users });
+    const r = await h.service.runCycle(h.catalogue as never);
+    // Two workspaces, 45 users each: 3 discovery pages per workspace, every user bound once with its own context.
+    const discovery = h.contexts.filter((c) => c.userId === '');
+    expect(discovery).toHaveLength(6);
+    for (const ws of [WS, WS2]) {
+      expect(
+        h.contexts.filter((c) => c.workspaceId === ws && c.userId !== '').map((c) => c.userId),
+      ).toEqual(users);
+    }
+    expect(r).toMatchObject({ users: 90, finalised: 90, skipped: 0 });
+  });
+
+  it('a page size of users exactly fills one page: one extra (empty) page read, nobody examined twice', async () => {
+    const users = Array.from(
+      { length: AI_STALE_SWEEP_USER_PAGE_SIZE },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    const h = harness({ users });
+    const r = await h.service.runCycle(h.catalogue as never);
+    expect(h.contexts.filter((c) => c.userId === '')).toHaveLength(4);
+    expect(r.users).toBe(2 * AI_STALE_SWEEP_USER_PAGE_SIZE);
   });
 
   it('bounded: never more than the per-cycle cap', async () => {
