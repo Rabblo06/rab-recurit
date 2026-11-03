@@ -252,9 +252,10 @@ describeIfDb('account invite cleanup job (integration)', () => {
   });
 
   beforeEach(async () => {
-    // No separate worker process runs during Jest — AccountLifecycleService.
-    // isEmailDeliveryAvailable() would otherwise see no heartbeat and skip
-    // every invite send, breaking every test that expects one queued.
+    // Fixture only: since the Phase D-Q "always queue" decision the Worker
+    // heartbeat no longer gates invite creation (AccountLifecycleService.
+    // isEmailDeliveryEnabled() reads only EMAIL_DELIVERY_ENABLED); kept so the
+    // stack looks like a normal running one.
     await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
   });
 

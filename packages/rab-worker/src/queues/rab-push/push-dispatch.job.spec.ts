@@ -100,8 +100,11 @@ describe('push dispatch — stale PENDING recovery (fresh jobId generation)', ()
     expect(result).toMatchObject({ published: 1, recovered: 1 });
   });
 
+  // Phase D-Q3: the fixture used to be a row ALREADY published inside its 2-minute window (queued_at = now), which the
+  // re-publish fix no longer re-adds (see the D-Q3 block below). The rule under test is unchanged: a PENDING row of
+  // generation > 0 that IS published goes out under its own generation, never attempt.0.
   it('a fresh PENDING row of generation > 0 is published under ITS generation, never attempt.0 (no bump)', async () => {
-    const { tenant, statements } = fakeTenant(pendingResponder(pending({ dispatch_generation: 2, queued_at: new Date() })));
+    const { tenant, statements } = fakeTenant(pendingResponder(pending({ dispatch_generation: 2, queued_at: null })));
     const publish = jest.fn(async () => undefined);
     const republish = jest.fn(async () => undefined);
     await dispatchPushScope(tenant as never, ORG_A, undefined, publish, republish, false);
@@ -128,4 +131,113 @@ describe('push dispatch — stale PENDING recovery (fresh jobId generation)', ()
       expect(sql).toContain("(status = 'PENDING' AND queued_at < now() - interval '2 minutes') AS stale_pending");
     }
   });
+});
+
+/**
+ * Phase D-Q3 (audit §13 #5, plan L8). Two fixes, nothing else: (1) a PENDING row already published (queued_at stamped)
+ * whose 2-minute window has not run out is not re-added every tick; (2) a publish error is caught PER ROW, so one failure
+ * no longer aborts the rest of the cycle. The claim SQL is byte-identical (asserted above), retries/leases/uncertain
+ * handling are untouched (the stale-PENDING, exhausted and DELIVERY_UNCERTAIN cases above still pass unchanged).
+ */
+describe('push dispatch — D-Q3 re-publish fix and per-row publish catch', () => {
+  const R3 = '00000000-0000-4000-8000-000000000003';
+  function rowsResponder(rows: Array<Record<string, unknown>>) {
+    const orgs = catalogue([ORG_A]);
+    return (sql: string, params: unknown[]) => {
+      const page = orgs(sql, params);
+      if (page !== undefined) return page;
+      if (sql.includes('FROM core.push_delivery')) return rows;
+      if (sql.includes('dispatch_generation = dispatch_generation + 1')) return [[{ dispatch_generation: 1 }], 1];
+      return [[], 1];
+    };
+  }
+  const pendingRow = (id: string, extra: Record<string, unknown>) =>
+    row(id, 'PENDING', { attempt_count: 0, dispatch_generation: 0, queued_at: null, stale_pending: false, ...extra });
+
+  it('a PENDING row already published inside its 2-minute window is NOT re-added (generation 0 and > 0) and nothing is written', async () => {
+    const recent = new Date(Date.now() - 30_000);
+    const { tenant, statements } = fakeTenant(
+      rowsResponder([pendingRow(R1, { queued_at: recent }), pendingRow(R2, { queued_at: recent, dispatch_generation: 3 })]),
+    );
+    const publish = jest.fn(async () => undefined);
+    const republish = jest.fn(async () => undefined);
+    const result = await dispatchPushScope(tenant as never, ORG_A, undefined, publish, republish, false);
+    expect(publish).not.toHaveBeenCalled(); // old code: publish(R1) every tick
+    expect(republish).not.toHaveBeenCalled(); // old code: republish(R2, 3) every tick
+    expect(statements.filter((s) => /^\s*UPDATE/i.test(s.sql))).toHaveLength(0);
+    expect(result).toMatchObject({ claimed: 0, published: 0, recovered: 0 });
+  });
+
+  it('the same skip applies to the global-mode claim path (ids)', async () => {
+    const { tenant } = fakeTenant(rowsResponder([pendingRow(R1, { queued_at: new Date() })]));
+    const publish = jest.fn(async () => undefined);
+    await dispatchPushScope(tenant as never, ORG_A, [R1], publish, jest.fn(), false);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('a never-published PENDING row and a STALE published one are still published exactly as before', async () => {
+    const { tenant } = fakeTenant(
+      rowsResponder([pendingRow(R1, {}), pendingRow(R2, { queued_at: new Date(Date.now() - 10 * 60_000), stale_pending: true })]),
+    );
+    const publish = jest.fn(async () => undefined);
+    const republish = jest.fn(async () => undefined);
+    const result = await dispatchPushScope(tenant as never, ORG_A, undefined, publish, republish, false);
+    expect(publish).toHaveBeenCalledWith(R1, ORG_A);
+    expect(republish).toHaveBeenCalledWith(R2, ORG_A, 1);
+    expect(result).toMatchObject({ published: 2, recovered: 1 });
+  });
+
+  it('one row\'s publish error does not abort the cycle: later rows are still published, the cycle resolves, the failure is counted', async () => {
+    const { tenant, statements, contexts } = fakeTenant(rowsResponder([pendingRow(R1, {}), pendingRow(R2, {}), pendingRow(R3, {})]));
+    const publish = jest.fn(async (id: string) => {
+      if (id === R1) throw Object.assign(new Error('Connection is closed.'), { name: 'Error' });
+    });
+    const result = await dispatchPushScope(tenant as never, ORG_A, undefined, publish, jest.fn(), false); // old code: rejects
+    expect(publish.mock.calls.map((c) => c[0])).toEqual([R1, R2, R3]);
+    expect(result).toMatchObject({ published: 2, publishFailed: 1 });
+    // No FAILED / uncertain write. The failed row's queued_at stamp is withdrawn, fenced on status + generation and under
+    // its own organisation, so the NEXT tick publishes it again (the old every-tick re-add's prompt retry is preserved).
+    expect(statements.some((s) => s.sql.includes("status = 'FAILED'"))).toBe(false);
+    const resets = statements.filter((s) => s.sql.includes('SET queued_at = NULL'));
+    expect(resets.map((s) => s.params)).toEqual([[R1, 0]]);
+    expect(resets[0]!.sql).toContain("status = 'PENDING' AND dispatch_generation = $2");
+    expect(contexts.every((c) => c.organisationId === ORG_A)).toBe(true);
+  });
+
+  it('a republish error on a recovered row is caught too (per_scope walk continues to the next organisation)', async () => {
+    const ORG_B = '00000000-0000-4000-8000-00000000000b';
+    const orgs = catalogue([ORG_A, ORG_B]);
+    const { tenant, dataSource } = fakeTenant((sql: string, params: unknown[]) => {
+      const page = orgs(sql, params);
+      if (page !== undefined) return page;
+      if (sql.includes('FROM core.push_delivery')) return [pendingRow(R1, { queued_at: new Date(Date.now() - 10 * 60_000), stale_pending: true })];
+      if (sql.includes('dispatch_generation = dispatch_generation + 1')) return [[{ dispatch_generation: 1 }], 1];
+      return [[], 1];
+    });
+    const republish = jest.fn(async () => {
+      throw new Error('Redis down');
+    });
+    const result = await runPushDispatchCycle(dataSource as never, tenant as never, jest.fn(), republish, false);
+    expect(republish).toHaveBeenCalledTimes(2); // both organisations reached (old code stopped at the first)
+    expect(result).toMatchObject({ published: 0, publishFailed: 2 });
+  });
+
+  it('after a failed publish the un-stamped row is published again on the very next tick (no 2-minute wait)', async () => {
+    const { tenant } = fakeTenant(rowsResponder([pendingRow(R1, { queued_at: null })])); // what the reset leaves behind
+    const publish = jest.fn(async () => undefined);
+    await dispatchPushScope(tenant as never, ORG_A, undefined, publish, jest.fn(), false);
+    expect(publish).toHaveBeenCalledWith(R1, ORG_A);
+  });
+
+  it('GLOBAL claim mode: a publish error propagates exactly as before (runGlobalDispatch releases with its 15 s retry) — no per-row catch, no queued_at withdrawal', async () => {
+    const { tenant, statements } = fakeTenant(rowsResponder([pendingRow(R1, {}), pendingRow(R2, {})]));
+    const publish = jest.fn(async (id: string) => {
+      if (id === R1) throw Object.assign(new Error('Connection is closed.'), { name: 'QueuePublishUnavailableError' });
+    });
+    await expect(dispatchPushScope(tenant as never, ORG_A, [R1, R2], publish, jest.fn(), false)).rejects.toThrow('Connection is closed.');
+    // Withdrawing the stamp would fire the pointer trigger (due now, claim cleared) and the same run would re-claim it.
+    expect(statements.some((s) => s.sql.includes('SET queued_at = NULL'))).toBe(false);
+    expect(publish.mock.calls.map((c) => c[0])).toEqual([R1]); // stops at the first failure, as before
+  });
+
 });

@@ -65,7 +65,7 @@ describe('shift statement dispatch', () => {
       get: () => ({
         runtimeDataSource: fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'pending' }])).dataSource,
         tenantContext: fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'pending' }])).tenant,
-        shiftStatementQueue: { add },
+        shiftStatementQueue: { name: 'rab-shift-statements', add }, // D-Q1: the registry name is checked before add
         logger: { log: jest.fn() },
       }),
     };
