@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -712,10 +713,27 @@ def cmd_scan(a, c: Check) -> None:
     outm = ['--mount', f'type=bind,source={out},target=/out']
     trivy = ['run', '--rm', *sock, *outm, '-v', f'{a.trivy_cache}:/root/.cache', '--pull', 'missing',
              pol['trivy']['image']]
+    # The DB is updated explicitly below (with retries); the scan itself never downloads, so a failed download can
+    # never silently fall back to a stale or missing DB.
     grype = ['run', '--rm', *sock, *outm, '-v', f'{a.grype_cache}:/cache', '-e', 'GRYPE_DB_CACHE_DIR=/cache',
-             '-e', 'GRYPE_DB_AUTO_UPDATE=true', '-e', 'GRYPE_CHECK_FOR_APP_UPDATE=false', '--pull', 'missing',
+             '-e', 'GRYPE_DB_AUTO_UPDATE=false', '-e', 'GRYPE_CHECK_FOR_APP_UPDATE=false', '--pull', 'missing',
              pol['grype']['image']]
     r = a.role
+    # Pull the digest-pinned scanner images first, so their pull progress never hides a scanner's own error message.
+    for img in (pol['trivy']['image'], pol['grype']['image']):
+        p = docker('pull', '--quiet', img, check=False, timeout=600)
+        if p.returncode != 0:
+            c.fail(f'cannot pull pinned scanner image {img}: {p.stderr.strip()[-300:]}')
+    # Grype DB: a transient CDN error must not need a manual re-run, but a DB that never arrives fails the check.
+    for attempt in range(1, 4):
+        p = docker(*grype, 'db', 'update', check=False, timeout=900)
+        if p.returncode == 0:
+            break
+        c.info(f'grype db update attempt {attempt} failed: {(p.stderr or p.stdout).strip()[-300:]}')
+        if attempt < 3:
+            time.sleep(20 * attempt)
+    else:
+        c.fail('grype DB could not be downloaded after 3 attempts (no scan without a current DB)')
     steps = [
         ('trivy vuln', trivy + ['image', '--quiet', '--scanners', 'vuln', '--list-all-pkgs', '--format', 'json',
                                 '--output', f'/out/{r}-trivy-vuln.json', a.image]),
@@ -726,7 +744,7 @@ def cmd_scan(a, c: Check) -> None:
                                  f'/out/{r}-trivy-vuln.json']),
         ('trivy cyclonedx', trivy + ['convert', '--quiet', '--format', 'cyclonedx',
                                      '--output', f'/out/{r}-sbom.cdx.json', f'/out/{r}-trivy-vuln.json']),
-        ('grype', grype + [f'docker:{a.image}', '--quiet', '-o', 'json', '--file', f'/out/{r}-grype.json']),
+        ('grype', grype + [f'docker:{a.image}', '-o', 'json', '--file', f'/out/{r}-grype.json']),
     ]
     for label, args in steps:
         p = docker(*args, check=False, timeout=3600)
