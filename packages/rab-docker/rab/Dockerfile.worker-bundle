@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# The Dockerfile frontend is pinned by its OCI index digest (H5 release gate refuses an unpinned frontend). Verified
+# 2026-11-03 with `docker buildx imagetools inspect docker/dockerfile:1` (the :1 tag resolves to this digest).
 #
 # Crewflow Worker bundle image: the ordinary Worker (jobs) and the Workspace Provisioner as two supervised OS processes
 # in ONE Worker deployment service. Built FROM the shared application image (packages/rab-docker/rab/Dockerfile, final

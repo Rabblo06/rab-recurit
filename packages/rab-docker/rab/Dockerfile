@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# The Dockerfile frontend is pinned by its OCI index digest (H5 release gate refuses an unpinned frontend). Verified
+# 2026-11-03 with `docker buildx imagetools inspect docker/dockerfile:1` (the :1 tag resolves to this digest).
 
 # Security floors (H1): the minimum Node, Chromium and libexpat versions, and the only Alpine branch apk may resolve from,
 # live in ONE place: packages/rab-docker/rab/security-floors.env. The stages below run security-floors.sh against it
