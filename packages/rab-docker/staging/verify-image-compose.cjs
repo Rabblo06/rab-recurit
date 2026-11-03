@@ -203,11 +203,34 @@ function checkResolvedImages(model, allowed = [DEFAULT_APP_REPOSITORY]) {
  * Environment mode: the DEPLOYED model (the variant + overrides, rendered with the real interpolation values) still holds
  * every control. Pure. Overrides may change only what the staging override changes: env files, ONE read-only bind of the
  * PostgreSQL CA at /run/crewflow/pg-ca.crt, STORAGE_KEY_PREFIX. `redisConf`: the text of the mounted Redis config, or null.
+ * `envFileKeys`: { service: { names: [variable names], dbUsers: { VAR: login } } } read from the services' env files (names
+ * and the login part of database URLs only, never a value), or omitted when the files are not readable here.
  */
-function checkDeployment(merged, production, redisConf) {
+function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
   const problems = [];
   const fail = (m) => problems.push(m);
   const services = merged?.services ?? {};
+  // Credential isolation in the deployed model (the same rules checkVariant applies to the committed file).
+  for (const name of ['rab-api', 'rab-worker']) {
+    const svc = services[name];
+    if (!svc) continue;
+    const files = (svc.env_file ?? []).map((e) => baseName(typeof e === 'string' ? e : e.path));
+    if (files.includes('.env.migrate') || files.includes('.env.ops')) fail(`${name}: names .env.migrate or .env.ops in the deployed model`);
+    const fromFiles = envFileKeys[name]?.names ?? [];
+    for (const k of [...MIGRATION_AUTHORITY, ...OPS_ONLY, ...LEGACY_DB]) {
+      if (Object.prototype.hasOwnProperty.call(envOf(svc), k) || fromFiles.includes(k)) fail(`${name}: sets ${k} in the deployed model`);
+    }
+    if (Object.prototype.hasOwnProperty.call(envOf(svc), 'REDIS_URL')) fail(`${name}: REDIS_URL is committed in a compose file (enter it in the env file)`);
+    for (const k of envFileKeys[name]?.unfilled ?? []) fail(`${name}: ${k} still holds a template <placeholder>`);
+    for (const k of ['PG_DATABASE_URL', 'REDIS_URL', ...(name === 'rab-worker' ? ['CREWFLOW_PROVISIONER_DATABASE_URL'] : [])]) {
+      if (envFileKeys[name] && !fromFiles.includes(k)) fail(`${name}: ${k} is missing from its env file`);
+    }
+    if (name === 'rab-api' && fromFiles.includes('CREWFLOW_PROVISIONER_DATABASE_URL')) fail('rab-api: sets CREWFLOW_PROVISIONER_DATABASE_URL (rab-worker launcher only)');
+    for (const [k, login] of Object.entries(envFileKeys[name]?.dbUsers ?? {})) {
+      const allowed = k === 'CREWFLOW_PROVISIONER_DATABASE_URL' ? ['crewflow'] : name === 'rab-api' ? ['crewflow_app'] : ['crewflow_app', 'crewflow_worker'];
+      if (!allowed.includes(login)) fail(`${name}: ${k} logs in as "${login}" (allowed: ${allowed.join(', ')})`);
+    }
+  }
   const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
   for (const name of ['rab-api', 'rab-worker']) {
     const a = services[name];
@@ -324,7 +347,37 @@ function environmentMode(argv) {
   } catch {
     redisConf = null;
   }
-  return { problems: [...images.problems, ...checkDeployment(model, production, redisConf)], lines: images.lines };
+  // The runtime services' env files: variable NAMES, unfilled placeholders, and the login part of database URLs only.
+  const envFileKeys = {};
+  for (const name of ['rab-api', 'rab-worker']) {
+    const paths = (model.services?.[name]?.env_file ?? []).map((e) => (typeof e === 'string' ? e : e.path));
+    if (!paths.length) continue;
+    const entry = { names: [], unfilled: [], dbUsers: {} };
+    for (const p of paths) {
+      let text;
+      try {
+        text = fs.readFileSync(p, 'utf8');
+      } catch {
+        entry.unfilled.push(`(env file ${baseName(p)} not readable)`);
+        continue;
+      }
+      for (const line of text.split(/\r?\n/)) {
+        const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+        if (!m || /^\s*#/.test(line)) continue;
+        entry.names.push(m[1]);
+        if (/<[^>]*>/.test(m[2])) entry.unfilled.push(m[1]);
+        if (/DATABASE_URL$/.test(m[1])) {
+          try {
+            entry.dbUsers[m[1]] = decodeURIComponent(new URL(m[2].replace(/^(['"])(.*)\1$/, '$2')).username);
+          } catch {
+            entry.unfilled.push(`${m[1]} (not a URL)`);
+          }
+        }
+      }
+    }
+    envFileKeys[name] = entry;
+  }
+  return { problems: [...images.problems, ...checkDeployment(model, production, redisConf, envFileKeys)], lines: images.lines };
 }
 
 if (require.main === module) {

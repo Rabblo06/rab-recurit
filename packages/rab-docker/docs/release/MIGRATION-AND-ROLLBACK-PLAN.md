@@ -320,6 +320,7 @@ API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
 | Roles (no passwords) | `pg_dumpall --roles-only --no-role-passwords` | same | with each dump |
 
 ```bash
+set -euo pipefail          # a failed pg_dump / pg_dumpall must fail the whole step, not leave an encrypted empty stream
 ts=$(date -u +%Y%m%dT%H%M%SZ)
 sudo install -d -m 0700 /var/backups/crewflow
 # No clear-text copy is ever written: pg_dump streams straight into age (the OFFLINE key's public half).
@@ -327,8 +328,13 @@ sudo -u postgres pg_dump -Fc --no-password -d <db> | age -r "<offline-recipient-
   | sudo tee /var/backups/crewflow/<db>-$ts.dump.age > /dev/null
 sudo -u postgres pg_dumpall --roles-only --no-role-passwords | age -r "<offline-recipient-public-key>" \
   | sudo tee /var/backups/crewflow/roles-$ts.sql.age > /dev/null
+# Both archives must exist and be larger than an encrypted empty stream (age adds about 200 bytes of header; a real roles dump is already larger than 400 bytes).
+for f in /var/backups/crewflow/<db>-$ts.dump.age /var/backups/crewflow/roles-$ts.sql.age; do
+  test "$(sudo stat -c %s "$f")" -gt 400 || { echo "backup $f is empty: STOP, do not approve the apply run"; exit 1; }
+done
 sudo sh -c "cd /var/backups/crewflow && sha256sum *-$ts.*.age > SHA256SUMS-$ts"
-# Upload the .age files and SHA256SUMS. `pg_restore -l` runs where the offline key is: on the disposable restore host (5.2).
+# Upload the .age files and SHA256SUMS. Full readability (`age -d | pg_restore -l`) is proved where the offline key is, on
+# the disposable restore host (5.2); for the pre-release dump do that BEFORE approving the apply run.
 ```
 
 ### 5.2 Restore rehearsal (disposable copy, never the source host)

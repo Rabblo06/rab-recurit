@@ -130,3 +130,22 @@ test('environment mode refuses a Redis config without the ACL file, with the def
   assertRefused(deployed(undefined, CONF.replace('maxmemory-policy noeviction', 'maxmemory-policy allkeys-lru')), /noeviction/);
   assertRefused(deployed(undefined, null), /cannot be read/);
 });
+
+test('environment mode refuses migration/ops authority, foreign logins and unfilled templates in the runtime env files', { skip }, () => {
+  const ok = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_app' } };
+  const worker = { names: [...ok.names, 'CREWFLOW_PROVISIONER_DATABASE_URL'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_worker', CREWFLOW_PROVISIONER_DATABASE_URL: 'crewflow' } };
+  const run = (keys, mutate = () => {}) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, CONF, keys);
+  };
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': worker }), []);
+  assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, 'CREWFLOW_MIGRATION_APPROVED'] }, 'rab-worker': worker }), /rab-api: sets CREWFLOW_MIGRATION_APPROVED/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: [...worker.names, 'DATABASE_URL'] } }), /rab-worker: sets DATABASE_URL/);
+  assertRefused(run({ 'rab-api': { ...ok, dbUsers: { PG_DATABASE_URL: 'crewflow_migrator' } }, 'rab-worker': worker }), /logs in as "crewflow_migrator"/);
+  assertRefused(run({ 'rab-api': { ...ok, dbUsers: { PG_DATABASE_URL: 'crewflow_worker' } }, 'rab-worker': worker }), /rab-api: PG_DATABASE_URL logs in as "crewflow_worker"/);
+  assertRefused(run({ 'rab-api': { ...ok, unfilled: ['APP_SECRET'] }, 'rab-worker': worker }), /APP_SECRET still holds a template/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: ['PG_DATABASE_URL', 'REDIS_URL'] } }), /CREWFLOW_PROVISIONER_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }), /rab-api: names \.env\.migrate/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
+});

@@ -54,6 +54,7 @@ Consequences:
 # 3.1 Engine and Compose; the runtime keys need Compose v2.24+ (!override/!reset are not used here, but tmpfs options are).
 docker version --format '{{.Server.Version}} {{.Server.Arch}}'
 docker compose version
+node --version                            # 20 or later: runs staging/verify-image-compose.cjs (no npm install needed)
 uname -m                                  # x86_64 or aarch64; record it (see §8 for the ARM64 gate)
 
 # 3.2 Directories. The secret directory is root-only.
@@ -92,7 +93,7 @@ Generate each value on the operator's machine or on the VM. Never reuse a produc
 
 | Secret | Generate | Lives in |
 |---|---|---|
-| `crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`, `rab_owner` and bootstrap passwords | `openssl rand -base64 32` (or psql `\password`) | the secret store; the env files (0600) |
+| `crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`, `rab_owner` and bootstrap passwords | `openssl rand -hex 32` (URL-safe: the passwords go straight into `postgresql://` URLs; any other generator's output must be percent-encoded there) | the secret store; the env files (0600) |
 | `APP_SECRET` | `openssl rand -hex 48` | `api.env`, `worker.env` |
 | Redis `crewflow` password | `openssl rand -hex 32`; the ACL file stores only its SHA-256: `printf '%s' "$P" \| sha256sum` | `REDIS_URL` in `api.env`/`worker.env`; the hash in `redis-users.acl` |
 | S3 key pair | provider console, scoped to the staging bucket | `api.env`, `worker.env` |
@@ -106,8 +107,14 @@ sudo cp release/packages/rab-docker/staging/env/worker.env.example  /etc/crewflo
 sudo cp release/packages/rab-docker/hosting/redis/users.acl.example /etc/crewflow-staging/secrets/redis-users.acl
 sudo chmod 0600 /etc/crewflow-staging/compose.env /etc/crewflow-staging/secrets/*
 sudo chmod 0644 /etc/crewflow-staging/secrets/redis-users.acl   # read by the redis user (uid 999); holds hashes only
+sudoedit /etc/crewflow-staging/compose.env                       # the two release digests + the Redis digest (release record)
 sudoedit /etc/crewflow-staging/secrets/api.env                   # fill every <placeholder>; never via echo/cat
+sudoedit /etc/crewflow-staging/secrets/worker.env                # fill every <placeholder> (same shared staging values)
+sudoedit /etc/crewflow-staging/secrets/redis-users.acl           # replace both #<sha256-...> placeholders with real hashes
 ```
+
+The preflight in §5 refuses any `<placeholder>` left in `api.env` or `worker.env`, a missing required name, a
+migration/ops credential and a database login other than the allowed one per service.
 
 Rotation:
 - database logins: `ALTER ROLE ... PASSWORD` from a `\password` prompt, update the env file, rolling restart;
@@ -123,9 +130,9 @@ Shortcut: `C` is the compose command, run from `/opt/crewflow-staging/release/pa
 ```bash
 cd /opt/crewflow-staging/release/packages/rab-docker
 C="sudo docker compose --env-file /etc/crewflow-staging/compose.env -f docker-compose.image.yml -f staging/docker-compose.staging.yml"
-node staging/verify-image-compose.cjs --environment --env-file /etc/crewflow-staging/compose.env \
-  --compose staging/docker-compose.staging.yml        # every image = adhin007/adolphus@sha256 / redis@sha256
-$C config --quiet                                     # renders; nothing started
+sudo node staging/verify-image-compose.cjs --environment --env-file /etc/crewflow-staging/compose.env \
+  --compose staging/docker-compose.staging.yml        # images by digest + every runtime control + env-file names
+$C config --quiet --no-env-resolution                 # renders without reading env files (.env.migrate may not exist yet)
 ```
 
 1. **PostgreSQL**: the Infrastructure agent's self-hosted template, with `CREWFLOW_BOOTSTRAP_PHASE_D=true`. It creates
