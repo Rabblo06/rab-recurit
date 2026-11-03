@@ -76,19 +76,21 @@ const SECRETS = {
   S_S3_SECRET_KEY: hex(24),
   S_FIXTURE_PASSWORD: `Fx${hex(16)}`,
 };
-// The per-run ACL file lives in a private temp directory (mkdtemp) removed at the end. It gives the throwaway password in
-// Redis's own `>password` form (Redis stores its SHA-256 itself); a real deployment's file holds only the `#<sha256>` form
-// (the Infrastructure template users.acl.example). The `ops` user stays disabled and passwordless here.
+// The per-run ACL file holds only the SHA-256 of the per-run random password: `#<sha256>` is the hashed form Redis's ACL
+// file format defines (the same form as the Infrastructure template users.acl.example), so no clear-text password is ever
+// written. CodeQL js/insufficient-password-hash flags this SHA-256: a documented false positive (the hash format is fixed
+// by Redis, the password is 24 random bytes per run, the Redis is a throwaway with no published port), left open for the
+// owner, not silenced. The file lives in a private mkdtemp directory removed at the end; `ops` stays disabled.
 const SECRETS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-s-rehearsal-'));
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const APP_PERMS = 'resetkeys ~* resetchannels &* +@all -@admin -@dangerous +info +client|setname +client|getname +client|id +client|info +client|list -flushall -flushdb -keys -swapdb';
 fs.writeFileSync(path.join(SECRETS_DIR, 'redis-users.acl'), [
   `user default off resetpass ${APP_PERMS}`,
-  `user crewflow on >${SECRETS.S_REDIS_PASSWORD} ${APP_PERMS}`,
+  `user crewflow on #${sha(SECRETS.S_REDIS_PASSWORD)} ${APP_PERMS}`,
   'user healthcheck on nopass resetkeys resetchannels -@all +ping',
   'user ops off resetpass resetkeys ~* resetchannels -@all +ping +info',
   '',
-].join('\n'), { mode: 0o644 }); // read by the redis user (uid 999) through the bind mount; the directory is private
+].join('\n'), { mode: 0o644 }); // 0644 is acceptable: hashes only; read by the redis user (uid 999) through the bind mount; the mkdtemp directory is private and removed afterwards
 
 const [, apiRepo, apiDigest] = DIGEST_REF.exec(process.env.S_API_IMAGE);
 const [, workerRepo, workerDigest] = DIGEST_REF.exec(process.env.S_WORKER_IMAGE);
