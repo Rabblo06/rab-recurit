@@ -378,6 +378,10 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     assert(/api-prestart: checking the schema is current/.test(logs), 'api-prestart did not run');
     assert(/\[runtime-db-guard\] process=api .* role=crewflow_app probe=read-only-ok/.test(logs), 'API guard line missing or wrong role');
     assert(!/EROFS|read-only file system/i.test(logs), 'the API hit the read-only filesystem');
+    // H6: the API's own report of what the platform applied (api-prestart.sh from this branch).
+    const iso = (/api-prestart: (runtime isolation as declared|WARNING runtime isolation weaker)[^\n]*/.exec(logs) || [''])[0];
+    measured.apiIsolationLine = iso;
+    if (!MATRIX_ONLY) assert(/runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids\.max=\d+ memory\.max=\d+/.test(iso), `API isolation line: ${iso || '(none)'}`);
     return `healthy in ${measured.apiStartToHealthyMs} ms (includes rab-migrate check run)`;
   });
 
@@ -389,6 +393,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     write(logs.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|rab-worker ready|workspace-provisioner\] started|EROFS|EACCES/.test(l)).join('\n'));
     assert(/\[worker-bundle\] live identity probes agree: database=rab cluster=\d+ \(jobs=crewflow_app, provisioner=crewflow\)/.test(logs), 'no agreeing live identity line');
     assert(/\[jobs\] rab-worker ready/.test(logs), 'jobs not ready');
+    const iso = (/\[worker-bundle\] (runtime isolation as declared|WARNING runtime isolation weaker)[^\n]*/.exec(logs) || [''])[0];
+    measured.workerIsolationLine = iso;
+    if (!MATRIX_ONLY) assert(/runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4\/4 pids\.max=\d+ memory\.max=\d+/.test(iso), `Worker isolation line: ${iso || '(none)'}`);
     fx.workerPids = bundlePids(containerId('rab-worker'));
     write(fx.workerPids.table.map((x) => `${x.pid} uid=${x.uid} ${x.cmd}`).join('\n'));
     assert(fx.workerPids.launcher && fx.workerPids.jobs && fx.workerPids.provisioner, 'missing a process');
