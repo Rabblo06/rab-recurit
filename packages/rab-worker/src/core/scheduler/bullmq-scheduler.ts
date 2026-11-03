@@ -86,10 +86,21 @@ export function registerIntervalScans(
  * stamp (`last<Loop>At` in the Worker stats hash, epoch ms): the time left until one interval after the last successful
  * run, clamped to [0, interval]. No stamp, an unparsable one, or one in the future → one full interval. So a restart never
  * re-runs a daily scan early, and frequent deploys can never postpone it forever (an overdue scan runs at start).
+ *
+ * D-Q5a (audit §13 #9): `firstSeenAt` is when a boot first found the stamp MISSING (daily-first-seen.ts, shared by every
+ * replica). Only for a missing stamp, and only when it is a finite time not in the future, the delay is measured from it
+ * the same way (clamped to [0, interval]) — so after a Redis wipe, restarts can no longer push the first run out forever.
+ * A present stamp (valid, unparsable or future) always decides exactly as before; no `firstSeenAt` → exactly as before.
  */
-export function firstRunDelayFromStamp(stamp: string | null | undefined, intervalMs: number, now: number = Date.now()): number {
-  const last = stamp === null || stamp === undefined || stamp === '' ? NaN : Number(stamp);
-  if (!Number.isFinite(last) || last > now) return intervalMs;
+export function firstRunDelayFromStamp(stamp: string | null | undefined, intervalMs: number, now: number = Date.now(), firstSeenAt?: number): number {
+  const missing = stamp === null || stamp === undefined || stamp === '';
+  const last = missing ? NaN : Number(stamp);
+  if (!Number.isFinite(last) || last > now) {
+    if (missing && firstSeenAt !== undefined && Number.isFinite(firstSeenAt) && firstSeenAt <= now) {
+      return Math.min(intervalMs, Math.max(0, firstSeenAt + intervalMs - now));
+    }
+    return intervalMs;
+  }
   return Math.min(intervalMs, Math.max(0, last + intervalMs - now));
 }
 

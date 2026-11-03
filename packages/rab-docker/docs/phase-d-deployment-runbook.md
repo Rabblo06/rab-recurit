@@ -433,6 +433,7 @@ pointers while it runs.
 | What keeps processing | Everything. per_scope scans outboxes and workspaces directly. In-flight global claims expire with their leases (15 s realtime, 30 s email/push), and the rows are claimed by their own state machines, so nothing is lost or double-completed. The triggers keep pointers current for a later re-activation. |
 | Data change | None. |
 | Risk | Low and fast: about the time of a rolling deploy. Verified on the disposable performance stack (global → per_scope and event → poll). |
+| D-Q5a | per_scope includes the D-Q5a realtime reclaim cap (a reclaim after claimant death counts toward `max_attempts`), so switching to per_scope does **not** restore the pre-Phase-D realtime claim; undoing D-Q5a is an image rollback (§8.3). Re-take any per_scope realtime baseline recorded before D-Q5a. |
 
 ### 8.2 Worker credential rollback (`crewflow_worker` → `crewflow_app`)
 

@@ -113,6 +113,10 @@ jobs:
         run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
+      # Docker hardening review H1-L1: no Dockerfile may add an apk repository on the command line or skip signature checks
+      # (the security-floors.sh gate covers /etc/apk/*; this covers `apk -X…/--rep…/--allow-u…/--keys-dir` in commands).
+      - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
+        run: bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh
 
   trivy:
     runs-on: ubuntu-latest

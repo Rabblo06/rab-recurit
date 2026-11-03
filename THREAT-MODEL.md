@@ -4733,6 +4733,96 @@ payroll, attendance or staffing rule change; email preferences untouched (notify
 - **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
   to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
 
+## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
+
+No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
+policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+**One delivery-policy change, for class-A realtime hints only — NEEDS OWNER APPROVAL (independent review F47-1):** a
+reclaim after claimant death now counts toward the existing `max_attempts` (10); a hint whose claimant dies (or stalls
+past the 60 s lease) 10 times is dropped (`failed`, `LEASE_RECLAIM_EXHAUSTED`) instead of being re-claimed forever.
+Before, redelivery after claimant death was unbounded; only publish failures were capped. Impact: every realtime event
+type is an ids-only UI hint (`attendance.changed`, `notification.created`, `offer.*`, `payroll.record_changed`,
+`shift.*`, `shift_request.*`, `navigation_layout.saved`); clients refetch, none is a security signal (authorisation is
+resolved server-side per request), and dropping one takes about 10 consecutive claimant deaths at 60 s each (≥ ~10
+minutes of crash-looping while that row is held). It removes an availability risk: one tenant's poison row could be
+re-claimed every cycle on every replica. `WORKER_CLAIM_MODE=per_scope` no longer reproduces the pre-Phase-D realtime
+claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2).
+
+- **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
+  (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
+  `processing` with an expired lease (its claimant died or hung) counts as an attempt; when `attempt_count + 1 >=
+  max_attempts` (the existing column, default 10, the same arithmetic `markRealtimeEventRetry` already used for a failed
+  publish) the row ends `failed` / `LEASE_RECLAIM_EXHAUSTED` with its claim and lease cleared and is not returned or
+  published. Before, a poison row whose publisher crashed every time was re-claimed forever — every cycle, every replica
+  — an availability risk one tenant's bad row could impose on the shared Worker. Actor → action → consequence after the
+  fix: a realtime hint (ids only; clients refetch) for a row whose publisher keeps dying is dropped after `max_attempts`
+  claims; no business record is touched. **Tenant isolation unchanged:** the same RLS-bound statement under the scope's
+  `SET LOCAL` (FORCE RLS on `core.realtime_event`); the MATERIALIZED CTE (eligibility, order, LIMIT, `FOR UPDATE SKIP
+  LOCKED`) is byte-identical to before (pinned by sha256 in `publish-outbox.job.spec.ts`). Abuse cases, real PostgreSQL
+  (`dq5-realtime-lease-reclaim.integration.spec.ts`): another organisation's context neither sees nor counts the row (per
+  scope and global); a claim with no tenant context bound returns zero rows and counts nothing; three concurrent
+  reclaimers of one row → exactly one wins, counted once. The global-mode pointer of a `failed` row is deleted by the
+  existing trigger (`failed` is terminal for realtime; tested). So that a LIVE claimant is never counted against (a batch
+  of up to 25 sequential publishes, 3 s each, can outlast the 60 s lease), `publishRealtimeScope` renews the lease of
+  the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
+  AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
+  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant,
+  and counted as `lostLease` in the cycle log (not `failed`: the other claimant holds and publishes it).
+- **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
+  `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
+  interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token
+  cleanup, storage cleanup and the provisioning-health alert run within one interval of the first boot instead of never
+  (when restarts are more frequent than the interval). A present stamp always decides exactly as before; Redis failing or
+  hanging (2 s bound) → one full interval, as before. The key holds a stat-key name and an epoch-ms number — no tenant
+  data — and is deliberately outside `rab:worker:stats`, which Admin Health lists as "last runs". **Residual:** production
+  Redis is unauthenticated (§13 #11): a party able to write Redis could plant an old first-seen value and make these
+  three idempotent housekeeping scans run at the next boot instead of a day later (a future or malformed value is
+  ignored), or delete it — the same reach it already has over the stamps themselves. bullmq scheduler mode is unchanged.
+- **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
+  Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
+  `crewflow_worker` only under global). Comment-only.
+
+## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
+
+Owner-approved plan (Docker consolidated plan 2026-11-02, R1/R2/R5 + compiled tests). Dockerfile-level only: no source,
+`package.json` or `yarn.lock` change; the application JavaScript and `node_modules` in the image are byte-identical to the
+unchanged Dockerfile's (only the compiled test helpers are gone).
+
+- **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
+  Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
+  2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
+  any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
+  v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
+  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  of that file (H5 release scanning re-checks against Chrome/Node releases).
+- **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
+  `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
+  execution bug could persist by editing code the process later loads. Control: application code is copied root-owned
+  and not group/other-writable; the build fails if anything under `/app` other than `/app/storage` (node, 0750) is not
+  root-owned or is group/other-writable. The Worker bundle no longer needs its recursive `chown -R`/`chmod -R` (−1.08 GB
+  layer) and refuses a base image that does not meet the rule; the launcher's start-time check is unchanged.
+- **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
+  sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
+  code imports one.
+- **Security review fixes (2026-11-03).**
+  - *H1-M1 (Medium, confirmed by a planted-file proof):* Node's CommonJS `globalPaths` include `$HOME/.node_modules` and
+    `$HOME/.node_libraries`; `/home/node` was node-owned (2755), so uid 1000 in the API could plant
+    `$HOME/.node_modules/pg-native/index.js`, which TypeORM's Postgres driver try-loads on every start (reproduced: the
+    planted file executes as uid 1000). Control: `/home/node` is root-owned 0555 in the image; the Worker launcher gives
+    both children `HOME=/nonexistent` (with Chromium's `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` inside the child's own 0700
+    TMPDIR) and refuses to start if that HOME or its parent is child-writable; `module-paths-gate.cjs` runs at build time as
+    `node` (API) and as uid 1000 and 10001 (Worker) and fails the build if any module search path is writable or the
+    pg-native plant succeeds. Regression: `launcher.test.cjs` 3b and the image gate (CI `trivy` job builds it).
+  - *H1-L1:* the Alpine gate also refuses `repositories.d` drop-ins, `/etc/apk/config`, `name@tag` pins in
+    `/etc/apk/world`, and any repository host other than `dl-cdn.alpinelinux.org`; CI rejects `-X`, `--repository`,
+    `--repositories-file` and `--allow-untrusted` in `packages/rab-docker/**/Dockerfile*`. `publish-image.yaml` builds the
+    runtime stage with `no-cache-filters: rab` so a release never reuses an old `apk upgrade` layer.
+  - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
+    setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.
+
 ## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
 
 Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,
