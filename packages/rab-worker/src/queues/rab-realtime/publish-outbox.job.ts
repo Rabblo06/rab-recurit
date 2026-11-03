@@ -73,6 +73,11 @@ export interface RealtimeOutboxPublishResult {
   failed: number;
   /** Workspace scopes skipped because the workspace's schema is not routable yet (still provisioning) — W6-E2E-07. */
   skippedNotReady: number;
+  /**
+   * D-Q5a: claimed rows this claimant skipped because a mid-batch lease renewal showed another claimant had already
+   * reclaimed them. NOT a failure: the other claimant holds the row and publishes it (review F47-3).
+   */
+  lostLease: number;
 }
 
 /** A Redis `PUBLISH` call — the caller owns the connection and its lifecycle; this function only calls it. Returns the subscriber count ioredis itself returns (0 is a normal, expected outcome, never treated as failure here). */
@@ -121,7 +126,7 @@ export async function runRealtimeOutboxPublishCycle(
   return result;
 }
 
-const emptyResult = (): RealtimeOutboxPublishResult => ({ claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0 });
+const emptyResult = (): RealtimeOutboxPublishResult => ({ claimed: 0, published: 0, invalid: 0, retried: 0, failed: 0, skippedNotReady: 0, lostLease: 0 });
 
 function addResult(into: RealtimeOutboxPublishResult, add: RealtimeOutboxPublishResult): void {
   into.claimed += add.claimed;
@@ -130,6 +135,7 @@ function addResult(into: RealtimeOutboxPublishResult, add: RealtimeOutboxPublish
   into.retried += add.retried;
   into.failed += add.failed;
   into.skippedNotReady += add.skippedNotReady;
+  into.lostLease += add.lostLease;
 }
 
 /**
@@ -179,7 +185,8 @@ export async function publishRealtimeScope(
   // claimant never reclaims (and, since D-Q5a, counts an attempt against) a row this live claimant still holds. A normal
   // batch finishes long before that and issues no extra statement. A failed renewal is not fatal (pre-renewal behaviour).
   // A row the renewal did NOT keep was already reclaimed by another claimant (its lease lapsed first): it is skipped — not
-  // published a second time — and counted as `failed` (lost lease), while the rows still held carry on.
+  // published a second time — and counted as `lostLease` (not a failure: the other claimant has it), while the rows still
+  // held carry on.
   const renewAfterMs = (leaseSeconds * 1000) / 2;
   const lost = new Set<string>();
   for (let i = 0; i < claimed.length; i += 1) {
@@ -197,7 +204,7 @@ export async function publishRealtimeScope(
     }
     const event = claimed[i]!;
     if (lost.has(event.id)) {
-      result.failed++;
+      result.lostLease++;
       continue;
     }
     // eslint-disable-next-line no-await-in-loop

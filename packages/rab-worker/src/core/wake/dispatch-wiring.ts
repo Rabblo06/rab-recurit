@@ -148,7 +148,7 @@ export function buildDispatchBindings(
           if (!environmentService.get('REALTIME_ENABLED')) return 0; // defence in depth, as the processor
           const r = await publishRealtimeScope(tenantContext, realtimePublish, environmentService.get('NODE_ENV'), scope, { ids: scope.subjectIds });
           // D-Q5a: also log a cycle whose only outcome was a lease reclaim that exhausted max_attempts (failed, none claimed).
-          if (r.claimed || r.failed) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed}`);
+          if (r.claimed || r.failed || r.lostLease) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed} lostLease=${r.lostLease}`);
           return r.claimed;
         };
         break;

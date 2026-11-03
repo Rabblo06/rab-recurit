@@ -280,7 +280,7 @@ describeIfDb('D-Q5a §13 #6: a realtime lease reclaim counts as an attempt and i
       return 1;
     }, 'test', { organisationId: identity.organisationId, workspaceId: identity.workspaceId }, { leaseSeconds: 2 });
     expect(competitor).toEqual([]);
-    expect(result).toMatchObject({ claimed: 3, published: 3, failed: 0 });
+    expect(result).toMatchObject({ claimed: 3, published: 3, failed: 0, lostLease: 0 });
     for (const id of ids) expect(await row(identity, id)).toMatchObject({ status: 'completed', attempt_count: 0 });
   });
 
@@ -300,7 +300,7 @@ describeIfDb('D-Q5a §13 #6: a realtime lease reclaim counts as an attempt and i
       return 1;
     }, 'test', { organisationId: identity.organisationId, workspaceId: identity.workspaceId }, { leaseSeconds: 2 });
     expect(published).toEqual([ids[0], ids[1]]); // never ids[2]: another claimant holds it
-    expect(result).toMatchObject({ claimed: 3, published: 2, failed: 1 });
+    expect(result).toMatchObject({ claimed: 3, published: 2, failed: 0, lostLease: 1 });
     expect(await row(identity, ids[2]!)).toMatchObject({ status: 'processing', attempt_count: 1, claim_token: competitorToken });
   });
 });

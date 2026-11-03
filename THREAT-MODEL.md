@@ -4664,9 +4664,18 @@ posture change.
 
 ## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
 
-Recovery and idempotency only; no business rule, payroll / attendance / staffing / permission rule, retry policy or
-delivery policy changed. No migration, role, grant, RLS policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md`
-§5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
+policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+**One delivery-policy change, for class-A realtime hints only — NEEDS OWNER APPROVAL (independent review F47-1):** a
+reclaim after claimant death now counts toward the existing `max_attempts` (10); a hint whose claimant dies (or stalls
+past the 60 s lease) 10 times is dropped (`failed`, `LEASE_RECLAIM_EXHAUSTED`) instead of being re-claimed forever.
+Before, redelivery after claimant death was unbounded; only publish failures were capped. Impact: every realtime event
+type is an ids-only UI hint (`attendance.changed`, `notification.created`, `offer.*`, `payroll.record_changed`,
+`shift.*`, `shift_request.*`, `navigation_layout.saved`); clients refetch, none is a security signal (authorisation is
+resolved server-side per request), and dropping one takes about 10 consecutive claimant deaths at 60 s each (≥ ~10
+minutes of crash-looping while that row is held). It removes an availability risk: one tenant's poison row could be
+re-claimed every cycle on every replica. `WORKER_CLAIM_MODE=per_scope` no longer reproduces the pre-Phase-D realtime
+claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2).
 
 - **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
   (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
@@ -4687,7 +4696,8 @@ delivery policy changed. No migration, role, grant, RLS policy or posture change
   the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
   AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
   token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
-  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant.
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant,
+  and counted as `lostLease` in the cycle log (not `failed`: the other claimant holds and publishes it).
 - **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
   `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
   interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token

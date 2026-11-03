@@ -21,9 +21,9 @@ export class RealtimeScanProcessor {
     // `perScopeLimit` per scope per cycle, unchanged) once REALTIME_ENABLED is true again.
     if (!environmentService.get('REALTIME_ENABLED')) return false;
     const result = await runRealtimeOutboxPublishCycle(runtimeDataSource, tenantContext, realtimePublish, environmentService.get('NODE_ENV'));
-    if (result.claimed || result.failed) {
+    if (result.claimed || result.failed || result.lostLease) {
       // D-Q5a: `failed` can be non-zero with nothing claimed (a lease reclaim that exhausted max_attempts) — still logged.
-      logger.log(`realtime outbox publish: claimed=${result.claimed} published=${result.published} invalid=${result.invalid} retried=${result.retried} failed=${result.failed}`);
+      logger.log(`realtime outbox publish: claimed=${result.claimed} published=${result.published} invalid=${result.invalid} retried=${result.retried} failed=${result.failed} lostLease=${result.lostLease}`);
     }
     return Boolean(result.claimed);
   }

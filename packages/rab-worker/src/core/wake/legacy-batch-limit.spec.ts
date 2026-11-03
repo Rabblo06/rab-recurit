@@ -1,4 +1,4 @@
-import { catalogue, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
+import { catalogue, DQ5A_SQL_SHA256, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { dispatchEmailScope, runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope, runPushDispatchCycle } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
@@ -143,7 +143,7 @@ describe('realtime per_scope scope: one note per scope whose 25-event batch came
   it.each([[0, 0], [24, 0], [25, 1]])('%i claimed → %i; the claim SQL is unchanged', async (n, expected) => {
     const { scopesAtLimit, claims } = await run(n);
     expect(scopesAtLimit).toBe(expected);
-    expect(sha256(claims[0]!.sql)).toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
+    expect(sha256(claims[0]!.sql)).toBe(DQ5A_SQL_SHA256.realtimeClaim);
   });
 
   it('the global-mode (ids) claim never signals', async () => {

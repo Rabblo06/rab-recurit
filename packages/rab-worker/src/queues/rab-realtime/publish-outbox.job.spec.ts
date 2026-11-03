@@ -1,4 +1,4 @@
-import { fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
+import { DQ5A_SQL_SHA256, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { publishRealtimeScope, runRealtimeOutboxPublishCycle } from './publish-outbox.job';
 
 /**
@@ -16,7 +16,7 @@ const E1 = '00000000-0000-4000-8000-000000000001';
 const USER = '00000000-0000-4000-8000-0000000000f1';
 
 describe('realtime publisher — per_scope mode (unchanged)', () => {
-  it('claims every scope with exactly the pre-Phase-D SQL (limit 25, lease 60 s)', async () => {
+  it('claims every scope with exactly the D-Q5a SQL (limit 25, lease 60 s) — the pre-Phase-D statement plus the reclaim cap, nothing else', async () => {
     const { tenant, dataSource, statements, contexts } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [[], 0] : []));
     await runRealtimeOutboxPublishCycle(dataSource as never, tenant as never, jest.fn(), 'test', {
       scopes: [{ organisationId: ORG, workspaceId: null }, { organisationId: ORG, workspaceId: WS }],
@@ -24,7 +24,9 @@ describe('realtime publisher — per_scope mode (unchanged)', () => {
     const claims = statements.filter((s) => s.sql.includes('WITH claimable'));
     expect(claims).toHaveLength(2);
     for (const c of claims) {
-      expect(sha256(c.sql)).toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
+      expect(sha256(c.sql)).toBe(DQ5A_SQL_SHA256.realtimeClaim);
+      // Review F47-2: per_scope is no longer byte-identical to the pre-Phase-D statement (undoing D-Q5a = image rollback).
+      expect(sha256(c.sql)).not.toBe(PRE_PHASE_D_SQL_SHA256.realtimeClaim);
       expect(c.params).toEqual([expect.any(String), '60', 25]);
     }
     expect(contexts).toEqual([
@@ -286,7 +288,7 @@ describe('D-Q5a realtime lease renewal during a slow batch', () => {
     expect(renewals[0]!.sql).toContain("status = 'processing' AND claim_token = $2");
   });
 
-  it('a row the renewal did not keep (reclaimed elsewhere) is skipped and counted failed; the rows still held are published', async () => {
+  it('a row the renewal did not keep (reclaimed elsewhere) is skipped and counted as lostLease (not failed); the rows still held are published', async () => {
     const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : isRenew(sql) ? [[{ id: ids[3] }], 1] : [[{ id: 'x' }], 1]));
     const publish = jest.fn(async () => {
       clock += 20_000;
@@ -295,7 +297,7 @@ describe('D-Q5a realtime lease renewal during a slow batch', () => {
     const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
     const publishedIds = (publish.mock.calls as unknown as Array<[string, string]>).map(([, m]) => JSON.parse(m).eventId);
     expect(publishedIds).toEqual([ids[0], ids[1], ids[3]]);
-    expect(result).toMatchObject({ claimed: 4, published: 3, failed: 1 });
+    expect(result).toMatchObject({ claimed: 4, published: 3, failed: 0, lostLease: 1 });
   });
 
   it('NEGATIVE: a renewal that throws does not stop the batch (falls back to the pre-renewal behaviour)', async () => {
