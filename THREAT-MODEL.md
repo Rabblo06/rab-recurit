@@ -4838,3 +4838,97 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
   shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
   jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
+
+## Docker hardening H6 — API and Worker runtime isolation (branch build/docker-hardening-h6, stacked on H2, not merged)
+
+Compose-level only, plus a report line in the Worker launcher and an explicit (unchanged) Chromium launch option. Evidence:
+the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on the committed production file).
+
+- **Compromised API process persists, escalates or exhausts the host.** Threat: before H6 the production `rab-api` ran
+  with Docker's default capability bounding set (14 capabilities), `no_new_privs` off, a writable root filesystem and no
+  memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
+  future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
+  rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (the API writes nothing to its filesystem: uploads are
+  buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production; measured by the runtime matrix
+  in `development` mode with push, Sentry, OIDC and AI off — those paths are covered by the code review only. Docker's
+  default 64 MiB noexec `/dev/shm` stays writable; the API never uses it),
+  `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
+  `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
+- **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
+  CAP_SETUID/CAP_SETGID (to give each child its own UID/GID; libuv calls setgroups/setgid/setuid) and CAP_KILL (to signal
+  and sweep children of other UIDs). Measured in the image under the production capability set: without SETUID or SETGID
+  every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
+  watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
+  the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
+  `pids_limit: 1024` (one Chromium render ≈ 130 tasks; up to 4 renders run at once — shift reports, final timesheets,
+  two statement consumers — measured 551 tasks; with 512, 4 of 12 concurrent renders failed), `mem_limit` and `cpus`
+  (`cpus` above the host's CPU count stops the container from starting: planned hosts have ≥ 2 vCPUs). Regression: "H6 rab-worker" test, launcher tests,
+  runtime matrix.
+- **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
+  OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
+  2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
+  modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
+  `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
+  verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
+  declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
+  `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
+  controls a platform applied (CPU limits are not reported). Owner decision "never drop a security setting silently":
+  `CREWFLOW_RUNTIME_ISOLATION=enforce` makes both REFUSE to start when any declared control is missing (uid, bounding set,
+  no_new_privs, read-only root, PID/memory limits, the Worker's per-child tmpfs; an unreadable value counts as missing);
+  the value is strict (`warn` | `enforce`, unset = `warn`, anything else refuses) and never reaches a Worker child. The
+  production file leaves it unset (warn) so today's OpenShip deployment still starts and reports; a deployment definition
+  that must never run degraded (the staging/OpenShip variant) sets `enforce`. Tests: prestart 7a–7e, launcher H6-4..7.
+  What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
+  files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
+- **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:
+  Playwright adds `--no-sandbox` unless `chromiumSandbox: true`, so unset/`false` launched unsandboxed too (verified on the
+  real command line). `render-pdf.util.ts` now passes `chromiumSandbox: false` explicitly (no behaviour change) and says so.
+  The S-7 spec name "unset: Chromium keeps its sandbox" in `render-pdf-sandbox-footer.integration.spec.ts` is therefore
+  inaccurate (it inspects only the arguments handed to Playwright) — follow-up for that file's owner.
+  Evaluation: under the production settings `chromiumSandbox: true` aborts (Docker's seccomp refuses CLONE_NEWUSER; the
+  setuid helper has no setuid bit since H1-L2). With a seccomp profile = Docker's default + clone/unshare of
+  NEWUSER/NEWPID/NEWNET/NEWIPC only (mount/cgroup/UTS still refused) + chroot, `chromiumSandbox: true` and
+  `--disable-gpu-sandbox`, Chromium reports "You are adequately sandboxed" (namespace layer 1, PID + network namespaces,
+  seccomp-BPF); renderers run in their own user/PID/net namespaces with an extra seccomp filter; 15/15 renders, median
+  +3.5 % (amd64, Docker Desktop kernel 6.6). Without `--disable-gpu-sandbox` the GPU process's seccomp policy kills it on
+  musl's pwritev2 and the browser exits. NOT applied: it widens the kernel attack surface of every process in the Worker
+  container (unprivileged user namespaces), needs a host-provided profile file (OpenShip drops `security_opt`), is
+  unverified on ARM64 and on Ubuntu hosts that restrict unprivileged user namespaces through AppArmor.
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Keep Chromium unsandboxed (--no-sandbox) in the Worker; do not ship the user-namespace seccomp delta.
+  Reason:     The only working sandbox needs unprivileged user namespaces for the whole Worker container (a kernel LPE
+              surface for the jobs process and the root launcher), a host seccomp file the current platform ignores, and
+              is unproven on ARM64 production.
+  Risk:       A memory-safety bug in Chromium's renderer/image decoders (e.g. a crafted organisation logo, embedded as a
+              data: URI) runs code as uid 1000 in the Worker container with no further sandbox layer.
+  Mitigation: JavaScript off, offline context, every non-data: request aborted, navigation refused, 30 s step bounds
+              (P0-pdf); uid 1000 with no capabilities and NoNewPrivs; read-only root-owned code; no provisioning
+              credential in the jobs environment; per-child 0700 tmpfs; Chromium/Node floors (H1); PID/memory caps (H6).
+  Reversal:   Owner approval → add the profile (packages/rab-docker), security_opt seccomp=<profile> on rab-worker,
+              chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
+              native arm64.
+  ```
+- **The API's PID 1 does not reap orphaned processes (finding, LOW, pre-existing, not fixed in H6).** `api-prestart.sh`
+  execs `node` as PID 1 with no init. The API itself spawns no child process, but anything orphaned inside the container
+  (a `docker exec` shell's background jobs, or code run by an attacker) stays a zombie: measured 5 of 5 orphans left as
+  zombies under the production flags. Each holds a PID slot, and H6 now caps the API at 256, so a compromised process
+  could exhaust the cap and stop the API from creating threads (denial of service of that container only). Fix options for
+  the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
+  `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
+  own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.

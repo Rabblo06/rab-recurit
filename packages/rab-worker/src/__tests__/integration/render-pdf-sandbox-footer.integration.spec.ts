@@ -12,8 +12,11 @@ import { inspectPdf } from '../helpers/pdf-inspect';
  * S-7 and S-9 (Phase 0 review) — MEASUREMENT ONLY, nothing here changes the renderer.
  *
  * S-7: `CHROMIUM_NO_SANDBOX=true` (set by the production Worker image, packages/rab-docker/rab/Dockerfile.worker-bundle)
- *      launches Chromium with `--no-sandbox --disable-setuid-sandbox`. Pinned here: exactly which flags each env value produces, and that the
- *      in-page hardening (no JavaScript, no network, no navigation) still holds with the OS sandbox turned off.
+ *      adds `--no-sandbox --disable-setuid-sandbox` to the arguments handed to Playwright. Docker hardening H6 measured that
+ *      the variable never controlled the OS sandbox: Playwright itself adds `--no-sandbox` unless `chromiumSandbox: true`,
+ *      and the renderer passes `chromiumSandbox: false` explicitly, so Chromium runs WITHOUT its OS sandbox for every value
+ *      (unset and "false" included). Pinned here: the arguments each value produces, that `chromiumSandbox` is false in
+ *      every case, and that the in-page hardening (no JavaScript, no network, no navigation) holds with the sandbox off.
  * S-9: the PDF footer template is rendered by Chromium's print pipeline, outside the page whose requests `page.route`
  *      intercepts. A synthetic footer referencing resources on a LOCAL loopback test server (and a closed local port) is
  *      rendered; the local server records whether any request actually arrives. No real external host is ever used.
@@ -66,6 +69,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 750));
 
 let server: CountingServer;
 let launchArgs: string[][] = [];
+let launchSandbox: Array<boolean | undefined> = [];
 let launched: playwright.Browser[] = [];
 let launchSpy: jest.SpyInstance;
 const savedEnv = process.env.CHROMIUM_NO_SANDBOX;
@@ -83,11 +87,13 @@ afterAll(async () => {
 beforeEach(() => {
   server.hits.length = 0;
   launchArgs = [];
+  launchSandbox = [];
   launched = [];
   delete process.env.CHROMIUM_NO_SANDBOX;
   const realLaunch = chromium.launch.bind(chromium);
   launchSpy = jest.spyOn(chromium, 'launch').mockImplementation(async (opts) => {
     launchArgs.push([...(opts?.args ?? [])]);
+    launchSandbox.push(opts?.chromiumSandbox);
     const browser = await realLaunch(opts);
     launched.push(browser);
     return browser;
@@ -103,22 +109,25 @@ afterEach(async () => {
 
 // ─── S-7 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed)', () => {
-  it('unset: Chromium keeps its sandbox (only --disable-dev-shm-usage is passed)', async () => {
+describe('S-7: CHROMIUM_NO_SANDBOX (measured, not changed) — the OS sandbox is OFF for every value', () => {
+  it('unset: only --disable-dev-shm-usage is added, and the sandbox is still OFF (chromiumSandbox: false)', async () => {
     await renderHtmlToPdf('<p>plain</p>');
     expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
+    expect(launchSandbox).toEqual([false]);
   });
 
   it('"true" (the production image value): --no-sandbox and --disable-setuid-sandbox are added', async () => {
     process.env.CHROMIUM_NO_SANDBOX = 'true';
     await renderHtmlToPdf('<p>plain</p>');
     expect(launchArgs).toEqual([['--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox']]);
+    expect(launchSandbox).toEqual([false]);
   });
 
-  it.each(['TRUE', '1', 'yes', 'True', ' true'])('any other value (%p) leaves the sandbox ON (exact match only)', async (value) => {
+  it.each(['TRUE', '1', 'yes', 'True', ' true', 'false'])('any other value (%p) adds no flag (exact match only), and the sandbox is still OFF', async (value) => {
     process.env.CHROMIUM_NO_SANDBOX = value;
     await renderHtmlToPdf('<p>plain</p>');
     expect(launchArgs).toEqual([['--disable-dev-shm-usage']]);
+    expect(launchSandbox).toEqual([false]);
   });
 
   it('with the sandbox OFF, page JavaScript still does not run and no request reaches the network', async () => {
