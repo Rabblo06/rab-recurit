@@ -286,6 +286,18 @@ describe('D-Q5a realtime lease renewal during a slow batch', () => {
     expect(renewals[0]!.sql).toContain("status = 'processing' AND claim_token = $2");
   });
 
+  it('a row the renewal did not keep (reclaimed elsewhere) is skipped and counted failed; the rows still held are published', async () => {
+    const { tenant } = fakeTenant((sql) => (sql.includes('WITH claimable') ? [claimRows, 4] : isRenew(sql) ? [[{ id: ids[3] }], 1] : [[{ id: 'x' }], 1]));
+    const publish = jest.fn(async () => {
+      clock += 20_000;
+      return 1;
+    });
+    const result = await publishRealtimeScope(tenant as never, publish, 'test', { organisationId: ORG, workspaceId: WS }, {});
+    const publishedIds = (publish.mock.calls as unknown as Array<[string, string]>).map(([, m]) => JSON.parse(m).eventId);
+    expect(publishedIds).toEqual([ids[0], ids[1], ids[3]]);
+    expect(result).toMatchObject({ claimed: 4, published: 3, failed: 1 });
+  });
+
   it('NEGATIVE: a renewal that throws does not stop the batch (falls back to the pre-renewal behaviour)', async () => {
     const { tenant } = fakeTenant((sql) => {
       if (sql.includes('WITH claimable')) return [claimRows, 4];

@@ -178,21 +178,30 @@ export async function publishRealtimeScope(
   // slow batch can outlast the lease. Once half the lease has elapsed, renew it for the rows still to do, so another
   // claimant never reclaims (and, since D-Q5a, counts an attempt against) a row this live claimant still holds. A normal
   // batch finishes long before that and issues no extra statement. A failed renewal is not fatal (pre-renewal behaviour).
+  // A row the renewal did NOT keep was already reclaimed by another claimant (its lease lapsed first): it is skipped — not
+  // published a second time — and counted as `failed` (lost lease), while the rows still held carry on.
   const renewAfterMs = (leaseSeconds * 1000) / 2;
+  const lost = new Set<string>();
   for (let i = 0; i < claimed.length; i += 1) {
     if (Date.now() - leaseFrom >= renewAfterMs) {
-      const remaining = claimed.slice(i).map((e) => e.id);
+      const remaining = claimed.slice(i).map((e) => e.id).filter((id) => !lost.has(id));
       const renewFrom = Date.now();
       try {
         // eslint-disable-next-line no-await-in-loop
-        await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) => renewRealtimeEventLeases(manager, remaining, claimToken, leaseSeconds));
+        const kept = new Set(await runScopedForOrg(tenantContext, organisationId, workspaceId, (manager) => renewRealtimeEventLeases(manager, remaining, claimToken, leaseSeconds)));
+        for (const id of remaining) if (!kept.has(id)) lost.add(id);
         leaseFrom = renewFrom;
       } catch {
         // keep going: the rows keep their current lease, exactly as before this renewal existed
       }
     }
+    const event = claimed[i]!;
+    if (lost.has(event.id)) {
+      result.failed++;
+      continue;
+    }
     // eslint-disable-next-line no-await-in-loop
-    await processOne(claimed[i]!);
+    await processOne(event);
   }
   return result;
 

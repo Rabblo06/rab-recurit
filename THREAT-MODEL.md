@@ -4686,7 +4686,8 @@ delivery policy changed. No migration, role, grant, RLS policy or posture change
   of up to 25 sequential publishes, 3 s each, can outlast the 60 s lease), `publishRealtimeScope` renews the lease of
   the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
   AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
-  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing.
+  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant.
 - **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
   `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
   interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token

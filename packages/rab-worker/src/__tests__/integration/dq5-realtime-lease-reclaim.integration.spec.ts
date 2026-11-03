@@ -256,10 +256,10 @@ describeIfDb('D-Q5a §13 #6: a realtime lease reclaim counts as an attempt and i
     const b = await newIdentity('dq5aRenB');
     const id = await seedEvent(a, 10);
     const [c] = await withContext(a, (m) => claimRealtimeEvents(m, { limit: 25, claimToken: randomUUID(), leaseSeconds: 1 }));
-    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], randomUUID(), 300))).toBe(0); // wrong token
-    expect(await withContext(b, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(0); // other organisation (RLS)
-    expect(await dataSource.transaction((m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(0); // no tenant context
-    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toBe(1);
+    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], randomUUID(), 300))).toEqual([]); // wrong token
+    expect(await withContext(b, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toEqual([]); // other organisation (RLS)
+    expect(await dataSource.transaction((m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toEqual([]); // no tenant context
+    expect(await withContext(a, (m) => renewRealtimeEventLeases(m, [id], c!.claimToken, 300))).toEqual([id]);
     const after = await row(a, id);
     expect(after.lease_expires_at!.getTime()).toBeGreaterThan(Date.now() + 250_000);
     expect(after).toMatchObject({ status: 'processing', attempt_count: 0, claim_token: c!.claimToken });
@@ -282,5 +282,25 @@ describeIfDb('D-Q5a §13 #6: a realtime lease reclaim counts as an attempt and i
     expect(competitor).toEqual([]);
     expect(result).toMatchObject({ claimed: 3, published: 3, failed: 0 });
     for (const id of ids) expect(await row(identity, id)).toMatchObject({ status: 'completed', attempt_count: 0 });
+  });
+
+  it('a row reclaimed by another claimant before the renewal is NOT published by the original claimant; the rows it still holds are (CodeRabbit on #47)', async () => {
+    const identity = await newIdentity('dq5aLost');
+    const ids = [await seedEvent(identity, 10), await seedEvent(identity, 10), await seedEvent(identity, 10)];
+    const published: string[] = [];
+    let competitorToken = '';
+    const result = await publishRealtimeScope(tenantContext, async (_channel, message) => {
+      const eventId = String((JSON.parse(message) as { eventId?: string }).eventId);
+      published.push(eventId);
+      if (eventId === ids[0]) {
+        await new Promise((r) => setTimeout(r, 2_300)); // past the 2 s lease, before any renewal check
+        const [got] = await withContext(identity, (m) => claimRealtimeEvents(m, { limit: 25, claimToken: randomUUID(), leaseSeconds: 60, ids: [ids[2]!] }));
+        competitorToken = got!.claimToken;
+      }
+      return 1;
+    }, 'test', { organisationId: identity.organisationId, workspaceId: identity.workspaceId }, { leaseSeconds: 2 });
+    expect(published).toEqual([ids[0], ids[1]]); // never ids[2]: another claimant holds it
+    expect(result).toMatchObject({ claimed: 3, published: 2, failed: 1 });
+    expect(await row(identity, ids[2]!)).toMatchObject({ status: 'processing', attempt_count: 1, claim_token: competitorToken });
   });
 });
