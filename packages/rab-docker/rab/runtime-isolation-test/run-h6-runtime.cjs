@@ -101,7 +101,11 @@ async function waitFor(label, predicate, timeoutMs, everyMs = 2000) {
 
 const results = [];
 const measured = {};
+// --only M09,M10,...: run just these cases after the always-needed setup (00, 10, M01, M02). Dependencies are the
+// caller's job (M10 needs M09).
+const ONLY = opt('--only') ? new Set(['00', '10', 'M01', 'M02', ...opt('--only').split(',').map((s) => s.trim())]) : null;
 async function step(id, title, fn) {
+  if (ONLY && !ONLY.has(id)) return;
   currentLog = path.join(OUT, `${id}-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}.log`);
   fs.writeFileSync(currentLog, `# ${id} ${title}\n# ${new Date().toISOString()}\n`);
   const started = Date.now();
@@ -226,15 +230,18 @@ const wsStatus = (id) => sql1(`SELECT coalesce(mw.schema_status,'NULL') || '|' |
 
 /** One HTTP call from INSIDE the API container (node fetch, uid 1000, no redirect following). JSON result. */
 function apiFetch(url, { method = 'GET', headers = {}, body } = {}) {
-  const js = `fetch(process.env.U,{method:process.env.M,redirect:'manual',headers:JSON.parse(process.env.H),body:process.env.B||undefined}).then(async r=>{const b=Buffer.from(await r.arrayBuffer());console.log(JSON.stringify({status:r.status,location:r.headers.get('location'),type:r.headers.get('content-type'),len:b.length,sha256:require('crypto').createHash('sha256').update(b).digest('hex'),magic:b.subarray(0,5).toString('latin1'),text:/json|text/.test(r.headers.get('content-type')||'')?b.toString('utf8').slice(0,4000):''}))},e=>{console.log(JSON.stringify({error:String(e.cause?.code||e.message)}))})`;
+  const js = `fetch(process.env.U,{method:process.env.M,redirect:'manual',headers:JSON.parse(process.env.H),body:process.env.B||undefined}).then(async r=>{const b=Buffer.from(await r.arrayBuffer());console.log(JSON.stringify({status:r.status,location:r.headers.get('location'),type:r.headers.get('content-type'),len:b.length,sha256:require('crypto').createHash('sha256').update(b).digest('hex'),magic:b.subarray(0,5).toString('latin1'),text:/json|text|xml/.test(r.headers.get('content-type')||'')?b.toString('utf8').slice(0,4000):''}))},e=>{console.log(JSON.stringify({error:String(e.cause?.code||e.message)}))})`;
   // The script travels as an environment variable like the inputs: nothing is spliced into the shell command line.
   const env = { J: js, U: url, M: method, H: JSON.stringify(headers), B: body ?? '' };
   const r = execAs('rab-api', '1000:1000', 'node -e "$J"', { env, quiet: true });
-  const line = r.out.trim().split('\n').pop();
+  // Parse the RAW output: the redacted copy replaces the per-run S3 access key inside a presigned URL's X-Amz-Credential
+  // with "<redacted>", which is exactly a URL the storage must refuse (H6 M10 root cause, harness defect). Callers write
+  // only redacted text (write() redacts), so nothing unredacted reaches the evidence.
+  const line = String(r.raw ?? '').trim().split('\n').pop();
   try {
     return JSON.parse(line);
   } catch {
-    return { error: `unparsable: ${line?.slice(0, 200)}` };
+    return { error: `unparsable: ${redact(line).slice(0, 200)}` };
   }
 }
 const mailCount = () => Number(compose(['exec', '-T', 'smtp', 'sh', '-c', 'ls /out | wc -l'], { quiet: true }).out.trim() || 0);
@@ -624,39 +631,65 @@ BEGIN; ${ctx(orgA, wsA)} SELECT count(*) FROM core.venue; COMMIT;`).out.trim().s
 
   await step('M10', 'Report retrieval: authorised presigned download returns the same bytes; anonymous and cross-tenant get nothing', async () => {
     const f = fx.reportFile;
+    const problems = [];
+    const expect = (cond, label) => {
+      if (!cond) problems.push(label);
+    };
+    /** A storage error body, without request ids, signatures or the (already redacted) access key. */
+    const errBody = (r) => String(r.text || '').replace(/<(RequestId|HostId)>[^<]*/g, '<$1>').replace(/[0-9a-f]{64}/g, '<hex64>').slice(0, 1200);
     const login = apiFetch('http://localhost:3000/rest/v1/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'manager.qa@example.test', password: SECRETS.H6_FIXTURE_PASSWORD }) });
     const token = (() => { try { return JSON.parse(login.text).accessToken; } catch { return undefined; } })();
     write(`login: status=${login.status} token=${token ? 'yes' : 'no'} ${token ? '' : login.text.slice(0, 300)}`);
     assert(login.status === 200 && token, 'fixture login failed');
     const dl = apiFetch(`http://localhost:3000/rest/v1/files/${f.fileId}/download`, { headers: { authorization: `Bearer ${token}` } });
-    write(`download: status=${dl.status} location=${dl.location ? dl.location.replace(/X-Amz-(Signature|Credential)=[^&]+/g, 'X-Amz-$1=<redacted>') : '-'}`);
-    assert(dl.status === 302 && /^http:\/\/minio:9000\/h6-runtime\//.test(dl.location || ''), 'no presigned redirect');
+    const shown = (u) => (u ? u.replace(/X-Amz-(Signature|Credential)=[^&]+/g, 'X-Amz-$1=<redacted>') : '-');
+    write(`download: status=${dl.status} location=${shown(dl.location)}`);
+    assert(dl.status === 302 && dl.location, 'no presigned redirect');
+    const signedHost = new URL(dl.location).host;
+    write(`presigned URL host: ${signedHost} (the harness fetches it from inside the API container on the project network, Host header = that same value)`);
     const obj = apiFetch(dl.location);
-    write(`presigned GET: status=${obj.status} len=${obj.len} magic=${obj.magic} sha256=${obj.sha256} (object ${f.objectSha})`);
-    assert(obj.status === 200 && obj.magic === '%PDF-' && obj.sha256 === f.objectSha, 'presigned bytes differ');
+    write(`presigned GET (app URL): status=${obj.status} len=${obj.len} magic=${obj.magic} sha256=${obj.sha256} (object ${f.objectSha})${obj.status === 200 ? '' : `\nerror body: ${errBody(obj)}`}`);
+    expect(obj.status === 200 && obj.magic === '%PDF-' && obj.sha256 === f.objectSha, `presigned bytes differ (status ${obj.status})`);
+    // Root-cause demonstration for the run-4 failure: the previous harness fetched the REDACTED copy of this URL.
+    const redactedCopy = apiFetch(redact(dl.location));
+    write(`the same URL with the access key redacted (what run 4 fetched): status=${redactedCopy.status} ${(/<Code>[^<]*<\/Code>/.exec(String(redactedCopy.text)) || [''])[0]} (changed=${redact(dl.location) !== dl.location})`);
+    // Controls, minted in the same container with the same client settings: a plain presigned GET, and one with the same
+    // response-content-type / response-content-disposition parameters the API adds. Separates signing from environment.
+    const filename = sql1(`SELECT original_filename FROM core.stored_file WHERE id = '${f.fileId}'`);
+    write(`stored original_filename: ${filename}`);
+    for (const variant of ['plain', 'app-params']) {
+      const js = "const {S3Client,GetObjectCommand}=require('@aws-sdk/client-s3');const {getSignedUrl}=require('@aws-sdk/s3-request-presigner');const c=new S3Client({region:process.env.S3_REGION,endpoint:process.env.S3_ENDPOINT,forcePathStyle:process.env.S3_FORCE_PATH_STYLE==='true',credentials:{accessKeyId:process.env.S3_ACCESS_KEY_ID,secretAccessKey:process.env.S3_SECRET_ACCESS_KEY}});const extra=process.env.V==='app-params'?{ResponseContentType:'application/pdf',ResponseContentDisposition:'attachment; filename=\"'+process.env.FN+'\"'}:{};getSignedUrl(c,new GetObjectCommand({Bucket:process.env.S3_BUCKET,Key:process.env.K,...extra}),{expiresIn:120}).then(async u=>{const r=await fetch(u);const t=await r.text();console.log(JSON.stringify({status:r.status,body:r.status===200?'':t.slice(0,1200)}))})";
+      const r = docker(['exec', '-u', '1000:1000', '-w', '/app', '-e', 'K', '-e', 'V', '-e', 'FN', '-e', 'J', containerId('rab-api'), 'sh', '-c', 'node -e "$J"'], { quiet: true, env: { K: f.key, V: variant, FN: filename || 'report.pdf', J: js } });
+      const line = r.out.trim().split('\n').pop();
+      write(`control presign (${variant}): ${String(line).replace(/<(RequestId|HostId)>[^<]*/g, '<$1>').slice(0, 1400)}`);
+    }
     const tampered = apiFetch(dl.location.replace(/X-Amz-Signature=[0-9a-f]{8}/, 'X-Amz-Signature=00000000'));
     const anon = apiFetch(`http://localhost:3000/rest/v1/files/${f.fileId}/download`);
     const direct = apiFetch(`http://minio:9000/h6-runtime/${f.key}`);
     write(`tampered signature: ${tampered.status}; anonymous API: ${anon.status}; unsigned object URL: ${direct.status}`);
-    assert(tampered.status === 403 && anon.status === 401 && direct.status === 403, 'unauthorised access not refused');
+    expect(tampered.status === 403, `tampered signature returned ${tampered.status}`);
+    expect(anon.status === 401, `anonymous API returned ${anon.status}`);
+    expect(direct.status === 403, `unsigned object URL returned ${direct.status}`);
     const wsOwn = sql1(`SELECT coalesce(workspace_id::text, '') FROM core.stored_file WHERE id = '${f.fileId}'`);
     const ctx = (org, ws) => `SELECT set_config('rab.organisation_id', '${org}', true), set_config('rab.workspace_id', '${ws}', true);`;
     const rls = appSql(`SELECT count(*) FROM core.stored_file WHERE id = '${f.fileId}';
 BEGIN; ${ctx(fx.probe.organisationId, fx.probe.id)} SELECT count(*) FROM core.stored_file WHERE id = '${f.fileId}'; COMMIT;
 BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '${f.fileId}'; COMMIT;`).out.trim().split('\n').filter((l) => /^\d+$/.test(l));
     write(`crewflow_app rows for the report file [no context, other tenant, own tenant]: ${rls.join(' ')}`);
-    assert(rls.join(' ') === '0 0 1', 'RLS does not isolate the report reference');
-    // Cross-tenant through the API: the h6-first owner (another organisation) gets 404 — when that account can sign in.
+    expect(rls.join(' ') === '0 0 1', `RLS rows ${rls.join(' ')}`);
+    // Cross-tenant through the API: the h6-first owner (another organisation) must get 404.
     psql(`UPDATE core."user" SET password_hash = (SELECT password_hash FROM core."user" WHERE email = 'manager.qa@example.test') WHERE email = 'h6-first@h6-runtime.invalid'`, { quiet: true });
     const other = apiFetch('http://localhost:3000/rest/v1/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'h6-first@h6-runtime.invalid', password: SECRETS.H6_FIXTURE_PASSWORD }) });
     const otherToken = (() => { try { return JSON.parse(other.text).accessToken; } catch { return undefined; } })();
     if (!otherToken) {
-      write(`other-tenant login: status=${other.status} ${other.text.slice(0, 300)}`);
-      return { status: 'PASS', note: 'presigned bytes match; tampered 403, anonymous 401, unsigned 403; RLS 0/0/1. API-level cross-tenant download NOT RUN (the synthetic other-tenant account could not sign in)' };
+      write(`other-tenant login: status=${other.status} ${String(other.text).slice(0, 300)}`);
+      problems.push(`other-tenant account could not sign in (status ${other.status}) — API cross-tenant check NOT RUN`);
+    } else {
+      const cross = apiFetch(`http://localhost:3000/rest/v1/files/${f.fileId}/download`, { headers: { authorization: `Bearer ${otherToken}` } });
+      write(`other-tenant download: ${cross.status}`);
+      expect(cross.status === 404, `cross-tenant download returned ${cross.status}`);
     }
-    const cross = apiFetch(`http://localhost:3000/rest/v1/files/${f.fileId}/download`, { headers: { authorization: `Bearer ${otherToken}` } });
-    write(`other-tenant download: ${cross.status}`);
-    assert(cross.status === 404, `cross-tenant download returned ${cross.status}`);
+    assert(problems.length === 0, problems.join('; '));
     return 'presigned bytes match; tampered 403, anonymous 401, unsigned 403, other tenant 404; RLS 0/0/1';
   });
 
@@ -667,7 +700,10 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     write(`navigation render: ${bad.out.trim()}`);
     assert(/refused: PdfRenderNavigationError/.test(bad.out), 'navigation not refused');
     // Real job failure: object storage down while a report is due.
-    compose(['stop', '-t', '10', 'minio']);
+    // Outage without data loss: MinIO keeps running (its tmpfs /data survives) but leaves the project network.
+    const minioId = containerId('minio');
+    const net = `${PROJECT}_default`;
+    assert(docker(['network', 'disconnect', net, minioId]).code === 0, 'could not disconnect minio');
     const { shiftId } = await startShiftReport(20);
     const since = new Date(Date.now() - 5_000).toISOString();
     compose(['restart', '-t', '60', 'rab-worker']);
@@ -679,8 +715,11 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     write(`report state during outage: ${state || '(no ready report)'}; chromium processes ${chrome}; profile dirs ${tmp}\n${failLogs.join('\n')}`);
     assert(!/^ready\|true$/.test(state) && chrome === 0 && tmp === '0', 'failure left residue or reported ready');
     const restartsDuring = restartsOf('rab-worker') - restarts0;
-    compose(['start', 'minio']);
+    assert(docker(['network', 'connect', '--alias', 'minio', net, minioId]).code === 0, 'could not reconnect minio');
     await waitFor('minio healthy', () => healthOf('minio') === 'healthy', 60_000);
+    const bucket = compose(['exec', '-T', 'minio', 'sh', '-c', 'mc alias set h6 http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; mc ls h6/ | grep -c h6-runtime'], { quiet: true }).out.trim();
+    write(`bucket present after the outage: ${bucket}`);
+    assert(bucket === '1', 'the bucket did not survive the outage');
     const since2 = new Date(Date.now() - 5_000).toISOString();
     compose(['restart', '-t', '60', 'rab-worker']);
     await waitFor('report ready after recovery', () => /^ready\|true$/.test(reportState(shiftId)), 240_000, 5000);
@@ -706,12 +745,15 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     measured.api = { memoryMaxMiB: mib(a2['memory.max']), memoryPeakMiB: mib(a2['memory.peak']), memoryCurrentMiB: mib(a2['memory.current']), pidsMax: a2['pids.max'], pidsPeak: a2['pids.peak'], cpuMax: a2['cpu.max'] };
     measured.worker = { memoryMaxMiB: mib(w['memory.max']), memoryPeakMiB: mib(w['memory.peak']), memoryCurrentMiB: mib(w['memory.current']), pidsMax: w['pids.max'], pidsPeak: w['pids.peak'], cpuMax: w['cpu.max'] };
     write(`api before load: ${JSON.stringify(a)}\napi after load: ${JSON.stringify(measured.api)}\nworker: ${JSON.stringify(measured.worker)}`);
-    // PID cap enforcement (API): background sleeps as uid 1000 until fork fails, then clean up.
-    const fork = execAs('rab-api', '1000:1000', 'i=0; while [ $i -lt 400 ]; do sleep 60 & i=$((i+1)); done 2>/dev/null; echo started=$(grep -lx sleep /proc/[0-9]*/comm 2>/dev/null | wc -l) current=$(cat /sys/fs/cgroup/pids.current) max=$(cat /sys/fs/cgroup/pids.max); for f in $(grep -lx sleep /proc/[0-9]*/comm 2>/dev/null); do p=${f#/proc/}; kill ${p%/comm} 2>/dev/null; done; echo done', { timeout: 120_000 });
-    write(`fork probe: ${fork.out.trim().split('\n').slice(-4).join(' | ')}`);
-    assert(/started=\d+/.test(fork.out), 'fork probe output');
-    const started = Number((/started=(\d+)/.exec(fork.out) || [])[1] ?? 999);
-    assert(started < 400, `pids_limit not enforced (${started} processes started)`);
+    // PID cap enforcement (API): 400 short background sleeps as uid 1000. Once the cap is reached nothing can fork — not
+    // even a $(...) — so the result is read with shell BUILTINS only (read/echo), after the sleeps have ended.
+    const fork = execAs('rab-api', '1000:1000', 'i=0; while [ $i -lt 400 ]; do sleep 8 & i=$((i+1)); done 2>/dev/null; read peak < /sys/fs/cgroup/pids.peak; read max < /sys/fs/cgroup/pids.max; read ev < /sys/fs/cgroup/pids.events; wait; echo "pids.peak=$peak pids.max=$max events=$ev"', { timeout: 120_000 });
+    write(`fork probe: ${fork.out.trim().split('\n').slice(-3).join(' | ')}`);
+    const peak = Number((/pids\.peak=(\d+)/.exec(fork.out) || [])[1]);
+    const max = Number((/pids\.max=(\d+)/.exec(fork.out) || [])[1]);
+    const started = peak;
+    assert(Number.isFinite(peak) && Number.isFinite(max), 'fork probe output');
+    assert(peak === max && /max \d*[1-9]/.test(fork.out), `pids_limit not enforced (peak ${peak}, max ${max})`);
     await waitFor('rab-api healthy after the fork probe', () => healthOf('rab-api') === 'healthy', 60_000);
     assert(a2['memory.max'] !== 'max' && a2['pids.max'] !== 'max' && a2['cpu.max'] && !/^max /.test(a2['cpu.max']), 'API cgroup limits missing');
     assert(w['memory.max'] !== 'max' && w['pids.max'] !== 'max' && !/^max /.test(w['cpu.max']), 'Worker cgroup limits missing');
@@ -735,6 +777,7 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
   await step('M18', 'Restart recovery: a killed jobs child fails the service, the restart policy brings it back healthy', async () => {
     await waitFor('rab-worker healthy', () => healthOf('rab-worker') === 'healthy', 240_000, 3000);
     const before = restartsOf('rab-worker');
+    const startedBefore = inspect('rab-worker', '{{.State.StartedAt}}');
     const p = bundlePids(containerId('rab-worker'));
     const since = new Date(Date.now() - 5_000).toISOString();
     execAs('rab-worker', '0:0', `kill -9 ${p.jobs}`);
@@ -743,7 +786,12 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     const logs = logsOf('rab-worker', since).split('\n').filter((l) => /\[worker-bundle\]/.test(l)).slice(0, 12);
     write(logs.join('\n'));
     const p2 = bundlePids(containerId('rab-worker'));
-    assert(p2.jobs && p2.provisioner && p2.jobs !== p.jobs, 'children not restarted');
+    // A restarted container gets a fresh PID namespace, so the children may get the SAME pid numbers again: compare the
+    // container start time and require the failure + a new start in the launcher's own log instead.
+    const startedAfter = inspect('rab-worker', '{{.State.StartedAt}}');
+    write(`StartedAt ${startedBefore} → ${startedAfter}; children now jobs=${p2.jobs} provisioner=${p2.provisioner}`);
+    assert(p2.jobs && p2.provisioner && startedAfter !== startedBefore, 'children not restarted');
+    assert(logs.some((l) => /jobs exited unexpectedly \(SIGKILL\)/.test(l)) && logs.some((l) => /live identity probes agree/.test(l)), 'expected the failure and a new start in the launcher log');
     return `restart count ${before} → ${restartsOf('rab-worker')}; healthy`;
   });
 
