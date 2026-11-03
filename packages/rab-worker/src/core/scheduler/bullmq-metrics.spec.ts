@@ -39,7 +39,10 @@ describe('BullMQ Worker metrics (admin panel Health chart source)', () => {
     expect(constructed.map((c) => c.name).sort()).toEqual(['rab-ai', 'rab-email', 'rab-push', 'rab-shift-statements']);
     for (const c of constructed) expect(c.opts.metrics).toEqual({ maxDataPoints: 10_080 });
     expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.concurrency]))).toEqual({ 'rab-email': 5, 'rab-push': 10, 'rab-shift-statements': 2, 'rab-ai': 4 });
-    // AI Phase 1: only rab-ai overrides the lock duration; the original three keep BullMQ's default.
-    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.lockDuration]))).toEqual({ 'rab-email': undefined, 'rab-push': undefined, 'rab-shift-statements': undefined, 'rab-ai': 60_000 });
+    // AI Phase 1: only rab-ai overrides the lock duration; the original three keep BullMQ's default (30 s). D-Q1: that
+    // default is now passed EXPLICITLY (same effective value — BULLMQ_WORKER_DEFAULTS is pinned to the installed bullmq's
+    // own defaults in queue-registry.spec.ts), as are maxStalledCount (1) and stalledInterval (30 s).
+    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.lockDuration]))).toEqual({ 'rab-email': 30_000, 'rab-push': 30_000, 'rab-shift-statements': 30_000, 'rab-ai': 60_000 });
+    for (const c of constructed) expect([c.opts.maxStalledCount, c.opts.stalledInterval]).toEqual([1, 30_000]);
   });
 });

@@ -4522,7 +4522,15 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   (`pg_db_role_setting`, this or all databases, own or inherited role) or a session value that does not match its mode;
   the security posture and the CI RLS gate also fail. Residual: `postgresql.conf` / `ALTER SYSTEM` (superuser) is only
   caught by poll-mode processes.
-- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode.
+- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode,
+  for a queue-and-scope pointerless backlog of up to 31 batches. #24 (follow-up sweeps when a legacy sweep returns a full
+  batch; bounded to 30 per window and queue per Worker, fair one-batch-per-scope sweeps, idle-neutral) closes the earlier
+  gap where a backlog above ONE batch drained a single batch per 15 min. The bound holds while each sweep takes well under
+  about 24 s (re-measure at production scale); push drains at its consumer's pace (a published push row stays PENDING, so
+  only a batch that moved rows asks for a follow-up). A larger backlog (an availability concern only: delay, never loss or
+  cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
+  Tests: `legacy-batch-limit.spec.ts`, `dispatch-coordinator.spec.ts` (#24 block),
+  `phase-d-backlog-reconciliation.integration.spec.ts`.
 
 ### D-e: account-invite cleanup (F-1) and automatic deletion
 - Redemption refuses expired, revoked and consumed links whether or not cleanup runs (tested). Today's cleanup is a no-op
@@ -4609,6 +4617,321 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
 - **Delivery semantics (not exactly-once):** claims are exclusive and fenced. Delivery is at-least-once for SMTP (a
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
+
+## Phase D-Q1 — one complete queue registry, a required tenant scope on every enqueue (branch phase-d/dq1-queue-registry, not merged)
+
+Structural change; no option value, job name, jobId format, prefix, payload or business rule changed (pinned by
+`queue-registry.spec.ts` and `queue-enqueue.spec.ts` against the pre-D-Q1 literals). No migration, role, grant, RLS or
+posture change.
+
+- **Tenant scope at enqueue (new control, producer side).** Every BullMQ job is built by `registeredJob` /
+  `scanJobTemplate` (`engine/worker-shared/queue-enqueue.ts`) with a REQUIRED scope: `{ kind: 'organisation',
+  organisationId }` (a UUID, equal to the payload's `organisationId`) for the four consumer queues, `{ kind: 'system' }`
+  for the seven scan queues. Missing, malformed or wrong-kind scopes, a scope naming another organisation than the
+  payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
+  with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
+  (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+  **This is not a new tenant boundary.** For every current producer, the scope's `organisationId` and the payload's
+  `organisationId` come from the same argument, so "scope must equal payload" cannot fail today. What the check adds is
+  validation of shape, UUID format and payload keys, plus a guard for future producers that might build the two
+  separately. Tenant isolation is still enforced by the consumers: `SET LOCAL` plus the RLS re-read, described next.
+- **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
+  (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
+  `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
+  `shift-statement.job.ts processShiftStatementJob` (`payroll_record ... FOR UPDATE` in `workerCtx(org, workspace)`),
+  `AiTurnRunnerService` / `AiTitleService` (turn / conversation rows under the job's org + workspace). A forged id
+  combination matches no row.
+- **Unknown job name on an existing queue — finding, FIXED (Low, integrity).** Actor → action → consequence: anything
+  able to add a job to `rab-email` / `rab-push` / `rab-shift-statements` (only Crewflow processes hold the Redis
+  credentials; production Redis is unauthenticated, see Phase D-Q plan §7) under ANY job name → the consumer handed it
+  to the one send / generate handler → the email/push/statement for the id in the payload was processed as if it had
+  been published under the registered name. `rab-ai` completed an unknown name silently. Where:
+  `rab-worker/src/core/scheduler/bullmq-scheduler.ts` `createConsumerWorkers` (`(job) => handler(job)`). Fix: a job
+  whose name the registry does not list for the queue is failed closed (`UnrecoverableError`: failed set after one
+  attempt, a warning naming the queue and job id only, the handler never runs). Regression tests:
+  `queue-registry-worker.spec.ts` (all four queues) and `queue-registry-consumers.integration.spec.ts` (real Redis:
+  a `bogus-job` with `attempts: 5` ends failed after one attempt, handler not called; registered names still handled).
+  The tenant re-read above already bounded the impact to the job's own organisation's rows.
+- **Unknown queue name:** `queueSettingsOf` throws `UnknownQueueError`; the Worker refuses to start on an invalid or
+  incomplete registry (`assertQueueRegistryValid`), on a `@Processor` naming an unregistered queue (unchanged) and, in
+  bullmq mode, on scan settings that drifted from `SCAN_JOBS` (`assertScanQueueSettings`). No queue name is read from the
+  environment (`BULLMQ_PREFIX` is a validated prefix, not a queue name); the Admin queue view answers 404 for an
+  unregistered queue name (unchanged).
+- **Missed-tick record:** `rab:worker:scan-ticks` (one epoch-ms field per scan, 7-day TTL) — timestamps only, no ids,
+  no configuration, no tenant data.
+- **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
+  decision); the producer-side checks are defence in depth, not an authentication boundary.
+
+## Phase D-Q3b — account invites always queued (branch phase-d/dq3-invites-always-queued, not merged)
+
+Owner decision (2026-11-02, D-Q plan §12.1 #3): Staff and Manager account invites are always written to the outbox at
+creation; the Worker heartbeat key in Redis no longer decides it. No migration, no role, grant, RLS or posture change.
+
+- **Asset:** a person's account-activation link (a bearer token that sets their first password) and the timing of the
+  email that carries it. **Actor:** a Manager creating, cancelling or resending an invite; anyone able to wipe or stall
+  Redis or the Worker.
+- **Before:** `StaffService.create` / `ManagerService.create` queued the invite only if `EMAIL_DELIVERY_ENABLED` was true
+  **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
+  silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
+- **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  written), not a Redis read.
+- **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
+  returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,
+  `email-send.processor.ts` `revalidate`):** the target user must still exist; the invite must not be revoked
+  ("Cancel invitation"), accepted, or superseded by a newer invite (a resend rotates the token and revokes the older one,
+  and the latest-invite check catches an un-revoked older row); **new in this PR: the invite must not be expired** — an
+  expired invite is cancelled, never sent (before, the consumer did not check `expires_at`; the activation endpoint already
+  refused an expired link, so the risk was a confusing dead-link email, not account takeover). Redemption keeps refusing
+  expired, revoked and consumed links independently of delivery.
+- **Organisation suspension:** unchanged. `sendAccountInvite` refuses to mint an invite for a suspended organisation; an
+  invite queued before a suspension is still governed by the same revalidation (no new behaviour in this PR).
+- **Tenant isolation:** the job payload is `{emailOutboxId, organisationId}` taken from the committed row; the consumer
+  re-reads the row under that organisation's RLS context. A job naming another organisation sees no row and sends nothing
+  (tested, `account-invite-delivery` I5); with no tenant context the outbox returns zero rows (tested).
+- **Tests:** `account-invite-abuse-cases` (heartbeat missing ⇒ invite queued; heartbeat stale ⇒ queued for staff and
+  managers; `EMAIL_DELIVERY_ENABLED=false` ⇒ nothing queued; RLS isolation), `account-invite-delivery` (Worker-side: a
+  current invite queued while the Worker was down is delivered once; cancelled, superseded and expired invites are never
+  delivered; cross-tenant job sends nothing), `account-lifecycle-email-enabled.spec` (unit).
+- **Residual:** an invite queued during a long Worker outage may arrive after the Manager has already chased the person by
+  other means; the email is still valid (or is cancelled if expired/revoked/superseded). The informational "Worker
+  offline" signal in the admin panel (`AdminPanelService.checkWorker`) is unchanged and does not block queueing.
+
+## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
+
+Flag `WORKER_FAST_PUBLISH_NOTIFY` (default false = today). No migration, no role, grant, RLS or posture change; no
+payroll, attendance or staffing rule change; email preferences untouched (notify() email stays default-off).
+
+- **Asset:** delivery of another person's notification email/push (the `email_outbox` / `push_delivery` rows notify()
+  writes in a business transaction). **Actor:** the API process acting on a committed business change; anyone able to
+  make the transaction roll back, stall Redis, or forge a job.
+- **Change:** with the flag on, `NotifyFastPublishService` adds the SAME BullMQ jobs the dispatcher's first publish adds
+  (`email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0`, existing producers, same options) right after the
+  transaction's OUTERMOST commit (TypeORM `AfterTransactionCommit`; savepoint releases ignored). Any rollback — of the
+  transaction or a savepoint in it — discards everything registered on it. Outside a transaction nothing is registered.
+- **Controls:** never published before commit (a rolled-back business change publishes nothing — tested). The fast path
+  writes nothing to the database: no status, `queued_at` or generation; the dispatcher's later add of the same jobId is
+  deduplicated by BullMQ and the consumers' fenced compare-and-set allows one delivery (tested: one job, one send).
+  `provider_call_started_at`, `DELIVERY_UNCERTAIN`, the idempotency key, attempts, backoff and leases are untouched.
+  Redis down or slow: publishes run detached from the request and are bounded by the producers' fail-fast connection;
+  failures are swallowed and the row is published later by the dispatcher (tested). Job payload = the committed row's id
+  and its `organisation_id` only (server values); consumers re-read the row under that organisation's RLS context and
+  revalidate before sending (tested: other organisation's context and no context see zero rows; a job naming another
+  organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
+- **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
+  publish error is caught per row instead of aborting the cycle; the failed row's `queued_at` stamp is withdrawn (fenced
+  on status + generation, in its organisation's context) so it is retried on the next tick, as before. per_scope only:
+  in global claim mode a publish error propagates exactly as before (the run releases the remaining claims and ends) —
+  withdrawing the stamp there would re-time the pointer to "due now" and the same run would re-claim it every batch. The claim SQL is byte-identical; FAILED /
+  DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
+  only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
+- **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
+  dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
+  lease instead of the 5 s dispatcher, a lease-outcome change.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
+  to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
+
+## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
+
+No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
+policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+**One delivery-policy change, for class-A realtime hints only — NEEDS OWNER APPROVAL (independent review F47-1):** a
+reclaim after claimant death now counts toward the existing `max_attempts` (10); a hint whose claimant dies (or stalls
+past the 60 s lease) 10 times is dropped (`failed`, `LEASE_RECLAIM_EXHAUSTED`) instead of being re-claimed forever.
+Before, redelivery after claimant death was unbounded; only publish failures were capped. Impact: every realtime event
+type is an ids-only UI hint (`attendance.changed`, `notification.created`, `offer.*`, `payroll.record_changed`,
+`shift.*`, `shift_request.*`, `navigation_layout.saved`); clients refetch, none is a security signal (authorisation is
+resolved server-side per request), and dropping one takes about 10 consecutive claimant deaths at 60 s each (≥ ~10
+minutes of crash-looping while that row is held). It removes an availability risk: one tenant's poison row could be
+re-claimed every cycle on every replica. `WORKER_CLAIM_MODE=per_scope` no longer reproduces the pre-Phase-D realtime
+claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2).
+
+- **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
+  (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
+  `processing` with an expired lease (its claimant died or hung) counts as an attempt; when `attempt_count + 1 >=
+  max_attempts` (the existing column, default 10, the same arithmetic `markRealtimeEventRetry` already used for a failed
+  publish) the row ends `failed` / `LEASE_RECLAIM_EXHAUSTED` with its claim and lease cleared and is not returned or
+  published. Before, a poison row whose publisher crashed every time was re-claimed forever — every cycle, every replica
+  — an availability risk one tenant's bad row could impose on the shared Worker. Actor → action → consequence after the
+  fix: a realtime hint (ids only; clients refetch) for a row whose publisher keeps dying is dropped after `max_attempts`
+  claims; no business record is touched. **Tenant isolation unchanged:** the same RLS-bound statement under the scope's
+  `SET LOCAL` (FORCE RLS on `core.realtime_event`); the MATERIALIZED CTE (eligibility, order, LIMIT, `FOR UPDATE SKIP
+  LOCKED`) is byte-identical to before (pinned by sha256 in `publish-outbox.job.spec.ts`). Abuse cases, real PostgreSQL
+  (`dq5-realtime-lease-reclaim.integration.spec.ts`): another organisation's context neither sees nor counts the row (per
+  scope and global); a claim with no tenant context bound returns zero rows and counts nothing; three concurrent
+  reclaimers of one row → exactly one wins, counted once. The global-mode pointer of a `failed` row is deleted by the
+  existing trigger (`failed` is terminal for realtime; tested). So that a LIVE claimant is never counted against (a batch
+  of up to 25 sequential publishes, 3 s each, can outlast the 60 s lease), `publishRealtimeScope` renews the lease of
+  the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
+  AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
+  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant,
+  and counted as `lostLease` in the cycle log (not `failed`: the other claimant holds and publishes it).
+- **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
+  `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
+  interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token
+  cleanup, storage cleanup and the provisioning-health alert run within one interval of the first boot instead of never
+  (when restarts are more frequent than the interval). A present stamp always decides exactly as before; Redis failing or
+  hanging (2 s bound) → one full interval, as before. The key holds a stat-key name and an epoch-ms number — no tenant
+  data — and is deliberately outside `rab:worker:stats`, which Admin Health lists as "last runs". **Residual:** production
+  Redis is unauthenticated (§13 #11): a party able to write Redis could plant an old first-seen value and make these
+  three idempotent housekeeping scans run at the next boot instead of a day later (a future or malformed value is
+  ignored), or delete it — the same reach it already has over the stamps themselves. bullmq scheduler mode is unchanged.
+- **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
+  Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
+  `crewflow_worker` only under global). Comment-only.
+
+## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
+
+Owner-approved plan (Docker consolidated plan 2026-11-02, R1/R2/R5 + compiled tests). Dockerfile-level only: no source,
+`package.json` or `yarn.lock` change; the application JavaScript and `node_modules` in the image are byte-identical to the
+unchanged Dockerfile's (only the compiled test helpers are gone).
+
+- **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
+  Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
+  2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
+  any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
+  v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
+  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  of that file (H5 release scanning re-checks against Chrome/Node releases).
+- **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
+  `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
+  execution bug could persist by editing code the process later loads. Control: application code is copied root-owned
+  and not group/other-writable; the build fails if anything under `/app` other than `/app/storage` (node, 0750) is not
+  root-owned or is group/other-writable. The Worker bundle no longer needs its recursive `chown -R`/`chmod -R` (−1.08 GB
+  layer) and refuses a base image that does not meet the rule; the launcher's start-time check is unchanged.
+- **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
+  sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
+  code imports one.
+- **Security review fixes (2026-11-03).**
+  - *H1-M1 (Medium, confirmed by a planted-file proof):* Node's CommonJS `globalPaths` include `$HOME/.node_modules` and
+    `$HOME/.node_libraries`; `/home/node` was node-owned (2755), so uid 1000 in the API could plant
+    `$HOME/.node_modules/pg-native/index.js`, which TypeORM's Postgres driver try-loads on every start (reproduced: the
+    planted file executes as uid 1000). Control: `/home/node` is root-owned 0555 in the image; the Worker launcher gives
+    both children `HOME=/nonexistent` (with Chromium's `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` inside the child's own 0700
+    TMPDIR) and refuses to start if that HOME or its parent is child-writable; `module-paths-gate.cjs` runs at build time as
+    `node` (API) and as uid 1000 and 10001 (Worker) and fails the build if any module search path is writable or the
+    pg-native plant succeeds. Regression: `launcher.test.cjs` 3b and the image gate (CI `trivy` job builds it).
+  - *H1-L1:* the Alpine gate also refuses `repositories.d` drop-ins, `/etc/apk/config`, `name@tag` pins in
+    `/etc/apk/world`, and any repository host other than `dl-cdn.alpinelinux.org`; CI rejects `-X`, `--repository`,
+    `--repositories-file` and `--allow-untrusted` in `packages/rab-docker/**/Dockerfile*`. `publish-image.yaml` builds the
+    runtime stage with `no-cache-filters: rab` so a release never reuses an old `apk upgrade` layer.
+  - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
+    setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.
+
+## Docker hardening H2 — Chromium only in the Worker image (branch build/docker-hardening-h2, stacked on H1, not merged)
+
+- **Browser attack surface in the API.** Threat: the API image carried Alpine Chromium and its whole dependency tree
+  (ffmpeg, libxml2, cjson, libsndfile, cups-libs, pulse, …) although no API code path launches a browser; every
+  Chromium/library advisory therefore applied to the internet-facing service too. Evidence: the only launcher is
+  `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts`; rab-server has no Playwright import, no dynamic
+  require of the renderer, and its report endpoints only serve PDFs the Worker already stored. Control: the API stage of
+  `packages/rab-docker/rab/Dockerfile` installs no browser, fonts or CHROMIUM_* settings and FAILS the build if
+  `chromium` is installed (`apk-absent:chromium`); `Dockerfile.worker-bundle` adds Chromium on top of the API image and
+  runs the Chromium/libexpat/Node floors there. CI builds the Worker image too, so the gates stay exercised.
+- **Unchanged:** tenant isolation, database identities and the Worker's privilege model (root launcher under tini,
+  jobs uid 1000, provisioner uid 10001, renderer still `--no-sandbox` with JavaScript, network and navigation off).
+- **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
+  shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
+  jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
+
+## Docker hardening H6 — API and Worker runtime isolation (branch build/docker-hardening-h6, stacked on H2, not merged)
+
+Compose-level only, plus a report line in the Worker launcher and an explicit (unchanged) Chromium launch option. Evidence:
+the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on the committed production file).
+
+- **Compromised API process persists, escalates or exhausts the host.** Threat: before H6 the production `rab-api` ran
+  with Docker's default capability bounding set (14 capabilities), `no_new_privs` off, a writable root filesystem and no
+  memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
+  future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
+  rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (the API writes nothing to its filesystem: uploads are
+  buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production; measured by the runtime matrix
+  in `development` mode with push, Sentry, OIDC and AI off — those paths are covered by the code review only. Docker's
+  default 64 MiB noexec `/dev/shm` stays writable; the API never uses it),
+  `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
+  `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
+- **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
+  CAP_SETUID/CAP_SETGID (to give each child its own UID/GID; libuv calls setgroups/setgid/setuid) and CAP_KILL (to signal
+  and sweep children of other UIDs). Measured in the image under the production capability set: without SETUID or SETGID
+  every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
+  watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
+  the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
+  `pids_limit: 1024` (one Chromium render ≈ 130 tasks; up to 4 renders run at once — shift reports, final timesheets,
+  two statement consumers — measured 551 tasks; with 512, 4 of 12 concurrent renders failed), `mem_limit` and `cpus`
+  (`cpus` above the host's CPU count stops the container from starting: planned hosts have ≥ 2 vCPUs). Regression: "H6 rab-worker" test, launcher tests,
+  runtime matrix.
+- **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
+  OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
+  2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
+  modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
+  `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
+  verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
+  declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
+  `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
+  controls a platform applied (CPU limits are not reported). Owner decision "never drop a security setting silently":
+  `CREWFLOW_RUNTIME_ISOLATION=enforce` makes both REFUSE to start when any declared control is missing (uid, bounding set,
+  no_new_privs, read-only root, PID/memory limits, the Worker's per-child tmpfs; an unreadable value counts as missing);
+  the value is strict (`warn` | `enforce`, unset = `warn`, anything else refuses) and never reaches a Worker child. The
+  production file leaves it unset (warn) so today's OpenShip deployment still starts and reports; a deployment definition
+  that must never run degraded (the staging/OpenShip variant) sets `enforce`. Tests: prestart 7a–7e, launcher H6-4..7.
+  What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
+  files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
+- **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:
+  Playwright adds `--no-sandbox` unless `chromiumSandbox: true`, so unset/`false` launched unsandboxed too (verified on the
+  real command line). `render-pdf.util.ts` now passes `chromiumSandbox: false` explicitly (no behaviour change) and says so.
+  The S-7 spec name "unset: Chromium keeps its sandbox" in `render-pdf-sandbox-footer.integration.spec.ts` is therefore
+  inaccurate (it inspects only the arguments handed to Playwright) — follow-up for that file's owner.
+  Evaluation: under the production settings `chromiumSandbox: true` aborts (Docker's seccomp refuses CLONE_NEWUSER; the
+  setuid helper has no setuid bit since H1-L2). With a seccomp profile = Docker's default + clone/unshare of
+  NEWUSER/NEWPID/NEWNET/NEWIPC only (mount/cgroup/UTS still refused) + chroot, `chromiumSandbox: true` and
+  `--disable-gpu-sandbox`, Chromium reports "You are adequately sandboxed" (namespace layer 1, PID + network namespaces,
+  seccomp-BPF); renderers run in their own user/PID/net namespaces with an extra seccomp filter; 15/15 renders, median
+  +3.5 % (amd64, Docker Desktop kernel 6.6). Without `--disable-gpu-sandbox` the GPU process's seccomp policy kills it on
+  musl's pwritev2 and the browser exits. NOT applied: it widens the kernel attack surface of every process in the Worker
+  container (unprivileged user namespaces), needs a host-provided profile file (OpenShip drops `security_opt`), is
+  unverified on ARM64 and on Ubuntu hosts that restrict unprivileged user namespaces through AppArmor.
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Keep Chromium unsandboxed (--no-sandbox) in the Worker; do not ship the user-namespace seccomp delta.
+  Reason:     The only working sandbox needs unprivileged user namespaces for the whole Worker container (a kernel LPE
+              surface for the jobs process and the root launcher), a host seccomp file the current platform ignores, and
+              is unproven on ARM64 production.
+  Risk:       A memory-safety bug in Chromium's renderer/image decoders (e.g. a crafted organisation logo, embedded as a
+              data: URI) runs code as uid 1000 in the Worker container with no further sandbox layer.
+  Mitigation: JavaScript off, offline context, every non-data: request aborted, navigation refused, 30 s step bounds
+              (P0-pdf); uid 1000 with no capabilities and NoNewPrivs; read-only root-owned code; no provisioning
+              credential in the jobs environment; per-child 0700 tmpfs; Chromium/Node floors (H1); PID/memory caps (H6).
+  Reversal:   Owner approval → add the profile (packages/rab-docker), security_opt seccomp=<profile> on rab-worker,
+              chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
+              native arm64.
+  ```
+- **The API's PID 1 does not reap orphaned processes (finding, LOW, pre-existing, not fixed in H6).** `api-prestart.sh`
+  execs `node` as PID 1 with no init. The API itself spawns no child process, but anything orphaned inside the container
+  (a `docker exec` shell's background jobs, or code run by an attacker) stays a zombie: measured 5 of 5 orphans left as
+  zombies under the production flags. Each holds a PID slot, and H6 now caps the API at 256, so a compromised process
+  could exhaust the cap and stop the API from creating threads (denial of service of that container only). Fix options for
+  the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
+  `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
+  own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.
 
 ## H4b — Sentry 8 → 10 (supported major; removes the OpenTelemetry advisories) (branch deps/h4b-sentry, not merged)
 

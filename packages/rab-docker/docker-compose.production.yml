@@ -232,6 +232,39 @@ services:
 
     restart: unless-stopped
 
+    # Runtime isolation (Docker hardening H6). REQUIRED, not decoration — if the
+    # platform cannot apply one of these, stop and report it; never relax it to
+    # make a deploy pass. Measured in the H6 runtime matrix (PR "H6 — Production
+    # API and Worker runtime isolation"):
+    #   - the image's non-root `node` user (uid/gid 1000), stated explicitly;
+    #   - no Linux capabilities at all and no-new-privileges (the API binds 3000,
+    #     an unprivileged port, and never changes identity);
+    #   - a READ-ONLY root filesystem and NO tmpfs: the API writes nothing to its
+    #     own filesystem in production (uploads are buffered in memory and stored
+    #     in R2/S3; production refuses STORAGE_DRIVER=LOCAL, so /app/storage is
+    #     unused; logs go to stdout). Any write fails with EROFS, except in
+    #     Docker's default /dev/shm (64 MiB, noexec), which the API never uses;
+    #   - a PID/thread cap and memory/CPU limits above the measured peak, and a
+    #     stop grace above the measured SIGTERM drain (Nest shutdown hooks).
+    #     `cpus` may not exceed the host's CPU count (Docker refuses to start the
+    #     container): the planned hosts have >= 2 vCPUs (docs/hosting/07); on a
+    #     smaller host set CREWFLOW_API_CPUS / CREWFLOW_WORKER_CPUS lower.
+    # api-prestart.sh logs what was actually applied at every start ("runtime
+    # isolation as declared", or a WARNING naming each control a platform dropped).
+    # CREWFLOW_RUNTIME_ISOLATION=enforce makes it REFUSE to start instead (exit 64)
+    # when any of these controls is missing; strict: only warn|enforce. This file
+    # leaves it unset (= warn) so a platform that drops these keys still starts
+    # and says so; a deployment definition that must never run degraded sets enforce.
+    # No Docker socket, host namespace or host mount is ever added here.
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: ${CREWFLOW_API_MEM_LIMIT:-768m}
+    cpus: ${CREWFLOW_API_CPUS:-2}
+    stop_grace_period: 35s
+
   # ---------------------------------------------------------------------------
   # rab-worker — the Worker SERVICE (2026-10-22 four-core-service packaging):
   # ONE container, TWO supervised OS processes, two non-root identities:
@@ -253,8 +286,10 @@ services:
   #
   # Image: packages/rab-docker/rab/Dockerfile.worker-bundle, built FROM the same
   # shared image as rab-api (passed as the named build context `crewflow-app`).
-  # It makes /app root-owned, removes the API entry scripts, adds the
-  # provisioner identity and tini. OPENSHIP: if its compose import cannot honour
+  # It adds Chromium + fonts (the only image with a browser since Docker
+  # hardening H2; the build fails below the security-floors.env minimums),
+  # verifies /app is root-owned (true since H1), removes the API entry scripts,
+  # adds the provisioner identity and tini. OPENSHIP: if its compose import cannot honour
   # `additional_contexts: service:`, build the shared image once, push it to a
   # registry pinned by digest, and set CREWFLOW_BASE_IMAGE to that reference —
   # see docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md section 12.
@@ -265,6 +300,12 @@ services:
   # platform cannot apply them, do NOT collapse both processes to one UID and do
   # NOT remove guards: the launcher refuses to start without root/its dirs, and
   # the limitation must be reported (CREWFLOW_FOUR_SERVICE_WORKER_BUNDLE_REPORT.md).
+  # H6: the launcher logs what it actually received at every start —
+  # "[worker-bundle] runtime isolation as declared: CapBnd=00000000000000e0
+  # NoNewPrivs=1 root=read-only tmpfs=4/4", or a WARNING naming each control
+  # the platform dropped (it still starts; report it, THREAT-MODEL.md H6).
+  # CREWFLOW_RUNTIME_ISOLATION=enforce (strict: warn|enforce; unset = warn, as
+  # here) makes the launcher refuse to start instead when any control is missing.
   #
   # ENTER IN OPENSHIP (rab-worker): everything listed for rab-api (same values;
   # the jobs process validates the same production config, including
@@ -335,6 +376,13 @@ services:
       - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
     # > launcher grace (42 s = 30 s jobs drain + margin) so no drain is cut short.
     stop_grace_period: 55s
+    # H6: limits above the measured worst case. pids_limit counts threads: one
+    # Chromium render peaks at ~130 tasks and up to 4 can run at once (shift
+    # reports, final timesheets, 2 statement consumers) = 551 tasks measured,
+    # plus tini, the launcher and both children; 512 made renders fail.
+    pids_limit: 1024
+    mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
+    cpus: ${CREWFLOW_WORKER_CPUS:-2}
 
     environment:
       NODE_ENV: production
