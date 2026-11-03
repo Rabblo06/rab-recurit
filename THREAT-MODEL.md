@@ -4622,8 +4622,9 @@ creation; the Worker heartbeat key in Redis no longer decides it. No migration, 
   **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
   silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
 - **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
-  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues nothing (operator kill switch — **assumption flagged for the
-  owner**). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
   written), not a Redis read.
 - **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
   returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,

@@ -59,7 +59,8 @@ export class AccountLifecycleService {
    * cancelled, never sent; a deleted target user is cancelled too.
    *
    * ASSUMPTION (flagged for the owner, unchanged behaviour): `EMAIL_DELIVERY_ENABLED=false` still means "do not queue
-   * an invite" — that is operator configuration (a deliberate kill switch), not Worker health. Purely synchronous and
+   * an invite at creation" — that is operator configuration, not Worker health. It gates only this creation-time
+   * decision; resend, change-pending-email, password reset and notify() emails do not read it. Purely synchronous and
    * Redis-free: it can neither fail nor slow the caller's request.
    */
   isEmailDeliveryEnabled(): boolean {

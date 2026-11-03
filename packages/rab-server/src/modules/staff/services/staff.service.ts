@@ -731,7 +731,7 @@ export class StaffService {
         // longer decides it. If the Worker is down the row waits and is sent
         // when it returns; the Worker's pre-delivery revalidation cancels it
         // instead if by then it was revoked, superseded by a resend, accepted
-        // or expired. EMAIL_DELIVERY_ENABLED=false (operator kill switch)
+        // or expired. EMAIL_DELIVERY_ENABLED=false (creation-time setting)
         // still skips it: no AccountInvite row, no EmailOutbox row, and a
         // Manager can send one later via "Resend invitation".
         const emailEnabled = this.accountLifecycle.isEmailDeliveryEnabled();
