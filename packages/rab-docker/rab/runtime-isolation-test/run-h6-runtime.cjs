@@ -717,7 +717,7 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     const restartsDuring = restartsOf('rab-worker') - restarts0;
     assert(docker(['network', 'connect', '--alias', 'minio', net, minioId]).code === 0, 'could not reconnect minio');
     await waitFor('minio healthy', () => healthOf('minio') === 'healthy', 60_000);
-    const bucket = compose(['exec', '-T', 'minio', 'sh', '-c', 'mc alias set h6 http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; mc ls h6/ | grep -c h6-runtime'], { quiet: true }).out.trim();
+    const bucket = compose(['exec', '-T', 'minio', 'sh', '-c', 'mc alias set h6 http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; mc stat h6/h6-runtime >/dev/null 2>&1 && echo 1 || echo 0'], { quiet: true }).out.trim();
     write(`bucket present after the outage: ${bucket}`);
     assert(bucket === '1', 'the bucket did not survive the outage');
     const since2 = new Date(Date.now() - 5_000).toISOString();
@@ -745,15 +745,26 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     measured.api = { memoryMaxMiB: mib(a2['memory.max']), memoryPeakMiB: mib(a2['memory.peak']), memoryCurrentMiB: mib(a2['memory.current']), pidsMax: a2['pids.max'], pidsPeak: a2['pids.peak'], cpuMax: a2['cpu.max'] };
     measured.worker = { memoryMaxMiB: mib(w['memory.max']), memoryPeakMiB: mib(w['memory.peak']), memoryCurrentMiB: mib(w['memory.current']), pidsMax: w['pids.max'], pidsPeak: w['pids.peak'], cpuMax: w['cpu.max'] };
     write(`api before load: ${JSON.stringify(a)}\napi after load: ${JSON.stringify(measured.api)}\nworker: ${JSON.stringify(measured.worker)}`);
-    // PID cap enforcement (API): 400 short background sleeps as uid 1000. Once the cap is reached nothing can fork — not
-    // even a $(...) — so the result is read with shell BUILTINS only (read/echo), after the sleeps have ended.
-    const fork = execAs('rab-api', '1000:1000', 'i=0; while [ $i -lt 400 ]; do sleep 8 & i=$((i+1)); done 2>/dev/null; read peak < /sys/fs/cgroup/pids.peak; read max < /sys/fs/cgroup/pids.max; read ev < /sys/fs/cgroup/pids.events; wait; echo "pids.peak=$peak pids.max=$max events=$ev"', { timeout: 120_000 });
-    write(`fork probe: ${fork.out.trim().split('\n').slice(-3).join(' | ')}`);
-    const peak = Number((/pids\.peak=(\d+)/.exec(fork.out) || [])[1]);
-    const max = Number((/pids\.max=(\d+)/.exec(fork.out) || [])[1]);
-    const started = peak;
-    assert(Number.isFinite(peak) && Number.isFinite(max), 'fork probe output');
-    assert(peak === max && /max \d*[1-9]/.test(fork.out), `pids_limit not enforced (peak ${peak}, max ${max})`);
+    // PID cap enforcement (API): one node process (uid 1000) spawns up to 400 short-lived children and counts the ones the
+    // kernel refuses (EAGAIN). A shell cannot do this: busybox sh exits on a failed background fork, and its orphans would
+    // then be re-parented to the API's PID 1 (node), which does not reap them (see the H6 report). node reaps its own
+    // children, so nothing is left behind; zombies are counted afterwards to prove it.
+    const probe = "const {spawn}=require('child_process');const fs=require('fs');let refused=0;const codes={};const kids=[];for(let i=0;i<400;i++){let c;try{c=spawn('sleep',['6'],{stdio:'ignore'})}catch(e){refused++;codes[e.code]=(codes[e.code]||0)+1;continue}c.on('error',e=>{refused++;codes[e.code]=(codes[e.code]||0)+1});kids.push(c)}setTimeout(()=>{const r=f=>fs.readFileSync('/sys/fs/cgroup/'+f,'utf8').trim();console.log(JSON.stringify({attempted:400,spawned:kids.filter(k=>k.pid).length,refused,codes,peak:r('pids.peak'),max:r('pids.max'),events:r('pids.events')}))},9000)";
+    const fork = docker(['exec', '-u', '1000:1000', '-e', 'J', containerId('rab-api'), 'sh', '-c', 'node -e "$J"'], { quiet: true, env: { J: probe }, timeout: 120_000 });
+    const res = (() => { try { return JSON.parse(fork.out.trim().split('\n').pop()); } catch { return null; } })();
+    const zombies = execAs('rab-api', '0:0', "z=0; for p in /proc/[0-9]*; do [ \"$(awk '{print $3}' $p/stat 2>/dev/null)\" = Z ] && z=$((z+1)); done; echo $z", { quiet: true }).out.trim();
+    write(`fork probe: ${res ? JSON.stringify(res) : fork.out.slice(-400)}; zombies afterwards: ${zombies}`);
+    assert(res, 'fork probe output');
+    const peak = Number(res.peak);
+    const max = Number(res.max);
+    const started = res.spawned;
+    // Enforcement proof = the KERNEL refused forks at the cap: EAGAIN for every refusal, fewer than 400 spawned, and the
+    // cgroup's own "max" event counter is non-zero. pids.peak may exceed pids.max by the processes `docker exec` ATTACHES
+    // to the cgroup (cgroup v2: "organisational operations are not blocked by cgroup policies"), never by forks: the
+    // overshoot is bounded by the 3 exec'd processes of this probe (sh, node, and the concurrent health-check exec).
+    const onlyEagain = Object.keys(res.codes || {}).every((c) => c === 'EAGAIN');
+    assert(res.refused > 0 && onlyEagain && res.spawned < 400 && /max \d*[1-9]/.test(res.events) && peak >= max && peak - max <= 3, `pids_limit not enforced (spawned ${res.spawned}, refused ${res.refused} ${JSON.stringify(res.codes)}, peak ${peak}, max ${max}, events ${res.events})`);
+    assert(zombies === '0', `zombies left in the API container: ${zombies}`);
     await waitFor('rab-api healthy after the fork probe', () => healthOf('rab-api') === 'healthy', 60_000);
     assert(a2['memory.max'] !== 'max' && a2['pids.max'] !== 'max' && a2['cpu.max'] && !/^max /.test(a2['cpu.max']), 'API cgroup limits missing');
     assert(w['memory.max'] !== 'max' && w['pids.max'] !== 'max' && !/^max /.test(w['cpu.max']), 'Worker cgroup limits missing');
