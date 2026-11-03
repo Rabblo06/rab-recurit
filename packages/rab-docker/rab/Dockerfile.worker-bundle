@@ -18,6 +18,13 @@
 #     fail closed) and sets CHROMIUM_EXECUTABLE_PATH / CHROMIUM_NO_SANDBOX / PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD for the
 #     renderer (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts, the only browser launcher). Every
 #     application layer below is the API image's own (shared, not duplicated);
+#   - H3: the Worker-only production dependencies (today: playwright and playwright-core, the browser driver) are added
+#     to the API image's node_modules, which no longer contains them. The `worker-modules` stage resolves @rab/worker's
+#     production closure from the same lockfile and copies ONLY the packages it adds; it refuses to build unless every
+#     package of the API tree is in the Worker tree at the same path and version (so the API layers are reused unchanged)
+#     and every added package needs no install script or native build (that stage runs none). The final stage proves the
+#     Worker's closure: every import in the Worker, server, shared and emails dist resolves, and no build or test tool is
+#     present (runtime-deps.cjs);
 #   - nothing about /app ownership any more: since H1 the shared image already ships application code and dependencies
 #     root-owned and not group/other-writable, so neither child identity can rewrite code the other imports. This build
 #     re-verifies that and REFUSES a base image that does not meet it (e.g. one built from an older Dockerfile, which
@@ -34,8 +41,37 @@
 # `chown -R root:root /app; chmod -R go-w /app` here rewrote node_modules as one extra layer of about 1.08 GB unpacked /
 # 144 MB compressed.
 ARG CREWFLOW_BASE_IMAGE
-FROM ${CREWFLOW_BASE_IMAGE}
+FROM ${CREWFLOW_BASE_IMAGE} AS app
 
+# H3: the Worker's production dependency closure, resolved from the committed manifests and lockfile with the same pinned
+# Node image as the shared Dockerfile. Lifecycle scripts are disabled: nothing is built here, and the packages the Worker
+# adds must not need building (runtime-deps.cjs worker-delta refuses one that does). Only the delta reaches the image.
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS worker-modules
+WORKDIR /app
+COPY package.json yarn.lock .yarnrc.yml ./
+COPY .yarn ./.yarn
+COPY packages/rab-server/package.json packages/rab-server/package.json
+COPY packages/rab-worker/package.json packages/rab-worker/package.json
+COPY packages/rab-shared/package.json packages/rab-shared/package.json
+COPY packages/rab-ui/package.json packages/rab-ui/package.json
+COPY packages/rab-front/package.json packages/rab-front/package.json
+COPY packages/rab-emails/package.json packages/rab-emails/package.json
+COPY packages/rab-e2e-testing/package.json packages/rab-e2e-testing/package.json
+COPY packages/rab-utils/package.json packages/rab-utils/package.json
+RUN --mount=type=bind,from=app,source=/app/node_modules,target=/api/node_modules \
+    --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
+    set -eu; \
+    lock="$(sha256sum yarn.lock)"; \
+    corepack enable; \
+    YARN_ENABLE_SCRIPTS=false yarn workspaces focus @rab/worker --production; \
+    test "$(sha256sum yarn.lock)" = "$lock"; \
+    nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
+    if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace:"; echo "$nested"; exit 1; fi; \
+    node /tmp/runtime-deps.cjs worker-delta /api/node_modules /app/node_modules /worker-delta; \
+    test -d /worker-delta/node_modules; \
+    find /worker-delta ! -type l -perm /022 -exec chmod go-w {} +
+
+FROM app
 USER root
 ARG MIN_NODE_VERSION
 ARG MIN_CHROMIUM_VERSION
@@ -79,10 +115,25 @@ RUN set -eux; \
     test -f /app/packages/rab-worker/dist/main.js; \
     test -f /app/packages/rab-worker/dist/workspace-provisioner.main.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
-    test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-ui/dist-cjs; test -d /app/packages/rab-emails/dist; \
+    test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-emails/dist; \
     test -x "$CHROMIUM_EXECUTABLE_PATH"; \
     for f in /app/.env /app/packages/rab-worker/.env /app/packages/rab-worker/.env.provisioner /app/packages/rab-server/.env; do test ! -e "$f"; done; \
     test -z "$(find /app -path /app/node_modules -prune -o -name '.env*' -print)"
+
+# H3: the Worker-only packages, root-owned (COPY's default) and not group/other-writable (cleared in worker-modules); the
+# ownership gate above already covers everything under /app, and is repeated for these by the setuid/ownership check below.
+COPY --from=worker-modules /worker-delta/node_modules/ /app/node_modules/
+# H3 runtime-dependency gate for the Worker: every bare import in the code the two children run resolves, the browser
+# driver is present, and no build or test tool is anywhere in node_modules.
+RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
+    set -eu; \
+    node /tmp/runtime-deps.cjs check /app/node_modules \
+      --scan /app/packages/rab-worker/dist /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' prettier eslint '@swc/*' \
+        webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on; \
+    test -f /app/node_modules/playwright-core/package.json; \
+    bad="$(find /app/node_modules ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
+    if [ -n "$bad" ]; then echo "FATAL: Worker dependencies not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi
 
 COPY --chown=root:root --chmod=0444 packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs /opt/crewflow-bundle/
 # COPY --chmod also applied 0444 to the new directory; root in this container has no CAP_DAC_* capabilities, so the

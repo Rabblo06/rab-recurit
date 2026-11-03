@@ -52,11 +52,16 @@ RUN test -f packages/rab-server/dist/main.js || (echo "FATAL: packages/rab-serve
 # src/__tests__/** helpers (fixtures, a fake SMTP sink, test identities) into dist. Delete every __tests__/__mocks__/
 # __fixtures__ directory and spec/test/jest/test-helper file from the dist folders the runtime stage copies (the source
 # tree is untouched), prove nothing left there imports a deleted path, and clear any group/other write bit.
+# H3: type declarations (*.d.ts), source maps and TypeScript build-info files are build-only output as well: nothing loads
+# them at runtime, and a source map can embed original source. They are deleted from the same dist folders (only .d.ts is
+# emitted today, about 4.9 MB; the final stage refuses any source map that comes back). packages/rab-ui is no longer in
+# the list: no runtime file imports @rab/ui (it is a front-end library), so the runtime stage does not copy it.
 RUN set -eu; \
-    dists="packages/rab-server/dist packages/rab-worker/dist packages/rab-shared/dist-cjs packages/rab-ui/dist-cjs packages/rab-emails/dist"; \
+    dists="packages/rab-server/dist packages/rab-worker/dist packages/rab-shared/dist-cjs packages/rab-emails/dist"; \
     for d in $dists; do test -d "$d"; done; \
     find $dists -type d \( -name __tests__ -o -name __mocks__ -o -name __fixtures__ \) -prune -exec rm -rf {} +; \
     find $dists -type f \( -name '*.spec.*' -o -name '*.test.*' -o -name 'jest-*' -o -name 'test-helpers.*' \) -delete; \
+    find $dists -type f \( -name '*.d.ts' -o -name '*.d.cts' -o -name '*.d.mts' -o -name '*.map' -o -name '*.tsbuildinfo' \) -delete; \
     left="$(find $dists \( -name __tests__ -o -name __mocks__ -o -name __fixtures__ -o -name '*.spec.*' -o -name '*.test.*' -o -name 'jest-*' -o -name 'test-helpers.*' \) -print)"; \
     if [ -n "$left" ]; then echo "FATAL: test files remain in runtime dist folders:"; echo "$left"; exit 1; fi; \
     rc=0; refs="$(grep -rlE "(require\(|from |import\()[[:space:]]*['\"][^'\"]*(/__tests__/|/__mocks__/|/__fixtures__/|\.spec(\.js)?['\"]|\.test(\.js)?['\"]|/test-helpers(\.js)?['\"]|/jest-[A-Za-z0-9-]+(\.js)?['\"])" $dists)" || rc=$?; \
@@ -64,18 +69,25 @@ RUN set -eu; \
     if [ -n "$refs" ]; then echo "FATAL: runtime code imports a removed test file:"; echo "$refs"; exit 1; fi; \
     find $dists ! -type l -perm /022 -exec chmod go-w {} +
 
-# Runtime node_modules = the build stage's tree minus the build-only native toolchains (image scan 2026-10-30): the esbuild
-# binaries (Vite's nested 0.25 copy embeds Go stdlib 1.23.12: 1 CRITICAL + ~25 HIGH) and Vite itself. Nothing the runtime
-# starts needs them — server, Worker, shared, ui and emails dist never import esbuild, vite or tsx; only build/dev CLIs do
-# (tsx, the react-email preview, Vite), and none of those runs in this image.
+# H3: the runtime node_modules is the PRODUCTION dependency closure of @rab/server alone, not the deps stage's whole
+# workspace install (which also holds the front end's, the e2e suite's and every test and build package: Nx, TypeScript,
+# Jest, Vite/esbuild — whose nested Go binaries were 1 CRITICAL + ~25 HIGH in the 2026-10-30 scan — react-email's preview
+# server, the Playwright test runner, ...). `yarn workspaces focus @rab/server --production` prunes the deps stage's install
+# in place, from the same lockfile and the yarn cache already in that layer, keeping only @rab/server's `dependencies` and,
+# transitively, those of the workspaces it depends on (@rab/shared, @rab/emails); the lockfile is verified unchanged.
+# The Worker-only browser driver (playwright) is NOT in it: Dockerfile.worker-bundle adds the Worker's extra packages on
+# top of this image. The final stage proves the closure (runtime-deps.cjs: every compiled import resolves, no build or test
+# tool is present), so a package the runtime needs but the manifests misclassify fails the BUILD.
 # H1: any group/other write bit a package tarball shipped with is cleared here (only the offending entries are touched,
 # so this stage does not rewrite the whole tree); the final stage then re-verifies the whole of /app.
-FROM build AS runtime-modules
-RUN rm -rf node_modules/esbuild node_modules/@esbuild node_modules/vite node_modules/.bin/esbuild node_modules/.bin/vite \
-      node_modules/*/node_modules/esbuild node_modules/*/node_modules/@esbuild \
-      node_modules/@*/*/node_modules/esbuild node_modules/@*/*/node_modules/@esbuild \
-  && test -z "$(find node_modules -type f -path '*esbuild*/bin/esbuild' -print -quit)" \
-  && find node_modules ! -type l -perm /022 -exec chmod go-w {} +
+FROM deps AS runtime-modules
+RUN set -eu; \
+    lock="$(sha256sum yarn.lock)"; \
+    yarn workspaces focus @rab/server --production; \
+    test "$(sha256sum yarn.lock)" = "$lock"; \
+    nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
+    if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace, which the runtime stage does not copy:"; echo "$nested"; exit 1; fi; \
+    find node_modules ! -type l -perm /022 -exec chmod go-w {} +
 
 # Final stage = the API image (rab-api, and the one-off rab-migrate / rab-ops). It is also the Dockerfile's last stage,
 # which Docker builds by default when no `--target` is given (OpenShip and Render cannot pass one): keep it last.
@@ -113,8 +125,9 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 # runtime user `node` (uid/gid 1000, shipped by node:24-alpine) can read and execute them but never rewrite them, so a
 # compromised process cannot persist by editing code it later re-imports. Only /app/storage (below) is writable by it.
 # packages/rab-worker/dist stays in this image although the API never loads it: the Worker bundle image is built FROM
-# this one (Dockerfile.worker-bundle has no build stage of its own), so this is where the Worker gets its code. It is
-# about 0.8 MB, and none of it runs in the API process.
+# this one (Dockerfile.worker-bundle builds no application code of its own), so this is where the Worker gets its code. It
+# is about 0.8 MB, and none of it runs in the API process; it cannot even start here, because its browser driver
+# (playwright) is a Worker-only dependency that this image does not contain (H3).
 COPY --from=runtime-modules /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
@@ -123,8 +136,6 @@ COPY --from=build /app/packages/rab-worker/package.json ./packages/rab-worker/pa
 COPY --from=build /app/packages/rab-worker/dist ./packages/rab-worker/dist
 COPY --from=build /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
 COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
-COPY --from=build /app/packages/rab-ui/package.json ./packages/rab-ui/package.json
-COPY --from=build /app/packages/rab-ui/dist-cjs ./packages/rab-ui/dist-cjs
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
@@ -151,7 +162,19 @@ RUN set -eu; \
     bad="$(find /app -path /app/storage -prune -o ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
     if [ -n "$bad" ]; then echo "FATAL: application files not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi; \
     tests="$(find /app/packages \( -name __tests__ -o -name '*.spec.js' -o -name '*.test.js' \) -print | head -n 20)"; \
-    if [ -n "$tests" ]; then echo "FATAL: compiled tests in the runtime image:"; echo "$tests"; exit 1; fi
+    if [ -n "$tests" ]; then echo "FATAL: compiled tests in the runtime image:"; echo "$tests"; exit 1; fi; \
+    maps="$(find /app/packages \( -name '*.map' -o -name '*.tsbuildinfo' \) -print | head -n 20)"; \
+    if [ -n "$maps" ]; then echo "FATAL: source maps or TypeScript build-info in the runtime image:"; echo "$maps"; exit 1; fi
+# H3 runtime-dependency gate (packages/rab-docker/rab/runtime-deps.cjs, bind-mounted, never shipped): every bare import in
+# the code this image runs (server, shared and emails dist; the Worker dist is checked by the Worker image) resolves with
+# Node's own resolver, and no build, test or Worker-only package is anywhere in node_modules. A package the runtime needs
+# but the production install dropped, or a dev tool that comes back, fails the build here.
+RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
+    node /tmp/runtime-deps.cjs check /app/node_modules \
+      --scan /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' prettier eslint '@swc/*' \
+        webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
+        playwright playwright-core
 
 USER node
 # Security review H1-M1 gate, run as the runtime user itself: no Node module search path (globalPaths including
