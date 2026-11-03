@@ -4,14 +4,17 @@
 #
 #   bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh [file...]   (default: every tracked Dockerfile)
 #
-# Like Docker, comment lines are dropped (also inside a continued instruction) and backslash-continued lines are joined;
-# quotes, brackets and commas are blanked so exec-form RUN ["apk", "add", ...] is scanned like the shell form.
+# Like Docker, comment lines are dropped (also inside a continued instruction) and backslash-continued lines are joined.
+# Quote characters are deleted (so shell word concatenation such as a'pk' still reads apk) and brackets and commas are
+# blanked (so exec-form RUN ["apk", "add", ...] is scanned like the shell form). A file that changes the escape character
+# (# escape=) is refused: its continuations would not be joined correctly.
 # Each instruction is split into commands at && || ; | and every command in which `apk` appears as a word (also after
 # `if`, `then`, `!`, `$(`, a backtick, `=` or a path such as /sbin/apk) is checked for: -X with a separate or attached
 # argument, alone or grouped (-X url, -Xurl, -qX url), and any long option apk could expand to --allow-untrusted,
 # --repository, --repositories-file or --keys-dir: every --al…, --rep… and --ke… prefix (apk accepts unambiguous
-# abbreviations such as --allow). This is a heuristic lint for reviewers; security-floors.sh checks the image itself. Other commands' arguments
-# (e.g. `curl -X POST`) are not checked. Exit 1 on any hit, on an unreadable file, or if no file is checked.
+# abbreviations such as --allow). Other commands' arguments (e.g. `curl -X POST`) are not checked. Exit 1 on any hit, on an
+# unreadable file, on an unsupported escape directive, or if no file is checked. This is a best-effort lint that catches
+# accidental or casual use; deliberate obfuscation is for code review, and security-floors.sh checks the image itself.
 set -euo pipefail
 fail() {
   echo "::error::$*"
@@ -26,7 +29,8 @@ fi
 commands=""
 for f in "${files[@]}"; do
   { [ -f "$f" ] && [ -r "$f" ]; } || fail "cannot read $f"
-  out="$(tr "\"'[]," "     " < "$f" | awk -v F="$f" '
+  if grep -qiE '^[[:space:]]*#[[:space:]]*escape[[:space:]]*=' "$f"; then fail "$f sets a Dockerfile escape directive; this check only supports the default backslash"; fi
+  out="$(tr -d "\"'" < "$f" | tr "[]," "   " | awk -v F="$f" '
     function emit(text,   n, i, parts) { n = split(text, parts, /&&|\|\||;|\|/); for (i = 1; i <= n; i++) print F ": " parts[i] }
     /^[[:space:]]*#/ { next }
     { line = $0; if (sub(/\\[[:space:]]*$/, "", line)) { buf = buf line " "; next } emit(buf line); buf = "" }
