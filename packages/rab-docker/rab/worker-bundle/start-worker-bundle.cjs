@@ -62,6 +62,15 @@ const APP_ROOT = '/app';
 /** Phase D: the logins the jobs child's PG_DATABASE_URL may name (code constants; the live boot gate is the authority). */
 const JOBS_LOGINS = Object.freeze(['crewflow_app', 'crewflow_worker']);
 const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+/**
+ * Security review H1-M1: each child's HOME is a path it cannot create or write. Node's CommonJS loader searches
+ * $HOME/.node_modules and $HOME/.node_libraries (require('module').globalPaths), so a writable HOME would let a child plant
+ * a module (e.g. pg-native, which TypeORM tries to load at start) that runs again after a restart. Chromium's per-user
+ * config/cache (crashpad database, fontconfig cache) go to XDG_* directories inside the child's own 0700 TMPDIR instead;
+ * those are not module search paths.
+ */
+const CHILD_HOME = '/nonexistent';
+const xdgDirs = (tmp) => ({ XDG_CONFIG_HOME: path.join(tmp, '.config'), XDG_CACHE_HOME: path.join(tmp, '.cache') });
 
 /**
  * Reviewed allowlist for the ordinary jobs child, reconciled 2026-10-22 against
@@ -435,8 +444,9 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
   const jobsEnv = {
     ...own(env, JOBS_ENV_KEYS),
     PATH: SAFE_PATH,
-    HOME: layout.jobs.home,
+    HOME: CHILD_HOME,
     TMPDIR: layout.jobs.home,
+    ...xdgDirs(layout.jobs.home),
     CREWFLOW_INSTANCE_HEALTH_FILE: layout.jobs.healthFile,
   };
   const jobs = {
@@ -462,8 +472,9 @@ function makePlan(env, layout = DEFAULT_LAYOUT) {
     CREWFLOW_PROVISIONER_ENABLED: 'true',
     WORKSPACE_PROVISIONER_INTERVAL_SECONDS: String(intervalSeconds),
     PATH: SAFE_PATH,
-    HOME: layout.provisioner.home,
+    HOME: CHILD_HOME,
     TMPDIR: layout.provisioner.home,
+    ...xdgDirs(layout.provisioner.home),
     CREWFLOW_INSTANCE_HEALTH_FILE: layout.provisioner.healthFile,
   };
   return [
@@ -512,6 +523,13 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
   }
   for (const rel of DOTENV_PATHS) {
     if (statOrNull(path.join(layout.root, rel))) throw new BundleConfigError(`packaged dotenv file present: ${rel} (remove it from the image)`);
+  }
+  // H1-M1: the children's HOME (a Node module search root) must be neither writable nor creatable by either child.
+  for (const p of [CHILD_HOME, path.dirname(CHILD_HOME)]) {
+    const s = statOrNull(p);
+    if (s && (childUids.has(s.uid) || (s.mode & 0o022) !== 0)) {
+      throw new BundleConfigError(`child HOME ${CHILD_HOME} must not be writable or creatable by a child identity (${p})`);
+    }
   }
   // Only the roles that will actually start (Phase A: a disabled provisioner needs no temp/health directory).
   const roles = new Set(plan.map((s) => s.name));

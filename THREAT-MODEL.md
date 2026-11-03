@@ -4782,3 +4782,43 @@ claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2)
 - **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
   Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
   `crewflow_worker` only under global). Comment-only.
+
+## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
+
+Owner-approved plan (Docker consolidated plan 2026-11-02, R1/R2/R5 + compiled tests). Dockerfile-level only: no source,
+`package.json` or `yarn.lock` change; the application JavaScript and `node_modules` in the image are byte-identical to the
+unchanged Dockerfile's (only the compiled test helpers are gone).
+
+- **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
+  Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
+  2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
+  any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
+  v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
+  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  of that file (H5 release scanning re-checks against Chrome/Node releases).
+- **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
+  `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
+  execution bug could persist by editing code the process later loads. Control: application code is copied root-owned
+  and not group/other-writable; the build fails if anything under `/app` other than `/app/storage` (node, 0750) is not
+  root-owned or is group/other-writable. The Worker bundle no longer needs its recursive `chown -R`/`chmod -R` (−1.08 GB
+  layer) and refuses a base image that does not meet the rule; the launcher's start-time check is unchanged.
+- **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
+  sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
+  code imports one.
+- **Security review fixes (2026-11-03).**
+  - *H1-M1 (Medium, confirmed by a planted-file proof):* Node's CommonJS `globalPaths` include `$HOME/.node_modules` and
+    `$HOME/.node_libraries`; `/home/node` was node-owned (2755), so uid 1000 in the API could plant
+    `$HOME/.node_modules/pg-native/index.js`, which TypeORM's Postgres driver try-loads on every start (reproduced: the
+    planted file executes as uid 1000). Control: `/home/node` is root-owned 0555 in the image; the Worker launcher gives
+    both children `HOME=/nonexistent` (with Chromium's `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` inside the child's own 0700
+    TMPDIR) and refuses to start if that HOME or its parent is child-writable; `module-paths-gate.cjs` runs at build time as
+    `node` (API) and as uid 1000 and 10001 (Worker) and fails the build if any module search path is writable or the
+    pg-native plant succeeds. Regression: `launcher.test.cjs` 3b and the image gate (CI `trivy` job builds it).
+  - *H1-L1:* the Alpine gate also refuses `repositories.d` drop-ins, `/etc/apk/config`, `name@tag` pins in
+    `/etc/apk/world`, and any repository host other than `dl-cdn.alpinelinux.org`; CI rejects `-X`, `--repository`,
+    `--repositories-file` and `--allow-untrusted` in `packages/rab-docker/**/Dockerfile*`. `publish-image.yaml` builds the
+    runtime stage with `no-cache-filters: rab` so a release never reuses an old `apk upgrade` layer.
+  - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
+    setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.

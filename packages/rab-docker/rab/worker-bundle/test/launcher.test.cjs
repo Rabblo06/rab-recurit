@@ -103,8 +103,8 @@ test('1 jobs child does not receive provisioning, migration or command authority
   // Adapted: the reference forwarded APP_SECRET etc.; so does this one — the jobs child needs them (push/QR/email/S3).
   assert.equal(w.env.APP_SECRET, 'fake-test-only');
   assert.equal(w.env.S3_SECRET_ACCESS_KEY, 'fake-s3-secret');
-  // Every forwarded key is on the reviewed allowlist, plus the four the launcher sets itself.
-  const extra = Object.keys(w.env).filter((k) => !JOBS_ENV_KEYS.includes(k) && !['PATH', 'HOME', 'TMPDIR', 'CREWFLOW_INSTANCE_HEALTH_FILE'].includes(k));
+  // Every forwarded key is on the reviewed allowlist, plus the six the launcher sets itself.
+  const extra = Object.keys(w.env).filter((k) => !JOBS_ENV_KEYS.includes(k) && !['PATH', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE'].includes(k));
   assert.deepEqual(extra, []);
 });
 
@@ -136,6 +136,8 @@ test('2 provisioner gets only its DB mapping and minimal infrastructure environm
       'REDIS_URL',
       'TMPDIR',
       'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
+      'XDG_CACHE_HOME',
+      'XDG_CONFIG_HOME',
     ].sort(),
   );
   for (const key of ['APP_SECRET', 'EMAIL_SMTP_PASSWORD', 'S3_SECRET_ACCESS_KEY', 'APNS_AUTH_KEY_P8', 'DATABASE_DIRECT_URL', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'PG_DATABASE_REPLICA_URL', 'PG_POOL_MAX_CONNECTIONS']) {
@@ -149,8 +151,25 @@ test('3 children have different non-root identities and separate homes/health fi
   assert.notEqual(w.uid, p.uid);
   assert.notEqual(w.gid, p.gid);
   for (const id of [w.uid, w.gid, p.uid, p.gid]) assert.ok(id > 0);
-  assert.notEqual(w.env.HOME, p.env.HOME);
+  assert.notEqual(w.env.TMPDIR, p.env.TMPDIR);
   assert.notEqual(w.healthFile, p.healthFile);
+});
+
+test('3b security review H1-M1: no child has a writable HOME (a Node module search root); Chromium dirs live in TMPDIR', () => {
+  for (const c of makePlan(env())) {
+    // HOME is a path neither child can create: $HOME/.node_modules and $HOME/.node_libraries are on require's globalPaths.
+    assert.equal(c.env.HOME, '/nonexistent', c.name);
+    assert.ok(!c.env.TMPDIR.startsWith(c.env.HOME), c.name);
+    // Chromium's crashpad database and fontconfig cache go to the child's own 0700 temp directory, not HOME.
+    assert.equal(c.env.XDG_CONFIG_HOME, path.join(c.env.TMPDIR, '.config'), c.name);
+    assert.equal(c.env.XDG_CACHE_HOME, path.join(c.env.TMPDIR, '.cache'), c.name);
+    // Neither the TMPDIR nor the XDG directories are module search paths, and no NODE_PATH is ever forwarded.
+    assert.equal(c.env.NODE_PATH, undefined, c.name);
+    const searchRoots = [path.join(c.env.HOME, '.node_modules'), path.join(c.env.HOME, '.node_libraries')];
+    for (const dir of [c.env.TMPDIR, c.env.XDG_CONFIG_HOME, c.env.XDG_CACHE_HOME]) {
+      assert.ok(!searchRoots.some((r) => r.startsWith(dir)), `${c.name}: ${dir} must not be a module search root`);
+    }
+  }
 });
 
 test('4 rejects globally injected privileged URL (DATABASE_URL_UNPOOLED)', () => {
