@@ -229,6 +229,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const diffs = [];
     for (const svc of ['rab-api', 'rab-worker', 'rab-migrate', 'rab-redis']) {
       for (const k of keys) {
+        // The one documented exception: rab-redis's data directory is a tmpfs instead of a named volume (no Docker volume).
+        if (svc === 'rab-redis' && k === 'tmpfs' && JSON.stringify(merged.services[svc][k]) === '["/data"]' && alone.services[svc][k] === undefined) continue;
         if (JSON.stringify(alone.services[svc][k] ?? null) !== JSON.stringify(merged.services[svc][k] ?? null)) diffs.push(`${svc}.${k}`);
       }
       // depends_on may only GAIN the throwaway infrastructure; every condition of the variant stays.
