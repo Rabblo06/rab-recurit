@@ -35,6 +35,9 @@ const SECRETS = {
   BT_APP_PASSWORD: hex(24),
   BT_APP_SECRET: hex(48),
   BT_FIXTURE_PASSWORD: `Fx${hex(16)}`,
+  // Case 26's deliberately wrong provisioner password: registered here so it is redacted from every evidence file and
+  // scanned by case 32 like every other synthetic secret (review F9).
+  BT_WRONG_PROVISIONER_PASSWORD: hex(24),
 };
 // Never inherit a developer DATABASE_URL / TEST_* into compose interpolation or the docker CLI.
 const BASE_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(DATABASE_|TEST_|CREWFLOW_|REDIS_URL|DB_TARGET)/.test(k)));
@@ -69,9 +72,18 @@ async function waitFor(label, predicate, timeoutMs, everyMs = 2000) {
 }
 
 const results = [];
+/** Set when the stack can no longer be trusted (review F10): every later case is recorded NOT RUN instead of running. */
+let abortReason = null;
 async function step(id, title, fn) {
   currentLog = path.join(OUT, `${id}-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}.log`);
   fs.writeFileSync(currentLog, `# ${id} ${title}\n# ${new Date().toISOString()}\n`);
+  if (abortReason) {
+    const note = `run aborted: ${abortReason}`;
+    write(`\n# RESULT: NOT RUN — ${note}`);
+    results.push({ id, title, status: 'NOT RUN', note, log: path.basename(currentLog) });
+    console.log(`${'NOT RUN'.padEnd(7)} ${id} ${title} — ${note}`);
+    return;
+  }
   const started = Date.now();
   let status = 'PASS';
   let note = '';
@@ -543,8 +555,9 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
       ['DATABASE_URL_UNPOOLED on the service', { DATABASE_URL_UNPOOLED: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` }, /refused: DATABASE_URL_UNPOOLED must not be configured/],
       ['migration approval on the service', { CREWFLOW_MIGRATION_APPROVED: `pending-1-${'0'.repeat(64)}` }, /refused: CREWFLOW_MIGRATION_APPROVED must not be configured/],
       // Phase B (aa855a88): the provisioner child reads its credential as PG_DATABASE_URL, so its live probe names that
-      // variable. A random 48-hex wrong password, so the leak check below also covers this refusal.
-      ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow:${hex(24)}@pg:5432/rab` }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the PG_DATABASE_URL database .*driver code 28P01/],
+      // variable. The wrong password is a registered synthetic secret (SECRETS): redacted, checked by the per-case leak
+      // check below (48 hex) and by case 32.
+      ['wrong provisioner password (live probe)', { CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow:${SECRETS.BT_WRONG_PROVISIONER_PASSWORD}@pg:5432/rab` }, /\[provisioner\] \[runtime-db-guard\] refused: Cannot reach the PG_DATABASE_URL database .*driver code 28P01/],
       // Phase A (pa-provisioner): the opt-in switch and the interval bounds.
       ['provisioner disabled but its URL still present', { CREWFLOW_PROVISIONER_ENABLED: 'false' }, /refused: CREWFLOW_PROVISIONER_DATABASE_URL is set but the workspace provisioner is disabled/],
       ['invalid provisioner switch', { CREWFLOW_PROVISIONER_ENABLED: 'yes' }, /refused: CREWFLOW_PROVISIONER_ENABLED must be "true" or "false"/],
@@ -640,17 +653,25 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
     write(`provisioner cycle on pg-other before the cross-check: ${/workspace provisioning: attempted=/.test(r.out) ? 'yes' : 'no'}; pg-other workspace_schema_registry rows: ${otherProvisioned}`);
     compose(['--profile', 'mismatch', 'rm', '-sf', 'pg-other']);
     // Live role guard: on the THROWAWAY database only, give crewflow_app BYPASSRLS for one start attempt. The launcher's
-    // string checks pass (the login name is right); assert-runtime-db-role.ts inside the jobs child must refuse.
-    psql('ALTER ROLE crewflow_app BYPASSRLS');
+    // string checks pass (the login name is right); a live role guard inside the jobs child must refuse.
+    const bypass = () => sql1(`SELECT rolbypassrls::text FROM pg_roles WHERE rolname = 'crewflow_app'`);
     let r2;
     try {
+      assert(psql('ALTER ROLE crewflow_app BYPASSRLS').code === 0 && bypass() === 'true', 'could not grant the temporary BYPASSRLS on the throwaway cluster');
       const env = { DATABASE_URL: `postgres://crewflow_app:${SECRETS.BT_APP_PASSWORD}@pg:5432/rab`, DATABASE_DIRECT_URL: `postgres://crewflow_app:${SECRETS.BT_APP_PASSWORD}@pg:5432/rab`, CREWFLOW_PROVISIONER_DATABASE_URL: `postgres://crewflow:${SECRETS.BT_CREWFLOW_PASSWORD}@pg:5432/rab` };
       r2 = compose(['--profile', 'mismatch', 'run', '--rm', '--no-deps', '-e', 'DATABASE_URL', '-e', 'DATABASE_DIRECT_URL', '-e', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'worker-mismatch'], { env, timeout: 180_000 });
     } finally {
-      psql('ALTER ROLE crewflow_app NOBYPASSRLS');
+      // Review F10: the restore must be PROVEN, not just logged. If crewflow_app may still bypass RLS, no later case's
+      // RLS result is trustworthy: abort the run (cases 28-33 are recorded NOT RUN; teardown still runs).
+      const restore = psql('ALTER ROLE crewflow_app NOBYPASSRLS');
+      const after = bypass();
+      write(`crewflow_app restored: restore exit=${restore.code} bypassrls=${after}`);
+      if (restore.code !== 0 || after !== 'false') {
+        abortReason = `crewflow_app BYPASSRLS restore not confirmed (exit=${restore.code}, rolbypassrls=${after || 'unreadable'})`;
+        throw new Error(abortReason);
+      }
     }
     write(r2.out.split('\n').filter((l) => /worker-bundle\]|Refusing|refused|Worker failed/.test(l)).slice(0, 12).join('\n'));
-    write(`crewflow_app restored: ${sql1(`SELECT 'bypassrls=' || rolbypassrls FROM pg_roles WHERE rolname = 'crewflow_app'`)}`);
     // Two live role guards run inside the jobs child; since Phase B the database boot gate "role"
     // (database-boot-gate-rules.ts) runs first, before assert-runtime-db-role.ts. Either must be the jobs child's own refusal.
     assert(r2.code === 1 && /\[jobs\] (Database boot gate "role" refused: the worker process login "crewflow_app" has SUPERUSER or BYPASSRLS|.*runtime role "crewflow_app" has BYPASSRLS\/SUPERUSER)/.test(r2.out), 'BYPASSRLS crewflow_app not refused by the live role guard');
