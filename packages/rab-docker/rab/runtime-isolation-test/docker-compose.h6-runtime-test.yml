@@ -1,0 +1,141 @@
+# H6 runtime-isolation TEST OVERRIDE. Never a deployment file. It is layered ON TOP of the committed production file, so the
+# runtime security settings under test are the production file's own (user, read_only, cap_drop/cap_add, security_opt,
+# tmpfs, pids_limit, mem_limit, cpus, stop_grace_period, healthcheck, restart, depends_on): this file sets NONE of them for
+# rab-api or rab-worker (run-h6-runtime.cjs asserts that before starting anything).
+#
+#   docker compose -p crewflow-h6-runtime --project-directory packages/rab-docker \
+#     -f packages/rab-docker/docker-compose.production.yml -f packages/rab-docker/rab/runtime-isolation-test/docker-compose.h6-runtime-test.yml ...
+#
+# Driven by run-h6-runtime.cjs (random credentials per run, passed as H6_* variables; nothing stored). What it replaces:
+#   - images: prebuilt local images (H6_APP_IMAGE / H6_WORKER_IMAGE), never built or pulled here;
+#   - NODE_ENV/RAB_RUNTIME_ENV=development and local URLs: NODE_ENV=production needs TLS verify-full and a database bound to
+#     the production deployment identity, which a throwaway database is not (same documented difference as
+#     docker-compose.qa.yml). Container security does not depend on NODE_ENV;
+#   - the database (a throwaway postgres:16-alpine migrated by the guarded dev runner), object storage (a throwaway MinIO
+#     standing in for R2, path-style, no SSE header, exactly as production) and email (a local SMTP sink);
+#   - rab-api's published port (reset: nothing on this stack is reachable from the host) and rab-migrate's .env.migrate;
+#   - every data directory is a tmpfs, so the run creates no Docker volume.
+services:
+  rab-redis:
+    volumes: !reset []
+    tmpfs:
+      - /data
+
+  rab-migrate:
+    image: ${H6_APP_IMAGE:?prebuilt API image}
+    pull_policy: never
+    env_file: !reset []
+    environment:
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      DB_TARGET: local
+      MIGRATION_URL: ${H6_MIGRATION_URL:?}
+      CREWFLOW_BOOTSTRAP_PASSWORD: ${H6_BOOTSTRAP_CREWFLOW:-}
+      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${H6_BOOTSTRAP_APP:-}
+    command: ['sh', '-c', 'exec env DATABASE_URL="$$MIGRATION_URL" DATABASE_URL_UNPOOLED="$$MIGRATION_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js']
+    depends_on:
+      pg:
+        condition: service_healthy
+
+  rab-api:
+    image: ${H6_APP_IMAGE:?}
+    pull_policy: never
+    ports: !reset []
+    environment: &runtime-env
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      PG_DATABASE_URL: postgres://crewflow_app:${H6_APP_PASSWORD:?}@pg:5432/rab
+      REDIS_URL: redis://rab-redis:6379
+      APP_SECRET: ${H6_APP_SECRET:?}
+      EMAIL_DRIVER: SMTP
+      EMAIL_SMTP_HOST: smtp
+      EMAIL_SMTP_PORT: '2525'
+      EMAIL_SMTP_NO_TLS: 'true'
+      EMAIL_FROM_ADDRESS: 'Crewflow H6 runtime test <no-reply@h6-runtime.invalid>'
+      APP_URL: http://127.0.0.1:5173
+      ACCOUNTS_URL: http://127.0.0.1:5173
+      CORS_ORIGINS: http://127.0.0.1:5173
+      STORAGE_KEY_PREFIX: h6runtime
+      S3_BUCKET: h6-runtime
+      S3_REGION: eu-west-2
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${H6_S3_ACCESS_KEY:?}
+      S3_SECRET_ACCESS_KEY: ${H6_S3_SECRET_KEY:?}
+      PUSH_ENABLED: 'false'
+    depends_on:
+      pg:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      smtp:
+        condition: service_started
+
+  rab-worker:
+    image: ${H6_WORKER_IMAGE:?prebuilt Worker bundle image}
+    pull_policy: never
+    environment:
+      <<: *runtime-env
+      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${H6_CREWFLOW_PASSWORD:?}@pg:5432/rab
+    depends_on:
+      pg:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      smtp:
+        condition: service_started
+
+  pg:
+    image: postgres:16-alpine
+    pull_policy: never
+    environment:
+      POSTGRES_USER: rab
+      POSTGRES_PASSWORD: ${H6_SUPERUSER_PASSWORD:?}
+      POSTGRES_DB: rab
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: ${H6_MINIO_IMAGE:-pgsty/minio:latest}
+    pull_policy: never
+    command: ['minio', 'server', '/data']
+    environment:
+      MINIO_ROOT_USER: ${H6_S3_ACCESS_KEY:?}
+      MINIO_ROOT_PASSWORD: ${H6_S3_SECRET_KEY:?}
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/minio/health/live']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: ${H6_MINIO_IMAGE:-pgsty/minio:latest}
+    pull_policy: never
+    entrypoint: ['sh', '-c', 'mc alias set h6 http://minio:9000 "$$H6_S3_ACCESS_KEY" "$$H6_S3_SECRET_KEY" >/dev/null && mc mb --ignore-existing h6/h6-runtime && mc anonymous set none h6/h6-runtime && echo bucket-ready']
+    environment:
+      H6_S3_ACCESS_KEY: ${H6_S3_ACCESS_KEY:?}
+      H6_S3_SECRET_KEY: ${H6_S3_SECRET_KEY:?}
+      MC_CONFIG_DIR: /tmp/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: 'no'
+
+  smtp:
+    image: node:24-alpine
+    pull_policy: never
+    user: '1000:1000'
+    read_only: true
+    command: ['node', '/sink/smtp-sink.cjs']
+    tmpfs:
+      - /out:uid=1000,gid=1000,mode=0755
+    volumes:
+      - ./rab/worker-bundle/test/integration/smtp-sink.cjs:/sink/smtp-sink.cjs:ro

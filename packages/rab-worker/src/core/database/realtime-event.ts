@@ -27,7 +27,8 @@ import { EntityManager } from 'typeorm';
  * self-healing — the claim query's own WHERE clause treats it as claimable
  * again, exactly like `pending`/`retry`. No separate reaper/sweep process is
  * needed for "a crashed worker's claim must expire so another worker can
- * reclaim": the next claim call IS the reclaim.
+ * reclaim": the next claim call IS the reclaim. D-Q5a: a reclaim counts as
+ * an attempt and is capped by `max_attempts` (see CLAIM_UPDATE_SQL).
  *
  * FENCING: every write after a claim (`completeRealtimeEvent`,
  * `markRealtimeEventRetry`, `failRealtimeEvent`) presents the SAME
@@ -39,6 +40,35 @@ import { EntityManager } from 'typeorm';
  */
 
 const DEFAULT_LEASE_SECONDS = 60;
+
+/**
+ * D-Q5a (audit §13 #6, realtime half; docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §5.2): the UPDATE half of BOTH claims below
+ * (per_scope and global), applied to exactly the rows their MATERIALIZED CTE locked — the CTE itself (eligibility, order,
+ * LIMIT, FOR UPDATE SKIP LOCKED) is unchanged.
+ *
+ * A row that was `processing` when claimed is a LEASE RECLAIM (its previous claimant died or hung past the lease). Before
+ * D-Q5a a reclaim did not count, so a row whose publisher died every time was re-claimed forever. Now a reclaim counts as
+ * an attempt with the SAME cap and arithmetic `markRealtimeEventRetry` already applies to a failed publish: if
+ * `attempt_count + 1 >= max_attempts` the row ends `failed` (`last_error_code = 'LEASE_RECLAIM_EXHAUSTED'`, claim and lease
+ * cleared, like a retry that exhausted) and is NOT returned; otherwise it is claimed as before, with `attempt_count + 1`.
+ * A `pending` / `retry` row is claimed exactly as before (not counted). `status` is returned so the caller can withhold
+ * the failed rows (claimedOnly). Realtime events are ids-only hints (clients refetch); no business record changes. The
+ * pointer trigger already treats `failed` as terminal (it deletes the global-mode pointer).
+ * `$1::uuid`: the claim token must be typed explicitly once it sits in a CASE next to NULL.
+ */
+const RECLAIM_EXHAUSTED = `status = 'processing' AND attempt_count + 1 >= max_attempts`;
+const CLAIM_UPDATE_SQL = `UPDATE core.realtime_event
+        SET status = CASE WHEN ${RECLAIM_EXHAUSTED} THEN 'failed' ELSE 'processing' END,
+            attempt_count = CASE WHEN status = 'processing' THEN attempt_count + 1 ELSE attempt_count END,
+            claimed_at = CASE WHEN ${RECLAIM_EXHAUSTED} THEN claimed_at ELSE now() END,
+            claim_token = CASE WHEN ${RECLAIM_EXHAUSTED} THEN NULL ELSE $1::uuid END,
+            lease_expires_at = CASE WHEN ${RECLAIM_EXHAUSTED} THEN NULL ELSE now() + ($2 || ' seconds')::interval END,
+            next_retry_at = CASE WHEN ${RECLAIM_EXHAUSTED} THEN NULL ELSE next_retry_at END,
+            last_error_code = CASE WHEN ${RECLAIM_EXHAUSTED} THEN 'LEASE_RECLAIM_EXHAUSTED' ELSE last_error_code END,
+            last_error_at = CASE WHEN ${RECLAIM_EXHAUSTED} THEN now() ELSE last_error_at END,
+            updated_at = CASE WHEN ${RECLAIM_EXHAUSTED} THEN now() ELSE updated_at END
+      WHERE id IN (SELECT id FROM claimable)
+     RETURNING id, organisation_id, workspace_id, target_user_id, event_type, entity_type, entity_id, payload, schema_version, attempt_count, max_attempts, claim_token, created_at, status`;
 
 export interface ClaimedRealtimeEvent {
   id: string;
@@ -70,6 +100,8 @@ interface ClaimRow {
   max_attempts: number;
   claim_token: string;
   created_at: Date;
+  /** D-Q5a: `processing` (claimed, returned) or `failed` (a reclaim that exhausted max_attempts; never returned). */
+  status?: string;
 }
 
 /**
@@ -89,16 +121,21 @@ export async function claimRealtimeEvents(
     /**
      * Phase D (D1, `WORKER_CLAIM_MODE=global`): restrict the claim to these ids (the global pointer claim's result for
      * this scope). Same MATERIALIZED CTE, eligibility, order, SKIP LOCKED, lease and token — only `AND id = ANY($4)`
-     * is added. Absent → the per_scope claim, byte-for-byte unchanged.
+     * is added. Absent → the per_scope claim (same CTE as before Phase D; D-Q5a changed only the SET / RETURNING).
      */
     ids?: readonly string[];
+    /**
+     * D-Q5a: called with the number of rows this statement ended `failed` (LEASE_RECLAIM_EXHAUSTED) instead of returning
+     * them, when that number is above zero. Those rows were taken by the LIMIT but are not in the returned array.
+     */
+    onReclaimExhausted?: (count: number) => void;
   },
 ): Promise<ClaimedRealtimeEvent[]> {
   const leaseSeconds = params.leaseSeconds ?? DEFAULT_LEASE_SECONDS;
   if (params.ids !== undefined) {
     if (params.ids.length === 0) return [];
     const [rows] = await manager.query<[ClaimRow[], number]>(GLOBAL_CLAIM_SQL, [params.claimToken, String(leaseSeconds), params.limit, [...params.ids]]);
-    return rows.map(toClaimedRealtimeEvent);
+    return claimedOnly(rows, params.onReclaimExhausted);
   }
   // `manager.query()` on an UPDATE/DELETE returns `[rows, rowCount]`, NOT bare
   // `rows` (unlike SELECT/INSERT) — `PostgresQueryRunner.query()`'s own switch
@@ -135,13 +172,10 @@ export async function claimRealtimeEvents(
        LIMIT $3
        FOR UPDATE SKIP LOCKED
      )
-     UPDATE core.realtime_event
-        SET status = 'processing', claimed_at = now(), claim_token = $1, lease_expires_at = now() + ($2 || ' seconds')::interval
-      WHERE id IN (SELECT id FROM claimable)
-     RETURNING id, organisation_id, workspace_id, target_user_id, event_type, entity_type, entity_id, payload, schema_version, attempt_count, max_attempts, claim_token, created_at`,
+     ${CLAIM_UPDATE_SQL}`,
     [params.claimToken, String(leaseSeconds), params.limit],
   );
-  return rows.map(toClaimedRealtimeEvent);
+  return claimedOnly(rows, params.onReclaimExhausted);
 }
 
 /** Phase D (D1): the per_scope claim above with `AND id = ANY($4::uuid[])` inside the MATERIALIZED CTE (see `ids`). */
@@ -154,10 +188,15 @@ const GLOBAL_CLAIM_SQL = `WITH claimable AS MATERIALIZED (
        LIMIT $3
        FOR UPDATE SKIP LOCKED
      )
-     UPDATE core.realtime_event
-        SET status = 'processing', claimed_at = now(), claim_token = $1, lease_expires_at = now() + ($2 || ' seconds')::interval
-      WHERE id IN (SELECT id FROM claimable)
-     RETURNING id, organisation_id, workspace_id, target_user_id, event_type, entity_type, entity_id, payload, schema_version, attempt_count, max_attempts, claim_token, created_at`;
+     ${CLAIM_UPDATE_SQL}`;
+
+/** D-Q5a: the rows a claim returns — every row it took except those it just ended `failed` (counted via the callback). */
+function claimedOnly(rows: ClaimRow[], onReclaimExhausted?: (count: number) => void): ClaimedRealtimeEvent[] {
+  const claimed = rows.filter((r) => r.status !== 'failed');
+  const exhausted = rows.length - claimed.length;
+  if (exhausted > 0) onReclaimExhausted?.(exhausted);
+  return claimed.map(toClaimedRealtimeEvent);
+}
 
 function toClaimedRealtimeEvent(r: ClaimRow): ClaimedRealtimeEvent {
   return ({
@@ -186,6 +225,26 @@ export async function completeRealtimeEvent(manager: EntityManager, eventId: str
     [eventId, claimToken],
   );
   return rows.length > 0;
+}
+
+/**
+ * D-Q5a (CodeRabbit on #47): extends the lease of rows a LIVE claimant still holds, so a slow batch (up to 25 sequential
+ * publishes, each bounded at 3 s, plus retry writes) is never reclaimed — and, since D-Q5a, counted as an attempt — while
+ * its claimant is still working through it. Fenced exactly like completion: only rows still `processing` under THIS
+ * `claimToken` are touched; a row already reclaimed by someone else is silently skipped. Changes nothing but
+ * `lease_expires_at`. Returns the ids it renewed — an id missing from the result was reclaimed by another claimant
+ * and must not be published by this one. Callers renew only once half the lease has elapsed, so a normal batch never
+ * issues this statement.
+ */
+export async function renewRealtimeEventLeases(manager: EntityManager, eventIds: readonly string[], claimToken: string, leaseSeconds: number): Promise<string[]> {
+  if (eventIds.length === 0) return [];
+  const [rows] = await manager.query<[Array<{ id: string }>, number]>(
+    `UPDATE core.realtime_event SET lease_expires_at = now() + ($3 || ' seconds')::interval
+     WHERE id = ANY($1::uuid[]) AND status = 'processing' AND claim_token = $2
+     RETURNING id`,
+    [[...eventIds], claimToken, String(leaseSeconds)],
+  );
+  return rows.map((r) => r.id);
 }
 
 /**
