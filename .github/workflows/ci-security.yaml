@@ -133,7 +133,7 @@ jobs:
       contents: read
       security-events: write
     with:
-      mode: pr
+      mode: release
       platforms: ${{ needs.changes.outputs.docker == 'true' && '["linux/amd64","linux/arm64"]' || '["linux/amd64"]' }}
 
   # One required status for the whole workflow: fails if any job above failed, was cancelled or was skipped.
