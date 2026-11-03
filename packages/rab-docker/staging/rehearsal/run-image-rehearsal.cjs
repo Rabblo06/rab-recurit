@@ -115,7 +115,10 @@ function docker(args, { input, timeout = 300_000, env = {}, quiet = false } = {}
   if (!quiet) write(`$ docker ${redact(args.join(' ')).slice(0, 400)}\n${out.trimEnd()}\n[exit ${res.status}]`);
   return { code: res.status, out, raw, stdout: redact(res.stdout ?? '') };
 }
-const files = (extra = []) => ['-p', PROJECT, '--project-directory', PROJECT_DIR, '-f', VARIANT, '-f', OVERRIDE, ...extra.flatMap((f) => ['-f', f])];
+// An empty --env-file: compose must not read a developer's packages/rab-docker/.env for interpolation.
+const EMPTY_ENV_FILE = path.join(SECRETS_DIR, 'empty.env');
+fs.writeFileSync(EMPTY_ENV_FILE, '');
+const files = (extra = []) => ['--env-file', EMPTY_ENV_FILE, '-p', PROJECT, '--project-directory', PROJECT_DIR, '-f', VARIANT, '-f', OVERRIDE, ...extra.flatMap((f) => ['-f', f])];
 const compose = (args, opts = {}) => docker(['compose', ...files(opts.extra), ...args], opts);
 const psql = (sql, opts = {}) => compose(['exec', '-T', 'pg', 'psql', '-U', 'rab', '-d', 'rab', '-v', 'ON_ERROR_STOP=1', '-qAt'], { input: sql, quiet: opts.quiet, timeout: 60_000 });
 const sql1 = (sql) => psql(sql, { quiet: true }).out.trim();
@@ -210,13 +213,13 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   const volumesBefore = docker(['volume', 'ls', '-q'], { quiet: true }).out.trim().split('\n').sort();
   const fx = {};
 
-  await step('R00', 'Static: verifier passes; the override changes no runtime security key and no image', async () => {
+  const r00 = await step('R00', 'Static: verifier passes; the override changes no runtime security key and no image', async () => {
     const m = renderModels();
     const problems = checkVariant(m.variant, m.production, m.variantFiles);
     write(`verifier problems: ${problems.join(' | ') || 'none'}`);
     assert(problems.length === 0, `verifier: ${problems.length} problem(s)`);
     const keys = ['image', 'user', 'read_only', 'cap_drop', 'cap_add', 'security_opt', 'tmpfs', 'pids_limit', 'mem_limit', 'cpus', 'stop_grace_period', 'privileged', 'healthcheck', 'restart', 'command', 'entrypoint', 'network_mode', 'pid', 'ipc'];
-    const render = (fs_) => JSON.parse(docker(['compose', '-p', `${PROJECT}-cfg`, '--project-directory', PROJECT_DIR, ...fs_.flatMap((f) => ['-f', f]), 'config', '--no-env-resolution', '--format', 'json'], { quiet: true }).stdout);
+    const render = (fs_) => JSON.parse(docker(['compose', '--env-file', EMPTY_ENV_FILE, '-p', `${PROJECT}-cfg`, '--project-directory', PROJECT_DIR, ...fs_.flatMap((f) => ['-f', f]), 'config', '--no-env-resolution', '--format', 'json'], { quiet: true }).stdout);
     const alone = render([VARIANT]);
     const merged = render([VARIANT, OVERRIDE]);
     const diffs = [];
@@ -235,6 +238,13 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     assert(merged.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION === 'enforce' && merged.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION === 'enforce', 'enforce not set');
     return 'verifier clean; override changes no security key, condition or image';
   });
+
+  if (r00 !== 'PASS') {
+    console.error('R00 failed: not starting anything with an unverified definition');
+    finish();
+    cleanup();
+    process.exit(1);
+  }
 
   await step('R01', 'Throwaway infrastructure up; Redis from the variant (reviewed config, per-run ACL)', async () => {
     const r = compose(['up', '-d', '--wait', '--pull', 'never', 'pg', 'rab-redis', 'smtp', 'minio', 'minio-init'], { timeout: 300_000 });
@@ -400,11 +410,17 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   });
 
   await step('R07', 'Report PDF rendered by the Worker lands in MinIO; PostgreSQL stores the reference only', async () => {
-    const cli = (name, dbUrl, env, args) => docker(['run', '--rm', '--name', `${PROJECT}-${name}`, '--network', `${PROJECT}_default`, '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pull', 'never',
-      '-e', 'NODE_ENV=development', '-e', 'RAB_RUNTIME_ENV=development', '-e', 'DB_TARGET=local', '-e', `DATABASE_URL=${dbUrl}`, '-e', `REDIS_URL=redis://crewflow:${SECRETS.S_REDIS_PASSWORD}@rab-redis:6379`,
-      '-e', `APP_SECRET=${SECRETS.S_APP_SECRET}`, '-e', 'APP_URL=http://127.0.0.1:5173', '-e', 'ACCOUNTS_URL=http://127.0.0.1:5173', '-e', 'CORS_ORIGINS=http://127.0.0.1:5173',
-      '-e', 'EMAIL_DRIVER=LOGGER', '-e', 'STORAGE_DRIVER=LOCAL', '-e', 'PUSH_ENABLED=false', ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      '--entrypoint', 'node', process.env.S_SEED_IMAGE, 'packages/rab-server/dist/command/main.js', ...args], { timeout: 300_000 });
+    // Credentials travel in the docker CLI's environment (`-e NAME` without a value), never on its command line.
+    const cli = (name, dbUrl, env, args) => {
+      const all = {
+        NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DB_TARGET: 'local', DATABASE_URL: dbUrl,
+        REDIS_URL: `redis://crewflow:${SECRETS.S_REDIS_PASSWORD}@rab-redis:6379`, APP_SECRET: SECRETS.S_APP_SECRET,
+        APP_URL: 'http://127.0.0.1:5173', ACCOUNTS_URL: 'http://127.0.0.1:5173', CORS_ORIGINS: 'http://127.0.0.1:5173',
+        EMAIL_DRIVER: 'LOGGER', STORAGE_DRIVER: 'LOCAL', PUSH_ENABLED: 'false', ...env,
+      };
+      return docker(['run', '--rm', '--name', `${PROJECT}-${name}`, '--network', `${PROJECT}_default`, '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pull', 'never',
+        ...Object.keys(all).flatMap((k) => ['-e', k]), '--entrypoint', 'node', process.env.S_SEED_IMAGE, 'packages/rab-server/dist/command/main.js', ...args], { timeout: 300_000, env: all });
+    };
     const admin = 'platform-admin@staging-rehearsal.invalid';
     const boot = cli('bootstrap', `postgres://crewflow:${SECRETS.S_CREWFLOW_PASSWORD}@pg:5432/rab`, { BOOTSTRAP_ADMIN_EMAIL: admin, BOOTSTRAP_ADMIN_ORG_SLUG: 's-platform' }, ['bootstrap-admin']);
     assert(boot.code === 0 && /Platform Admin bootstrapped/.test(boot.out), 'bootstrap-admin failed');

@@ -62,9 +62,10 @@ sudo install -d -m 0700 /etc/crewflow-staging /etc/crewflow-staging/secrets
 
 # 3.3 Release bundle: the compose files and templates of the APPROVED commit, verified, never a branch tip.
 git clone --filter=blob:none --no-checkout https://github.com/Rabblo06/rab-recurit.git /tmp/crewflow-release
-git -C /tmp/crewflow-release checkout --detach <APPROVED_SHA> -- packages/rab-docker
-git -C /tmp/crewflow-release rev-parse HEAD                     # must print <APPROVED_SHA>
-sudo cp -r /tmp/crewflow-release/packages /opt/crewflow-staging/release/ && rm -rf /tmp/crewflow-release
+git -C /tmp/crewflow-release checkout --detach <APPROVED_SHA>   # no pathspec: HEAD becomes exactly that commit
+test "$(git -C /tmp/crewflow-release rev-parse HEAD)" = "<APPROVED_SHA, full 40 hex>" && echo commit-ok   # otherwise STOP
+git -C /tmp/crewflow-release archive <APPROVED_SHA> packages/rab-docker | sudo tar -x -C /opt/crewflow-staging/release
+rm -rf /tmp/crewflow-release
 ```
 
 ### 3.4 Pull the images by digest

@@ -199,6 +199,60 @@ function checkResolvedImages(model, allowed = [DEFAULT_APP_REPOSITORY]) {
   return { problems, lines };
 }
 
+/**
+ * Environment mode: the DEPLOYED model (the variant + overrides, rendered with the real interpolation values) still holds
+ * every control. Pure. Overrides may change only what the staging override changes: env files, ONE read-only bind of the
+ * PostgreSQL CA at /run/crewflow/pg-ca.crt, STORAGE_KEY_PREFIX. `redisConf`: the text of the mounted Redis config, or null.
+ */
+function checkDeployment(merged, production, redisConf) {
+  const problems = [];
+  const fail = (m) => problems.push(m);
+  const services = merged?.services ?? {};
+  const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
+  for (const name of ['rab-api', 'rab-worker']) {
+    const a = services[name];
+    const b = production?.services?.[name];
+    if (!a || !b) {
+      fail(`${name}: missing`);
+      continue;
+    }
+    for (const key of RUNTIME_KEYS) {
+      const value = key === 'volumes' ? (a.volumes ?? []).filter((v) => !caMount(v)) : a[key];
+      const expected = key === 'volumes' ? b.volumes ?? [] : b[key];
+      if (stable(key === 'volumes' && !value.length ? undefined : value) !== stable(key === 'volumes' && !expected.length ? undefined : expected)) {
+        fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
+      }
+    }
+    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX')) {
+      if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
+    }
+    if (envOf(a).CREWFLOW_RUNTIME_ISOLATION !== 'enforce') fail(`${name}: CREWFLOW_RUNTIME_ISOLATION is not "enforce" in the deployed model`);
+    const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
+    if (stable(deps(a)) !== stable(deps(b))) fail(`${name}.depends_on differs from docker-compose.production.yml`);
+    for (const p of a.ports ?? []) {
+      if (!p.host_ip || p.host_ip === '0.0.0.0' || p.host_ip === '::') fail(`${name}: port ${p.target} is published on every interface (CREWFLOW_API_BIND)`);
+    }
+  }
+  const migrate = services['rab-migrate'];
+  if (!migrate || !migrate.read_only || stable(migrate.cap_drop) !== stable(['ALL']) || !(migrate.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-migrate: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
+  if (migrate && !(migrate.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) fail('rab-migrate: the long-form tmpfs /tmp (OpenShip import guard) is missing');
+  const redis = services['rab-redis'];
+  if (redis) {
+    if ((redis.ports ?? []).length) fail('rab-redis: publishes a port');
+    if (!(redis.volumes ?? []).some((v) => v.target === '/run/secrets/redis-users.acl' && v.read_only)) fail('rab-redis: ACL file not mounted read-only');
+  }
+  if (redisConf === null) {
+    fail('rab-redis: the mounted config file cannot be read on this host');
+  } else {
+    const lines = redisConf.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    if (!lines.includes('aclfile /run/secrets/redis-users.acl')) fail('rab-redis config: no `aclfile /run/secrets/redis-users.acl`');
+    if (!lines.includes('maxmemory-policy noeviction')) fail('rab-redis config: maxmemory-policy is not noeviction');
+    if (!lines.includes('appendonly yes')) fail('rab-redis config: AOF is not on');
+    if (lines.some((l) => /^user\s+default\s+.*\bon\b/.test(l) || /^requirepass\b/.test(l))) fail('rab-redis config: enables the default user or requirepass (use the ACL file)');
+  }
+  return problems;
+}
+
 function render(files, { projectDirectory, env, resolveEnvFiles }) {
   const args = ['compose', '-p', 'crewflow-image-verify', '--project-directory', projectDirectory, ...files.flatMap((f) => ['-f', f]),
     '--profile', 'ops', 'config', '--format', 'json', ...(resolveEnvFiles ? [] : ['--no-env-resolution'])];
@@ -252,9 +306,25 @@ function environmentMode(argv) {
   for (const k of ['CREWFLOW_API_IMAGE_DIGEST', 'CREWFLOW_WORKER_IMAGE_DIGEST']) {
     if (!DIGEST.test(String(env[k] ?? ''))) return { problems: [`${k} is not sha256:<64 hex>`], lines: [] };
   }
-  // Rendering without env_file resolution: the env files hold secrets and are not needed to check image references.
+  // Rendering without env_file resolution: the env files hold secrets and are not needed for these checks (compose gives
+  // `environment:` precedence over env_file, so an env file cannot change a committed value such as the enforce mode).
   const model = render(files, { projectDirectory, env, resolveEnvFiles: false });
-  return checkResolvedImages(model, allowed);
+  const images = checkResolvedImages(model, allowed);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
+  let production;
+  try {
+    production = render([PRODUCTION], { projectDirectory: dir, env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }, resolveEnvFiles: false });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const confSource = (model.services?.['rab-redis']?.volumes ?? []).find((v) => v.target === '/usr/local/etc/redis/redis.conf')?.source;
+  let redisConf = null;
+  try {
+    redisConf = confSource ? fs.readFileSync(confSource, 'utf8') : null;
+  } catch {
+    redisConf = null;
+  }
+  return { problems: [...images.problems, ...checkDeployment(model, production, redisConf)], lines: images.lines };
 }
 
 if (require.main === module) {
@@ -278,7 +348,7 @@ if (require.main === module) {
     for (const p of result.problems) console.error(`FAIL ${p}`);
     process.exit(1);
   }
-  console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
+  console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, DIGEST_REF, RUNTIME_KEYS, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, renderModels, staticMode };
+module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, renderModels, staticMode };

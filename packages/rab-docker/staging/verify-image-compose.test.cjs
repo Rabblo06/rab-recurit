@@ -97,3 +97,36 @@ test('environment mode: digest references from the release repository pass; tags
   const built = { services: { 'rab-api': { image: `adhin007/adolphus@${d('a')}`, build: { context: '.' } } } };
   assert.match(checkResolvedImages(built).problems.join(), /build section/);
 });
+
+const { checkDeployment } = require('./verify-image-compose.cjs');
+const CONF = ['aclfile /run/secrets/redis-users.acl', 'appendonly yes', 'maxmemory-policy noeviction', ''].join('\n');
+const deployed = (mutate = () => {}, conf = CONF) => {
+  const m = fresh();
+  mutate(m.variantFiles);
+  return checkDeployment(m.variantFiles, m.production, conf);
+};
+test('environment mode: the deployed model passes, with the staging CA bind and prefix allowed', { skip }, () => {
+  assert.deepEqual(deployed((v) => {
+    for (const s of ['rab-api', 'rab-worker']) {
+      v.services[s].volumes = [{ type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true }];
+      v.services[s].environment.STORAGE_KEY_PREFIX = 'staging';
+    }
+  }), []);
+});
+const deployedWeakenings = [
+  ['an override switches enforce to warn', (v) => { v.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION = 'warn'; }, /CREWFLOW_RUNTIME_ISOLATION/],
+  ['an override makes the root writable', (v) => { v.services['rab-worker'].read_only = false; }, /rab-worker\.read_only/],
+  ['CREWFLOW_API_BIND=0.0.0.0', (v) => { v.services['rab-api'].ports[0].host_ip = '0.0.0.0'; }, /every interface/],
+  ['a writable bind mount on the API', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/srv', target: '/srv' }]; }, /rab-api\.volumes/],
+  ['the CA mounted writable', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/x', target: '/run/crewflow/pg-ca.crt' }]; }, /rab-api\.volumes/],
+  ['HWS switched on by an override', (v) => { v.services['rab-worker'].environment.HWS_RUNTIME_ENABLED = 'true'; }, /HWS_RUNTIME_ENABLED/],
+];
+for (const [name, mutate, pattern] of deployedWeakenings) {
+  test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
+}
+test('environment mode refuses a Redis config without the ACL file, with the default user on, or unreadable', { skip }, () => {
+  assertRefused(deployed(undefined, CONF.replace('aclfile /run/secrets/redis-users.acl', '')), /no `aclfile/);
+  assertRefused(deployed(undefined, `${CONF}user default on nopass ~* +@all\n`), /default user or requirepass/);
+  assertRefused(deployed(undefined, CONF.replace('maxmemory-policy noeviction', 'maxmemory-policy allkeys-lru')), /noeviction/);
+  assertRefused(deployed(undefined, null), /cannot be read/);
+});

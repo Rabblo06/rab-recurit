@@ -78,7 +78,8 @@ the marker:
 ```bash
 node packages/rab-docker/staging/print-ledger-inventory-sql.cjs > ledger-inventory.sql
 # ONLY after a separate owner approval, on a BRANCH of the Neon project first, never on the pooler host:
-PGOPTIONS='-c default_transaction_read_only=on' psql "<direct URL from the secret store>" \
+# The connection comes from a pg_service.conf entry plus a 0600 PGPASSFILE: never a URL with a password in argv or history.
+PGOPTIONS='-c default_transaction_read_only=on' PGSERVICE=<inventory-service> psql \
   -X -v ON_ERROR_STOP=1 -P pager=off -f ledger-inventory.sql > ledger-inventory-<utc>.txt
 ```
 
@@ -320,17 +321,22 @@ API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
 
 ```bash
 ts=$(date -u +%Y%m%dT%H%M%SZ)
-sudo -u postgres pg_dump -Fc --no-password -d <db> -f /var/backups/crewflow/<db>-$ts.dump
-sudo -u postgres pg_dumpall --roles-only --no-role-passwords > /var/backups/crewflow/roles-$ts.sql
-pg_restore -l /var/backups/crewflow/<db>-$ts.dump > /dev/null && sha256sum /var/backups/crewflow/*-$ts.* > /var/backups/crewflow/SHA256SUMS-$ts
-age -r "<offline-recipient-public-key>" -o <db>-$ts.dump.age /var/backups/crewflow/<db>-$ts.dump   # then upload; shred the clear copy
+sudo install -d -m 0700 /var/backups/crewflow
+# No clear-text copy is ever written: pg_dump streams straight into age (the OFFLINE key's public half).
+sudo -u postgres pg_dump -Fc --no-password -d <db> | age -r "<offline-recipient-public-key>" \
+  | sudo tee /var/backups/crewflow/<db>-$ts.dump.age > /dev/null
+sudo -u postgres pg_dumpall --roles-only --no-role-passwords | age -r "<offline-recipient-public-key>" \
+  | sudo tee /var/backups/crewflow/roles-$ts.sql.age > /dev/null
+sudo sh -c "cd /var/backups/crewflow && sha256sum *-$ts.*.age > SHA256SUMS-$ts"
+# Upload the .age files and SHA256SUMS. `pg_restore -l` runs where the offline key is: on the disposable restore host (5.2).
 ```
 
 ### 5.2 Restore rehearsal (disposable copy, never the source host)
 
 1. Create a disposable PostgreSQL 16 of the same minor version. Load the roles file, then set new random passwords.
    The restored copy must never reuse the source's credentials.
-2. Restore: `pg_restore --exit-on-error -d <copy-db> <dump>` as the superuser. Keep the owners and ACLs: the security
+2. Verify the checksum, then restore: `age -d -i <offline-key-file> <dump>.age | pg_restore --exit-on-error -d <copy-db>`
+   as the superuser (`pg_restore -l` on the decrypted stream first proves the archive is readable). Keep the owners and ACLs: the security
    model depends on `rab_secure_owner` ownership, so never use `--no-owner`.
 3. Verify (read-only):
 
