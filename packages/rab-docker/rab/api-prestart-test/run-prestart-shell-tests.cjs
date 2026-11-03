@@ -112,7 +112,8 @@ r = run('start-sh-missing', BASE, { entry: 'start.sh', withPrestart: false });
 check('5c start.sh without api-prestart.sh in the image -> refused (64), never falls back to migrating', r.code === 64 && !line(r.out, 'main') && noMigration(r.out), r.out);
 
 // 6. Docker hardening H6: the isolation report. Never a refusal — it names each control the platform did not apply.
-r = run('isolation-default', BASE);
+// --pids-limit -1: unlimited even where the daemon sets a default PID limit (GitHub runners do), so the case is deterministic.
+r = run('isolation-default', BASE, { dockerArgs: ['--pids-limit', '-1'] });
 check('6a Docker defaults (root, 14 capabilities, writable root, no limits) -> WARNING naming each gap, still starts', r.code === 0 && line(r.out, 'main') &&
   r.out.includes('api-prestart: WARNING runtime isolation weaker than docker-compose.production.yml declares (running as root; capabilities in the bounding set (CapBnd=') &&
   /\(CapBnd=[0-9a-f]{16}\); no-new-privileges is off; root filesystem is writable; no PID limit; no memory limit\): uid=0 /.test(r.out), r.out);
