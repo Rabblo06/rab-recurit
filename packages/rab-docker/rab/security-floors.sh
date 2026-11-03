@@ -5,7 +5,8 @@
 #
 #   node                    /usr/local/bin/node must be >= MIN_NODE_VERSION
 #   alpine                  /etc/alpine-release and EVERY /etc/apk/repositories entry must be the stable ALPINE_BRANCH
-#                           (https, main or community only): no edge, no tagged (@...) repository, no branch mixing
+#                           (https://dl-cdn.alpinelinux.org, main or community only): no edge, no tagged (@...) repository,
+#                           no branch mixing, no repositories.d drop-in, no /etc/apk/config, no name@tag pin in world
 #   apk-required:<pkg>      <pkg> must be installed and >= MIN_<PKG>_VERSION
 #   apk-if-installed:<pkg>  if <pkg> is installed it must be >= MIN_<PKG>_VERSION (absence is fine)
 #   apk-absent:<pkg>        <pkg> must NOT be installed
@@ -85,9 +86,23 @@ check_alpine() {
   esc="$(printf '%s' "$branch" | sed 's/\./\\./g')"
   repos="$(grep -v -E '^[[:space:]]*(#|$)' /etc/apk/repositories || true)"
   [ -n "$repos" ] || die "/etc/apk/repositories lists no repository"
-  bad="$(printf '%s\n' "$repos" | grep -v -E "^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)*/alpine/${esc}/(main|community)/?$" || true)"
-  [ -z "$bad" ] || die "repository outside the stable $branch main/community set (edge, tagged or mixed): $bad"
-  echo "security-floor: OK alpine $(cat /etc/alpine-release), repositories = $branch main/community only"
+  bad="$(printf '%s\n' "$repos" | grep -v -E "^https://dl-cdn\.alpinelinux\.org/alpine/${esc}/(main|community)/?$" || true)"
+  [ -z "$bad" ] || die "repository outside https://dl-cdn.alpinelinux.org stable $branch main/community (edge, tagged, other host or mixed): $bad"
+  # Security review H1-L1: apk also reads repositories from repositories.d drop-ins and options from an apk config file,
+  # and a world entry pinned to a tagged repository (name@tag) would pull from it. None of these may exist.
+  for d in /etc/apk/repositories.d /lib/apk/repositories.d; do
+    if [ -e "$d" ]; then
+      extra="$(find "$d" -mindepth 1 -print | head -n 5)"
+      [ -z "$extra" ] || die "apk repository drop-ins present in $d: $extra"
+    fi
+  done
+  for f in /etc/apk/config /lib/apk/config; do
+    [ ! -e "$f" ] || die "apk configuration file present: $f"
+  done
+  [ -f /etc/apk/world ] || die "/etc/apk/world missing"
+  pinned="$(grep '@' /etc/apk/world || true)"
+  [ -z "$pinned" ] || die "/etc/apk/world pins a package to a tagged repository: $pinned"
+  echo "security-floor: OK alpine $(cat /etc/alpine-release), repositories = dl-cdn.alpinelinux.org $branch main/community only; no drop-ins, apk config or tag pins"
 }
 
 installed_version() {
