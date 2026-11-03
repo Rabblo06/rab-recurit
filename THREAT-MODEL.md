@@ -4823,6 +4823,186 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
   - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
     setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.
 
+## Docker hardening H2 — Chromium only in the Worker image (branch build/docker-hardening-h2, stacked on H1, not merged)
+
+- **Browser attack surface in the API.** Threat: the API image carried Alpine Chromium and its whole dependency tree
+  (ffmpeg, libxml2, cjson, libsndfile, cups-libs, pulse, …) although no API code path launches a browser; every
+  Chromium/library advisory therefore applied to the internet-facing service too. Evidence: the only launcher is
+  `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts`; rab-server has no Playwright import, no dynamic
+  require of the renderer, and its report endpoints only serve PDFs the Worker already stored. Control: the API stage of
+  `packages/rab-docker/rab/Dockerfile` installs no browser, fonts or CHROMIUM_* settings and FAILS the build if
+  `chromium` is installed (`apk-absent:chromium`); `Dockerfile.worker-bundle` adds Chromium on top of the API image and
+  runs the Chromium/libexpat/Node floors there. CI builds the Worker image too, so the gates stay exercised.
+- **Unchanged:** tenant isolation, database identities and the Worker's privilege model (root launcher under tini,
+  jobs uid 1000, provisioner uid 10001, renderer still `--no-sandbox` with JavaScript, network and navigation off).
+- **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
+  shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
+  jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
+
+## Docker hardening H6 — API and Worker runtime isolation (branch build/docker-hardening-h6, stacked on H2, not merged)
+
+Compose-level only, plus a report line in the Worker launcher and an explicit (unchanged) Chromium launch option. Evidence:
+the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on the committed production file).
+
+- **Compromised API process persists, escalates or exhausts the host.** Threat: before H6 the production `rab-api` ran
+  with Docker's default capability bounding set (14 capabilities), `no_new_privs` off, a writable root filesystem and no
+  memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
+  future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
+  rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (the API writes nothing to its filesystem: uploads are
+  buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production; measured by the runtime matrix
+  in `development` mode with push, Sentry, OIDC and AI off — those paths are covered by the code review only. Docker's
+  default 64 MiB noexec `/dev/shm` stays writable; the API never uses it),
+  `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
+  `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
+- **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
+  CAP_SETUID/CAP_SETGID (to give each child its own UID/GID; libuv calls setgroups/setgid/setuid) and CAP_KILL (to signal
+  and sweep children of other UIDs). Measured in the image under the production capability set: without SETUID or SETGID
+  every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
+  watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
+  the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
+  `pids_limit: 1024` (one Chromium render ≈ 130 tasks; up to 4 renders run at once — shift reports, final timesheets,
+  two statement consumers — measured 551 tasks; with 512, 4 of 12 concurrent renders failed), `mem_limit` and `cpus`
+  (`cpus` above the host's CPU count stops the container from starting: planned hosts have ≥ 2 vCPUs). Regression: "H6 rab-worker" test, launcher tests,
+  runtime matrix.
+- **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
+  OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
+  2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
+  modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
+  `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
+  verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
+  declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
+  `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
+  controls a platform applied (CPU limits are not reported). Owner decision "never drop a security setting silently":
+  `CREWFLOW_RUNTIME_ISOLATION=enforce` makes both REFUSE to start when any declared control is missing (uid, bounding set,
+  no_new_privs, read-only root, PID/memory limits, the Worker's per-child tmpfs; an unreadable value counts as missing);
+  the value is strict (`warn` | `enforce`, unset = `warn`, anything else refuses) and never reaches a Worker child. The
+  production file leaves it unset (warn) so today's OpenShip deployment still starts and reports; a deployment definition
+  that must never run degraded (the staging/OpenShip variant) sets `enforce`. Tests: prestart 7a–7e, launcher H6-4..7.
+  What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
+  files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
+- **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:
+  Playwright adds `--no-sandbox` unless `chromiumSandbox: true`, so unset/`false` launched unsandboxed too (verified on the
+  real command line). `render-pdf.util.ts` now passes `chromiumSandbox: false` explicitly (no behaviour change) and says so.
+  The S-7 spec name "unset: Chromium keeps its sandbox" in `render-pdf-sandbox-footer.integration.spec.ts` is therefore
+  inaccurate (it inspects only the arguments handed to Playwright) — follow-up for that file's owner.
+  Evaluation: under the production settings `chromiumSandbox: true` aborts (Docker's seccomp refuses CLONE_NEWUSER; the
+  setuid helper has no setuid bit since H1-L2). With a seccomp profile = Docker's default + clone/unshare of
+  NEWUSER/NEWPID/NEWNET/NEWIPC only (mount/cgroup/UTS still refused) + chroot, `chromiumSandbox: true` and
+  `--disable-gpu-sandbox`, Chromium reports "You are adequately sandboxed" (namespace layer 1, PID + network namespaces,
+  seccomp-BPF); renderers run in their own user/PID/net namespaces with an extra seccomp filter; 15/15 renders, median
+  +3.5 % (amd64, Docker Desktop kernel 6.6). Without `--disable-gpu-sandbox` the GPU process's seccomp policy kills it on
+  musl's pwritev2 and the browser exits. NOT applied: it widens the kernel attack surface of every process in the Worker
+  container (unprivileged user namespaces), needs a host-provided profile file (OpenShip drops `security_opt`), is
+  unverified on ARM64 and on Ubuntu hosts that restrict unprivileged user namespaces through AppArmor.
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Keep Chromium unsandboxed (--no-sandbox) in the Worker; do not ship the user-namespace seccomp delta.
+  Reason:     The only working sandbox needs unprivileged user namespaces for the whole Worker container (a kernel LPE
+              surface for the jobs process and the root launcher), a host seccomp file the current platform ignores, and
+              is unproven on ARM64 production.
+  Risk:       A memory-safety bug in Chromium's renderer/image decoders (e.g. a crafted organisation logo, embedded as a
+              data: URI) runs code as uid 1000 in the Worker container with no further sandbox layer.
+  Mitigation: JavaScript off, offline context, every non-data: request aborted, navigation refused, 30 s step bounds
+              (P0-pdf); uid 1000 with no capabilities and NoNewPrivs; read-only root-owned code; no provisioning
+              credential in the jobs environment; per-child 0700 tmpfs; Chromium/Node floors (H1); PID/memory caps (H6).
+  Reversal:   Owner approval → add the profile (packages/rab-docker), security_opt seccomp=<profile> on rab-worker,
+              chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
+              native arm64.
+  ```
+- **The API's PID 1 does not reap orphaned processes (finding, LOW, pre-existing, not fixed in H6).** `api-prestart.sh`
+  execs `node` as PID 1 with no init. The API itself spawns no child process, but anything orphaned inside the container
+  (a `docker exec` shell's background jobs, or code run by an attacker) stays a zombie: measured 5 of 5 orphans left as
+  zombies under the production flags. Each holds a PID slot, and H6 now caps the API at 256, so a compromised process
+  could exhaust the cap and stop the API from creating threads (denial of service of that container only). Fix options for
+  the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
+  `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
+  own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.
+
+## H4b — Sentry 8 → 10 (supported major; removes the OpenTelemetry advisories) (branch deps/h4b-sentry, not merged)
+
+### H4b-sentry: the SDK upgrade adds no telemetry source and keeps every P0-sentry control
+- **Actor → action → consequence considered:** an SDK major upgrade silently widens what leaves the process to the
+  third-party Sentry project. Measured on 10.78.0 before any code change: `enableLogs` now defaults to `true`, and 13
+  default integrations appear that 8.55 did not run, among them `VercelAI` (Sentry 10 patches `ai` < 7, so it would
+  switch on telemetry for every model call of the server's `ai` 6; Sentry 8 only patched `ai` < 5), `Anthropic_AI`,
+  `OpenAI`, `Google_GenAI`, `LangChain`, `LangGraph`, `Firebase`, `Prisma`, `PostgresJs`, `NodeSystemError` and
+  `ProcessSession` (release-health session envelopes). Separately, the advisory GHSA-qqmp-wf37-98f9 (DB login name in
+  a `db.user` span attribute) is **not** fixed by the upgrade: Sentry 10 vendors copies of the older DB
+  instrumentations, so scanners stop matching the `@opentelemetry/instrumentation-*` packages while the pg span still
+  carries `db.user` (measured against a disposable PostgreSQL: present on 8.55.2 and on unpatched 10.78.0).
+- **Control:** `packages/rab-server/src/instrument.ts`. `integrations` is a function over Sentry's defaults that keeps
+  only `ALLOWED_DEFAULT_INTEGRATIONS` (the 8.55 default set under 10.x names, `ChildProcess` being the renamed
+  `ProcessAndThreadBreadcrumbs`) plus the restricted `RequestData`; anything a later 10.x minor adds is dropped (fail
+  closed). `enableLogs: false` and `enableMetrics: false` explicitly (Sentry 10 defaults both to on; neither channel
+  has a scrubber here). `dataCollection`, `defaultIntegrations`, `openTelemetryInstrumentations`, `tracesSampler` and
+  profiling are pinned after the test-only `overrides`, so no override can widen collection or sampling. `spotlight:
+  false` and `debug: false` are pinned the same way: Spotlight is added after the `integrations` function and POSTs every
+  envelope over plain HTTP to its sidecar URL, and `false` also stops Sentry reading `SENTRY_SPOTLIGHT` / `SENTRY_DEBUG`
+  from the environment (review F5; Sentry 8.55 behaved the same, so this closes a pre-existing path). The SDK is
+  pinned to exactly 10.78.0: the name allow-list cannot catch a new default-on option in a later minor. `db.user` is
+  added to the dropped span attributes (the only scrubber change; stricter). Sentry 10's `http.server` span now copies
+  request headers that its own deny lists keep (referer with its query string, custom headers) into
+  `http.request.header.*`; the existing `DROPPED_KEY_RE` already drops them, now proven by the envelope test. Unchanged: `sendDefaultPii: false` (Sentry 10 maps it to its restrictive data-collection mapping:
+  `userInfo: false`, `httpBodies: []`, `genAI` inputs/outputs off, `databaseQueryData: false`), `includeLocalVariables:
+  false` (Sentry 10's local-variables integration still returns early on it), the RequestData include list, the four
+  fail-closed scrubbing hooks, and `tracesSampleRate` (0.01 in production, 0 elsewhere, `SENTRY_TRACES_SAMPLE_RATE`
+  override). No DSN: no client, no module, `http` or `require` patching (measured identical on 8.55.2 and 10.78.0).
+- **Not chosen:** Sentry 11. It replaces `sendDefaultPii` with a `dataCollection` option whose unset default collects
+  user/IP, cookies, headers, bodies, query strings and stack-frame locals, and streams spans by default so
+  `beforeSendTransaction` no longer runs. Moving there is a separate privacy review.
+- **Tests:** `instrument.spec.ts` (exact integration set against the real Sentry 10 defaults, fail-closed for an
+  unknown default, overrides cannot re-add integrations or enable logs/local variables, RequestData attaches nothing
+  even under the most permissive data-collection mapping, `db.user` dropped and connection-string userinfo masked) and
+  `instrument.envelope.spec.ts` (real `Sentry.init` in a child: installed integrations, effective options and resolved
+  data collection, by name and by the client's full installed set; a custom header and a referer token never reach an
+  envelope; only `event`, `transaction` and `client_report` items leave the process when no release is set).
+- **Residual:** API request exceptions handled by Nest's exception layer are not reported to Sentry (pre-existing: the
+  server never called `setupNestErrorHandler`, and Sentry 8's `Nest` integration only produced spans); uncaught
+  exceptions, unhandled rejections and the Worker's explicit `captureMessage` are. Sentry 8's `Nest` spans are gone
+  (fewer spans, no new data). As in Sentry 8, the allowed `Http` integration records request sessions (counts,
+  release, environment), sent only when a release is configured (`SENTRY_RELEASE` or an auto-detected commit
+  variable). With tracing sampled, `baggage`/`sentry-trace` still go to every outgoing host (`tracePropagationTargets`
+  unset, as before); Sentry 10 adds the Sentry `org_id` to that baggage. `@opentelemetry/sdk-trace-base` 2.x carries
+  an npm deprecation notice (not an advisory). Independent review (2026-11-03, read-only): no Critical / High / Medium;
+  Low items 1-4 fixed here, 5-6 documented above. Programme review F5 (Low, Spotlight / debug via
+  environment or override) fixed: proven by a child process with `SENTRY_SPOTLIGHT` pointing at the stub ingest.
+
+## seed-qa runs as the restricted runtime role (branch fix/qa-seed-org-provisioning, not merged)
+
+`seed-qa` (manual-QA fixture CLI) used to INSERT into `core.organisation` directly, which only an owner/superuser
+connection could do. After Phase B the runtime role `crewflow_app` cannot (the `organisation_self` RLS predicate,
+`id = current_org()`, never holds for a row that does not exist yet), and the superuser is refused by the CLI boot gates,
+so the fixture failed everywhere (Worker-bundle integration harness case 10 and its dependents).
+
+- **Now:** the command runs as `crewflow_app` and creates its organisation only through `core.create_organisation()`
+  (the production path, CF-13), under the authority of an active platform administrator named by `--admin-email`, then
+  writes the `organisation.created` audit entry with that administrator as actor. Existing organisation is found through
+  `core.list_organisations_for_admin()` (same authority), so a re-run creates nothing new.
+- **Abuse cases (refused before any write):** no `--admin-email`; an email that is not an unrevoked platform
+  administrator (ordinary account, unknown address, revoked grant, more than one account, any status other than
+  active/invited); and the database refuses the definer call again for anyone else.
+- **No privilege change:** no new grant, role, policy, migration, BYPASSRLS or owner connection. On a fresh database the
+  administrator comes from `bootstrap-admin` (the existing one-time operator step, `crewflow`).
+- **Assumption, flagged:** an INVITED (never activated) platform administrator may authorise the QA organisation. That
+  matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
+  `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
+- **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
 ## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
 
 Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,

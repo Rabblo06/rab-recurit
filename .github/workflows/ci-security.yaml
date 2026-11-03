@@ -111,29 +111,72 @@ jobs:
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
       - name: Worker bundle launcher and committed deployment definitions
         run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+      # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
+      # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
+      # skip itself), fails; any check failure fails the job.
+      - name: Image compose variant matches production (staging/verify-image-compose, when present)
+        run: |
+          set -euo pipefail
+          files=(packages/rab-docker/staging/verify-image-compose.cjs packages/rab-docker/staging/verify-image-compose.test.cjs packages/rab-docker/docker-compose.image.yml)
+          present=0
+          for f in "${files[@]}"; do if [ -e "$f" ]; then present=$((present + 1)); fi; done
+          if [ "$present" -eq 0 ]; then
+            echo "image compose variant not on this branch yet (#44); nothing to verify"
+            exit 0
+          fi
+          if [ "$present" -ne "${#files[@]}" ]; then
+            echo "::error::only $present of ${#files[@]} image-compose files are present: ${files[*]}"
+            exit 1
+          fi
+          docker compose version || { echo "::error::docker compose is required to verify the image compose variant"; exit 1; }
+          node --test packages/rab-docker/staging/verify-image-compose.test.cjs
+          node packages/rab-docker/staging/verify-image-compose.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
-      # Docker hardening review H1-L1: no Dockerfile may add an apk repository on the command line or skip signature checks
-      # (the security-floors.sh gate covers /etc/apk/*; this covers `apk -X…/--rep…/--allow-u…/--keys-dir` in commands).
-      - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
-        run: bash packages/rab-docker/scripts/check-dockerfile-apk-options.sh
+      # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
+      # in image-security-gate.yaml's static job, which the image-gate job below (and every release) calls.
 
-  trivy:
-    runs-on: ubuntu-latest
+  # Docker hardening H5: replaces the former `trivy` job. Builds the API and Worker images exactly as a release would
+  # (no cache, SBOM + provenance, nothing pushed) and gates the built images: floors, privileges, writable code paths,
+  # dev packages, Trivy + Grype, layer secrets, SBOM/provenance, manifest. Mode pr: fixable High/Critical and every
+  # structural check fail the PR; release-only items (unfixed High/Critical without an owner decision, H3's
+  # development packages, the unpinned Dockerfile frontend) are reported as HOLD (NEEDS OWNER APPROVAL) and block a
+  # release. arm64 (native runner) is added when the Docker inputs change; every release gates both architectures.
+  changes:
+    uses: ./.github/workflows/changed-files.yaml
+
+  image-gate:
+    needs: changes
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/image-security-gate.yaml
     permissions:
       contents: read
       security-events: write
+      actions: read # the gate can verify a candidate from another run (never used on PRs)
+    with:
+      mode: pr
+      platforms: ${{ needs.changes.outputs.docker == 'true' && '["linux/amd64","linux/arm64"]' || '["linux/amd64"]' }}
+
+  # One required status for the whole workflow: fails if any job above failed, was cancelled or was skipped.
+  ci-security-gate:
+    name: ci-security gate
+    # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, deployment-config, changes, image-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Build image
-        run: docker build -f packages/rab-docker/rab/Dockerfile -t rab-server:ci --target rab .
-      - uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0 (was unpinned "0.24.0" with no leading v -- that ref does not exist upstream)
-        with:
-          image-ref: rab-server:ci
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-      - uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
+      - name: Every required ci-security job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ['RESULTS'])
+          bad = {k: v['result'] for k, v in needs.items() if v['result'] != 'success'}
+          for k, v in sorted(needs.items()):
+              print(f"{k}: {v['result']}")
+          if bad:
+              print(f"::error::ci-security: required jobs did not succeed: {bad}")
+              sys.exit(1)
+          EOF

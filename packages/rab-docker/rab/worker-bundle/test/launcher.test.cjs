@@ -1125,3 +1125,116 @@ test('D4 WORKER_INVITE_AUTO_DELETE_ENABLED reaches the jobs child only, verbatim
   }
   assert.equal(makePlan(env())[0].env.WORKER_INVITE_AUTO_DELETE_ENABLED, undefined);
 });
+
+// ---------------------------------------------------------------- H6: runtime isolation report (never a refusal)
+
+const H6_MOUNTS_DECLARED = [
+  'overlay / overlay ro,relatime,lowerdir=/x 0 0',
+  'proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0',
+  'tmpfs /tmp/crewflow-jobs tmpfs rw,nosuid,nodev,noexec,relatime,mode=700,uid=1000,gid=1000 0 0',
+  'tmpfs /tmp/crewflow-provisioner tmpfs rw,nosuid,nodev,noexec,relatime,mode=700,uid=10001,gid=10001 0 0',
+  'tmpfs /run/crewflow-health/jobs tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=1000,gid=1000 0 0',
+  'tmpfs /run/crewflow-health/provisioner tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=10001,gid=10001 0 0',
+].join('\n');
+
+test('H6-1 runtime isolation: the declared production settings (SETUID/SETGID/KILL, NNP, read-only root, 4 tmpfs, limits) report no gap', () => {
+  const limits = { pidsMax: '512\n', memoryMax: '1610612736\n' };
+  const r = launcher.runtimeIsolation('Name:\tnode\nCapEff:\t00000000000000e0\nCapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, limits);
+  assert.deepEqual(r, { capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', pidsMax: '512', memoryMax: '1610612736', gaps: [] });
+  // Fewer capabilities than declared is not a gap (only MORE would be).
+  assert.deepEqual(launcher.runtimeIsolation('CapBnd:\t00000000000000c0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, limits).gaps, []);
+});
+
+test('H6-2 runtime isolation: a platform that drops the compose security keys (Docker defaults) is named gap by gap', () => {
+  const dockerDefault = 'CapEff:\t00000000a80425fb\nCapBnd:\t00000000a80425fb\nNoNewPrivs:\t0\n';
+  // OpenShip honours mem_limit but not pids_limit.
+  const r = launcher.runtimeIsolation(dockerDefault, 'overlay / overlay rw,relatime 0 0\nproc /proc proc rw 0 0', { pidsMax: 'max\n', memoryMax: '1610612736\n' });
+  assert.equal(r.rootReadOnly, false);
+  assert.equal(r.tmpfs, '0/4');
+  assert.deepEqual(r.gaps, [
+    'capabilities beyond SETUID/SETGID/KILL (CapBnd=00000000a80425fb)',
+    'no-new-privileges is off',
+    'root filesystem is writable',
+    '4 of 4 per-child temp/health directories are not tmpfs',
+    'no PID limit',
+  ]);
+  // Unreadable /proc and cgroup files: every check is a gap, root is unknown (null, never "read-only"), nothing throws.
+  const none = launcher.runtimeIsolation('', '', {});
+  assert.equal(none.rootReadOnly, null);
+  assert.deepEqual(none.gaps.slice(-2), ['PID limit unreadable', 'memory limit unreadable']);
+  assert.equal(none.gaps.length, 6);
+});
+
+test('H6-3 runtime isolation of the live test container matches the kernel (evidence line; the image run applies the production capability set)', { skip: !linuxRoot && 'needs root on Linux' }, () => {
+  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+  const status = read('/proc/self/status');
+  const live = launcher.runtimeIsolation(status, read('/proc/self/mounts'), { pidsMax: read('/sys/fs/cgroup/pids.max'), memoryMax: read('/sys/fs/cgroup/memory.max') });
+  console.log(`# evidence runtime isolation (this test container): CapBnd=${live.capBnd} NoNewPrivs=${live.noNewPrivs} rootReadOnly=${live.rootReadOnly} tmpfs=${live.tmpfs} pids.max=${live.pidsMax} memory.max=${live.memoryMax} gaps=${JSON.stringify(live.gaps)}`);
+  assert.equal(live.capBnd, /^CapBnd:\s*(\S+)/m.exec(status)[1]);
+  assert.equal(live.noNewPrivs, /^NoNewPrivs:\s*(\S+)/m.exec(status)[1]);
+});
+
+// ---------------------------------------------------------------- H6: CREWFLOW_RUNTIME_ISOLATION=enforce (owner decision)
+
+const H6_FULL = () => ({ capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', pidsMax: '1024', memoryMax: '1610612736', gaps: [] });
+const H6_STATUS_FULL = 'CapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n';
+const H6_LIMITS_FULL = { pidsMax: '1024\n', memoryMax: '1610612736\n' };
+
+test('H6-4 CREWFLOW_RUNTIME_ISOLATION is strict: unset/empty/"warn" = warn, "enforce" = enforce, anything else refuses', () => {
+  assert.equal(launcher.runtimeIsolationMode({}), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: '' }), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: 'warn' }), 'warn');
+  assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }), 'enforce');
+  for (const v of ['ENFORCE', 'Enforce', ' enforce', 'true', '1', 'strict', 'off']) {
+    assert.equal(launcher.runtimeIsolationMode({ CREWFLOW_RUNTIME_ISOLATION: v }), null, v);
+    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: v }, { log: () => {}, probe: H6_FULL }), /CREWFLOW_RUNTIME_ISOLATION must be "warn" or "enforce"/, v);
+  }
+});
+
+test('H6-5 enforce + every declared control present → starts (no refusal), reported "as declared ... mode=enforce"', () => {
+  const lines = [];
+  launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: (s) => lines.push(s), probe: () => launcher.runtimeIsolation(H6_STATUS_FULL, H6_MOUNTS_DECLARED, H6_LIMITS_FULL) });
+  assert.deepEqual(lines, ['runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4/4 pids.max=1024 memory.max=1610612736 mode=enforce']);
+});
+
+test('H6-6 enforce + EACH missing control → refused, naming that control; warn → starts with a WARNING naming it', () => {
+  const rwRoot = H6_MOUNTS_DECLARED.replace('overlay / overlay ro,', 'overlay / overlay rw,');
+  const noTmpfs = H6_MOUNTS_DECLARED.split('\n').filter((l) => !l.includes('/tmp/crewflow-jobs')).join('\n');
+  const cases = [
+    ['extra capability in the bounding set', 'CapBnd:\t00000000000000e1\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED, H6_LIMITS_FULL, /capabilities beyond SETUID\/SETGID\/KILL \(CapBnd=00000000000000e1\)/],
+    ['no-new-privileges off', 'CapBnd:\t00000000000000e0\nNoNewPrivs:\t0\n', H6_MOUNTS_DECLARED, H6_LIMITS_FULL, /no-new-privileges is off/],
+    ['writable root', H6_STATUS_FULL, rwRoot, H6_LIMITS_FULL, /root filesystem is writable/],
+    ['a per-child tmpfs missing', H6_STATUS_FULL, noTmpfs, H6_LIMITS_FULL, /1 of 4 per-child temp\/health directories are not tmpfs/],
+    ['unlimited PIDs', H6_STATUS_FULL, H6_MOUNTS_DECLARED, { ...H6_LIMITS_FULL, pidsMax: 'max\n' }, /no PID limit/],
+    ['unlimited memory', H6_STATUS_FULL, H6_MOUNTS_DECLARED, { ...H6_LIMITS_FULL, memoryMax: 'max\n' }, /no memory limit/],
+    ['unreadable /proc (fail closed)', '', '', H6_LIMITS_FULL, /capability bounding set unreadable/],
+  ];
+  for (const [label, status, mounts, limits, re] of cases) {
+    const probe = () => launcher.runtimeIsolation(status, mounts, limits);
+    assert.throws(() => launcher.checkRuntimeIsolation({ CREWFLOW_RUNTIME_ISOLATION: 'enforce' }, { log: () => {}, probe }), (e) => e instanceof launcher.BundleConfigError && re.test(e.message) && /CREWFLOW_RUNTIME_ISOLATION=enforce/.test(e.message), label);
+    for (const env of [{}, { CREWFLOW_RUNTIME_ISOLATION: 'warn' }]) {
+      const lines = [];
+      assert.doesNotThrow(() => launcher.checkRuntimeIsolation(env, { log: (s) => lines.push(s), probe }), label);
+      assert.ok(lines.length === 1 && /^WARNING runtime isolation weaker/.test(lines[0]) && re.test(lines[0]) && /mode=warn/.test(lines[0]), `${label}: ${lines}`);
+    }
+  }
+});
+
+test('H6-7 main() in enforce mode refuses with exit 1 BEFORE starting any child when a control is missing (live, in the image)', { skip: !linuxRoot && 'needs root on Linux' }, async () => {
+  const lines = [];
+  const original = console.error;
+  console.error = (...a) => lines.push(a.join(' '));
+  let code;
+  try {
+    // The image test run grants the fixture-only CHOWN/FOWNER/DAC_OVERRIDE, so the bounding set is wider than declared.
+    code = await launcher.main({ ...env(), CREWFLOW_RUNTIME_ISOLATION: 'enforce', CREWFLOW_BUNDLE_FAILURE_EXIT_DELAY_MS: '0' });
+  } finally {
+    console.error = original;
+  }
+  const out = lines.join('\n');
+  console.log(`# evidence enforce refusal: ${lines.find((l) => /refused/.test(l)) || '(none)'}`);
+  assert.equal(code, 1);
+  assert.match(out, /\[worker-bundle\] refused: runtime isolation weaker than declared and CREWFLOW_RUNTIME_ISOLATION=enforce \(capabilities beyond SETUID\/SETGID\/KILL/);
+  assert.doesNotMatch(out, /started pid=/);
+  for (const marker of SECRET_MARKERS) assert.ok(!out.includes(marker), `leaked ${marker}`);
+});

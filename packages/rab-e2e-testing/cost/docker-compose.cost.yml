@@ -267,10 +267,13 @@ services:
         exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
   # Runs harness scripts that need the application's own compiled code/deps (seed, history backfill, storage CLI).
-  # The harness folder is mounted read-only at /cost.
+  # The harness folder is mounted read-only at /cost. Docker hardening H2: the history backfill renders real PDFs and
+  # Chromium now exists only in the Worker image, so this one-off runs the Worker image as the jobs identity (uid 1000,
+  # the same user the server image runs as; the image's tini entrypoint just execs the given command).
   tool:
     profiles: ['ops']
-    image: crewflow-cost/server:${COST_TAG:?}
+    image: crewflow-cost/worker:${COST_TAG:?}
+    user: '1000:1000'
     environment:
       <<: *app-env
       NODE_PATH: /app/node_modules

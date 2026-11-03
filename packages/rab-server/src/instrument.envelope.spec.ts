@@ -8,10 +8,17 @@
  * error and flushes. Every envelope the real Sentry transport delivers is captured here and searched for each secret.
  */
 import { spawn } from 'child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { createServer, type IncomingMessage, type Server } from 'http';
 import type { AddressInfo } from 'net';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { gunzipSync } from 'zlib';
+
+delete process.env.SENTRY_DSN; // importing instrument.ts must never initialise Sentry in this (parent) process
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { ALLOWED_DEFAULT_INTEGRATIONS } =
+  require('./instrument') as typeof import('./instrument');
 
 const SERVER_DIR = join(__dirname, '..');
 const INSTRUMENT = join(__dirname, 'instrument.ts');
@@ -32,7 +39,86 @@ const SECRETS = {
   email: 'bob.envelope-marker@example.com',
   sqlLiteral: 'envelope-SQL-LITERAL-SECRET',
   failClosed: 'envelope-FAILCLOSED-SECRET-fc',
+  // H4b: headers Sentry 10's own deny lists keep (they only match auth/token/session/cookie-like names), so they reach
+  // its http.server span attributes and only this file's scrubber stands between them and the envelope.
+  headerProbe: 'envelope-CUSTOM-HEADER-SECRET-hp',
+  refererToken: 'envelope-REFERER-TOKEN-SECRET-rt',
 };
+
+/**
+ * Every integration name Sentry 8.55 or 10.x installs by default, plus the ones this file must never see. The child
+ * reports which of them its real client has installed.
+ */
+const FORBIDDEN_INTEGRATIONS = [
+  'Anthropic_AI',
+  'ConversationId',
+  'ExtraErrorData',
+  'Firebase',
+  'Google_GenAI',
+  'Hono',
+  'LangChain',
+  'LangGraph',
+  'LocalVariables',
+  'Nest',
+  'NodeSystemError',
+  'OpenAI',
+  'PostgresJs',
+  'Prisma',
+  'ProcessAndThreadBreadcrumbs',
+  'ProcessSession',
+  'VercelAI',
+  'vercelAI',
+];
+const INTEGRATION_CANDIDATES = [
+  ...ALLOWED_DEFAULT_INTEGRATIONS,
+  'RequestData',
+  ...FORBIDDEN_INTEGRATIONS,
+];
+
+/** Every variable @sentry/node-core 10.78 `getSentryRelease()` reads to infer a release. */
+const RELEASE_ENV_VARS = [
+  'SENTRY_RELEASE',
+  'GITHUB_SHA',
+  'CI_MERGE_REQUEST_SOURCE_BRANCH_SHA',
+  'CI_BUILD_REF',
+  'CI_COMMIT_SHA',
+  'BITBUCKET_COMMIT',
+  'APPVEYOR_PULL_REQUEST_HEAD_COMMIT',
+  'APPVEYOR_REPO_COMMIT',
+  'CODEBUILD_RESOLVED_SOURCE_VERSION',
+  'AWS_COMMIT_ID',
+  'BUILD_SOURCEVERSION',
+  'GIT_CLONE_COMMIT_HASH',
+  'BUDDY_EXECUTION_REVISION',
+  'BUILDKITE_COMMIT',
+  'CIRCLE_SHA1',
+  'CIRRUS_CHANGE_IN_REPO',
+  'CF_REVISION',
+  'CM_COMMIT',
+  'CF_PAGES_COMMIT_SHA',
+  'DRONE_COMMIT_SHA',
+  'FC_GIT_COMMIT_SHA',
+  'HEROKU_TEST_RUN_COMMIT_VERSION',
+  'HEROKU_SLUG_COMMIT',
+  'HEROKU_BUILD_COMMIT',
+  'RAILWAY_GIT_COMMIT_SHA',
+  'RENDER_GIT_COMMIT',
+  'SEMAPHORE_GIT_SHA',
+  'TRAVIS_PULL_REQUEST_SHA',
+  'VERCEL_GIT_COMMIT_SHA',
+  'VERCEL_GITHUB_COMMIT_SHA',
+  'VERCEL_GITLAB_COMMIT_SHA',
+  'VERCEL_BITBUCKET_COMMIT_SHA',
+  'ZEIT_GITHUB_COMMIT_SHA',
+  'ZEIT_GITLAB_COMMIT_SHA',
+  'ZEIT_BITBUCKET_COMMIT_SHA',
+  'CI_COMMIT_ID',
+  'SOURCE_COMMIT',
+  'SOURCE_VERSION',
+  'GIT_COMMIT',
+  'COMMIT_REF',
+  'BUILD_VCS_NUMBER',
+];
 
 /** The child program (CommonJS). `instrument.ts` is required before `http`, exactly like the real entrypoints. */
 function childProgram(): string {
@@ -45,6 +131,31 @@ require(${JSON.stringify(INSTRUMENT)});
 const Sentry = require(${JSON.stringify(require.resolve('@sentry/node', { paths: [SERVER_DIR] }))});
 const http = require('http');
 const S = JSON.parse(process.env.ENVELOPE_TEST_SECRETS);
+
+// H4b: what the real Sentry.init (not just buildSentryOptions) ended up with, for the parent to assert.
+{
+  const client = Sentry.getClient();
+  const o = client.getOptions();
+  const candidates = JSON.parse(process.env.ENVELOPE_TEST_INTEGRATION_CANDIDATES);
+  require('fs').writeFileSync(process.env.ENVELOPE_TEST_REPORT, JSON.stringify({
+    sdkVersion: Sentry.SDK_VERSION,
+    installed: candidates.filter((name) => client.getIntegrationByName(name) !== undefined),
+    // Every integration the client actually set up, whatever its name (catches one added outside \`integrations\`).
+    installedAll: Object.keys(client._integrations || {}),
+    options: {
+      sendDefaultPii: o.sendDefaultPii,
+      includeLocalVariables: o.includeLocalVariables,
+      enableLogs: o.enableLogs,
+      enableMetrics: o.enableMetrics,
+      tracesSampleRate: o.tracesSampleRate,
+      profilesSampleRate: o.profilesSampleRate === undefined ? null : o.profilesSampleRate,
+      release: o.release === undefined ? null : o.release,
+      spotlight: o.spotlight === undefined ? null : o.spotlight,
+      debug: o.debug === undefined ? null : o.debug,
+    },
+    dataCollection: client.getDataCollectionOptions(),
+  }));
+}
 
 const server = http.createServer((req, res) => {
   let body = '';
@@ -110,6 +221,8 @@ server.listen(0, () => {
         authorization: 'Bearer ' + S.jwt,
         cookie: 'rab_session=' + S.cookie,
         'x-forwarded-for': '203.0.113.77',
+        'x-rab-probe': S.headerProbe,
+        referer: 'https://app.example.test/page?invite=' + S.refererToken,
       },
     },
     (res) => {
@@ -154,12 +267,20 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
   const envelopes: Envelope[] = [];
   let childOutput = '';
   let childExitCode: number | null = null;
+  let report: Record<string, any> = {};
+  // Requests that reached the Spotlight sidecar path (SENTRY_SPOTLIGHT points at this stub): must stay 0.
+  let spotlightRequests = 0;
 
   beforeAll(async () => {
     ingest = createServer((req: IncomingMessage, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
+        if ((req.url ?? '').startsWith('/spotlight')) {
+          spotlightRequests += 1;
+          res.end('{}');
+          return;
+        }
         let body = Buffer.concat(chunks);
         if (req.headers['content-encoding'] === 'gzip') body = gunzipSync(body);
         envelopes.push(parseEnvelope(body.toString('utf8')));
@@ -171,6 +292,8 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       ingest.listen(0, '127.0.0.1', resolve),
     );
     const { port } = ingest.address() as AddressInfo;
+    const reportDir = mkdtempSync(join(tmpdir(), 'sentry-envelope-'));
+    const reportFile = join(reportDir, 'report.json');
 
     // A local stub DSN, not a real one: the public key is a placeholder and the host is this test's own server.
     const env: NodeJS.ProcessEnv = {
@@ -179,8 +302,19 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       NODE_ENV: 'production',
       SENTRY_TRACES_SAMPLE_RATE: '1',
       ENVELOPE_TEST_SECRETS: JSON.stringify(SECRETS),
+      ENVELOPE_TEST_REPORT: reportFile,
+      // F5: an operator or platform env asking for Spotlight / SDK debug logging must change nothing.
+      SENTRY_SPOTLIGHT: `http://127.0.0.1:${port}/spotlight/stream`,
+      SENTRY_DEBUG: 'true',
+      ENVELOPE_TEST_INTEGRATION_CANDIDATES: JSON.stringify(
+        INTEGRATION_CANDIDATES,
+      ),
     };
     delete env.JEST_WORKER_ID;
+    // No release: Sentry infers one from CI/platform commit variables (GITHUB_SHA on Actions), and with a release the
+    // allowed Http integration also sends request-session counts, exactly as Sentry 8 did (THREAT-MODEL.md, H4b). This
+    // run asserts the release-less item set; the list is @sentry/node-core 10.78's getSentryRelease() lookup.
+    for (const name of RELEASE_ENV_VARS) delete env[name];
 
     childExitCode = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(process.execPath, ['-e', childProgram()], {
@@ -206,6 +340,14 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
         resolve(code);
       });
     });
+    try {
+      report = JSON.parse(readFileSync(reportFile, 'utf8')) as Record<
+        string,
+        any
+      >;
+    } finally {
+      rmSync(reportDir, { recursive: true, force: true });
+    }
   }, 90_000);
 
   afterAll(async () => {
@@ -287,5 +429,61 @@ describe('instrument.ts — real Sentry envelopes contain no request secrets', (
       expect(span.data?.['db.statement']).toBeUndefined();
       expect(span.description).toBe('SELECT [Filtered]');
     }
+  });
+
+  it('the real client runs exactly the allowed default integrations plus the restricted RequestData (H4b)', () => {
+    const expected = [...ALLOWED_DEFAULT_INTEGRATIONS, 'RequestData'].sort();
+    expect([...(report.installed as string[])].sort()).toEqual(expected);
+    // The full set the client set up, not just the names this file thought to ask about.
+    expect([...new Set(report.installedAll as string[])].sort()).toEqual(
+      expected,
+    );
+  });
+
+  it('the real client keeps PII, local variables, logs and profiling off; tracing only as configured (H4b)', () => {
+    expect(report.sdkVersion).toMatch(/^10\./);
+    expect(report.options).toEqual({
+      sendDefaultPii: false,
+      includeLocalVariables: false,
+      enableLogs: false,
+      enableMetrics: false,
+      tracesSampleRate: 1, // forced by this test through SENTRY_TRACES_SAMPLE_RATE; production default is 0.01
+      profilesSampleRate: null,
+      release: null, // see RELEASE_ENV_VARS: a new inferred-release variable fails here, not in the item-type check
+      spotlight: false, // despite SENTRY_SPOTLIGHT in the child's environment
+      debug: false, // despite SENTRY_DEBUG=true
+    });
+    // Sentry 10 derives its data-collection categories from sendDefaultPii: false (the restrictive legacy mapping).
+    expect(report.dataCollection).toMatchObject({
+      userInfo: false,
+      httpBodies: [],
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+    });
+  });
+
+  it('request headers Sentry 10 itself keeps never reach an envelope (H4b: the http.server span adds them)', () => {
+    const all = envelopes.map((envelope) => envelope.raw).join('\n');
+    expect(all).not.toContain(SECRETS.headerProbe);
+    expect(all).not.toContain(SECRETS.refererToken);
+    expect(all).not.toContain('http.request.header.');
+  });
+
+  it('SENTRY_SPOTLIGHT adds no Spotlight integration and sends nothing to its sidecar URL (H4b, review F5)', () => {
+    expect(report.installedAll as string[]).not.toContain('Spotlight');
+    expect(spotlightRequests).toBe(0);
+  });
+
+  // Sessions: like Sentry 8, the allowed Http integration records request sessions, which Sentry sends only when a
+  // release is configured (SENTRY_RELEASE or an auto-detected commit variable). This run sets none; the assertion is
+  // that the upgrade adds no other item type (logs, metrics, profiles, check-ins, replays).
+  it('only error events, transactions and client reports leave the process: no logs, metrics or profiles (H4b)', () => {
+    const types = new Set(
+      envelopes.flatMap((envelope) =>
+        envelope.items.map((item) => String(item.header.type)),
+      ),
+    );
+    for (const type of types)
+      expect(['event', 'transaction', 'client_report']).toContain(type);
   });
 });
