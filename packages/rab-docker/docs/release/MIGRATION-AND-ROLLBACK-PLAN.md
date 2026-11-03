@@ -395,4 +395,30 @@ $C up -d --no-deps rab-api && $C up -d --no-deps rab-worker    # never run rab-m
 
 The local isolated rehearsal of `docker-compose.image.yml` (`staging/rehearsal/run-image-rehearsal.cjs`) ran the guarded
 path on a throwaway PostgreSQL 16, with the variant's own `rab-migrate` and the API image referenced by digest.
-<!-- EVIDENCE -->
+Run of 2026-11-03 on amd64 (Docker 29.8.1, Compose 5.6.1). Images: the H2 API and Worker images with the H6 enforce
+scripts (`09286aef`) overlaid, by local digest. Test-only; never published. All values MEASURED on empty throwaway
+databases. **10 passed, 0 failed, 0 blocked.**
+
+| Case | Result |
+|---|---|
+| Phase A check (`rab_owner`) | exit **3**, 250 pending, token printed, ledger 0 |
+| Phase A apply with the token | stops at the role split: ledger **128**, role split not applied (exit 1, as designed) |
+| Phase B check (bootstrap superuser) | exit **3**, **122** pending |
+| Phase B apply with the phase A token (stale) | exit **1**, nothing applied |
+| Phase B apply with `apply-pending-migrations` (retired) | exit **1**, nothing applied |
+| Phase B apply with the right token | exit **0**, "post-checks passed", **12.6 s** on an empty database |
+| Final check | exit **0** ("schema is current"); ledger **250**, max 1786721350000, **1786721330000 absent**, 64 after the marker |
+| rab-migrate container | the API image by digest, `user 1000:1000`, read-only root, `CapDrop [ALL]`, no-new-privileges, tmpfs `/tmp` |
+| A dependency run before phase A | `rab-api` did **not** start: the dependency check refused (superuser in phase A), and `service_completed_successfully` held |
+| Generated inventory, read-only session | `applied 250`, nothing pending, unknown or gated; `crewflow_worker` shape as reviewed |
+| Roles after phase B | `crewflow`, `crewflow_app`, `crewflow_worker`: LOGIN, NOSUPERUSER, NOBYPASSRLS; `rab_secure_owner`: NOLOGIN |
+
+The same run also showed the following, under `CREWFLOW_RUNTIME_ISOLATION=enforce`:
+- the API was healthy in 13.2 s and the Worker in 8.9 s, both logging `mode=enforce`;
+- capabilities: API `CapBnd 0`, launcher `e0`, children `CapEff 0`, and `NoNewPrivs=1` everywhere;
+- read-only root (EROFS), with `pids.max` 256/1024 and `memory.max` 768/1536 MiB;
+- a 71,930-byte report PDF in MinIO, with only the reference in PostgreSQL;
+- the hardened Redis (NOAUTH unauthenticated, PING-only health user, NOPERM `CONFIG`, noeviction, AOF);
+- enforce refused a writable API root (exit 64) and a Worker without no-new-privileges (exit 1).
+
+Not measured: any production-sized duration (§4.4).
