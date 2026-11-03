@@ -59,3 +59,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Docker hardening review: never reuse a cached runtime stage on a release. The `rab` stage's `apk upgrade`
+          # (and any apk add) must resolve the current Alpine v3.24 packages; the build stages may still come from cache.
+          no-cache-filters: rab
