@@ -936,6 +936,224 @@ def cmd_secrets(a, c: Check) -> None:
     c.data['secret_findings'] = n
 
 
+# ----------------------------------------------------------------------------------------------------------- PDF
+def _pdf_objects(pdf: bytes) -> dict:
+    """Python port of packages/rab-worker/src/__tests__/helpers/pdf-inspect.ts parseObjects (Skia/PDF output only)."""
+    import zlib
+    text = pdf.decode('latin1')
+    objs: dict = {}
+    pos = 0
+    rx = re.compile(r'(\d+) 0 obj\s*')
+    while True:
+        m = rx.search(text, pos)
+        if not m:
+            break
+        start = m.end()
+        end = text.find('endobj', start)
+        if end < 0:
+            break
+        body = text[start:end]
+        sm = re.search(r'>>\s*stream\r?\n', body)
+        if not sm:
+            objs[int(m[1])] = (body, None)
+            pos = end
+            continue
+        hdr = re.search(r'stream\r?\n', body[sm.start():])
+        data_start = start + sm.start() + hdr.end()
+        data_end = text.find('endstream', data_start)
+        if data_end < 0:
+            break
+        raw = pdf[data_start:data_end]
+        if raw.endswith(b'\n'):
+            raw = raw[:-1]
+        if raw.endswith(b'\r'):
+            raw = raw[:-1]
+        d = body[:sm.start() + 2]
+        stream = raw
+        if '/FlateDecode' in d:
+            try:
+                stream = zlib.decompress(raw)
+            except zlib.error:
+                stream = raw
+        objs[int(m[1])] = (d, stream)
+        pos = data_end
+    return objs
+
+
+def inspect_pdf(pdf: bytes) -> dict:
+    """Page count and text (decoded through each font's ToUnicode CMap), like the repo's pdf-inspect test helper."""
+    if pdf[:5] != b'%PDF-':
+        raise ValueError('not a PDF (no %PDF- header)')
+    if b'%%EOF' not in pdf[-1024:]:
+        raise ValueError('PDF has no %%EOF trailer (truncated)')
+    objs = _pdf_objects(pdf)
+
+    def ref(d: str, key: str):
+        m = re.search(r'/' + key + r'\s+(\d+)\s+0\s+R', d)
+        return int(m[1]) if m else None
+
+    def h2s(h: str) -> str:
+        return ''.join(chr(int(h[i:i + 4], 16)) for i in range(0, len(h) - 3, 4))
+
+    def cmap_of(stream: bytes) -> dict:
+        out: dict = {}
+        s = stream.decode('latin1')
+        for blk in re.findall(r'beginbfchar(.*?)endbfchar', s, re.S):
+            for a, b in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>', blk):
+                out[a.upper()] = h2s(b)
+        for blk in re.findall(r'beginbfrange(.*?)endbfrange', s, re.S):
+            for lo, hi, dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])', blk):
+                a, b, w = int(lo, 16), int(hi, 16), len(lo)
+                if dst.startswith('['):
+                    items = [h2s(x) for x in re.findall(r'<([0-9A-Fa-f]+)>', dst)]
+                    for c in range(a, b + 1):
+                        out[format(c, 'X').zfill(w)] = items[c - a] if c - a < len(items) else ''
+                else:
+                    base = int(dst[1:-1], 16)
+                    for c in range(a, b + 1):
+                        out[format(c, 'X').zfill(w)] = chr(base + c - a)
+        return out
+
+    catalog = next((d for d, _ in objs.values() if re.search(r'/Type\s*/Catalog', d)), None)
+    pages: list = []
+
+    def walk(i, depth=0):
+        node = objs.get(i)
+        if node is None or depth > 50:
+            return
+        d = node[0]
+        if re.search(r'/Type\s*/Pages', d):
+            kids = re.search(r'/Kids\s*\[([^\]]*)\]', d)
+            for k in re.findall(r'(\d+)\s+0\s+R', kids[1] if kids else ''):
+                walk(int(k), depth + 1)
+        elif re.search(r'/Type\s*/Page\b', d):
+            pages.append(d)
+
+    root = ref(catalog, 'Pages') if catalog else None
+    if root is not None:
+        walk(root)
+    texts = []
+    for d in pages:
+        fonts = {}
+        fd = re.search(r'/Font\s*<<(.*?)>>', d, re.S)
+        for name, fid in re.findall(r'/(\w+)\s+(\d+)\s+0\s+R', fd[1] if fd else ''):
+            f = objs.get(int(fid))
+            tu = ref(f[0], 'ToUnicode') if f else None
+            fonts[name] = cmap_of(objs[tu][1] or b'') if tu in objs else {}
+        single = ref(d, 'Contents')
+        if single is not None:
+            ids = [single]
+        else:
+            arr = re.search(r'/Contents\s*\[([^\]]*)\]', d)
+            ids = [int(x) for x in re.findall(r'(\d+)\s+0\s+R', arr[1] if arr else '')]
+        content = '\n'.join((objs.get(i, ('', b''))[1] or b'').decode('latin1') for i in ids)
+        lines = []
+        for bt in re.findall(r'BT(.*?)ET', content, re.S):
+            cur, line = None, ''
+            for t in re.finditer(r'/(\w+)\s+[-\d.]+\s+Tf|<([0-9A-Fa-f\s]*)>\s*Tj|\[([^\]]*)\]\s*TJ', bt):
+                if t[1]:
+                    cur = fonts.get(t[1])
+                    continue
+                hexes = [t[2]] if t[2] is not None else re.findall(r'<([0-9A-Fa-f\s]*)>', t[3])
+                for h in hexes:
+                    h = re.sub(r'\s+', '', h).upper()
+                    line += ''.join((cur or {}).get(h[i:i + 4], '�') for i in range(0, len(h) - 3, 4))
+            if line:
+                lines.append(line)
+        texts.append('\n'.join(lines))
+    images = sum(1 for d, _ in objs.values() if re.search(r'/Subtype\s*/Image', d))
+    return {'pages': len(pages), 'text': re.sub(r'\s+', ' ', '\n'.join(texts)).strip(), 'images': images}
+
+
+def cmd_pdf(a, c: Check) -> None:
+    """Native PDF render of a real report template inside the exact gated Worker image, as the launcher's jobs child."""
+    import base64
+    rp = role_policy(a.role)
+    if not rp['chromium_binary']:
+        c.fail(f'role {a.role} has no Chromium; the PDF render gate applies to the Worker image')
+        return
+    smoke = os.path.join(HERE, 'pdf-render-smoke.cjs')
+    hard = ['run', '--rm', '--pull', 'never', '--network', 'none', '--cap-drop', 'ALL', '--security-opt',
+            'no-new-privileges', '--read-only', *_mount(smoke, '/gate/pdf-render-smoke.cjs')]
+    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH, CHROMIUM_*).
+    p = docker(*hard, '--user', '1000:1000', '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'plan',
+               check=False, timeout=120)
+    try:
+        plan = json.loads(p.stdout)
+    except ValueError:
+        c.fail(f'launcher plan failed (exit {p.returncode}): {(p.stderr or p.stdout)[-500:]}')
+        return
+    env = plan['env']
+    if env.get('HOME') != '/nonexistent' or not str(env.get('TMPDIR', '')).startswith('/tmp/crewflow-jobs'):
+        c.fail(f'unexpected jobs-child environment from the launcher: HOME={env.get("HOME")} TMPDIR={env.get("TMPDIR")}')
+    c.info(f'jobs child per launcher plan: uid {plan["uid"]} gid {plan["gid"]} HOME={env.get("HOME")} '
+           f'TMPDIR={env.get("TMPDIR")} XDG_CONFIG_HOME={env.get("XDG_CONFIG_HOME")} '
+           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")} CHROMIUM_NO_SANDBOX={env.get("CHROMIUM_NO_SANDBOX")}')
+    uid, gid = plan['uid'], plan['gid']
+    # 2. Runtime facts: the kernel architecture the image ran on and the Chromium that rendered.
+    u = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--entrypoint', 'uname', a.image, '-m',
+               check=False).stdout.strip()
+    cv = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--tmpfs', '/tmp',
+                '--user', f'{uid}:{gid}', '-e', 'HOME=/tmp', '--entrypoint', rp['chromium_binary'], a.image,
+                '--version', check=False).stdout.strip()
+    img = inspect_image(a.image)
+    # Native, not emulated: inside a QEMU-emulated container `uname -m` also says aarch64, so compare the image's
+    # architecture with the Docker host's own.
+    host = docker('info', '--format', '{{.Architecture}}', check=False).stdout.strip()
+    native = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(host) == img.get('Architecture')
+    facts = dict(image=a.image, image_id=img['Id'], repo_digests=img.get('RepoDigests'),
+                 platform=f'{img.get("Os")}/{img.get("Architecture")}', uname_m=u, docker_host_arch=host,
+                 native=native, chromium=cv)
+    c.data.update(facts)
+    if not native:
+        c.fail(f'the {img.get("Architecture")} image ran on a {host!r} Docker host (emulated): not a native render')
+    # 3. The render, as that child, with the production compose runtime settings (read-only root, per-child tmpfs,
+    #    no capabilities, no-new-privileges, no network).
+    envargs = [x for k, v in env.items() for x in ('-e', f'{k}={v}')]
+    p = docker(*hard, '--user', f'{uid}:{gid}', '--workdir', plan.get('cwd') or '/app',
+               '--tmpfs', f'/tmp/crewflow-jobs:uid={uid},gid={gid},mode=0700',
+               '--tmpfs', f'/run/crewflow-health/jobs:uid={uid},gid={gid},mode=0755',
+               *envargs, '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'render',
+               check=False, timeout=600)
+    try:
+        run = json.loads(p.stdout)
+    except ValueError:
+        c.fail(f'PDF render failed (exit {p.returncode}) on {u} ({"native" if native else "EMULATED"}): '
+               f'{(p.stderr or p.stdout)[-800:]}')
+        with open(os.path.join(a.results, f'{a.role}-pdf-run.json'), 'w', encoding='utf-8') as f:
+            json.dump(dict(facts, render='FAILED', stderr_tail=(p.stderr or '')[-2000:]), f, indent=2)
+        return
+    run.update(facts)
+    pdf = base64.b64decode(run.pop('pdf_b64'))
+    with open(os.path.join(a.results, f'{a.role}-render.pdf'), 'wb') as f:
+        f.write(pdf)
+    run['pdf_sha256'] = hashlib.sha256(pdf).hexdigest()
+    # 4. Validate the PDF outside the image under test.
+    try:
+        info = inspect_pdf(pdf)
+    except ValueError as e:
+        c.fail(f'render output is not a valid PDF: {e}')
+        info = {'pages': 0, 'text': '', 'images': 0}
+    run.update(pdf_pages=info['pages'], pdf_images=info['images'], pdf_text_chars=len(info['text']))
+    with open(os.path.join(a.results, f'{a.role}-pdf-run.json'), 'w', encoding='utf-8') as f:
+        json.dump(run, f, indent=2)
+    c.data.update(run)
+    want_arch = {'amd64': 'x86_64', 'arm64': 'aarch64'}.get(img.get('Architecture'))
+    if u != want_arch:
+        c.fail(f'uname -m inside the {img.get("Architecture")} image is {u!r}, expected {want_arch}')
+    if info['pages'] < 1:
+        c.fail('the PDF has no pages')
+    for needle in (f'{run.get("marker")} Venue', 'Alex Example', 'H5-SMOKE-0001', '<script>alert(1)</script>',
+                   '<img src="http://example.invalid/x.png">'):
+        if needle not in info['text']:
+            c.fail(f'expected text not found in the PDF: {needle!r}')
+    if info['images'] < 1:
+        c.fail('no embedded image (logo / QR) in the PDF')
+    c.info(f'{u}: {cv}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
+           f'{run["render_ms"]} ms as uid {run["uid"]} (HOME={run["home"]}, TMPDIR={run["tmpdir"]}); markup in the '
+           'synthetic names came out as literal text')
+
+
 # ----------------------------------------------------------------------------------------------------------- OCI
 def blob(layout: str, digest: str) -> bytes:
     if not DIGEST_RE.fullmatch(digest):
@@ -1212,6 +1430,11 @@ def cmd_summary(a) -> int:
             for f in hc:
                 lines.append(f'| {f["id"]} | {f["package"]} | {f["installed"]} | {f["severity"]} | '
                              f'{", ".join(f["fixed_in"]) or "none"} | {"+".join(f["scanners"])} | {f["verdict"]} |')
+        if r and name.endswith('-pdf') and r['data'].get('uname_m'):
+            d = r['data']
+            lines += ['', f'#### {name}: native={d.get("native")} uname -m={d.get("uname_m")} '
+                          f'(Docker host {d.get("docker_host_arch")}), {d.get("chromium")}, render '
+                          f'{d.get("render_ms", "n/a")} ms, {d.get("pdf_pages", 0)} page(s), image {d.get("image_id")}']
         if r and r.get('holds') and not name.endswith('-vulns'):
             lines += ['', f'#### {name}: held items', ''] + [f'- {h}' for h in r['holds'][:40]]
     md = '\n'.join(lines) + '\n'
@@ -1239,7 +1462,7 @@ def main(argv: list[str]) -> int:
     p.add_argument('role'), p.add_argument('image')
     p.add_argument('--revision', required=True), p.add_argument('--platform', required=True)
     p.add_argument('--source')
-    for n in ('container', 'fs'):
+    for n in ('container', 'fs', 'pdf'):
         p = sub.add_parser(n)
         p.add_argument('role'), p.add_argument('image')
     p = sub.add_parser('worker-base')
@@ -1272,7 +1495,7 @@ def main(argv: list[str]) -> int:
     c = Check(name, a.mode, a.results)
     handler = {'static': cmd_static, 'config': cmd_config, 'container': cmd_container, 'fs': cmd_fs,
                'worker-base': cmd_worker_base, 'scan': cmd_scan, 'vulns': cmd_vulns, 'secrets': cmd_secrets,
-               'attest': cmd_attest, 'manifest': cmd_manifest}[a.cmd]
+               'attest': cmd_attest, 'manifest': cmd_manifest, 'pdf': cmd_pdf}[a.cmd]
     try:
         handler(a, c)
     except Exception as e:  # fail closed: any unexpected error is a failed check, never a pass

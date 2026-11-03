@@ -6,7 +6,8 @@ name: image-security-gate
 # runtime user/entrypoint/revision label, setuid/setgid and file capabilities, world-writable and non-root-owned code,
 # writable Node module paths and HOME, test/env/.git files, development packages, Trivy + Grype (pinned by digest, fresh
 # DBs) with the owner-decision register and the scanner-blind watch list, credential leaks in any layer, the SBOM and
-# provenance attestations, and the multi-platform manifest. Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
+# provenance attestations, the multi-platform manifest, and a NATIVE PDF render (the owner's mandatory ARM64 release
+# gate): a real report through the production renderer inside the gated Worker image, as the launcher's jobs child. Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
 #
 # Callers: ci-security.yaml (mode pr; amd64, plus arm64 when Docker inputs change) and publish-image.yaml (mode release,
 # both platforms, before anything is pushed). workflow_dispatch = a release-mode dry run of both platforms. This workflow
@@ -171,7 +172,7 @@ jobs:
         run: |
           python3 "$GATE" --mode "$MODE" --results "$RESULTS" summary \
             --title "Image gate - $PLATFORM" --markdown "$RESULTS/summary.md" \
-            --expected api-config,api-container,api-fs,api-attest,api-scan,api-vulns,api-secrets,worker-config,worker-container,worker-fs,worker-attest,worker-scan,worker-vulns,worker-secrets,worker-base
+            --expected api-config,api-container,api-fs,api-attest,api-scan,api-vulns,api-secrets,worker-config,worker-container,worker-fs,worker-attest,worker-scan,worker-vulns,worker-secrets,worker-pdf,worker-base
       - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

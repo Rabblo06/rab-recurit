@@ -31,6 +31,8 @@ run attest attest "$role" "$LAYOUT" --image "$IMAGE" --image-id "$IMAGE_ID" --re
 run scan scan "$role" "$IMAGE" --image-id "$IMAGE_ID" --trivy-cache "$TRIVY_CACHE" --grype-cache "$GRYPE_CACHE"
 run vulns vulns "$role"
 run secrets secrets "$role"
+# Mandatory native PDF render (Worker only): a real report through the production renderer, as the launcher's jobs child.
+if [ "$role" = worker ]; then run pdf pdf "$role" "$IMAGE"; fi
 if [ "${#failed[@]}" -gt 0 ]; then
   echo "::error::$role image gates FAILED: ${failed[*]}"
   exit 1

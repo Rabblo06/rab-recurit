@@ -45,6 +45,7 @@ succeeded. The default mode of `image_gate.py` is `release`, so forgetting the f
 | `worker-base` | The Worker's lower layers are not exactly the gated API image's layers | – |
 | `scan` | A scanner failed; the scanner version is not the pinned one; DB older than 72 h; the scanned image ID or layer chain is not the gated image | – |
 | `vulns` | **Fixable** High/Critical (either scanner knows a fixed version) without a valid owner decision | **Unfixed** High/Critical without a valid owner decision; a watch-list package whose version changed (re-verify) |
+| `pdf` (Worker) | No PDF: the launcher's jobs-child plan is not `HOME=/nonexistent` + its own TMPDIR/XDG dirs; the render through the production renderer fails; the output lacks a `%PDF-` header, `%%EOF`, a page, the known text markers (including the synthetic markup, which must come out as literal text) or an embedded image; the image ran on a host of another architecture (emulated) | – |
 | `secrets` | Any Trivy secret finding in any layer (including files deleted in later layers) or in the image config | – |
 | `attest` | Build output is not the gated image; no SBOM; SBOM too small or missing key packages; no or more than one provenance; provenance records a build argument not in the allowlist, a build secret, SSH, a credential-like string, or a source revision ≠ the commit | – |
 | `manifest` | Platforms ≠ the expected set; config OS/architecture ≠ descriptor; an image without its attestation manifest; revision label mismatch; Worker not layered on the API for every platform | – |

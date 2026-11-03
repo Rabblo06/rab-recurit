@@ -272,5 +272,44 @@ class Summary(unittest.TestCase):
         self.assertEqual(result(d, 'worker-vulns')['status'], 'FAIL')
 
 
+def minimal_pdf(text: str, truncate: bool = False) -> bytes:
+    """A tiny Skia-shaped PDF: one page, a Type0 font drawn with a hex Tj string decoded through a ToUnicode CMap."""
+    import zlib
+    nl = '\n'
+    codes = ''.join(format(i + 1, '04X') for i in range(len(text)))
+    pairs = ''.join('<%04X> <%04X>%s' % (i + 1, ord(ch), nl) for i, ch in enumerate(text))
+    cmap = f'begincmap{nl}{len(text)} beginbfchar{nl}{pairs}endbfchar{nl}endcmap'
+    content = zlib.compress(f'BT /F1 12 Tf <{codes}> Tj ET'.encode())
+    tu = zlib.compress(cmap.encode())
+
+    def stream(data: bytes) -> bytes:
+        return b'<< /Filter /FlateDecode /Length ' + str(len(data)).encode() + b' >>\nstream\n' + data + b'\nendstream'
+
+    objs = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        b'<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+        stream(content),
+        b'<< /Type /Font /Subtype /Type0 /ToUnicode 6 0 R >>',
+        stream(tu),
+    ]
+    out = b'%PDF-1.4\n' + b''.join(str(i + 1).encode() + b' 0 obj\n' + o + b'\nendobj\n' for i, o in enumerate(objs))
+    return out if truncate else out + b'trailer << /Root 1 0 R >>\n%%EOF\n'
+
+
+
+class Pdf(unittest.TestCase):
+    def test_text_and_pages(self):
+        info = g.inspect_pdf(minimal_pdf('H5 <script>'))
+        self.assertEqual(info['pages'], 1)
+        self.assertEqual(info['text'], 'H5 <script>')
+
+    def test_not_a_pdf_or_truncated(self):
+        with self.assertRaises(ValueError):
+            g.inspect_pdf(b'<html>not a pdf</html>')
+        with self.assertRaises(ValueError):
+            g.inspect_pdf(minimal_pdf('x', truncate=True))
+
+
 if __name__ == '__main__':
     unittest.main()
