@@ -4981,3 +4981,24 @@ the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on 
   an npm deprecation notice (not an advisory). Independent review (2026-11-03, read-only): no Critical / High / Medium;
   Low items 1-4 fixed here, 5-6 documented above. Programme review F5 (Low, Spotlight / debug via
   environment or override) fixed: proven by a child process with `SENTRY_SPOTLIGHT` pointing at the stub ingest.
+
+## seed-qa runs as the restricted runtime role (branch fix/qa-seed-org-provisioning, not merged)
+
+`seed-qa` (manual-QA fixture CLI) used to INSERT into `core.organisation` directly, which only an owner/superuser
+connection could do. After Phase B the runtime role `crewflow_app` cannot (the `organisation_self` RLS predicate,
+`id = current_org()`, never holds for a row that does not exist yet), and the superuser is refused by the CLI boot gates,
+so the fixture failed everywhere (Worker-bundle integration harness case 10 and its dependents).
+
+- **Now:** the command runs as `crewflow_app` and creates its organisation only through `core.create_organisation()`
+  (the production path, CF-13), under the authority of an active platform administrator named by `--admin-email`, then
+  writes the `organisation.created` audit entry with that administrator as actor. Existing organisation is found through
+  `core.list_organisations_for_admin()` (same authority), so a re-run creates nothing new.
+- **Abuse cases (refused before any write):** no `--admin-email`; an email that is not an unrevoked platform
+  administrator (ordinary account, unknown address, revoked grant, more than one account, any status other than
+  active/invited); and the database refuses the definer call again for anyone else.
+- **No privilege change:** no new grant, role, policy, migration, BYPASSRLS or owner connection. On a fresh database the
+  administrator comes from `bootstrap-admin` (the existing one-time operator step, `crewflow`).
+- **Assumption, flagged:** an INVITED (never activated) platform administrator may authorise the QA organisation. That
+  matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
+  `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
+- **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).

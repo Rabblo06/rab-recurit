@@ -124,7 +124,8 @@ services:
     command: ['sh', '-c', 'exec env DATABASE_URL="$$MIGRATION_URL" DATABASE_URL_UNPOOLED="$$MIGRATION_URL" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js']
     restart: 'no'
 
-  # One-off CLI (fixture seeding as `crewflow`, guarded by DB_TARGET=local).
+  # One-off CLI, guarded by DB_TARGET=local. Defaults to the `crewflow` operator identity (bootstrap-admin); the harness
+  # runs seed-qa with DATABASE_URL overridden to the restricted runtime role crewflow_app.
   cli:
     image: ${BT_APP_IMAGE:-crewflow-app:bundle-test}
     profiles: ['cli']

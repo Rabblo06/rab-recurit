@@ -17,6 +17,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const PROJECT = 'crewflow-bundle-test';
+// The fixture's platform administrator (bootstrap-admin, then seed-qa --admin-email). Never given a password.
+const QA_ADMIN_EMAIL = 'platform.admin.qa@bundle-test.invalid';
 const FILE = path.join(__dirname, 'docker-compose.bundle-test.yml');
 const OUT = path.resolve(process.argv[2] || '');
 const KEEP = process.argv.includes('--keep');
@@ -182,7 +184,14 @@ function schemaFacts(schema) {
     const roles = sql1(`SELECT string_agg(rolname || ':' || rolcanlogin || ':' || rolsuper || ':' || rolbypassrls, ' ' ORDER BY rolname) FROM pg_roles WHERE rolname IN ('crewflow','crewflow_app','rab_secure_owner')`);
     write(`roles: ${roles}`);
     assert(roles === 'crewflow:true:false:false crewflow_app:true:false:false rab_secure_owner:false:false:false', 'unexpected role posture');
-    const seed = compose(['--profile', 'cli', 'run', '--rm', '-e', `DATABASE_URL=postgres://rab:${SECRETS.BT_SUPERUSER_PASSWORD}@pg:5432/rab`, 'cli', 'seed-qa']);
+    // The QA fixture is created exactly as on a real deploy, never by a superuser: the one-time first platform
+    // administrator through bootstrap-admin (the `crewflow` operator identity, the cli service default), then seed-qa
+    // as the restricted runtime role crewflow_app, which creates its organisation through core.create_organisation()
+    // under that administrator's authority.
+    const boot = compose(['--profile', 'cli', 'run', '--rm', '-e', `BOOTSTRAP_ADMIN_EMAIL=${QA_ADMIN_EMAIL}`, '-e', 'BOOTSTRAP_ADMIN_ORG_SLUG=bt-platform', 'cli', 'bootstrap-admin']);
+    assert(boot.code === 0 && /Platform Admin bootstrapped/.test(boot.out), 'bootstrap-admin failed');
+    const seed = compose(['--profile', 'cli', 'run', '--rm', '-e', `DATABASE_URL=postgres://crewflow_app:${SECRETS.BT_APP_PASSWORD}@pg:5432/rab`, 'cli', 'seed-qa', '--admin-email', QA_ADMIN_EMAIL]);
+    assert(/role=crewflow_app\b/.test(seed.out), 'seed-qa did not run as the restricted runtime role');
     assert(/Seeded QA fixture/.test(seed.out), 'seed-qa fixture failed');
     fx.legacyWorkspace = sql1(`SELECT id FROM core.manager_workspace WHERE subdomain = 'adolphus-qa'`);
     fx.migrationsBefore = sql1('SELECT count(*) FROM core.migrations');
