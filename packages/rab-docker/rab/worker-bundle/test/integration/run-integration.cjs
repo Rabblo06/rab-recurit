@@ -651,7 +651,9 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
     }
     write(r2.out.split('\n').filter((l) => /worker-bundle\]|Refusing|refused|Worker failed/.test(l)).slice(0, 12).join('\n'));
     write(`crewflow_app restored: ${sql1(`SELECT 'bypassrls=' || rolbypassrls FROM pg_roles WHERE rolname = 'crewflow_app'`)}`);
-    assert(r2.code === 1 && /has BYPASSRLS\/SUPERUSER/.test(r2.out), 'BYPASSRLS crewflow_app not refused by the live role guard');
+    // Two live role guards run inside the jobs child; since Phase B the database boot gate "role"
+    // (database-boot-gate-rules.ts) runs first, before assert-runtime-db-role.ts. Either must be the jobs child's own refusal.
+    assert(r2.code === 1 && /\[jobs\] (Database boot gate "role" refused: the worker process login "crewflow_app" has SUPERUSER or BYPASSRLS|.*runtime role "crewflow_app" has BYPASSRLS\/SUPERUSER)/.test(r2.out), 'BYPASSRLS crewflow_app not refused by the live role guard');
   });
 
   await step('28', 'Ownership alone protects shared code when the root filesystem is writable (platform without read_only)', async () => {
