@@ -11,9 +11,17 @@ import { chromium, errors, Route } from 'playwright';
  *
  * Container support (the production image is `node:alpine`, where Playwright's
  * bundled Chromium does not run): when `CHROMIUM_EXECUTABLE_PATH` is set the
- * renderer launches that system Chromium instead, and `CHROMIUM_NO_SANDBOX=true`
- * adds the sandbox flags a non-root container user needs. Both are unset in
- * local development, where Playwright's own downloaded browser is used.
+ * renderer launches that system Chromium instead. Unset in local development,
+ * where Playwright's own downloaded browser is used.
+ *
+ * OS sandbox (Docker hardening H6, measured): Chromium runs WITHOUT its OS sandbox in every environment. Playwright adds
+ * `--no-sandbox` itself unless `chromiumSandbox: true` is passed, so `CHROMIUM_NO_SANDBOX` (whose `true` only repeats
+ * the flag) has never switched the sandbox on — unset and `false` were verified to launch with `--no-sandbox` too.
+ * `chromiumSandbox: false` below states that explicitly. In the production Worker container the sandbox cannot start
+ * anyway: Docker's default seccomp profile refuses the user namespace it needs and the setuid helper has no setuid bit
+ * (H1-L2), so `chromiumSandbox: true` aborts the launch. Enabling it is an owner decision (a reviewed seccomp delta for
+ * the Worker container; see THREAT-MODEL.md "Docker hardening H6"). The in-page controls below are what contain a
+ * hostile document today.
  *
  * Hardening (Phase 0). Every template is self-contained, server-generated HTML whose values are escaped and whose
  * images (logo, shift QR) are `data:` URIs, so the renderer needs neither script nor any fetch. It therefore renders in
@@ -79,7 +87,8 @@ export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = 
   const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
   const args = ['--disable-dev-shm-usage'];
   if (process.env.CHROMIUM_NO_SANDBOX === 'true') args.push('--no-sandbox', '--disable-setuid-sandbox');
-  const browser = await chromium.launch({ executablePath, args });
+  // chromiumSandbox: Playwright's own default, stated (see "OS sandbox" above): never read as a sandbox being on.
+  const browser = await chromium.launch({ executablePath, args, chromiumSandbox: false });
   let blockedRequests = 0;
   let navigationAttempted = false;
   try {

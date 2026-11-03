@@ -360,3 +360,99 @@ test(
     }
   },
 );
+
+// ---------------------------------------------------------------- H6: runtime isolation keys of the production services
+
+/** Compose durations used here ("35s", "1m30s") in milliseconds; anything else is a test failure, not a guess. */
+function durationMs(value) {
+  const m = /^(?:(\d+)m)?(?:(\d+)s)?$/.exec(String(value ?? ''));
+  assert.ok(m && (m[1] || m[2]), `unparsable duration ${value}`);
+  return (Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0)) * 1000;
+}
+
+/** Memory sizes ("768m", "1536m", "2g") in MiB. */
+function sizeMiB(value) {
+  const m = /^(\d+)([mg])$/i.exec(String(value ?? ''));
+  assert.ok(m, `unparsable size ${value}`);
+  return Number(m[1]) * (m[2].toLowerCase() === 'g' ? 1024 : 1);
+}
+
+/** No privileged mode, host namespace, device, host mount (Docker socket included) or extra capability source. */
+function assertNoHostAccess(name, svc) {
+  assert.notEqual(svc.privileged, true, `${name}: privileged`);
+  for (const key of ['network_mode', 'pid', 'ipc', 'uts', 'userns_mode', 'cgroup']) {
+    assert.ok(!/^host$/i.test(String(svc[key] ?? '')), `${name}: ${key}=host`);
+  }
+  assert.equal(svc.devices, undefined, `${name}: devices`);
+  assert.equal(svc.volumes, undefined, `${name}: volumes (no host mount, no Docker socket)`);
+  assert.equal(svc.volumes_from, undefined, `${name}: volumes_from`);
+  for (const opt of svc.security_opt ?? []) {
+    assert.ok(!/unconfined|label[:=]disable/i.test(opt), `${name}: security_opt ${opt}`);
+  }
+}
+
+test(
+  'H6 rab-api: non-root, read-only root with NO tmpfs, no capabilities, no-new-privileges, bounded PIDs/memory/CPU, stop grace',
+  { skip },
+  () => {
+    const svc = loadCompose('packages/rab-docker/docker-compose.production.yml').services['rab-api'];
+    assert.equal(svc.user, '1000:1000');
+    assert.equal(svc.read_only, true);
+    assert.deepEqual(svc.cap_drop, ['ALL']);
+    assert.equal(svc.cap_add, undefined, 'the API needs no capability (port 3000 is unprivileged)');
+    assert.ok((svc.security_opt ?? []).includes('no-new-privileges:true'));
+    assert.equal(svc.tmpfs, undefined, 'the API writes nothing to its filesystem (H6 runtime matrix); a tmpfs needs evidence');
+    assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit > 0 && svc.pids_limit <= 1024, `pids_limit ${svc.pids_limit}`);
+    const mem = sizeMiB(interpolate(svc.mem_limit, {}));
+    assert.ok(mem >= 512 && mem <= 4096, `mem_limit ${mem} MiB`);
+    assert.ok(Number(interpolate(svc.cpus, {})) > 0, `cpus ${svc.cpus}`);
+    assert.ok(durationMs(svc.stop_grace_period) >= 15_000, 'stop grace shorter than the measured Nest drain + margin');
+    assertNoHostAccess('rab-api', svc);
+  },
+);
+
+test(
+  'H6 rab-worker: root launcher with ONLY SETUID/SETGID/KILL, no-new-privileges, read-only root, per-child tmpfs, bounded PIDs/memory/CPU',
+  { skip },
+  () => {
+    const svc = loadCompose('packages/rab-docker/docker-compose.production.yml').services['rab-worker'];
+    // The launcher must start as root to give each child its own UID/GID (start-worker-bundle.cjs preflight refuses otherwise).
+    assert.equal(svc.user, '0:0');
+    assert.equal(svc.read_only, true);
+    assert.deepEqual(svc.cap_drop, ['ALL']);
+    assert.deepEqual([...(svc.cap_add ?? [])].sort(), ['KILL', 'SETGID', 'SETUID'], 'the launcher needs exactly setgid/setuid (child identities) and kill (signal them)');
+    assert.ok((svc.security_opt ?? []).includes('no-new-privileges:true'));
+    const tmpfs = Object.fromEntries((svc.tmpfs ?? []).map((t) => { const [p, o = ''] = String(t).split(/:(.*)/s); return [p, o]; }));
+    assert.deepEqual(Object.keys(tmpfs).sort(), [
+      '/run/crewflow-health/jobs',
+      '/run/crewflow-health/provisioner',
+      '/tmp/crewflow-jobs',
+      '/tmp/crewflow-provisioner',
+    ]);
+    for (const [p, uid, mode] of [
+      ['/tmp/crewflow-jobs', 1000, '0700'],
+      ['/tmp/crewflow-provisioner', 10001, '0700'],
+      ['/run/crewflow-health/jobs', 1000, '0755'],
+      ['/run/crewflow-health/provisioner', 10001, '0755'],
+    ]) {
+      const o = tmpfs[p].split(',');
+      assert.ok(o.includes(`uid=${uid}`) && o.includes(`gid=${uid}`) && o.includes(`mode=${mode}`), `${p}: ${tmpfs[p]}`);
+      assert.ok(!o.includes('exec'), `${p} must stay noexec (Docker's tmpfs default)`);
+    }
+    assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit >= 256 && svc.pids_limit <= 4096, `pids_limit ${svc.pids_limit} (Chromium needs ~130 tasks per render)`);
+    const mem = sizeMiB(interpolate(svc.mem_limit, {}));
+    assert.ok(mem >= 1024 && mem <= 8192, `mem_limit ${mem} MiB`);
+    assert.ok(Number(interpolate(svc.cpus, {})) > 0, `cpus ${svc.cpus}`);
+    // The platform stop timeout must exceed the launcher's default grace (30 s jobs drain + 12 s = 42 s).
+    assert.ok(durationMs(svc.stop_grace_period) > 42_000, `stop_grace_period ${svc.stop_grace_period}`);
+    assertNoHostAccess('rab-worker', svc);
+  },
+);
+
+test('H6 production file: nothing but rab-api publishes a port, and no PostgreSQL service is defined in it', { skip }, () => {
+  const services = loadCompose('packages/rab-docker/docker-compose.production.yml').services;
+  for (const [name, svc] of Object.entries(services)) {
+    if (name !== 'rab-api') assert.equal(svc.ports, undefined, `${name} publishes a port`);
+    assert.ok(!/postgres/i.test(String(svc.image ?? '')), `${name} runs PostgreSQL inside this stack`);
+  }
+});

@@ -4665,3 +4665,65 @@ unchanged Dockerfile's (only the compiled test helpers are gone).
 - **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
   shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
   jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
+
+## Docker hardening H6 — API and Worker runtime isolation (branch build/docker-hardening-h6, stacked on H2, not merged)
+
+Compose-level only, plus a report line in the Worker launcher and an explicit (unchanged) Chromium launch option. Evidence:
+the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on the committed production file).
+
+- **Compromised API process persists, escalates or exhausts the host.** Threat: before H6 the production `rab-api` ran
+  with Docker's default capability bounding set (14 capabilities), `no_new_privs` off, a writable root filesystem and no
+  memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
+  future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
+  rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (measured: the API writes nothing to its filesystem in
+  production — uploads are buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production),
+  `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
+  `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
+- **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
+  CAP_SETUID/CAP_SETGID (to give each child its own UID/GID; libuv calls setgroups/setgid/setuid) and CAP_KILL (to signal
+  and sweep children of other UIDs). Measured in the image under the production capability set: without SETUID or SETGID
+  every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
+  watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
+  the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
+  `pids_limit` (Chromium ≈ 130 tasks per render), `mem_limit` and `cpus`. Regression: "H6 rab-worker" test, launcher tests,
+  runtime matrix.
+- **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
+  OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
+  2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
+  modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
+  `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
+  verified. Control: the Worker launcher now logs one line at start — `runtime isolation as declared: CapBnd=… NoNewPrivs=…
+  root=… tmpfs=…` or a `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the
+  logs which controls a platform applied. It never refuses (that would stop today's OpenShip Worker; owner decision).
+  What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
+  files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
+- **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:
+  Playwright adds `--no-sandbox` unless `chromiumSandbox: true`, so unset/`false` launched unsandboxed too (verified on the
+  real command line). `render-pdf.util.ts` now passes `chromiumSandbox: false` explicitly (no behaviour change) and says so.
+  The S-7 spec name "unset: Chromium keeps its sandbox" in `render-pdf-sandbox-footer.integration.spec.ts` is therefore
+  inaccurate (it inspects only the arguments handed to Playwright) — follow-up for that file's owner.
+  Evaluation: under the production settings `chromiumSandbox: true` aborts (Docker's seccomp refuses CLONE_NEWUSER; the
+  setuid helper has no setuid bit since H1-L2). With a seccomp profile = Docker's default + clone/unshare of
+  NEWUSER/NEWPID/NEWNET/NEWIPC only (mount/cgroup/UTS still refused) + chroot, `chromiumSandbox: true` and
+  `--disable-gpu-sandbox`, Chromium reports "You are adequately sandboxed" (namespace layer 1, PID + network namespaces,
+  seccomp-BPF); renderers run in their own user/PID/net namespaces with an extra seccomp filter; 15/15 renders, median
+  +3.5 % (amd64, Docker Desktop kernel 6.6). Without `--disable-gpu-sandbox` the GPU process's seccomp policy kills it on
+  musl's pwritev2 and the browser exits. NOT applied: it widens the kernel attack surface of every process in the Worker
+  container (unprivileged user namespaces), needs a host-provided profile file (OpenShip drops `security_opt`), is
+  unverified on ARM64 and on Ubuntu hosts that restrict unprivileged user namespaces through AppArmor.
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Keep Chromium unsandboxed (--no-sandbox) in the Worker; do not ship the user-namespace seccomp delta.
+  Reason:     The only working sandbox needs unprivileged user namespaces for the whole Worker container (a kernel LPE
+              surface for the jobs process and the root launcher), a host seccomp file the current platform ignores, and
+              is unproven on ARM64 production.
+  Risk:       A memory-safety bug in Chromium's renderer/image decoders (e.g. a crafted organisation logo, embedded as a
+              data: URI) runs code as uid 1000 in the Worker container with no further sandbox layer.
+  Mitigation: JavaScript off, offline context, every non-data: request aborted, navigation refused, 30 s step bounds
+              (P0-pdf); uid 1000 with no capabilities and NoNewPrivs; read-only root-owned code; no provisioning
+              credential in the jobs environment; per-child 0700 tmpfs; Chromium/Node floors (H1); PID/memory caps (H6).
+  Reversal:   Owner approval → add the profile (packages/rab-docker), security_opt seccomp=<profile> on rab-worker,
+              chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
+              native arm64.
+  ```

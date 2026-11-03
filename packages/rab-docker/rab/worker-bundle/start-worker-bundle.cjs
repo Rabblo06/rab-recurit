@@ -544,6 +544,49 @@ function preflight(plan, layout = DEFAULT_LAYOUT, { platform = process.platform,
   }
 }
 
+/**
+ * H6: the container-level isolation this launcher actually received, compared with what docker-compose.production.yml
+ * declares (cap_drop ALL + SETUID/SETGID/KILL, no-new-privileges, read-only root, the four per-child tmpfs mounts).
+ * REPORT ONLY — it never refuses: some platforms drop these keys (OpenShip's compose import does not model cap_*,
+ * security_opt, read_only, tmpfs or pids_limit), and refusing there is an owner decision (THREAT-MODEL.md, Docker hardening
+ * H6). The child identity split, the env allowlists and preflight() above do not depend on any of these keys.
+ * Pure: takes the text of /proc/self/status and /proc/self/mounts.
+ */
+const LAUNCHER_CAPS = 0xe0n; // CAP_KILL (5) | CAP_SETGID (6) | CAP_SETUID (7)
+function runtimeIsolation(statusText, mountsText, layout = DEFAULT_LAYOUT) {
+  const field = (k) => (new RegExp(`^${k}:\\s*(\\S+)`, 'm').exec(String(statusText ?? '')) || [])[1];
+  const capBnd = field('CapBnd');
+  const noNewPrivs = field('NoNewPrivs');
+  const mounts = String(mountsText ?? '').split('\n').map((l) => l.split(' ')).filter((p) => p.length >= 4);
+  const root = mounts.filter((p) => p[1] === '/').pop();
+  const rootReadOnly = root ? root[3].split(',').includes('ro') : null;
+  const dirs = [layout.jobs.home, layout.provisioner.home, path.dirname(layout.jobs.healthFile), path.dirname(layout.provisioner.healthFile)];
+  const tmpfs = dirs.filter((d) => mounts.some((p) => p[1] === d && p[2] === 'tmpfs')).length;
+  const gaps = [];
+  if (!/^[0-9a-f]{16}$/.test(capBnd ?? '')) gaps.push('capability bounding set unreadable');
+  else if ((BigInt(`0x${capBnd}`) & ~LAUNCHER_CAPS) !== 0n) gaps.push(`capabilities beyond SETUID/SETGID/KILL (CapBnd=${capBnd})`);
+  if (noNewPrivs !== '1') gaps.push('no-new-privileges is off');
+  if (rootReadOnly !== true) gaps.push('root filesystem is writable');
+  if (tmpfs !== dirs.length) gaps.push(`${dirs.length - tmpfs} of ${dirs.length} per-child temp/health directories are not tmpfs`);
+  return { capBnd: capBnd ?? '?', noNewPrivs: noNewPrivs ?? '?', rootReadOnly, tmpfs: `${tmpfs}/${dirs.length}`, gaps };
+}
+
+function reportRuntimeIsolation(log = (s) => console.error(`[worker-bundle] ${s}`)) {
+  let status = '';
+  let mounts = '';
+  try {
+    status = fs.readFileSync('/proc/self/status', 'utf8');
+    mounts = fs.readFileSync('/proc/self/mounts', 'utf8');
+  } catch {
+    // reported as gaps below
+  }
+  const r = runtimeIsolation(status, mounts);
+  const summary = `CapBnd=${r.capBnd} NoNewPrivs=${r.noNewPrivs} root=${r.rootReadOnly ? 'read-only' : 'writable'} tmpfs=${r.tmpfs}`;
+  if (r.gaps.length === 0) log(`runtime isolation as declared: ${summary}`);
+  else log(`WARNING runtime isolation weaker than docker-compose.production.yml declares (${r.gaps.join('; ')}): ${summary} — starting anyway; report it (THREAT-MODEL.md, Docker hardening H6)`);
+  return r;
+}
+
 const GUARD_LINE = /^\[runtime-db-guard\] process=(\S+) runtime=\S+ classification=\S+ endpoint=\S+ database=(\S+) cluster=(\S+) role=(\S+) probe=read-only-ok/;
 
 /** Every process (other than ourselves) whose real UID is one of `uids` — the bundle's dedicated child identities. */
@@ -808,6 +851,7 @@ async function main(env = process.env) {
     await failureDelay(delayMs);
     return 1;
   }
+  reportRuntimeIsolation();
   // Must exceed the jobs process's own deadline (WORKER_SHUTDOWN_TIMEOUT_MS drain, default 30 s, + its 10 s hard exit),
   // so its drain finishes before any SIGKILL. The platform's stop timeout must in turn exceed this (compose: 55 s).
   const workerDrainMs = boundedInt(env.WORKER_SHUTDOWN_TIMEOUT_MS, 30_000, 1_000, 600_000);
@@ -855,5 +899,6 @@ module.exports = {
   main,
   supervise,
   processesOwnedBy,
+  runtimeIsolation,
   GUARD_LINE,
 };

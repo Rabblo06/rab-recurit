@@ -1125,3 +1125,43 @@ test('D4 WORKER_INVITE_AUTO_DELETE_ENABLED reaches the jobs child only, verbatim
   }
   assert.equal(makePlan(env())[0].env.WORKER_INVITE_AUTO_DELETE_ENABLED, undefined);
 });
+
+// ---------------------------------------------------------------- H6: runtime isolation report (never a refusal)
+
+const H6_MOUNTS_DECLARED = [
+  'overlay / overlay ro,relatime,lowerdir=/x 0 0',
+  'proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0',
+  'tmpfs /tmp/crewflow-jobs tmpfs rw,nosuid,nodev,noexec,relatime,mode=700,uid=1000,gid=1000 0 0',
+  'tmpfs /tmp/crewflow-provisioner tmpfs rw,nosuid,nodev,noexec,relatime,mode=700,uid=10001,gid=10001 0 0',
+  'tmpfs /run/crewflow-health/jobs tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=1000,gid=1000 0 0',
+  'tmpfs /run/crewflow-health/provisioner tmpfs rw,nosuid,nodev,noexec,relatime,mode=755,uid=10001,gid=10001 0 0',
+].join('\n');
+
+test('H6-1 runtime isolation: the declared production settings (SETUID/SETGID/KILL, NNP, read-only root, 4 tmpfs) report no gap', () => {
+  const r = launcher.runtimeIsolation('Name:\tnode\nCapEff:\t00000000000000e0\nCapBnd:\t00000000000000e0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED);
+  assert.deepEqual(r, { capBnd: '00000000000000e0', noNewPrivs: '1', rootReadOnly: true, tmpfs: '4/4', gaps: [] });
+  // Fewer capabilities than declared is not a gap (only MORE would be).
+  assert.deepEqual(launcher.runtimeIsolation('CapBnd:\t00000000000000c0\nNoNewPrivs:\t1\n', H6_MOUNTS_DECLARED).gaps, []);
+});
+
+test('H6-2 runtime isolation: a platform that drops the compose security keys (Docker defaults) is named gap by gap', () => {
+  const dockerDefault = 'CapEff:\t00000000a80425fb\nCapBnd:\t00000000a80425fb\nNoNewPrivs:\t0\n';
+  const r = launcher.runtimeIsolation(dockerDefault, 'overlay / overlay rw,relatime 0 0\nproc /proc proc rw 0 0');
+  assert.equal(r.rootReadOnly, false);
+  assert.equal(r.tmpfs, '0/4');
+  assert.deepEqual(r.gaps, [
+    'capabilities beyond SETUID/SETGID/KILL (CapBnd=00000000a80425fb)',
+    'no-new-privileges is off',
+    'root filesystem is writable',
+    '4 of 4 per-child temp/health directories are not tmpfs',
+  ]);
+  // Unreadable /proc: every check is a gap, nothing throws.
+  assert.equal(launcher.runtimeIsolation('', '').gaps.length, 4);
+});
+
+test('H6-3 runtime isolation of the live test container is readable and reported (evidence line; the image run applies the production capability set)', { skip: !linuxRoot && 'needs root on Linux' }, () => {
+  // Live values of THIS test process (the image test run applies the production capability set).
+  const live = launcher.runtimeIsolation(fs.readFileSync('/proc/self/status', 'utf8'), fs.readFileSync('/proc/self/mounts', 'utf8'));
+  console.log(`# evidence runtime isolation (this test container): CapBnd=${live.capBnd} NoNewPrivs=${live.noNewPrivs} rootReadOnly=${live.rootReadOnly} tmpfs=${live.tmpfs} gaps=${JSON.stringify(live.gaps)}`);
+  assert.ok(Array.isArray(live.gaps));
+});
