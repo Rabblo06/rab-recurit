@@ -168,3 +168,31 @@ const otherWeakenings = [
 for (const [name, mutate, pattern] of otherWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
+
+// Compose-version independence (CI runs Compose v2.38, which resolves env files and drops env_file even under
+// --no-env-resolution). A REAL variant file in which rab-migrate / rab-ops no longer read their env file must still fail.
+test('a variant file whose rab-migrate and rab-ops read no env file fails, whatever the Compose version', { skip }, () => {
+  const fsx = require('node:fs');
+  const os = require('node:os');
+  const pathx = require('node:path');
+  const src = fsx.readFileSync(pathx.join(__dirname, '../docker-compose.image.yml'), 'utf8');
+  const weakened = src.replace(/\n    env_file:\n      - \.env\.migrate\n/, '\n').replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
+  assert.notEqual(weakened, src, 'the fixture edit did not apply');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'crewflow-image-verify-test-'));
+  try {
+    // renderModels() renders in its own throw-away project directory, so the copy's location does not change any path.
+    const copy = pathx.join(dir, 'docker-compose.image.yml');
+    fsx.writeFileSync(copy, weakened);
+    try {
+      const m = renderModels(copy);
+      const problems = checkVariant(m.variant, m.production, m.variantFiles);
+      assertRefused(problems, /rab-migrate: does not read \.env\.migrate/);
+      assertRefused(problems, /rab-ops: must read \.env\.ops only/);
+      assertRefused(checkDeployment(m.variantFiles, m.production, CONF), /rab-migrate: does not read \.env\.migrate in the deployed model/);
+    } finally {
+      fsx.rmSync(copy, { force: true });
+    }
+  } finally {
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
+});
