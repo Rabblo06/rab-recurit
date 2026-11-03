@@ -625,6 +625,20 @@ export class EnvironmentVariables {
   // database/boot-checks/database-boot-gate-rules.ts — that rule needs the database, so it is not checked here).
 
   /**
+   * Phase D-Q3: best-effort AFTER-COMMIT fast publish of the email_outbox / push_delivery rows NotificationService.notify()
+   * writes in the caller's transaction (NotifyFastPublishService). DEFAULT false = today's behaviour: those rows wait for the
+   * dispatcher's next tick. true = the same `.attempt.0` jobs the dispatcher's first publish adds are added right after the
+   * transaction commits (never before; a rollback publishes nothing); the outbox row stays the record, nothing in the
+   * database is changed by the fast path, and the dispatcher remains the safety net (its later add of the same jobId is
+   * deduplicated). A latency change only. Read where notify() runs (the API; the Worker too if it is set there).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  WORKER_FAST_PUBLISH_NOTIFY: boolean = false;
+
+  /**
    * How the email/push/realtime/statement dispatchers find due work.
    *  - `per_scope` (DEFAULT): walk every organisation/workspace and claim inside its own tenant transaction (today).
    *  - `global`: claim due routing ids through the `core.worker_claim_*_dispatch` SECURITY DEFINER functions (EXECUTE
