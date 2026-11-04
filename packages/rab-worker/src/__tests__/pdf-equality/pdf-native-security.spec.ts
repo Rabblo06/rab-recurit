@@ -276,13 +276,14 @@ if ('unavailable' in native) {
       const bounded = new poolModule.NativeRenderPool({ size: 1, timeoutMs: 1_500, allowProbe: true, logger: quiet });
       try {
         const f = fixtures.get('rows-500/final-timesheet')!;
-        const huge = mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.staff = Array.from({ length: 6 }, () => d.data.staff).flat()));
+        // 1,000 rows (the 500-row fixture twice): a real document that takes longer than the 1.5 s bound to lay out.
+        const huge = mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.staff = [...d.data.staff, ...d.data.staff]));
         const spy = jest.spyOn(poolModule, 'renderInPool').mockImplementation((request) => bounded.render(request));
         const err = await renderer.render(huge).then(
           () => null,
           (e: unknown) => e,
         );
-        expect(err).toBeInstanceOf(PdfRenderTimeoutError);
+        if (!(err instanceof PdfRenderTimeoutError)) throw new Error(`expected PdfRenderTimeoutError, got ${err === null ? 'a PDF' : `${(err as Error).name}: ${(err as Error).message}`}`);
         expect((err as { step?: string }).step).toBe('native-render');
         const after = await renderer.render(fixtures.get('one-row/approved-shift-statement')!.doc);
         expect(after.subarray(0, 5).toString('latin1')).toBe('%PDF-');

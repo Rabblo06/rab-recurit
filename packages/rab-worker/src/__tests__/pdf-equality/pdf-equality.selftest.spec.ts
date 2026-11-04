@@ -131,7 +131,11 @@ describe(`extraction regressions on real ${renderer.name} output`, () => {
     expect(x.pages.some((p) => p.blocks.some((b) => compact(b).includes(compact(notes))) || compact(p.lines.join('')).includes(compact(notes)))).toBe(false);
     // … found exactly once, and every one of its 56 paragraphs starts a printed line.
     expect(countValue(x, notes, { forcedBreakHyphens: NATIVE_ONLY })).toBe(1);
-    if (!LINE_BREAKS_PENDING) expect(checkAgainstInput(expectations.get(f.id)!, x, 'r', OPTIONS).find((c) => c.check === 'line-breaks(r)')).toMatchObject({ ok: true, info: undefined });
+    if (!LINE_BREAKS_PENDING) {
+      const breaks = checkAgainstInput(expectations.get(f.id)!, x, 'r', OPTIONS).find((c) => c.check === 'line-breaks(r)')!;
+      expect(breaks.ok).toBe(true);
+      expect(breaks.info).toBeFalsy(); // passed, not merely reported
+    }
   });
 
   if (LINE_BREAKS_PENDING) {
