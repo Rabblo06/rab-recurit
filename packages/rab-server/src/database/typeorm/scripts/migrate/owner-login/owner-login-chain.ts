@@ -103,6 +103,20 @@ class SelectedMigrationExecutor extends MigrationExecutor {
   }
 }
 
+/**
+ * Phase B's selection of one loaded migration (pure; exported for its regression spec). Before the split: not phase B.
+ * A PENDING ROW_COPY migration is replaced by its shim on a proven fresh install and refused otherwise; every other
+ * migration, an already-applied ROW_COPY one included (an existing database transitioned to the owner login), is
+ * returned unchanged — TypeORM skips what the ledger has.
+ */
+export function selectPhaseBMigration(m: Migration, ctx: { pending: ReadonlySet<string>; freshInstall: boolean; shimmed: string[] }): Migration | null {
+  if (m.timestamp < ROLE_SPLIT_TIMESTAMP) return null;
+  if (!SHIMMED_MIGRATIONS.includes(m.name) || !ctx.pending.has(m.name)) return m;
+  if (!ctx.freshInstall || !m.instance) throw new OwnerLoginChainError(`${m.name}: the ROW_COPY shim needs a proven fresh install. Refusing.`);
+  ctx.shimmed.push(m.name);
+  return new Migration(m.id, m.timestamp, m.name, shimMigrationInstance(m.name, m.instance) as never, m.transaction);
+}
+
 export interface OwnerLoginChainOptions {
   dataSource: DataSource;
   session: QueryRunner;
@@ -202,13 +216,8 @@ export async function runOwnerLoginChain(options: OwnerLoginChainOptions): Promi
       }
       result.phaseB.push(...(await run((m) => (m.timestamp >= ROLE_SPLIT_TIMESTAMP ? m : null))));
     } else {
-      result.phaseB = await run((m) => {
-        if (m.timestamp < ROLE_SPLIT_TIMESTAMP) return null;
-        if (!SHIMMED_MIGRATIONS.includes(m.name)) return m;
-        if (!options.freshInstall || !m.instance) throw new OwnerLoginChainError(`${m.name}: the ROW_COPY shim needs a proven fresh install. Refusing.`);
-        result.shimmed.push(m.name);
-        return new Migration(m.id, m.timestamp, m.name, shimMigrationInstance(m.name, m.instance) as never, m.transaction);
-      });
+      const pendingNow = new Set(await pendingMigrationNames(query, dataSource));
+      result.phaseB = await run((m) => selectPhaseBMigration(m, { pending: pendingNow, freshInstall: options.freshInstall, shimmed: result.shimmed }));
     }
   } finally {
     // Discard: neither value is kept, logged or returned.

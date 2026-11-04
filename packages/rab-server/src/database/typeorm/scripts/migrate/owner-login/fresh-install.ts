@@ -104,10 +104,15 @@ export async function classifyDatabaseState(query: Query, expected: readonly str
   return { ...classifyDatabase(facts, expected, applied), facts };
 }
 
+/**
+ * Every relation is resolved with to_regclass at EXECUTION time (NULL when absent; pg_relation_size(NULL) is NULL): a
+ * literal `'core.x'` handed to pg_relation_size is cast to regclass while the statement is PLANNED, so on an EMPTY
+ * database it raised 42P01 even inside an untaken CASE branch (found by CI on PR #71; regression: owner-login.spec.ts).
+ */
 export const TENANT_EVIDENCE_SQL = `
-SELECT (SELECT CASE WHEN to_regclass('core.organisation') IS NULL THEN 0 ELSE pg_catalog.pg_relation_size('core.organisation') END)::bigint AS "organisationBytes",
-       (SELECT CASE WHEN to_regclass('core.manager_workspace') IS NULL THEN 0 ELSE pg_catalog.pg_relation_size('core.manager_workspace') END)::bigint AS "workspaceBytes",
-       (SELECT CASE WHEN to_regclass('core.workspace_schema_registry') IS NULL THEN 0 ELSE pg_catalog.pg_relation_size('core.workspace_schema_registry') END)::bigint AS "registryBytes",
+SELECT coalesce(pg_catalog.pg_relation_size(pg_catalog.to_regclass('core.organisation')), 0)::bigint AS "organisationBytes",
+       coalesce(pg_catalog.pg_relation_size(pg_catalog.to_regclass('core.manager_workspace')), 0)::bigint AS "workspaceBytes",
+       coalesce(pg_catalog.pg_relation_size(pg_catalog.to_regclass('core.workspace_schema_registry')), 0)::bigint AS "registryBytes",
        (SELECT count(*)::int FROM pg_catalog.pg_namespace WHERE nspname ~ '^workspace_[0-9a-f]{32}$') AS "workspaceSchemas",
        EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members a
                 WHERE a.roleid = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rab_owner')

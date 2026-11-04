@@ -20,7 +20,10 @@ import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './boo
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
 import { blockingPostCheckProblems, codeMigrationNames, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
-import { LAST_ROLE_MIGRATION_TIMESTAMP, ROLE_SPLIT_TIMESTAMP } from './owner-login-chain';
+import { Migration } from 'typeorm/migration/Migration';
+
+import { LAST_ROLE_MIGRATION_TIMESTAMP, ROLE_SPLIT_TIMESTAMP, selectPhaseBMigration } from './owner-login-chain';
+import { TENANT_EVIDENCE_SQL } from './fresh-install';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityFacts } from './owner-login-identity';
 import {
   AI_ASSISTANT_ROUND_ONLY_MIGRATION,
@@ -388,5 +391,24 @@ describe('the code migration list read from the files (the assessment of a run t
     expect(names.some((n) => n.endsWith('1786721330000'))).toBe(false);
     const ts = names.map((n) => Number(n.slice(-13)));
     expect([...ts].sort((a, b) => a - b)).toEqual(ts);
+  });
+});
+
+describe('regressions found by CI on PR #71', () => {
+  it('the tenant evidence never hands a literal relation name to pg_relation_size (planned as regclass: 42P01 on EMPTY)', () => {
+    expect(TENANT_EVIDENCE_SQL).not.toMatch(/pg_relation_size\('core\./);
+    expect(TENANT_EVIDENCE_SQL.match(/pg_relation_size\(pg_catalog\.to_regclass\('core\.[a-z_]+'\)\)/g)).toHaveLength(3);
+  });
+
+  it('phase B passes an ALREADY-APPLIED ROW_COPY migration through on a non-fresh database (transition), and still refuses a pending one', () => {
+    const instance = { name: PRIVILEGED_COPY_MIGRATION, up: async () => undefined, down: async () => undefined };
+    const m = new Migration(undefined, 1786719520000, PRIVILEGED_COPY_MIGRATION, instance);
+    const shimmed: string[] = [];
+    expect(selectPhaseBMigration(m, { pending: new Set(['Other1786721350000']), freshInstall: false, shimmed })).toBe(m);
+    expect(() => selectPhaseBMigration(m, { pending: new Set([PRIVILEGED_COPY_MIGRATION]), freshInstall: false, shimmed })).toThrow(/proven fresh install/);
+    const wrapped = selectPhaseBMigration(m, { pending: new Set([PRIVILEGED_COPY_MIGRATION]), freshInstall: true, shimmed });
+    expect(wrapped).not.toBe(m);
+    expect(shimmed).toEqual([PRIVILEGED_COPY_MIGRATION]);
+    expect(selectPhaseBMigration(new Migration(undefined, 1786681000000, 'PhaseA1786681000000', instance), { pending: new Set(), freshInstall: true, shimmed })).toBeNull();
   });
 });
