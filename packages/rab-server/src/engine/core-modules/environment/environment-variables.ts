@@ -598,6 +598,20 @@ export class EnvironmentVariables {
   WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
 
   /**
+   * Phase D-Q4a (owner approval 2026-11-04, OD-1): how the Worker walks the four 300-s shift-family scans (shift monitor,
+   * attendance monitor, shift report scheduler, final timesheet).
+   *  - `separate` (DEFAULT): four independent scans, each with its own workspace walk (today, unchanged).
+   *  - `combined`: one scan `shift-scan-combined` walks the workspaces once and runs every DUE member's own discovery
+   *    query inside that workspace's tenant transaction (one SAVEPOINT per member); each member then processes its own
+   *    candidates exactly as in separate mode. Same SQL, keys, thresholds and transitions; each member keeps its interval.
+   * Late clock-in is never a member. Exactly `separate` or `combined`; anything else refuses to boot. Combined mode also
+   * refuses to boot when the members' intervals have no common tick of at least 30 s (env.validation.ts).
+   */
+  @IsOptional()
+  @IsIn(['separate', 'combined'], { message: 'WORKER_SHIFT_SCAN_MODE must be exactly separate or combined' })
+  WORKER_SHIFT_SCAN_MODE: 'separate' | 'combined' = 'separate';
+
+  /**
    * Redis key prefix for the NEW BullMQ scan queues only (`bullmq` mode). Unset → `crewflow:<NODE_ENV>:bull`. The three
    * existing queues (`rab-email`, `rab-push`, `rab-shift-statements`) keep BullMQ's default `bull` prefix permanently —
    * the API publishes to two of them — so `bull` itself (or anything under `bull:`) is refused here.

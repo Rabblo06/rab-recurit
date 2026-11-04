@@ -1,7 +1,7 @@
 import { effectiveAssignmentTime, assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { isLateClockIn } from '@rab/server/modules/scheduling/services/late-clock-in';
 import { formatLondonDateTime, NotificationType, ShiftAssignmentStatus, ShiftStatus, UserStatus } from '@rab/shared';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
@@ -78,16 +78,22 @@ function isStillLate(assignment: ShiftAssignment | null, shift: Shift | null, la
   return isLateClockIn({ assignmentStatus: assignment.status, shiftStatus: shift.status, startsAt: effectiveAssignmentTime(assignment, shift).startsAt, serverNow: new Date(), graceMinutes: lateClockInGraceMinutes, hasAttendance: false });
 }
 
-export async function runLateClockInCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  notificationService: NotificationService,
-  auditService: AuditService,
-  lateClockInGraceMinutes: number,
-): Promise<LateClockInResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      return await manager.query<ScanCandidate[]>(
-        `
+/**
+ * D-Q4a (refactor only, no behaviour change): late clock-in split into its per-workspace discovery and its per-candidate
+ * body. Late clock-in is NOT a member of the combined shift scan (owner decision OD-1: the four 300-s scans only); it keeps
+ * its own 120-s scan. The split exists so D-Q4b's timer trigger runs exactly this body (`flagLateClockInCandidate`: Pass A,
+ * the `late-clock-in:<assignment>` claim, Pass B) instead of a second copy.
+ */
+export interface LateClockInDeps {
+  notificationService: NotificationService;
+  auditService: AuditService;
+}
+
+export type LateClockInCandidate = ScanCandidate;
+
+export async function discoverLateClockInInWorkspace(manager: EntityManager, lateClockInGraceMinutes: number): Promise<LateClockInCandidate[]> {
+  return await manager.query<ScanCandidate[]>(
+    `
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
         FROM shift_assignment sa
         JOIN shift s ON s.id = sa.shift_id
@@ -111,108 +117,131 @@ export async function runLateClockInCycle(
         ORDER BY ${assignmentTimeSql().start} ASC
         LIMIT 500
       `,
-        [lateClockInGraceMinutes],
-      );
-  });
+    [lateClockInGraceMinutes],
+  );
+}
+
+export async function runLateClockInCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  notificationService: NotificationService,
+  auditService: AuditService,
+  lateClockInGraceMinutes: number,
+): Promise<LateClockInResult> {
+  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, (manager) => discoverLateClockInInWorkspace(manager, lateClockInGraceMinutes));
 
   let flagged = 0;
   for (const candidate of candidates) {
-    const didFlag = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
-      // --- Pass A: is this candidate still genuinely late? ---
-      let assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
-      let shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
-      if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) return false;
-
-      const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
-      if (hasAttendance.length > 0) return false; // clocked in since the scan — never even worth claiming
-
-      const eventId = await claimWorkerEvent(manager, {
-        organisationId: candidate.organisation_id,
-        workspaceId: candidate.workspace_id,
-        eventKey: `late-clock-in:${assignment!.id}`,
-        eventType: 'late_clock_in',
-        entityType: 'shift_assignment',
-        entityId: assignment!.id,
-      });
-      if (!eventId) return false; // another replica/tick already claimed this occurrence
-
-      // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
-      // Fresh reads under READ COMMITTED — each sees anything another
-      // transaction committed since Pass A, closing the race window rather
-      // than trusting data that could already be stale.
-      assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
-      shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
-      if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) {
-        await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
-        return false;
-      }
-      const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
-      if (hasAttendanceNow.length > 0) {
-        await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
-        return false;
-      }
-
-      const staffProfile = await manager.findOne(StaffProfile, { where: { id: assignment!.staffProfileId } });
-      const user = staffProfile ? await manager.findOne(User, { where: { id: staffProfile.userId } }) : null;
-      if (!staffProfile || !user || user.status !== UserStatus.ACTIVE) {
-        await cancelWorkerEvent(manager, eventId, 'staff_profile_or_user_unavailable');
-        return false;
-      }
-
-      const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM venue WHERE id = $1`, [shift!.venueId]);
-      const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM job_role WHERE id = $1`, [shift!.jobRoleId]);
-      const venueName = venueRow?.name ?? 'the venue';
-      const roleName = roleRow?.name ?? null;
-      const localStart = formatLondonDateTime(effectiveAssignmentTime(assignment!, shift!).startsAt);
-
-      // Staff: their own shift, their own heads-up.
-      await notificationService.notify(manager, {
-        organisationId: candidate.organisation_id,
-        userId: user.id,
-        type: NotificationType.LATE_CLOCK_IN,
-        title: 'You have not clocked in',
-        message: `Your shift at ${venueName} started at ${localStart}. Please clock in if you are on site.`,
-        relatedEntityType: 'shift_assignment',
-        relatedEntityId: assignment!.id,
-      });
-
-      // Manager: the canonical responsible manager for THIS assignment — see
-      // resolve-responsible-manager.ts for why this replaces
-      // staffProfile.createdBy. `null` (no valid manager found) is a
-      // legitimate, safely-handled outcome, not an error: the event still
-      // completes (the staff-facing notification and audit already happened
-      // above; there is simply no one else to tell), and nothing retries
-      // forever chasing a relationship that is permanently absent.
-      const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, assignment!, shift!);
-      if (resolvedManager) {
-        await notificationService.notify(manager, {
-          organisationId: candidate.organisation_id,
-          userId: resolvedManager.userId,
-          type: NotificationType.LATE_CLOCK_IN,
-          title: 'Staff running late',
-          message: `${user.firstName} ${user.lastName} has not clocked in for the ${roleName ?? 'shift'} at ${venueName}. Scheduled start: ${localStart}.`,
-          relatedEntityType: 'shift_assignment',
-          relatedEntityId: assignment!.id,
-        });
-      }
-
-      await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.LATE_CLOCK_IN_FLAGGED, {
-        targetUserId: user.id,
-        metadata: {
-          assignmentId: assignment!.id,
-          shiftId: shift!.id,
-          venueId: shift!.venueId,
-          staffProfileId: staffProfile.id,
-          notifiedManagerUserId: resolvedManager?.userId ?? null,
-          managerResolutionSource: resolvedManager?.source ?? 'none',
-        },
-        actorUserId: null,
-      });
-      await completeWorkerEvent(manager, eventId);
-      return true;
-    });
+    const didFlag = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, (manager) =>
+      flagLateClockInCandidate(manager, { notificationService, auditService }, candidate, lateClockInGraceMinutes),
+    );
     if (didFlag) flagged += 1;
   }
 
   return { flagged };
+}
+
+/**
+ * D-Q4b entry (shared, not a copy): ONE assignment inside the caller's `runScopedForOrg` transaction — Pass A, the
+ * `late-clock-in:<assignment>` worker_event claim, Pass B, then the staff and manager notifications and the audit record.
+ * True only when this call flagged it.
+ */
+export async function flagLateClockInCandidate(
+  manager: EntityManager,
+  deps: LateClockInDeps,
+  candidate: LateClockInCandidate,
+  lateClockInGraceMinutes: number,
+): Promise<boolean> {
+  // --- Pass A: is this candidate still genuinely late? ---
+  let assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
+  let shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
+  if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) return false;
+
+  const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+  if (hasAttendance.length > 0) return false; // clocked in since the scan — never even worth claiming
+
+  const eventId = await claimWorkerEvent(manager, {
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id,
+    eventKey: `late-clock-in:${assignment!.id}`,
+    eventType: 'late_clock_in',
+    entityType: 'shift_assignment',
+    entityId: assignment!.id,
+  });
+  if (!eventId) return false; // another replica/tick already claimed this occurrence
+
+  // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
+  // Fresh reads under READ COMMITTED — each sees anything another
+  // transaction committed since Pass A, closing the race window rather
+  // than trusting data that could already be stale.
+  assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
+  shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
+  if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) {
+    await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
+    return false;
+  }
+  const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+  if (hasAttendanceNow.length > 0) {
+    await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
+    return false;
+  }
+
+  const staffProfile = await manager.findOne(StaffProfile, { where: { id: assignment!.staffProfileId } });
+  const user = staffProfile ? await manager.findOne(User, { where: { id: staffProfile.userId } }) : null;
+  if (!staffProfile || !user || user.status !== UserStatus.ACTIVE) {
+    await cancelWorkerEvent(manager, eventId, 'staff_profile_or_user_unavailable');
+    return false;
+  }
+
+  const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM venue WHERE id = $1`, [shift!.venueId]);
+  const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM job_role WHERE id = $1`, [shift!.jobRoleId]);
+  const venueName = venueRow?.name ?? 'the venue';
+  const roleName = roleRow?.name ?? null;
+  const localStart = formatLondonDateTime(effectiveAssignmentTime(assignment!, shift!).startsAt);
+
+  // Staff: their own shift, their own heads-up.
+  await deps.notificationService.notify(manager, {
+    organisationId: candidate.organisation_id,
+    userId: user.id,
+    type: NotificationType.LATE_CLOCK_IN,
+    title: 'You have not clocked in',
+    message: `Your shift at ${venueName} started at ${localStart}. Please clock in if you are on site.`,
+    relatedEntityType: 'shift_assignment',
+    relatedEntityId: assignment!.id,
+  });
+
+  // Manager: the canonical responsible manager for THIS assignment — see
+  // resolve-responsible-manager.ts for why this replaces
+  // staffProfile.createdBy. `null` (no valid manager found) is a
+  // legitimate, safely-handled outcome, not an error: the event still
+  // completes (the staff-facing notification and audit already happened
+  // above; there is simply no one else to tell), and nothing retries
+  // forever chasing a relationship that is permanently absent.
+  const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, assignment!, shift!);
+  if (resolvedManager) {
+    await deps.notificationService.notify(manager, {
+      organisationId: candidate.organisation_id,
+      userId: resolvedManager.userId,
+      type: NotificationType.LATE_CLOCK_IN,
+      title: 'Staff running late',
+      message: `${user.firstName} ${user.lastName} has not clocked in for the ${roleName ?? 'shift'} at ${venueName}. Scheduled start: ${localStart}.`,
+      relatedEntityType: 'shift_assignment',
+      relatedEntityId: assignment!.id,
+    });
+  }
+
+  await deps.auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.LATE_CLOCK_IN_FLAGGED, {
+    targetUserId: user.id,
+    metadata: {
+      assignmentId: assignment!.id,
+      shiftId: shift!.id,
+      venueId: shift!.venueId,
+      staffProfileId: staffProfile.id,
+      notifiedManagerUserId: resolvedManager?.userId ?? null,
+      managerResolutionSource: resolvedManager?.source ?? 'none',
+    },
+    actorUserId: null,
+  });
+  await completeWorkerEvent(manager, eventId);
+  return true;
 }

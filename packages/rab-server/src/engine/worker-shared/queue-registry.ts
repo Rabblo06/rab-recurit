@@ -202,7 +202,9 @@ export const QUEUE_SETTINGS = Object.freeze({
   // ── scan queues (BULLMQ_PREFIX; system-scoped; bullmq scheduler mode only — one job scheduler per scan) ─────────────
   [SCAN_QUEUES.email]: scanQueue(1, ['email-dispatch']),
   [SCAN_QUEUES.push]: scanQueue(1, ['push-dispatch']),
-  [SCAN_QUEUES.shifts]: scanQueue(4, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup']),
+  // Phase D-Q4a adds `shift-scan-combined` (one more slot: 4 → 5). Registered only when WORKER_SHIFT_SCAN_MODE=combined
+  // (its two shifts-queue members, shift-monitor and attendance-monitor, are then not), so one slot is idle in either mode.
+  [SCAN_QUEUES.shifts]: scanQueue(5, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup', 'shift-scan-combined']),
   [SCAN_QUEUES.offers]: scanQueue(3, ['offer-expiry', 'manager-confirmation-timeout', 'replacement-staff']),
   [SCAN_QUEUES.reports]: scanQueue(4, ['shift-report-scheduler', 'final-timesheet', 'shift-statement-dispatch', 'payroll-period-attention']),
   // Phase D-Q2 adds `ai-stale-turn-sweep` (one more slot: 7 → 8). Registered only when AI_STALE_TURN_SWEEP=true; the

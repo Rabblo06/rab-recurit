@@ -31,7 +31,14 @@ export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-maintenance:workspace-provisioning-health',
   // Phase D-Q2: the AI stale-queued-turn sweep (off by default; registered only when AI_STALE_TURN_SWEEP=true).
   'crewflow:crewflow-scan-maintenance:ai-stale-turn-sweep',
+  // Phase D-Q4a: the combined shift scan (registered only with WORKER_SHIFT_SCAN_MODE=combined, instead of its four members).
+  'crewflow:crewflow-scan-shifts:shift-scan-combined',
 ]);
+
+/** Phase D-Q4a: the scan registered only in WORKER_SHIFT_SCAN_MODE=combined (the default, separate, never schedules it). */
+export const COMBINED_SHIFT_SCAN_ID = 'crewflow:crewflow-scan-shifts:shift-scan-combined';
+/** Every scan id a default (separate-mode) Worker may schedule. */
+export const SEPARATE_MODE_SCAN_IDS: readonly string[] = Object.freeze(EXPECTED_SCAN_SCHEDULER_IDS.filter((id) => id !== COMBINED_SHIFT_SCAN_ID));
 
 /** `<queue>/<jobName>` of every consumer handler (legacy `bull` prefix queues). */
 export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
@@ -41,7 +48,7 @@ export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
   'rab-ai/ai-turn',
 ]);
 
-/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 22 scans + 4 consumers = 26. */
+/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 23 scans + 4 consumers = 27. */
 export const EXPECTED_HANDLERS: readonly string[] = Object.freeze([
   ...EXPECTED_SCAN_SCHEDULER_IDS.map((id) => {
     const [, queue, jobName] = id.split(':');

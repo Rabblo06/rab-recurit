@@ -41,7 +41,8 @@ const PRE_DQ1_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDurat
   'rab-ai': { concurrency: 4, lockDuration: 60_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-email': { concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-push': { concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
-  'crewflow-scan-shifts': { concurrency: 4, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
+  // Phase D-Q4a: + shift-scan-combined (one slot per distinct scan on the queue: 4 → 5; one slot idle in either mode).
+  'crewflow-scan-shifts': { concurrency: 5, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-offers': { concurrency: 3, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-reports': { concurrency: 4, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-maintenance': { concurrency: 7, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
@@ -173,10 +174,10 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
   });
 
-  it('every scan job name is declared once, on one scan queue (22 scans: 21 pre-D-Q2 + ai-stale-turn-sweep)', () => {
+  it('every scan job name is declared once, on one scan queue (23 scans: 21 pre-D-Q2 + ai-stale-turn-sweep + D-Q4a shift-scan-combined)', () => {
     const names = SCAN_QUEUE_NAMES.flatMap((q) => [...QUEUE_SETTINGS[q].jobNames]);
-    expect(names).toHaveLength(22);
-    expect(new Set(names).size).toBe(22);
+    expect(names).toHaveLength(23);
+    expect(new Set(names).size).toBe(23);
   });
 
   it('an unknown queue name fails closed (UnknownQueueError), never a default', () => {

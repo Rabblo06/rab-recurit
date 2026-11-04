@@ -133,6 +133,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Lane A (BullMQ worker migration): scheduler mode, scan-queue prefix and reconcile period (validated by the shared
   // EnvironmentVariables class: an invalid mode/prefix refuses to boot; interval is the default).
   'WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS',
+  // Phase D-Q4a: separate (default) | combined shift scan (validated by the shared EnvironmentVariables class: anything
+  // else, or combined with a common member tick under 30 s, refuses to boot).
+  'WORKER_SHIFT_SCAN_MODE',
   // Phase A pa-intervals: per-scan polling intervals in seconds (environment/worker-scan-intervals.ts; defaults = the
   // historical cadences, bounded, out-of-range refuses to boot).
   'WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS', 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS',
