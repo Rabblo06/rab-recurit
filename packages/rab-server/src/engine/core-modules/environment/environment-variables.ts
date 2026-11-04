@@ -637,6 +637,15 @@ export class EnvironmentVariables {
   @IsIn(['1', '2', '3', '4'], { message: 'PDF_NATIVE_CONCURRENCY must be an integer from 1 to 4' })
   PDF_NATIVE_CONCURRENCY?: '1' | '2' | '3' | '4';
 
+  /**
+   * PDF renderer P1 (F3) — render threads started at Worker boot when PDF_RENDERER=native (`pdfNativePrewarm`, rab-worker
+   * native/runtime/render-pool.ts). Unset → min(2, PDF_NATIVE_CONCURRENCY); exactly "0".."4" ("0" = none); more than the
+   * pool size refuses to start (checked at Worker boot, where the pool size is known); anything else refuses to boot.
+   */
+  @IsOptional()
+  @IsIn(['0', '1', '2', '3', '4'], { message: 'PDF_NATIVE_PREWARM must be an integer from 0 to 4' })
+  PDF_NATIVE_PREWARM?: '0' | '1' | '2' | '3' | '4';
+
   // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
   // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
   // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot

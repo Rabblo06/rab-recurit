@@ -21,6 +21,12 @@ export { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './word-breaking';
  * registered, and a missing or altered file refuses the render (fail closed).
  */
 export const FONT_FAMILY = 'Liberation Sans';
+/**
+ * The family stack every layout uses (`fontFamily: [...FONT_FAMILY_STACK]`). In-process (this interim module) only the
+ * primary family is registered; the render runtime's own stack (runtime/native-fonts.ts: Liberation Sans, then the Noto
+ * Sans fallback) replaces this export when the runtime is wired in, with no layout change.
+ */
+export const FONT_FAMILY_STACK: readonly string[] = Object.freeze([FONT_FAMILY]);
 export const FONT_DIR = join(__dirname, 'assets', 'fonts');
 
 const FONT_FILES: Readonly<Record<400 | 700, string>> = Object.freeze({ 400: 'LiberationSans-Regular.ttf', 700: 'LiberationSans-Bold.ttf' });

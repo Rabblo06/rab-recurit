@@ -5,6 +5,7 @@ import type { FinalTimesheetData } from '@rab/server/modules/attendance/template
 import { ApprovedShiftStatementData } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
 
 import type { NativeReportDocument } from './native/render-native';
+import { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 /**
  * PDF renderer migration P5: every report PDF is rendered NATIVELY (@react-pdf/renderer, pure JavaScript, vendored
@@ -15,18 +16,11 @@ import type { NativeReportDocument } from './native/render-native';
  * (P3 security tests). The one shared contract that remains is the time bound below.
  */
 
-/** Upper bound for one render. Real reports render in well under a second. */
-export const PDF_RENDER_STEP_TIMEOUT_MS = 30_000;
-
-export class PdfRenderTimeoutError extends Error {
-  constructor(
-    readonly step: string,
-    readonly timeoutMs: number,
-  ) {
-    super(`PDF render step "${step}" did not finish within ${timeoutMs} ms`);
-    this.name = 'PdfRenderTimeoutError';
-  }
-}
+/**
+ * The render deadline and its error class live in the dependency-free native/runtime/render-timeout.ts (shared with the
+ * native render runtime). Re-exported here: ONE class, so `instanceof PdfRenderTimeoutError` holds everywhere.
+ */
+export { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 /** Rejects with `PdfRenderTimeoutError` if `work` has not settled within `ms`. The loser's later rejection is swallowed. */
 export async function withRenderStepTimeout<T>(step: string, ms: number, work: Promise<T>): Promise<T> {

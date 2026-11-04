@@ -196,8 +196,8 @@ const JOBS_ENV_KEYS = Object.freeze([
   'MEMBER_INVITE_RATE_ORGANISATION_PER_DAY', 'MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR',
   // P5: no browser settings. CHROMIUM_EXECUTABLE_PATH / CHROMIUM_NO_SANDBOX / PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD are no
   // longer forwarded (the Worker renders PDFs natively; test 3c pins their absence). The renderer switch (kept for one
-  // release, D10) and the native pool size (PDF renderer P1) are.
-  'PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY',
+  // release, D10) and the native pool size and pre-warm count (PDF renderer P1) are.
+  'PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY', 'PDF_NATIVE_PREWARM',
 ]);
 
 /**

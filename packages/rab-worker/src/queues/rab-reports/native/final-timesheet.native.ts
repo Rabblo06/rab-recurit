@@ -1,7 +1,7 @@
 import { Document, View } from '@react-pdf/renderer';
 import { ReactElement, ReactNode } from 'react';
 
-import { FinalTimesheetRowView, FinalTimesheetViewModel } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
+import type { FinalTimesheetRowView, FinalTimesheetViewModel } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
 
 import {
   BottomSection,
