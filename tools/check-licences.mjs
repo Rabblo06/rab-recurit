@@ -20,6 +20,14 @@ const ROOT = resolve(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z
 // checked (owner-vetoable, PR #19): MIT-0 (MIT without the attribution clause: nodemailer, postal-mime) and BlueOak-1.0.0
 // (a permissive model licence: lru-cache, minipass, glob's helpers).
 const ALLOW = ['MIT', 'ISC', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'CC0-1.0', 'Unlicense', 'Python-2.0', 'MIT-0', 'BlueOak-1.0.0'];
+/**
+ * Reviewed packages whose package.json has NO licence field but which ship a licence file. Exact name@version only, and
+ * the file must still contain the expected licence text at check time (a new version or a changed file fails as before).
+ * PDF renderer P1: png-js 2.0.0 (pdfkit's PNG decoder, via @react-pdf/renderer) ships an MIT LICENSE (Devon Govett).
+ */
+const LICENCE_FROM_FILE = {
+  'png-js@2.0.0': { licence: 'MIT', file: 'LICENSE', mustContain: ['MIT License', 'Permission is hereby granted, free of charge'] },
+};
 /** First-party workspaces whose production dependencies ship (server/worker images, the web bundle, shared libraries). */
 const SHIPPED = ['rab-server', 'rab-worker', 'rab-front', 'rab-shared', 'rab-ui', 'rab-emails', 'rab-utils'];
 
@@ -61,7 +69,14 @@ function visit(dir, via) {
   const key = dir;
   if (seen.has(key)) return;
   const firstParty = pkg.private === true && (pkg.name?.startsWith('@rab/') || dir.startsWith(join(ROOT, 'packages')));
-  seen.set(key, { name: pkg.name, version: pkg.version, licence: licenceOf(pkg), firstParty, via });
+  let licence = licenceOf(pkg);
+  const reviewed = LICENCE_FROM_FILE[`${pkg.name}@${pkg.version}`];
+  if (licence === null && reviewed) {
+    const file = join(dir, reviewed.file);
+    const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    if (reviewed.mustContain.every((needle) => text.includes(needle))) licence = reviewed.licence;
+  }
+  seen.set(key, { name: pkg.name, version: pkg.version, licence, firstParty, via });
   const deps = { ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}), ...(pkg.peerDependencies ?? {}) };
   for (const name of Object.keys(deps)) {
     const child = findPackageDir(dir, name);
