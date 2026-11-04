@@ -5113,3 +5113,146 @@ plan §2.3 A2 — that is what `shadow` measures). Owner approval OD-3 / OD-4, 2
   The Admin Panel lists `crewflow-timer-triggers` read-only (counts, metrics, failed job ids; retry/delete → 409, tested),
   like `rab-ai`. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
   carries the subject UUID (no personal data).
+
+
+## Phase D-Q5b — cumulative email/push attempt cap, no BullMQ resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
+
+Owner approval 2026-11-04 (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §10: OC-1 confirmed, OD-5 Option B, OD-6 no change;
+audit §13 #3 and #4). No migration, column, role, grant, RLS policy or posture change; no payroll / attendance /
+staffing / permission rule. **Asset:** another person's email or push notification (its delivery count, and whether it
+is delivered twice). **Actor:** the Worker, without a request; a replica racing another; a forged job payload.
+
+- **Cumulative cap (OC-1, §13 #4).** The claim CAS that moves an `email_outbox` / `push_delivery` row to PROCESSING now
+  adds one to the row's existing `infrastructure_attempt_count` / `attempt_count` and returns it (`RETURNING`); SENT /
+  ACCEPTED / RETRY / FAILED record that value and the attempt is final at the row's own max (5). The claim refuses a row
+  already at its max (`… AND count < max`), and a claim that reports no count fails closed (the claim rolls back, nothing
+  is sent). Before, every write used the BullMQ job's `attemptsMade + 1`, which restarted at 1 for each republished
+  generation, so the cap applied per generation and a row republished after lease/RETRY recovery could be retried for
+  ever. Actor → action → consequence after the fix: a delivery that keeps failing stops at 5 attempts in total (FAILED,
+  audited) instead of looping; a row recovered after a Redis loss has fewer attempts left (accepted under OC-1). A
+  provider-throttled email attempt (Resend 429 Retry-After, D5) still gives its count back, as before; an operator replay
+  (`core.replay_failed_email`) still resets the count to 0 (unchanged).
+- **No resend after a confirmed send (OD-5 Option B, §13 #3).** When the provider accepted an email and every local try
+  to persist SENT fails, the processor no longer routes the error to the RETRY/FAILED path (RETRY made BullMQ call the
+  provider again: a duplicate email, reproduced). It writes nothing more, throws `UnrecoverableError` (BullMQ does not
+  retry the job; tested with a real BullMQ job: one provider call, `attemptsMade` 1) and leaves the row PROCESSING under its
+  token with `provider_call_started_at` set. After the 10-minute lease the existing dispatcher recovery resolves it:
+  SMTP → FAILED `DELIVERY_UNCERTAIN` (manual review; replay needs the explicit allow-uncertain flag); Resend → one
+  re-presentation under the SAME idempotency key `email-outbox:<id>` (Resend returns the original message instead of
+  sending again; its key window is 24 h, the lease 10 min) → SENT. The log line now states that behaviour (it used to say
+  the row "remains PROCESSING" while the code wrote RETRY); it carries ids, provider and provider message id only.
+  Push already left the row PROCESSING after a failed ACCEPTED write (no RETRY write); unchanged.
+- **Exhausted ambiguous lease.** Because the count now includes the in-flight attempt, a PROCESSING row whose lease
+  expired at the cap means the last allowed attempt died. With the provider-call marker set (the message may have gone
+  out — including the OD-5 case on the 5th attempt) both dispatchers now mark it `DELIVERY_UNCERTAIN` (email: for every
+  driver, with its own "attempt cap reached" reason text) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
+  it is never re-presented past the cap. Without the marker nothing was sent: `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, unchanged.
+  For push this keeps the pre-change outcome (with the job-relative count that row sat one below the cap → uncertain).
+- **Unchanged (OD-6):** SMTP definite-rejection handling (the marker is still not cleared on RETRY), push uncertain
+  delivery (at-most-once), the payroll statement lease cap; the dispatcher claim SQL (sha256-pinned), jobIds, leases and
+  backoff.
+- **Tenant isolation:** every changed statement runs under the same organisation-bound `SET LOCAL` and FORCE RLS as
+  before; the count is never taken from the job payload. Abuse cases on real PostgreSQL
+  (`dq5b-email-cumulative-attempts.integration.spec.ts`, `dq5b-push-cumulative-attempts.integration.spec.ts`): a job naming
+  another organisation sees, claims and counts nothing (no send); another organisation's dispatcher does not reclassify the
+  row; a query with no tenant context returns zero rows. **Replicas:** two consumers (old and republished generation) race
+  one row → one claim, one provider call, count +1 once; five dispatchers race one exhausted ambiguous row → one
+  `DELIVERY_UNCERTAIN` transition and one audit row.
+- **Residual:** this is not exactly-once delivery. An SMTP email whose SENT write failed after a confirmed send now needs
+  manual review instead of going out twice (owner-accepted trade-off of Option B). A Resend row is re-presented once under
+  the same idempotency key; Resend deduplicates only inside its key window (24 h), so a recovery delayed past that window
+  (the Worker down for a day, the row untouched) could still send a second email. The log line for this case carries the
+  error name/code only, never the error object (a `QueryFailedError` holds the bound fencing token). A job whose own BullMQ attempts run out before the cumulative cap (attempts
+  spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
+  republishes it until the cumulative cap.
+- **Independent verification (2026-11-04, "V" tests in the same two integration specs).** A real crash loop (every claim
+  dies after the provider call; a restart's redelivery inside the lease claims, counts and sends nothing; lease recovery
+  republishes) stops at the 5th cumulative attempt with `DELIVERY_UNCERTAIN` and five provider calls on one key, and the
+  dead Workers' late outcomes are fenced out; the `DELIVERY_UNCERTAIN` rows this change produces (SMTP below the cap,
+  Resend at the cap) are refused by `core.replay_failed_email` without the allow-uncertain flag; the counting claim and
+  the reclassification UPDATE change nothing with no tenant context or another organisation bound (email and push).
+
+## formatPence exact; bigint pence enter a number only through assertSafePence (branch fix/format-pence-exact, not merged)
+
+Formatting and range guards only. No payroll, rate-resolution, rounding, pay-period or pay-date rule changes. There is
+no migration and no change to roles, grants or RLS.
+
+- **Asset:** money printed or returned to people: payroll views, payslip and run totals, offers, attendance pay, the
+  approved shift statement, and the assistant's payroll answers.
+- **Finding 1 (Low, integrity):**
+  - **What:** `@rab/shared` `formatPence` divided pence by 100 as a float, so `formatPence(2^53 - 1)` printed
+    `£90,071,992,547,409.90` instead of `.91`.
+  - **Scope:** the first wrong value found in a 32,000-value sweep was about 7.0 × 10^15 pence (£70 trillion), so no
+    real amount is affected today. The function is still the single money formatter, and it must be exact by
+    construction.
+  - **Fix:** split pounds and pence with integer arithmetic (number: `% 100` and an exact division; bigint: `/ 100n` and
+    `% 100n`). Format the same way as before: `-£1,234.56`, `£0.00`, `£0.01`, and `-£0.00` for `-0` as before.
+  - **New behaviour:** accepts a `bigint` of any size. A `number` must now be a safe integer (`assertSafePence`) rather
+    than any integer, because past 2^53 a number no longer holds the exact pence. That case is refused rather than
+    printed wrong. An unsupported currency code is refused.
+- **Finding 2 (Low, integrity, control at one layer only):**
+  - **What:** entity columns convert bigint pence through `bigintAsNumber`, which calls `assertSafePence`. Raw
+    `manager.query` rows did not: 22 sites ran `Number(r.x_pence)` directly, so a stored value past 2^53 - 1 would
+    have been silently rounded into a different, plausible amount.
+  - **Where:** attendance, shift-report, offer and offer-confirmation services; payroll and payroll-run services.
+  - **Write paths affected:** two of the sites write the rounded value back. `preparePayrollRecords` inserts
+    `pay_rate_pence`, and run preparation inserts `payroll_run_line`.
+  - **Fix:** each site now calls `assertSafePence(Number(...), '<column>')`, and JS-side gross sums are guarded the same
+    way. A corrupt or out-of-range value now fails that request or job closed (RangeError → 500 / job failure). It
+    never produces a wrong amount.
+- **Regression tests:**
+  - `money.spec.ts`: `formatPence` matches an exact BigInt reference for all boundaries (±(2^53 − 1), 0, ±1, ±99, ±100,
+    …) and 20,000 random safe integers. It matches the previous implementation wherever that one was exact. The bigint
+    form equals the number form. Unsafe or non-integer numbers are refused.
+  - `pence-number-boundary.spec.ts`: an AST scan of server and Worker source. Any new `Number(...)` on a pence or gross
+    value outside `assertSafePence` fails. On main's code it lists all 21 money sites it can see.
+- **Residual (reported, not changed here):**
+  - **Statement:** the approved shift statement's loader (`shift-statement.job.ts`, 2 sites) is guarded on the PDF
+    integration branches (#57) and is baselined here.
+  - **Assistant totals:** `payroll-assistant.service.ts` guards with `Number.isSafeInteger`.
+  - **Scan pattern:** the scan matches identifiers containing `pence` or `gross` only. A pence value under another name
+    (e.g. `row.rate`, guarded by hand here) is not caught automatically.
+  - **Precision before the guard:** `payForMinutes` computes `rate × minutes` as a float, which is exact only while the
+    product is ≤ 2^53. Rate DTOs have `@Min(0)` but no `@Max`, so an absurd rate is refused only later, at the column
+    transformer (500, not 400).
+
+## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
+
+Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
+grants, RLS, the renderer's isolation, or any money or worked-minutes value.
+
+- **Asset:** the final timesheet. It is the record of the manager's sign-off ("Reviewed by … Finalised at …", the typed
+  "Signed off as …") and of the shift's "Total worked hours". The pre-shift roster's BEFORE-SHIFT DOCUMENT column is
+  also affected.
+- **Actor:** anyone who can write shift notes, a free-text field. This can also be accidental: a pasted URL, reference
+  or token.
+- **Finding (Medium, integrity):**
+  - **Actor → action → consequence:** notes holding one long unbroken token → the NOTES column grows to the token's
+    width → the right-hand column is pushed off the page → Chromium omits it from the PDF.
+  - **What is lost:** MANAGER SIGN-OFF and the total disappear without any error or warning, and only 237 of a
+    1,000-character token print.
+  - **Where:** `adolphus-document.ts` `DOCUMENT_CSS`, `.bottom > div { flex: 1 }`.
+  - **Root cause:** a flex item's `min-width: auto` means its smallest width is its longest unbreakable word.
+- **Fix:** `.bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }`. Both columns keep half the width, and a
+  token too long for its column breaks at the column edge. Every character is printed.
+- **Owner decision applied in the same change:** notes keep their line breaks. The notes paragraph only (class
+  `notes-text`) gets `white-space: pre-line`. The native renderer applies the same rule to the same field (agreed
+  field list: shift notes in both final-timesheet variants and in the pre-shift roster). Every other field still
+  collapses whitespace, including names, so a line break typed into a name cannot reshape the sign-off block.
+- **Unchanged otherwise:** for ordinary notes the PDF is byte-identical to the pre-fix stylesheet (tested), and values
+  are still escaped (`escapeHtml`). `pre-line` changes whitespace handling only; it cannot turn text into markup.
+- **Regression test:** `render-pdf-notes-layout.integration.spec.ts` (real Chromium via `renderHtmlToPdf`).
+  - A 1,000-character token prints in full.
+  - The sign-off, the total and the before-shift column are each printed exactly once.
+  - Chromium's print layout places nothing past the printable width.
+  - Paragraphs stay on separate lines, with blank lines kept.
+  - Run against main's templates, the token and line-break cases fail.
+- **Test-helper fix:** the PDF text reader (`__tests__/helpers/pdf-inspect.ts`) now honours a stream's direct `/Length`.
+  Before, it stripped a final 0x0d data byte as if it were an end-of-line marker. That made a font's ToUnicode map
+  unreadable, so every glyph of that font decoded as U+FFFD, which hides text from assertions. The fuller reader on
+  `worker/pdf-inspectors` (#54) already uses the same rule.
+- **Residual:**
+  - **Already-stored PDFs:** final timesheets generated before the fix whose notes held such a token remain without
+    their sign-off and total. Regenerating them is an owner decision.
+  - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
+    reported to the native-renderer owner.

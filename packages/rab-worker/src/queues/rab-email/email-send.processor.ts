@@ -25,6 +25,7 @@ import {
   REPORT_RECIPIENT_INELIGIBLE,
   ReportPermissionChecker,
 } from '../rab-reports/report-recipients';
+import { ClaimedAttempt, claimedAttemptFrom } from '../claimed-attempt';
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -101,6 +102,25 @@ export function deliveryKeyFor(emailOutboxId: string): string {
   return `email-outbox:${emailOutboxId}`;
 }
 
+/** Minutes after which the dispatcher reclaims a PROCESSING row (`email-dispatch.job.ts` PROCESSING_LEASE_MINUTES). Log text only. */
+const LEASE_MINUTES_FOR_LOG = 10;
+
+/**
+ * D-Q5b, OD-5 Option B (owner approval 2026-11-04): the provider CONFIRMED the send and only persisting SENT failed. Never
+ * routed to handleSendFailure: a RETRY write there made BullMQ call the provider a second time (a duplicate email, audit
+ * §13 #3). The processor ends the job instead (UnrecoverableError) and leaves the row to lease recovery.
+ */
+export class SentWriteFailedError extends Error {
+  readonly code = 'PERSIST_SENT_FAILED';
+  constructor(
+    emailOutboxId: string,
+    readonly persistError: unknown,
+  ) {
+    super(`Email outbox row ${emailOutboxId}: the provider accepted the email but SENT could not be persisted; left PROCESSING for lease recovery (no resend).`);
+    this.name = 'SentWriteFailedError';
+  }
+}
+
 export interface EmailSendProcessorDeps {
   tenantContext: TenantContextService;
   emailService: EmailService;
@@ -158,6 +178,13 @@ function auditActionsForJobType(jobType: string): { sent: AuditActionType; faile
  * binding context is re-read the row's live status — SENT or CANCELLED both
  * return immediately, no second send attempt, regardless of how many times
  * BullMQ redelivers the same job id.
+ *
+ * D-Q5b: the claim counts the attempt (`infrastructure_attempt_count + 1`, cumulative across generations — see
+ * `claimed-attempt.ts`) and refuses a row already at `max_infrastructure_attempts`; a failed SENT write after a confirmed
+ * send is never retried by BullMQ and never written RETRY (see `SentWriteFailedError`). This is not exactly-once: lease
+ * recovery re-presents a Resend row once under the same idempotency key, which the provider deduplicates only inside its
+ * key window (24 h; the lease is 10 min) — a recovery delayed past that window could send a second email. SMTP rows go to
+ * DELIVERY_UNCERTAIN (manual review) instead.
  */
 export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
   return async function processEmailSendJob(job: Job<EmailQueueJobData>): Promise<void> {
@@ -179,13 +206,25 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
       // Race-safe claim: only one worker (or one retry-in-flight) can move
       // a row into PROCESSING at a time, and it mints the ONE token every
       // subsequent write for this attempt must present.
+      // D-Q5b (OC-1): the same CAS counts this attempt and returns the cumulative count; a row already at its cap is not
+      // claimed (nothing is sent; the dispatcher's exhausted gate fails it).
       const claim = await manager
         .createQueryBuilder()
         .update(EmailOutbox)
-        .set({ status: EmailOutboxStatus.PROCESSING, processingAt: () => 'now()', processingToken })
-        .where('id = :id AND status IN (:...open)', { id: row.id, open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.RETRY] })
+        .set({
+          status: EmailOutboxStatus.PROCESSING,
+          processingAt: () => 'now()',
+          processingToken,
+          infrastructureAttemptCount: () => 'infrastructure_attempt_count + 1',
+        })
+        .where('id = :id AND status IN (:...open) AND infrastructure_attempt_count < max_infrastructure_attempts', {
+          id: row.id,
+          open: [EmailOutboxStatus.PENDING, EmailOutboxStatus.QUEUED, EmailOutboxStatus.RETRY],
+        })
+        .returning(['infrastructureAttemptCount', 'maxInfrastructureAttempts'])
         .execute();
       if (!claim.affected) return { skip: true as const };
+      const attempt = claimedAttemptFrom(claim.raw, 'infrastructure_attempt_count', 'max_infrastructure_attempts');
 
       const revalidation = await revalidate(manager, row);
       if (!revalidation.ok) {
@@ -196,7 +235,7 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
       // A row with an attachment (a report PDF) is revalidated once more against its WORKSPACE's own tables before the
       // provider-call marker is written — see the attachment step below. Every other row is unchanged: the marker is
       // written here, in this same transaction, exactly as before.
-      if (row.attachmentFileId) return { skip: false as const, row, attachmentCheckPending: true };
+      if (row.attachmentFileId) return { skip: false as const, row, attempt, attachmentCheckPending: true };
 
       // Durable, committed BEFORE the provider is ever contacted — the fact
       // this write happened is itself the signal recovery needs; its own
@@ -204,11 +243,12 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
       // the claim between the two statements above and here.
       await markProviderCallStarted(manager, row, processingToken);
 
-      return { skip: false as const, row, attachmentCheckPending: false };
+      return { skip: false as const, row, attempt, attachmentCheckPending: false };
     });
 
     if (outcome.skip) return;
     const row = outcome.row!;
+    const attempt = outcome.attempt!;
 
     try {
       if (outcome.attachmentCheckPending) {
@@ -282,14 +322,18 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
         attachments,
         idempotencyKey: deliveryKeyFor(row.id),
       });
-      await persistSent(deps, ctx, row, job, processingToken, result);
+      await persistSent(deps, ctx, row, attempt, processingToken, result);
     } catch (error) {
+      // D-Q5b, OD-5 Option B: the provider already accepted this email; only SENT could not be written. No RETRY/FAILED write
+      // (RETRY made BullMQ send it again) — the row stays PROCESSING under this token with its provider-call marker, and
+      // UnrecoverableError stops BullMQ from re-running the job. Lease recovery resolves the row without a second email.
+      if (error instanceof SentWriteFailedError) throw new UnrecoverableError(error.message);
       // Always throws — either the original error (BullMQ retries per its
       // own attempts/backoff config) or UnrecoverableError (BullMQ stops
       // immediately) — after persisting RETRY/FAILED state, UNLESS this
       // worker already lost the fencing token, in which case it does
       // neither (see handleSendFailure's own doc comment).
-      await handleSendFailure(deps, ctx, row, job, processingToken, error);
+      await handleSendFailure(deps, ctx, row, job, processingToken, attempt, error);
     }
   };
 }
@@ -334,17 +378,23 @@ async function markProviderCallStarted(manager: EntityManager, row: EmailOutbox,
  * it again here would be exactly the duplicate-send risk this phase exists
  * to remove). If every local retry is exhausted by a genuine error (not a
  * lost fencing token — that case is handled inline, no retry needed, no
- * error), this fails LOUDLY: logged in full and rethrown, never swallowed.
- * The row is left PROCESSING under a token this same worker still holds;
+ * error), this fails LOUDLY: logged in full and thrown as
+ * `SentWriteFailedError`, never swallowed. The row is left PROCESSING under a
+ * token this same worker still holds, and the processor ends the job without
+ * a RETRY write (D-Q5b, OD-5 Option B — before, the error reached
+ * handleSendFailure, which wrote RETRY, and BullMQ sent the email again).
  * `email-dispatch.job.ts`'s stale-lease recovery — which by then sees
  * `provider_call_started_at` set — is the backstop that resolves the
- * ambiguity this leaves behind, per the driver's own ambiguous-retry safety.
+ * ambiguity this leaves behind, per the driver's own ambiguous-retry safety:
+ * SMTP → FAILED `DELIVERY_UNCERTAIN` (manual review); Resend → one
+ * re-presentation under the same idempotency key (deduplicated by Resend); a
+ * row at its attempt cap → `DELIVERY_UNCERTAIN` for every driver.
  */
 async function persistSent(
   deps: EmailSendProcessorDeps,
   ctx: AuthContext,
   row: EmailOutbox,
-  job: Job<EmailQueueJobData>,
+  attempt: ClaimedAttempt,
   processingToken: string,
   result: { provider: string; providerMessageId?: string },
 ): Promise<void> {
@@ -360,7 +410,7 @@ async function persistSent(
           .set({
             status: EmailOutboxStatus.SENT,
             sentAt: () => 'now()',
-            infrastructureAttemptCount: job.attemptsMade + 1,
+            infrastructureAttemptCount: attempt.count,
             provider: result.provider,
             providerMessageId: result.providerMessageId,
             ...scrubSecretBody(row),
@@ -387,10 +437,22 @@ async function persistSent(
   }
   // eslint-disable-next-line no-console
   console.error(
-    `email send: PROVIDER SUCCEEDED (provider=${result.provider}${result.providerMessageId ? `, messageId=${result.providerMessageId}` : ''}) but persisting SENT for outbox row ${row.id} failed after ${attempts.length} local attempts. The row remains PROCESSING; recovery will resolve it as an ambiguous delivery.`,
-    lastError,
+    `email send: PROVIDER SUCCEEDED (provider=${result.provider}${result.providerMessageId ? `, messageId=${result.providerMessageId}` : ''}) but persisting SENT for outbox row ${row.id} failed after ${attempts.length} local attempts. ` +
+      `The row is left PROCESSING with its provider-call marker and this job is not retried (no second send). After the ${LEASE_MINUTES_FOR_LOG}-minute lease, ` +
+      'recovery resolves it per driver: SMTP → FAILED DELIVERY_UNCERTAIN (manual review); Resend → one re-presentation under the same idempotency key (the provider returns the original message); at the attempt cap → DELIVERY_UNCERTAIN. ' +
+      // Name and code only: a QueryFailedError carries the bound parameters (the fencing token) as an own property.
+      `Last error: ${describeErrorForLog(lastError)}.`,
   );
-  throw lastError;
+  throw new SentWriteFailedError(row.id, lastError);
+}
+
+/** `Name/code` of an error for a log line — never its message or own properties (bound query parameters, tokens). */
+function describeErrorForLog(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' || typeof code === 'number' ? `${error.name}/${code}` : error.name;
+  }
+  return typeof error;
 }
 
 /** `code` is written to `email_outbox.last_error_code`; `auditReasonCode` (S-6) refines it in the audit row only. */
@@ -572,15 +634,32 @@ async function revalidateOrganisationInvitation(manager: EntityManager, row: Ema
  * never be able to mark RETRY/FAILED (or anything else) once its lease has
  * been reclaimed, and there is nothing useful left for it to signal BullMQ
  * about — the row's fate now belongs to whoever holds the current token.
+ *
+ * D-Q5b (OC-1): final when the error is permanent or this attempt's CUMULATIVE count (from the claim) reached the row's
+ * cap — no longer when the current BullMQ job ran out of its own attempts. If a job's BullMQ attempts run out first
+ * (attempts spent before any claim, e.g. a row not yet visible), the row stays RETRY and the dispatcher's stale-RETRY
+ * recovery republishes it until the cumulative cap is reached.
  */
-async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext, row: EmailOutbox, job: Job<EmailQueueJobData>, processingToken: string, error: unknown): Promise<void> {
-  const attemptsMade = job.attemptsMade + 1;
-  const maxAttempts = job.opts.attempts ?? row.maxInfrastructureAttempts;
+async function handleSendFailure(
+  deps: EmailSendProcessorDeps,
+  ctx: AuthContext,
+  row: EmailOutbox,
+  job: Job<EmailQueueJobData>,
+  processingToken: string,
+  attempt: ClaimedAttempt,
+  error: unknown,
+): Promise<void> {
   const verdict = classifyEmailSendError(error);
   const retryable = verdict.retryable;
   const sanitized = sanitizeErrorMessage(error);
   const code = (error as { code?: string })?.code ?? (error as { name?: string })?.name ?? 'UNKNOWN';
-  const isFinal = !retryable || attemptsMade >= maxAttempts;
+  const isFinal = !retryable || attempt.count >= attempt.max;
+  // D5: a provider-throttled failure (Resend 429 retry-after) is re-delayed without consuming an attempt. Decided before
+  // the write so the throttled attempt gives its count back (recorded count = this attempt - 1), as when the count was
+  // job-relative; the last allowed attempt is never re-delayed (it is final, unchanged).
+  const delayMs = isFinal ? null : throttleDelayMs(verdict);
+  const throttled = delayMs !== null && Boolean(job.token) && (job.attemptsStarted ?? 0) < THROTTLE_MAX_STARTS;
+  const recordedCount = throttled ? attempt.count - 1 : attempt.count;
 
   const wroteAsOwner = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
     const write = await manager
@@ -588,7 +667,7 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
       .update(EmailOutbox)
       .set({
         status: isFinal ? EmailOutboxStatus.FAILED : EmailOutboxStatus.RETRY,
-        infrastructureAttemptCount: attemptsMade,
+        infrastructureAttemptCount: recordedCount,
         lastErrorCode: code,
         lastErrorMessageSanitized: sanitized,
         ...(isFinal ? { failedAt: () => 'now()', ...scrubSecretBody(row) } : {}),
@@ -608,7 +687,7 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
     if (isFinal) {
       await deps.auditService.record(manager, ctx, auditActionsForJobType(row.jobType).failed, {
         targetUserId: row.targetUserId,
-        metadata: { emailOutboxId: row.id, jobType: row.jobType, errorCode: code, attempts: attemptsMade, retryable },
+        metadata: { emailOutboxId: row.id, jobType: row.jobType, errorCode: code, attempts: attempt.count, retryable },
         actorUserId: null,
       });
     }
@@ -628,9 +707,8 @@ async function handleSendFailure(deps: EmailSendProcessorDeps, ctx: AuthContext,
   // backoff, wait what the provider asked for (clamped 1 s .. 2 min) by delaying THIS job (BullMQ DelayedError: no new
   // add(), so no jobId dedupe; the attempt is not consumed). Bounded by attemptsStarted so a provider that throttles
   // forever still ends through the normal attempts. Without a lock token (direct calls, tests) the normal path applies.
-  const delayMs = throttleDelayMs(verdict);
-  if (delayMs !== null && job.token && (job.attemptsStarted ?? 0) < THROTTLE_MAX_STARTS) {
-    await job.moveToDelayed(Date.now() + delayMs, job.token);
+  if (throttled) {
+    await job.moveToDelayed(Date.now() + delayMs!, job.token);
     throw new DelayedError(`email outbox row ${row.id} throttled by the provider; retrying in ${delayMs} ms`);
   }
   throw error;

@@ -165,6 +165,15 @@ export async function dispatchPushScope(
           continue;
         }
         if (hadPriorAttempt && row.attempt_count >= row.max_attempts) {
+          // D-Q5b: the claim now counts the in-flight attempt, so PROCESSING at the cap is "the last allowed attempt died".
+          // If it had already called the provider (marker set) the push may have been delivered: DELIVERY_UNCERTAIN, as it
+          // was before the counter change (with the job-relative count that row sat one below the cap) — never relabelled
+          // as a plain exhausted failure. Without the marker nothing was sent: exhausted, unchanged.
+          if (row.status === 'PROCESSING' && row.provider_call_started_at) {
+            await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN' WHERE id = $1`, [row.id]);
+            uncertainCount++;
+            continue;
+          }
           await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' WHERE id = $1`, [row.id]);
           exhaustedCount++;
           continue;

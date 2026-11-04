@@ -16,6 +16,7 @@ import {
   ShiftStatus,
   ShiftStatusType,
   POST_SHIFT_EXPIRED_MS,
+  assertSafePence,
 } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -226,7 +227,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     managerConfirmedAt: (r.manager_confirmed_at as Date) ?? null,
     managerRejectedAt: (r.manager_rejected_at as Date) ?? null,
     rejectionReason: (r.rejection_reason as string) ?? null,
-    estimatedPayPence: Number(r.estimated_pay_pence),
+    estimatedPayPence: assertSafePence(Number(r.estimated_pay_pence), 'job_offer.estimated_pay_pence'),
     offerBatchId: (r.offer_batch_id as string) ?? null,
     shiftId: r.shift_id as string,
     startsAt: r.starts_at as Date,
@@ -235,7 +236,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
-    payRatePence: Number(r.pay_rate_pence),
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'shift.pay_rate_pence'),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
