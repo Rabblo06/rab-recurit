@@ -620,12 +620,12 @@ export class EnvironmentVariables {
 
   /**
    * PDF renderer P1 (owner decisions D1/D2) — how the Worker renders the report kinds that have a native layout
-   * (today: the final timesheet).
+   * (today: the final timesheet and the pre-shift roster).
    *  - `chromium` (DEFAULT; also when unset or empty): the HTML template through the Chromium renderer, as before;
    *  - `native`: @react-pdf/renderer inside the Worker (pure JavaScript, no browser).
    * Anything else (a different case, surrounding spaces, another word) refuses to boot. Read by rab-worker only
    * (queues/rab-reports/render-pdf.util.ts `pdfRendererMode`, which applies the same rule at render time); report kinds
-   * without a native layout yet (pre-shift roster, shift statement) are rendered by Chromium in either mode.
+   * without a native layout yet (shift statement) are rendered by Chromium in either mode.
    */
   @IsOptional()
   @Transform(({ value }) => (value === '' ? undefined : value))

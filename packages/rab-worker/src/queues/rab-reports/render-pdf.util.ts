@@ -223,8 +223,8 @@ export type ReportDocument =
   | { kind: 'final-timesheet'; data: FinalTimesheetData }
   | { kind: 'approved-shift-statement'; data: ApprovedShiftStatementData };
 
-/** Kinds with a native layout. P1: the final timesheet only; every other kind renders through Chromium in either mode. */
-export const NATIVE_KINDS: ReadonlySet<ReportDocument['kind']> = new Set<ReportDocument['kind']>(['final-timesheet']);
+/** Kinds with a native layout: the final timesheet (P1) and the pre-shift roster (P2); every other kind renders through Chromium in either mode. */
+export const NATIVE_KINDS: ReadonlySet<ReportDocument['kind']> = new Set<ReportDocument['kind']>(['final-timesheet', 'pre-shift']);
 
 /** Chromium: today's template output for the document, unchanged. */
 export function htmlFor(doc: ReportDocument): string {
