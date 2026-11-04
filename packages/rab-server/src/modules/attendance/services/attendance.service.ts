@@ -3,6 +3,7 @@ import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignme
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import {
+  assertSafePence,
   assertTransition,
   ATTENDANCE_TRANSITIONS,
   AttendanceStatus,
@@ -205,7 +206,7 @@ function toAttendanceSummary(r: Record<string, unknown>): AttendanceSummary {
     clockInAt: r.clock_in_at as Date,
     clockOutAt: (r.clock_out_at as Date) ?? null,
     workedMinutes: r.worked_minutes === null || r.worked_minutes === undefined ? null : Number(r.worked_minutes),
-    earnedPence: r.earned_pence === null || r.earned_pence === undefined ? null : Number(r.earned_pence),
+    earnedPence: r.earned_pence === null || r.earned_pence === undefined ? null : assertSafePence(Number(r.earned_pence), 'attendance.earned_pence'),
     breakMinutes: r.break_minutes === null || r.break_minutes === undefined ? null : Number(r.break_minutes),
     locationVerified: Boolean(r.location_verified),
     clockOutMethod: (r.clock_out_method as string) ?? null,
@@ -218,7 +219,7 @@ function toAttendanceSummary(r: Record<string, unknown>): AttendanceSummary {
     staffName: `${r.first_name} ${r.last_name}`,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
     payrollStatus: (r.payroll_status as string) ?? null,
-    payrollApprovedPence: r.payroll_approved_pence === null || r.payroll_approved_pence === undefined ? null : Number(r.payroll_approved_pence),
+    payrollApprovedPence: r.payroll_approved_pence === null || r.payroll_approved_pence === undefined ? null : assertSafePence(Number(r.payroll_approved_pence), 'payroll_record.amount_pence'),
     clockInMethod: (r.clock_in_method as string) ?? null,
     checkInRequired: Boolean(r.check_in_required),
     checkedInAt: (r.checked_in_at as Date) ?? null,
