@@ -83,9 +83,15 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
         expect(out).toMatch(/"g_admin_only" is a member of owner role "crewflow" \(admin=true inherit=false set=false\)/);
         expect(out).toMatch(/owner role "rab_owner" is LOGIN/);
       });
-      await tx(owner, async () => {
-        await owner.query('GRANT crewflow_worker TO crewflow_owner');
-        expect((await ownerLoginRolePostureProblems(q(owner))).join('; ')).toMatch(/member of "crewflow_worker"/);
+      // B3 (rolemaker bootstrap): the owner login holds no ADMIN on crewflow_worker, so it cannot even add itself.
+      expect(await tx(owner, () => code(owner.query('GRANT crewflow_worker TO crewflow_owner')))).toBe('42501');
+      // Planted by the superuser instead: the inventory refuses it.
+      await tx(admin, async () => {
+        await admin.query('GRANT crewflow_worker TO crewflow_owner WITH INHERIT FALSE, SET FALSE');
+        const out = await ownerLoginRolePostureProblems(async (sql, params) =>
+          (await admin.query(sql.replace(/session_user/g, `'crewflow_owner'::name`).replace(/current_user/g, `'crewflow_owner'::name`), params as unknown[] | undefined)).rows,
+        );
+        expect(out.join('; ')).toMatch(/crewflow_owner is a member of "crewflow_worker"/);
       });
     });
 
@@ -132,11 +138,12 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       await tx(owner, async () => {
         await owner.query(`ALTER TABLE core.user_session NO FORCE ROW LEVEL SECURITY`);
         await owner.query(`DROP POLICY member_invitation_secure_owner_definer ON core.member_invitation`);
-        await owner.query(`CREATE TABLE public.g_owned (id int)`);
+        // The provider grant gives the login CREATE on the database (not on public): a schema it creates is unexpected.
+        await owner.query(`CREATE SCHEMA g_owned_schema`);
         const out = (await ownerLoginObjectPostureProblems(q(owner))).join('; ');
         expect(out).toMatch(/not-forced\|core\.user_session/);
         expect(out).toMatch(/core\.member_invitation: owner-only definer policy member_invitation_secure_owner_definer is missing/);
-        expect(out).toMatch(/public-object\|public\.g_owned\|crewflow_owner/);
+        expect(out).toMatch(/unexpected-schema\|g_owned_schema\|crewflow_owner/);
       });
     });
   });
@@ -249,7 +256,8 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       ['ALTER POLICY … USING (true)', `ALTER POLICY user_select ON core."user" USING (true)`, /\[core\] \+ policy\|user\|user_select/],
       [
         'a trojaned SECURITY DEFINER body',
-        `CREATE OR REPLACE FUNCTION core.auth_find_session_by_web_token_hash(p text) RETURNS SETOF core.user_session LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f$ SELECT * FROM core.user_session $f$`,
+        // Same signature and attributes, body changed (a comment is enough to change prosrc and the hash).
+        `TROJAN core.auth_find_session_by_web_token_hash(text)`,
         /function\|auth_find_session_by_web_token_hash/,
       ],
       ['an extra LOGIN member', `CREATE ROLE g_monitor_agent LOGIN; GRANT rab_secure_owner TO g_monitor_agent`, /\[roles\] \+ member\|rab_secure_owner\|g_monitor_agent/],
@@ -259,7 +267,10 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
     ])('%s', async (_label, plant, pattern) => {
       const baseline = await readSemanticPosture(q(owner));
       const drift = await tx(owner, async () => {
-        for (const sql of plant.split('; ')) await owner.query(sql);
+        if (plant.startsWith('TROJAN ')) {
+          const [{ def }] = await q(owner)(`SELECT pg_get_functiondef($1::regprocedure) AS def`, [plant.slice(7)]);
+          await owner.query(String(def).replace(/\$function\$\n?/, () => '$function$\n-- trojan: credential capture would go here\n'));
+        } else for (const sql of plant.split('; ')) await owner.query(sql);
         return semanticDriftFromSnapshot(baseline, await readSemanticPosture(q(owner), { ownTransaction: false }));
       });
       const text = drift.flatMap((d) => [...d.missing.map((l) => `[${d.section}] - ${l}`), ...d.unexpected.map((l) => `[${d.section}] + ${l}`)]).join('\n');

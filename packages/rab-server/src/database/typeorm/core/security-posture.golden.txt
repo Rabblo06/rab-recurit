@@ -386,6 +386,8 @@ execute|organisation_is_suspended(uuid)|crewflow|true
 execute|organisation_slug_taken(citext,uuid)|PUBLIC|false
 execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
+execute|owner_login_grant_parity_guard()|crewflow_app|false
+execute|owner_login_grant_parity_guard()|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
 execute|provision_workspace(uuid)|PUBLIC|false
@@ -625,6 +627,7 @@ owner|function|organisation_invitation_revoke(uuid)|rab_secure_owner|definer=tru
 owner|function|organisation_invitation_state(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|owner_login_grant_parity_guard()|crewflow|definer=false
 owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -1513,8 +1516,24 @@ ws|table|venue_role_rate|crewflow|S,I,U,D,T,R,G
 ws|table|venue|crewflow_app|S,I,U,D
 ws|table|venue|crewflow|S,I,U,D,T,R,G
 ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
+ws|trigger|payroll_record|payroll_record_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_record|payroll_record_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_record|payroll_record_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|payroll_record|payroll_record_guard|enabled=O|core.payroll_record_guard()
 ws|trigger|payroll_record|payroll_record_statement_pointer_del|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_ins|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_trunc|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_upd|enabled=O|core.worker_dispatch_pointer_statement_trg()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|shift_staff_review|shift_staff_review_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()

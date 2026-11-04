@@ -57,7 +57,7 @@ SELECT schema, line FROM (
   SELECT 'core',
          'function|' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')'
          || '|owner=' || pg_catalog.pg_get_userbyid(p.proowner) || '|definer=' || p.prosecdef || '|lang=' || l.lanname
-         || '|vol=' || p.provolatile || '|strict=' || p.proisstrict || '|leakproof=' || p.proleakproof
+         || '|vol=' || p.provolatile::text || '|strict=' || p.proisstrict || '|leakproof=' || p.proleakproof
          || '|config=' || coalesce(pg_catalog.array_to_string(p.proconfig, ';'), '-')
          || '|body=' || pg_catalog.md5(coalesce(p.prosrc, '') || '|' || coalesce(pg_catalog.pg_get_function_sqlbody(p.oid), ''))
     FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid = p.prolang
@@ -193,6 +193,9 @@ export function semanticDriftFromGolden(posture: SemanticPosture, golden: readon
   const out: SemanticDrift[] = [];
   const core = diff('core', g.core, posture.core);
   if (core) out.push(core);
+  // No workspace template in the golden (it was generated from a database with no workspace schema): workspaces are not
+  // compared here (the caller warns); the posture golden's ws| lines, check-rls-coverage and the fingerprints cover them.
+  if (g.workspace.length === 0) return out;
   for (const [schema, lines] of posture.workspaces) {
     const d = diff(schema, g.workspace, lines);
     if (d) out.push(d);
