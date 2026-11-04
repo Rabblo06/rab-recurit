@@ -9,6 +9,7 @@ import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-en
 import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
+import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -89,6 +90,15 @@ WORKER_SHIFT_SCAN_MODE=combined needs the greatest common divisor of ${COMBINED_
           `to be at least ${COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS} s (it is ${tick} s). Use intervals with a common tick (for example multiples of 60) or WORKER_SHIFT_SCAN_MODE=separate.`,
       );
     }
+  }
+
+  // Phase D-Q4b: the regex on WORKER_TIMER_TRIGGER_KINDS cannot see a repeated kind; the shared parser (the one the API and
+  // the Worker use) is the rule. Fail closed at boot, never on the first trigger.
+  try {
+    parseTimerTriggerKinds(validated.WORKER_TIMER_TRIGGER_KINDS);
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
   }
 
   // Fail fast on a malformed STORAGE_KEY_PREFIX (e.g. `../etc`) rather than on the first object write.

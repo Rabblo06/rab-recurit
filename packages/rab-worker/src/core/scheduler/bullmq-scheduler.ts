@@ -180,26 +180,39 @@ export function createConsumerJobProcessor(
   def: Pick<ConsumerQueueDefinition, 'name' | 'logName'>,
   handler: ProcessHandler,
   logger: Pick<Logger, 'warn'>,
-): (job: Pick<Job, 'id' | 'name'>) => Promise<unknown> {
-  return async (job) => {
+): (job: Pick<Job, 'id' | 'name'>, token?: string) => Promise<unknown> {
+  // D-Q4b: the BullMQ lock token is passed through (the timer-trigger handler needs it to re-delay an early job); the
+  // other consumers' handlers take one argument and ignore it.
+  return async (job, token) => {
     if (!acceptsJobName(def.name, job.name)) {
       logger.warn(`${def.logName} job ${job.id} refused: job name is not registered for ${def.name} (failed closed, not run)`);
       throw new UnrecoverableError(`unknown job name for ${def.name}`);
     }
-    return handler(job);
+    return handler(job, token);
   };
 }
 
 /**
- * The four consumers (`rab-email` 5, `rab-push` 10, `rab-shift-statements` 2, `rab-ai` 4) — one Worker each, in BOTH
+ * The consumers (`rab-email` 5, `rab-push` 10, `rab-shift-statements` 2, `rab-ai` 4, and — D-Q4b, only when enabled —
+ * `crewflow-timer-triggers` 2) — one Worker each, in BOTH
  * scheduler modes (never duplicated), on the legacy `bull` prefix, with the same connection and event logging main.ts
  * always used. D-Q1: every Worker option comes from the queue registry and is explicit (concurrency, lockDuration,
  * maxStalledCount, stalledInterval — the values BullMQ applied before, `rab-ai`'s 60 s lock included), and a job with an
  * unregistered name is failed closed (createConsumerJobProcessor).
  */
-export function createConsumerWorkers(registry: HandlerRegistry, connection: Redis, logger: Logger): Map<ConsumerQueueDefinition['key'], Worker> {
+export function createConsumerWorkers(
+  registry: HandlerRegistry,
+  connection: Redis,
+  logger: Logger,
+  /**
+   * D-Q4b: whether this process consumes the queue (default: every consumer). main.ts passes false for the timer-trigger
+   * queue when WORKER_TIMER_TRIGGERS=off, so `off` creates no extra BullMQ Worker and no extra Redis polling — today exactly.
+   */
+  isEnabled: (def: ConsumerQueueDefinition) => boolean = () => true,
+): Map<ConsumerQueueDefinition['key'], Worker> {
   const workers = new Map<ConsumerQueueDefinition['key'], Worker>();
   for (const def of Object.values(CONSUMER_QUEUES)) {
+    if (!isEnabled(def)) continue;
     const handler = registry.get(def.name, def.jobName)!.handler;
     // Every ACCEPTED job name on the queue goes to its one handler, exactly as the single processor function did before.
     const worker = new Worker(def.name, createConsumerJobProcessor(def, handler, logger), {

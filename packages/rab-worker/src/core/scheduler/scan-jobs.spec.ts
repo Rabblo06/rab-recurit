@@ -99,12 +99,13 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
     ]);
   });
 
-  it('consumer queues keep the legacy `bull` prefix, their names and concurrency 5 / 10 / 2 (+ AI Phase 1 rab-ai, 4)', () => {
+  it('consumer queues keep the legacy `bull` prefix, their names and concurrency 5 / 10 / 2 (+ AI Phase 1 rab-ai, 4; + D-Q4b timer triggers, 2)', () => {
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.name, q.jobName, q.prefix, q.concurrency])).toEqual([
       ['rab-email', 'send-email', LEGACY_BULL_PREFIX, 5],
       ['rab-push', 'send-push', LEGACY_BULL_PREFIX, 10],
       ['rab-shift-statements', 'generate-shift-statement', LEGACY_BULL_PREFIX, 2],
       ['rab-ai', 'ai-turn', LEGACY_BULL_PREFIX, 4],
+      ['crewflow-timer-triggers', 'offer-expiry-trigger', LEGACY_BULL_PREFIX, 2],
     ]);
     // No scan queue reuses a consumer queue name.
     for (const q of SCAN_QUEUE_NAMES) expect(Object.values(CONSUMER_QUEUES).map((c) => c.name)).not.toContain(q);
