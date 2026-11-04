@@ -18,6 +18,10 @@
  *   LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE, a fresh random password per run (never printed), and only the
  *   memberships the current stage needs: SET-only rab_owner for phase A; rab_secure_owner + crewflow afterwards.
  *
+ * Owner-login scenarios (PR 3): MIGRATION_SECURITY_SCENARIOS=owner-login | owner-login:transition | owner-login:unsupported
+ * delegate, on a CLEAN cluster, to migrate/owner-login/owner-login-lifecycle-check.ts (bootstrap, the D3(b) shim with golden
+ * equivalence, lifecycle, transition, version refusal). They never run together with the scenarios below.
+ *
  * Scenarios, each on its own new database:
  *   fresh    empty database -> head. Every privileged migration is first attempted by the restricted migrator and must be
  *            refused with the ledger unchanged; the CF-41 runner must refuse a superuser in phase A, and the migrator
@@ -775,7 +779,25 @@ async function main(): Promise<void> {
   // `fresh,upgrade` (default, the migration-security job) or `fresh` alone (ci-server / rls-coverage build their test
   // database through the restricted path this way). Anything else is refused: a typo must not silently run less.
   const scenarios = (process.env.MIGRATION_SECURITY_SCENARIOS ?? 'fresh,upgrade').trim();
-  if (!['fresh,upgrade', 'fresh'].includes(scenarios)) throw new CheckFailure(`MIGRATION_SECURITY_SCENARIOS must be "fresh,upgrade" or "fresh"`);
+  if (scenarios.startsWith('owner-login')) {
+    // Owner-login lifecycle (PR 3) on a CLEAN disposable cluster: nothing of the restricted-migrator scenarios may run
+    // first (roles are cluster-wide and the owner-login bootstrap must create them itself). `owner-login` = fresh +
+    // lifecycle (golden equivalence included); `owner-login:transition` / `owner-login:unsupported` need their own cluster.
+    const group = scenarios === 'owner-login' ? 'fresh,lifecycle' : scenarios.slice('owner-login:'.length);
+    if (!['fresh,lifecycle', 'transition', 'unsupported'].includes(group)) throw new CheckFailure('MIGRATION_SECURITY_SCENARIOS=owner-login[:transition|:unsupported]');
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, OWNER_LOGIN_CHECK_ADMIN_URL: ADMIN.toString(), OWNER_LOGIN_CHECK_SCENARIOS: group };
+    for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete childEnv[k];
+    const r = spawnSync(
+      process.execPath,
+      [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', join(__dirname, '..', '..', '..', '..', 'tsconfig.app.json'), join(__dirname, 'migrate', 'owner-login', 'owner-login-lifecycle-check.ts')],
+      { env: childEnv, stdio: 'inherit' },
+    );
+    check(r.status === 0, `owner-login lifecycle (${group}) passes`);
+    if (failures.length) process.exit(1);
+    log('all checks passed');
+    return;
+  }
+  if (!['fresh,upgrade', 'fresh'].includes(scenarios)) throw new CheckFailure(`MIGRATION_SECURITY_SCENARIOS must be "fresh,upgrade", "fresh" or "owner-login[:transition|:unsupported]"`);
   staticChecks();
   await ensureMigratorRole();
   try {
