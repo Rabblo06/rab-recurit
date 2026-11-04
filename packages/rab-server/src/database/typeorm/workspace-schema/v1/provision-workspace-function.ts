@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { SERVER_PATH_SENTINEL_SCHEMA as SENTINEL_SCHEMA, SERVER_PATH_TABLES_V1 as TABLES } from './server-path-template';
 
 /**

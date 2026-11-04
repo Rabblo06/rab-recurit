@@ -55,6 +55,7 @@ export class AiProposalExecutorService implements AiProposalExecutorContract {
   ): Promise<{ entityType: string; entityId: string }> {
     await this.access.assertDecidableTx(m, approverCtx);
 
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const [current] = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.id = $1`, [proposalId])) as AiProposalRow[];
     if (!current || current.status !== AiProposalStatus.PENDING) throw new AiProposalNotDecidableError();
     const tool = this.tools.get(current.tool);

@@ -200,6 +200,7 @@ export async function runOutboxRetentionCycle(
 
 async function purgeOnce(manager: EntityManager, fn: string, days: number, batch: number): Promise<number> {
   // `fn` is one of four fixed identifiers from TABLES above — never caller input.
+  // sql-injection-reviewed: function names from a module-constant list (code), never input.
   const rows: Array<{ n: number }> = await manager.query(`SELECT ${fn}(make_interval(days => $1), $2::integer) AS n`, [days, batch]);
   return Number(rows[0]?.n ?? 0);
 }

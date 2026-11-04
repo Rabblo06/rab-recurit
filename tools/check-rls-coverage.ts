@@ -1,15 +1,23 @@
 /**
  * CI gate (rab-workforce-architecture.md §5.7, §5.6): every table in schema
  * `core` with an `organisation_id` column must have Row-Level Security
- * enabled AND forced, and the application role (rab_app) must not have
- * BYPASSRLS. Run with a connection that can read `pg_class`/`pg_roles` —
- * PG_DATABASE_URL (or the deprecated DATABASE_URL outside production) is sufficient (no elevated grants needed).
+ * enabled AND forced, and no schema role may have BYPASSRLS. Run with
+ * PG_DATABASE_URL = the owner login crewflow_owner (the one runtime login).
  *
- * If the app ever connected as the table owner, RLS would be silently
- * skipped for every query it runs — this check is what makes that regressed
- * state fail CI instead of shipping quietly.
+ * Owner-login architecture (2026-11-04): the runtime login now OWNS the tables
+ * (through rab_secure_owner / crewflow), so RLS binds it only where FORCE is
+ * set. That is why every tenant table AND (since M-T1) every pre-auth table must
+ * be FORCE, and why this gate also proves the login's role / object posture.
  */
+import {
+  OWNER_LOGIN_ROLE,
+  ownerLoginObjectPostureProblems,
+  ownerLoginRolePostureProblems,
+  PREAUTH_DEFINER_POLICY_SQL,
+  preauthDefinerPolicyProblems,
+} from '../packages/rab-server/src/database/boot-checks/owner-login-posture';
 import { createPgClient, resolvePgEnvironment } from '../packages/rab-server/src/database/postgres';
+import { PREAUTH_FORCE_TABLES } from '../packages/rab-server/src/database/typeorm/core/preauth-force-sql';
 import { dispatchTriggerProblems } from '../packages/rab-server/src/database/typeorm/core/worker-dispatch-pointer-sql';
 import { dispatchNotifySettingProblems } from '../packages/rab-server/src/database/typeorm/core/security-posture';
 import type { Client } from 'pg';
@@ -22,112 +30,31 @@ import type { Client } from 'pg';
 const APP_ROLE = process.env.RAB_APP_ROLE ?? 'crewflow_app';
 
 /**
- * Tables deliberately not FORCEd — each needs a SECURITY TRADE-OFF note at
- * its migration explaining why (see IdentitySchema1786665800000 for
- * `organisation`/`user`: pre-auth login lookups can't satisfy a forced
- * tenant policy because no tenant context exists yet). Still must have
- * `rowsecurity = true` — this only relaxes the FORCE requirement, never the
- * "RLS enabled at all" one.
+ * Tables deliberately not FORCEd. EMPTY since M-T1 (PreAuthTablesForceOwnerOnly1786721400000, Twenty Mode Option A,
+ * owner-approved 2026-11-04). Every table with an organisation_id must now be ENABLE + FORCE.
+ *
+ * History (kept so the reasoning is not lost): until M-T1 this held the 14 pre-auth tables whose SECURITY DEFINER lookups
+ * run as the table owner rab_secure_owner before any tenant context exists — user, login_history, refresh_token,
+ * password_reset_token, manager_workspace, worker_due_work, account_invite, user_session, user_auth_identity,
+ * member_invitation, email_change_request, released_host_label, login_handoff, organisation_invitation — each with a
+ * SECURITY TRADE-OFF note at its migration; `organisation` and `platform_admin` (no organisation_id) were the same class,
+ * checked separately. FORCE would have bound the owner inside those definers and hidden the rows. M-T1 FORCEs all 16 and
+ * adds ONE owner-only PERMISSIVE policy per table (TO rab_secure_owner USING / WITH CHECK CURRENT_USER =
+ * 'rab_secure_owner'), so a definer still sees every row while a session that merely INHERITS the owner (Twenty mode's
+ * crewflow_owner; the separated migration identity acting as itself) is bound by the tenant policies like everyone else.
+ * The authoritative list is PREAUTH_FORCE_TABLES (preauth-force-sql.ts); this set must stay empty unless a reviewed
+ * migration re-introduces an exemption with its own SECURITY TRADE-OFF note.
  */
-const NOT_FORCED_ALLOWLIST = new Set([
-  'user',
-  'login_history',
-  'refresh_token',
-  'password_reset_token',
-  // Added by the Private Workspace migration (Stage 2A) — a SECURITY
-  // DEFINER function (workspace_subdomain_taken) needs owner-privilege
-  // visibility across every workspace for the cross-tenant subdomain
-  // uniqueness check, the same reason every other table on this list is
-  // exempt. `rab_app` is never affected either way — it isn't the owner.
-  'manager_workspace',
-  // worker_due_work (WorkerDueWork1786676800000): timer discovery must see due pointers across every tenant, and the SECURITY DEFINER
-  // claim/complete/reschedule functions run as the table owner. A FORCE policy would hide the rows from them. rab_app is not the owner and is
-  // fully bound by the tenant policy. SECURITY TRADE-OFF, recorded in the migration's own comment. Pointers carry no business data.
-  'worker_due_work',
-  // staff_profile and manager_profile were exempted by ResolveWorkspaceForUserPreAuthExemption1786668400000 for the retired
-  // resolve_workspace_for_user(). That function was retired (RetireResolveWorkspaceForUser1786675400000), so the exemption no longer
-  // applies. Both tables now FORCE (StaffProfileForceRls1786675800000, ManagerProfileForceRls1786675810000). Not listed here.
-  // Added by AccountInviteSchema1786670100000 — auth_find_account_invite_org
-  // is the pre-auth lookup /auth/activate-account needs (resolve which org a
-  // bare presented token belongs to, before any tenant context exists),
-  // exactly the same reasoning as password_reset_token above.
-  'account_invite',
-  // Added by WebSessionCookieAuthentication1786681000000 (P1C.1C), owner-approved — cookie-first
-  // browser authentication needs a pre-auth lookup (resolve a validated cookie's SHA-256 hash to
-  // the owning session's user/org/application-target, before any tenant context can exist — that
-  // context is literally what this lookup establishes) via
-  // `core.auth_find_session_by_web_token_hash`, a narrow SECURITY DEFINER function. Same
-  // reasoning as every other table on this list, including the most recent entry
-  // (`user_auth_identity`) whose own comment documents exactly why FORCE would silently break a
-  // SECURITY DEFINER pre-auth function. `rab_app` is never the owner and remains fully bound by
-  // `user_session_select`/`_insert`/`_update` regardless of this flag.
-  'user_session',
-  // Added by UserAuthIdentity1786680200000 (P1C.1B) — the ORIGINAL migration
-  // comment claimed a SECURITY DEFINER function alone would make FORCE safe
-  // for the pre-auth `auth_find_user_by_provider_identity` lookup (resolve
-  // which Crewflow user a validated Google/Microsoft identity belongs to,
-  // before any tenant context exists). That was wrong, caught by this
-  // table's own integration test, not assumed correct: FORCE binds the
-  // table OWNER too, including inside SECURITY DEFINER execution (the exact
-  // `core.user_session`/`count_user_session_backfill_status` lesson this
-  // codebase already learned once, UserSession1786678000000's own doc
-  // comment) — a SECURITY DEFINER function is not a bypass by itself, only
-  // NOT FORCE is. Same reasoning as password_reset_token/account_invite above.
-  'user_auth_identity',
-  // Added by MemberInvitationSchema1786715000000 — the public invitation-acceptance endpoint resolves which
-  // organisation/workspace a bare presented token belongs to through `core.auth_find_member_invitation`, a
-  // SECURITY DEFINER function running as the table owner, before any tenant context exists. Identical
-  // reasoning to account_invite above. `crewflow_app` is not the owner and stays bound by
-  // `member_invitation_scope` (organisation AND workspace) regardless of this flag.
-  'member_invitation',
-  // Added by EmailChangeRequest1786717800000 (CF-04) — the public email-change confirmation endpoint resolves which
-  // organisation a bare presented token belongs to through `core.auth_find_email_change_request`, before any tenant
-  // context exists. Same reasoning as password_reset_token / account_invite above; crewflow_app stays bound by the policy.
-  'email_change_request',
-  // Added by HostLabelNamespace1786719820000 (Wave 2/3 lane S2) — `core.resolve_released_host_label` is a PRE-AUTH lookup
-  // (an old host label → its workspace's current label, for a redirect) that must find the row before any tenant context
-  // exists, and the subdomain write triggers must see other organisations' live quarantines to refuse a claim. Both are
-  // SECURITY DEFINER functions owned by the table owner (rab_secure_owner, NOLOGIN); FORCE would bind the owner too.
-  // crewflow_app and crewflow hold NO privilege on this table at all. SECURITY TRADE-OFF note in the migration's SQL
-  // (host-label-namespace-sql.ts). The sibling `host_label_claim` and `workspace_schema_migration` ARE forced.
-  'released_host_label',
-  // Added by LoginHandoff1786719910000 (Waves 4+5 lane DB5) — `core.login_handoff_consume` is a PRE-AUTH lookup on the
-  // target workspace host: it must find the single-use handoff by its token hash before any tenant context exists
-  // (establishing that context is its purpose). It runs as the table owner rab_secure_owner (NOLOGIN); FORCE would bind the
-  // owner to the tenant policy and hide the row. crewflow_app and crewflow hold NO privilege on the table; access is only
-  // through login_handoff_create / _consume / _cleanup. SECURITY TRADE-OFF note in login-handoff-sql.ts. (Its sibling
-  // core.user_mfa_recovery_code IS forced: MFA functions run with the server-derived tenant bound.)
-  'login_handoff',
-  // Added by OrganisationCeoInvitation1786720010000 (owner correction 2026-10-23: email-only CEO invitations) —
-  // `core.organisation_invitation_peek` / `_complete` are PRE-AUTH lookups by token hash (the invited CEO has no account,
-  // session or organisation yet; establishing them is the purpose). Both run as the table owner rab_secure_owner (NOLOGIN);
-  // FORCE would bind the owner to the platform-admin policy and hide the row. crewflow and crewflow_app hold NO privilege
-  // on the table; every other operation goes through functions that re-check the platform-administrator claim. No
-  // organisation_id column (not tenant data — like platform_admin), so only this ENABLE-but-NOT-FORCE check covers it.
-  'organisation_invitation',
-]);
+const NOT_FORCED_ALLOWLIST = new Set<string>([]);
 
 /**
- * `organisation` itself is deliberately NOT FORCEd (IdentitySchema1786665800000
- * — the pre-auth org-lookup-by-slug/email flow can't satisfy a forced
- * `id = current_org()` policy before any tenant context exists), but it has
- * no `organisation_id` column (its own PK is `id`), so the scan above never
- * even looks at it — a live audit found it silently drifted to FORCEd
- * (breaking every org-bootstrap insert, `rab_owner` included) with this
- * checker still reporting "OK" throughout, since it was entirely out of
- * scope. Checked explicitly here, alongside every other table on
- * NOT_FORCED_ALLOWLIST, so a repeat of that drift — on `organisation` or any
- * of the others — fails this gate instead of failing silently.
- *
- * `platform_admin` (Stage 2A Phase 2) is the same class of gap as
- * `organisation` — genuinely global, no `organisation_id` column at all, so
- * it's equally invisible to the scan above. NOT FORCEd deliberately: the
- * bootstrap CLI (`grant-platform-admin`, connects as `rab_owner`) must be
- * able to write the very first row when zero admins exist yet, which a
- * self-referential `WITH CHECK` (requiring the caller already be an active
- * admin) can never satisfy for any `rab_app` session by design.
+ * M-T1: the 16 pre-auth tables (14 with organisation_id + `organisation` and `platform_admin`, which have none and so are
+ * invisible to the per-table scan below). Each must be ENABLE + FORCE AND carry its exact owner-only definer policy
+ * (`<table>_secure_owner_definer`, PERMISSIVE, FOR ALL, TO rab_secure_owner, USING / WITH CHECK
+ * (CURRENT_USER = 'rab_secure_owner'::name)). A drift back to NOT FORCE (the `organisation` incident class, in the other
+ * direction now), a dropped or rewritten definer policy, or a missing table fails this gate.
  */
-const PRE_AUTH_EXEMPT_TABLES = new Set(['organisation', 'platform_admin', ...NOT_FORCED_ALLOWLIST]);
+const PREAUTH_FORCED_TABLES = new Set<string>(PREAUTH_FORCE_TABLES);
 
 /**
  * Phase B / B3 (DeploymentIdentity1786721230000): tables with NO `organisation_id` (not tenant data — the deployment
@@ -167,6 +94,16 @@ const WORKSPACE_SCHEMA_PATTERN = '^workspace_[0-9a-f]{32}$';
  *  - the claim / release functions: EXECUTE crewflow_worker only.
  */
 const WORKER_ROLE = 'crewflow_worker';
+
+/**
+ * Owner-login architecture (owner's final decision 2026-11-04, PERMANENT): the one runtime login is crewflow_owner, which
+ * INHERITS the owner roles by design. Updated in place: the connection must BE crewflow_owner and its role / object
+ * posture must be the reviewed owner-login layout (owner-login-posture.ts, the boot gate's own functions); the
+ * pointer-table probe now expects zero rows (the RESTRICTIVE deny policy TO crewflow applies to crewflow_owner through its
+ * crewflow membership) instead of a permission error (catalogue BC-10). APP_ROLE (crewflow_app) remains the SCHEMA role
+ * whose grants and BYPASSRLS attribute are still checked: definers and historical grants reference it.
+ */
+const CONNECT_ROLE = OWNER_LOGIN_ROLE;
 const WORKER_CALLABLE = [
   'core.worker_claim_email_dispatch(integer)',
   'core.worker_claim_push_dispatch(integer)',
@@ -235,14 +172,17 @@ async function checkWorkerRole(client: Client): Promise<string[]> {
     }
   }
   problems.push(...(await checkDispatchTriggers(client)));
-  // Fail closed for the connected runtime role: a read is refused outright (no privilege), never answered with rows.
+  // Fail closed for the connected runtime login on normal paths. Before the owner login a read was refused outright (no
+  // privilege, 42501). crewflow_owner reaches the owner's privilege, so the read is no longer refused (catalogue BC-10,
+  // PENDING OWNER APPROVAL); the RESTRICTIVE deny policy (TO crewflow, inherited) must still answer zero rows. A
+  // `SET ROLE rab_secure_owner` (injection) reads every pointer: owner-accepted (final prompt section 2), not detectable here.
   await client.query('BEGIN READ ONLY');
   try {
-    await client.query('SELECT count(*) FROM core.worker_dispatch_pointer');
-    problems.push('core.worker_dispatch_pointer: the connected runtime role could read it (expected permission denied)');
+    const { rows } = await client.query<{ n: number }>('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer');
+    if (rows[0]!.n !== 0) problems.push(`core.worker_dispatch_pointer: ${rows[0]!.n} row(s) visible to ${CONNECT_ROLE} (expected 0: restrictive deny)`);
   } catch (error) {
     const code = (error as { code?: string }).code;
-    if (code !== '42501') problems.push(`core.worker_dispatch_pointer: probe failed with ${code ?? 'error'}, expected 42501`);
+    problems.push(`core.worker_dispatch_pointer: probe failed with ${code ?? 'error'} as ${CONNECT_ROLE}, expected 0 rows`);
   } finally {
     await client.query('ROLLBACK');
   }
@@ -425,17 +365,21 @@ async function main(): Promise<void> {
     }
 
     const drifted: DriftedExemptTable[] = [];
-    for (const table of PRE_AUTH_EXEMPT_TABLES) {
-      const { rows } = await client.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
-        `SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = $1::regclass`,
+    for (const table of PREAUTH_FORCED_TABLES) {
+      const { rows } = await client.query<{ relrowsecurity: boolean | null; relforcerowsecurity: boolean | null }>(
+        `SELECT c.relrowsecurity, c.relforcerowsecurity
+           FROM (SELECT 1) one LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass($1)`,
         [`core."${table}"`],
       );
       const status = rows[0];
-      const correct = Boolean(status?.relrowsecurity) && !status?.relforcerowsecurity;
+      const correct = Boolean(status?.relrowsecurity) && Boolean(status?.relforcerowsecurity);
       if (!correct) {
         drifted.push({ table, rowsecurity: Boolean(status?.relrowsecurity), forced: Boolean(status?.relforcerowsecurity) });
       }
     }
+    const definerPolicyProblems = preauthDefinerPolicyProblems(
+      (await client.query(PREAUTH_DEFINER_POLICY_SQL, [[...PREAUTH_FORCED_TABLES]])).rows as Array<Record<string, unknown>>,
+    );
 
     const forcedNonTenant: DriftedExemptTable[] = [];
     for (const table of FORCED_NON_TENANT_TABLES) {
@@ -469,13 +413,22 @@ async function main(): Promise<void> {
 
     let failed = false;
 
-    if (connectedAs !== APP_ROLE) {
+    if (connectedAs !== CONNECT_ROLE) {
       failed = true;
       console.error(
-        `RLS coverage FAILED — DATABASE_URL connects as "${connectedAs}", not "${APP_ROLE}". ` +
-          `Any table in NOT_FORCED_ALLOWLIST (${[...NOT_FORCED_ALLOWLIST].join(', ')}) is fully ` +
-          `unscoped for every query run over this connection, regardless of tenant context.\n`,
+        `RLS coverage FAILED: PG_DATABASE_URL connects as "${connectedAs}", not the owner login "${CONNECT_ROLE}". ` +
+          `Every process connects as the owner login; the legacy logins are schema roles.\n`,
       );
+    } else {
+      // The connection IS the owner login by design; prove it is the reviewed owner-login shape (the boot gate's functions).
+      const q = async (sql: string, params?: unknown[]) => (await client.query(sql, params as unknown[] | undefined)).rows as Array<Record<string, unknown>>;
+      const ownerProblems = [...(await ownerLoginRolePostureProblems(q)), ...(await ownerLoginObjectPostureProblems(q))];
+      if (ownerProblems.length > 0) {
+        failed = true;
+        console.error(`RLS coverage FAILED: the owner-login role / object posture drifted:\n`);
+        for (const p of ownerProblems) console.error(`  ${p}`);
+        console.error('');
+      }
     }
 
     if (unprotected.length > 0) {
@@ -490,15 +443,16 @@ async function main(): Promise<void> {
       console.error('');
     }
 
-    if (drifted.length > 0) {
+    if (drifted.length > 0 || definerPolicyProblems.length > 0) {
       failed = true;
-      console.error(`RLS coverage FAILED — pre-auth-exempt tables drifted from ENABLE-but-NOT-FORCE:\n`);
+      console.error(`RLS coverage FAILED — the M-T1 pre-auth tables are not ENABLE + FORCE with their owner-only definer policy:\n`);
       for (const t of drifted) {
         console.error(
           `  core.${t.table}: rowsecurity=${t.rowsecurity} forceRowSecurity=${t.forced}` +
-            ` — expected rowsecurity=true forceRowSecurity=false (see SECURITY TRADE-OFF note at its migration)`,
+            ` — expected rowsecurity=true forceRowSecurity=true (PreAuthTablesForceOwnerOnly1786721400000; a missing table counts as not forced)`,
         );
       }
+      for (const p of definerPolicyProblems) console.error(`  ${p}`);
       console.error('');
     }
 
@@ -561,7 +515,8 @@ async function main(): Promise<void> {
     }
 
     console.log(
-      `RLS coverage OK — ${tenantTables.rows.length} tenant table(s) checked, all protected; ` +
+      `RLS coverage OK (connected as the owner login ${CONNECT_ROLE}) — ${tenantTables.rows.length} tenant table(s) checked, all protected; ` +
+        `${PREAUTH_FORCED_TABLES.size} pre-auth table(s) FORCE with their owner-only definer policy; ` +
         `${FORCED_NON_TENANT_TABLES.length} non-tenant FORCE table(s) (${FORCED_NON_TENANT_TABLES.join(', ')}) forced; ` +
         `${workspaces.schemas} workspace schema(s), ${workspaces.tables} workspace table(s) checked.`,
     );

@@ -100,6 +100,7 @@ export async function processAttendanceMonitorScopes(
   const candidates: ScanCandidate[] = [];
   for (const scope of scopes) {
     const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, manager =>
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       manager.query<ScanCandidate[]>(`
         SELECT a.id AS attendance_id, a.organisation_id, a.workspace_id
         FROM attendance a

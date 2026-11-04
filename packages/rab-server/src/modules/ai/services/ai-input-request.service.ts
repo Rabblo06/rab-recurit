@@ -119,6 +119,7 @@ export class AiInputRequestService {
       await this.access.assertDecidableTx(m, ctx);
       await this.ownConversation(m, conversationId);
       await this.expireDueTx(m, ctx, `r.conversation_id = $1`, [conversationId]);
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await m.query<RequestRow[]>(`SELECT ${COLUMNS} FROM core.ai_input_request r WHERE r.conversation_id = $1 ORDER BY r.created_at, r.id LIMIT ${MAX_LISTED}`, [conversationId]);
       return rows.map(toView);
     });
@@ -131,6 +132,7 @@ export class AiInputRequestService {
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.access.assertDecidableTx(m, ctx);
       await this.ownConversation(m, conversationId);
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const [row] = await m.query<RequestRow[]>(`SELECT ${COLUMNS} FROM core.ai_input_request r WHERE r.id = $1 AND r.conversation_id = $2 FOR UPDATE`, [requestId, conversationId]);
       if (!row) throw new AiRecordNotFoundException();
       if (row.state === 'awaiting_input' && row.expired) return { kind: 'expired' as const };
@@ -165,6 +167,7 @@ export class AiInputRequestService {
           ...(typeof checked.value === 'object' ? { fields: Object.keys(checked.value).filter((k) => (checked.value as Record<string, unknown>)[k] !== null) } : {}),
         },
       });
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const [fresh] = await m.query<RequestRow[]>(`SELECT ${COLUMNS} FROM core.ai_input_request r WHERE r.id = $1`, [requestId]);
       return { kind: 'answered' as const, view: toView(fresh!), turnId: row.turn_id };
     });
@@ -200,12 +203,17 @@ export class AiInputRequestService {
       params.push(turnId);
       only = ' AND turn_id = $2';
     }
+    // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
     await m.query(`UPDATE core.ai_input_request SET state = 'superseded' WHERE conversation_id = $1 AND state = 'awaiting_input'${only}`, params);
+    // SQL-injection lint (owner login): the target status is a bound parameter (it was a literal validated only by
+    // assertTransition above); the optional turn filter is a fixed fragment.
+    const endedParams = [...params, to];
     const ended = await returningRows<{ id: string }>(
       m,
-      `UPDATE core.ai_message SET status = '${to}', completed_at = now(), updated_at = now()
+      // sql-injection-reviewed: only the literal ' AND id = $2' is spliced; the status is $N, every value is bound.
+      `UPDATE core.ai_message SET status = $${endedParams.length}, completed_at = now(), updated_at = now()
         WHERE conversation_id = $1 AND role = 'assistant' AND status = 'waiting_for_input'${turnId ? ' AND id = $2' : ''} RETURNING id`,
-      params,
+      endedParams,
     );
     for (const t of ended) {
       await this.audit.record(m, ctx, to === 'cancelled' ? AuditAction.AI_TURN_CANCELLED : AuditAction.AI_TURN_COMPLETED, {
@@ -222,6 +230,7 @@ export class AiInputRequestService {
     assertTransition(AI_INPUT_REQUEST_TRANSITIONS, 'awaiting_input', 'expired');
     const expired = await returningRows<{ id: string; turn_id: string; conversation_id: string }>(
       m,
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `UPDATE core.ai_input_request r SET state = 'expired' WHERE ${where} AND r.state = 'awaiting_input' AND r.expires_at <= now() RETURNING r.id, r.turn_id, r.conversation_id`,
       params,
     );

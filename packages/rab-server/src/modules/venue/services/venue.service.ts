@@ -157,6 +157,7 @@ export class VenueService {
         const targets = ['venue.name ILIKE :q'];
         if (visible('clientName')) targets.push('venue.clientName ILIKE :q');
         if (visible('address')) targets.push("venue.address->>'city' ILIKE :q");
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         qb.andWhere(`(${targets.join(' OR ')})`, { q: toIlikePattern(dto.q) });
       }
       if (dto.status) qb.andWhere('venue.status = :status', { status: dto.status });

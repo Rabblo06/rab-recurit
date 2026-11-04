@@ -105,6 +105,7 @@ export async function decideTimerTrigger(
     const [row] = await manager.query<
       Array<{ status: string; shift_status: string; checked_in: boolean; has_attendance: boolean; already_claimed: boolean; starts_at: Date; db_now: Date }>
     >(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT sa.status, s.status AS shift_status, sa.checked_in_at IS NOT NULL AS checked_in,
               EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id) AS has_attendance,
               EXISTS (SELECT 1 FROM core.worker_event we WHERE we.event_key = $2 AND we.status IN ('completed', 'cancelled')) AS already_claimed,

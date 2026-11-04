@@ -201,6 +201,7 @@ export function compileRecordFilter(objectKey: string, stored: unknown, target: 
     }
   };
   const renderGroup = (g: FilterGroup): string =>
+    // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
     `(${g.conditions.map((node) => (isGroup(node) ? renderGroup(node) : renderCondition(node))).join(g.op === 'and' ? ' AND ' : ' OR ')})`;
 
   return { sql: renderGroup(filter), named, positional };
@@ -213,6 +214,7 @@ export function compileRecordFilter(objectKey: string, stored: unknown, target: 
 export function andCompiled(parts: CompiledFilter[]): CompiledFilter {
   if (parts.length === 0) return { sql: 'FALSE', named: {}, positional: [] };
   return {
+    // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
     sql: parts.map((p) => `(${p.sql})`).join(' AND '),
     named: Object.assign({}, ...parts.map((p) => p.named)),
     positional: parts.flatMap((p) => p.positional),

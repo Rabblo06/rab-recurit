@@ -47,6 +47,7 @@ export interface ShiftVacancy {
  */
 export async function loadShiftVacancy(manager: EntityManager, shiftId: string): Promise<ShiftVacancy> {
   const [row] = await manager.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT s.required_count, s.filled_count,
             count(sa.id) FILTER (WHERE ${occupiedSeatSql('sa')})::int AS occupied,
             count(sa.id) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows,
@@ -89,6 +90,7 @@ export function vacancyFromCounts(input: { requiredCount: number; filledCount: n
  */
 export function shiftSeatCountsSql(sa = 'sa'): string {
   if (!/^[a-z][a-z0-9_]*$/.test(sa)) throw new Error('Invalid SQL alias');
+  // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
   return `count(${sa}.id) FILTER (WHERE ${occupiedSeatSql(sa)})::int AS occupied,
             count(${sa}.id) FILTER (WHERE ${sa}.status = 'no_show' AND ${sa}.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows,
             count(${sa}.id) FILTER (WHERE ${sa}.status = 'offered')::int AS pending_offers,
