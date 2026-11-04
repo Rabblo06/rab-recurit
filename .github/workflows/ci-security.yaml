@@ -85,7 +85,7 @@ jobs:
           docker exec disposable-postgres psql -X -q -v ON_ERROR_STOP=1 -U ci_bootstrap -d postgres \
             -c "CREATE DATABASE ${db}" -c "ALTER DATABASE ${db} SET crewflow.disposable_test_database = 'true'"
           printf '%s' "${owner_pass}" | docker exec -i disposable-postgres sh -c 'umask 077; cat > /tmp/owner-pw'
-          docker exec -i disposable-postgres psql -X -q -U ci_bootstrap -d "${db}" -v owner_password_file=/tmp/owner-pw -v DBNAME="${db}" -f - \
+          docker exec -i disposable-postgres psql -X -q -U ci_bootstrap -d "${db}" -v owner_password_file=/tmp/owner-pw -f - \
             < packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
           docker exec disposable-postgres rm -f /tmp/owner-pw
           admin="${MIGRATION_SECURITY_ADMIN_URL%/*}/${db}"
