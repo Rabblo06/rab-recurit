@@ -4,7 +4,7 @@ import { bullmqJobOptionsOf, BullmqJobOptions, JobNameOf, QueueName, QueueSettin
  * Phase D-Q1: the ONE way a Crewflow producer builds a BullMQ job. Pure (no Nest, no Redis, no BullMQ runtime import).
  *
  * Every enqueue DECLARES WHOSE JOB IT IS — a required tenant scope, checked against the queue registry:
- *   - `{ kind: 'organisation', organisationId }` for the four consumer queues. `organisationId` must be a UUID and must
+ *   - `{ kind: 'organisation', organisationId }` for the consumer queues. `organisationId` must be a UUID and must
  *     equal the payload's `organisationId`. It is always taken from a committed row or the server-side tenant context
  *     (the outbox row the producer just wrote or claimed, the bound AuthContext), never from a client value — the
  *     consumer then binds exactly this id with SET LOCAL and re-reads the row under FORCE RLS, so a mismatch could only

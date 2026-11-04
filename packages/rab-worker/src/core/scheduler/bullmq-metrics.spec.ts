@@ -32,17 +32,22 @@ describe('BullMQ Worker metrics (admin panel Health chart source)', () => {
     expect(WORKER_METRICS_MAX_DATA_POINTS).toBe(MetricsTime.ONE_WEEK);
   });
 
-  it('every consumer Worker (rab-email, rab-push, rab-shift-statements, rab-ai) is created with the metrics option; concurrency unchanged', () => {
+  it('every consumer Worker (rab-email, rab-push, rab-shift-statements, rab-ai, D-Q4b crewflow-timer-triggers) is created with the metrics option; concurrency unchanged', () => {
     constructed.length = 0;
     const registry = { get: () => ({ handler: async () => undefined }) } as unknown as Parameters<typeof createConsumerWorkers>[0];
     createConsumerWorkers(registry, {} as Redis, new Logger('test'));
-    expect(constructed.map((c) => c.name).sort()).toEqual(['rab-ai', 'rab-email', 'rab-push', 'rab-shift-statements']);
+    expect(constructed.map((c) => c.name).sort()).toEqual(['crewflow-timer-triggers', 'rab-ai', 'rab-email', 'rab-push', 'rab-shift-statements']);
     for (const c of constructed) expect(c.opts.metrics).toEqual({ maxDataPoints: 10_080 });
-    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.concurrency]))).toEqual({ 'rab-email': 5, 'rab-push': 10, 'rab-shift-statements': 2, 'rab-ai': 4 });
+    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.concurrency]))).toEqual({ 'rab-email': 5, 'rab-push': 10, 'rab-shift-statements': 2, 'rab-ai': 4, 'crewflow-timer-triggers': 2 });
     // AI Phase 1: only rab-ai overrides the lock duration; the original three keep BullMQ's default (30 s). D-Q1: that
     // default is now passed EXPLICITLY (same effective value — BULLMQ_WORKER_DEFAULTS is pinned to the installed bullmq's
     // own defaults in queue-registry.spec.ts), as are maxStalledCount (1) and stalledInterval (30 s).
-    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.lockDuration]))).toEqual({ 'rab-email': 30_000, 'rab-push': 30_000, 'rab-shift-statements': 30_000, 'rab-ai': 60_000 });
+    expect(Object.fromEntries(constructed.map((c) => [c.name, c.opts.lockDuration]))).toEqual({ 'rab-email': 30_000, 'rab-push': 30_000, 'rab-shift-statements': 30_000, 'rab-ai': 60_000, 'crewflow-timer-triggers': 30_000 });
+    // D-Q4b: with WORKER_TIMER_TRIGGERS=off main.ts passes an enable predicate that skips the trigger consumer — exactly the
+    // four pre-D-Q4b Workers.
+    constructed.length = 0;
+    createConsumerWorkers(registry, {} as Redis, new Logger('test'), (def) => def.key !== 'timerTriggers');
+    expect(constructed.map((c) => c.name).sort()).toEqual(['rab-ai', 'rab-email', 'rab-push', 'rab-shift-statements']);
     for (const c of constructed) expect([c.opts.maxStalledCount, c.opts.stalledInterval]).toEqual([1, 30_000]);
   });
 });

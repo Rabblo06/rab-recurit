@@ -41,9 +41,15 @@ jobs:
         id: filter
         with:
           filters: |
+            # The Node version every CI job runs (setup-node reads .nvmrc in .github/actions/yarn-install): a change to it
+            # must re-run every suite on the new Node, so it counts as a change to every package below (and to e2e).
+            toolchain: &toolchain
+              - '.nvmrc'
             shared: &shared
+              - *toolchain
               - 'packages/rab-shared/**'
             ui: &ui
+              - *toolchain
               - 'packages/rab-ui/**'
             server: &server
               - *shared
@@ -76,6 +82,7 @@ jobs:
             # The e2e package itself, the fixtures its AI visual suites load, and the CI wiring that runs it: a change
             # to any of these must run ci-e2e even when no application package changed.
             e2e:
+              - *toolchain
               - 'packages/rab-e2e-testing/**'
               - 'packages/rab-docs/tools/web/**'
               - '.github/workflows/ci-e2e.yaml'

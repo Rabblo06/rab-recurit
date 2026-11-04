@@ -16,8 +16,9 @@ import {
   ShiftStatus,
   ShiftStatusType,
   POST_SHIFT_EXPIRED_MS,
+  assertSafePence,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -54,6 +55,8 @@ import { applyOfferConfirmation } from './apply-offer-confirmation';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
+import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
+import { TimerTriggerQueueService } from '../../../engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
@@ -224,7 +227,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     managerConfirmedAt: (r.manager_confirmed_at as Date) ?? null,
     managerRejectedAt: (r.manager_rejected_at as Date) ?? null,
     rejectionReason: (r.rejection_reason as string) ?? null,
-    estimatedPayPence: Number(r.estimated_pay_pence),
+    estimatedPayPence: assertSafePence(Number(r.estimated_pay_pence), 'job_offer.estimated_pay_pence'),
     offerBatchId: (r.offer_batch_id as string) ?? null,
     shiftId: r.shift_id as string,
     startsAt: r.starts_at as Date,
@@ -233,7 +236,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
-    payRatePence: Number(r.pay_rate_pence),
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'shift.pay_rate_pence'),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
@@ -267,6 +270,10 @@ export class OfferService {
     private readonly venueService: VenueService,
     private readonly userNotes: UserNoteService,
     private readonly permissions: PermissionsService,
+    // Phase D-Q4b: delayed timer triggers (WORKER_TIMER_TRIGGERS, default off ⇒ these arm nothing). Optional so a context
+    // without the producer behaves exactly as before; the backstop scans never depend on them.
+    @Optional() private readonly timerTriggers?: TimerTriggerQueueService,
+    @Optional() private readonly env?: EnvironmentService,
   ) {}
 
   /**
@@ -579,6 +586,18 @@ export class OfferService {
       createdBy: ctx.userId,
     });
     await manager.save(offer);
+    // Phase D-Q4b: arm the offer-expiry trigger AFTER this transaction commits (a rollback — of the whole send or of a
+    // bulk send's savepoint — arms nothing). Ids and the committed expires_at only; never throws into this transaction.
+    // An offer with no workspace is unreachable by the workspace-scoped Worker, so it gets no trigger (the scan ignores it too).
+    if (offer.workspaceId) {
+      this.timerTriggers?.afterCommit(manager, {
+        kind: 'offer-expiry',
+        organisationId: offer.organisationId,
+        workspaceId: offer.workspaceId,
+        subjectId: offer.id,
+        dueAt: expiresAt,
+      });
+    }
 
     await this.auditService.record(manager, ctx, AuditAction.OFFER_SENT, {
       entityType: 'offer',
@@ -1277,6 +1296,19 @@ export class OfferService {
           subjectId: offer.id,
           dueAt: now,
         });
+        // Phase D-Q4b: WAKE the Worker's manager-confirmation-timeout claim at the deadline (staff_accepted_at + the
+        // configured timeout), after this transaction commits. The pointer above stays the authority; the Worker re-reads
+        // the offer and only then runs the existing claim cycle. Never throws into this transaction.
+        const timeoutMinutes = this.env?.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES');
+        if (typeof timeoutMinutes === 'number') {
+          this.timerTriggers?.afterCommit(manager, {
+            kind: 'manager-confirmation',
+            organisationId: offer.organisationId,
+            workspaceId: offer.workspaceId,
+            subjectId: offer.id,
+            dueAt: new Date(now.getTime() + timeoutMinutes * 60_000),
+          });
+        }
       }
 
       if (claimedRows.length === 0) {

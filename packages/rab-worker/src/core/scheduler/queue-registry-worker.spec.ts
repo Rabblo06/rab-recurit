@@ -28,6 +28,8 @@ describe('consumer unknown job name (D-Q1)', () => {
     'rab-push': ['send-push'],
     'rab-shift-statements': ['generate-shift-statement'],
     'rab-ai': ['ai-turn', 'ai-title'],
+    // Phase D-Q4b: the four timer-trigger job names (one handler dispatches on job.name).
+    'crewflow-timer-triggers': ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger'],
   };
 
   it.each(Object.values(CONSUMER_QUEUES).map((d) => [d.name, d] as const))('%s: an unregistered job name is failed closed, never handled', async (_name, def) => {

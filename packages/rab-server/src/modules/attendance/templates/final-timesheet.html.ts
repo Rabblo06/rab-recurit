@@ -113,7 +113,7 @@ export function renderFinalTimesheetHtml(data: FinalTimesheetData): string {
   <section class="bottom">
     <div>
       <h3>NOTES</h3>
-      <p>${data.notes && data.notes.trim() ? escapeHtml(data.notes) : '<span class="muted">No shift notes.</span>'}</p>
+      <p class="notes-text">${data.notes && data.notes.trim() ? escapeHtml(data.notes) : '<span class="muted">No shift notes.</span>'}</p>
       <p class="muted">Corrected entries: ${corrected} · Missing clock-outs: ${missing}</p>
     </div>
     <div>

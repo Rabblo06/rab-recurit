@@ -3,6 +3,7 @@ import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches,
 
 // Phase A pa-intervals
 import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-intervals';
+import { TIMER_TRIGGER_KINDS_PATTERN } from '../../worker-shared/timer-trigger.contract';
 // Phase B (B3): the deployment identity's accepted values, from their one definition.
 import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
 
@@ -598,6 +599,20 @@ export class EnvironmentVariables {
   WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
 
   /**
+   * Phase D-Q4a (owner approval 2026-11-04, OD-1): how the Worker walks the four 300-s shift-family scans (shift monitor,
+   * attendance monitor, shift report scheduler, final timesheet).
+   *  - `separate` (DEFAULT): four independent scans, each with its own workspace walk (today, unchanged).
+   *  - `combined`: one scan `shift-scan-combined` walks the workspaces once and runs every DUE member's own discovery
+   *    query inside that workspace's tenant transaction (one SAVEPOINT per member); each member then processes its own
+   *    candidates exactly as in separate mode. Same SQL, keys, thresholds and transitions; each member keeps its interval.
+   * Late clock-in is never a member. Exactly `separate` or `combined`; anything else refuses to boot. Combined mode also
+   * refuses to boot when the members' intervals have no common tick of at least 30 s (env.validation.ts).
+   */
+  @IsOptional()
+  @IsIn(['separate', 'combined'], { message: 'WORKER_SHIFT_SCAN_MODE must be exactly separate or combined' })
+  WORKER_SHIFT_SCAN_MODE: 'separate' | 'combined' = 'separate';
+
+  /**
    * Redis key prefix for the NEW BullMQ scan queues only (`bullmq` mode). Unset → `crewflow:<NODE_ENV>:bull`. The three
    * existing queues (`rab-email`, `rab-push`, `rab-shift-statements`) keep BullMQ's default `bull` prefix permanently —
    * the API publishes to two of them — so `bull` itself (or anything under `bull:`) is refused here.
@@ -637,6 +652,35 @@ export class EnvironmentVariables {
   @Transform(({ value }) => value === 'true')
   @IsBoolean()
   WORKER_FAST_PUBLISH_NOTIFY: boolean = false;
+
+  /**
+   * Phase D-Q4b (owner approval OD-3, 2026-11-04): delayed-job TIMER TRIGGERS for offer expiry, manager-confirmation
+   * timeout, provisional no-show and late clock-in (engine/worker-shared/timer-trigger.contract.ts). The backstop scans keep
+   * their intervals and code in every mode; triggers only let a transition happen earlier INSIDE its existing window, and
+   * they add database work (no load reduction is claimed).
+   *  - `off` (DEFAULT): today exactly — the API adds no trigger job, the Worker creates no trigger consumer and arms nothing.
+   *  - `shadow`: triggers are armed and fire; the Worker runs a READ ONLY decision and logs/counts what it WOULD do. No
+   *    business write, notification or audit row.
+   *  - `on`: the Worker runs the scan's own per-candidate compare-and-set for the subject (same worker_event key, same
+   *    notifications and audit as the scan).
+   * Set the same value on the API (offer producers) and the Worker (consumer, no-show/late arming). Strict: exactly off,
+   * shadow or on (OFF, On, ' on', true, 1 refuse to boot). Production `on` needs the owner's approval per kind (OD-3).
+   */
+  @IsOptional()
+  @IsIn(['off', 'shadow', 'on'], { message: 'WORKER_TIMER_TRIGGERS must be exactly off, shadow or on' })
+  WORKER_TIMER_TRIGGERS: 'off' | 'shadow' | 'on' = 'off';
+
+  /**
+   * Phase D-Q4b (OD-3 "on one kind at a time"): the trigger kinds WORKER_TIMER_TRIGGERS applies to — a comma-separated list
+   * without spaces of offer-expiry, manager-confirmation, no-show, late-clock-in. Unset → all four. A kind not listed is
+   * `off` for that kind. Unknown, misspelt, spaced or repeated items refuse to boot.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(TIMER_TRIGGER_KINDS_PATTERN, {
+    message: 'WORKER_TIMER_TRIGGER_KINDS must be a comma-separated list (no spaces) of offer-expiry, manager-confirmation, no-show, late-clock-in',
+  })
+  WORKER_TIMER_TRIGGER_KINDS?: string;
 
   /**
    * How the email/push/realtime/statement dispatchers find due work.

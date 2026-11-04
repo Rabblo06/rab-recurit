@@ -1,11 +1,10 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { DataSource, EntityManager, QueryRunner } from 'typeorm';
+import { EntityManager, QueryRunner } from 'typeorm';
 
+import { AfterCommitPublisher } from '../../../engine/core-modules/after-commit/after-commit-publisher';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { PushQueueService } from '../../../engine/core-modules/push/push-queue.service';
-
-type PublishTask = () => Promise<void>;
 
 /** Bound on deferred publishes held for ONE transaction (a notify() fan-out never comes near it; beyond it the dispatcher publishes). */
 export const NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION = 200;
@@ -59,14 +58,17 @@ export interface FastPublishRow {
 @Injectable()
 export class NotifyFastPublishService {
   private readonly logger = new Logger('NotifyFastPublish');
-  private readonly pending = new WeakMap<QueryRunner, PublishTask[]>();
-  private inFlight = 0;
-  private readonly subscriber = {
-    afterTransactionCommit: (event: { queryRunner: QueryRunner }): void =>
-      this.onCommit(event.queryRunner),
-    afterTransactionRollback: (event: { queryRunner: QueryRunner }): void =>
-      this.onRollback(event.queryRunner),
-  };
+  /**
+   * Phase D-Q4b: the after-commit mechanism this service introduced now lives in the engine (`AfterCommitPublisher`) so
+   * the timer-trigger producer reuses it; the rules above, the bounds and the warning line are unchanged.
+   */
+  private readonly publisher = new AfterCommitPublisher({
+    maxPerTransaction: NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION,
+    maxInFlight: NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT,
+    // Best effort only: the row is durably PENDING; the dispatcher publishes it on its next pass.
+    failureMessage: (name) => `fast publish failed (${name}); the dispatcher will publish the row`,
+    logger: this.logger,
+  });
 
   constructor(
     private readonly env: EnvironmentService,
@@ -103,68 +105,18 @@ export class NotifyFastPublishService {
 
   /** Publishes still held for this QueryRunner (tests / diagnostics). */
   heldFor(runner: QueryRunner | undefined): number {
-    return runner ? (this.pending.get(runner)?.length ?? 0) : 0;
+    return this.publisher.heldFor(runner);
   }
 
-  private defer(manager: EntityManager, task: PublishTask): boolean {
+  private defer(manager: EntityManager, task: () => Promise<void>): boolean {
     if (!this.enabled) return false;
-    const runner = manager.queryRunner;
-    // Only inside an open transaction: there must be a commit to wait for. Otherwise the dispatcher publishes.
-    if (!runner || runner.isReleased || !runner.isTransactionActive)
-      return false;
-    this.subscribe(manager.connection);
-    const tasks = this.pending.get(runner) ?? [];
-    if (tasks.length >= NOTIFY_FAST_PUBLISH_MAX_PER_TRANSACTION) return false;
-    tasks.push(task);
-    this.pending.set(runner, tasks);
-    return true;
-  }
-
-  /** Registers the commit/rollback listener on the transaction's own DataSource, once. */
-  private subscribe(connection: DataSource): void {
-    if (!connection.subscribers.includes(this.subscriber as never))
-      connection.subscribers.push(this.subscriber as never);
-  }
-
-  private onCommit(runner: QueryRunner): void {
-    // A savepoint release (nested transaction) is not a commit: the outer transaction may still roll back.
-    if (runner.isTransactionActive) return;
-    const tasks = this.pending.get(runner);
-    if (!tasks) return;
-    this.pending.delete(runner);
-    // Detached on purpose: the broadcast (and so the caller's transaction() promise) never waits for Redis.
-    void this.flush(tasks);
-  }
-
-  private onRollback(runner: QueryRunner): void {
-    this.pending.delete(runner);
-  }
-
-  /**
-   * Concurrently: one slow or hanging publish (each is bounded by the producer) never holds back the others. A publish
-   * beyond the process-wide in-flight bound is skipped — the row stays PENDING for the dispatcher.
-   */
-  private async flush(tasks: readonly PublishTask[]): Promise<void> {
-    await Promise.all(
-      tasks.map(async (task) => {
-        if (this.inFlight >= NOTIFY_FAST_PUBLISH_MAX_IN_FLIGHT) return;
-        this.inFlight++;
-        try {
-          await task();
-        } catch (error) {
-          // Best effort only: the row is durably PENDING; the dispatcher publishes it on its next pass.
-          this.logger.warn(
-            `fast publish failed (${(error as Error)?.name ?? 'Error'}); the dispatcher will publish the row`,
-          );
-        } finally {
-          this.inFlight--;
-        }
-      }),
-    );
+    // Only inside an open transaction (AfterCommitPublisher.defer): there must be a commit to wait for. Otherwise the
+    // dispatcher publishes.
+    return this.publisher.defer(manager, task);
   }
 
   /** Fast publishes currently in flight (tests / diagnostics). */
   get inFlightCount(): number {
-    return this.inFlight;
+    return this.publisher.inFlightCount;
   }
 }

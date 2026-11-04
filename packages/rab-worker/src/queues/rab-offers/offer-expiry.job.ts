@@ -1,5 +1,5 @@
 import { NotificationType, OfferStatus, ShiftStatus } from '@rab/shared';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { RealtimeEventService, RealtimeEventType } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
@@ -74,47 +74,66 @@ export async function runOfferExpiryCycle(
   });
 
   let expired = 0;
+  const deps: OfferExpiryDeps = { notificationService, auditService, realtimeEventService };
   for (const candidate of candidates) {
-    const didExpire = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
-      // PHASE 6 — the atomic claim itself IS the revalidation: a fresh,
-      // unlocked `findOne` immediately before a blind `update()` (the old
-      // code) leaves a real window for a concurrent `staffAccept()` to
-      // land in between — `claimExpiredOffer`'s `WHERE status = 'pending'
-      // AND expires_at <= now()` is what actually closes it, using real DB
-      // time, not this scan's own possibly-stale `Date.now()`-free read.
-      const offer = await claimExpiredOffer(manager, candidate.offer_id);
-      if (!offer) return false; // already resolved by something else (accepted/declined/withdrawn/already expired) — no side effects.
-
-      await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_EXPIRED_BY_WORKER, {
-        entityType: 'offer',
-        entityId: offer.id,
-        metadata: { offerBatchId: offer.offerBatchId },
-        actorUserId: null,
-      });
-
-      const assignment = await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId } });
-      if (assignment?.assignedBy) {
-        await notificationService.notify(manager, {
-          organisationId: candidate.organisation_id,
-          userId: assignment.assignedBy,
-          type: NotificationType.OFFER_EXPIRED,
-          title: 'Offer expired',
-          message: 'A shift offer expired before the staff member responded.',
-          relatedEntityType: 'offer',
-          relatedEntityId: offer.id,
-        });
-      }
-      // C1b realtime (same transaction as the expiry claim; same key and audience as the API's lazy expiry in
-      // OfferService.staffAccept): offer.expired → staff, sender, shift owner, venue managers. Ids only.
-      await realtimeEventService?.recordForRecipients(manager, {
-        organisationId: candidate.organisation_id, eventKey: `offer.expired:${offer.id}`, eventType: RealtimeEventType.OFFER_EXPIRED, entityType: 'offer', entityId: offer.id,
-      }, (m) => offerAudience(m, offer.id));
-      return true;
-    });
+    const didExpire = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, (manager) =>
+      expireOfferCandidate(manager, deps, candidate),
+    );
     if (didExpire) expired += 1;
   }
 
   return { expired };
+}
+
+export interface OfferExpiryDeps {
+  notificationService: NotificationService;
+  auditService: AuditService;
+  realtimeEventService?: RealtimeEventService;
+}
+
+export type OfferExpiryCandidate = ScanCandidate;
+
+/**
+ * Phase D-Q4b (refactor only, no behaviour change): the per-candidate body of `runOfferExpiryCycle`, moved verbatim out
+ * of the loop so the offer-expiry timer trigger runs EXACTLY the scan's compare-and-set and side effects (never a copy).
+ * Runs in the caller's `runScopedForOrg` transaction for `candidate`'s organisation/workspace.
+ */
+export async function expireOfferCandidate(manager: EntityManager, deps: OfferExpiryDeps, candidate: OfferExpiryCandidate): Promise<boolean> {
+  const { notificationService, auditService, realtimeEventService } = deps;
+  // PHASE 6 — the atomic claim itself IS the revalidation: a fresh,
+  // unlocked `findOne` immediately before a blind `update()` (the old
+  // code) leaves a real window for a concurrent `staffAccept()` to
+  // land in between — `claimExpiredOffer`'s `WHERE status = 'pending'
+  // AND expires_at <= now()` is what actually closes it, using real DB
+  // time, not this scan's own possibly-stale `Date.now()`-free read.
+  const offer = await claimExpiredOffer(manager, candidate.offer_id);
+  if (!offer) return false; // already resolved by something else (accepted/declined/withdrawn/already expired) — no side effects.
+
+  await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_EXPIRED_BY_WORKER, {
+    entityType: 'offer',
+    entityId: offer.id,
+    metadata: { offerBatchId: offer.offerBatchId },
+    actorUserId: null,
+  });
+
+  const assignment = await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId } });
+  if (assignment?.assignedBy) {
+    await notificationService.notify(manager, {
+      organisationId: candidate.organisation_id,
+      userId: assignment.assignedBy,
+      type: NotificationType.OFFER_EXPIRED,
+      title: 'Offer expired',
+      message: 'A shift offer expired before the staff member responded.',
+      relatedEntityType: 'offer',
+      relatedEntityId: offer.id,
+    });
+  }
+  // C1b realtime (same transaction as the expiry claim; same key and audience as the API's lazy expiry in
+  // OfferService.staffAccept): offer.expired → staff, sender, shift owner, venue managers. Ids only.
+  await realtimeEventService?.recordForRecipients(manager, {
+    organisationId: candidate.organisation_id, eventKey: `offer.expired:${offer.id}`, eventType: RealtimeEventType.OFFER_EXPIRED, entityType: 'offer', entityId: offer.id,
+  }, (m) => offerAudience(m, offer.id));
+  return true;
 }
 
 /**

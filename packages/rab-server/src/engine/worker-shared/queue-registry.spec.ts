@@ -22,6 +22,8 @@ import {
   SCAN_QUEUE_NAMES,
   UnknownQueueError,
 } from './queue-registry';
+import { registeredJob, QueueEnqueueRefusedError } from './queue-enqueue';
+import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
 
 /**
  * Phase D-Q1 "queue registry": every queue's options are explicit, complete at compile time, and EXACTLY the values in
@@ -34,14 +36,17 @@ import {
  *     (statements), ai-turn-queue.service.ts AI_TURN_JOB_OPTIONS, queue-registry.ts SCAN_JOB_OPTIONS.
  */
 const DAY = 86_400;
-const PRE_DQ1_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
+/** The queues that existed before D-Q4b (the pre-D-Q1 tables below cover exactly these; D-Q4b's queue is pinned on its own). */
+type PreDq4bQueueName = Exclude<QueueName, typeof TIMER_TRIGGER_QUEUE_NAME>;
+const PRE_DQ1_WORKER_OPTIONS: Record<PreDq4bQueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
   'rab-email': { concurrency: 5, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'rab-push': { concurrency: 10, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'rab-shift-statements': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'rab-ai': { concurrency: 4, lockDuration: 60_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-email': { concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-push': { concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
-  'crewflow-scan-shifts': { concurrency: 4, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
+  // Phase D-Q4a: + shift-scan-combined (one slot per distinct scan on the queue: 4 → 5; one slot idle in either mode).
+  'crewflow-scan-shifts': { concurrency: 5, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-offers': { concurrency: 3, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-reports': { concurrency: 4, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-maintenance': { concurrency: 7, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
@@ -55,6 +60,8 @@ const PRE_DQ1_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDurat
 const EXPECTED_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
   ...PRE_DQ1_WORKER_OPTIONS,
   'crewflow-scan-maintenance': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'], concurrency: 8 },
+  // Phase D-Q4b (plan §4): a NEW consumer starts at concurrency 2; stall settings are BullMQ's defaults, written out.
+  'crewflow-timer-triggers': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
 };
 const OUTBOX = {
   attempts: 5,
@@ -63,7 +70,7 @@ const OUTBOX = {
   removeOnFail: { age: 30 * DAY },
 };
 const SCAN = { attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604_800 } };
-const PRE_DQ1_JOB_OPTIONS: Record<QueueName, object> = {
+const PRE_DQ1_JOB_OPTIONS: Record<PreDq4bQueueName, object> = {
   'rab-email': OUTBOX,
   'rab-push': OUTBOX,
   'rab-shift-statements': { attempts: 1, removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 } },
@@ -78,7 +85,7 @@ const PRE_DQ1_JOB_OPTIONS: Record<QueueName, object> = {
 };
 
 describe('queue registry (Phase D-Q1)', () => {
-  it('lists exactly the eleven BullMQ queues Crewflow uses (names unchanged)', () => {
+  it('lists exactly the twelve BullMQ queues Crewflow uses (the eleven pre-D-Q4b names unchanged + crewflow-timer-triggers)', () => {
     expect([...QUEUE_NAMES].sort()).toEqual(
       [
         'rab-email',
@@ -92,6 +99,7 @@ describe('queue registry (Phase D-Q1)', () => {
         'crewflow-scan-reports',
         'crewflow-scan-maintenance',
         'crewflow-scan-realtime',
+        'crewflow-timer-triggers',
       ].sort(),
     );
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.name, q.jobName, q.prefix])).toEqual([
@@ -99,6 +107,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-push', 'send-push', 'bull'],
       ['rab-shift-statements', 'generate-shift-statement', 'bull'],
       ['rab-ai', 'ai-turn', 'bull'],
+      ['crewflow-timer-triggers', 'offer-expiry-trigger', 'bull'],
     ]);
   });
 
@@ -107,7 +116,8 @@ describe('queue registry (Phase D-Q1)', () => {
   });
 
   it('Phase D-Q2: the only Worker-option change is one more crewflow-scan-maintenance slot for ai-stale-turn-sweep', () => {
-    const changed = QUEUE_NAMES.filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
+    const changed = (Object.keys(PRE_DQ1_WORKER_OPTIONS) as PreDq4bQueueName[]).filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
+    expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers']);
     expect(changed).toEqual(['crewflow-scan-maintenance']);
     expect(bullmqWorkerOptionsOf('crewflow-scan-maintenance').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'].concurrency).toBe(1);
     expect(acceptsJobName('crewflow-scan-maintenance', 'ai-stale-turn-sweep')).toBe(true);
@@ -116,7 +126,7 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-stale-turn-sweep')).toBe(false);
   });
 
-  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as QueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
+  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
     expect(bullmqJobOptionsOf(name)).toEqual(PRE_DQ1_JOB_OPTIONS[name]);
     // No job timeout exists in bullmq 5.x; the registry records the absence and never emits one.
     expect(QUEUE_SETTINGS[name].job.timeoutMs).toBeNull();
@@ -131,6 +141,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['push', 10, 30_000, 'push'],
       ['shiftStatements', 2, 30_000, 'shift statement'],
       ['ai', 4, 60_000, 'ai turn'],
+      ['timerTriggers', 2, 30_000, 'timer trigger'],
     ]);
   });
 
@@ -158,6 +169,7 @@ describe('queue registry (Phase D-Q1)', () => {
       'rab-push': ['organisation', ['pushDeliveryId', 'organisationId']],
       'rab-shift-statements': ['organisation', ['payrollRecordId', 'organisationId', 'workspaceId', 'generation']],
       'rab-ai': ['organisation', ['v', 'kind', 'turnId', 'conversationId', 'organisationId', 'workspaceId', 'userId', 'pausedTurnId', 'cause', 'refId']],
+      'crewflow-timer-triggers': ['organisation', ['organisationId', 'workspaceId', 'subjectId', 'dueAtEpochMs']],
       ...Object.fromEntries(SCAN_QUEUE_NAMES.map((n) => [n, ['system', ['v']]])),
     });
   });
@@ -168,15 +180,16 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-push', ['send-push']],
       ['rab-shift-statements', ['generate-shift-statement']],
       ['rab-ai', ['ai-turn', 'ai-title']],
+      ['crewflow-timer-triggers', ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger']],
     ]);
     expect(acceptsJobName('rab-email', 'send-push')).toBe(false);
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
   });
 
-  it('every scan job name is declared once, on one scan queue (22 scans: 21 pre-D-Q2 + ai-stale-turn-sweep)', () => {
+  it('every scan job name is declared once, on one scan queue (23 scans: 21 pre-D-Q2 + ai-stale-turn-sweep + D-Q4a shift-scan-combined)', () => {
     const names = SCAN_QUEUE_NAMES.flatMap((q) => [...QUEUE_SETTINGS[q].jobNames]);
-    expect(names).toHaveLength(22);
-    expect(new Set(names).size).toBe(22);
+    expect(names).toHaveLength(23);
+    expect(new Set(names).size).toBe(23);
   });
 
   it('an unknown queue name fails closed (UnknownQueueError), never a default', () => {
@@ -186,6 +199,56 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(() => queueSettingsOf('toString')).toThrow(UnknownQueueError);
     expect(() => bullmqWorkerOptionsOf('crewflow-scan-nope' as QueueName)).toThrow(UnknownQueueError);
     expect(() => bullmqJobOptionsOf('nope' as QueueName)).toThrow(UnknownQueueError);
+  });
+
+  describe('Phase D-Q4b: crewflow-timer-triggers', () => {
+    const ORG = '11111111-1111-4111-8111-111111111111';
+    const OTHER = '22222222-2222-4222-8222-222222222222';
+    const WS = '33333333-3333-4333-8333-333333333333';
+    const SUBJECT = '44444444-4444-4444-8444-444444444444';
+    const data = { organisationId: ORG, workspaceId: WS, subjectId: SUBJECT, dueAtEpochMs: 1_800_000_000_000 };
+    const job = (d: object, scope: object | undefined = { kind: 'organisation', organisationId: ORG }, name = 'offer-expiry-trigger') =>
+      registeredJob(TIMER_TRIGGER_QUEUE_NAME, name as 'offer-expiry-trigger', scope as never, d, { jobId: `offer-expiry.${SUBJECT}.1800000000000`, delayMs: 60_000 });
+
+    it('OD-4: legacy `bull` prefix (the API produces with no prefix configuration); a consumer queue, organisation-scoped', () => {
+      expect(prefixOf(TIMER_TRIGGER_QUEUE_NAME, resolveScanPrefix('production', undefined))).toBe(LEGACY_BULL_PREFIX);
+      expect(QUEUE_SETTINGS[TIMER_TRIGGER_QUEUE_NAME]).toMatchObject({ kind: 'consumer', prefix: 'legacy-bull', tenantScope: 'organisation' });
+    });
+
+    it('job options: attempts 3, exponential from 5 s (jitter 0.5), 1 h / 1000 completed, 7 d / 5000 failed', () => {
+      expect(bullmqJobOptionsOf(TIMER_TRIGGER_QUEUE_NAME)).toEqual({
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
+        removeOnComplete: { age: 3600, count: 1000 },
+        removeOnFail: { age: 7 * DAY, count: 5000 },
+      });
+    });
+
+    it('a valid trigger: ids-only payload, the caller jobId, the delay and the registry options', () => {
+      expect(job(data)).toEqual({
+        queue: TIMER_TRIGGER_QUEUE_NAME,
+        name: 'offer-expiry-trigger',
+        data,
+        opts: { jobId: `offer-expiry.${SUBJECT}.1800000000000`, delay: 60_000, ...bullmqJobOptionsOf(TIMER_TRIGGER_QUEUE_NAME) },
+      });
+    });
+
+    it.each<[string, () => unknown]>([
+      ['no scope', () => job(data, null as never)],
+      ['a system scope', () => job(data, { kind: 'system' })],
+      ['a non-UUID organisation', () => job({ ...data, organisationId: 'org-1' }, { kind: 'organisation', organisationId: 'org-1' })],
+      ['a scope organisation different from the payload organisation (cross-tenant)', () => job(data, { kind: 'organisation', organisationId: OTHER })],
+      ['an extra payload key', () => job({ ...data, staffEmail: 'x@example.com' })],
+      ['a nested object', () => job({ ...data, subjectId: { id: SUBJECT } })],
+      ['an unknown job name', () => job(data, undefined, 'offer-expiry')],
+    ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, build) => {
+      expect(build).toThrow(QueueEnqueueRefusedError);
+    });
+
+    it('an unknown job name is not accepted by the consumer (fail closed)', () => {
+      expect(acceptsJobName(TIMER_TRIGGER_QUEUE_NAME, 'shift-monitor')).toBe(false);
+      expect(acceptsJobName(TIMER_TRIGGER_QUEUE_NAME, 'offer-expiry-trigger')).toBe(true);
+    });
   });
 
   describe('assertQueueRegistryValid (boot check)', () => {

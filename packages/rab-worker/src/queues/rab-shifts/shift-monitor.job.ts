@@ -259,30 +259,47 @@ async function reminderWindowsAlreadyClaimed(
   return reminderWindows.every((w, i) => msUntilStart > w.ms || claimed.has(keys[i]!));
 }
 
-export async function runShiftMonitorCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  notificationService: NotificationService,
-  auditService: AuditService,
-  clockInEarlyMinutes: number,
-): Promise<ShiftMonitorResult> {
-  const reminderWindows = buildReminderWindows(clockInEarlyMinutes);
-  const discoveries = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      // P2.2 — ONE round trip, not two: the reminder and no-show branches are combined via
-      // UNION ALL of two independently-LIMITed subqueries, rather than two separate
-      // `manager.query()` calls. Each branch keeps its OWN `ORDER BY ... LIMIT 500` — this is
-      // not a cosmetic merge: a single combined `ORDER BY starts_at LIMIT 1000` would NOT be
-      // equivalent and would reintroduce exactly the starvation bug the original two-query split
-      // existed to avoid (long-dead CONFIRMED assignments filling every slot and starving
-      // imminent shifts of their reminders). Halving the round-trips matters here specifically
-      // because this callback runs once per workspace via `discoverInWorkspaces`, and this
-      // dev database alone has 9,673 workspaces (see that function's own doc comment) — one
-      // fewer query per workspace is a real, measurable, risk-free reduction in total worker
-      // round-trips, not a micro-optimisation.
-      //   reminders: shifts that have NOT started, starting within a day — soonest first.
-      //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
-      const combinedCandidates = await manager.query<ScanCandidate[]>(
-        `
+/**
+ * D-Q4a (refactor only, no behaviour change): the shift monitor split into its per-workspace DISCOVERY, its per-candidate
+ * bodies and the cycle that ties them together. `runShiftMonitorCycle` (separate mode) runs exactly the same SQL, in the
+ * same order, with the same per-candidate transactions as before. The combined shift scan (D-Q4a,
+ * WORKER_SHIFT_SCAN_MODE=combined) calls the same `discoverShiftMonitorInWorkspace` inside its shared workspace walk and
+ * the same `processShiftMonitorDiscoveries` afterwards. D-Q4b's timer triggers reuse `flagNoShowCandidate` (the scan's
+ * no-show body: row lock, Pass B, compare-and-set, the same worker_event key), never a second copy.
+ */
+export interface ShiftMonitorDeps {
+  notificationService: NotificationService;
+  auditService: AuditService;
+}
+
+/** The ids a per-candidate body needs (a discovery row, or a trigger payload that is re-read under RLS). */
+export type ShiftMonitorCandidate = Pick<ScanCandidate, 'assignment_id' | 'organisation_id' | 'workspace_id'>;
+
+export interface ShiftMonitorDiscovery {
+  assignments: ScanCandidate[];
+  lifecycleCandidates: Awaited<ReturnType<typeof PostShiftLifecycleService.discover>>;
+}
+
+/**
+ * The shift monitor's discovery for ONE workspace, on the caller's RLS-bound, read-only manager (`discoverInWorkspaces` in
+ * separate mode, the combined walk in combined mode). Returns exactly the value the pre-D-Q4a callback returned.
+ */
+export async function discoverShiftMonitorInWorkspace(manager: EntityManager): Promise<ShiftMonitorDiscovery[]> {
+  // P2.2 — ONE round trip, not two: the reminder and no-show branches are combined via
+  // UNION ALL of two independently-LIMITed subqueries, rather than two separate
+  // `manager.query()` calls. Each branch keeps its OWN `ORDER BY ... LIMIT 500` — this is
+  // not a cosmetic merge: a single combined `ORDER BY starts_at LIMIT 1000` would NOT be
+  // equivalent and would reintroduce exactly the starvation bug the original two-query split
+  // existed to avoid (long-dead CONFIRMED assignments filling every slot and starving
+  // imminent shifts of their reminders). Halving the round-trips matters here specifically
+  // because this callback runs once per workspace via `discoverInWorkspaces`, and this
+  // dev database alone has 9,673 workspaces (see that function's own doc comment) — one
+  // fewer query per workspace is a real, measurable, risk-free reduction in total worker
+  // round-trips, not a micro-optimisation.
+  //   reminders: shifts that have NOT started, starting within a day — soonest first.
+  //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
+  const combinedCandidates = await manager.query<ScanCandidate[]>(
+    `
         (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
            FROM shift_assignment sa
            JOIN shift s ON s.id = sa.shift_id
@@ -303,183 +320,238 @@ export async function runShiftMonitorCycle(
           ORDER BY ${assignmentTimeSql().start} DESC
           LIMIT 500)
       `,
-        [NO_SHOW_GRACE_MS / 1000],
-      );
-      const lifecycleCandidates = await PostShiftLifecycleService.discover(manager);
-      return [{ assignments: combinedCandidates, lifecycleCandidates }];
-  });
+    [NO_SHOW_GRACE_MS / 1000],
+  );
+  const lifecycleCandidates = await PostShiftLifecycleService.discover(manager);
+  return [{ assignments: combinedCandidates, lifecycleCandidates }];
+}
 
+export async function runShiftMonitorCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  notificationService: NotificationService,
+  auditService: AuditService,
+  clockInEarlyMinutes: number,
+): Promise<ShiftMonitorResult> {
+  const discoveries = await discoverInWorkspaces(ownerDataSource, tenantContext, discoverShiftMonitorInWorkspace);
+  return processShiftMonitorDiscoveries(tenantContext, { notificationService, auditService }, clockInEarlyMinutes, discoveries);
+}
+
+/** Everything after discovery: one scoped transaction per assignment, then the post-shift lifecycle (unchanged order). */
+export async function processShiftMonitorDiscoveries(
+  tenantContext: TenantContextService,
+  deps: ShiftMonitorDeps,
+  clockInEarlyMinutes: number,
+  discoveries: readonly ShiftMonitorDiscovery[],
+): Promise<ShiftMonitorResult> {
+  const reminderWindows = buildReminderWindows(clockInEarlyMinutes);
   const discovery = { assignments: discoveries.flatMap(d => d.assignments), lifecycleCandidates: discoveries.flatMap(d => d.lifecycleCandidates) };
   let remindersSent = 0;
   let noShowsFlagged = 0;
 
   for (const candidate of discovery.assignments) {
-    const result = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
-      // Phase D (D6): nothing left to do for this assignment on this tick (every applicable window already claimed).
-      if (await reminderWindowsAlreadyClaimed(manager, candidate.assignment_id, reminderWindows)) return { reminders: 0, noShow: false };
-      // Shared by Pass A (below) and every window/no-show's own Pass B —
-      // one definition of "still a real, active, staffed occurrence."
-      const loadCurrent = () => loadReminderCandidate(manager, candidate.assignment_id);
-
-      const first = await loadCurrent();
-      if (!first) return { reminders: 0, noShow: false };
-      const { shift } = first;
-
-      const msUntilStart = effectiveAssignmentTime(first.assignment, shift).startsAt.getTime() - Date.now();
-      let reminders = 0;
-
-      if (msUntilStart > 0) {
-        for (const window of reminderWindows) {
-          if (msUntilStart > window.ms) continue;
-          // --- Pass A: still eligible right before claiming this window? ---
-          const beforeClaim = await loadCurrent();
-          if (!beforeClaim) continue;
-          if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeClaim.assignment.id))) continue;
-
-          const eventId = await claimWorkerEvent(manager, {
-            organisationId: candidate.organisation_id,
-            workspaceId: candidate.workspace_id,
-            eventKey: `${window.eventKeySlug}:${beforeClaim.assignment.id}`,
-            eventType: window.eventKeySlug.replace(/-/g, '_'),
-            entityType: 'shift_assignment',
-            entityId: beforeClaim.assignment.id,
-          });
-          if (!eventId) continue; // another replica/tick already claimed this reminder window
-
-          // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
-          const beforeSend = await loadCurrent();
-          if (!beforeSend) {
-            await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
-            continue;
-          }
-          // Catches a clock-in landing in the exact window between the claim above and now —
-          // e.g. the member clocked in seconds before this worker reached the irreversible
-          // notify() call. The reminder is suppressed, never sent for a window that is already moot.
-          if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeSend.assignment.id))) {
-            await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
-            continue;
-          }
-          const { assignment: currentAssignment, user: currentUser } = beforeSend;
-
-          await notificationService.notify(manager, {
-            organisationId: candidate.organisation_id,
-            userId: currentUser.id,
-            type: window.type,
-            title: window.title,
-            message: window.buildMessage(beforeSend),
-            relatedEntityType: 'shift_assignment',
-            relatedEntityId: currentAssignment.id,
-          });
-          await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_REMINDER_SENT, {
-            targetUserId: currentUser.id,
-            metadata: { assignmentId: currentAssignment.id, window: window.auditNote },
-            actorUserId: null,
-          });
-          await completeWorkerEvent(manager, eventId);
-          reminders += 1;
-        }
-        return { reminders, noShow: false };
-      }
-
-      // Shift has already started — no-show check, gated by grace period.
-      if (-msUntilStart < NO_SHOW_GRACE_MS) return { reminders, noShow: false };
-      // A checked-in staff member proved arrival (owner brief 2026-10-21): never flagged as a no-show by the worker. A
-      // missing clock-in is then the manager's call (clock in on behalf, record attendance, or confirm the no-show).
-      if (first.assignment.checkedInAt) return { reminders, noShow: false };
-      const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
-      if (hasAttendance.length > 0) return { reminders, noShow: false };
-
-      // A blind status read-then-write is racy across replicas by itself
-      // (two replicas can both observe CONFIRMED and both flip to NO_SHOW,
-      // both firing notify()+audit() redundantly even though the final
-      // status ends up correct either way) — the worker_event UNIQUE claim
-      // is the real cross-replica guard here, not the status transition
-      // alone.
-      const noShowEventId = await claimWorkerEvent(manager, {
-        organisationId: candidate.organisation_id,
-        workspaceId: candidate.workspace_id,
-        eventKey: `no-show:${first.assignment.id}`,
-        eventType: 'no_show',
-        entityType: 'shift_assignment',
-        entityId: first.assignment.id,
-      });
-      if (!noShowEventId) return { reminders, noShow: false }; // another replica/tick already claimed this
-
-      // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
-      // Row lock first (owner rule 2026-10-21): a manager recording attendance or confirming the no-show holds this
-      // same assignment lock, so the worker waits for it and then re-reads the committed state instead of overwriting
-      // a manager's action with a stale decision.
-      await manager.query(`SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE`, [first.assignment.id]);
-      const beforeNoShow = await loadCurrent();
-      if (!beforeNoShow) {
-        await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
-        return { reminders, noShow: false };
-      }
-      // Re-read under the row lock: a Check In committed while this tick was deciding wins (check-in takes the same lock).
-      if (beforeNoShow.assignment.checkedInAt) {
-        await cancelWorkerEvent(manager, noShowEventId, 'staff_checked_in');
-        return { reminders, noShow: false };
-      }
-      const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
-      if (hasAttendanceNow.length > 0) {
-        await cancelWorkerEvent(manager, noShowEventId, 'staff_clocked_in_before_completion');
-        return { reminders, noShow: false };
-      }
-      const { assignment: noShowAssignment, shift: noShowShift, user: noShowUser } = beforeNoShow;
-
-      assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, noShowAssignment.status, ShiftAssignmentStatus.NO_SHOW);
-      // Compare-and-set on the status re-read under the lock: never a blind write.
-      const [, flipped] = (await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [
-        noShowAssignment.id,
-      ])) as [unknown, number];
-      if (!flipped) {
-        await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
-        return { reminders, noShow: false };
-      }
-      // WORK-02 — was `staffProfile.createdBy ?? user.id`: the manager who
-      // onboarded this staff member (an HR relationship), falling back to
-      // notifying the STAFF MEMBER THEMSELVES as an "operational manager"
-      // recipient if unowned. Replaced with the same canonical resolver
-      // `late-clock-in.job.ts` already uses — see its own doc comment. No
-      // staff-user fallback: if no valid responsible manager resolves, the
-      // notification is simply skipped (never invented), while the status
-      // transition, audit record and event completion all still happen.
-      const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, noShowAssignment, noShowShift);
-      if (resolvedManager) {
-        await notificationService.notify(manager, {
-          organisationId: candidate.organisation_id,
-          userId: resolvedManager.userId,
-          type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW,
-          title: 'Staff member did not clock in',
-          message: `${noShowUser.firstName} ${noShowUser.lastName} has not clocked in for a shift that started at ${effectiveAssignmentTime(noShowAssignment, noShowShift).startsAt.toISOString()}. Record their attendance or confirm the no-show in the shift report.`,
-          relatedEntityType: 'shift_assignment',
-          relatedEntityId: noShowAssignment.id,
-        });
-      }
-      await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_ASSIGNMENT_NO_SHOW, {
-        targetUserId: noShowUser.id,
-        metadata: {
-          assignmentId: noShowAssignment.id,
-          // Provisional until a manager confirms it or records attendance (owner rule 2026-10-21).
-          provisional: true,
-          notifiedManagerUserId: resolvedManager?.userId ?? null,
-          managerResolutionSource: resolvedManager?.source ?? 'none',
-        },
-        actorUserId: null,
-      });
-      await completeWorkerEvent(manager, noShowEventId);
-      return { reminders, noShow: true };
-    });
+    const result = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, (manager) =>
+      processShiftMonitorCandidate(manager, deps, reminderWindows, candidate),
+    );
 
     remindersSent += result.reminders;
     if (result.noShow) noShowsFlagged += 1;
   }
 
-  const lifecycle = new PostShiftLifecycleService(auditService);
+  const lifecycle = new PostShiftLifecycleService(deps.auditService);
   let postShiftTransitions = 0;
   for (const candidate of discovery.lifecycleCandidates) {
     postShiftTransitions += await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id,
       manager => lifecycle.advance(manager, candidate.id));
   }
   return { remindersSent, noShowsFlagged, postShiftTransitions };
+}
+
+/** One assignment, inside the caller's scoped transaction: the reminder windows before start, the no-show check after. */
+async function processShiftMonitorCandidate(
+  manager: EntityManager,
+  deps: ShiftMonitorDeps,
+  reminderWindows: readonly ReminderWindowDefinition[],
+  candidate: ShiftMonitorCandidate,
+): Promise<{ reminders: number; noShow: boolean }> {
+  // Phase D (D6): nothing left to do for this assignment on this tick (every applicable window already claimed).
+  if (await reminderWindowsAlreadyClaimed(manager, candidate.assignment_id, reminderWindows)) return { reminders: 0, noShow: false };
+  // Shared by Pass A (below) and every window/no-show's own Pass B —
+  // one definition of "still a real, active, staffed occurrence."
+  const loadCurrent = () => loadReminderCandidate(manager, candidate.assignment_id);
+
+  const first = await loadCurrent();
+  if (!first) return { reminders: 0, noShow: false };
+  const { shift } = first;
+
+  const msUntilStart = effectiveAssignmentTime(first.assignment, shift).startsAt.getTime() - Date.now();
+  let reminders = 0;
+
+  if (msUntilStart > 0) {
+    for (const window of reminderWindows) {
+      if (msUntilStart > window.ms) continue;
+      // --- Pass A: still eligible right before claiming this window? ---
+      const beforeClaim = await loadCurrent();
+      if (!beforeClaim) continue;
+      if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeClaim.assignment.id))) continue;
+
+      const eventId = await claimWorkerEvent(manager, {
+        organisationId: candidate.organisation_id,
+        workspaceId: candidate.workspace_id,
+        eventKey: `${window.eventKeySlug}:${beforeClaim.assignment.id}`,
+        eventType: window.eventKeySlug.replace(/-/g, '_'),
+        entityType: 'shift_assignment',
+        entityId: beforeClaim.assignment.id,
+      });
+      if (!eventId) continue; // another replica/tick already claimed this reminder window
+
+      // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
+      const beforeSend = await loadCurrent();
+      if (!beforeSend) {
+        await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
+        continue;
+      }
+      // Catches a clock-in landing in the exact window between the claim above and now —
+      // e.g. the member clocked in seconds before this worker reached the irreversible
+      // notify() call. The reminder is suppressed, never sent for a window that is already moot.
+      if (window.requiresNoAttendance && (await hasAttendanceRow(manager, beforeSend.assignment.id))) {
+        await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
+        continue;
+      }
+      const { assignment: currentAssignment, user: currentUser } = beforeSend;
+
+      await deps.notificationService.notify(manager, {
+        organisationId: candidate.organisation_id,
+        userId: currentUser.id,
+        type: window.type,
+        title: window.title,
+        message: window.buildMessage(beforeSend),
+        relatedEntityType: 'shift_assignment',
+        relatedEntityId: currentAssignment.id,
+      });
+      await deps.auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_REMINDER_SENT, {
+        targetUserId: currentUser.id,
+        metadata: { assignmentId: currentAssignment.id, window: window.auditNote },
+        actorUserId: null,
+      });
+      await completeWorkerEvent(manager, eventId);
+      reminders += 1;
+    }
+    return { reminders, noShow: false };
+  }
+
+  // Shift has already started — no-show check, gated by grace period (no reminder is ever sent on this path).
+  return { reminders, noShow: await flagNoShowLoaded(manager, deps, candidate, first, msUntilStart) };
+}
+
+/**
+ * D-Q4b entry (shared, not a copy): the scan's no-show body for ONE assignment, inside the caller's `runScopedForOrg`
+ * transaction. Loads the assignment exactly as the scan's Pass A does and returns false (no claim, no write) unless the
+ * shift has started; then runs the scan's own grace check, row lock, Pass B, compare-and-set and worker_event key
+ * `no-show:<assignment>`. True only when this call flagged the provisional no-show.
+ */
+export async function flagNoShowCandidate(manager: EntityManager, deps: ShiftMonitorDeps, candidate: ShiftMonitorCandidate): Promise<boolean> {
+  const first = await loadReminderCandidate(manager, candidate.assignment_id);
+  if (!first) return false;
+  const msUntilStart = effectiveAssignmentTime(first.assignment, first.shift).startsAt.getTime() - Date.now();
+  if (msUntilStart > 0) return false;
+  return flagNoShowLoaded(manager, deps, candidate, first, msUntilStart);
+}
+
+/** The no-show body, verbatim from the pre-D-Q4a cycle, given Pass A's snapshot and the start offset it computed. */
+async function flagNoShowLoaded(
+  manager: EntityManager,
+  deps: ShiftMonitorDeps,
+  candidate: ShiftMonitorCandidate,
+  first: ReminderCandidateSnapshot,
+  msUntilStart: number,
+): Promise<boolean> {
+  const loadCurrent = () => loadReminderCandidate(manager, candidate.assignment_id);
+  if (-msUntilStart < NO_SHOW_GRACE_MS) return false;
+  // A checked-in staff member proved arrival (owner brief 2026-10-21): never flagged as a no-show by the worker. A
+  // missing clock-in is then the manager's call (clock in on behalf, record attendance, or confirm the no-show).
+  if (first.assignment.checkedInAt) return false;
+  const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
+  if (hasAttendance.length > 0) return false;
+
+  // A blind status read-then-write is racy across replicas by itself
+  // (two replicas can both observe CONFIRMED and both flip to NO_SHOW,
+  // both firing notify()+audit() redundantly even though the final
+  // status ends up correct either way) — the worker_event UNIQUE claim
+  // is the real cross-replica guard here, not the status transition
+  // alone.
+  const noShowEventId = await claimWorkerEvent(manager, {
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id,
+    eventKey: `no-show:${first.assignment.id}`,
+    eventType: 'no_show',
+    entityType: 'shift_assignment',
+    entityId: first.assignment.id,
+  });
+  if (!noShowEventId) return false; // another replica/tick already claimed this
+
+  // --- Pass B: final revalidation, immediately before the irreversible side effects. ---
+  // Row lock first (owner rule 2026-10-21): a manager recording attendance or confirming the no-show holds this
+  // same assignment lock, so the worker waits for it and then re-reads the committed state instead of overwriting
+  // a manager's action with a stale decision.
+  await manager.query(`SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE`, [first.assignment.id]);
+  const beforeNoShow = await loadCurrent();
+  if (!beforeNoShow) {
+    await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
+    return false;
+  }
+  // Re-read under the row lock: a Check In committed while this tick was deciding wins (check-in takes the same lock).
+  if (beforeNoShow.assignment.checkedInAt) {
+    await cancelWorkerEvent(manager, noShowEventId, 'staff_checked_in');
+    return false;
+  }
+  const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
+  if (hasAttendanceNow.length > 0) {
+    await cancelWorkerEvent(manager, noShowEventId, 'staff_clocked_in_before_completion');
+    return false;
+  }
+  const { assignment: noShowAssignment, shift: noShowShift, user: noShowUser } = beforeNoShow;
+
+  assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, noShowAssignment.status, ShiftAssignmentStatus.NO_SHOW);
+  // Compare-and-set on the status re-read under the lock: never a blind write.
+  const [, flipped] = (await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [
+    noShowAssignment.id,
+  ])) as [unknown, number];
+  if (!flipped) {
+    await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
+    return false;
+  }
+  // WORK-02 — was `staffProfile.createdBy ?? user.id`: the manager who
+  // onboarded this staff member (an HR relationship), falling back to
+  // notifying the STAFF MEMBER THEMSELVES as an "operational manager"
+  // recipient if unowned. Replaced with the same canonical resolver
+  // `late-clock-in.job.ts` already uses — see its own doc comment. No
+  // staff-user fallback: if no valid responsible manager resolves, the
+  // notification is simply skipped (never invented), while the status
+  // transition, audit record and event completion all still happen.
+  const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, noShowAssignment, noShowShift);
+  if (resolvedManager) {
+    await deps.notificationService.notify(manager, {
+      organisationId: candidate.organisation_id,
+      userId: resolvedManager.userId,
+      type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW,
+      title: 'Staff member did not clock in',
+      message: `${noShowUser.firstName} ${noShowUser.lastName} has not clocked in for a shift that started at ${effectiveAssignmentTime(noShowAssignment, noShowShift).startsAt.toISOString()}. Record their attendance or confirm the no-show in the shift report.`,
+      relatedEntityType: 'shift_assignment',
+      relatedEntityId: noShowAssignment.id,
+    });
+  }
+  await deps.auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_ASSIGNMENT_NO_SHOW, {
+    targetUserId: noShowUser.id,
+    metadata: {
+      assignmentId: noShowAssignment.id,
+      // Provisional until a manager confirms it or records attendance (owner rule 2026-10-21).
+      provisional: true,
+      notifiedManagerUserId: resolvedManager?.userId ?? null,
+      managerResolutionSource: resolvedManager?.source ?? 'none',
+    },
+    actorUserId: null,
+  });
+  await completeWorkerEvent(manager, noShowEventId);
+  return true;
 }

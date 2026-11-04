@@ -41,13 +41,15 @@ function fakeDeps(f: Fake, send: jest.Mock): PushSendProcessorDeps {
           return qb;
         },
         where: () => qb,
+        returning: () => qb,
         execute: async () => {
           if (values.status === 'ACCEPTED' && f.failAcceptedWrites > 0) {
             f.failAcceptedWrites -= 1;
             throw new Error('connection terminated unexpectedly');
           }
           f.writes.push(values);
-          return { affected: 1 };
+          // D-Q5b: the claim counts the attempt in SQL and returns the new count (RETURNING); first attempt here.
+          return { affected: 1, raw: [{ attempt_count: 1, max_attempts: 5 }] };
         },
       };
       return qb;

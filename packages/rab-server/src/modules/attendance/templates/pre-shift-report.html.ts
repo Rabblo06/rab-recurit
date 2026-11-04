@@ -69,7 +69,7 @@ ${DOCUMENT_CSS}
   <section class="bottom">
     <div>
       <h3>NOTES</h3>
-      <p>${data.notes && data.notes.trim() ? escapeHtml(data.notes) : '<span class="muted">No shift notes.</span>'}</p>
+      <p class="notes-text">${data.notes && data.notes.trim() ? escapeHtml(data.notes) : '<span class="muted">No shift notes.</span>'}</p>
       <p class="muted">The QR grants attendance access for this shift only.</p>
     </div>
     <div>

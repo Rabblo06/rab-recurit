@@ -2,12 +2,14 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 
 import { EnvironmentVariables } from './environment-variables';
+import { COMBINED_SHIFT_SCAN_MEMBER_KEYS, COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS, combinedShiftScanTickSeconds } from './worker-scan-intervals';
 import { normaliseKeyPrefix } from '../storage/storage-key-prefix';
 import { parseHostAuthority } from '@rab/shared';
 import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-encryption/keyring.util';
 import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
+import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -74,6 +76,29 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     throw new Error(
       'Invalid environment configuration:\nWORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global (supported: per_scope+poll, global+poll, global+event).',
     );
+  }
+
+  // Phase D-Q4a: the combined shift scan ticks at the greatest common divisor of its members' intervals, so each member
+  // still runs exactly at its own interval. A tick under 30 s (e.g. 301 s and 300 s → 1 s) refuses to boot rather than
+  // walking every workspace every second. Separate mode (the default) never reads this: its four scans are unchanged.
+  if (validated.WORKER_SHIFT_SCAN_MODE === 'combined') {
+    const tick = combinedShiftScanTickSeconds(COMBINED_SHIFT_SCAN_MEMBER_KEYS.map((key) => validated[key]));
+    if (tick < COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS) {
+      throw new Error(
+        `Invalid environment configuration:
+WORKER_SHIFT_SCAN_MODE=combined needs the greatest common divisor of ${COMBINED_SHIFT_SCAN_MEMBER_KEYS.join(', ')} ` +
+          `to be at least ${COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS} s (it is ${tick} s). Use intervals with a common tick (for example multiples of 60) or WORKER_SHIFT_SCAN_MODE=separate.`,
+      );
+    }
+  }
+
+  // Phase D-Q4b: the regex on WORKER_TIMER_TRIGGER_KINDS cannot see a repeated kind; the shared parser (the one the API and
+  // the Worker use) is the rule. Fail closed at boot, never on the first trigger.
+  try {
+    parseTimerTriggerKinds(validated.WORKER_TIMER_TRIGGER_KINDS);
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
   }
 
   // Fail fast on a malformed STORAGE_KEY_PREFIX (e.g. `../etc`) rather than on the first object write.
