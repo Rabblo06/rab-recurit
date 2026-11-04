@@ -11,7 +11,10 @@ import { BASE_SHIFT_INFO, FIXTURE_QR_PNG_BASE64, PRE_SHIFT_FIXTURE_NAMES, PRE_SH
  *
  * T1 golden HTML: `golden/pre-shift-report/*.html` were written by the template on origin/main 824f0824, BEFORE the
  * view-model refactor. The Chromium input (page HTML and footer template) must stay byte-identical, so the Chromium path
- * provably prints exactly what it printed before.
+ * provably prints exactly what it printed before. Regenerated ONCE since, for the owner-ordered F-PDF-1 fix and pre-line
+ * notes (decision 2026-11-04): VERIFIED when regenerated that, with `.bottom > div { flex: 1; }` restored, the
+ * `.notes-text` rule removed and `<p class="notes-text">` back to `<p>`, every page equals its 824f0824 golden byte for
+ * byte (footers unchanged), so nothing else moved.
  * T4 view-model: the strings both renderers print, the organisation timezone (incl. both DST nights), and that the
  * view-model carries no number either renderer could compute with.
  */

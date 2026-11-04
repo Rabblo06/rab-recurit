@@ -35,22 +35,26 @@ const base: ApprovedShiftStatementData = {
 };
 const HOSTILE = `<script>alert('x')</script><img src="http://127.0.0.1:9/leak.png"> &amp; &lt;b&gt; "quoted" 'single' ‮evil‬ zero​width`;
 
+// The pinned hashes changed ONCE since the refactor, for the shared DOCUMENT_CSS rules of the F-PDF-1 fix and pre-line
+// notes (`.bottom > div { …; min-width: 0; overflow-wrap: anywhere; }`, `.notes-text { white-space: pre-line; }`, owner
+// decision 2026-11-04). VERIFIED when re-pinned: with those two CSS lines restored, every fixture hashes to its old value,
+// so nothing else in the statement HTML changed.
 const FIXTURES: Array<[string, ApprovedShiftStatementData, string]> = [
-  ['typical', base, 'fc934e0db7e95e56519d155afecea819948e919e3d5604e1399b49353ea2b426'],
+  ['typical', base, '0a1200eee431d7bf30198d31a7e5d9a142b2ff5a2d793f6fbcb0adb519ceeada'],
   ['night shift in BST, paid break, no period, no approver', {
     ...base, statementReference: 'ASS-20260815-0F0E0D0C', scheduledStart: '2026-08-15T21:00:00.000Z', scheduledEnd: '2026-08-16T05:30:00.000Z',
     clockInAt: '2026-08-15T20:55:00.000Z', clockOutAt: '2026-08-16T05:31:00.000Z', breakMinutes: 45, breakPaid: true, payableMinutes: 516, payRatePence: 1525,
     amountPence: 13115, approvedByName: null, payrollPeriodLabel: null, paydayLabel: null,
-  }, '69b05670109bf9b5ce12fd07ebdaac3b618a70fc6b5b3a84aeea5475b08a2184'],
+  }, '7e5085757ea5307bfdbddceab2f6e4967005d95f3c8222ef807dbfb72cff1452'],
   ['zero pence, no clock times, no break, no staff ref', {
     ...base, payRatePence: 0, amountPence: 0, payableMinutes: 0, clockInAt: null, clockOutAt: null, breakMinutes: null, breakPaid: null, staffRef: null,
-  }, 'ac826fc69a635f0a460ef2a08b223701322d90435404a8bae89e9edd1e4f8ac0'],
-  ['one penny', { ...base, payRatePence: 1, amountPence: 1, payableMinutes: 1, breakMinutes: 7, breakPaid: null }, '0cf0bd6613c7afddeafeb8ae39f3efa0837c34cf99ab5e946f5528a777ee088c'],
-  ['large amount', { ...base, payRatePence: 99_999_999, amountPence: 123_456_789_012, payableMinutes: 7_407_407 }, 'd7156ec17638b041ff04989a90d71bbf92d0e93360e717b54e07db743ff67b5c'],
+  }, 'ba35f4fb45baa4474e54c726d08ebd44b14a51dd6acab56fe8cc7a90e336f25e'],
+  ['one penny', { ...base, payRatePence: 1, amountPence: 1, payableMinutes: 1, breakMinutes: 7, breakPaid: null }, '5df7f3e5c8799a8ee394a3c1adecb199875354da860631d272675d28023be739'],
+  ['large amount', { ...base, payRatePence: 99_999_999, amountPence: 123_456_789_012, payableMinutes: 7_407_407 }, '53ab877c0312bdb4b26bf4fffd2a8b0f9ffb1eb862c17cef0d970445330f1ae0'],
   ['hostile text', {
     ...base, staffName: HOSTILE, employerName: HOSTILE, workspaceName: HOSTILE, venueName: HOSTILE, roleName: HOSTILE, approvedByName: HOSTILE, staffRef: '<b>ref</b>',
     payrollPeriodLabel: '<i>period</i>', paydayLabel: '&nbsp;payday',
-  }, '1117add25b39961959eccb3f697190753acbfca3be747cf0ce651c9167d0f7bc'],
+  }, '279e1aa8847e283157f1194398c3ae6e8a589c34fc56a16532c6bac8fcc524ec'],
 ];
 
 describe('Approved Shift Statement view-model', () => {
