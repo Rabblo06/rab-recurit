@@ -150,6 +150,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH',
   // Phase D-Q3: after-commit fast publish of notify() email/push rows written by Worker jobs (default false).
   'WORKER_FAST_PUBLISH_NOTIFY',
+  // Phase D-Q4b: delayed timer triggers (default off = no trigger consumer, no arming). Validated by the shared
+  // EnvironmentVariables class in the jobs child (strict off|shadow|on and a known-kinds list); forwarded verbatim.
+  'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS',
   // Phase D wave 2: may the account-invite cleanup delete expired-invite user accounts — default false; true in production
   // refuses to boot until the owner approves a retention policy (env.validation.ts). Forwarded verbatim, never invented.
   'WORKER_INVITE_AUTO_DELETE_ENABLED',

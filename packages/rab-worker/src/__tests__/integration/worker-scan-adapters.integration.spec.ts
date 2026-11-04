@@ -33,7 +33,7 @@ import { WorkerModule } from '../../worker.module';
 import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
 
 /**
- * Lane A M3/M7: the REAL WorkerModule graph discovers all 21 scan handlers + 4 consumer handlers (no duplicates, no
+ * Lane A M3/M7: the REAL WorkerModule graph discovers all scan handlers + 5 consumer handlers (D-Q4b: + crewflow-timer-triggers) (no duplicates, no
  * gaps; AI Phase 1 added the `ai-retention` scan and the `rab-ai` consumer), and every real adapter runs its real cycle
  * once through the bullmq-mode path (runtime.runOnce + the per-scan advisory lock) as the restricted crewflow_app role, against the disposable test database. Interval mode uses the same
  * adapters, so this also proves the interval path's handlers resolve.
@@ -98,10 +98,10 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
 
     const registry = moduleRef.get(ProcessorExplorer).explore();
     expect(() => validateHandlerRegistry(registry)).not.toThrow();
-    // By name, not just a count: exactly these 27 handlers (23 scans incl. ai-retention, workspace-provisioning-health, D-Q2's ai-stale-turn-sweep and D-Q4a's shift-scan-combined + 4 consumers incl. rab-ai).
+    // By name, not just a count: exactly these 28 handlers (23 scans incl. ai-retention, workspace-provisioning-health, D-Q2's ai-stale-turn-sweep and D-Q4a's shift-scan-combined + 5 consumers incl. rab-ai and D-Q4b's timer triggers).
     const discovered = [...registry.handlers.values()].map((h) => `${h.queue}/${h.jobName}`);
     expect(discovered.sort()).toEqual([...EXPECTED_HANDLERS].sort());
-    expect(registry.handlers.size).toBe(27);
+    expect(registry.handlers.size).toBe(28);
     expect(registry.get('crewflow-scan-maintenance', 'ai-retention')).toBeDefined();
     expect(registry.get('rab-ai', 'ai-turn')).toBeDefined();
     // ...and every scan that will be scheduled is exactly the expected set.

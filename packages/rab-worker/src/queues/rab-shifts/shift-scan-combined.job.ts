@@ -8,6 +8,7 @@ import { discoverMembersInWorkspaces, WalkMember, WalkResult } from '../../core/
 import { discoverFinalTimesheetCandidates, FinalTimesheetCandidate, processFinalTimesheetCandidates } from '../rab-reports/final-timesheet.job';
 import { discoverShiftReportCandidates, processShiftReportCandidates, ShiftReportCandidate } from '../rab-reports/shift-report-scheduler.job';
 import { AttendanceMonitorScope, discoverAttendanceMonitorScopes, processAttendanceMonitorScopes } from './attendance-monitor.job';
+import { armFromShiftMonitorDiscoveries } from '../rab-timer-triggers/timer-trigger-arming';
 import { discoverShiftMonitorInWorkspace, processShiftMonitorDiscoveries, ShiftMonitorDiscovery } from './shift-monitor.job';
 
 /**
@@ -171,6 +172,9 @@ export function bindCombinedShiftScanMembers(deps: WorkerJobDependencies): Map<C
       {
         discover: discoverShiftMonitorInWorkspace,
         process: async (found) => {
+          // Phase D-Q4b: no-show / late clock-in arming from the same discovery rows, exactly as separate mode does (no-op
+          // unless WORKER_TIMER_TRIGGERS enables a shift kind; never throws).
+          await armFromShiftMonitorDiscoveries(deps.timerTriggers, found as ShiftMonitorDiscovery[], { environmentService, logger, recordOutcome: deps.timerTriggerOutcomes });
           const result = await processShiftMonitorDiscoveries(tenantContext, { notificationService, auditService }, clockInEarlyMinutes, found as ShiftMonitorDiscovery[]);
           if (result.remindersSent || result.noShowsFlagged) {
             logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);

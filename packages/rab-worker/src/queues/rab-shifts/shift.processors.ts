@@ -1,10 +1,12 @@
+import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { SCAN_QUEUES } from '../../core/scheduler/queue-registry';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runAttendanceMonitorCycle } from './attendance-monitor.job';
 import { runLateClockInCycle } from './late-clock-in.job';
 import { runShiftCancellationFollowupCycle } from './shift-cancellation-followup.job';
-import { runShiftMonitorCycle } from './shift-monitor.job';
+import { armFromShiftMonitorDiscoveries } from '../rab-timer-triggers/timer-trigger-arming';
+import { discoverShiftMonitorInWorkspace, processShiftMonitorDiscoveries, runShiftMonitorCycle } from './shift-monitor.job';
 
 /** Thin adapters — the pre-migration main.ts loop bodies, verbatim (see rab-email/email.processors.ts). */
 @Processor(SCAN_QUEUES.shifts)
@@ -13,8 +15,20 @@ export class ShiftScanProcessor {
 
   @Process('shift-monitor')
   async shiftMonitor(): Promise<void> {
-    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
-    const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('CLOCK_IN_EARLY_MINUTES'));
+    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger, timerTriggers, timerTriggerOutcomes } = this.deps.get();
+    const clockInEarlyMinutes = environmentService.get('CLOCK_IN_EARLY_MINUTES');
+    const arming = Boolean(timerTriggers && (timerTriggers.enabled('no-show') || timerTriggers.enabled('late-clock-in')));
+    // WORKER_TIMER_TRIGGERS=off (default), or neither shift kind enabled: exactly the pre-D-Q4b call. Otherwise the same two
+    // steps runShiftMonitorCycle runs (discover, then process) with D-Q4b's arming in between: it reuses the discovery rows
+    // (no extra query) and never throws; the processing that follows is unchanged. Combined mode arms the same way
+    // (shift-scan-combined.job.ts).
+    const result = !arming
+      ? await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, clockInEarlyMinutes)
+      : await (async () => {
+          const discoveries = await discoverInWorkspaces(runtimeDataSource, tenantContext, discoverShiftMonitorInWorkspace);
+          await armFromShiftMonitorDiscoveries(timerTriggers, discoveries, { environmentService, logger, recordOutcome: timerTriggerOutcomes });
+          return processShiftMonitorDiscoveries(tenantContext, { notificationService, auditService }, clockInEarlyMinutes, discoveries);
+        })();
     if (result.remindersSent || result.noShowsFlagged) {
       logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
     }

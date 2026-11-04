@@ -62,6 +62,8 @@ import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/conn
 import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
+import { TimerTriggerQueueService } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
+import { redisTimerTriggerOutcomeRecorder } from './queues/rab-timer-triggers/timer-trigger-arming';
 
 /**
  * ONE `rab-worker` process, multiple job categories — its own deployable
@@ -151,6 +153,8 @@ function refuseStartup(error: unknown): never {
           ? '[worker-scheduler] refused: '
           : error instanceof Error && error.name === 'DispatchConfigError'
             ? '[worker-dispatch] refused: '
+            : error instanceof Error && error.name === 'TimerTriggerConfigError'
+              ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
               : '';
@@ -272,6 +276,9 @@ async function bootstrap(): Promise<void> {
     storageReconcileCommand: appContext.get(StorageReconcileCommand),
     realtimePublish,
     shiftStatementQueue,
+    // Phase D-Q4b: trigger outcome counters on the fail-fast client (a Redis outage rejects at once, never queues).
+    timerTriggerOutcomes: redisTimerTriggerOutcomeRecorder(scanTicksRedis),
+    timerTriggers: appContext.get(TimerTriggerQueueService),
   });
 
   // Processor discovery (BullMQ migration M2): every scan and consumer handler is a `@Process` method on a `@Processor`
@@ -339,8 +346,23 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     refuseStartup(error);
   }
-  // The four consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4).
-  const consumers = createConsumerWorkers(registry, redis, logger);
+  // Phase D-Q4b: WORKER_TIMER_TRIGGERS (off | shadow | on, default off) and WORKER_TIMER_TRIGGER_KINDS, re-checked here,
+  // fail closed. The producer service resolved them already (one source); `off` = no trigger consumer, no arming.
+  const timerTriggers = (() => {
+    try {
+      return appContext.get(TimerTriggerQueueService).settings;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  logger.log(
+    timerTriggers.mode === 'off'
+      ? 'timer triggers: WORKER_TIMER_TRIGGERS=off — no trigger consumer, no arming (the backstop scans run unchanged)'
+      : `timer triggers: WORKER_TIMER_TRIGGERS=${timerTriggers.mode} kinds=${timerTriggers.kinds.join(',')} — consumer concurrency 2; the backstop scans run unchanged`,
+  );
+  // The consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4, and
+  // D-Q4b's timer triggers 2 only when WORKER_TIMER_TRIGGERS is not off).
+  const consumers = createConsumerWorkers(registry, redis, logger, (def) => def.key !== 'timerTriggers' || timerTriggers.mode !== 'off');
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).

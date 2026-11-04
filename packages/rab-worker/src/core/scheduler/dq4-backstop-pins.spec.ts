@@ -1,4 +1,5 @@
 import { WORKER_SCAN_INTERVAL_SETTINGS } from '@rab/server/engine/core-modules/environment/worker-scan-intervals';
+import { parseTimerTriggerMode } from '@rab/server/engine/worker-shared/timer-trigger.contract';
 import { QUEUE_SETTINGS, SCAN_QUEUES } from './queue-registry';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './scan-jobs';
 
@@ -62,12 +63,14 @@ describe('D-Q4a characterisation: the five shift-family scans are separate scans
     ]);
   });
 
-  it('D-Q4a: the combined scan exists but is NOT scheduled by default (separate); no timer-trigger queue (D-Q4b) yet', () => {
+  it('D-Q4a: the combined scan exists but is NOT scheduled by default (separate); D-Q4b adds only the trigger CONSUMER queue (never a scan)', () => {
     const defaults = { get: () => undefined } as never;
     expect(SCAN_JOBS.filter((j) => /combined|timer-trigger/i.test(j.jobName)).map((j) => j.jobName)).toEqual(['shift-scan-combined']);
     expect(SCAN_JOBS.filter((j) => /combined/.test(j.jobName) && isScanJobEnabled(j, defaults))).toEqual([]);
     expect(members.every((m) => isScanJobEnabled(SCAN_JOBS.find((j) => j.jobName === m)!, defaults))).toBe(true);
-    expect(Object.keys(QUEUE_SETTINGS).filter((q) => /timer|trigger/i.test(q))).toEqual([]);
+    // D-Q4b: the triggers are a consumer queue, never a scan — every backstop scan above keeps its interval and code.
+    expect(Object.keys(QUEUE_SETTINGS).filter((q) => /timer|trigger/i.test(q))).toEqual(['crewflow-timer-triggers']);
+    expect(QUEUE_SETTINGS['crewflow-timer-triggers'].kind).toBe('consumer');
   });
 
   it('scan queue concurrency equals the number of scans on that queue (D-Q4d baseline)', () => {
@@ -99,6 +102,18 @@ describe('D-Q4a characterisation: the five shift-family scans are separate scans
       expect(own % tick).toBe(0);
     }
   });
-  it.todo('PROPOSED D-Q4b: WORKER_TIMER_TRIGGERS defaults to `off`; any value other than off|shadow|on refuses to boot');
-  it.todo('PROPOSED D-Q4b: the timer-trigger queue is in the registry with an organisation scope, ids-only payload keys and explicit options');
+  it('D-Q4b: WORKER_TIMER_TRIGGERS defaults to `off`; any value other than off|shadow|on refuses to boot', () => {
+    expect(parseTimerTriggerMode(undefined)).toBe('off');
+    for (const v of ['off', 'shadow', 'on'] as const) expect(parseTimerTriggerMode(v)).toBe(v);
+    for (const v of ['OFF', ' on', 'true', '1']) expect(() => parseTimerTriggerMode(v)).toThrow();
+  });
+  it('D-Q4b: the timer-trigger queue is in the registry with an organisation scope, ids-only payload keys and explicit options', () => {
+    expect(QUEUE_SETTINGS['crewflow-timer-triggers']).toMatchObject({
+      prefix: 'legacy-bull',
+      tenantScope: 'organisation',
+      payloadKeys: ['organisationId', 'workspaceId', 'subjectId', 'dueAtEpochMs'],
+      worker: { concurrency: 2, lockDurationMs: 30_000, maxStalledCount: 1, stalledIntervalMs: 30_000 },
+      job: { attempts: 3, timeoutMs: null },
+    });
+  });
 });
