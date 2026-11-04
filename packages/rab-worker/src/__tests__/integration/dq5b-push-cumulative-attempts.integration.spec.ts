@@ -3,7 +3,9 @@
  * cumulative across republish generations, like email's. Real PostgreSQL (RLS-bound crewflow_app runtime), the real
  * `FakeFcmDriver` provider (PUSH_PROVIDER defaults to FAKE — never a real push).
  *
- *  1. 3 attempts in generation 0 + dispatcher republish + 2 more → FAILED at 5 (before: 5 per generation, forever).
+ *  1. The count accumulates across retries and across generations: 3 attempts in generation 0 + dispatcher republish + 2
+ *     more → FAILED at 5 (before: 5 per generation). A stale RETRY whose provider call started is DELIVERY_UNCERTAIN, never
+ *     republished (push at-most-once, unchanged).
  *  2. A republished accepted push records the cumulative count; a row at the cap is never claimed again.
  *  3. The last allowed attempt dying after the provider call (PROCESSING at the cap, marker set) stays DELIVERY_UNCERTAIN —
  *     the push "uncertain" rule is unchanged by the counter (OD-6).
@@ -110,24 +112,39 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
     return { publish, republish, result };
   };
 
-  it('1: OC-1 — 3 attempts in generation 0, republish (generation 1), 2 more → FAILED at 5 cumulative, five provider calls', async () => {
-    const { org, token, deliveryId } = await seed('dq5bp1');
+  it('1a: OC-1 — the count accumulates across the same job retries; a stale RETRY whose provider call started stays DELIVERY_UNCERTAIN (push at-most-once, OD-6 unchanged)', async () => {
+    const { org, token, deliveryId } = await seed('dq5bp1a');
     expect((await rowOf(deliveryId)).max_attempts).toBe(5);
     FakeFcmDriver.behaviorForToken.set(token, { outcome: 'retryable-error' });
     const p = processor();
     for (const attemptsMade of [0, 1, 2]) await expect(p(jobOf(deliveryId, org.id, attemptsMade))).rejects.toThrow(/retryable/);
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'RETRY', count: 3, generation: 0 });
-
+    // The BullMQ job is lost. Every one of those attempts reached the provider (marker set), and push drivers are not safe to
+    // retry an ambiguous call: recovery marks it DELIVERY_UNCERTAIN and never republishes — unchanged by D-Q5b.
     await setRow(deliveryId, `updated_at = now() - interval '10 minutes'`);
+    const { publish, republish } = await dispatch(org.id);
+    expect(publish).not.toHaveBeenCalled();
+    expect(republish).not.toHaveBeenCalled();
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 3 });
+    expect(sends(token)).toBe(3);
+  });
+
+  it('1b: OC-1 — across generations: 3 claims whose claimant died before the provider call, dispatcher republish (generation 1), 2 more → FAILED at 5 cumulative', async () => {
+    const { org, token, deliveryId } = await seed('dq5bp1b');
+    // Generation 0 used 3 attempts that never reached the provider (each claim counted; the last claimant died while PROCESSING).
+    await setRow(deliveryId, `status = 'PROCESSING', processing_at = now() - interval '20 minutes', processing_token = gen_random_uuid(), attempt_count = 3`);
     const { republish } = await dispatch(org.id);
     expect(republish).toHaveBeenCalledWith(deliveryId, org.id, 1);
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'PENDING', count: 3, generation: 1 });
 
+    // The republished job starts at attemptsMade 0 — the row's count does not.
+    FakeFcmDriver.behaviorForToken.set(token, { outcome: 'retryable-error' });
+    const p = processor();
     await expect(p(jobOf(deliveryId, org.id, 0))).rejects.toThrow(/retryable/);
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'RETRY', count: 4 });
     await expect(p(jobOf(deliveryId, org.id, 1))).rejects.toBeInstanceOf(UnrecoverableError);
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', count: 5 });
-    expect(sends(token)).toBe(5);
+    expect(sends(token)).toBe(2);
   });
 
   it('2: a republished push accepted on its first new-generation attempt records the cumulative count (3 → 4)', async () => {
