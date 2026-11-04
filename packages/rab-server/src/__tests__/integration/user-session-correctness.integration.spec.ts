@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
@@ -544,7 +544,8 @@ describeIfDb('core.user_session correctness (P1B)', () => {
       expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: toOrg, params: [sid, org.id] }])).toBe('42501');
       const [before] = await adminDataSource.query(`SELECT user_id, organisation_id FROM core.user_session WHERE id = $1`, [sid]);
       await expect(asRabApp(staffA.userId, (manager) => manager.query(toUser, [sid, staffB.userId]))).rejects.toBeDefined();
-      await expect(asRabApp(staffA.userId, (manager) => manager.query(toOrg, [sid, org.id]))).rejects.toBeDefined();
+      // A REAL change for the runtime login (the same organisation id is a no-op the value-comparing trigger lets through).
+      await expect(asRabApp(staffA.userId, (manager) => manager.query(toOrg, [sid, randomUUID()]))).rejects.toBeDefined();
       const [after] = await adminDataSource.query(`SELECT user_id, organisation_id FROM core.user_session WHERE id = $1`, [sid]);
       expect(after).toEqual(before);
     });

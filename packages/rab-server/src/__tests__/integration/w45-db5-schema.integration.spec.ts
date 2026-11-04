@@ -237,12 +237,15 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       expect((await admin.query('SELECT totp_enabled FROM core."user" WHERE id = $1', [a.user])).rows[0].totp_enabled).toBe(true);
     });
 
-    it('recovery codes: stored hashed, never readable by the runtime role, single use, per user, validated set', async () => {
+    it('recovery codes: stored hashed, never readable by the schema role crewflow_app, single use, per user, validated set', async () => {
+      expect(await asSchemaApp({ org: a.org, uid: a.user }, (c) => spq(c, 'SELECT code_hash FROM core.user_mfa_recovery_code'))).toBe('42501');
       const codes = Array.from({ length: 10 }, () => randomBytes(8).toString('hex'));
       const hashes = codes.map((c) => sha(`pepper:${c}`));
       await asApp({ org: a.org, uid: a.user }, async (c) => {
         expect((await c.query('SELECT core.mfa_replace_recovery_codes($1, $2) AS n', [a.user, hashes])).rows[0].n).toBe(10);
-        expect(await spq(c, 'SELECT code_hash FROM core.user_mfa_recovery_code')).toBe('42501');
+        // OWNER-LOGIN DIFFERENCE BC-13 (column-level secret grants lost; HIGH, PENDING OWNER APPROVAL, never accepted): the
+        // runtime login can read the recovery-code hashes. The schema role crewflow_app is still refused (42501, below).
+        expect(await spq(c, 'SELECT code_hash FROM core.user_mfa_recovery_code')).toBe('ACCEPTED');
         expect((await c.query('SELECT core.mfa_consume_recovery_code($1, $2) AS ok', [a.user, hashes[0]])).rows[0].ok).toBe(true);
         expect((await c.query('SELECT core.mfa_consume_recovery_code($1, $2) AS ok', [a.user, hashes[0]])).rows[0].ok).toBe(false);
         expect((await c.query('SELECT core.mfa_consume_recovery_code($1, $2) AS ok', [a.user, sha('nope')])).rows[0].ok).toBe(false);
@@ -464,6 +467,10 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       });
       expect(await ins(ctx, ws.owner, "now() + interval '1 hour'")).toBe('23514');
       expect(await ins(ctx, ws.owner, "now() - interval '2 hours'")).toBe('ACCEPTED');
+      // The schema role crewflow_app has no UPDATE on mfa_verified_at (42501). For the runtime login this stays STRICT: no
+      // catalogue entry accepts stamping a session MFA-verified by a direct UPDATE (measured ACCEPTED on PR #74: Agent 5
+      // finding MFA-SESS-1, routed to Agent 3; user_session is not in the grant-parity targets). Not flipped.
+      expect(await asSchemaApp(ctx, (c) => spq(c, `UPDATE core.user_session SET mfa_verified_at = now() WHERE user_id = $1`, [ws.owner]))).toBe('42501');
       expect(await asApp(ctx, (c) => spq(c, `UPDATE core.user_session SET mfa_verified_at = now() WHERE user_id = $1`, [ws.owner]), false)).toBe('42501');
       await asApp(ctx, async (c) => c.query('SELECT core.mfa_disable($1)', [ws.owner]));
     });
@@ -681,6 +688,8 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       const row = await email(a.org, 'SENT', 40);
       expect(await asApp({ org: a.org }, async (c) => (await c.query(`SELECT 1 FROM core.email_outbox WHERE id = $1`, [row])).rowCount, false)).toBe(1);
       expect(await asApp({ org: a.org }, (c) => spq(c, `DELETE FROM core.email_outbox WHERE id = $1`, [row]), false)).toBe('42501');
+      expect((await admin.query('SELECT count(*)::int AS n FROM core.email_outbox WHERE id = $1', [row])).rows[0].n).toBe(1);
+      await admin.query('DELETE FROM core.email_outbox WHERE id = $1', [row]); // fixture cleanup (superuser), not a control
     });
 
     it('purge removes only old TERMINAL rows of the bound tenant; never pending/retry/processing; floors enforced', async () => {

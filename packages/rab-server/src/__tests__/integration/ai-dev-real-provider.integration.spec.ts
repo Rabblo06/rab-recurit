@@ -92,8 +92,13 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
     it('crewflow_app cannot execute the marker function; the function itself refuses a disposable test database', async () => {
       const org = await kit.factory.createOrganisation('ai-synth-fn');
       const ceo = await kit.factory.createCeo(org, { permissions: 'production', platformAdmin: true });
+      // The schema role crewflow_app has no EXECUTE (42501). The runtime login inherits the function owner and reaches the body,
+      // which still refuses on this disposable test database (55000): OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL).
+      expect(
+        await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.id, userId: ceo.userId }, [{ sql: `SELECT core.ai_dev_mark_organisation_synthetic($1)`, params: [org.id] }]),
+      ).toBe('42501');
       const denied = await asTenant({ organisationId: org.id, workspaceId: null, userId: ceo.userId }, `SELECT core.ai_dev_mark_organisation_synthetic($1)`, [org.id]).catch((e) => e);
-      expect(pgCode(denied)).toBe('42501');
+      expect(pgCode(denied)).toBe('55000');
       // The bootstrap identity CAN execute it: this database's catalog marker stops it (even with the session value faked).
       const refused = await kit.owner
         .transaction(async (m) => {

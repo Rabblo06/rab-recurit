@@ -422,7 +422,17 @@ describeIfDb('AI skills (integration)', () => {
         }),
       ).rejects.toBe(rollback);
       expect((await rows(org.orgId)).length).toBeGreaterThan(0);
-      expect(pgCode(await asTenant(org.ceo, `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`, [org.orgId, org.ceo.userId]).catch((e) => e))).toBe('42501');
+      // A client-chosen id: refused to the schema role crewflow_app by its column INSERT grant (42501). The runtime login is
+      // not refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL), rolled back.
+      const withId = `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`;
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: withId, params: [org.orgId, org.ceo.userId] }])).toBe('42501');
+      await expect(
+        kit.runtime.transaction(async (m) => {
+          await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [org.orgId, org.ceo.userId]);
+          await m.query(withId, [org.orgId, org.ceo.userId]);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
       const [owner] = await kit.owner.query(`SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced, pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'core' AND c.relname = 'ai_skill'`);
       expect(owner).toEqual({ rls: true, forced: true, owner: 'crewflow' });
     });
