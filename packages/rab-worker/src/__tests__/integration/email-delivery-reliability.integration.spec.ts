@@ -511,6 +511,28 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
       expect(republishSpy).not.toHaveBeenCalled();
       const after = await rowOf(row.id);
       expect(after.status).toBe(EmailOutboxStatus.FAILED);
+      // D-Q5b: the claim now counts the in-flight attempt, so PROCESSING at the cap = the LAST allowed attempt died. With the
+      // provider-call marker set the email may have gone out: DELIVERY_UNCERTAIN (manual review; replay needs the explicit
+      // allow-uncertain flag), never a plain exhausted failure a replay would resend. Still FAILED and never republished.
+      expect(after.lastErrorCode).toBe('DELIVERY_UNCERTAIN');
+    });
+
+    it('C5b: the same exhausted stuck row WITHOUT the provider-call marker (nothing was sent) is STUCK_LEASE_ATTEMPTS_EXHAUSTED, never republished', async () => {
+      const row = await seedRow();
+      await tenantContext.runInTenantContext(ctx, (m) =>
+        m.update(EmailOutbox, row.id, {
+          status: EmailOutboxStatus.PROCESSING,
+          processingAt: new Date(),
+          infrastructureAttemptCount: 5,
+          maxInfrastructureAttempts: 5,
+        }),
+      );
+      await markStale(row.id, 'processing_at', 20);
+      const { publishSpy, republishSpy } = await dispatch(true); // even on an idempotent driver
+      expect(publishSpy).not.toHaveBeenCalled();
+      expect(republishSpy).not.toHaveBeenCalled();
+      const after = await rowOf(row.id);
+      expect(after.status).toBe(EmailOutboxStatus.FAILED);
       expect(after.lastErrorCode).toBe('STUCK_LEASE_ATTEMPTS_EXHAUSTED');
     });
 
