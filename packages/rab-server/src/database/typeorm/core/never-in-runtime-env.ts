@@ -105,6 +105,8 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   { name: 'PG_WORKER_DATABASE_URL', why: ONE_URL, ...OWNER_LOGIN },
   { name: 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
   { name: 'CREWFLOW_OWNER_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
+  // The provider step's / test harness's name for the owner password (twenty-test-env.cjs): never in a runtime process.
+  { name: 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
 ]);
 
 /**

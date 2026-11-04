@@ -69,6 +69,19 @@ export async function actAsProvisioningRole(client: Pick<Client, 'query'>): Prom
   return 'set-role';
 }
 
+/**
+ * Per-cycle re-check (Agent 3's recommendation): before every provisioning cycle the session must still be `crewflow`. A
+ * session whose role was reset (anything that ran RESET ROLE on it) is refused for that cycle with ProvisioningIdentityError;
+ * the caller drops the connection, so the next cycle reconnects and `actAsProvisioningRole` re-applies the role.
+ */
+export async function assertProvisioningIdentity(client: Pick<Client, 'query'>): Promise<void> {
+  const { rows } = await client.query<{ who: string }>('SELECT current_user::text AS who');
+  const who = rows[0]?.who;
+  if (who !== PROVISIONING_ROLE) {
+    throw new ProvisioningIdentityError(`workspace provisioning: the session is "${who ?? 'unknown'}", not ${PROVISIONING_ROLE}; this cycle is skipped and the connection is reopened.`);
+  }
+}
+
 export interface ProvisioningLoopsLogger {
   log(message: string): void;
   warn(message: string): void;
@@ -139,6 +152,15 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
     intervalMs: options.intervalMs,
     statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
     run: async () => {
+      if (options.actAsCrewflow) {
+        const client = await provisioning.acquire();
+        try {
+          await assertProvisioningIdentity(client);
+        } catch (error) {
+          provisioning.invalidate(client, 'the session is no longer crewflow');
+          throw error; // the cycle fails (counted as a failure); the next one reconnects and re-applies the role
+        }
+      }
       if (!(await compatibleForThisCycle())) return false;
       const result = await runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown });
       if (!result.lockAcquired) {
