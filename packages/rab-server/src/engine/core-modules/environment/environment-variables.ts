@@ -632,6 +632,15 @@ export class EnvironmentVariables {
   @IsIn(['chromium', 'native'], { message: 'PDF_RENDERER must be exactly chromium or native' })
   PDF_RENDERER?: 'chromium' | 'native' = 'chromium';
 
+  /**
+   * PDF renderer P1 — size of the native renderer's worker_threads pool (rab-worker queues/rab-reports/native/runtime,
+   * `pdfNativeConcurrency`, which applies the same rule at render time). Unset (or empty, as for every variable) → 2;
+   * exactly "1".."4"; anything else (spaces, "0", "5", "2.0") refuses to boot. Only read when PDF_RENDERER=native.
+   */
+  @IsOptional()
+  @IsIn(['1', '2', '3', '4'], { message: 'PDF_NATIVE_CONCURRENCY must be an integer from 1 to 4' })
+  PDF_NATIVE_CONCURRENCY?: '1' | '2' | '3' | '4';
+
   // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
   // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
   // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot

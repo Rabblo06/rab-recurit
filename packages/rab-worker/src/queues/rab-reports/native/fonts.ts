@@ -4,6 +4,10 @@ import { join } from 'path';
 
 import { Font } from '@react-pdf/renderer';
 
+import { breakOnlyOverlongTokens } from './word-breaking';
+
+export { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './word-breaking';
+
 /**
  * Embedded fonts for the native PDF renderer (PDF renderer P1, owner decision D11). INTERIM: the render-runtime agent
  * (P) owns the font assets, the Noto fallback subsets (D3) and the glyph-coverage guard; this module is the minimal
@@ -22,21 +26,6 @@ export const FONT_DIR = join(__dirname, 'assets', 'fonts');
 const FONT_FILES: Readonly<Record<400 | 700, string>> = Object.freeze({ 400: 'LiberationSans-Regular.ttf', 700: 'LiberationSans-Bold.ttf' });
 
 let registered = false;
-
-/** A token longer than this many characters (no space or hyphen in it) may be broken anywhere. */
-export const OVERLONG_TOKEN_CHARS = 24;
-
-/**
- * Word breaking. Chromium never hyphenates these templates, and react-pdf's default English hyphenation would, so
- * ordinary words stay whole. But with no break opportunity at all an unbroken token wider than its box (a 140-character
- * name, a URL in the notes) overflows it and is drawn over the neighbouring text (MEASURED; Chromium instead shrinks the
- * whole page to fit). A token longer than OVERLONG_TOKEN_CHARS may therefore break between any two characters. react-pdf
- * always draws a "-" at such a break (textkit inserts it; it cannot be turned off), so a broken token shows hyphens that
- * are not in the data — the price of keeping every character on the page (plan §6 native/fonts.ts; owner to confirm).
- */
-export function breakOnlyOverlongTokens(word: string): string[] {
-  return word.length > OVERLONG_TOKEN_CHARS ? Array.from(word) : [word];
-}
 
 function expectedHashes(): Map<string, string> {
   const map = new Map<string, string>();
