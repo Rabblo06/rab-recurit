@@ -38,7 +38,7 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
   const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {
-    expect(SCAN_JOBS).toHaveLength(22); // Phase D-Q2 appends ai-stale-turn-sweep (below)
+    expect(SCAN_JOBS).toHaveLength(23); // Phase D-Q2 appends ai-stale-turn-sweep, Phase D-Q4a shift-scan-combined (below)
     SCAN_JOBS.slice(0, PRE_MIGRATION_MAIN_TS.length).forEach((def, i) => {
       const [name, interval, lastRunAt, failures] = PRE_MIGRATION_MAIN_TS[i]!;
       expect(def.name).toBe(name);
@@ -65,38 +65,47 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
     expect(SCAN_JOBS.some((d) => /drift-runtime/.test(d.jobName))).toBe(false);
   });
 
-  it('Phase D-Q2: the AI stale-turn sweep is appended last — maintenance queue, minutes setting (default 5), OFF by default (AI_STALE_TURN_SWEEP)', () => {
-    expect(SCAN_JOBS.slice(21).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy])).toEqual([
+  it('Phase D-Q2: the AI stale-turn sweep is appended — maintenance queue, minutes setting (default 5), OFF by default (AI_STALE_TURN_SWEEP)', () => {
+    expect(SCAN_JOBS.slice(21, 22).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy])).toEqual([
       ['ai-stale-turn-sweep', 'crewflow-scan-maintenance', { kind: 'env-minutes', key: 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' }, 'lastAiStaleTurnSweepAt', 'aiStaleTurnSweepFailures', true, 'AI_STALE_TURN_SWEEP'],
     ]);
     expect(resolveIntervalMs(SCAN_JOBS[21]!, env)).toBe(5 * MIN);
   });
 
+  it('Phase D-Q4a: the combined shift scan is appended last — shifts queue, tick = gcd of its members (default 300 s), only with WORKER_SHIFT_SCAN_MODE=combined', () => {
+    expect(SCAN_JOBS.slice(22).map((d) => [d.jobName, d.queue, d.interval, d.statKeys.lastRunAt, d.statKeys.failures, d.mayReturnFalse, d.enabledBy, d.shiftScanMode])).toEqual([
+      ['shift-scan-combined', 'crewflow-scan-shifts', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, undefined, 'combined'],
+    ]);
+    expect(resolveIntervalMs(SCAN_JOBS[22]!, env)).toBe(5 * MIN);
+    expect(SCAN_JOBS.filter((d) => d.shiftScanMode === 'separate').map((d) => d.jobName)).toEqual(['shift-monitor', 'attendance-monitor', 'shift-report-scheduler', 'final-timesheet']);
+  });
+
   it('the eight `return false` cycles are flagged (dispatchers, login-handoff and storage cleanup, outbox and AI retention)', () => {
     expect(SCAN_JOBS.filter((d) => d.mayReturnFalse).map((d) => d.jobName)).toEqual([
       'email-dispatch', 'push-dispatch', 'login-handoff-cleanup', 'storage-cleanup', 'shift-statement-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention',
-      'ai-stale-turn-sweep',
+      'ai-stale-turn-sweep', 'shift-scan-combined',
     ]);
   });
 
   it('scheduler ids are unique and `crewflow:<queue>:<jobName>`; job names unique per queue', () => {
     const ids = SCAN_JOBS.map(schedulerIdOf);
-    expect(new Set(ids).size).toBe(22);
+    expect(new Set(ids).size).toBe(23);
     for (const def of SCAN_JOBS) expect(schedulerIdOf(def)).toBe(`crewflow:${def.queue}:${def.jobName}`);
     expect(schedulerIdOf(SCAN_JOBS[1]!)).toBe('crewflow:crewflow-scan-email:email-dispatch');
     // Each queue's Worker concurrency = its number of distinct scans.
     expect(SCAN_QUEUE_NAMES.map((q) => [q, scanJobsOn(q).length])).toEqual([
-      ['crewflow-scan-email', 1], ['crewflow-scan-push', 1], ['crewflow-scan-shifts', 4], ['crewflow-scan-offers', 3],
+      ['crewflow-scan-email', 1], ['crewflow-scan-push', 1], ['crewflow-scan-shifts', 5], ['crewflow-scan-offers', 3],
       ['crewflow-scan-reports', 4], ['crewflow-scan-maintenance', 8], ['crewflow-scan-realtime', 1],
     ]);
   });
 
-  it('consumer queues keep the legacy `bull` prefix, their names and concurrency 5 / 10 / 2 (+ AI Phase 1 rab-ai, 4)', () => {
+  it('consumer queues keep the legacy `bull` prefix, their names and concurrency 5 / 10 / 2 (+ AI Phase 1 rab-ai, 4; + D-Q4b timer triggers, 2)', () => {
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.name, q.jobName, q.prefix, q.concurrency])).toEqual([
       ['rab-email', 'send-email', LEGACY_BULL_PREFIX, 5],
       ['rab-push', 'send-push', LEGACY_BULL_PREFIX, 10],
       ['rab-shift-statements', 'generate-shift-statement', LEGACY_BULL_PREFIX, 2],
       ['rab-ai', 'ai-turn', LEGACY_BULL_PREFIX, 4],
+      ['crewflow-timer-triggers', 'offer-expiry-trigger', LEGACY_BULL_PREFIX, 2],
     ]);
     // No scan queue reuses a consumer queue name.
     for (const q of SCAN_QUEUE_NAMES) expect(Object.values(CONSUMER_QUEUES).map((c) => c.name)).not.toContain(q);

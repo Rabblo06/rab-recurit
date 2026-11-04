@@ -1,4 +1,5 @@
 import {
+  assertSafePence,
   assertTransition,
   payForMinutes,
   PAYROLL_RECORD_TRANSITIONS,
@@ -217,8 +218,8 @@ function toView(r: Record<string, unknown>): PayrollRecordView {
     clockInAt: iso(r.clock_in_at),
     clockOutAt: iso(r.clock_out_at),
     workedMinutes: Number(r.worked_minutes),
-    payRatePence: Number(r.pay_rate_pence),
-    amountPence: Number(r.amount_pence),
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
+    amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
     approvedAt: iso(r.approved_at),
     approvedByName: (r.approved_by_name as string) ?? null,
     rejectedAt: iso(r.rejected_at),
@@ -328,9 +329,9 @@ export class PayrollService {
         throw new ConflictException('An approved attendance has no recorded hours or pay, so payroll cannot be prepared. Contact support.');
       }
       const workedMinutes = Number(row.worked_minutes);
-      const ratePence = Number(row.rate);
+      const ratePence = assertSafePence(Number(row.rate), 'shift_assignment.pay_rate_snapshot_pence');
       const amountPence = payForMinutes(ratePence, workedMinutes);
-      if (amountPence !== Number(row.earned_pence)) {
+      if (amountPence !== assertSafePence(Number(row.earned_pence), 'attendance.earned_pence')) {
         throw new ConflictException('The recorded pay for a staff member does not match their rate and hours, so payroll cannot be prepared. Contact support.');
       }
       await manager.query(
@@ -490,8 +491,8 @@ export class PayrollService {
           startsAt: iso(r.starts_at)!,
           endsAt: iso(r.ends_at)!,
           workedMinutes: Number(r.worked_minutes),
-          payRatePence: Number(r.pay_rate_pence),
-          amountPence: Number(r.amount_pence),
+          payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
+          amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
           approvedAt: iso(r.approved_at)!,
           ...(() => { const v = toAllocationView(alloc.get(r.id as string)); return { payrollPeriod: v.payrollPeriod, payday: v.payday, allocationStatus: v.status }; })(),
           statement: toStatement(r)!,
@@ -562,7 +563,7 @@ export class PayrollService {
         entityId: record.id,
         metadata: {
           attendanceId: record.attendance_id, shiftId: record.shift_id, staffProfileId: record.staff_profile_id,
-          workedMinutes: Number(record.worked_minutes), amountPence: Number(record.amount_pence), bulk, payStatementRequested: true,
+          workedMinutes: Number(record.worked_minutes), amountPence: assertSafePence(Number(record.amount_pence), 'payroll_record.amount_pence'), bulk, payStatementRequested: true,
         },
       });
       await this.emitPayrollChanged(manager, ctx, ctx.workspaceId!, 'payroll_record', record.id, 'approved', sharedAudience); // C1b realtime

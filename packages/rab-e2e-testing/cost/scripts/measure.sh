@@ -17,6 +17,9 @@ OUT="${OUT:?OUT not set}"; assert_outside_main "the results directory (OUT)" "$O
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CONTAINERS="costaudit-pg costaudit-worker costaudit-api costaudit-redis costaudit-minio"
 
+# pg_stat_database counters flush within ~1 s of a transaction end (PostgreSQL 15+ cumulative statistics), so a short
+# pause before reading keeps the window edges honest.
+pg_xact() { sleep 1; q "select xact_commit + xact_rollback from pg_stat_database where datname = 'rab'"; }
 cpu_snapshot() { for c in $CONTAINERS ${EXTRA_CONTAINERS:-}; do echo "$c $(cg_cpu_usec "$c" 2>/dev/null || echo 0)"; done; }
 
 # make_worker_env: lib/worker-env.sh
@@ -105,6 +108,9 @@ case "${1:?usage}" in
     docker inspect -f '{{.Name}} {{range .Config.Env}}{{if or (eq (index (split . "=") 0) "REALTIME_ENABLED") (eq (index (split . "=") 0) "PUSH_ENABLED")}}{{.}} {{end}}{{end}}' costaudit-api costaudit-worker > "$R/flags.txt" 2>/dev/null || true
     q "select pg_stat_statements_reset()" >/dev/null
     cpu_snapshot > "$R/cpu-start.txt"; redis_cli INFO stats > "$R/redis-stats-start.txt"; date +%s > "$R/t-start"
+    # D-Q6: committed + rolled-back transactions of the measured database (pg_stat_database; every role, this harness's own
+    # start snapshot query included (the end one commits after its own read), so analyze-idle.js subtracts it; a load generator logs its own in dq6-*.gen.jsonl).
+    pg_xact > "$R/pg-xact-start.txt"
     END=$(( $(date +%s) + D )); : > "$R/dstats.txt"; : > "$R/redis-ops.txt"; : > "$R/dstats-host.txt"
     while [ "$(date +%s)" -lt "$END" ]; do
       docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $CONTAINERS | sed "s/^/$(date +%s),/" >> "$R/dstats.txt"
@@ -115,7 +121,7 @@ case "${1:?usage}" in
       redis_cli INFO stats | grep instantaneous_ops_per_sec | tr -d '\r' | sed "s/^/$(date +%s),/" >> "$R/redis-ops.txt"
       sleep 15
     done
-    date +%s > "$R/t-end"; cpu_snapshot > "$R/cpu-end.txt"
+    date +%s > "$R/t-end"; cpu_snapshot > "$R/cpu-end.txt"; pg_xact > "$R/pg-xact-end.txt"
     redis_cli INFO stats > "$R/redis-stats-end.txt"; redis_cli INFO memory > "$R/redis-mem.txt"; redis_cli DBSIZE > "$R/redis-dbsize.txt"
     # Raw pg_stat_statements dump (full text, every role) + the compact views the analyser reads.
     q "copy (select userid::regrole::text as role, toplevel, calls, total_exec_time, rows, shared_blks_hit, shared_blks_read, query from pg_stat_statements where dbid=(select oid from pg_database where datname='rab') order by calls desc) to stdout with csv header" > "$R/pgss-raw.csv"

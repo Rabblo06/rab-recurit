@@ -15,8 +15,10 @@ import { FONT_FAMILY_STACK } from './native-fonts';
 import {
   NativeRenderPool,
   pdfNativeConcurrency,
+  pdfNativeMemoryPlan,
   pdfNativePrewarm,
   prewarmRenderPool,
+  PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT,
   PDF_NATIVE_POOL_SIZE_DEFAULT,
   shutdownRenderPool,
 } from './render-pool';
@@ -274,6 +276,51 @@ describe('pool configuration (fail closed)', () => {
     }
   });
 
+  // Review M-3: the threads' heap caps together must fit the Worker container, so concurrent oversized renders kill their
+  // own thread (error_PDF_NATIVE_OUT_OF_MEMORY) instead of getting the whole Worker OOM-killed.
+  it('memory plan: 384 MB per thread; size × 384 MB must fit PDF_NATIVE_MEMORY_BUDGET_MB (default 768), else it refuses', () => {
+    expect(PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT).toBe(384);
+    expect(pdfNativeMemoryPlan({})).toEqual({ size: 2, heapLimitMb: 384, budgetMb: 768 });
+    expect(pdfNativeMemoryPlan({ PDF_NATIVE_CONCURRENCY: '', PDF_NATIVE_MEMORY_BUDGET_MB: '' })).toEqual({ size: 2, heapLimitMb: 384, budgetMb: 768 });
+    expect(pdfNativeMemoryPlan({ PDF_NATIVE_CONCURRENCY: '1' })).toEqual({ size: 1, heapLimitMb: 384, budgetMb: 768 });
+    expect(pdfNativeMemoryPlan({ PDF_NATIVE_CONCURRENCY: '4', PDF_NATIVE_MEMORY_BUDGET_MB: '1536' })).toEqual({ size: 4, heapLimitMb: 384, budgetMb: 1536 });
+    for (const env of [
+      { PDF_NATIVE_CONCURRENCY: '3' },
+      { PDF_NATIVE_CONCURRENCY: '4' },
+      { PDF_NATIVE_CONCURRENCY: '4', PDF_NATIVE_MEMORY_BUDGET_MB: '1535' },
+      { PDF_NATIVE_MEMORY_BUDGET_MB: '767' },
+    ]) {
+      let err: unknown;
+      try {
+        pdfNativeMemoryPlan(env);
+      } catch (e) {
+        err = e;
+      }
+      expect((err as Error).name).toBe('PdfNativeMemoryBudgetError');
+      expect((err as Error).message).toMatch(/× 384 MB per render thread = \d+ MB exceeds PDF_NATIVE_MEMORY_BUDGET_MB=\d+/);
+    }
+    for (const bad of [' ', '0', '383', '16385', '0768', '768.0', '-1', 'lots']) {
+      expect(() => pdfNativeMemoryPlan({ PDF_NATIVE_MEMORY_BUDGET_MB: bad })).toThrow('PDF_NATIVE_MEMORY_BUDGET_MB must be an integer');
+    }
+  });
+
+  it('the process-wide pool refuses to exist (no thread started) when its threads would not fit the budget', async () => {
+    const saved = { c: process.env.PDF_NATIVE_CONCURRENCY, b: process.env.PDF_NATIVE_MEMORY_BUDGET_MB, p: process.env.PDF_NATIVE_PREWARM };
+    await shutdownRenderPool();
+    process.env.PDF_NATIVE_CONCURRENCY = '4';
+    delete process.env.PDF_NATIVE_MEMORY_BUDGET_MB;
+    process.env.PDF_NATIVE_PREWARM = '0';
+    try {
+      expect(() => prewarmRenderPool(0)).toThrow(/PDF_NATIVE_CONCURRENCY=4 × 384 MB per render thread = 1536 MB exceeds PDF_NATIVE_MEMORY_BUDGET_MB=768/);
+    } finally {
+      for (const [k, v] of [['PDF_NATIVE_CONCURRENCY', saved.c], ['PDF_NATIVE_MEMORY_BUDGET_MB', saved.b], ['PDF_NATIVE_PREWARM', saved.p]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      await shutdownRenderPool();
+    }
+  });
+
   it('options are bounded: size ≤ 4, deadline ≤ 30 s, heap within 32..2048 MB', () => {
     expect(() => new NativeRenderPool({ size: 5 })).toThrow(RangeError);
     expect(() => new NativeRenderPool({ size: 0 })).toThrow(RangeError);
@@ -285,7 +332,7 @@ describe('pool configuration (fail closed)', () => {
     );
     const p = new NativeRenderPool();
     expect([p.size, p.timeoutMs, p.maxOldGenerationSizeMb]).toEqual([
-      2, 30_000, 512,
+      2, 30_000, 384, // review M-3: 384 MB per thread (was 512)
     ]);
   });
 
@@ -483,7 +530,6 @@ describe('unprintable characters: visible marker + count-only log (F1)', () => {
     ['emoji', 'Sam 😀', 1],
     ['lone surrogate', 'bad \ud800 half', 1],
     ['NUL', 'a\u0000b', 1],
-    ['lone CR', 'a\rb', 1],
     ['ESC', 'a\u001bb', 1],
     ['C1 control', 'a\u0085b', 1],
     ['zero-width space', 'Ann​Smith', 1],
@@ -529,10 +575,10 @@ describe('unprintable characters: visible marker + count-only log (F1)', () => {
     60_000,
   );
 
-  it('CRLF becomes LF and TAB a space (normalised, not counted, not logged)', async () => {
+  it('CRLF, a lone CR, U+2028 and U+2029 become LF and TAB a space (normalised, not counted, not logged; review L-6)', async () => {
     const p = pool();
     const r = await p.renderWithTimings(
-      text(['line one\r\nline two', 'col\tcol']),
+      text(['line one\r\nline two', 'col\tcol', 'a\rb', 'c\u2028d', 'e\u2029f']),
     );
     expect(r.substitutions).toEqual([]);
     expect(logs).toEqual([]);
@@ -756,7 +802,7 @@ describe('deadline and memory cap', () => {
     await expect(p.render(table(5))).resolves.toBeInstanceOf(Buffer);
   }, 60_000);
 
-  it('a layout that exhausts the heap kills only its thread at the default 512 MB cap; the pool recovers', async () => {
+  it('a layout that exhausts the heap kills only its thread at the default 384 MB cap; the pool recovers', async () => {
     const p = pool({ size: 1 });
     const err = (await p
       .render({ kind: 'test-heap-bomb', viewModel: {}, generatedAt: AT })

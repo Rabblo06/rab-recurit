@@ -3,13 +3,14 @@ import { PUSH_QUEUE_JOB_NAME, PUSH_QUEUE_NAME } from '../core-modules/push/push-
 import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-statement-queue.constants';
 import { AI_TITLE_JOB_NAME } from './ai-jobs.contract';
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
+import { TIMER_TRIGGER_JOB_NAMES, TIMER_TRIGGER_KINDS, TIMER_TRIGGER_PAYLOAD_KEYS, TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
 
 /**
  * CANONICAL queue registry (Admin Panel plan §3; Phase D-Q1 "queue registry"). The worker (consumers, scan scheduler) and
  * the API (producers, Admin Panel queue view) read ONE list. Pure constants and pure functions: no Nest, no Redis, no
  * BullMQ runtime import, no `modules/` import (the shift-statement names come from `./shift-statement-queue.constants`).
  *
- * D-Q1: EVERY BullMQ queue Crewflow uses — the four consumer queues and the seven `crewflow-scan-*` scan queues — has ONE
+ * D-Q1: EVERY BullMQ queue Crewflow uses — the consumer queues (four at D-Q1; D-Q4b adds `crewflow-timer-triggers`) and the seven `crewflow-scan-*` scan queues — has ONE
  * entry in `QUEUE_SETTINGS` with EVERY option written out: worker concurrency, lockDuration, maxStalledCount,
  * stalledInterval, job attempts + backoff, removeOnComplete / removeOnFail retention, job timeout, the job names the queue
  * accepts, its tenant scope and its payload keys. Completeness is a COMPILE-TIME property (`satisfies` a mapped type over
@@ -17,7 +18,7 @@ import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
  * compile. The values are EXACTLY the effective values before D-Q1, including BullMQ's own defaults that were implicit
  * until now (`BULLMQ_WORKER_DEFAULTS`, read from the installed bullmq) — `queue-registry.spec.ts` pins every one.
  *
- * PREFIX COMPATIBILITY (owner decision D2): the four consumer queues keep BullMQ's default `bull` prefix — the API process
+ * PREFIX COMPATIBILITY (owner decision D2): the consumer queues keep BullMQ's default `bull` prefix — the API process
  * publishes to `rab-email` / `rab-push` / `rab-ai` with no prefix, and moving the consumer alone would strand every API
  * publish. Only the scan queues (bullmq scheduler mode) live under `BULLMQ_PREFIX` (default `crewflow:<env>:bull`).
  * A future single-prefix cutover is a separate, controlled operation (see the migration report §Prefix).
@@ -42,7 +43,7 @@ export const BULLMQ_WORKER_DEFAULTS = Object.freeze({ lockDurationMs: 30_000, ma
 /** The job option D-Q1 records as "none": bullmq 5.x has no per-job timeout (a handler bounds its own run time). */
 export const NO_JOB_TIMEOUT = null;
 
-export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai';
+export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai' | 'timerTriggers';
 
 /** The scan queues (bullmq scheduler mode only), grouped by the existing `queues/rab-<domain>` folders. */
 export const SCAN_QUEUES = Object.freeze({
@@ -56,7 +57,12 @@ export const SCAN_QUEUES = Object.freeze({
 } as const);
 
 export type ScanQueueName = (typeof SCAN_QUEUES)[keyof typeof SCAN_QUEUES];
-export type ConsumerQueueName = typeof EMAIL_QUEUE_NAME | typeof PUSH_QUEUE_NAME | typeof SHIFT_STATEMENT_QUEUE_NAME | typeof AI_QUEUE_NAME;
+export type ConsumerQueueName =
+  | typeof EMAIL_QUEUE_NAME
+  | typeof PUSH_QUEUE_NAME
+  | typeof SHIFT_STATEMENT_QUEUE_NAME
+  | typeof AI_QUEUE_NAME
+  | typeof TIMER_TRIGGER_QUEUE_NAME;
 export type QueueName = ConsumerQueueName | ScanQueueName;
 
 /** Whose job a queue carries: `organisation` = one tenant's row (the payload carries its organisationId); `system` = none. */
@@ -199,10 +205,37 @@ export const QUEUE_SETTINGS = Object.freeze({
       timeoutMs: NO_JOB_TIMEOUT,
     }),
   }),
+  /**
+   * Phase D-Q4b (OD-3 / OD-4, 2026-11-04): delayed TIMER TRIGGERS (engine/worker-shared/timer-trigger.contract.ts). Legacy
+   * `bull` prefix like email/push/ai (OD-4: the API produces offer triggers with no prefix configuration). A NEW queue
+   * name, so a Worker built before D-Q4b never receives a trigger (rolling deploy). Ids-only payload
+   * {organisationId, workspaceId, subjectId, dueAtEpochMs}; jobId `<kind>.<subjectId>.<dueAtEpochMs>`. The consumer is
+   * created only when WORKER_TIMER_TRIGGERS is shadow or on. Concurrency 2 (plan §4: the consumers already total 21 against
+   * a runtime pool of 12 — a new consumer starts low and is measured before anything is raised). attempts 3, exponential
+   * from 5 s (a database blip; every attempt is the same idempotent compare-and-set); 1 h / 1000 completed, 7 d / 5000
+   * failed (the AI queue's retention: a trigger is a short-lived hint, not a record).
+   */
+  [TIMER_TRIGGER_QUEUE_NAME]: Object.freeze({
+    kind: 'consumer' as const,
+    prefix: 'legacy-bull' as const,
+    jobNames: Object.freeze(TIMER_TRIGGER_KINDS.map((k) => TIMER_TRIGGER_JOB_NAMES[k])),
+    tenantScope: 'organisation' as const,
+    payloadKeys: Object.freeze([...TIMER_TRIGGER_PAYLOAD_KEYS]),
+    worker: Object.freeze({ concurrency: 2, ...DEFAULT_STALL }),
+    job: Object.freeze({
+      attempts: 3,
+      backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }),
+      removeOnComplete: Object.freeze({ age: 3600, count: 1000 }),
+      removeOnFail: Object.freeze({ age: 7 * DAY, count: 5000 }),
+      timeoutMs: NO_JOB_TIMEOUT,
+    }),
+  }),
   // ── scan queues (BULLMQ_PREFIX; system-scoped; bullmq scheduler mode only — one job scheduler per scan) ─────────────
   [SCAN_QUEUES.email]: scanQueue(1, ['email-dispatch']),
   [SCAN_QUEUES.push]: scanQueue(1, ['push-dispatch']),
-  [SCAN_QUEUES.shifts]: scanQueue(4, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup']),
+  // Phase D-Q4a adds `shift-scan-combined` (one more slot: 4 → 5). Registered only when WORKER_SHIFT_SCAN_MODE=combined
+  // (its two shifts-queue members, shift-monitor and attendance-monitor, are then not), so one slot is idle in either mode.
+  [SCAN_QUEUES.shifts]: scanQueue(5, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup', 'shift-scan-combined']),
   [SCAN_QUEUES.offers]: scanQueue(3, ['offer-expiry', 'manager-confirmation-timeout', 'replacement-staff']),
   [SCAN_QUEUES.reports]: scanQueue(4, ['shift-report-scheduler', 'final-timesheet', 'shift-statement-dispatch', 'payroll-period-attention']),
   // Phase D-Q2 adds `ai-stale-turn-sweep` (one more slot: 7 → 8). Registered only when AI_STALE_TURN_SWEEP=true; the
@@ -371,6 +404,8 @@ export const CONSUMER_QUEUES: Readonly<Record<ConsumerQueueKey, ConsumerQueueDef
   push: consumer('push', PUSH_QUEUE_NAME, PUSH_QUEUE_JOB_NAME, 'push'),
   shiftStatements: consumer('shiftStatements', SHIFT_STATEMENT_QUEUE_NAME, SHIFT_STATEMENT_JOB_NAME, 'shift statement'),
   ai: consumer('ai', AI_QUEUE_NAME, AI_TURN_JOB_NAME, 'ai turn'),
+  // D-Q4b: one handler receives all four trigger job names (it dispatches on job.name); created only when the flag is not off.
+  timerTriggers: consumer('timerTriggers', TIMER_TRIGGER_QUEUE_NAME, TIMER_TRIGGER_JOB_NAMES['offer-expiry'], 'timer trigger'),
 });
 
 export const SCAN_QUEUE_NAMES: readonly ScanQueueName[] = Object.freeze(Object.values(SCAN_QUEUES));

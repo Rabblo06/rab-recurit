@@ -2,10 +2,11 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import { layoutLines, TextRun } from '../helpers/pdf-layout';
-import { checkAgainstDocument, checkAgainstInput, compareExtractions, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
+import { acceptOneExtraPage, checkAgainstDocument, checkAgainstInput, compareExtractions, Finding, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
 import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
 import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
 import { loadGlyphTransform } from './glyph-transform';
+import { F_PDF_1_PRESENT, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { equalityMode } from './mode';
 import { footerTexts, htmlText, htmlTextNodes, joinLineBreaks, markerOccurrences, tokensJoiningForcedBreaks } from './native-reference';
 import { guardNetwork, NetworkDeniedError, renderGuarded } from './network-guard';
@@ -164,6 +165,62 @@ function blockExtraction(blocks: string[][]): PdfExtraction {
   return x;
 }
 
+describe('OWNER-ACCEPTED page-count delta (2026-11-04): native may print one page more, only when every other check passes', () => {
+  const finding = (check: string, ok: boolean, info?: boolean): Finding => ({ check, ok, ...(info === undefined ? {} : { info }), detail: check });
+  const accepted = (fs: Finding[]) => fs.find((f) => f.check === 'page-count')!;
+
+  it('exactly one extra page with everything else passing: page-count becomes INFO, marked ACCEPTED', () => {
+    const fs = [finding('values-equal', true), finding('page-text', true, true), finding('page-count', false)];
+    acceptOneExtraPage(fs, 1, 'native');
+    expect(accepted(fs)).toMatchObject({ ok: false, info: true });
+    expect(accepted(fs).detail).toMatch(/ACCEPTED \(owner 2026-11-04\): native prints one page more; every other check passed$/);
+  });
+
+  it.each([
+    ['two extra pages', 2],
+    ['one page FEWER', -1],
+    ['an equal count that still failed', 0],
+  ])('%s: stays a failure', (_label, over) => {
+    const fs = [finding('values-equal', true), finding('page-count', false)];
+    acceptOneExtraPage(fs, over, 'native');
+    expect(accepted(fs).info).toBeUndefined();
+  });
+
+  it('one extra page together with ANY other failing check: stays a failure (nothing else is waved through)', () => {
+    for (const other of ['values-equal', 'line-breaks(native)', 'footer-numbering(native)', 'tokens', 'no-overlap(native)']) {
+      const fs = [finding(other, false), finding('page-count', false)];
+      acceptOneExtraPage(fs, 1, 'native');
+      expect([other, accepted(fs).info]).toEqual([other, undefined]);
+      expect(fs[0]).toMatchObject({ ok: false });
+    }
+  });
+
+  it('compareExtractions applies it only to the named render, never to Chromium, and only for +1 page', () => {
+    const e: DocumentExpectation = { kind: 'approved-shift-statement', spec: DOCUMENT_SPECS['approved-shift-statement'], values: [], qrPayloads: [], rowMarkers: [], multiLine: [], parseBack: { durations: [], breaks: [], fields: [] } };
+    const withLogo = (x: PdfExtraction): PdfExtraction => ({ ...x, imageCount: 1, images: [{ width: 166, height: 70 } as PdfExtraction['images'][number]] });
+    const one = withLogo(extraction([['same words']]));
+    const two = withLogo(extraction([['same'], ['words']]));
+    const three = withLogo(extraction([['same'], ['words'], []]));
+    const page = (r: ReturnType<typeof compareExtractions>) => r.findings.find((f) => f.check === 'page-count')!;
+    // Without the option: a failure, as before.
+    expect(page(compareExtractions('t', e, one, two, ['chromium', 'native']))).toMatchObject({ ok: false });
+    expect(page(compareExtractions('t', e, one, two, ['chromium', 'native'])).info).toBeUndefined();
+    // With it, for the native render printing one page more: accepted when nothing else fails.
+    const ok = compareExtractions('t', e, one, two, ['chromium', 'native'], { extraPageAccepted: 'native' });
+    expect(ok.findings.filter((f) => f.check !== 'page-count' && !f.ok && !f.info).map((f) => f.check)).toEqual([]);
+    expect(page(ok)).toMatchObject({ ok: false, info: true });
+    expect(ok.ok).toBe(true);
+    // The same pair with one other failing check (a value printed by Chromium only): page-count is not accepted either.
+    const withValue: DocumentExpectation = { ...e, values: [{ label: 'staff name', value: 'Zed Only', min: 1 }] };
+    const lost = compareExtractions('t', withValue, withLogo(extraction([['same words Zed Only']])), two, ['chromium', 'native'], { extraPageAccepted: 'native' });
+    expect(page(lost).info).toBeUndefined();
+    expect(lost.ok).toBe(false);
+    // Chromium printing the extra page, or native printing two more: never accepted.
+    expect(page(compareExtractions('t', e, two, one, ['chromium', 'native'], { extraPageAccepted: 'native' })).info).toBeUndefined();
+    expect(page(compareExtractions('t', e, one, three, ['chromium', 'native'], { extraPageAccepted: 'native' })).info).toBeUndefined();
+  });
+});
+
 describe('F1 on the native side: □ for each unprintable character (owner decision F1)', () => {
   const nativeValue = 'Nul□l By□te'; // F1 of "Nul\u0000l By\u0000te"
 
@@ -182,12 +239,15 @@ describe('F1 on the native side: □ for each unprintable character (owner decis
       return;
     }
     expect(glyphs.marker).toBe('□');
-    const [nul, arabic, emoji, crlf, latin] = await glyphs.transform(['Nul\u0000l', 'محمد', 'Chef 👩‍🍳', 'a\r\nb\tc', 'Zażółć Ŵyn']);
+    const [nul, arabic, emoji, crlf, latin, cr, ls, ps, ff] = await glyphs.transform(['Nul\u0000l', 'محمد', 'Chef 👩‍🍳', 'a\r\nb\tc', 'Zażółć Ŵyn', 'a\rb', 'a\u2028b', 'a\u2029b', 'a\fb']);
     expect(nul).toBe('Nul□l');
     expect(arabic).toBe('□□□□');
     expect(emoji).toBe('Chef □□□');
     expect(crlf).toBe('a\nb c');
     expect(latin).toBe('Zażółć Ŵyn');
+    // Review L-6: a lone CR, U+2028 and U+2029 are line breaks (LF), never □; every other control character keeps F1's □.
+    expect([cr, ls, ps]).toEqual(['a\nb', 'a\nb', 'a\nb']);
+    expect(ff).toBe('a□b');
   });
 });
 
@@ -450,6 +510,18 @@ describe('D6 hyphen wrap: accepted only when the joined text is identical and ev
     expect(joinLineBreaks(x, ['Reviewed', 'by', 'Morgan', 'Duty-Manager', 'today'], { forcedBreaks: false, d6: true }).d6).toEqual(['Duty-Manager']);
   });
 
+  it("Chromium's unhyphenated overflow-wrap break of a long token rejoins (not D6); whole words never merge", () => {
+    const token = 'A1b2C3d4E5'.repeat(3);
+    const x = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(12, 25), `${token.slice(25)} end`], ['go in', 'to town']]);
+    const doc = ['Token:', token, 'end', 'go', 'in', 'to', 'town', 'into'];
+    const joined = joinLineBreaks(x, doc, { forcedBreaks: false, d6: true, unhyphenated: true });
+    expect([...joined.tokens].sort()).toEqual(['Token:', token, 'end', 'go', 'in', 'to', 'town'].sort());
+    expect(joined.d6).toEqual([]);
+    const truncated = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(13, 25), `${token.slice(25)} end`]]); // one character dropped
+    expect(joinLineBreaks(truncated, doc, { forcedBreaks: false, d6: true, unhyphenated: true }).tokens).not.toContain(token);
+    expect(joinLineBreaks(x, doc, { forcedBreaks: false, d6: true }).tokens).not.toContain(token); // off unless asked
+  });
+
   it('native-only mode (checkAgainstDocument) applies the same rule against the document, never against Chromium', () => {
     const reference = { label: 'document', count: (v: string) => (v === name ? 1 : 0), tokens: words, footers: [] };
     const r = checkAgainstDocument('t', e, chromiumWrapped(), 'native', reference, { images: 1, forcedBreakHyphens: ['native'] });
@@ -468,6 +540,19 @@ describe('text drawn over other text (extract overlappingRuns; checker no-overla
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 15, 100)])).toHaveLength(1);
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 25, 100)])).toEqual([]);
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 24.5, 100)])).toEqual([]);
+  });
+
+  it('a kerned pair drawn glyph by glyph (the measured "Y" / "," at 16.5 pt, 1.1 pt kern) is ONE piece of text, not an overlap', () => {
+    // As pdfkit and Skia both drew it on long-text page 1 (runs consecutive in the content stream, one baseline).
+    const y = { text: 'Y', x: 100, endX: 111, y: 484.83, size: 16.5 };
+    const comma = { text: ',', x: 109.9, endX: 114.48, y: 484.83, size: 16.5 };
+    expect(overlappingRuns([y, comma])).toEqual([]);
+    // Teeth: the same two glyphs are an overlap when they are NOT one continued piece of text — drawn apart in the
+    // stream (another run in between), or the second starting further back than a kern (one cell running into another).
+    const elsewhere = { text: 'Other', x: 300, endX: 340, y: 200, size: 10 };
+    expect(overlappingRuns([y, elsewhere, comma])).toHaveLength(1);
+    expect(overlappingRuns([run('Long cell text', 0, 100), run('Next', 50, 100)])).toHaveLength(1); // starts 20 pt back
+    expect(overlappingRuns([run('Hello', 0, 100), run('Wor', 25, 100), run('ld', 40, 100), run('Hello', 30, 100)])).toHaveLength(1);
   });
 
   it('a line drawn into the line above overlaps; ordinary line spacing does not; blank runs never count', () => {
@@ -496,6 +581,14 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     const problems = lineBreakProblems(blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for', 'Jamie on arrival.']]), note);
     expect(problems).toHaveLength(2);
     expect(problems[0]).toMatch(/line 2 of 3/);
+  });
+
+  it('a lone CR, U+2028 and U+2029 separate lines too (review L-6): kept when each line starts a printed line, a failure when collapsed', () => {
+    const odd = 'Black tie.\rReport to the staff entrance at 16:45.\u2028Ask for Jamie\u2029on arrival.';
+    const kept = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie'], ['on arrival.']]);
+    expect(lineBreakProblems(kept, odd)).toEqual([]);
+    const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
+    expect(lineBreakProblems(collapsed, odd)).toHaveLength(3);
   });
 
   it('lines out of order fail', () => {
@@ -533,6 +626,37 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
     expect(checkAgainstInput(e, kept, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: true });
     expect(checkAgainstInput(e, collapsed, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+    // Only a render named in lineBreaksInfo (Chromium on a tree whose template does not keep them yet) reports it as INFO.
+    expect(checkAgainstInput(e, collapsed, 'chromium', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(chromium)')).toMatchObject({ ok: true, info: true });
+    expect(checkAgainstInput(e, collapsed, 'native', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+  });
+
+  it('F1 turning CRLF into LF is not a printed difference (no document reference needed); a □ or any other change still is', () => {
+    const base = (value: string): DocumentExpectation => ({
+      kind: 'approved-shift-statement',
+      spec: DOCUMENT_SPECS['approved-shift-statement'],
+      values: [{ label: 'shift notes', value, min: 1 }],
+      qrPayloads: [],
+      rowMarkers: [],
+      multiLine: [],
+      parseBack: { durations: [], breaks: [], fields: [] },
+    });
+    const x = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']]);
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, '\n')) })).not.toThrow();
+    // Review L-6: a lone CR, U+2028 or U+2029 printed as LF is not a printed difference either.
+    for (const sep of ['\r', '\u2028', '\u2029']) {
+      const stored = note.replace(/\r\n/g, sep);
+      expect(() => compareExtractions('t', base(stored), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, '\n')) })).not.toThrow();
+    }
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace('tie', 't□e')) })).toThrow(/referenceB is required/);
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, ' ')) })).toThrow(/referenceB is required/);
+  });
+
+  it('the pending flag follows the template: origin/main collapses notes, the fixed template keeps them (known-findings.ts)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DOCUMENT_CSS } = require('@rab/server/modules/attendance/templates/adolphus-document') as { DOCUMENT_CSS: string };
+    expect(NOTES_LINE_BREAKS_IN_TEMPLATE).toBe(/\.notes-text\s*\{[^}]*white-space\s*:\s*pre-line/.test(DOCUMENT_CSS));
+    expect(F_PDF_1_PRESENT).toBe(!/\.bottom\s*>\s*div\s*\{[^}]*min-width\s*:\s*0/.test(DOCUMENT_CSS));
   });
 });
 

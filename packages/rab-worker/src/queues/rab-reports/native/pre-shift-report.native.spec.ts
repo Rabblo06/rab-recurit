@@ -197,6 +197,13 @@ describe('pre-shift attendance sheet, native layout: prints exactly the Chromium
 });
 
 describe('pre-shift attendance sheet, native PDF bytes', () => {
+  it('a 500-row roster renders in the process-wide pool at the default 384 MB per-thread heap cap (review M-3)', async () => {
+    const base = PRE_SHIFT_FIXTURES['sixty-staff']!;
+    const staff = Array.from({ length: 500 }, (_, i) => base.staff[i % base.staff.length]!);
+    const pdf = await renderNativePdf({ kind: 'pre-shift', data: { ...base, staff } });
+    expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  }, 60_000);
+
   it('hostile text renders, embeds only the logo and the QR, and carries no link or action', async () => {
     const pdf = await renderNativePdf({ kind: 'pre-shift', data: PRE_SHIFT_FIXTURES.hostile! });
     expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');

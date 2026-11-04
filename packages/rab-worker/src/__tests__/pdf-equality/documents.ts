@@ -173,8 +173,11 @@ function add(values: BusinessValue[], label: string, value: string | null | unde
   } else values.push({ label, value, min });
 }
 
-/** A line break in stored text: LF, CRLF or a lone CR (all three are line ends in HTML and in the native layouts). */
-export const LINE_BREAK = /\r\n|\r|\n/;
+/**
+ * A line break in stored text: LF, CRLF, a lone CR, U+2028 or U+2029. The native renderer prints every one of them as a
+ * line break (glyph guard, review L-6); HTML treats LF, CRLF and a lone CR as line ends.
+ */
+export const LINE_BREAK = /\r\n|\r|\n|\u2028|\u2029/;
 
 /**
  * The free-text fields each document prints that keep their line breaks — the shift notes, on the final timesheet (both

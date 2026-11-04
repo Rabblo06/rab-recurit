@@ -10,7 +10,7 @@ import { renderInPool } from './runtime/render-pool';
  *
  * Here, in the jobs process, each document's rab-server view-model builder turns the job's data into display strings;
  * only that plain view-model crosses into the render pool (runtime/render-pool.ts: worker_threads, size
- * PDF_NATIVE_CONCURRENCY, empty env, 512 MB heap cap, glyph-coverage guard, sha256-verified fonts, the 30 s deadline
+ * PDF_NATIVE_CONCURRENCY, empty env, 384 MB heap cap within PDF_NATIVE_MEMORY_BUDGET_MB, glyph-coverage guard, sha256-verified fonts, the 30 s deadline
  * enforced by terminating the thread → PdfRenderTimeoutError). The layouts run in the thread from
  * native-documents.ts. Errors propagate unchanged: no fallback to Chromium (T3).
  */

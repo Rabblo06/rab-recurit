@@ -241,3 +241,25 @@ describe('push dispatch — D-Q3 re-publish fix and per-row publish catch', () =
   });
 
 });
+
+/**
+ * D-Q5b (OC-1): the push claim now counts the in-flight attempt, so a PROCESSING row whose lease expired at count = max is
+ * "the last allowed attempt died". With the provider-call marker set the push may have been delivered: it stays
+ * DELIVERY_UNCERTAIN exactly as before the counter change (OD-6: push uncertain unchanged), never relabelled exhausted.
+ */
+describe('push dispatch — D-Q5b exhausted lease classification', () => {
+  const MARKER = new Date('2026-11-04T10:00:00Z');
+  it('PROCESSING at the cap WITH the marker → DELIVERY_UNCERTAIN, never republished', async () => {
+    const { tenant, statements } = fakeTenant(responder([row(R1, 'PROCESSING', { attempt_count: 5, provider_call_started_at: MARKER })]));
+    const republish = jest.fn(async () => undefined);
+    const result = await dispatchPushScope(tenant as never, ORG_A, [R1], jest.fn(), republish, false);
+    expect(republish).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ deliveryUncertain: 1, failedExhausted: 0 });
+    expect(statements.some((s) => s.sql.includes("last_error_code = 'DELIVERY_UNCERTAIN'") && s.params[0] === R1)).toBe(true);
+  });
+
+  it('PROCESSING at the cap WITHOUT the marker → STUCK_LEASE_ATTEMPTS_EXHAUSTED, unchanged', async () => {
+    const { tenant } = fakeTenant(responder([row(R1, 'PROCESSING', { attempt_count: 5 })]));
+    expect(await dispatchPushScope(tenant as never, ORG_A, [R1], jest.fn(), jest.fn(), false)).toMatchObject({ failedExhausted: 1, deliveryUncertain: 0 });
+  });
+});

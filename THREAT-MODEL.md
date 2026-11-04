@@ -5135,6 +5135,188 @@ Their security and correctness assertions are kept, against the native renderer,
   - text drawn over other text fails the native renderer.
   Regressions for each are in `pdf-harness.unit.spec.ts`.
 
+## Phase D-Q4a — combined shift scan behind `WORKER_SHIFT_SCAN_MODE` (branch phase-d/dq4a-combined-scan, not merged)
+
+No business record, rule, threshold, deadline, recipient or transition changes; no migration, role, grant, RLS policy
+or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §1, owner approval 2026-11-04 OD-1). Default `separate` is
+today's four scans, byte for byte (the refactor commit only moved each scan's discovery and processing into named
+functions; SQL template text unchanged). `combined` changes HOW the four 300-s scans (shift monitor, attendance monitor,
+shift report scheduler, final timesheet) find their work: ONE workspace walk per tick instead of four.
+
+- **Tenant isolation (unchanged primitives).** The walk (`discoverMembersInWorkspaces`) uses the same
+  `core.worker_list_workspaces` catalogue pages (ids only, READ ONLY) and, per workspace, ONE READ ONLY
+  `runInTenantContext` transaction with the same server-derived worker context (organisation + workspace bound with
+  `SET LOCAL`, `actorType: 'worker'`, no user, no role; FORCE RLS). Each member's own discovery query runs inside that
+  transaction under its own `SAVEPOINT` (a constant identifier, never data). The callbacks receive only the RLS-bound
+  manager. Every mutation is still one `runScopedForOrg` transaction per candidate inside the member's unchanged
+  processing; the report members still take their per-shift session advisory locks on the direct DataSource. Abuse
+  cases (real PostgreSQL, `dq4-shift-scan-equivalence.integration.spec.ts`): no tenant context bound → every member
+  discovery returns zero rows or is refused; organisation A cannot read organisation B's events after a combined tick;
+  every event carries its own organisation and workspace.
+- **Failure containment.** A member whose query fails in any workspace rolls back to its savepoint, its cycle fails
+  for that tick (`<loop>Failures` + 1, nothing of it processed — what a failing separate scan does) and the other
+  members in the same transaction still run. A workspace-level or catalogue failure fails every due member (fail closed;
+  no partial discovery is ever processed). A not-yet-routable workspace is skipped, as today.
+- **Timing (owner rule §12.1/5).** The tick is the greatest common divisor of the member intervals; combined mode
+  refuses to boot under 30 s (env validation and the Worker boot check). Each member runs only when its own interval
+  has passed, so none runs less often than in separate mode. Each member's processing is its own runtime cycle with
+  its own overlap guard and Health keys, so a slow member never delays another.
+- **Multi-replica.** Interval mode: each replica runs the combined scan, as each scan today; cross-replica safety is the
+  same worker_event UNIQUE keys, compare-and-sets and per-shift advisory locks (two concurrent combined scanners → each
+  key exactly once, tested). Lane A (`WORKER_SCHEDULER=bullmq`): one cluster scheduler and scan lock for the walk, plus
+  each member's own scan lock for its processing. The scan lock reaches the combined scan (`onScanLock`) before any
+  scan Worker exists, and a member that finds no lock under bullmq is `skipped-locked`, never run unlocked (fail
+  closed; `cf56382d`, unit + integration tested). The earlier first-tick residual is closed.
+- **Redis.** Interval mode needs no Redis to find or process work (tested with Redis unreachable); stats writes stay
+  best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the next periodic reconcile, within
+  one `WORKER_SCHEDULER_RECONCILE_SECONDS` (default 60 s, configurable up to 3 600 s). In Lane A a member's scan lock
+  is taken after the shared walk, so a second replica may repeat a member's read-only discovery and then skip it.
+- **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
+  worker_event keys and do nothing twice (tested).
+## Phase D-Q4b — delayed-job timer triggers, scans unchanged as backstop (branch phase-d/dq4b-timer-triggers, stacked on phase-d/dq4a-combined-scan, not merged)
+
+Flags `WORKER_TIMER_TRIGGERS=off|shadow|on` (default off = today exactly) and `WORKER_TIMER_TRIGGER_KINDS` (OD-3: on one
+kind at a time). No migration, no role, grant, RLS, definer or posture change; no payroll, attendance, staffing or
+permission rule change (same windows, same outcomes; with `on` a transition may happen EARLIER inside its existing window,
+plan §2.3 A2 — that is what `shadow` measures). Owner approval OD-3 / OD-4, 2026-11-04.
+
+- **Asset:** the timed transitions on another person's records — offer expiry (`job_offer`), manager-confirmation
+  auto-confirm, provisional no-show and late clock-in (`shift_assignment`, `core.worker_event`) and the notifications /
+  audit rows they produce. **Actor:** the API and Worker producers acting on committed rows; anyone able to roll a
+  transaction back, stall or wipe Redis, replay or forge a BullMQ job, or run two Workers.
+- **Change:** a new consumer queue `crewflow-timer-triggers` (legacy `bull` prefix, OD-4; organisation scope; payload
+  `{organisationId, workspaceId, subjectId, dueAtEpochMs}`; jobId `<kind>.<subjectId>.<dueAtEpochMs>`; concurrency 2).
+  Producers: `OfferService.sendOne` (offer expiry) and `staffAccept` (manager-confirmation wake) through the engine
+  `AfterCommitPublisher` (#35's mechanism, generalised — the notify fast path delegates to it unchanged); the Worker arms
+  no-show / late clock-in from shift-monitor's existing discovery rows (no API scheduling, withdraw or cancel code changed).
+- **Controls:** published only after the outermost commit; any rollback (or savepoint rollback) arms nothing (tested). A
+  refused job (bad id, mismatched scope) never throws into the business transaction. `registeredJob` refuses a missing,
+  system or mismatched organisation scope, extra payload keys and non-scalar values before Redis (tested). The consumer
+  re-checks the payload shape (exactly four keys, three UUIDs, an integer epoch) before any database access and fails
+  closed with UnrecoverableError (tested); it then binds the PAYLOAD organisation/workspace with SET LOCAL
+  (`runScopedForOrg`) and re-reads the subject under FORCE RLS in a READ ONLY transaction — a forged organisation sees no
+  row, another organisation's workspace fails routing or sees no row (ABUSE tests: no-op, offer untouched). Stale (row due
+  time ≠ payload), early (DB clock), duplicate (two replicas, re-adds) triggers are no-ops: `on` runs the scan's OWN
+  per-candidate body (`expireOfferCandidate`, `flagNoShowCandidate`, `flagLateClockInCandidate`; manager confirmation is a
+  wake of the existing definer claim cycle from the Worker only — DBA-01 grants untouched) with the same compare-and-set
+  and `worker_event` UNIQUE key (tested: three concurrent firings → one expiry, one audit row). `shadow` writes nothing
+  (tested: no status, audit, notification, realtime or worker_event row). `off`: no Redis connection, no consumer, no job
+  (tested). Rolling deploy: a new queue name, so a Worker without the consumer never takes a trigger (tested).
+- **Redis:** a lost trigger (wipe, publish failure, Redis down at commit) changes nothing — every backstop scan keeps its
+  interval and code (tested: wipe → scan expires once; Redis down → the business commit is not delayed, nothing armed).
+  Delayed jobs add Redis memory (≈ one job per pending offer / accepted offer / upcoming assignment × 2; ids only).
+- **Residual:** triggers ADD database work (one READ ONLY decision transaction per fired trigger, plus the action
+  transaction in `on`); no load reduction is claimed (owner rule §14.4). Bulk send: its per-recipient savepoints are
+  plain SQL (`SAVEPOINT sp_bulk_send`), which TypeORM does not broadcast, so one recipient's rollback does NOT drop the
+  other recipients' triggers (tested: BULK SEND). If a recipient failed after its trigger was registered, that trigger is
+  still published after the outer commit and is a `noop` on consume (its offer row was rolled back; the consumer re-reads
+  under RLS). Only a TypeORM nested-transaction rollback discards the transaction's triggers (the scan handles those).
+  The Admin Panel lists `crewflow-timer-triggers` read-only (counts, metrics, failed job ids; retry/delete → 409, tested),
+  like `rab-ai`. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
+  carries the subject UUID (no personal data).
+
+
+## Phase D-Q5b — cumulative email/push attempt cap, no BullMQ resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
+
+Owner approval 2026-11-04 (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §10: OC-1 confirmed, OD-5 Option B, OD-6 no change;
+audit §13 #3 and #4). No migration, column, role, grant, RLS policy or posture change; no payroll / attendance /
+staffing / permission rule. **Asset:** another person's email or push notification (its delivery count, and whether it
+is delivered twice). **Actor:** the Worker, without a request; a replica racing another; a forged job payload.
+
+- **Cumulative cap (OC-1, §13 #4).** The claim CAS that moves an `email_outbox` / `push_delivery` row to PROCESSING now
+  adds one to the row's existing `infrastructure_attempt_count` / `attempt_count` and returns it (`RETURNING`); SENT /
+  ACCEPTED / RETRY / FAILED record that value and the attempt is final at the row's own max (5). The claim refuses a row
+  already at its max (`… AND count < max`), and a claim that reports no count fails closed (the claim rolls back, nothing
+  is sent). Before, every write used the BullMQ job's `attemptsMade + 1`, which restarted at 1 for each republished
+  generation, so the cap applied per generation and a row republished after lease/RETRY recovery could be retried for
+  ever. Actor → action → consequence after the fix: a delivery that keeps failing stops at 5 attempts in total (FAILED,
+  audited) instead of looping; a row recovered after a Redis loss has fewer attempts left (accepted under OC-1). A
+  provider-throttled email attempt (Resend 429 Retry-After, D5) still gives its count back, as before; an operator replay
+  (`core.replay_failed_email`) still resets the count to 0 (unchanged).
+- **No resend after a confirmed send (OD-5 Option B, §13 #3).** When the provider accepted an email and every local try
+  to persist SENT fails, the processor no longer routes the error to the RETRY/FAILED path (RETRY made BullMQ call the
+  provider again: a duplicate email, reproduced). It writes nothing more, throws `UnrecoverableError` (BullMQ does not
+  retry the job; tested with a real BullMQ job: one provider call, `attemptsMade` 1) and leaves the row PROCESSING under its
+  token with `provider_call_started_at` set. After the 10-minute lease the existing dispatcher recovery resolves it:
+  SMTP → FAILED `DELIVERY_UNCERTAIN` (manual review; replay needs the explicit allow-uncertain flag); Resend → one
+  re-presentation under the SAME idempotency key `email-outbox:<id>` (Resend returns the original message instead of
+  sending again; its key window is 24 h, the lease 10 min) → SENT. The log line now states that behaviour (it used to say
+  the row "remains PROCESSING" while the code wrote RETRY); it carries ids, provider and provider message id only.
+  Push already left the row PROCESSING after a failed ACCEPTED write (no RETRY write); unchanged.
+- **Exhausted ambiguous lease.** Because the count now includes the in-flight attempt, a PROCESSING row whose lease
+  expired at the cap means the last allowed attempt died. With the provider-call marker set (the message may have gone
+  out — including the OD-5 case on the 5th attempt) both dispatchers now mark it `DELIVERY_UNCERTAIN` (email: for every
+  driver, with its own "attempt cap reached" reason text) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
+  it is never re-presented past the cap. Without the marker nothing was sent: `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, unchanged.
+  For push this keeps the pre-change outcome (with the job-relative count that row sat one below the cap → uncertain).
+- **Unchanged (OD-6):** SMTP definite-rejection handling (the marker is still not cleared on RETRY), push uncertain
+  delivery (at-most-once), the payroll statement lease cap; the dispatcher claim SQL (sha256-pinned), jobIds, leases and
+  backoff.
+- **Tenant isolation:** every changed statement runs under the same organisation-bound `SET LOCAL` and FORCE RLS as
+  before; the count is never taken from the job payload. Abuse cases on real PostgreSQL
+  (`dq5b-email-cumulative-attempts.integration.spec.ts`, `dq5b-push-cumulative-attempts.integration.spec.ts`): a job naming
+  another organisation sees, claims and counts nothing (no send); another organisation's dispatcher does not reclassify the
+  row; a query with no tenant context returns zero rows. **Replicas:** two consumers (old and republished generation) race
+  one row → one claim, one provider call, count +1 once; five dispatchers race one exhausted ambiguous row → one
+  `DELIVERY_UNCERTAIN` transition and one audit row.
+- **Residual:** this is not exactly-once delivery. An SMTP email whose SENT write failed after a confirmed send now needs
+  manual review instead of going out twice (owner-accepted trade-off of Option B). A Resend row is re-presented once under
+  the same idempotency key; Resend deduplicates only inside its key window (24 h), so a recovery delayed past that window
+  (the Worker down for a day, the row untouched) could still send a second email. The log line for this case carries the
+  error name/code only, never the error object (a `QueryFailedError` holds the bound fencing token). A job whose own BullMQ attempts run out before the cumulative cap (attempts
+  spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
+  republishes it until the cumulative cap.
+- **Independent verification (2026-11-04, "V" tests in the same two integration specs).** A real crash loop (every claim
+  dies after the provider call; a restart's redelivery inside the lease claims, counts and sends nothing; lease recovery
+  republishes) stops at the 5th cumulative attempt with `DELIVERY_UNCERTAIN` and five provider calls on one key, and the
+  dead Workers' late outcomes are fenced out; the `DELIVERY_UNCERTAIN` rows this change produces (SMTP below the cap,
+  Resend at the cap) are refused by `core.replay_failed_email` without the allow-uncertain flag; the counting claim and
+  the reclassification UPDATE change nothing with no tenant context or another organisation bound (email and push).
+
+## formatPence exact; bigint pence enter a number only through assertSafePence (branch fix/format-pence-exact, not merged)
+
+Formatting and range guards only. No payroll, rate-resolution, rounding, pay-period or pay-date rule changes. There is
+no migration and no change to roles, grants or RLS.
+
+- **Asset:** money printed or returned to people: payroll views, payslip and run totals, offers, attendance pay, the
+  approved shift statement, and the assistant's payroll answers.
+- **Finding 1 (Low, integrity):**
+  - **What:** `@rab/shared` `formatPence` divided pence by 100 as a float, so `formatPence(2^53 - 1)` printed
+    `£90,071,992,547,409.90` instead of `.91`.
+  - **Scope:** the first wrong value found in a 32,000-value sweep was about 7.0 × 10^15 pence (£70 trillion), so no
+    real amount is affected today. The function is still the single money formatter, and it must be exact by
+    construction.
+  - **Fix:** split pounds and pence with integer arithmetic (number: `% 100` and an exact division; bigint: `/ 100n` and
+    `% 100n`). Format the same way as before: `-£1,234.56`, `£0.00`, `£0.01`, and `-£0.00` for `-0` as before.
+  - **New behaviour:** accepts a `bigint` of any size. A `number` must now be a safe integer (`assertSafePence`) rather
+    than any integer, because past 2^53 a number no longer holds the exact pence. That case is refused rather than
+    printed wrong. An unsupported currency code is refused.
+- **Finding 2 (Low, integrity, control at one layer only):**
+  - **What:** entity columns convert bigint pence through `bigintAsNumber`, which calls `assertSafePence`. Raw
+    `manager.query` rows did not: 22 sites ran `Number(r.x_pence)` directly, so a stored value past 2^53 - 1 would
+    have been silently rounded into a different, plausible amount.
+  - **Where:** attendance, shift-report, offer and offer-confirmation services; payroll and payroll-run services.
+  - **Write paths affected:** two of the sites write the rounded value back. `preparePayrollRecords` inserts
+    `pay_rate_pence`, and run preparation inserts `payroll_run_line`.
+  - **Fix:** each site now calls `assertSafePence(Number(...), '<column>')`, and JS-side gross sums are guarded the same
+    way. A corrupt or out-of-range value now fails that request or job closed (RangeError → 500 / job failure). It
+    never produces a wrong amount.
+- **Regression tests:**
+  - `money.spec.ts`: `formatPence` matches an exact BigInt reference for all boundaries (±(2^53 − 1), 0, ±1, ±99, ±100,
+    …) and 20,000 random safe integers. It matches the previous implementation wherever that one was exact. The bigint
+    form equals the number form. Unsafe or non-integer numbers are refused.
+  - `pence-number-boundary.spec.ts`: an AST scan of server and Worker source. Any new `Number(...)` on a pence or gross
+    value outside `assertSafePence` fails. On main's code it lists all 21 money sites it can see.
+- **Residual (reported, not changed here):**
+  - **Statement:** the approved shift statement's loader (`shift-statement.job.ts`, 2 sites) is guarded on the PDF
+    integration branches (#57) and is baselined here.
+  - **Assistant totals:** `payroll-assistant.service.ts` guards with `Number.isSafeInteger`.
+  - **Scan pattern:** the scan matches identifiers containing `pence` or `gross` only. A pence value under another name
+    (e.g. `row.rate`, guarded by hand here) is not caught automatically.
+  - **Precision before the guard:** `payForMinutes` computes `rate × minutes` as a float, which is exact only while the
+    product is ≤ 2^53. Rate DTOs have `@Min(0)` but no `@Max`, so an absurd rate is refused only later, at the column
+    transformer (500, not 400).
+
 ## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
 
 Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
@@ -5213,3 +5395,25 @@ approves; the renderer-source half is a separate follow-up patch (native only, `
   floor, PDF gate refusing a role without `pdf_render`) and `Pdf.test_native_renderer_shape` (the gate's PDF oracle reads
   the native renderer's indirect `/Resources`; MEASURED: it extracted no text from a react-pdf PDF before this fix);
   `check-no-browser-in-worker.cjs` (fails on main: the manifest and six imports).
+
+## PDF renderer review fixes M-3 and L-6 (branch integration/pdf-native-pre-removal, #62, not merged)
+
+No migration, role, grant, RLS or posture change; no money or worked-minutes value changes.
+
+- **M-3 — render memory bounded by the Worker container.** Asset: the Worker's availability for every tenant (all
+  consumers and scans share one container). Actor: any user whose text reaches a PDF (long notes, large rosters), or a
+  layout bug. Before: each native render thread could grow to a 512 MB old generation, independent of
+  `PDF_NATIVE_CONCURRENCY` and of the 1536m `mem_limit`, so concurrent oversized renders could get the whole container
+  OOM-killed instead of failing one thread with `error_PDF_NATIVE_OUT_OF_MEMORY`. Now: 384 MB per thread, and
+  `PDF_NATIVE_CONCURRENCY × 384 MB ≤ PDF_NATIVE_MEMORY_BUDGET_MB` (default 768 = half the default `mem_limit`; strict
+  integer 384–16384) is enforced, fail closed, by boot validation in both processes (every renderer mode), again at Worker
+  boot in native mode, and again by the process-wide pool before it creates any thread
+  (`engine/worker-shared/pdf-native-memory.contract.ts`, one rule). The launcher forwards the variable to the jobs child
+  only. Residual: the budget is a configured number, not read from the cgroup; an operator who raises it without raising
+  `mem_limit` defeats it (documented beside `mem_limit` in both compose files). Tests: `env.validation.pdf-renderer.spec`,
+  `render-pool.spec` (plan, process pool refuses), `pool-env-consistency.spec`, a 500-row roster at the default cap,
+  launcher test 34. The image-level OOM run (H6 M09 with two oversized renders) is still to be re-measured.
+- **L-6 — line separators in notes.** A lone CR, U+2028 and U+2029 are normalised to LF with CRLF in the render
+  thread's glyph guard (and in `collapsePreLine`), so notes keep their author's line breaks instead of printing □. Every
+  other control or format character keeps F1's □ and its count-only log. Tests: `render-pool.spec`, `native-pdf.spec`,
+  harness `pdf-harness.unit.spec` (transform and the `line-breaks` check).

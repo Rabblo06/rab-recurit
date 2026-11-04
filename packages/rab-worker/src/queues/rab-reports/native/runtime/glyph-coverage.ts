@@ -7,7 +7,9 @@ import { fieldSegment } from './render-protocol';
  * in P0 for CJK, Arabic and emoji). That silent loss must never happen, but neither may an unusual character refuse a
  * timesheet or a pay statement. So, BEFORE layout, every string of the view-model is rewritten:
  *
- *  - CRLF becomes LF and TAB becomes one space (layout normalisation; not counted);
+ *  - every line break becomes LF: CRLF, a lone CR, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR (review L-6:
+ *    notes keep the line breaks their author typed, whatever the client sent as the separator); TAB becomes one space
+ *    (layout normalisation; not counted);
  *  - every character the stack cannot print visibly is replaced by REPLACEMENT_MARKER, a glyph that really prints
  *    (verified at thread start in both weights of the primary font);
  *  - the caller gets, per field, only the COUNT of replaced characters. Never the text, the character or its code point.
@@ -15,11 +17,12 @@ import { fieldSegment } from './render-protocol';
  * "Cannot print visibly" means: not mapped by every weight of a family in the font stack (Liberation Sans, then the
  * Noto Sans fallback), OR one of the characters react-pdf maps but never prints (MEASURED with react-pdf 4.9.0: drawn
  * as nothing or consumed by the text engine and absent from the text layer):
- *  - controls (Cc) other than LF: NUL, CR, ESC, DEL, C1 (TAB is normalised first). Noto maps U+0000/U+000D to empty glyphs;
+ *  - controls (Cc) other than LF: NUL, ESC, FF, DEL, C1 (TAB and CR are normalised first). Noto maps U+0000 to an empty glyph;
  *  - format and default-ignorable characters: soft hyphen, ZWSP/ZWNJ/ZWJ, LRM/RLM, bidi embeddings/overrides
  *    U+202A-U+202E and isolates U+2066-U+2069 (which would otherwise silently REORDER visible text), word joiner,
  *    BOM, variation selectors, CGJ;
- *  - U+2028/U+2029, lone surrogates (Cs), private use (Co), unassigned and noncharacters (Cn).
+ *  - lone surrogates (Cs), private use (Co), unassigned and noncharacters (Cn). (U+2028/U+2029 never get here: they are
+ *    line breaks, normalised to LF first.)
  *
  * The fallback family is LOADED LAZILY (F3): its fontkit objects are only requested when a string holds a character the
  * primary font lacks.
@@ -38,6 +41,8 @@ export interface GlyphFont {
 }
 
 const LINE_FEED = 0x0a;
+/** Every line-break form normalised to LF before the glyph check: CRLF, lone CR, U+2028, U+2029 (review L-6). */
+const LINE_BREAKS = /\r\n?|[\u2028\u2029]/g;
 const NEVER_PRINTABLE =
   /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
 
@@ -135,7 +140,7 @@ export class GlyphCoverage {
   }
 
   private replaceIn(text: string): { text: string; count: number } {
-    const normalised = text.replace(/\r\n/g, '\n').replace(/\t/g, ' ');
+    const normalised = text.replace(LINE_BREAKS, '\n').replace(/\t/g, ' ');
     let out = '';
     let count = 0;
     for (let i = 0; i < normalised.length;) {

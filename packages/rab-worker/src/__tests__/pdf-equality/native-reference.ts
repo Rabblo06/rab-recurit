@@ -207,7 +207,7 @@ export async function htmlReference(doc: ReportDocument, x: PdfExtraction, trans
 /** Whether the document's text changes under F1 (it holds a character the bundled fonts cannot print). */
 export async function changedByF1(doc: ReportDocument, transform: GlyphTransform): Promise<boolean> {
   const { html, options } = renderCall(doc);
-  const texts = [htmlText(html), ...footerTexts(options.footerTemplate, 1)].map((t) => t.replace(/\r\n/g, '\n').replace(/\t/g, ' '));
+  const texts = [htmlText(html), ...footerTexts(options.footerTemplate, 1)].map((t) => t.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/\t/g, ' '));
   const out = await transform(texts);
   return out.some((t, i) => t !== texts[i]);
 }
@@ -235,15 +235,19 @@ export interface JoinedTokens {
  *   forced break (only with `forcedBreaks`: react-pdf draws a visible "-" where it force-breaks an over-long token,
  *       word-breaking.ts): the document holds them joined WITHOUT the hyphen and not WITH it — the hyphen is dropped;
  *   D6 hyphen wrap (with `d6`, any renderer): the document holds them joined WITH the hyphen ("Worthington-Smythe") —
- *       the hyphen is the word's own and stays; Chromium wraps there, react-pdf may not, or the other way round.
+ *       the hyphen is the word's own and stays; Chromium wraps there, react-pdf may not, or the other way round;
+ *   unhyphenated break (only with `unhyphenated`: Chromium's `overflow-wrap: anywhere` in the fixed `.bottom` columns,
+ *       F-PDF-1 fix): a line ending WITHOUT "-" whose last word, glued to the next line's first word, is in the document,
+ *       while neither piece alone is a whole word of the document. Not a D6 delta: it is the same token either way.
  *
  * Every other hyphen and every other line end stays a word boundary; chains over several lines join piece by piece.
  * A truncated or altered piece is joined as it is printed, so the joined word differs from the document's and the
  * token comparison still fails: joining never repairs text, it only removes the line break.
  */
-export function joinLineBreaks(x: PdfExtraction, reference: readonly string[], options: { forcedBreaks: boolean; d6: boolean }): JoinedTokens {
+export function joinLineBreaks(x: PdfExtraction, reference: readonly string[], options: { forcedBreaks: boolean; d6: boolean; unhyphenated?: boolean }): JoinedTokens {
   const words = normaliseText(x.text).split(' ').filter(Boolean);
   const inReference = (s: string) => reference.some((t) => t.includes(s));
+  const exactWords = new Set(reference);
   const remove: string[] = [];
   const add: string[] = [];
   const d6: string[] = [];
@@ -268,7 +272,12 @@ export function joinLineBreaks(x: PdfExtraction, reference: readonly string[], o
         const open: Joined | null = current;
         const last: Joined = open && line.length === 1 ? open : { word: tail.join(''), pieces: tail, d6: false, forced: false };
         const first = next[0];
-        if (!first || !last.word.endsWith('-')) {
+        const glued = first ? last.word + first : '';
+        // Chromium's `overflow-wrap: anywhere` breaks an over-long token with NO hyphen: rejoined only where the document
+        // holds the glued word and neither piece is a whole word of the document on its own (so "in" / "to" never merge).
+        const soft =
+          !!first && !last.word.endsWith('-') && options.unhyphenated === true && inReference(glued) && (last !== open ? !exactWords.has(last.word) : true) && !exactWords.has(first);
+        if (!first || (!last.word.endsWith('-') && !soft)) {
           close(current);
           current = null;
           continue;
@@ -278,7 +287,8 @@ export function joinLineBreaks(x: PdfExtraction, reference: readonly string[], o
         // If the next line is this one word and itself ends in a candidate break, probe without that hyphen (decided next).
         const probe = (s: string) => (next.length === 1 && k + 2 < split.length && s.endsWith('-') ? s.slice(0, -1) : s);
         let joined: Joined | null = null;
-        if (options.forcedBreaks && inReference(probe(broken)) && !inReference(probe(kept))) joined = { ...last, word: broken, pieces: [...last.pieces, first], forced: true };
+        if (soft) joined = { ...last, word: glued, pieces: [...last.pieces, first] };
+        else if (options.forcedBreaks && inReference(probe(broken)) && !inReference(probe(kept))) joined = { ...last, word: broken, pieces: [...last.pieces, first], forced: true };
         else if (options.d6 && inReference(probe(kept))) joined = { ...last, word: kept, pieces: [...last.pieces, first], d6: true };
         if (joined) {
           current = joined;

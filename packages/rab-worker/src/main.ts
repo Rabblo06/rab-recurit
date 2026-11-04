@@ -43,14 +43,16 @@ import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
+import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
+import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
 import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
-import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { assertCombinedShiftScanTick, isScanJobEnabled, resolveIntervalMs, resolveShiftScanMode, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { COMBINED_SHIFT_SCAN_JOB, combinedMemberLock, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
 import { DispatchWakeListener } from './core/wake/dispatch-listener';
@@ -62,6 +64,8 @@ import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/conn
 import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
+import { TimerTriggerQueueService } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
+import { redisTimerTriggerOutcomeRecorder } from './queues/rab-timer-triggers/timer-trigger-arming';
 
 /**
  * ONE `rab-worker` process, multiple job categories — its own deployable
@@ -151,8 +155,12 @@ function refuseStartup(error: unknown): never {
           ? '[worker-scheduler] refused: '
           : error instanceof Error && error.name === 'DispatchConfigError'
             ? '[worker-dispatch] refused: '
+            : error instanceof Error && error.name === 'TimerTriggerConfigError'
+              ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
+              ? '[worker-pdf] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
@@ -272,6 +280,9 @@ async function bootstrap(): Promise<void> {
     storageReconcileCommand: appContext.get(StorageReconcileCommand),
     realtimePublish,
     shiftStatementQueue,
+    // Phase D-Q4b: trigger outcome counters on the fail-fast client (a Redis outage rejects at once, never queues).
+    timerTriggerOutcomes: redisTimerTriggerOutcomeRecorder(scanTicksRedis),
+    timerTriggers: appContext.get(TimerTriggerQueueService),
   });
 
   // Processor discovery (BullMQ migration M2): every scan and consumer handler is a `@Process` method on a `@Processor`
@@ -312,10 +323,15 @@ async function bootstrap(): Promise<void> {
   );
   // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
   // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
-  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start.
+  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start, and so
+  // does a pool whose threads' heap caps would not fit PDF_NATIVE_MEMORY_BUDGET_MB (review M-3, fail closed).
   try {
     logger.log(describePdfRendering());
-    if (pdfRendererMode() === 'native') prewarmRenderPool();
+    if (pdfRendererMode() === 'native') {
+      const plan = pdfNativeMemoryPlan();
+      logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
+      prewarmRenderPool();
+    }
   } catch (error) {
     refuseStartup(error);
   }
@@ -329,6 +345,17 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     refuseStartup(error);
   }
+  // Phase D-Q4a: WORKER_SHIFT_SCAN_MODE (default separate = the four shift-family scans exactly as before). Re-checked here,
+  // fail closed: an unknown value, or combined mode with a common tick under 30 s, refuses to start.
+  const shiftScanMode = (() => {
+    try {
+      const mode = resolveShiftScanMode({ get: (key) => environmentService.get(key) });
+      if (mode === 'combined') assertCombinedShiftScanTick(intervalOf(SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!));
+      return mode;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
 
   // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
   // any consumer exists — fail closed.
@@ -337,8 +364,23 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     refuseStartup(error);
   }
-  // The four consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4).
-  const consumers = createConsumerWorkers(registry, redis, logger);
+  // Phase D-Q4b: WORKER_TIMER_TRIGGERS (off | shadow | on, default off) and WORKER_TIMER_TRIGGER_KINDS, re-checked here,
+  // fail closed. The producer service resolved them already (one source); `off` = no trigger consumer, no arming.
+  const timerTriggers = (() => {
+    try {
+      return appContext.get(TimerTriggerQueueService).settings;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  logger.log(
+    timerTriggers.mode === 'off'
+      ? 'timer triggers: WORKER_TIMER_TRIGGERS=off — no trigger consumer, no arming (the backstop scans run unchanged)'
+      : `timer triggers: WORKER_TIMER_TRIGGERS=${timerTriggers.mode} kinds=${timerTriggers.kinds.join(',')} — consumer concurrency 2; the backstop scans run unchanged`,
+  );
+  // The consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4, and
+  // D-Q4b's timer triggers 2 only when WORKER_TIMER_TRIGGERS is not off).
+  const consumers = createConsumerWorkers(registry, redis, logger, (def) => def.key !== 'timerTriggers' || timerTriggers.mode !== 'off');
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
@@ -354,6 +396,8 @@ async function bootstrap(): Promise<void> {
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
   let scheduler: BullmqScheduler | null = null;
+  // Phase D-Q4a Lane A: the scan lock as soon as startBullmqScheduler opens it (onScanLock), before its first scan Worker.
+  let memberScanLock: ScanLock | null = null;
 
   // Phase D (D1): global claim mode. The four dispatch scans call the coordinator (reconciliation sweep when due + global
   // claim through core.worker_claim_*); wake-ups (event mode) run through runtime.runOnce so they take a scan slot, are
@@ -396,6 +440,23 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  // Phase D-Q4a: combined mode only. The four members are not registered (isScanJobEnabled); `shift-scan-combined` is,
+  // and runs the shared walk + each member's own processing as its own runtime cycle. Lane A: each member's processing
+  // also takes that member's own scan lock once the bullmq scheduler exists. separate (default): nothing installed here.
+  if (shiftScanMode === 'combined') {
+    const combinedDef = SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!;
+    const combined = createCombinedShiftScan(() => appContext.get(WorkerDependencies).get(), {
+      intervalOf,
+      tickMs: intervalOf(combinedDef),
+      runtime,
+      // Lane A: the member's own scan lock, from onScanLock (set before any scan Worker exists); fail closed
+      // (skipped-locked) if a job ever arrives before it. Interval mode: no member lock, as today.
+      memberLock: combinedMemberLock(schedulerMode === 'bullmq' ? 'bullmq' : 'interval', () => memberScanLock ?? scheduler?.scanLock),
+    });
+    scanRegistry = withCombinedShiftScan(scanRegistry, combined);
+    logger.log(`shift scans: WORKER_SHIFT_SCAN_MODE=combined tick=${intervalOf(combinedDef) / 1000}s members=shift-monitor,attendance-monitor,shift-report-scheduler,final-timesheet`);
+  }
+
   // Heartbeat: unchanged in both modes (the liveness signal Admin Health and invitation sends read).
   const beat = () => {
     if (scheduler?.consumersRunning()) runtime.markConsumersReady();
@@ -425,6 +486,9 @@ async function bootstrap(): Promise<void> {
       intervalOf,
       isEnabled,
       logger,
+      onScanLock: (lock) => {
+        memberScanLock = lock;
+      },
     }).catch(refuseStartup);
     beat();
   } else {

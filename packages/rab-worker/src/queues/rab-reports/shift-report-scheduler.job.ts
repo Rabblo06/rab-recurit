@@ -1,7 +1,7 @@
 import { effectiveAssignmentBreakMinutes, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { EmailOutboxJobType, ShiftStatus } from '@rab/shared';
 import { Logger } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -59,19 +59,17 @@ export interface ShiftReportSchedulerResult {
   failed: number;
 }
 
-export async function runShiftReportSchedulerCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  attendanceQr: AttendanceQrService,
-  qrImage: QrImageService,
-  emailOutbox: EmailOutboxService,
-  files: FileService,
-  reportAvailableBeforeMinutes: number,
-  options: { organisationId?: string; audit?: AuditService } = {},
-): Promise<ShiftReportSchedulerResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      return await manager.query<ScanCandidate[]>(
-        `
+/**
+ * D-Q4a (refactor only, no behaviour change): discovery for ONE workspace, then the unchanged per-shift processing
+ * (`processShiftReportCandidates`: per shift the session advisory lock `shift_report:<id>` on `lockDataSource`, which the
+ * Worker gives as the DIRECT DataSource, then the render/persist). The combined shift scan calls the same two functions
+ * and keeps the direct DataSource for the lock; `runShiftReportSchedulerCycle` stays the separate-mode entry.
+ */
+export type ShiftReportCandidate = ScanCandidate;
+
+export async function discoverShiftReportCandidates(manager: EntityManager, reportAvailableBeforeMinutes: number, organisationId?: string): Promise<ShiftReportCandidate[]> {
+  return await manager.query<ScanCandidate[]>(
+    `
         SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
         FROM shift s
         LEFT JOIN shift_report sr ON sr.shift_id = s.id
@@ -87,10 +85,39 @@ export async function runShiftReportSchedulerCycle(
         ORDER BY s.starts_at ASC
         LIMIT 200
       `,
-        [options.organisationId ?? null],
-      );
-  }, options.organisationId);
+    [organisationId ?? null],
+  );
+}
 
+export async function runShiftReportSchedulerCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  reportAvailableBeforeMinutes: number,
+  options: { organisationId?: string; audit?: AuditService } = {},
+): Promise<ShiftReportSchedulerResult> {
+  const candidates = await discoverInWorkspaces(
+    ownerDataSource,
+    tenantContext,
+    (manager) => discoverShiftReportCandidates(manager, reportAvailableBeforeMinutes, options.organisationId),
+    options.organisationId,
+  );
+  return processShiftReportCandidates(ownerDataSource, tenantContext, attendanceQr, qrImage, emailOutbox, files, candidates, options.audit);
+}
+
+export async function processShiftReportCandidates(
+  lockDataSource: DataSource,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  candidates: readonly ShiftReportCandidate[],
+  audit?: AuditService,
+): Promise<ShiftReportSchedulerResult> {
   let generated = 0;
   let skippedLocked = 0;
   let failed = 0;
@@ -98,8 +125,8 @@ export async function runShiftReportSchedulerCycle(
   for (const candidate of candidates) {
     // One failing shift (bad data, renderer down) must not block every shift behind it.
     try {
-      const outcome = await withAdvisoryLock(ownerDataSource, `shift_report:${candidate.shift_id}`, () =>
-        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, options.audit),
+      const outcome = await withAdvisoryLock(lockDataSource, `shift_report:${candidate.shift_id}`, () =>
+        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, audit),
       );
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) generated += 1;

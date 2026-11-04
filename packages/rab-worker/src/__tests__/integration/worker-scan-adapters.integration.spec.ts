@@ -30,10 +30,10 @@ import { ProcessorExplorer, validateHandlerRegistry } from '../../core/scheduler
 import { resolveIntervalMs, SCAN_JOBS, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { WorkerModule } from '../../worker.module';
-import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
+import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
 
 /**
- * Lane A M3/M7: the REAL WorkerModule graph discovers all 21 scan handlers + 4 consumer handlers (no duplicates, no
+ * Lane A M3/M7: the REAL WorkerModule graph discovers all scan handlers + 5 consumer handlers (D-Q4b: + crewflow-timer-triggers) (no duplicates, no
  * gaps; AI Phase 1 added the `ai-retention` scan and the `rab-ai` consumer), and every real adapter runs its real cycle
  * once through the bullmq-mode path (runtime.runOnce + the per-scan advisory lock) as the restricted crewflow_app role, against the disposable test database. Interval mode uses the same
  * adapters, so this also proves the interval path's handlers resolve.
@@ -98,10 +98,10 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
 
     const registry = moduleRef.get(ProcessorExplorer).explore();
     expect(() => validateHandlerRegistry(registry)).not.toThrow();
-    // By name, not just a count: exactly these 26 handlers (22 scans incl. ai-retention, workspace-provisioning-health and D-Q2's ai-stale-turn-sweep + 4 consumers incl. rab-ai).
+    // By name, not just a count: exactly these 28 handlers (23 scans incl. ai-retention, workspace-provisioning-health, D-Q2's ai-stale-turn-sweep and D-Q4a's shift-scan-combined + 5 consumers incl. rab-ai and D-Q4b's timer triggers).
     const discovered = [...registry.handlers.values()].map((h) => `${h.queue}/${h.jobName}`);
     expect(discovered.sort()).toEqual([...EXPECTED_HANDLERS].sort());
-    expect(registry.handlers.size).toBe(26);
+    expect(registry.handlers.size).toBe(28);
     expect(registry.get('crewflow-scan-maintenance', 'ai-retention')).toBeDefined();
     expect(registry.get('rab-ai', 'ai-turn')).toBeDefined();
     // ...and every scan that will be scheduled is exactly the expected set.
@@ -112,7 +112,9 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     const errors: unknown[] = [];
     jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'error').mockImplementation((_m, e) => void errors.push(e));
     const outcomes: Record<string, string> = {};
-    for (const def of SCAN_JOBS) {
+    // D-Q4a: the combined scan's handler is replaced by main.ts only in combined mode; unwired it fails closed
+    // (shift-scan-combined.spec.ts). Every other scan runs here, as before.
+    for (const def of SCAN_JOBS.filter((d) => d.shiftScanMode !== 'combined')) {
       outcomes[def.jobName] = await runtime.runOnce(loopOptionsOf(def, registry.scan(def), resolveIntervalMs(def, env)), (work) => lock!.run(schedulerIdOf(def), work));
     }
     expect(errors).toEqual([]);
@@ -120,7 +122,7 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     // The disabled-by-default retention job never shows as a successful run.
     expect(outcomes['outbox-retention']).toBe('idle');
     // Same contract for AI retention (AI_RETENTION_MODE=off by default ⇒ the cycle returns false, never stamped).
-    expect(Object.keys(outcomes).sort()).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.map((id) => id.split(':')[2]!).sort());
+    expect(Object.keys(outcomes).sort()).toEqual(SEPARATE_MODE_SCAN_IDS.map((id) => id.split(':')[2]!).sort());
     expect(outcomes['ai-retention']).toBe('idle');
     // D-Q2: the AI stale-turn sweep is off by default (AI_STALE_TURN_SWEEP=false ⇒ the cycle returns false, never stamped).
     expect(outcomes['ai-stale-turn-sweep']).toBe('idle');

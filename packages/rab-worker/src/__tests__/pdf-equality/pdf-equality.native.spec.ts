@@ -7,21 +7,33 @@ import { PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureIds } from './fixtures';
 import { GlyphTransform, loadGlyphTransform } from './glyph-transform';
 import { extractFixture, fileFindings, goldenFindings, outDir, rasterise, RENDER_CONCURRENCY, saveArtifact, verifyShiftQr } from './harness';
-import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { MODE, NATIVE_ONLY } from './mode';
 import { changedByF1, documentWords, htmlReference, nativeExpectation } from './native-reference';
 import { chromiumRenderer, loadNativeRenderer, mapLimit, NativeNotConvertedError, switchChromiumHtml } from './renderers';
 
 /**
- * OWNER DECISION D6 — APPROVED WITH CONDITIONS (FINAL brief, 2026-11-04). On the long-text documents Chromium wraps a
- * hyphenated surname after its hyphen ("Worthington-" / "Smythe"); react-pdf's textkit keeps "Worthington-Smythe" whole
- * (word-breaking.ts). The checker accepts exactly that difference (checker.ts `tokens`: the text with those line breaks
- * rejoined must be identical, and every other check must pass: nothing missing or added, nothing outside the page, no
- * overlap, footers, repeated headers and notes' line breaks correct). These fixtures are where Chromium wraps that way;
- * the evidence test pins that the D6 rule — not a looser check — is what makes them pass.
+ * D6 hyphen wraps (approved with conditions, FINAL brief 2026-11-04) need no pin any more: the native kit now wraps a
+ * hyphenated name after its own hyphen like Chromium (#55 bd7f7834), so the long-text words are an identical multiset in
+ * compare mode. The rule itself stays in checker.ts `tokens` (accepted only with the joined text identical and every
+ * other check passing), with its regressions in pdf-harness.unit.spec.ts; in native-only mode it is what accepts native's
+ * wrap against the document's whole word.
+ *
+ * OWNER-ACCEPTED page-count delta (owner decision 2026-11-04). In compare mode the long-text documents paginate
+ * differently: final timesheet (both variants) Chromium 6 / native 7 pages, roster 5 / 6. Agent A measured the cause:
+ * Chromium rounds Liberation Sans' line box to whole px (9.00 pt baseline-to-baseline), react-pdf does not (9.49 pt), and
+ * the 56-paragraph pre-line note runs ~5% longer. A matching lineHeight was tried and reverted (react-pdf 4.9.0 then
+ * dropped a paragraph). The owner accepted it as a rule (checker.ts `extraPageAccepted` / `acceptOneExtraPage`): the
+ * native render may print at most ONE page more than Chromium (beyond D4), and only when every other check passes. It
+ * applies to every fixture, and the evidence test below pins that on these three the page count is the only difference,
+ * at exactly the measured counts.
  */
-const D6 = 'D6 (approved with conditions: Chromium wraps "Worthington-" / "Smythe", native keeps "Worthington-Smythe")';
-const D6_FIXTURES = ['long-text/final-timesheet-original', 'long-text/final-timesheet', 'long-text/pre-shift-report'];
+const OWNER_PAGE_COUNT_DELTA = 'OWNER-ACCEPTED page-count delta (long note paginates one page longer natively)';
+const OWNER_PAGE_COUNT_FIXTURES: Readonly<Record<string, { chromium: number; native: number }>> = Object.freeze({
+  'long-text/final-timesheet-original': { chromium: 6, native: 7 },
+  'long-text/final-timesheet': { chromium: 6, native: 7 },
+  'long-text/pre-shift-report': { chromium: 5, native: 6 },
+});
 
 /**
  * NATIVE RENDERER EQUALITY over the whole fixture matrix (P0 plan §5.2, owner-approved 2026-11-04). Two modes
@@ -144,6 +156,10 @@ if ('unavailable' in native) {
           expectB: expectNative,
           referenceB: reference,
           documentWords: { a: words, b: reference ? reference.tokens : words },
+          // Chromium only, and only while this tree's template collapses notes (pinned in the self-test); never native.
+          lineBreaksInfo: NOTES_LINE_BREAKS_IN_TEMPLATE ? [] : ['chromium'],
+          // Owner-accepted (2026-11-04): native may print one page more than Chromium, only with every other check passing.
+          extraPageAccepted: 'native',
         });
         if (known) {
           // F-PDF-1: Chromium's own input checks fail exactly as pinned in the self-test (known-findings.ts) — INFO here;
@@ -179,25 +195,25 @@ if ('unavailable' in native) {
       const result = await compare(id);
       if (result && !result.ok) throw new Error(formatReport([result]));
     };
+    // Every fixture is a plain test; the owner-accepted page-count delta is a checker rule (see OWNER_PAGE_COUNT_DELTA).
     it.each(IDS)('%s', assertEqual);
 
-    if (!NATIVE_ONLY) {
-      // D6 evidence: on these fixtures the words differ ONLY by hyphen wraps, accepted under the D6 conditions.
-      it.each(D6_FIXTURES)(`%s: ${D6} — accepted only with the joined text identical and every other check passing`, async (id) => {
+    // Compare mode only (native-only mode has no Chromium page count): on the long-text fixtures the page count is the
+    // ONLY difference, at exactly the measured counts, and it is accepted only because every other check passed.
+    const pageAccepted = NATIVE_ONLY ? [] : Object.keys(OWNER_PAGE_COUNT_FIXTURES);
+    if (pageAccepted.length) {
+      it.each(pageAccepted)(`%s: ${OWNER_PAGE_COUNT_DELTA} — evidence: page count is the only difference`, async (id) => {
         const result = await compare(id);
         if (!result) throw new Error(`${id}: native not converted`);
-        const tokens = result.findings.find((x) => x.check === 'tokens')!;
-        expect(tokens.ok).toBe(true);
-        expect(result.findings.filter((x) => !x.ok && !x.info)).toEqual([]);
-        // Either the renderers now wrap alike (no difference left: the native kit wraps after a word's own hyphen too),
-        // or the difference is exactly a D6 hyphen wrap, accepted under its conditions and reported as such.
-        if (/^D6 hyphen wrap: /.test(tokens.detail)) {
-          expect(tokens.detail).toMatch(/Worthington-/);
-          expect(result.findings.find((x) => x.check === 'd6-hyphen-wrap')).toMatchObject({ ok: true, info: true });
-        } else {
-          expect(tokens.detail).toMatch(/identical multiset/);
-          expect(result.findings.some((x) => x.check === 'd6-hyphen-wrap')).toBe(false);
-        }
+        expect(result.ok).toBe(true);
+        const page = result.findings.find((x) => x.check === 'page-count')!;
+        const want = OWNER_PAGE_COUNT_FIXTURES[id]!;
+        expect(page).toMatchObject({ ok: false, info: true });
+        expect(page.detail).toBe(`chromium ${want.chromium}, native ${want.native} — ACCEPTED (owner 2026-11-04): native prints one page more; every other check passed`);
+        // Nothing else failed and nothing else was waved through as INFO by this rule.
+        expect(result.findings.filter((x) => !x.ok && x !== page && !x.info).map((x) => x.check)).toEqual([]);
+        expect(result.findings.filter((x) => x.detail.includes('ACCEPTED (owner 2026-11-04)')).map((x) => x.check)).toEqual(['page-count']);
+        expect(result.findings.find((x) => x.check === 'tokens')).toMatchObject({ ok: true });
       });
     }
 

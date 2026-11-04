@@ -6,7 +6,7 @@ import { compact, PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureAttendanceQr, fixtureIds, fixtureQrTokens, scenarioSeeds, shiftEntity } from './fixtures';
 import { loadGlyphTransform } from './glyph-transform';
 import { extractFixture, outDir, RENDER_CONCURRENCY, saveArtifact, verifyShiftQr } from './harness';
-import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES, F_PDF_1_PRESENT, F_PDF_1_SHAPES, fixedColumnProblems, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { MODE, NATIVE_ONLY } from './mode';
 import { nativeExpectation } from './native-reference';
 import { chromiumRenderer, loadNativeRenderer, mapLimit, Renderer, renderHtmlWithChromium } from './renderers';
@@ -38,7 +38,10 @@ if (NATIVE_ONLY && 'unavailable' in nativeOrUnavailable) throw new Error(`PDF_EQ
 const renderer: Renderer = NATIVE_ONLY ? (nativeOrUnavailable as Renderer) : chromiumRenderer;
 const N1 = `${renderer.name}#1`;
 const N2 = `${renderer.name}#2`;
-const OPTIONS: CheckOptions = NATIVE_ONLY ? { boundsStrict: [N1, N2, 'original', 'altered'], forcedBreakHyphens: [N1, N2, 'original', 'altered'] } : {};
+const SELF_NAMES = [N1, N2, 'original', 'altered'];
+/** Chromium line-break gaps are INFO only where this tree's template does not keep them yet (pinned below). */
+const LINE_BREAKS_PENDING = !NATIVE_ONLY && !NOTES_LINE_BREAKS_IN_TEMPLATE;
+const OPTIONS: CheckOptions = NATIVE_ONLY ? { boundsStrict: SELF_NAMES, forcedBreakHyphens: SELF_NAMES } : { lineBreaksInfo: LINE_BREAKS_PENDING ? SELF_NAMES : [] };
 let fixtures: Map<string, FixtureDocument>;
 const renders = new Map<string, [Buffer, Buffer]>();
 const expectations = new Map<string, DocumentExpectation>();
@@ -89,6 +92,13 @@ describe(`${renderer.name} vs ${renderer.name}: every fixture compares equal (th
       const [a, b] = renders.get(id)!;
       expect(a.equals(b)).toBe(true);
     });
+  } else if (!F_PDF_1_PRESENT) {
+    // F-PDF-1 FIXED in this tree's template (known-findings.ts): the right-hand column, the sign-off and the total are
+    // printed, all 1,000 token characters are printed, and nothing is outside the page — on both Chromium renders.
+    it.each(Object.entries(F_PDF_1_SHAPES))(`%s: ${F_PDF_1} is fixed — every column, the sign-off and the total printed, inside the page`, (id, shape) => {
+      const f = fixtures.get(id)!;
+      for (const [k, pdf] of renders.get(id)!.entries()) expect(fixedColumnProblems(f.doc, extractFixture(f, pdf), `chromium#${k + 1}`, shape.droppedHeading)).toEqual([]);
+    });
   } else if (findingIds.length) {
     // KNOWN FINDING F-PDF-1 (known-findings.ts): Chromium drops the notes' tail and the right-hand column. The assertion is
     // unchanged; `test.failing` turns RED the day the template stops dropping text — then make these plain `it`s again.
@@ -121,8 +131,25 @@ describe(`extraction regressions on real ${renderer.name} output`, () => {
     expect(x.pages.some((p) => p.blocks.some((b) => compact(b).includes(compact(notes))) || compact(p.lines.join('')).includes(compact(notes)))).toBe(false);
     // … found exactly once, and every one of its 56 paragraphs starts a printed line.
     expect(countValue(x, notes, { forcedBreakHyphens: NATIVE_ONLY })).toBe(1);
-    expect(checkAgainstInput(expectations.get(f.id)!, x, 'r', OPTIONS).find((c) => c.check === 'line-breaks(r)')).toMatchObject({ ok: true });
+    if (!LINE_BREAKS_PENDING) {
+      const breaks = checkAgainstInput(expectations.get(f.id)!, x, 'r', OPTIONS).find((c) => c.check === 'line-breaks(r)')!;
+      expect(breaks.ok).toBe(true);
+      expect(breaks.info).toBeFalsy(); // passed, not merely reported
+    }
   });
+
+  if (LINE_BREAKS_PENDING) {
+    // PENDING in this tree (origin/main): the Chromium templates collapse notes' line breaks (white-space: normal). Owner
+    // decision 2026-11-04 requires them kept; the template change (fix/pdf-notes-column-and-line-breaks) turns this RED,
+    // and then NOTES_LINE_BREAKS_IN_TEMPLATE makes the check strict everywhere.
+    test.failing("notes keep their line breaks in Chromium's templates (PENDING the template change)", () => {
+      for (const id of ['one-row/final-timesheet', 'one-row/pre-shift-report', 'long-text/final-timesheet', 'long-text/pre-shift-report']) {
+        const f = fixtures.get(id)!;
+        const strict = checkAgainstInput(expectations.get(id)!, extractFixture(f, renders.get(id)![0]), 'chromium').find((c) => c.check === 'line-breaks(chromium)')!;
+        expect(strict).toMatchObject({ ok: true });
+      }
+    });
+  }
 
   if (!NATIVE_ONLY) {
     it('unicode: a multi-word Arabic name (drawn right to left, one run per word) reads in logical order', () => {
@@ -232,12 +259,17 @@ const ALTERATIONS: Alteration[] = [
       ),
     mustFail: ['values-present(altered)', 'tokens'],
   },
-  {
-    name: 'a multi-line note printed with its line breaks collapsed',
-    fixture: 'one-row/final-timesheet',
-    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.notes = d.data.notes!.replace(/\s*[\r\n]+\s*/g, ' ')))),
-    mustFail: ['line-breaks(altered)'],
-  },
+  // Only where the renderer under test keeps line breaks (native; Chromium once its template does).
+  ...(LINE_BREAKS_PENDING
+    ? []
+    : [
+        {
+          name: 'a multi-line note printed with its line breaks collapsed',
+          fixture: 'one-row/final-timesheet',
+          alter: async (f: FixtureDocument) => renderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.notes = d.data.notes!.replace(/\s*[\r\n]+\s*/g, ' ')))),
+          mustFail: ['line-breaks(altered)'],
+        } satisfies Alteration,
+      ]),
 ];
 
 describe('altered PDFs compare unequal (the checker catches differences)', () => {
