@@ -793,6 +793,14 @@ test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and
   assert.equal(provisioner.env.AI_TITLE_GENERATION, undefined);
 });
 
+test('34 the jobs allowlist forwards PDF_RENDERER (PDF renderer P1; otherwise native would silently never reach the child) and never to the provisioner', () => {
+  assert.ok(JOBS_ENV_KEYS.includes('PDF_RENDERER'));
+  assert.ok(!PROVISIONER_ENV_KEYS.includes('PDF_RENDERER'));
+  const [jobs, provisioner] = makePlan({ ...env(), PDF_RENDERER: 'native' });
+  assert.equal(jobs.env.PDF_RENDERER, 'native');
+  assert.equal(provisioner.env.PDF_RENDERER, undefined);
+});
+
 test('35 the jobs allowlist forwards the 7b budget and rate names (T7-W1) and never to the provisioner', () => {
   for (const name of ['AI_USER_DAILY_BUDGET_USD', 'AI_ORG_RATE_PER_MIN', 'AI_USER_TURNS_PER_DAY', 'AI_USER_RATE_PER_MIN', 'AI_DAILY_BUDGET_USD']) {
     assert.ok(JOBS_ENV_KEYS.includes(name), name);
