@@ -70,7 +70,7 @@ describeTwenty('Twenty Option A behaviour catalogue C1–C8 (crewflow_owner, rea
     } else {
       expect(notForce).toHaveLength(16);
       expect(notForce).toContain('organisation_invitation');
-      expectedRisk('DOC-16', 'LOW', 'CLAUDE.md → lists 15 NOT FORCE tables → organisation_invitation is undocumented', `live NOT FORCE set (${notForce.length}): ${notForce.join(',')}`, 'doc fix (Agent 2 owns CLAUDE.md)');
+      expectedRisk('DOC-16', 'LOW', 'CLAUDE.md → lists 15 NOT FORCE tables → organisation_invitation is undocumented', `live NOT FORCE set (${notForce.length}): ${notForce.join(',')}`, 'doc fix (CLAUDE.md is owned by Agent 3, security)');
     }
   });
 
