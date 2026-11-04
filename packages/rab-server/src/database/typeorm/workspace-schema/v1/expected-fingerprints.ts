@@ -158,14 +158,29 @@ export function resetWorkspaceFingerprintSelectionForTests(): void {
   selected = null;
 }
 
+/**
+ * A read-only Proxy over the LIVE selected table: every read (a version, Object.keys / entries, `in`) sees the table as it
+ * is now. (The first version precomputed its keys at load time, so a version added later — the generator's throwaway
+ * placeholder for a pending module — was invisible to the frozen migrations; found by the v20 append run.) Writes and
+ * deletes through the view are refused.
+ */
 function selectedView(): Readonly<Record<number, string>> {
-  const view: Record<number, string> = {};
-  const versions = new Set<number>();
-  for (const table of Object.values(TABLES)) for (const v of Object.keys(table)) versions.add(Number(v));
-  for (const v of [...versions].sort((a, b) => a - b)) {
-    Object.defineProperty(view, v, { enumerable: true, get: () => TABLES[workspaceFingerprintMajor()][v] });
-  }
-  return Object.freeze(view);
+  const live = () => TABLES[workspaceFingerprintMajor()] as Record<string, string>;
+  const refuse = (): never => {
+    throw new TypeError('EXPECTED_WORKSPACE_FINGERPRINTS is read-only');
+  };
+  return new Proxy({} as Record<number, string>, {
+    get: (_t, key) => (typeof key === 'string' ? live()[key] : undefined),
+    has: (_t, key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(live(), key),
+    ownKeys: () => Object.keys(live()),
+    getOwnPropertyDescriptor: (_t, key) =>
+      typeof key === 'string' && Object.prototype.hasOwnProperty.call(live(), key)
+        ? { value: live()[key], enumerable: true, configurable: true, writable: false }
+        : undefined,
+    set: refuse,
+    defineProperty: refuse,
+    deleteProperty: refuse,
+  });
 }
 
 /**

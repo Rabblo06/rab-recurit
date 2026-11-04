@@ -9,7 +9,7 @@ import {
   missingVersions,
   planAppend,
 } from './fingerprint-append';
-import { EXPECTED_WORKSPACE_FINGERPRINTS_PG16, EXPECTED_WORKSPACE_FINGERPRINTS_PG18 } from './expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, EXPECTED_WORKSPACE_FINGERPRINTS_PG16, EXPECTED_WORKSPACE_FINGERPRINTS_PG18 } from './expected-fingerprints';
 
 const h = (c: string) => c.repeat(64);
 const COMMITTED = { 14: h('a'), 15: h('b'), 16: h('c'), 17: h('d'), 18: h('e'), 19: h('f') };
@@ -69,5 +69,25 @@ describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQ
     expect(appendToTableSource(`export const T: Readonly<Record<number, string>> = {};\n`, 'T', { 14: h('a') })).toBe(
       `export const T: Readonly<Record<number, string>> = {\n  14: '${h('a')}',\n};\n`,
     );
+  });
+});
+
+describe('regression found by the v20 append run: the selected view reads the LIVE table', () => {
+  it('a version added to the selected table later is visible through EXPECTED_WORKSPACE_FINGERPRINTS (keys, entries, reads), and the view is read-only', () => {
+    const t = EXPECTED_WORKSPACE_FINGERPRINTS_PG16 as Record<number, string>;
+    expect(EXPECTED_WORKSPACE_FINGERPRINTS[99]).toBeUndefined();
+    t[99] = h('5');
+    try {
+      expect(EXPECTED_WORKSPACE_FINGERPRINTS[99]).toBe(h('5'));
+      expect(Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS)).toContain('99');
+      expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS).find(([v]) => v === '99')?.[1]).toBe(h('5'));
+    } finally {
+      delete t[99];
+    }
+    expect(EXPECTED_WORKSPACE_FINGERPRINTS[99]).toBeUndefined();
+    expect(() => {
+      (EXPECTED_WORKSPACE_FINGERPRINTS as Record<number, string>)[14] = h('0');
+    }).toThrow(/read-only/);
+    expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe(EXPECTED_WORKSPACE_FINGERPRINTS_PG16[19]);
   });
 });
