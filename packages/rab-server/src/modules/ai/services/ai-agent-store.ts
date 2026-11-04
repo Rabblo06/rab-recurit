@@ -70,11 +70,13 @@ export function scopeOf(ctx: { organisationId?: string | null; workspaceId?: str
 /** Live agents of the scope, newest first, each with its triggers. */
 export async function listAgentViews(m: EntityManager, scope: Scope): Promise<AiAgentStorageView[]> {
   const agents = await m.query<AgentRow[]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${AGENT_COLUMNS} FROM core.ai_agent WHERE organisation_id = $1 AND workspace_id = $2 AND deleted_at IS NULL ORDER BY created_at DESC, id`,
     [scope.organisationId, scope.workspaceId],
   );
   if (agents.length === 0) return [];
   const triggers = await m.query<TriggerRow[]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${TRIGGER_COLUMNS} FROM core.ai_agent_trigger WHERE organisation_id = $1 AND workspace_id = $2 AND agent_id = ANY($3::uuid[]) ORDER BY created_at, id`,
     [scope.organisationId, scope.workspaceId, agents.map((a) => a.id)],
   );
@@ -85,6 +87,7 @@ export async function listAgentViews(m: EntityManager, scope: Scope): Promise<Ai
 export async function agentView(m: EntityManager, scope: Scope, id: string): Promise<AiAgentStorageView> {
   const agent = await findAgent(m, scope, id, false);
   const triggers = await m.query<TriggerRow[]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${TRIGGER_COLUMNS} FROM core.ai_agent_trigger WHERE organisation_id = $1 AND workspace_id = $2 AND agent_id = $3 ORDER BY created_at, id`,
     [scope.organisationId, scope.workspaceId, agent.id],
   );
@@ -95,6 +98,7 @@ export async function agentView(m: EntityManager, scope: Scope, id: string): Pro
 export async function findAgent(m: EntityManager, scope: Scope, id: string, lock: boolean): Promise<AgentRow> {
   if (!UUID.test(String(id))) throw new AiRecordNotFoundException();
   const [row] = await m.query<AgentRow[]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${AGENT_COLUMNS} FROM core.ai_agent WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 AND deleted_at IS NULL${lock ? ' FOR UPDATE' : ''}`,
     [id, scope.organisationId, scope.workspaceId],
   );
@@ -117,6 +121,7 @@ export async function lockCustomAgent(m: EntityManager, scope: Scope, id: string
 export async function findTrigger(m: EntityManager, scope: Scope, agentId: string, triggerId: string, lock: boolean): Promise<TriggerRow> {
   if (!UUID.test(String(triggerId))) throw new AiRecordNotFoundException();
   const [row] = await m.query<TriggerRow[]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${TRIGGER_COLUMNS} FROM core.ai_agent_trigger WHERE id = $1 AND agent_id = $2 AND organisation_id = $3 AND workspace_id = $4${lock ? ' FOR UPDATE' : ''}`,
     [triggerId, agentId, scope.organisationId, scope.workspaceId],
   );

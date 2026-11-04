@@ -148,6 +148,7 @@ export class StorageMigrateLocalCommand extends CommandRunner {
         const file = await this.files.registerAvailable(manager, uploaded);
         const column = item.table === 'user' ? 'avatar_file_id' : 'logo_file_id';
         const table = item.table === 'user' ? 'core."user"' : `core.${item.table}`;
+        // sql-injection-reviewed: item.table is the union 'user' | 'organisation' | 'manager_workspace' set by this command's own discovery query, never input.
         await manager.query(`UPDATE ${table} SET ${column} = $1 WHERE id = $2`, [file.id, item.rowId]);
         await this.audit.record(manager, { organisationId: item.organisationId, userId: '', inspectedBy: undefined }, AuditAction.FILE_MIGRATION_COMPLETED, {
           entityType: 'stored_file',
@@ -164,6 +165,7 @@ export class StorageMigrateLocalCommand extends CommandRunner {
         await this.files.readVerified(file);
         const table = item.table === 'user' ? 'core."user"' : `core.${item.table}`;
         const keyColumn = item.table === 'user' ? 'avatar_key' : 'logo_key';
+        // sql-injection-reviewed: item.table is the union 'user' | 'organisation' | 'manager_workspace' set by this command's own discovery query, never input.
         await manager.query(`UPDATE ${table} SET ${keyColumn} = NULL WHERE id = $1`, [item.rowId]);
       });
       return { outcome: 'migrated', detail: fileId };

@@ -93,6 +93,7 @@ export type LateClockInCandidate = ScanCandidate;
 
 export async function discoverLateClockInInWorkspace(manager: EntityManager, lateClockInGraceMinutes: number): Promise<LateClockInCandidate[]> {
   return await manager.query<ScanCandidate[]>(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
         FROM shift_assignment sa

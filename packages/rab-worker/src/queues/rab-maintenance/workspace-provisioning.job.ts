@@ -52,6 +52,7 @@ export async function tryAcquireProvisioningLock(client: Pick<Client, 'query'>, 
   const deadline = now() + waitMs;
   for (;;) {
     if (options.shouldAbort?.()) return false;
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const { rows } = await client.query<{ locked: boolean }>(`SELECT pg_try_advisory_lock(${PROVISIONING_LOCK_SQL_KEY}) AS locked`);
     if (rows[0]?.locked === true) return true;
     const remaining = deadline - now();
@@ -141,6 +142,7 @@ export async function runWorkspaceProvisioningCycle(
 
     return { attempted: candidates.rows.length, ready, failed, lockAcquired: true };
   } finally {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     await client.query(`SELECT pg_advisory_unlock(${PROVISIONING_LOCK_SQL_KEY})`);
   }
 }

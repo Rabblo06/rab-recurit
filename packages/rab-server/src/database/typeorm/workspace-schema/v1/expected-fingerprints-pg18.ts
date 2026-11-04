@@ -19,4 +19,8 @@ export const EXPECTED_WORKSPACE_FINGERPRINTS_PG18: Readonly<Record<number, strin
   17: '3c5cf741074298397189b0a0076e21e4c897a3fbc627a8779e64f544a857cb0f',
   18: '4abe001915802d3bf6fded617f39bee387672cdbfc765f40ec6d922b02a9b681',
   19: 'af115ec7490665c7df38fbc78128e95e680e59764bb626e4c21d0c061fe699e6',
+  // WorkspaceGrantParityGuards1786721430000 (PAY-1, module v1.020-grant-parity-guards): generated 2026-11-04 by
+  // generate-workspace-fingerprints.ts FINGERPRINT_MODE=append on a disposable PostgreSQL 18.6 (fp_gen_mw2ee2ncff07); modules 14..19 regenerated
+  // identically in the same run; cross-checked by the TypeScript provisioner at module 20.
+  20: '32b7904407c0e07247917d134ba9c1060780d09695126ab1de878f049b87461f',
 };

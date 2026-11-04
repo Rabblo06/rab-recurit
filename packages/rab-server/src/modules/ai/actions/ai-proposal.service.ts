@@ -234,6 +234,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
       const [conversation] = (await m.query(`SELECT 1 AS ok FROM core.ai_conversation WHERE id = $1`, [conversationId])) as Array<{ ok: number }>;
       if (!conversation) throw new AiRecordNotFoundException();
       await this.expireDueTx(m, ctx, `p.conversation_id = $1`, [conversationId]);
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.conversation_id = $1 ORDER BY p.created_at, p.id LIMIT ${MAX_LISTED}`, [
         conversationId,
       ])) as AiProposalRow[];
@@ -322,6 +323,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
   /** The owner's PENDING, unexpired proposal — else 404 (not this caller's) / 409 EXPIRED (expired now, recorded) / 409. */
   private async loadDecidable(ctx: AuthContext, proposalId: string): Promise<AiProposalRow> {
     const row = await this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const [found] = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.id = $1`, [proposalId])) as AiProposalRow[];
       return found ?? null;
     });
@@ -403,6 +405,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
   private async expireDueTx(m: EntityManager, ctx: AuthContext, where: string, params: unknown[]): Promise<void> {
     assertTransition(AI_PROPOSAL_TRANSITIONS, AiProposalStatus.PENDING, AiProposalStatus.EXPIRED);
     const [rows] = (await m.query(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `UPDATE core.ai_action_proposal p SET status = 'EXPIRED', decided_by = core.current_uid(), decided_at = now()
         WHERE ${where} AND p.status = 'PENDING' AND p.expires_at <= now()
         RETURNING ${AI_PROPOSAL_COLUMNS}`,
@@ -415,6 +418,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
 
   private async view(ctx: AuthContext, proposalId: string): Promise<AiProposalView> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = (await m.query(`SELECT ${AI_PROPOSAL_COLUMNS} FROM core.ai_action_proposal p WHERE p.id = $1`, [proposalId])) as AiProposalRow[];
       if (rows.length === 0) throw new AiRecordNotFoundException();
       return (await this.toViews(m, ctx, rows))[0]!;

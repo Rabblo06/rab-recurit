@@ -191,6 +191,7 @@ export interface OfferBatchSummary {
   recipients: OfferSummary[];
 }
 
+// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
 const OFFER_SUMMARY_SELECT = `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
@@ -334,11 +335,13 @@ export class OfferService {
         conditions.push(`o.sent_at < ${nextParam(exclusive)}`);
       }
 
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = `WHERE ${conditions.join(' AND ')}`;
       const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*)::int AS count FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
            JOIN shift s ON s.id = sa.shift_id
@@ -353,6 +356,7 @@ export class OfferService {
       const { skip, take } = paginationSkipTake(dto);
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
       return { data: rows.map(toOfferSummary), total: count };
     }, { useReplica: true });
@@ -380,6 +384,7 @@ export class OfferService {
         `${assignmentTimeSql().start} < ${nextParam(range.to)}`,
       ];
       const rows: Array<{ status: string; n: number }> = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT o.status, count(*)::int AS n
            FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
@@ -450,6 +455,7 @@ export class OfferService {
       // Paged mode reads one extra key to know whether a next page exists; the cursor's timestamp is PostgreSQL's exact
       // (microsecond) text form of sent_at, which a JS Date would truncate.
       const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT o.id, ${keysetTimestampSql('o.sent_at')} AS keyset_ts FROM job_offer o
           WHERE ${conditions.join(' AND ')}
           ORDER BY o.sent_at DESC, o.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
@@ -463,6 +469,7 @@ export class OfferService {
       if (page.data.length) await manager.query(`SELECT set_config('jit', 'off', true)`);
       const rows: Array<Record<string, unknown>> = page.data.length
         ? await manager.query(
+            // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
             `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
                CROSS JOIN LATERAL (${OFFER_SUMMARY_SELECT} WHERE o.id = k.id AND o.staff_profile_id = $2 OFFSET 0) x
               ORDER BY x.sent_at DESC, x.id DESC`,
@@ -1545,6 +1552,7 @@ export class OfferService {
   /** Batch summary for `BatchOfferDrawer` — one shift, N recipients, counted by status. RLS scopes the org filter. */
   async getBatch(ctx: AuthContext, batchId: string): Promise<OfferBatchSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
         batchId,
       ]);

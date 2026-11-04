@@ -386,6 +386,8 @@ execute|organisation_is_suspended(uuid)|crewflow|true
 execute|organisation_slug_taken(citext,uuid)|PUBLIC|false
 execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
+execute|owner_login_grant_parity_guard()|crewflow_app|false
+execute|owner_login_grant_parity_guard()|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
 execute|provision_workspace(uuid)|PUBLIC|false
@@ -625,6 +627,7 @@ owner|function|organisation_invitation_revoke(uuid)|rab_secure_owner|definer=tru
 owner|function|organisation_invitation_state(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|owner_login_grant_parity_guard()|crewflow|definer=false
 owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -765,7 +768,7 @@ owner|table|worker_event|crewflow
 owner|table|workspace_membership|crewflow
 owner|table|workspace_schema_migration|crewflow
 owner|table|workspace_schema_registry|crewflow
-rls|account_invite|enable=true|force=false
+rls|account_invite|enable=true|force=true
 rls|admin_inspect_session|enable=true|force=true
 rls|ai_action_proposal|enable=true|force=true
 rls|ai_agent_event|enable=true|force=true
@@ -782,18 +785,18 @@ rls|attendance|enable=true|force=true
 rls|audit_log|enable=true|force=true
 rls|deployment_identity_history|enable=true|force=true
 rls|deployment_identity|enable=true|force=true
-rls|email_change_request|enable=true|force=false
+rls|email_change_request|enable=true|force=true
 rls|email_outbox|enable=true|force=true
 rls|host_label_claim|enable=true|force=true
 rls|hws_backfill_checkpoint|enable=true|force=true
 rls|job_offer|enable=true|force=true
 rls|job_role|enable=true|force=true
-rls|login_handoff|enable=true|force=false
-rls|login_history|enable=true|force=false
+rls|login_handoff|enable=true|force=true
+rls|login_history|enable=true|force=true
 rls|manager_profile|enable=true|force=true
 rls|manager_venue|enable=true|force=true
-rls|manager_workspace|enable=true|force=false
-rls|member_invitation|enable=true|force=false
+rls|manager_workspace|enable=true|force=true
+rls|member_invitation|enable=true|force=true
 rls|migrations|enable=false|force=false
 rls|navigation_layout|enable=true|force=true
 rls|notification_preference|enable=true|force=true
@@ -804,10 +807,10 @@ rls|organisation_ai_instruction|enable=true|force=true
 rls|organisation_ai_model_policy|enable=true|force=true
 rls|organisation_ai_model_preference|enable=true|force=true
 rls|organisation_ai_setting|enable=true|force=true
-rls|organisation_invitation|enable=true|force=false
+rls|organisation_invitation|enable=true|force=true
 rls|organisation_member|enable=true|force=true
-rls|organisation|enable=true|force=false
-rls|password_reset_token|enable=true|force=false
+rls|organisation|enable=true|force=true
+rls|password_reset_token|enable=true|force=true
 rls|payroll_calendar_period|enable=true|force=true
 rls|payroll_calendar|enable=true|force=true
 rls|payroll_record|enable=true|force=true
@@ -816,13 +819,13 @@ rls|payroll_run|enable=true|force=true
 rls|payslip_document|enable=true|force=true
 rls|payslip|enable=true|force=true
 rls|permission|enable=false|force=false
-rls|platform_admin|enable=true|force=false
+rls|platform_admin|enable=true|force=true
 rls|platform_config|enable=true|force=true
 rls|push_delivery|enable=true|force=true
 rls|push_device|enable=true|force=true
 rls|realtime_event|enable=true|force=true
-rls|refresh_token|enable=true|force=false
-rls|released_host_label|enable=true|force=false
+rls|refresh_token|enable=true|force=true
+rls|released_host_label|enable=true|force=true
 rls|replacement_request|enable=true|force=true
 rls|reserved_host_label|enable=true|force=true
 rls|role_field_permission|enable=true|force=true
@@ -836,19 +839,19 @@ rls|shift_staff_review|enable=true|force=true
 rls|shift|enable=true|force=true
 rls|staff_profile|enable=true|force=true
 rls|stored_file|enable=true|force=true
-rls|user_auth_identity|enable=true|force=false
+rls|user_auth_identity|enable=true|force=true
 rls|user_mfa_recovery_code|enable=true|force=true
 rls|user_note|enable=true|force=true
 rls|user_permission_override|enable=true|force=true
 rls|user_preference|enable=true|force=true
 rls|user_role|enable=true|force=true
-rls|user_session|enable=true|force=false
-rls|user|enable=true|force=false
+rls|user_session|enable=true|force=true
+rls|user|enable=true|force=true
 rls|venue_manager_staff|enable=true|force=true
 rls|venue_role_rate|enable=true|force=true
 rls|venue|enable=true|force=true
 rls|worker_dispatch_pointer|enable=true|force=true
-rls|worker_due_work|enable=true|force=false
+rls|worker_due_work|enable=true|force=true
 rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
 rls|workspace_schema_migration|enable=true|force=true
@@ -1513,8 +1516,24 @@ ws|table|venue_role_rate|crewflow|S,I,U,D,T,R,G
 ws|table|venue|crewflow_app|S,I,U,D
 ws|table|venue|crewflow|S,I,U,D,T,R,G
 ws|trigger|attendance|attendance_post_shift_reset|enabled=O|core.reset_attendance_post_shift()
+ws|trigger|payroll_record|payroll_record_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_record|payroll_record_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_record|payroll_record_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
 ws|trigger|payroll_record|payroll_record_guard|enabled=O|core.payroll_record_guard()
 ws|trigger|payroll_record|payroll_record_statement_pointer_del|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_ins|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_trunc|enabled=O|core.worker_dispatch_pointer_statement_trg()
 ws|trigger|payroll_record|payroll_record_statement_pointer_upd|enabled=O|core.worker_dispatch_pointer_statement_trg()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run_line|payroll_run_line_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payroll_run|payroll_run_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip_document|payslip_document_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_truncate|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|payslip|payslip_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()
+ws|trigger|shift_staff_review|shift_staff_review_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()

@@ -304,6 +304,7 @@ const DEFINER_FUNCTIONS = [
   'core.worker_account_invite_cleanup_candidates(integer, timestamp with time zone, uuid)',
   'core.worker_delete_expired_invited_user(uuid)',
 ] as const;
+// sql-injection-reviewed: function names from a module-constant list (code), never input.
 const DEFINER_PROBE_SQL = `SELECT COALESCE(bool_and(f.p IS NOT NULL AND has_function_privilege(f.p, 'EXECUTE')), false) AS usable
   FROM (VALUES ${DEFINER_FUNCTIONS.map((fn) => `(to_regprocedure('${fn}'))`).join(', ')}) AS f(p)`;
 

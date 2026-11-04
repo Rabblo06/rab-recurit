@@ -23,7 +23,7 @@
  *           so the migrator and planAppend refuse the run if any committed value no longer regenerates identically; only
  *           the versions absent from the table are appended (printed; written to the source with FINGERPRINT_WRITE=true).
  * verify    With the committed values: a fresh database built normally (no placeholders); the TypeScript provisioner,
- *           the SERVER path (core.provision_workspace as crewflow_app, its literal baked from the selected table) and a
+ *           the SERVER path (core.provision_workspace as the owner login, its literal baked from the selected table) and a
  *           pre-ledger v14 workspace migrated forward must all produce exactly the committed latest value, and the v14
  *           build must equal the committed v14 value.
  */
@@ -44,6 +44,7 @@ import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../workspace-schema/
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, modulesThrough } from '../workspace-schema/workspace-schema-modules';
 import { runMigrateOnStart } from './migrate/owner-login/migrate-on-start';
+import { scramSha256Verifier } from './setup/migrator-role';
 
 const log = (line: string) => console.log(`[fingerprints] ${line}`); // eslint-disable-line no-console
 const ROOT = join(__dirname, '..', '..', '..', '..', '..', '..');
@@ -81,8 +82,27 @@ function table(major: number): Record<number, string> {
   throw new Error(`no fingerprint table for PostgreSQL ${major}`);
 }
 
+/** Database names are generated here (`fp_gen_<run>` / `fp_verify_<run>`); anything else is refused before any DDL. */
+function assertGeneratedDatabaseName(db: string): string {
+  if (!/^fp_(gen|verify)_[a-z0-9]{6,32}$/.test(db)) throw new Error('refusing an unexpected database name');
+  return db;
+}
+
+/**
+ * The owner login's password reaches the server only as a SCRAM-SHA-256 verifier computed here (never the plaintext in
+ * SQL text); its shape is checked before it is placed in the utility statement, which cannot take a bound parameter.
+ */
+function ownerPasswordVerifier(): string {
+  const v = scramSha256Verifier(OWNER_PASSWORD);
+  if (!/^SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/.test(v)) throw new Error('unexpected SCRAM verifier shape');
+  return v;
+}
+
 async function buildDatabase(db: string): Promise<void> {
+  assertGeneratedDatabaseName(db);
+  const verifier = ownerPasswordVerifier();
   await withClient(adminUrl('postgres'), async (c) => {
+    // sql-injection-reviewed: db is a generated fp_gen_/fp_verify_ name validated by assertGeneratedDatabaseName above
     await c.query(`CREATE DATABASE "${db}"`);
     const exists = (await c.query(`SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner'`)).rows.length > 0;
     if (!exists) {
@@ -91,10 +111,12 @@ async function buildDatabase(db: string): Promise<void> {
       const statements = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql'), 'utf8')
         .split('\n')
         .filter((l) => /^(CREATE ROLE|GRANT) /.test(l.trim()))
-        .map((l) => l.replace(/:'owner_pw'/g, `'${OWNER_PASSWORD}'`).replace(/:"DBNAME"/g, `"${db}"`).replace(/;\s*$/, ''));
+        .map((l) => l.replace(/:'owner_pw'/g, `'${verifier}'`).replace(/:"DBNAME"/g, `"${db}"`).replace(/;\s*$/, '')); // sql-injection-reviewed: the committed admin SQL with a shape-checked SCRAM verifier and a validated generated database name
       for (const s of statements) await c.query(s);
     } else {
-      await c.query(`ALTER ROLE crewflow_owner PASSWORD '${OWNER_PASSWORD}'`);
+      // sql-injection-reviewed: a shape-checked SCRAM verifier (ownerPasswordVerifier), never the plaintext password
+      await c.query(`ALTER ROLE crewflow_owner PASSWORD '${verifier}'`);
+      // sql-injection-reviewed: db is a generated fp_gen_/fp_verify_ name validated by assertGeneratedDatabaseName above
       await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${db}" TO crewflow_owner WITH GRANT OPTION`);
     }
   });
@@ -139,7 +161,9 @@ async function legacyV14(c: Client, ws: Ws): Promise<void> {
     await c.query('BEGIN');
     await c.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ws.org]);
     for (const m of modulesThrough(14)) await c.query(m.sql(ws.schema));
+    if (!/^workspace_[0-9a-f]{32}$/.test(ws.schema) || ws.schema !== `workspace_${ws.id.replace(/-/g, '')}`) throw new Error('unexpected workspace schema name');
     for (const t of WORKSPACE_TABLES) {
+      // sql-injection-reviewed: ws.schema is validated just above (workspace_<32 hex> of this uuid); t is the frozen WORKSPACE_TABLES constant
       await c.query(`ALTER TABLE ${ws.schema}.${t} ADD CONSTRAINT ${t}_workspace_bound CHECK (workspace_id IS NOT NULL AND workspace_id = '${ws.id}'::uuid)`);
     }
     await c.query('SELECT core.mark_workspace_schema_ready($1, 1)', [ws.id]);
@@ -249,7 +273,6 @@ async function verify(major: number): Promise<void> {
   if (!t[14] || !t[L]) throw new Error(`the PostgreSQL ${major} table has no committed values to verify`);
   const db = `fp_verify_${RUN}`;
   await buildDatabase(db);
-  const appPw = randomBytes(18).toString('hex');
   await withClient(adminUrl(db), async (c) => {
     const results: string[] = [];
     const legacy = await seedWorkspace(c, `fpv-legacy-${RUN}`);
@@ -266,20 +289,16 @@ async function verify(major: number): Promise<void> {
     await c.query('RESET ROLE');
     results.push(`typescript ${tsRes.outcome} ${(await fingerprint(c, ts.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
 
+    // The server path as the RUNTIME login, which is the owner login (owner-login architecture); no other role is unlocked.
     const srv = await seedWorkspace(c, `fpv-srv-${RUN}`);
-    await c.query(`ALTER ROLE crewflow_app PASSWORD '${appPw}'`);
-    try {
-      const outcome = await withClient(adminUrl(db, { name: 'crewflow_app', password: appPw }), async (app) => {
-        await app.query('BEGIN');
-        await app.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [srv.org, srv.owner]);
-        const { rows } = await app.query('SELECT core.provision_workspace($1) AS o', [srv.id]);
-        await app.query('COMMIT');
-        return rows[0].o as string;
-      });
-      results.push(`server path ${outcome} ${(await fingerprint(c, srv.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
-    } finally {
-      await c.query(`ALTER ROLE crewflow_app PASSWORD NULL`);
-    }
+    const outcome = await withClient(adminUrl(db, { name: 'crewflow_owner', password: OWNER_PASSWORD }), async (owner) => {
+      await owner.query('BEGIN');
+      await owner.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [srv.org, srv.owner]);
+      const { rows } = await owner.query('SELECT core.provision_workspace($1) AS o', [srv.id]);
+      await owner.query('COMMIT');
+      return rows[0].o as string;
+    });
+    results.push(`server path ${outcome} ${(await fingerprint(c, srv.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
     for (const r of results) log(`  ${r}`);
     if (results.some((r) => !/ OK$/.test(r) || /FAILED|REFUSED/.test(r))) throw new Error('verification FAILED');
     log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14 and v${L})`);

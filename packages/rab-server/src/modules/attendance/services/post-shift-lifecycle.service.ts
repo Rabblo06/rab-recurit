@@ -74,6 +74,7 @@ export class PostShiftLifecycleService {
       if (row[milestone.column] || !row[milestone.due]) continue;
       const effectiveAt = new Date(clockOut + milestone.hours * 3600000);
       await manager.query(
+        // sql-injection-reviewed: milestone.column comes from the module-constant MILESTONES table (fixed column names); values are bound.
         `UPDATE attendance SET ${milestone.column}=clock_out_at + make_interval(hours => $2), updated_at=now() WHERE id=$1`,
         [row.id, milestone.hours],
       );

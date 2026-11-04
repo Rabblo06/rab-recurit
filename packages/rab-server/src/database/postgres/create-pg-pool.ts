@@ -36,6 +36,7 @@ import {
 } from './pg-config';
 import { buildPgSsl } from './pg-tls';
 import { parsePgUrl, PgConfigError } from './pg-url-policy';
+import { installSessionRoleResetOnAcquire, installSessionRoleResetOnDataSource } from './session-role-reset';
 
 export type PgServerRole = 'primary' | 'replica';
 
@@ -273,7 +274,10 @@ export function createPgClientForUrl(
 
 /** `createPgPool({ url?, role, purpose, max })` — a plain pg Pool with every setting explicit. */
 export function createPgPool(resolved: ResolvedPgEnvironment, request: PgPoolRequest): Pool {
-  return new Pool(pgPoolConfig(resolved, request));
+  const pool = new Pool(pgPoolConfig(resolved, request));
+  // Owner login: a session-level SET ROLE must never reach the next checkout (session-role-reset.ts).
+  installSessionRoleResetOnAcquire(pool);
+  return pool;
 }
 
 /** A TypeORM DataSource whose connection comes from the factory; `base` carries the non-connection options. */
@@ -282,5 +286,13 @@ export function createPgDataSource(
   request: PgPoolRequest,
   base: Omit<Partial<PostgresConnectionOptions>, 'type' | 'url' | 'host' | 'port' | 'username' | 'password' | 'database' | 'ssl' | 'extra'> = {},
 ): DataSource {
-  return new DataSource({ ...base, ...pgTypeOrmConnectionOptions(resolved, request) } as DataSourceOptions);
+  const dataSource = new DataSource({ ...base, ...pgTypeOrmConnectionOptions(resolved, request) } as DataSourceOptions);
+  // Owner login: RESET ROLE on every pool checkout, installed as soon as the driver's pool exists (session-role-reset.ts).
+  const initialize = dataSource.initialize.bind(dataSource);
+  dataSource.initialize = async () => {
+    await initialize();
+    installSessionRoleResetOnDataSource(dataSource);
+    return dataSource;
+  };
+  return dataSource;
 }

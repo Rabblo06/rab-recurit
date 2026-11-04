@@ -161,6 +161,7 @@ export class MembersService {
         const p = `$${params.length}`;
         searchSql = `(u.first_name ILIKE ${p} OR u.last_name ILIKE ${p} OR (u.first_name || ' ' || u.last_name) ILIKE ${p} OR u.email::text ILIKE ${p})`;
       }
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const from = `
           FROM core.workspace_membership m
           JOIN core."user" u ON u.id = m.user_id
@@ -171,9 +172,11 @@ export class MembersService {
              SELECT 1 FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id
               WHERE ur.user_id = u.id AND r.is_system AND r.key IN ('staff', 'venue_manager'))
            AND ${searchSql}`;
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const [{ count }] = await manager.query<Array<{ count: string }>>(`SELECT count(*)::text AS count ${from}`, params);
       const offset = (opts.page - 1) * opts.limit;
       const rows = await manager.query<Array<{ user_id: string; first_name: string; last_name: string; email: string; user_status: string; membership_status: string; roles: Array<{ id: string; name: string; key: string }> | null }>>(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT u.id AS user_id, u.first_name, u.last_name, u.email::text AS email, u.status AS user_status, m.status AS membership_status,
                 (SELECT json_agg(json_build_object('id', r.id, 'name', r.name, 'key', r.key) ORDER BY r.is_system DESC, r.name)
                    FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles

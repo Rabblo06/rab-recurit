@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Frozen SQL shipped with migration PayrollEvidenceRestrict1786719700000 (and applied by both workspace provisioners after
  * the earlier V1 add-ons — see `WORKSPACE_TEMPLATE_STEPS` in provision-workspace-schema.ts and

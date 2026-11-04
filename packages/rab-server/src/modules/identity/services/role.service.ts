@@ -334,6 +334,7 @@ export class RoleService {
     for (const [table, ids] of Object.entries(relationIds)) {
       if (table !== 'venue' && table !== 'job_role') throw new RecordFilterError('Unsupported relation.');
       const rows = await manager.query<Array<{ id: string }>>(
+        // sql-injection-reviewed: table is checked against the literal allow-list 'venue' | 'job_role' on the line above; ids are bound.
         `SELECT id FROM core.${table} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
         [ids, ctx.workspaceId],
       );

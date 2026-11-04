@@ -1,7 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
-import { TenantContextService } from './tenant-context.service';
+import { TenantContextService, TenantSessionRoleError } from './tenant-context.service';
 import { EnvironmentService } from '../environment/environment.service';
 
 describe('TenantContextService', () => {
@@ -9,11 +9,16 @@ describe('TenantContextService', () => {
   // (`rab.team_shift_id` / `rab.team_staff_id`, set only by ShiftTeamService for one query) to '' on every
   // transaction, so a capability can never outlive the call that set it. Both resets are literal '' — never a
   // client-supplied parameter.
+  // Owner-login pool safety: the same round trip also returns current_user / session_user (asserted equal), and it is
+  // preceded by RESET ROLE (call 1).
   const BIND_GUCS_SQL =
-    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true)`;
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), current_user::text AS cu, session_user::text AS su`;
 
-  function buildManager() {
-    return { query: jest.fn().mockResolvedValue(undefined) } as unknown as EntityManager;
+  /** The bind answers with the session identity; every other statement with nothing. `actingAs` simulates a SET ROLE. */
+  function buildManager(actingAs = 'crewflow_owner') {
+    return {
+      query: jest.fn(async (sql: string) => (sql.startsWith(`SELECT set_config('rab.organisation_id'`) ? [{ cu: actingAs, su: 'crewflow_owner' }] : undefined)),
+    } as unknown as EntityManager;
   }
 
   function buildDataSource(manager: EntityManager) {
@@ -43,8 +48,9 @@ describe('TenantContextService', () => {
     );
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.query).toHaveBeenNthCalledWith(1, 'RESET ROLE');
     expect(manager.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       BIND_GUCS_SQL,
       ['org-1', 'ws-1', 'user-1', 'MANAGER', ''],
     );
@@ -59,8 +65,9 @@ describe('TenantContextService', () => {
       async () => undefined,
     );
 
+    expect(manager.query).toHaveBeenNthCalledWith(1, 'RESET ROLE');
     expect(manager.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       BIND_GUCS_SQL,
       ['', '', 'super-1', 'SUPER_ADMIN', ''],
     );
@@ -75,8 +82,9 @@ describe('TenantContextService', () => {
       async () => undefined,
     );
 
+    expect(manager.query).toHaveBeenNthCalledWith(1, 'RESET ROLE');
     expect(manager.query).toHaveBeenNthCalledWith(
-      1,
+      2,
       BIND_GUCS_SQL,
       ['org-1', 'ws-1', '', '', 'worker'],
     );
@@ -88,7 +96,7 @@ describe('TenantContextService', () => {
 
     await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'STAFF' }, async () => undefined);
 
-    const [sql, params] = (manager.query as jest.Mock).mock.calls[0] as [string, unknown[]];
+    const [sql, params] = (manager.query as jest.Mock).mock.calls[1] as [string, unknown[]];
     expect(sql).toContain(`set_config('rab.team_shift_id', '', true)`);
     expect(sql).toContain(`set_config('rab.team_staff_id', '', true)`);
     expect(sql).not.toMatch(/\$6/);
@@ -120,7 +128,7 @@ describe('TenantContextService', () => {
       await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, async () => undefined);
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('search_path', $1, true)`, ['core']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('search_path', $1, true)`, ['core']);
     });
 
     it('binds search_path to "core" when HWS_RUNTIME_ENABLED is true but ctx.workspaceId is null (a workspace-less actor)', async () => {
@@ -131,7 +139,7 @@ describe('TenantContextService', () => {
       await service.runInTenantContext({ organisationId: 'org-1', workspaceId: null, userId: 'ceo-1', role: 'CEO' }, async () => undefined);
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('search_path', $1, true)`, ['core']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('search_path', $1, true)`, ['core']);
     });
 
     it('resolves the trusted physical schema and binds search_path to exactly that schema when HWS_RUNTIME_ENABLED is true and ctx.workspaceId is set', async () => {
@@ -142,7 +150,7 @@ describe('TenantContextService', () => {
       await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, async () => undefined);
 
       expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, 'ws-1');
-      expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('search_path', $1, true)`, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('search_path', $1, true)`, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
     });
 
     it('fails closed: a workspace that is not READY (or otherwise unroutable) rejects before any business callback runs, and search_path is never set', async () => {
@@ -157,8 +165,38 @@ describe('TenantContextService', () => {
       ).rejects.toThrow(WorkspaceRoutingError);
 
       expect(callback).not.toHaveBeenCalled();
-      // Only the GUC bind happened — the search_path set_config never ran because resolve() rejected first.
-      expect(manager.query).toHaveBeenCalledTimes(1);
+      // Only RESET ROLE and the GUC bind happened — the search_path set_config never ran because resolve() rejected first.
+      expect(manager.query).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Owner-login pool safety (M0 §6.4 control 3, G-09): a session-level SET ROLE left on a pooled connection by an earlier
+  // request must never reach this tenant transaction. Real-PostgreSQL proof: pool-session-role-reset.integration.spec.ts.
+  describe('pool safety — RESET ROLE and current_user = session_user', () => {
+    it('runs RESET ROLE as the first statement of every tenant transaction, before the tenant is bound', async () => {
+      const manager = buildManager();
+      const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
+      await service.runInTenantContext({ organisationId: 'org-1', workspaceId: null, userId: 'u', role: 'MANAGER' }, async () => undefined);
+      expect((manager.query as jest.Mock).mock.calls[0]).toEqual(['RESET ROLE']);
+    });
+
+    it('fails closed (no callback) when the session still acts as another role after the reset', async () => {
+      const manager = buildManager('rab_secure_owner');
+      const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
+      const callback = jest.fn();
+      await expect(service.runInTenantContext({ organisationId: 'org-1', workspaceId: null, userId: 'u', role: 'MANAGER' }, callback)).rejects.toThrow(
+        TenantSessionRoleError,
+      );
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    it('applies the same reset and check to bindCoreIdentityGucs (the auth security snapshot path)', async () => {
+      const manager = buildManager('crewflow');
+      const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
+      await expect(service.bindCoreIdentityGucs(manager, { organisationId: 'org-1', workspaceId: null, userId: 'u', role: 'MANAGER' })).rejects.toThrow(
+        TenantSessionRoleError,
+      );
+      expect((manager.query as jest.Mock).mock.calls[0]).toEqual(['RESET ROLE']);
     });
   });
 
@@ -196,7 +234,7 @@ describe('TenantContextService', () => {
       );
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('search_path', $1, true)`, ['core']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('search_path', $1, true)`, ['core']);
       expect(result).toBe('core');
     });
 
@@ -211,7 +249,7 @@ describe('TenantContextService', () => {
       );
 
       expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, 'ws-1');
-      expect(manager.query).toHaveBeenNthCalledWith(2, `SELECT set_config('search_path', $1, true)`, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, `SELECT set_config('search_path', $1, true)`, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
       expect(result).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
     });
 

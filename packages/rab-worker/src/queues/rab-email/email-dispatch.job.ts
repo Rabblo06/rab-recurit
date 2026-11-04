@@ -140,6 +140,7 @@ export async function runEmailDispatchCycle(
  * the ids the global pointer claim returned for this organisation. The predicate text is asserted equal to the per_scope
  * SQL's by `email-dispatch.job.spec.ts`. Same row locks (FOR UPDATE SKIP LOCKED), same order.
  */
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const GLOBAL_CLAIM_SQL = `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at,
                   dispatch_generation
            FROM core.email_outbox
@@ -192,6 +193,7 @@ export async function dispatchEmailScope(
         const claimed = ids !== undefined
           ? await manager.query<ClaimedRow[]>(GLOBAL_CLAIM_SQL, [ids.length, [...ids]])
           : await manager.query<ClaimedRow[]>(
+          // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
           `SELECT id, organisation_id, status, infrastructure_attempt_count, max_infrastructure_attempts, provider_call_started_at,
                   dispatch_generation
            FROM core.email_outbox

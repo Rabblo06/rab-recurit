@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /** Frozen additive policy shipped with migration 1786718100000. No RLS bypass.
  * Capability GUCs are transaction-local and bound ONLY after resolving self and
  * locking the caller's confirmed assignment. Normal profile reads remain self-only.

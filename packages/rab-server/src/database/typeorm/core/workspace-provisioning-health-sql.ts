@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * SQL of migration ProvisioningHealth1786721220000 — Phase B P8 (E6 gates 10 and 14). Owner decision C (2026-10-29):
  * APPROVED for the counts-only health definer ONLY. The status-only drift wrapper `core.worker_record_workspace_schema_drift`

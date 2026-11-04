@@ -12,13 +12,16 @@ type Side = {
   head?: string;
 };
 
+// Owner-login architecture: the replica connection is the same owner login as the primary (no separate replica URL /
+// login in the owner's final decision; this validation is kept for the read-replica path that remains in the code).
 const goodFacts = {
-  who: 'crewflow_app',
-  login: 'crewflow_app',
+  who: 'crewflow_owner',
+  login: 'crewflow_owner',
   super: false,
   bypassrls: false,
   login_privileged: false,
-  owner_roles: null,
+  login_repl_createdb: false,
+  owner_roles: 'crewflow,rab_owner,rab_secure_owner',
   server_version_num: 160004,
   database: 'crewflow',
   extensions: 'btree_gist,citext,pg_trgm,pgcrypto,unaccent',
@@ -64,7 +67,9 @@ describe('replica validation (B4)', () => {
     ['a superuser login', { super: true }],
     ['a BYPASSRLS login', { bypassrls: true }],
     ['another role', { who: 'crewflow', login: 'crewflow' }],
-    ['an owner-role member', { owner_roles: 'rab_secure_owner' }],
+    ['a legacy schema-role login', { who: 'crewflow_app', login: 'crewflow_app' }],
+    ['a REPLICATION / CREATEDB login', { login_repl_createdb: true }],
+    ['a member of crewflow_worker', { worker_member: true }],
     ['SET ROLE', { login: 'someone_else' }],
   ])('refuses %s on the replica', async (_label, facts) => {
     const error = await validateReplica({ primary: primary(), replica: standby({ facts }), production: false }).catch((e) => e);

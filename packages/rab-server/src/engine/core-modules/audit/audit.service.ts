@@ -535,13 +535,16 @@ export class AuditService {
         params.push(exclusive);
         conditions.push(`al.created_at < $${params.length}`);
       }
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = `WHERE ${conditions.join(' AND ')}`;
       const direction = opts.direction === 'asc' ? 'ASC' : 'DESC';
 
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const [{ count }] = await manager.query(`SELECT count(*)::int AS count FROM core.audit_log al ${where}`, params);
 
       params.push(limit, offset);
       const rows = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `
           SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.target_user_id, al.created_at,
                  u.first_name AS actor_first_name, u.last_name AS actor_last_name
