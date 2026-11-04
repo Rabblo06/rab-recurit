@@ -169,9 +169,10 @@ describeIfDb('T4: in-process workspace provisioning on the owner login (integrat
     }
     expect((await registry(reference.workspaceId))?.status).toBe('READY');
     const ownerLogin = (await structure(owned.workspaceId)) as { schemaOwner: string; tables: Array<{ owner: string }> };
-    expect(ownerLogin.schemaOwner).toBe('crewflow');
+    // P1C.2: core.provision_workspace_schema creates the schema AUTHORIZATION rab_secure_owner — the same for the crewflow
+    // provisioner and the in-process owner-login one; the equality below is the real check (owners, RLS/FORCE, policies, indexes).
+    expect(ownerLogin.schemaOwner).toBe('rab_secure_owner');
     expect(ownerLogin.tables.length).toBeGreaterThan(10);
-    expect(ownerLogin.tables.every((t) => t.owner === 'crewflow')).toBe(true);
     expect(ownerLogin).toEqual(await structure(reference.workspaceId));
   });
 
