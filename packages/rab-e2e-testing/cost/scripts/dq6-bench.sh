@@ -189,7 +189,8 @@ do_arm() {
   case "$rep" in '' | *[!0-9]*) die "rep must be a number" ;; esac
   # Fail closed on label reuse: the scenarios select rows and files by label, so a second run under the same label would
   # merge with the first. Nothing is deleted; rerun under a new repetition number instead.
-  used="$(cd "$OUT" && ls -d "idle-$L-"* "dq6-$L-"* 2>/dev/null | head -3 | tr '\n' ' ')"
+  # (ls exits 2 when a pattern matches nothing, which pipefail + set -e would turn into a silent exit of the arm)
+  used="$(cd "$OUT" && { ls -d "idle-$L-"* "dq6-$L-"* 2>/dev/null || true; } | head -3 | tr '\n' ' ')"
   [ -z "$used" ] || die "arm $L already has results ($used...): rerun with a new repetition number"
   clock_guard
   set_arm "$arm"
