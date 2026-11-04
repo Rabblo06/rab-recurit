@@ -124,10 +124,10 @@ const vm = new Map(); // label -> { start, end }
 const vmFile = path.join(OUT, 'vm-memory.txt');
 if (fs.existsSync(vmFile)) {
   for (const l of fs.readFileSync(vmFile, 'utf8').split(/\r?\n/)) {
-    const m = /^(\S+) (start|end) t=(\d+) availMiB=(\d+) swapFreeMiB=(\d+) pswpin=(\d+) pswpout=(\d+)(?: harnessRefaultPages=(\d+))?/.exec(l.trim());
+    const m = /^(\S+) (start|end) t=(\d+) availMiB=(\d+) swapFreeMiB=(\d+) pswpin=(\d+) pswpout=(\d+)(?: harnessRefaultPages=(\d+))?(?: harnessRefaultByContainer=(\S+))?/.exec(l.trim());
     if (!m) continue;
     if (!vm.has(m[1])) vm.set(m[1], {});
-    vm.get(m[1])[m[2]] = { t: Number(m[3]), availMiB: Number(m[4]), swapFreeMiB: Number(m[5]), pswpin: Number(m[6]), pswpout: Number(m[7]), harnessRefault: m[8] == null ? null : Number(m[8]) };
+    vm.get(m[1])[m[2]] = { t: Number(m[3]), availMiB: Number(m[4]), swapFreeMiB: Number(m[5]), pswpin: Number(m[6]), pswpout: Number(m[7]), harnessRefault: m[8] == null ? null : Number(m[8]), byContainer: m[9] ? Object.fromEntries(m[9].split(',').map((x) => x.split(':')).map(([k, n]) => [k, Number(n)])) : null };
   }
 }
 const vmRows = [];
@@ -138,11 +138,26 @@ const memVerdict = (label) => {
   const swapInMiB = (v.end.pswpin - v.start.pswpin) * PAGE_MIB;
   const swapOutMiB = (v.end.pswpout - v.start.pswpout) * PAGE_MIB;
   const minAvail = Math.min(v.start.availMiB, v.end.availMiB);
-  // Attribution only: swap-ins by the harness's own containers (a recreated container restarts its counter: shown as n/a).
-  const hr = v.start.harnessRefault != null && v.end.harnessRefault != null && v.end.harnessRefault >= v.start.harnessRefault ? +((v.end.harnessRefault - v.start.harnessRefault) * PAGE_MIB).toFixed(1) : null;
-  const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1), harnessRefaultMiB: hr };
+  // Attribution: swap-ins by the harness's own containers. Per container when recorded: a container restarted inside the
+  // window (counter below its start value) counts its end value, a LOWER BOUND (swap-ins before its stop are lost), and
+  // the cell is marked >=. Older records carry only the sum: a decrease there is n/a.
+  let hr = null;
+  let lowerBound = false;
+  if (v.start.byContainer && v.end.byContainer) {
+    let pages = 0;
+    for (const [k, e] of Object.entries(v.end.byContainer)) {
+      const st = v.start.byContainer[k];
+      if (st != null && e >= st) pages += e - st;
+      else { pages += e; lowerBound = true; }
+    }
+    hr = +(pages * PAGE_MIB).toFixed(1);
+  } else if (v.start.harnessRefault != null && v.end.harnessRefault != null && v.end.harnessRefault >= v.start.harnessRefault) {
+    hr = +((v.end.harnessRefault - v.start.harnessRefault) * PAGE_MIB).toFixed(1);
+  }
+  const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1), harnessRefaultMiB: hr, harnessRefaultLowerBound: lowerBound };
   const counted = SWAPIN_SCOPE === 'vm' ? swapInMiB : hr;
   if (counted == null) return { row, why: 'no harness swap-in attribution for this window (post-hoc rule)' };
+  if (SWAPIN_SCOPE === 'harness' && lowerBound && counted <= MAX_SWAPIN_MIB) return { row, why: `harness swap-in only known as a lower bound (>= ${counted} MiB; a container restarted inside the window)` };
   const why = counted > MAX_SWAPIN_MIB ? `${SWAPIN_SCOPE === 'vm' ? '' : 'harness containers '}swapped in ${counted.toFixed(1)} MiB (> ${MAX_SWAPIN_MIB})` : minAvail < MIN_AVAIL_MIB ? `MemAvailable ${minAvail} MiB at an edge (< ${MIN_AVAIL_MIB})` : null;
   return { row, why };
 };
@@ -166,7 +181,7 @@ if (excludedMem.length) md.push(`**Windows EXCLUDED for memory contention** (${S
 md.push('## Docker VM memory per window (MEASURED, VM-wide)', '');
 md.push('| Window | MemAvailable start / end MiB | SwapFree at end MiB | Swapped in / out MiB (VM) | of which faulted in by harness containers MiB | Verdict |');
 md.push('|---|---|---|---|---|---|');
-for (const v of vmRows) md.push(`| ${v.label} | ${v.availStartMiB} / ${v.availEndMiB} | ${v.swapFreeEndMiB} | ${v.swapInMiB} / ${v.swapOutMiB} | ${v.harnessRefaultMiB == null ? 'n/a' : v.harnessRefaultMiB} | ${v.verdict} |`);
+for (const v of vmRows) md.push(`| ${v.label} | ${v.availStartMiB} / ${v.availEndMiB} | ${v.swapFreeEndMiB} | ${v.swapInMiB} / ${v.swapOutMiB} | ${v.harnessRefaultMiB == null ? 'n/a' : `${v.harnessRefaultLowerBound ? '>= ' : ''}${v.harnessRefaultMiB}`} | ${v.verdict} |`);
 md.push('');
 
 // A loaded resource window is valid only if the generator's own recorded [start, end] covers the window's [t-start, t-end]

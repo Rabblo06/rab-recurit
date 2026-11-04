@@ -78,13 +78,16 @@ vm_snapshot() { # "<label> <start|end>"
   local v h c r; v="$(vm_counters)" || v=""
   # Attribution only (no verdict uses it): anon pages the harness's own containers faulted back in from swap so far
   # (cgroup v2 workingset_refault_anon, cumulative per container; a recreated container restarts at 0).
+  # Also per container (pg:N,worker:N,...): a container the scenario restarts (Worker, Redis) restarts its counter, and the
+  # report then counts that container's end value as a lower bound instead of losing the whole window's attribution.
+  local per=""
   h=0
   for c in costaudit-pg costaudit-worker costaudit-redis costaudit-api costaudit-minio; do
     r="$(docker exec "$c" sh -c 'awk "/^workingset_refault_anon /{print \$2}" /sys/fs/cgroup/memory.stat' 2>/dev/null)" || r=0
     case "$r" in '' | *[!0-9]*) r=0 ;; esac
-    h=$(( h + ${r:-0} ))
+    h=$(( h + r )); per="${per:+$per,}${c#costaudit-}:$r"
   done
-  [ -n "$v" ] && echo "$1 t=$(date +%s) $v harnessRefaultPages=$h" >> "$OUT/vm-memory.txt" || true
+  [ -n "$v" ] && echo "$1 t=$(date +%s) $v harnessRefaultPages=$h harnessRefaultByContainer=$per" >> "$OUT/vm-memory.txt" || true
 }
 MIN_AVAIL_MIB="${DQ6_MIN_AVAIL_MIB:-384}"
 case "$MIN_AVAIL_MIB" in '' | *[!0-9]*) die "DQ6_MIN_AVAIL_MIB must be whole MiB" ;; esac
