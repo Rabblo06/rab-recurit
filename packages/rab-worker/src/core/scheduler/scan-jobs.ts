@@ -26,7 +26,7 @@ import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
 export type IntervalSource =
   | { kind: 'constant'; ms: number }
   | { kind: 'env-seconds'; key: WorkerScanIntervalKey }
-  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' };
+  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' | 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' };
 
 /**
  * Env switches a scan's registration may depend on. Phase A: REALTIME_ENABLED / PUSH_ENABLED. Phase D (D3, owner
@@ -34,7 +34,7 @@ export type IntervalSource =
  * LOGIN_HANDOFF_CLEANUP_ENABLED, OUTBOX_RETENTION_ENABLED (booleans) and AI_RETENTION_MODE (enabled in `report` / `purge`).
  * The cycles keep their own check (defence in depth).
  */
-export type ScanEnableKey = 'REALTIME_ENABLED' | 'PUSH_ENABLED' | 'LOGIN_HANDOFF_CLEANUP_ENABLED' | 'OUTBOX_RETENTION_ENABLED' | 'AI_RETENTION_MODE';
+export type ScanEnableKey = 'REALTIME_ENABLED' | 'PUSH_ENABLED' | 'LOGIN_HANDOFF_CLEANUP_ENABLED' | 'OUTBOX_RETENTION_ENABLED' | 'AI_RETENTION_MODE' | 'AI_STALE_TURN_SWEEP';
 
 export interface ScanJobDefinition {
   queue: ScanQueueName;
@@ -152,6 +152,18 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     'workspaceProvisioningHealthFailures',
     false,
     { firstRunAfterInterval: true },
+  ),
+  // Phase D-Q2: AI stale-queued-turn sweep (queues/rab-ai/ai.processors.ts). OFF by default (AI_STALE_TURN_SWEEP=false ⇒
+  // not registered); finalises turns whose BullMQ job was lost as failed AI_WORKER_INTERRUPTED, never requeues.
+  job(
+    SCAN_QUEUES.maintenance,
+    'ai-stale-turn-sweep',
+    'ai stale turn sweep',
+    { kind: 'env-minutes', key: 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' },
+    'lastAiStaleTurnSweepAt',
+    'aiStaleTurnSweepFailures',
+    true,
+    { enabledBy: 'AI_STALE_TURN_SWEEP' },
   ),
 ]);
 

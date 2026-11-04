@@ -5002,3 +5002,34 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
+## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
+
+Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,
+grant, RLS or posture change.
+
+- **Asset:** another person's AI turn (a CEO's or Initial Manager's `core.ai_message` row), their organisation's AI token
+  budget and org slot. **Actor:** the Worker, acting without a request; an attacker able to forge or replay ids.
+- **Change:** a Worker scan finalises turns that have been `queued` longer than `AI_STALE_TURN_THRESHOLD_MINUTES`
+  (default 15, floor 11) as `failed` / `AI_WORKER_INTERRUPTED`. Their BullMQ job was evidently lost (Redis data loss, a
+  dropped promotion/deferral). Owner rule: **fail-and-user-retry only** — never re-run, requeue or replay (possibly
+  completed) AI work.
+- **Controls:** discovery uses only the existing catalogue definers (`worker_list_organisations` /
+  `worker_list_workspaces`) and, per workspace, that workspace's own tenant context (owner and CEO/Initial-Manager
+  profiles placed there). Each user's turns are read and written only under that user's own (organisation, workspace,
+  user) binding — the same binding the turn runner uses for a delivered job — so `ai_message`'s owner-scoped FORCE RLS
+  applies unchanged; an organisation-only context sees zero rows, no context sees zero rows, a forged (other tenant)
+  binding finalises nothing (tested). One compare-and-set on `status = 'queued'` **and** age, with the usage counter and
+  `AI_TURN_FAILED` audit (stage `stale_queued`) in the same transaction: with several replicas exactly one finalises a
+  turn (tested with concurrent calls and concurrent cycles). The threshold must exceed the longest legitimate queued
+  wait (org-slot TTL = turn timeout + 5 min; a deferred successor gives up at timeout + 60 s) — checked at boot (floor)
+  and again at run time (fail closed), so a legitimately delayed deferred claim is never swept (tested).
+- **Effects after commit (same as the existing queued → failed paths):** reservation refunded (a queued turn never called
+  the model), org slot released only if the conversation has nothing else queued or running, `done` (failed) on the
+  turn's stream. No email/push/notification is produced.
+- **Suspended organisation:** the turn is finalised like the runner does today when such a job is delivered (it ends the
+  turn failed); nothing is sent (tested).
+- **Residual / limitations:** a turn whose job is merely stuck in a BullMQ backlog longer than the threshold (far beyond
+  the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
+  workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
+  turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).

@@ -47,6 +47,15 @@ const PRE_DQ1_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDurat
   'crewflow-scan-maintenance': { concurrency: 7, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'crewflow-scan-realtime': { concurrency: 1, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
 };
+/**
+ * Phase D-Q2: the ONLY intended delta from the pre-D-Q1 table. `ai-stale-turn-sweep` is one more scan on
+ * crewflow-scan-maintenance, so its Worker gets one more slot (7 → 8, the `scanJobsOn(queue).length` rule). Every other
+ * value is the pre-D-Q1 one, unchanged.
+ */
+const EXPECTED_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
+  ...PRE_DQ1_WORKER_OPTIONS,
+  'crewflow-scan-maintenance': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'], concurrency: 8 },
+};
 const OUTBOX = {
   attempts: 5,
   backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
@@ -93,8 +102,18 @@ describe('queue registry (Phase D-Q1)', () => {
     ]);
   });
 
-  it.each(Object.keys(PRE_DQ1_WORKER_OPTIONS) as QueueName[])('%s: Worker options are explicit and equal the pre-D-Q1 effective values', (name) => {
-    expect(bullmqWorkerOptionsOf(name)).toEqual(PRE_DQ1_WORKER_OPTIONS[name]);
+  it.each(Object.keys(EXPECTED_WORKER_OPTIONS) as QueueName[])('%s: Worker options are explicit and equal the pre-D-Q1 effective values (plus the D-Q2 maintenance slot)', (name) => {
+    expect(bullmqWorkerOptionsOf(name)).toEqual(EXPECTED_WORKER_OPTIONS[name]);
+  });
+
+  it('Phase D-Q2: the only Worker-option change is one more crewflow-scan-maintenance slot for ai-stale-turn-sweep', () => {
+    const changed = QUEUE_NAMES.filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
+    expect(changed).toEqual(['crewflow-scan-maintenance']);
+    expect(bullmqWorkerOptionsOf('crewflow-scan-maintenance').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'].concurrency).toBe(1);
+    expect(acceptsJobName('crewflow-scan-maintenance', 'ai-stale-turn-sweep')).toBe(true);
+    // A system scan, not a consumer: the sweep never enqueues or accepts an organisation-scoped job.
+    expect(QUEUE_SETTINGS['crewflow-scan-maintenance'].tenantScope).toBe('system');
+    expect(acceptsJobName('rab-ai', 'ai-stale-turn-sweep')).toBe(false);
   });
 
   it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as QueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
@@ -154,10 +173,10 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
   });
 
-  it('every scan job name is declared once, on one scan queue (21 scans)', () => {
+  it('every scan job name is declared once, on one scan queue (22 scans: 21 pre-D-Q2 + ai-stale-turn-sweep)', () => {
     const names = SCAN_QUEUE_NAMES.flatMap((q) => [...QUEUE_SETTINGS[q].jobNames]);
-    expect(names).toHaveLength(21);
-    expect(new Set(names).size).toBe(21);
+    expect(names).toHaveLength(22);
+    expect(new Set(names).size).toBe(22);
   });
 
   it('an unknown queue name fails closed (UnknownQueueError), never a default', () => {
