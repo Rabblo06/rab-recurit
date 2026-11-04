@@ -18,4 +18,10 @@ import type { NativeDocumentMeta } from './runtime/render-protocol';
 export const NATIVE_DOCUMENT_REGISTRY = Object.freeze({
   'final-timesheet': (vm: unknown, meta: NativeDocumentMeta) =>
     h(FinalTimesheetDocument, { vm: vm as FinalTimesheetViewModel, creationDate: meta.creationDate }),
+  // INTEGRATION SLOT 'pre-shift' (#59, roster): import { PreShiftReportDocument } from './pre-shift-report.native';
+  //   'pre-shift': (vm: unknown, meta: NativeDocumentMeta) => h(PreShiftReportDocument, { vm: vm as PreShiftReportViewModel, creationDate: meta.creationDate }),
+  // INTEGRATION SLOT 'approved-shift-statement' (#57, payroll): import { ApprovedShiftStatementDocument } from './approved-shift-statement.native';
+  //   'approved-shift-statement': (vm: unknown, meta: NativeDocumentMeta) => h(ApprovedShiftStatementDocument, { vm: vm as ApprovedShiftStatementViewModel, creationDate: meta.creationDate }),
+  // Each slot also needs: the kind in NATIVE_KINDS (render-pdf.util.ts) and a `case` in render-native.ts that calls
+  // renderInPool({ kind, viewModel: build…ViewModel(doc.data), generatedAt: doc.data.generatedAt }).
 });

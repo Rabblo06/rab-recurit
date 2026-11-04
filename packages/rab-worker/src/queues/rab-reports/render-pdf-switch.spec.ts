@@ -4,7 +4,10 @@ import { documentFooterTemplate } from '@rab/server/modules/attendance/templates
 import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
 
 import { FINAL_TIMESHEET_CASES } from '../../__tests__/helpers/final-timesheet-fixtures';
+import { inlinePageResources } from '../../__tests__/helpers/pdf-images';
+import { inspectPdf } from '../../__tests__/helpers/pdf-inspect';
 import * as nativeModule from './native/render-native';
+import * as renderPool from './native/runtime/render-pool';
 import { shutdownRenderPool } from './native/runtime/render-pool';
 import * as renderTimeout from './native/runtime/render-timeout';
 import {
@@ -65,6 +68,32 @@ describe('Chromium input is exactly what the job passed before the seam changed'
   it('final timesheet: the template output and the landscape footer options, unchanged', () => {
     expect(htmlFor(doc)).toBe(renderFinalTimesheetHtml(data));
     expect(optionsFor(doc)).toEqual({ footerTemplate: documentFooterTemplate(data), landscape: true });
+  });
+});
+
+/**
+ * I-1 regression: the PRODUCTION native path (renderReportPdf → renderNativePdf) renders in the worker-thread pool, not
+ * in-process. Evidence from the bytes, not only from a spy: the creation date is a valid PDF date built inside the
+ * thread (an in-process render under Jest writes `Date.toString()`), and an unprintable note becomes the F1 marker
+ * (only the thread's glyph guard does that).
+ */
+describe('native renders go through the render pool (I-1)', () => {
+  afterAll(() => shutdownRenderPool());
+
+  it('renderReportPdf(native) submits the view-model to the pool; the thread applies D7 and the F1 glyph guard', async () => {
+    const pooled = jest.spyOn(renderPool, 'renderInPool');
+    try {
+      const pdf = await renderReportPdf({ kind: 'final-timesheet', data: { ...data, notes: 'Arabic محمد end' } }, { PDF_RENDERER: 'native' });
+      expect(pooled).toHaveBeenCalledTimes(1);
+      expect(pooled.mock.calls[0]![0]).toMatchObject({ kind: 'final-timesheet', generatedAt: data.generatedAt });
+      const raw = pdf.toString('latin1');
+      expect(raw).toMatch(/\(D:20261020150000Z?\)/); // a real PDF date, built in the thread realm
+      expect(raw).not.toMatch(/GMT[+-]\d{4}/); // never Date.toString()
+      // F1: the four Arabic letters (no glyphs in the font stack) print as four visible markers, the rest as written.
+      expect(inspectPdf(inlinePageResources(pdf)).text).toContain('Arabic □□□□ end');
+    } finally {
+      pooled.mockRestore();
+    }
   });
 });
 
