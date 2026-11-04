@@ -144,7 +144,24 @@ PT-01 pointers:
 5. **Start.** Choose one:
    - **Quick start (migrate-on-start):** `$P $M [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks) and serves only after it succeeds. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The override gives the API a 900 s `start_period`. The Worker follows a healthy API.
    - **Controlled (production):** use section 3 from step 3.2. On an EMPTY database `rab-migrate` exits 3 with the full chain as the pending set; approve it with the token.
-6. **First platform admin.** Use the existing one-off `bootstrap-admin` command. Its owner-login invocation (which login, and which authority) is an Agent 1/2 interface and is **not defined yet**. `BOOTSTRAP_ADMIN_*` never goes in an env file.
+6. **First platform admin.** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`) and the same runtime config (`runtime.env`). Its inputs come from your shell for this one run only (`-e NAME` with no value forwards them, so they never sit on a command line or in a file):
+   ```bash
+   export BOOTSTRAP_ADMIN_EMAIL=… BOOTSTRAP_ADMIN_PASSWORD=…        # the variable names the command documents
+   $P run --rm --no-deps -e BOOTSTRAP_ADMIN_EMAIL -e BOOTSTRAP_ADMIN_PASSWORD \
+     rab-api node packages/rab-server/dist/command/main.js bootstrap-admin
+   unset BOOTSTRAP_ADMIN_EMAIL BOOTSTRAP_ADMIN_PASSWORD
+   ```
+   `run` publishes no port, and `--no-deps` leaves the running stack alone. How the command's authority is checked under the owner login is being settled by Agent 1; follow its output. `BOOTSTRAP_ADMIN_*` never goes in an env file (the lint refuses it).
+
+**Optional startup and watchdog knobs** (code defaults; set in `runtime.env` only to change them):
+
+| Variable | Service | Range | Default | Effect |
+|---|---|---|---|---|
+| `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS` | rab-api | 0–300 | 15 | Delay before a failed start exits, so a restart loop does not hammer the database. |
+| `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS` | rab-worker | 30–900 | 120 | An event loop silent this long is a stall; the watchdog kills the process and Docker restarts it. |
+| `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` | rab-worker | 0–3600 | 900 | How long the Worker waits for the schema to be current before refusing to start (it never migrates). |
+
+**The Worker runs with `init: true`.** Its watchdog SIGKILLs a stalled process, and the kernel ignores that signal for PID 1, so the Worker refuses to start as PID 1. Docker's init must be PID 1; every compose file that runs the Worker sets it, and the gate fails CI otherwise.
 
 **Failure semantics:**
 - **First install:** non-zero exit; the API never becomes healthy. Docker restarts it with capped backoff. Each start re-classifies: EMPTY or BOOTSTRAP-PARTIAL bootstraps, CHAIN-PARTIAL resumes, FOREIGN refuses.
@@ -400,7 +417,8 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 | `deploy-prepare.js` (in place) is the release step, with exit codes 0 / 3 / M0 §7 and token approval. It reads `PG_DATABASE_URL` only, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
 | `01-crewflow-owner.sql` reads the password from `/run/secrets/crewflow-owner-password` inside the SQL, and fails on a missing or short password. A tested reference implementation was handed to the lead. | Agent 1 |
-| The `bootstrap-admin` owner-login invocation. | Agents 1 and 2 |
+| `bootstrap-admin` runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy (section 2, step 6); its command-authority handling. | Agent 1 |
+| The Worker refuses to run as PID 1 (watchdog SIGKILL); `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`, `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS`, `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` with the ranges above. | Agent 2 |
 
 **Tested here:**
 - the gate: 18 self-tests, plus `--static` on the committed files;
