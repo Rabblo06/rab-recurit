@@ -9,7 +9,7 @@ import { compact, PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureIds } from './fixtures';
 import { extractFixture, outDir, saveArtifact } from './harness';
 import { loadGlyphTransform } from './glyph-transform';
-import { F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { F_PDF_1, F_PDF_1_FIXTURES, F_PDF_1_PRESENT, F_PDF_1_SHAPES, fixedColumnProblems } from './known-findings';
 import { nativeExpectation } from './native-reference';
 import { renderGuarded } from './network-guard';
 import { NATIVE_ONLY } from './mode';
@@ -134,6 +134,13 @@ async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): P
   const findingRenders = new Map<string, PdfExtraction>();
   const findingIds = IDS.filter((id) => id in F_PDF_1_FIXTURES);
   // Empty once the template is fixed (known-findings.ts F_PDF_1_PRESENT): the plain test above then covers them.
+  if (!F_PDF_1_PRESENT) {
+    // F-PDF-1 fixed in this tree's template: the hostile unbroken token keeps every column, the sign-off and the total.
+    it.each(Object.entries(F_PDF_1_SHAPES))(`%s: ${F_PDF_1} is fixed — every column printed, inside the page`, async (id, shape) => {
+      const f = fixtures.get(id)!;
+      expect(fixedColumnProblems(f.doc, await renderSafely(chromiumRenderer, f, 'record'), 'chromium', shape.droppedHeading)).toEqual([]);
+    });
+  }
   if (findingIds.length) {
     it.each(findingIds)('%s: no request, no active content', async (id) => {
       findingRenders.set(id, await renderSafely(chromiumRenderer, fixtures.get(id)!, 'record'));

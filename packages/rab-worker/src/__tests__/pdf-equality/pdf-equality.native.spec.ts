@@ -7,7 +7,7 @@ import { PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureIds } from './fixtures';
 import { GlyphTransform, loadGlyphTransform } from './glyph-transform';
 import { extractFixture, fileFindings, goldenFindings, outDir, rasterise, RENDER_CONCURRENCY, saveArtifact, verifyShiftQr } from './harness';
-import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { MODE, NATIVE_ONLY } from './mode';
 import { changedByF1, documentWords, htmlReference, nativeExpectation } from './native-reference';
 import { chromiumRenderer, loadNativeRenderer, mapLimit, NativeNotConvertedError, switchChromiumHtml } from './renderers';
@@ -144,6 +144,8 @@ if ('unavailable' in native) {
           expectB: expectNative,
           referenceB: reference,
           documentWords: { a: words, b: reference ? reference.tokens : words },
+          // Chromium only, and only while this tree's template collapses notes (pinned in the self-test); never native.
+          lineBreaksInfo: NOTES_LINE_BREAKS_IN_TEMPLATE ? [] : ['chromium'],
         });
         if (known) {
           // F-PDF-1: Chromium's own input checks fail exactly as pinned in the self-test (known-findings.ts) — INFO here;

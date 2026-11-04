@@ -6,6 +6,7 @@ import { checkAgainstDocument, checkAgainstInput, compareExtractions, countValue
 import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
 import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
 import { loadGlyphTransform } from './glyph-transform';
+import { F_PDF_1_PRESENT, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { equalityMode } from './mode';
 import { footerTexts, htmlText, htmlTextNodes, joinLineBreaks, markerOccurrences, tokensJoiningForcedBreaks } from './native-reference';
 import { guardNetwork, NetworkDeniedError, renderGuarded } from './network-guard';
@@ -450,6 +451,18 @@ describe('D6 hyphen wrap: accepted only when the joined text is identical and ev
     expect(joinLineBreaks(x, ['Reviewed', 'by', 'Morgan', 'Duty-Manager', 'today'], { forcedBreaks: false, d6: true }).d6).toEqual(['Duty-Manager']);
   });
 
+  it("Chromium's unhyphenated overflow-wrap break of a long token rejoins (not D6); whole words never merge", () => {
+    const token = 'A1b2C3d4E5'.repeat(3);
+    const x = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(12, 25), `${token.slice(25)} end`], ['go in', 'to town']]);
+    const doc = ['Token:', token, 'end', 'go', 'in', 'to', 'town', 'into'];
+    const joined = joinLineBreaks(x, doc, { forcedBreaks: false, d6: true, unhyphenated: true });
+    expect([...joined.tokens].sort()).toEqual(['Token:', token, 'end', 'go', 'in', 'to', 'town'].sort());
+    expect(joined.d6).toEqual([]);
+    const truncated = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(13, 25), `${token.slice(25)} end`]]); // one character dropped
+    expect(joinLineBreaks(truncated, doc, { forcedBreaks: false, d6: true, unhyphenated: true }).tokens).not.toContain(token);
+    expect(joinLineBreaks(x, doc, { forcedBreaks: false, d6: true }).tokens).not.toContain(token); // off unless asked
+  });
+
   it('native-only mode (checkAgainstDocument) applies the same rule against the document, never against Chromium', () => {
     const reference = { label: 'document', count: (v: string) => (v === name ? 1 : 0), tokens: words, footers: [] };
     const r = checkAgainstDocument('t', e, chromiumWrapped(), 'native', reference, { images: 1, forcedBreakHyphens: ['native'] });
@@ -533,6 +546,16 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
     expect(checkAgainstInput(e, kept, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: true });
     expect(checkAgainstInput(e, collapsed, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+    // Only a render named in lineBreaksInfo (Chromium on a tree whose template does not keep them yet) reports it as INFO.
+    expect(checkAgainstInput(e, collapsed, 'chromium', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(chromium)')).toMatchObject({ ok: true, info: true });
+    expect(checkAgainstInput(e, collapsed, 'native', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+  });
+
+  it('the pending flag follows the template: origin/main collapses notes, the fixed template keeps them (known-findings.ts)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DOCUMENT_CSS } = require('@rab/server/modules/attendance/templates/adolphus-document') as { DOCUMENT_CSS: string };
+    expect(NOTES_LINE_BREAKS_IN_TEMPLATE).toBe(/\.notes-text\s*\{[^}]*white-space\s*:\s*pre-line/.test(DOCUMENT_CSS));
+    expect(F_PDF_1_PRESENT).toBe(!/\.bottom\s*>\s*div\s*\{[^}]*min-width\s*:\s*0/.test(DOCUMENT_CSS));
   });
 });
 
