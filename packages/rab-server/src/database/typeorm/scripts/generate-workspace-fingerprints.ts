@@ -5,7 +5,7 @@
  * workspace build of the migrator suite, WorkspaceSchemaMigrator (one module version at a time) and the TypeScript
  * provisioner. DISPOSABLE cluster only (loopback, `crewflow.disposable_cluster = on`), never anything else.
  *
- *   FINGERPRINT_ADMIN_URL=<superuser of the disposable cluster> FINGERPRINT_MODE=generate|verify \
+ *   FINGERPRINT_ADMIN_URL=<superuser of the disposable cluster> FINGERPRINT_MODE=generate|append|verify|ci [FINGERPRINT_WRITE=true] \
  *   ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts
  *
  * generate  1. The provider-admin step and the owner-login child build a fresh database from migrations. The frozen
@@ -19,13 +19,16 @@
  *           3. Cross-check in the same run: a NEW workspace built by the TypeScript provisioner at the latest module
  *              must equal the latest value from step 2 (it is now in the table, so the provisioner itself compares).
  *           Prints the table to commit.
+ * append    "Only missing versions" (fingerprint-append.ts): the same build and regeneration, with every COMMITTED value loaded,
+ *           so the migrator and planAppend refuse the run if any committed value no longer regenerates identically; only
+ *           the versions absent from the table are appended (printed; written to the source with FINGERPRINT_WRITE=true).
  * verify    With the committed values: a fresh database built normally (no placeholders); the TypeScript provisioner,
  *           the SERVER path (core.provision_workspace as crewflow_app, its literal baked from the selected table) and a
  *           pre-ledger v14 workspace migrated forward must all produce exactly the committed latest value, and the v14
  *           build must equal the committed v14 value.
  */
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Client } from 'pg';
@@ -36,6 +39,7 @@ import {
   EXPECTED_WORKSPACE_FINGERPRINTS_PG18,
   selectWorkspaceFingerprintMajor,
 } from '../workspace-schema/v1/expected-fingerprints';
+import { appendToTableSource, buildPlaceholders, missingVersions, planAppend } from '../workspace-schema/v1/fingerprint-append';
 import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../workspace-schema/provision-workspace-schema';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, modulesThrough } from '../workspace-schema/workspace-schema-modules';
@@ -147,27 +151,40 @@ async function legacyV14(c: Client, ws: Ws): Promise<void> {
 
 const fingerprint = async (c: Client, id: string) => (await c.query('SELECT core.workspace_schema_fingerprint($1) AS f', [id])).rows[0].f as string;
 
-async function generate(major: number): Promise<void> {
+/**
+ * Regenerates EVERY version 14..LATEST on one throwaway database. The build loads the committed values plus
+ * placeholders for the missing ones (fingerprint-append.ts buildPlaceholders); right after the chain the table holds the
+ * committed values only, so for every COMMITTED version the migrator itself compares (BASELINE_MISMATCH /
+ * FINGERPRINT_MISMATCH refuses the run — a committed value is never silently replaced), and each MISSING version is
+ * recorded as generated. Returns all regenerated values.
+ */
+async function regenerate(major: number, committed: Readonly<Record<number, string>>): Promise<{ db: string; out: Record<number, string> }> {
   const t = table(major);
-  if (Object.keys(t).length) throw new Error(`the PostgreSQL ${major} table is not empty; use FINGERPRINT_MODE=verify`);
-  Object.assign(t, EXPECTED_WORKSPACE_FINGERPRINTS_PG16); // throwaway build only (see the header)
+  const L = LATEST_WORKSPACE_MODULE_VERSION;
+  Object.assign(t, buildPlaceholders(committed, L)); // throwaway build only (see the header)
   const db = `fp_gen_${RUN}`;
-  await buildDatabase(db);
-  for (const k of Object.keys(t)) delete t[Number(k)];
+  try {
+    await buildDatabase(db);
+  } finally {
+    for (const k of Object.keys(t)) delete t[Number(k)];
+    Object.assign(t, committed);
+  }
 
   const out: Record<number, string> = {};
   await withClient(adminUrl(db), async (c) => {
     const ws = await seedWorkspace(c, `fp-legacy-${RUN}`);
     await legacyV14(c, ws);
     out[14] = await fingerprint(c, ws.id);
-    t[14] = out[14]; // the migrator adopts a pre-ledger schema only at a known value
+    if (t[14] === undefined) t[14] = out[14]; // the migrator adopts a pre-ledger schema only at a known value
     await c.query('SET ROLE crewflow');
     const migrator = new WorkspaceSchemaMigrator(pgClientRunner(c));
-    for (let v = 15; v <= LATEST_WORKSPACE_MODULE_VERSION; v++) {
+    for (let v = 15; v <= L; v++) {
       const [o] = await migrator.migrateAll({ workspaceIds: [ws.id], throughVersion: v, appVersion: 'fingerprint-generation' });
-      if (!o || !['MIGRATED', 'BASELINED'].includes(o.status)) throw new Error(`module ${v}: ${JSON.stringify(o)}`);
+      if (!o || !['MIGRATED', 'BASELINED'].includes(o.status)) {
+        throw new Error(`module ${v}: ${JSON.stringify(o)} (a committed value that no longer regenerates is refused, never replaced)`);
+      }
       out[v] = await fingerprint(c, ws.id);
-      t[v] = out[v];
+      if (t[v] === undefined) t[v] = out[v];
     }
     await c.query('RESET ROLE');
     // Cross-check: a fresh TypeScript-provisioned workspace at the latest module equals the forward-migrated one.
@@ -181,10 +198,49 @@ async function generate(major: number): Promise<void> {
     }
     log(`cross-check: the TypeScript provisioner at module ${LATEST_WORKSPACE_MODULE_VERSION} equals the v14 workspace migrated forward`);
   });
+  return { db, out };
+}
+
+/** Every version, on a major with an EMPTY table (the original D4 run). */
+async function generate(major: number): Promise<void> {
+  if (Object.keys(table(major)).length) throw new Error(`the PostgreSQL ${major} table is not empty; use FINGERPRINT_MODE=append or verify`);
+  const { db, out } = await regenerate(major, {});
   console.log(`FINGERPRINTS_JSON ${JSON.stringify({ major, generatedOn: db, values: out })}`); // eslint-disable-line no-console
   log(`PostgreSQL ${major} expected fingerprints (generated on ${db}):`);
   for (const [v, f] of Object.entries(out)) log(`  ${v}: '${f}',`);
   for (const [v, f] of Object.entries(out)) log(`  v${v} ${f === EXPECTED_WORKSPACE_FINGERPRINTS_PG16[Number(v)] ? 'EQUALS' : 'differs from'} PostgreSQL 16`);
+}
+
+const TABLE_FILES: Readonly<Record<number, { file: string; exportName: string }>> = {
+  16: { file: 'expected-fingerprints.ts', exportName: 'EXPECTED_WORKSPACE_FINGERPRINTS_PG16' },
+  18: { file: 'expected-fingerprints-pg18.ts', exportName: 'EXPECTED_WORKSPACE_FINGERPRINTS_PG18' },
+};
+
+/**
+ * "Only missing versions" (PAY-1 module 20 and every later module): regenerates everything (committed versions are
+ * compared by the migrator and by planAppend; any difference refuses), appends ONLY the missing versions. Prints
+ * FINGERPRINTS_APPEND_JSON; with FINGERPRINT_WRITE=true also appends the lines to the table's source file for review.
+ */
+async function append(major: number): Promise<Record<number, string>> {
+  const committed = { ...table(major) };
+  const missing = missingVersions(committed, LATEST_WORKSPACE_MODULE_VERSION);
+  if (!missing.length) {
+    log(`PostgreSQL ${major}: every module through ${LATEST_WORKSPACE_MODULE_VERSION} already has a committed value; nothing to append`);
+    return {};
+  }
+  log(`PostgreSQL ${major}: generating module version(s) ${missing.join(', ')}; ${Object.keys(committed).length} committed value(s) must regenerate identically`);
+  const { db, out } = await regenerate(major, committed);
+  const entries = planAppend(committed, out, LATEST_WORKSPACE_MODULE_VERSION);
+  console.log(`FINGERPRINTS_APPEND_JSON ${JSON.stringify({ major, generatedOn: db, values: entries })}`); // eslint-disable-line no-console
+  for (const [v, f] of Object.entries(entries)) log(`  append ${v}: '${f}',`);
+  if (process.env.FINGERPRINT_WRITE === 'true') {
+    const target = TABLE_FILES[major];
+    if (!target) throw new Error(`no table source file for PostgreSQL ${major}`);
+    const path = join(__dirname, '..', 'workspace-schema', 'v1', target.file);
+    writeFileSync(path, appendToTableSource(readFileSync(path, 'utf8'), target.exportName, entries, `generated ${new Date().toISOString().slice(0, 10)} on ${db}`));
+    log(`appended ${Object.keys(entries).length} line(s) to workspace-schema/v1/${target.file} (review and commit)`);
+  }
+  return entries;
 }
 
 async function verify(major: number): Promise<void> {
@@ -240,15 +296,20 @@ async function main(): Promise<void> {
   log(`PostgreSQL ${major} (${num}); latest module ${LATEST_WORKSPACE_MODULE_VERSION}; selected table has ${Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS).filter((k) => EXPECTED_WORKSPACE_FINGERPRINTS[Number(k)]).length} value(s)`);
   const mode = process.env.FINGERPRINT_MODE;
   if (mode === 'generate') await generate(major);
+  else if (mode === 'append') await append(major);
   else if (mode === 'verify') await verify(major);
   else if (mode === 'ci') {
-    // CI: verify committed values; when the major has none yet, generate them, print them, and FAIL (never a silent pass).
-    if (Object.keys(table(major)).length) await verify(major);
+    // CI: verify committed values; when versions are missing, generate ONLY those (committed ones must regenerate
+    // identically), print them, and FAIL (never a silent pass).
+    const missing = missingVersions(table(major), LATEST_WORKSPACE_MODULE_VERSION);
+    if (!missing.length) await verify(major);
     else {
-      await generate(major);
-      throw new Error(`PostgreSQL ${major} fingerprints are not committed yet: review the FINGERPRINTS_JSON line above and commit expected-fingerprints-pg${major}.ts`);
+      await append(major);
+      throw new Error(
+        `PostgreSQL ${major}: module version(s) ${missing.join(', ')} have no committed fingerprint: review the FINGERPRINTS_APPEND_JSON line above and commit them`,
+      );
     }
-  } else throw new Error('FINGERPRINT_MODE must be generate, verify or ci');
+  } else throw new Error('FINGERPRINT_MODE must be generate, append, verify or ci');
 }
 
 main().catch((e: Error) => {
