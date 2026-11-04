@@ -2,12 +2,14 @@ name: image-security-gate
 
 # Docker hardening H5: the image security gate. Builds the API image and the Worker bundle image FROM it (per platform,
 # on a native runner, --pull --no-cache, with SBOM + provenance attestations), then gates the EXACT built images:
-# security floors (Node, Chromium, libexpat, Alpine repositories) re-run inside the image, the Chromium binary version,
-# runtime user/entrypoint/revision label, setuid/setgid and file capabilities, world-writable and non-root-owned code,
+# security floors (Node, libexpat, Chromium ABSENT, Alpine repositories) re-run inside the image, no browser-stack OS or
+# npm package in either image (P5: policy.json forbidden_apk / forbidden_npm / sbom_must_not_include), runtime
+# user/entrypoint/revision label, setuid/setgid and file capabilities, world-writable and non-root-owned code,
 # writable Node module paths and HOME, test/env/.git files, development packages, Trivy + Grype (pinned by digest, fresh
 # DBs) with the owner-decision register and the scanner-blind watch list, credential leaks in any layer, the SBOM and
 # provenance attestations (the Worker's must name this run's API image as its base), the multi-platform manifest, and a
-# NATIVE PDF render (the owner's mandatory ARM64 release gate). Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
+# PDF render through the Worker's native (browser-free) renderer on a NATIVE host (the owner's mandatory ARM64 release
+# gate). Policy: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.
 #
 # CANDIDATE mode (candidate-run-id + both index digests): nothing is built. The gated multi-platform API and Worker
 # layouts a previous run exported are verified against the given digests, and every check above, including the native
@@ -93,6 +95,10 @@ jobs:
       - name: Dockerfile base-image pins, security-floors.env, decision register, watch list
         if: ${{ !cancelled() }}
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" static
+      # P5: the source-level half of "Chromium must not return" (the image checks are the other half).
+      - name: No browser dependency in the Worker or the server code it runs
+        if: ${{ !cancelled() }}
+        run: node tools/check-no-browser-in-worker.cjs
       # Docker hardening review H1-L1 (reused): no Dockerfile adds an apk repository, alternative keys or --allow-untrusted.
       - name: No ad-hoc apk repositories, alternative keys or unsigned packages in Dockerfiles
         if: ${{ !cancelled() }}

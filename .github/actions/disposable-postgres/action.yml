@@ -2,8 +2,12 @@ name: Disposable PostgreSQL
 description: >-
   Starts a throwaway PostgreSQL 16 container on 127.0.0.1:5432 AFTER checkout (no volume mount from the workspace, which
   broke checkout with EACCES when it was a service volume), marked crewflow.disposable_cluster=on for the M2 harness.
-  Writes MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD and APP_SECRET to
-  $GITHUB_ENV, every value random per run and masked before first use. Nothing is printed.
+  Writes MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD,
+  CREWFLOW_WORKER_BOOTSTRAP_PASSWORD and APP_SECRET to $GITHUB_ENV, every value random per run and masked before first
+  use. Nothing is printed. CREWFLOW_WORKER_BOOTSTRAP_PASSWORD is the password the M2 harness gives crewflow_worker when it
+  creates that role (Phase D operator bootstrap step); it is what lets a job hand the gated Phase D suites a
+  TEST_DATABASE_WORKER_URL (migration-security-test-env.cjs --with-worker-login). Before E5 the harness picked a random
+  password nobody else knew, so those suites could never run in CI.
 
 runs:
   using: composite
@@ -15,10 +19,12 @@ runs:
         su_pass="$(openssl rand -hex 24)"
         cf_pass="$(openssl rand -hex 24)"
         app_pass="$(openssl rand -hex 24)"
+        worker_pass="$(openssl rand -hex 24)"
         app_secret="$(openssl rand -hex 32)"
         echo "::add-mask::${su_pass}"
         echo "::add-mask::${cf_pass}"
         echo "::add-mask::${app_pass}"
+        echo "::add-mask::${worker_pass}"
         echo "::add-mask::${app_secret}"
         # Password through a file, not -e: an environment value shows in the process list and in `docker inspect`.
         mkdir -p "${RUNNER_TEMP}/disposable-pg"
@@ -43,5 +49,6 @@ runs:
           echo "MIGRATION_SECURITY_ADMIN_URL=${admin_url}"
           echo "CREWFLOW_BOOTSTRAP_PASSWORD=${cf_pass}"
           echo "CREWFLOW_APP_BOOTSTRAP_PASSWORD=${app_pass}"
+          echo "CREWFLOW_WORKER_BOOTSTRAP_PASSWORD=${worker_pass}"
           echo "APP_SECRET=${app_secret}"
         } >> "$GITHUB_ENV"
