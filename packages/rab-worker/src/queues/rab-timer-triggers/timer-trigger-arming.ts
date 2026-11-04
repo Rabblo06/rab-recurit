@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 import { NO_SHOW_GRACE_MINUTES } from '@rab/server/modules/attendance/services/no-show-policy';
 import type { TimerTriggerArm } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import {
+  TIMER_TRIGGER_ARM_HORIZON_INTERVALS,
   TIMER_TRIGGER_OUTCOMES_KEY,
   TIMER_TRIGGER_OUTCOMES_TTL_SECONDS,
   TimerTriggerKind,
@@ -81,4 +82,28 @@ export function redisTimerTriggerOutcomeRecorder(redis: Pick<Redis, 'multi'>): (
       .exec()
       .catch(() => undefined);
   };
+}
+
+/**
+ * The ONE arming step both shift-monitor paths call between discovery and processing — separate mode
+ * (shift.processors.ts) and D-Q4a's combined scan (shift-scan-combined.job.ts) — so the two modes arm identically. No-op
+ * (returns at once, no Redis call) when neither shift kind is enabled. Never throws.
+ */
+export async function armFromShiftMonitorDiscoveries(
+  producer: TimerTriggerArmProducer | undefined,
+  discoveries: ReadonlyArray<{ assignments: readonly ShiftArmCandidate[] }>,
+  deps: {
+    environmentService: { get(key: 'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS' | 'LATE_CLOCK_IN_GRACE_MINUTES'): number };
+    logger: { warn(message: string): void };
+    recordOutcome?: (kind: TimerTriggerKind, outcome: TimerTriggerOutcome) => void;
+  },
+): Promise<void> {
+  if (!producer || !(producer.enabled('no-show') || producer.enabled('late-clock-in'))) return;
+  const result = await armShiftTimerTriggers(producer, discoveries.flatMap((d) => d.assignments), {
+    nowMs: Date.now(),
+    horizonMs: deps.environmentService.get('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS') * 1000 * TIMER_TRIGGER_ARM_HORIZON_INTERVALS,
+    lateClockInGraceMinutes: deps.environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+    recordOutcome: deps.recordOutcome,
+  }).catch(() => ({ armed: 0, failed: 0 }));
+  if (result.failed) deps.logger.warn(`shift monitor: timer-trigger arming failed for ${result.failed} trigger(s); the scans are the backstop`);
 }

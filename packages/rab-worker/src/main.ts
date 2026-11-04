@@ -277,6 +277,7 @@ async function bootstrap(): Promise<void> {
     shiftStatementQueue,
     // Phase D-Q4b: trigger outcome counters on the fail-fast client (a Redis outage rejects at once, never queues).
     timerTriggerOutcomes: redisTimerTriggerOutcomeRecorder(scanTicksRedis),
+    timerTriggers: appContext.get(TimerTriggerQueueService),
   });
 
   // Processor discovery (BullMQ migration M2): every scan and consumer handler is a `@Process` method on a `@Processor`

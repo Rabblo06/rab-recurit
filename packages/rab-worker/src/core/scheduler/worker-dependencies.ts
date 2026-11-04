@@ -20,6 +20,7 @@ import { NotificationService } from '@rab/server/modules/notification/services/n
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
 import { ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import type { TimerTriggerKind, TimerTriggerOutcome } from '@rab/server/engine/worker-shared/timer-trigger.contract';
+import type { TimerTriggerArmProducer } from '../../queues/rab-timer-triggers/timer-trigger-arming';
 
 /**
  * Everything the job adapters pass to the existing `run*Cycle` functions — the same objects main.ts always passed
@@ -57,6 +58,8 @@ export interface WorkerJobDependencies {
    * Optional: absent (unit fixtures) ⇒ not recorded.
    */
   timerTriggerOutcomes?: (kind: TimerTriggerKind, outcome: TimerTriggerOutcome) => void;
+  /** Phase D-Q4b: the trigger producer, for no-show / late clock-in arming in both shift-monitor paths. Absent ⇒ never arms. */
+  timerTriggers?: TimerTriggerArmProducer;
 }
 
 /**
