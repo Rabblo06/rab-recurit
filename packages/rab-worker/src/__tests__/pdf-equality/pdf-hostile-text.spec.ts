@@ -12,6 +12,7 @@ import { loadGlyphTransform } from './glyph-transform';
 import { F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
 import { nativeExpectation } from './native-reference';
 import { renderGuarded } from './network-guard';
+import { NATIVE_ONLY } from './mode';
 import { chromiumRenderer, loadNativeRenderer, NativeNotConvertedError, Renderer } from './renderers';
 
 /**
@@ -26,7 +27,9 @@ import { chromiumRenderer, loadNativeRenderer, NativeNotConvertedError, Renderer
  *     renderer's own blocked-request counter must stay at zero, i.e. nothing even tried to load; native: DENY mode, so
  *     any socket / DNS / fetch / http(s) call in this process fails the render);
  *   - the PDF has no active content (/JavaScript, /JS, /OpenAction, /Launch, /URI, /EmbeddedFile, /AA, /AcroForm);
- *   - native only: no text outside the page (the 1,000-character token wraps).
+ *   - native only: no text outside the page (the 1,000-character token wraps), no text drawn over other text.
+ *
+ * PDF_EQUALITY_MODE=native-only (P5) runs the native half only; the Chromium half needs Chromium in the tree.
  *
  *   bash C:/rab-ai-wt/setup/heavy-run.sh pdf-tests npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts pdf-hostile-text
  */
@@ -39,6 +42,8 @@ const native = loadNativeRenderer();
 let server: Server;
 let base = '';
 const hits: string[] = [];
+/** TCP connections accepted by the listener (a request needs one; a connection without a request still counts). */
+let connections = 0;
 const sockets = new Set<Socket>();
 let fixtures: Map<string, FixtureDocument>;
 
@@ -49,6 +54,7 @@ beforeAll(async () => {
     res.end('HOSTILE-REMOTE-MARKER');
   });
   server.on('connection', (s) => {
+    connections++;
     sockets.add(s);
     s.on('close', () => sockets.delete(s));
   });
@@ -64,6 +70,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   hits.length = 0;
+  connections = 0;
 });
 
 const IDS = fixtureIds({ hostileBase: 'http://127.0.0.1:9' }).filter((id) => SCENARIOS.some((s) => id.startsWith(`${s}/`)));
@@ -82,6 +89,7 @@ async function renderSafely(renderer: Renderer, f: FixtureDocument, mode: 'recor
   const x = extractFixture(f, rendered.pdf);
 
   expect(hits).toEqual([]);
+  expect(connections).toBe(0);
   expect(rendered.attempts).toEqual([]);
   expect(blocked).toEqual([]);
   expect(x.activeContentKeys).toEqual([]);
@@ -116,7 +124,7 @@ async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): P
   await assertPrintedLiterally(renderer, f, await renderSafely(renderer, f, mode));
 }
 
-describe('hostile text — Chromium', () => {
+(NATIVE_ONLY ? describe.skip : describe)('hostile text — Chromium (compare mode only: P5 removes Chromium)', () => {
   it.each(IDS.filter((id) => !(id in F_PDF_1_FIXTURES)))('%s: printed literally, no request, no active content', async (id) => {
     await check(chromiumRenderer, id, 'record');
   });
@@ -125,14 +133,17 @@ describe('hostile text — Chromium', () => {
   // assertions stay plain tests; only "printed literally" is `test.failing`, and turns RED once the template is fixed.
   const findingRenders = new Map<string, PdfExtraction>();
   const findingIds = IDS.filter((id) => id in F_PDF_1_FIXTURES);
-  it.each(findingIds)('%s: no request, no active content', async (id) => {
-    findingRenders.set(id, await renderSafely(chromiumRenderer, fixtures.get(id)!, 'record'));
-  });
-  test.failing.each(findingIds)(`%s: printed literally — KNOWN FINDING ${F_PDF_1}`, async (id) => {
-    const x = findingRenders.get(id);
-    if (!x) throw new Error(`${id}: not rendered (see the test above)`);
-    await assertPrintedLiterally(chromiumRenderer, fixtures.get(id)!, x);
-  });
+  // Empty once the template is fixed (known-findings.ts F_PDF_1_PRESENT): the plain test above then covers them.
+  if (findingIds.length) {
+    it.each(findingIds)('%s: no request, no active content', async (id) => {
+      findingRenders.set(id, await renderSafely(chromiumRenderer, fixtures.get(id)!, 'record'));
+    });
+    test.failing.each(findingIds)(`%s: printed literally — KNOWN FINDING ${F_PDF_1}`, async (id) => {
+      const x = findingRenders.get(id);
+      if (!x) throw new Error(`${id}: not rendered (see the test above)`);
+      await assertPrintedLiterally(chromiumRenderer, fixtures.get(id)!, x);
+    });
+  }
 });
 
 if ('unavailable' in native) {

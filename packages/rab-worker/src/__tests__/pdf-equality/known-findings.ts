@@ -1,3 +1,5 @@
+import { DOCUMENT_CSS } from '@rab/server/modules/attendance/templates/adolphus-document';
+
 import { checkAgainstInput, countValue } from './checker';
 import { expectationFor, ReportDocument } from './documents';
 import { compact, PdfExtraction } from './extract';
@@ -26,6 +28,14 @@ import { compact, PdfExtraction } from './extract';
  */
 export const F_PDF_1 = 'F-PDF-1 (Chromium: unbroken token in notes clips the notes and drops the right-hand column)';
 
+/**
+ * Whether THIS tree's template still has the F-PDF-1 cause: `.bottom > div` without `min-width: 0` (the fix, branch
+ * fix/pdf-notes-column-and-line-breaks, adds `min-width: 0; overflow-wrap: anywhere`). Where it is fixed the finding no
+ * longer applies: F_PDF_1_FIXTURES is empty, so the unbroken-token fixtures run as PLAIN tests with the full assertion
+ * (a fix that does not really stop the clipping fails them), and Chromium is again the native renderer's reference there.
+ */
+export const F_PDF_1_PRESENT = !/\.bottom\s*>\s*div\s*\{[^}]*min-width\s*:\s*0/.test(DOCUMENT_CSS);
+
 export interface ClippingExpectation {
   /** Labels of the business values that are not printed. */
   missing: string[];
@@ -35,7 +45,7 @@ export interface ClippingExpectation {
   droppedHeading: string;
 }
 
-export const F_PDF_1_FIXTURES: Readonly<Record<string, ClippingExpectation>> = Object.freeze({
+const F_PDF_1_SHAPES: Readonly<Record<string, ClippingExpectation>> = Object.freeze({
   'unbroken-token/final-timesheet-original': {
     missing: ['shift notes'],
     parseBack: 'durations: stored minutes not printed 270; printed but not stored ; total worked hours: printed 0× (want exactly once)',
@@ -48,6 +58,9 @@ export const F_PDF_1_FIXTURES: Readonly<Record<string, ClippingExpectation>> = O
   },
   'unbroken-token/pre-shift-report': { missing: ['shift notes'], parseBack: null, droppedHeading: 'BEFORE-SHIFT DOCUMENT' },
 });
+
+/** The fixtures F-PDF-1 affects, with the exact shape of the clipping — empty once the template is fixed. */
+export const F_PDF_1_FIXTURES: Readonly<Record<string, ClippingExpectation>> = F_PDF_1_PRESENT ? F_PDF_1_SHAPES : Object.freeze({});
 
 export interface ClippingEvidence {
   /** Failing (non-INFO) checks of `checkAgainstInput`. */

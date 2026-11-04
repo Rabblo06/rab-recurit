@@ -3,7 +3,7 @@ import { inflateSync } from 'zlib';
 import jsQR from 'jsqr';
 
 import { inspectPdf } from '../helpers/pdf-inspect';
-import { ImagePlacement, inspectPdfLayout, LayoutBlock, PdfDict, PdfName, pdfNumber, PdfReader, PdfRef, PdfString, PdfValue } from '../helpers/pdf-layout';
+import { ImagePlacement, inspectPdfLayout, LayoutBlock, PdfDict, PdfName, pdfNumber, PdfReader, PdfRef, PdfString, PdfValue, TextRun } from '../helpers/pdf-layout';
 
 /**
  * PDF EXTRACTOR for the renderer migration (Chromium → native). Text, positions and images come from
@@ -44,6 +44,11 @@ export interface PageExtraction {
   number: number;
   /** Normalised lines, top to bottom; within a line the column segments are joined by one space. */
   lines: string[];
+  /**
+   * Each line's column segments (normalised), aligned with `lines`: text separated on the line by more than 1.2 em,
+   * i.e. one table cell or one field each. Used to count a value as a whole field (F1 marker values, checker.ts).
+   */
+  lineSegments: string[][];
   /** `lines` joined with "\n". */
   text: string;
   /** Wrapped cells / paragraphs joined (reading order). Used to find values that wrap over several lines. */
@@ -87,6 +92,8 @@ export interface PdfExtraction {
   activeContentKeys: string[];
   /** Text drawn past the page's right edge, or left of its left edge (per page: count of runs). */
   outOfPageRuns: number[];
+  /** Text drawn over other text, per page (see `overlappingRuns`). */
+  overlaps: TextOverlap[][];
   /** The page size of every page, points, rounded to 0.01. */
   pageSizes: Array<[number, number]>;
   /**
@@ -99,6 +106,54 @@ export interface PdfExtraction {
 const ACTIVE_KEYS = ['JavaScript', 'JS', 'OpenAction', 'Launch', 'URI', 'EmbeddedFile', 'EmbeddedFiles', 'AA', 'AcroForm', 'SubmitForm', 'GoToR', 'RichMedia'];
 
 const PAGE_OF = /Page\s*(\d+)\s*of\s*(\d+)/i;
+
+/** Two text runs whose glyph boxes intersect (one drawn over the other). */
+export interface TextOverlap {
+  a: string;
+  b: string;
+  /** Horizontal intersection, points. */
+  overlapX: number;
+  /** Baseline distance, points. */
+  dy: number;
+}
+
+type RunBox = Pick<TextRun, 'text' | 'x' | 'endX' | 'y' | 'size'>;
+
+/**
+ * Text drawn over other text on one page: two non-blank runs whose glyph boxes intersect, i.e. baselines closer than
+ * 0.6 of the smaller font size (a line drawn into another line, or two runs on one baseline) and a horizontal
+ * intersection wider than 1 pt and than a fifth of the narrower run (so kerning, touching runs and blank edges never
+ * count). A layout that lets a cell, a wrapped line or a footer run into another prints unreadable text there; the
+ * checker fails it for the native renderer (one of the D6 conditions: no overlap) and reports it for Chromium.
+ */
+export function overlappingRuns(runs: readonly RunBox[]): TextOverlap[] {
+  const boxes = runs
+    .map((r) => {
+      // The ink, not the advance of blank edges: trim them in proportion to the characters.
+      const chars = [...r.text];
+      const lead = chars.length - [...r.text.trimStart()].length;
+      const trail = chars.length - [...r.text.trimEnd()].length;
+      const per = chars.length ? (r.endX - r.x) / chars.length : 0;
+      return { text: r.text.trim(), x: r.x + lead * per, endX: r.endX - trail * per, y: r.y, size: r.size };
+    })
+    .filter((r) => r.text.length > 0 && r.endX > r.x)
+    .sort((a, b) => a.y - b.y);
+  const out: TextOverlap[] = [];
+  for (let i = 0; i < boxes.length; i++) {
+    const a = boxes[i]!;
+    for (let k = i + 1; k < boxes.length; k++) {
+      const b = boxes[k]!;
+      const dy = b.y - a.y;
+      if (dy >= 0.6 * Math.max(a.size, b.size)) break; // sorted by baseline: nothing further on can be closer
+      if (dy >= 0.6 * Math.min(a.size, b.size)) continue;
+      const overlapX = Math.min(a.endX, b.endX) - Math.max(a.x, b.x);
+      if (overlapX > Math.max(1, 0.2 * Math.min(a.endX - a.x, b.endX - b.x))) {
+        out.push({ a: a.text, b: b.text, overlapX: Math.round(overlapX * 10) / 10, dy: Math.round(dy * 10) / 10 });
+      }
+    }
+  }
+  return out;
+}
 
 export interface Continuation {
   /** 1-based page numbers, consecutive. */
@@ -154,7 +209,9 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
   const header = spec.tableHeader ? compact(spec.tableHeader.join('')) : null;
 
   const outPages: PageExtraction[] = pages.map((p, i) => {
-    const lines = p.lines.map((l) => normaliseText(l.text)).filter((l) => l.length > 0);
+    const kept = p.lines.filter((l) => normaliseText(l.text).length > 0);
+    const lines = kept.map((l) => normaliseText(l.text));
+    const lineSegments = kept.map((l) => l.segments.map((g) => normaliseText(g.text)).filter((g) => g.length > 0));
     let footer: string | null = null;
     let footerNumbering: PageExtraction['footerNumbering'] = null;
     for (let k = lines.length - 1; k >= 0; k--) {
@@ -168,6 +225,7 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
     return {
       number: i + 1,
       lines,
+      lineSegments,
       text: lines.join('\n'),
       blocks: p.blocks.map((b) => normaliseText(b.text)).filter((b) => b.length > 0),
       blockLines: p.blocks.filter((b) => normaliseText(b.text).length > 0).map((b) => b.lines.map(normaliseText).filter((l) => l.length > 0)),
@@ -253,6 +311,7 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
     continuations,
     activeContentKeys: [...active].sort(),
     outOfPageRuns: pages.map((p) => p.runs.filter((r) => r.text.trim() && (r.endX > p.width + 0.5 || r.x < -0.5)).length),
+    overlaps: pages.map((p) => overlappingRuns(p.runs)),
     pageSizes: pages.map((p): [number, number] => [Math.round(p.width * 100) / 100, Math.round(p.height * 100) / 100]),
     oracle,
   };

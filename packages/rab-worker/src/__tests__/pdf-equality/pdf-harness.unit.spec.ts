@@ -1,9 +1,13 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import { layoutLines, TextRun } from '../helpers/pdf-layout';
-import { compareExtractions, countValue, forcedBreakOccurrences, permutedOccurrences } from './checker';
-import { DOCUMENT_SPECS, DocumentExpectation } from './documents';
-import { Continuation, pageContinuations, PdfExtraction } from './extract';
+import { checkAgainstDocument, checkAgainstInput, compareExtractions, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
+import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
+import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
 import { loadGlyphTransform } from './glyph-transform';
-import { footerTexts, htmlText, tokensJoiningForcedBreaks } from './native-reference';
+import { equalityMode } from './mode';
+import { footerTexts, htmlText, htmlTextNodes, joinLineBreaks, markerOccurrences, tokensJoiningForcedBreaks } from './native-reference';
 import { guardNetwork, NetworkDeniedError, renderGuarded } from './network-guard';
 
 // The real module object (what the guard patches), not an `import * as` copy.
@@ -29,6 +33,7 @@ function extraction(pages: string[][], continuations: Continuation[] = []): PdfE
     pages: pages.map((lines, i) => ({
       number: i + 1,
       lines,
+      lineSegments: lines.map((l) => [l]),
       text: lines.join('\n'),
       blocks: lines,
       blockLines: lines.map((l) => [l]),
@@ -44,6 +49,7 @@ function extraction(pages: string[][], continuations: Continuation[] = []): PdfE
     continuations,
     activeContentKeys: [],
     outOfPageRuns: pages.map(() => 0),
+    overlaps: pages.map(() => []),
     pageSizes: pages.map((): [number, number] => [595, 842]),
     oracle: { pageCount: pages.length, images: [], agrees: true, detail: '' },
   };
@@ -219,11 +225,12 @@ describe('F-PDF-1 interplay: native counted against the document, not against Ch
     values: [{ label: 'row 1 worked; total', value: '4h 30m', min: 1 }],
     qrPayloads: [],
     rowMarkers: [],
+    multiLine: [],
     parseBack: { durations: [], breaks: [], fields: [] },
   };
   const chromium = extraction([['row 1 4h 30m']]); // the total is clipped away (F-PDF-1)
   const native = extraction([['row 1 4h 30m', 'Total worked hours: 4h 30m']]);
-  const ref = (n: number, words: string[]) => ({ label: 'document', count: () => n, tokens: words, tokensB: (x: PdfExtraction) => x.text.split(/\s+/).filter(Boolean) });
+  const ref = (n: number, words: string[]) => ({ label: 'document', count: () => n, tokens: words });
   const words = ['row', '1', '4h', '30m', 'Total', 'worked', 'hours:', '4h', '30m'];
   const check = (r: ReturnType<typeof compareExtractions>, name: string) => r.findings.find((f) => f.check === name)!;
 
@@ -243,14 +250,19 @@ describe('F-PDF-1 interplay: native counted against the document, not against Ch
     expect(check(compareExtractions('t', expect_, chromium, native), 'values-equal').ok).toBe(false);
   });
 
-  it('a value that F1 makes all □ is not count-compared (no identity); any other value still is', () => {
+  it('a value that F1 makes all □ is count-compared exactly, as a whole field (no longer exempt)', () => {
     const e = (value: string): DocumentExpectation => ({ ...expect_, values: [{ label: 'v', value, min: 1 }] });
-    const x = extraction([['□□ □□□ Kraków □']]);
+    const x = extraction([['□□ □□□ Kraków □']]); // "□ □□" is NOT printed as a field here: only inside longer marker runs
     const opaque = compareExtractions('t', e('□ □□'), x, x, ['chromium', 'native'], { referenceB: ref(1, ['□□', '□□□', 'Kraków', '□']) });
-    expect(check(opaque, 'values-equal').ok).toBe(true);
-    expect(check(opaque, 'values-equal').detail).toMatch(/not count-compared/);
-    const visible = compareExtractions('t', e('Kraków □'), x, x, ['chromium', 'native'], { referenceB: ref(2, ['□□', '□□□', 'Kraków', '□']) });
-    expect(check(visible, 'values-equal').ok).toBe(false);
+    expect(check(opaque, 'values-equal').ok).toBe(false);
+    expect(check(opaque, 'values-equal').detail).not.toMatch(/not count-compared/);
+    expect(check(opaque, 'values-present(native)').ok).toBe(false);
+    const printed = extraction([['□ □□', 'Kraków □']]);
+    const ok = compareExtractions('t', e('□ □□'), printed, printed, ['chromium', 'native'], { referenceB: ref(1, ['□', '□□', 'Kraków', '□']) });
+    expect(check(ok, 'values-equal').ok).toBe(true);
+    expect(check(ok, 'values-present(native)').ok).toBe(true);
+    const twice = compareExtractions('t', e('□ □□'), printed, printed, ['chromium', 'native'], { referenceB: ref(2, ['□', '□□', 'Kraków', '□']) });
+    expect(check(twice, 'values-equal').ok).toBe(false); // the document prints it twice, the render once
   });
 
   it("the document's text-transform: uppercase classes are applied, as the template prints them", () => {
@@ -297,5 +309,253 @@ describe('network guard (network-guard.ts)', () => {
       return Buffer.from('%PDF-');
     });
     expect(attempts.map((a) => a.api)).toContain('net.connect');
+  });
+});
+
+/** One page whose lines are given as their column segments (one cell / field each). */
+function segmentExtraction(lines: string[][]): PdfExtraction {
+  const x = extraction([lines.map((segments) => segments.join(' '))]);
+  x.pages[0]!.lineSegments = lines;
+  return x;
+}
+
+/** The 166×70 logo, so a synthetic extraction passes `logo-166x70`. */
+function withLogo(x: PdfExtraction): PdfExtraction {
+  x.images = [{ width: 166, height: 70, placements: 1, undecodable: null, qrPayload: null }];
+  x.imageCount = 1;
+  return x;
+}
+
+const findingOf = (r: { findings: Array<{ check: string; ok: boolean; info?: boolean; detail: string }> }, check: string) => r.findings.find((f) => f.check === check)!;
+
+describe('□-name assertion: F1 marker values are counted exactly, as whole fields (owner instruction, FINAL brief)', () => {
+  it('a marker-only value is a whole field, or whole tokens next to visible text — never part of a longer marker run', () => {
+    expect(markerOccurrences('□ □□', '□ □□')).toBe(1);
+    expect(markerOccurrences('Staff: □ □□ (ŚT-2012)', '□ □□')).toBe(1);
+    expect(markerOccurrences('□□ □□□', '□ □□')).toBe(0);
+    expect(markerOccurrences('C1[□□] Lone[□]surrogate', '□□')).toBe(0);
+    expect(markerOccurrences('C1[□□] Lone[□]surrogate', '□')).toBe(0);
+    expect(markerOccurrences('□□ □ □□', '□ □□')).toBe(0); // next to another marker token: ambiguous, so not a printing
+    expect(markerOccurrences('□ □□', '□□')).toBe(0);
+    expect(markerOccurrences('□ □□ and □ □□', '□ □□')).toBe(2);
+  });
+
+  it('a value mixing markers and visible text is anchored by the text, and its edge markers may not be extended', () => {
+    expect(markerOccurrences('Chef □□□ Emoji □', 'Chef □□□ Emoji □')).toBe(1);
+    expect(markerOccurrences('Chef □□□□ Emoji □', 'Chef □□□ Emoji □')).toBe(0); // one marker too many
+    expect(markerOccurrences('Chef □□ Emoji □', 'Chef □□□ Emoji □')).toBe(0); // one marker missing
+    expect(markerOccurrences('Emoji □□', 'Emoji □')).toBe(0);
+    expect(markerOccurrences('row 5 Nul□l By□te REF-4', 'Nul□l By□te')).toBe(1);
+  });
+
+  it('fields are located by line and x position: a value is never matched across two neighbouring cells', () => {
+    expect(markerFieldCount(segmentExtraction([['□', '□□', 'ŚT-2012']]), '□ □□')).toBe(0); // two cells "□" | "□□"
+    expect(markerFieldCount(segmentExtraction([['□ □□', 'ŚT-2012'], ['□ □□', 'ŚT-2014']]), '□ □□')).toBe(2); // two rows, exact
+    expect(markerFieldCount(segmentExtraction([['□□', '□ □□']]), '□□')).toBe(1); // the first cell only
+    // countValue (values-present, values-equal) uses this for every value holding □.
+    expect(countValue(segmentExtraction([['□', '□□', 'ŚT-2012']]), '□ □□')).toBe(0);
+    expect(countValue(segmentExtraction([['□ □□', 'ŚT-2012']]), '□ □□')).toBe(1);
+  });
+
+  it('a field wrapped over whole lines of one cell counts once; part of a cell does not', () => {
+    const x = blockExtraction([['□', '□□'], ['□□ □', '□□ x']]);
+    expect(markerFieldCount(x, '□ □□')).toBe(1);
+  });
+
+  it('unsupported-glyph detection is not weakened: the raw characters (no marker), a lost space or a missing marker fail', () => {
+    expect(countValue(segmentExtraction([['王 小明', 'ŚT-2012']]), '□ □□')).toBe(0);
+    expect(countValue(segmentExtraction([['□□□', 'ŚT-2012']]), '□ □□')).toBe(0);
+    expect(countValue(segmentExtraction([['□ □', 'ŚT-2012']]), '□ □□')).toBe(0);
+  });
+
+  it('the document reference counts the same way, over its HTML text nodes (one field each)', () => {
+    expect(htmlTextNodes('<body><td>王 小明</td><td>ŚT-2012</td><div>x<b>y &amp; z</b></div></body>')).toEqual(['王 小明', 'ŚT-2012', 'x', 'y & z']);
+  });
+});
+
+describe('D6 hyphen wrap: accepted only when the joined text is identical and every other check passes', () => {
+  const name = 'Maximilian Montgomery-Fitzgerald Worthington-Smythe III';
+  const words = ['Maximilian', 'Montgomery-Fitzgerald', 'Worthington-Smythe', 'III', 'REF-1'];
+  const e: DocumentExpectation = {
+    kind: 'final-timesheet',
+    spec: { ...DOCUMENT_SPECS['final-timesheet'], tableHeader: null, hasFooter: false },
+    values: [{ label: 'row 1 name', value: name, min: 1 }],
+    qrPayloads: [],
+    rowMarkers: [],
+    multiLine: [],
+    parseBack: { durations: [], breaks: [], fields: [] },
+  };
+  const chromiumWrapped = () => withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald Worthington-', 'Smythe III'], ['REF-1']]));
+  const nativeWhole = () => withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald', 'Worthington-Smythe III'], ['REF-1']]));
+  const opts = { documentWords: { a: words, b: words }, forcedBreakHyphens: ['native'] };
+
+  it('Chromium "Worthington-" + "Smythe" equals native "Worthington-Smythe": accepted, and reported as D6', () => {
+    const r = compareExtractions('t', e, chromiumWrapped(), nativeWhole(), ['chromium', 'native'], opts);
+    expect(findingOf(r, 'tokens').ok).toBe(true);
+    expect(findingOf(r, 'tokens').detail).toMatch(/^D6 hyphen wrap: /);
+    expect(findingOf(r, 'd6-hyphen-wrap')).toMatchObject({ ok: true, info: true });
+    expect(r.ok).toBe(true);
+  });
+
+  it('the other way round (native breaks at the existing hyphen) is accepted the same way', () => {
+    const r = compareExtractions('t', e, nativeWhole(), chromiumWrapped(), ['chromium', 'native'], opts);
+    expect(findingOf(r, 'tokens').ok).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it('a truncated name fails: native "Worthington-Smyth", or the wrapped pieces "Worthington-" + "Smyth"', () => {
+    const truncated = withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald', 'Worthington-Smyth III'], ['REF-1']]));
+    const r = compareExtractions('t', e, chromiumWrapped(), truncated, ['chromium', 'native'], opts);
+    expect(findingOf(r, 'tokens').ok).toBe(false);
+    expect(findingOf(r, 'values-present(native)').ok).toBe(false);
+    const wrappedTruncated = withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald Worthington-', 'Smyth III'], ['REF-1']]));
+    const r2 = compareExtractions('t', e, nativeWhole(), wrappedTruncated, ['chromium', 'native'], opts);
+    expect(findingOf(r2, 'tokens').ok).toBe(false);
+    expect(r2.ok).toBe(false);
+  });
+
+  it('a dropped character fails, on either side of the hyphen', () => {
+    for (const printed of ['Worthngton-Smythe', 'Worthington-Smyte', 'WorthingtonSmythe']) {
+      const native = withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald', `${printed} III`], ['REF-1']]));
+      const r = compareExtractions('t', e, chromiumWrapped(), native, ['chromium', 'native'], opts);
+      expect(findingOf(r, 'tokens').ok).toBe(false);
+      expect(r.ok).toBe(false);
+    }
+  });
+
+  it('without the document words no line break is rejoined, so the difference fails (it is never accepted silently)', () => {
+    const r = compareExtractions('t', e, chromiumWrapped(), nativeWhole(), ['chromium', 'native'], { forcedBreakHyphens: ['native'] });
+    expect(findingOf(r, 'tokens').ok).toBe(false);
+  });
+
+  it('D6 is NOT accepted when another check fails (here: text drawn over other text); the tokens finding names it', () => {
+    const native = nativeWhole();
+    native.overlaps = [[{ a: 'Worthington-Smythe', b: 'REF-1', overlapX: 12, dy: 0 }]];
+    const r = compareExtractions('t', e, chromiumWrapped(), native, ['chromium', 'native'], opts);
+    expect(findingOf(r, 'no-overlap(native)').ok).toBe(false);
+    expect(findingOf(r, 'tokens').ok).toBe(false);
+    expect(findingOf(r, 'tokens').detail).toMatch(/D6 hyphen-wrap difference NOT accepted: other checks fail \(no-overlap\(native\)\)/);
+    expect(r.findings.some((f) => f.check === 'd6-hyphen-wrap')).toBe(false);
+  });
+
+  it('a hyphen that is not in the document is never joined as D6', () => {
+    const x = blockExtraction([['Reviewed by Morgan Duty-', 'Manager today']]);
+    expect(joinLineBreaks(x, ['Reviewed', 'by', 'Morgan', 'Duty', 'Manager', 'today'], { forcedBreaks: false, d6: true }).d6).toEqual([]);
+    expect(joinLineBreaks(x, ['Reviewed', 'by', 'Morgan', 'Duty-Manager', 'today'], { forcedBreaks: false, d6: true }).d6).toEqual(['Duty-Manager']);
+  });
+
+  it('native-only mode (checkAgainstDocument) applies the same rule against the document, never against Chromium', () => {
+    const reference = { label: 'document', count: (v: string) => (v === name ? 1 : 0), tokens: words, footers: [] };
+    const r = checkAgainstDocument('t', e, chromiumWrapped(), 'native', reference, { images: 1, forcedBreakHyphens: ['native'] });
+    expect(findingOf(r, 'tokens').ok).toBe(true);
+    expect(findingOf(r, 'd6-hyphen-wrap')).toMatchObject({ ok: true, info: true });
+    expect(r.ok).toBe(true);
+    const truncated = withLogo(blockExtraction([['Maximilian Montgomery-Fitzgerald Worthington-', 'Smyth III'], ['REF-1']]));
+    expect(checkAgainstDocument('t', e, truncated, 'native', reference, { images: 1, forcedBreakHyphens: ['native'] }).ok).toBe(false);
+  });
+});
+
+describe('text drawn over other text (extract overlappingRuns; checker no-overlap)', () => {
+  const run = (text: string, x: number, y: number, size = 10) => ({ text, x, y, endX: x + 5 * [...text].length, size });
+
+  it('two runs on one baseline that intersect overlap; touching or kerned runs do not', () => {
+    expect(overlappingRuns([run('Hello', 0, 100), run('World', 15, 100)])).toHaveLength(1);
+    expect(overlappingRuns([run('Hello', 0, 100), run('World', 25, 100)])).toEqual([]);
+    expect(overlappingRuns([run('Hello', 0, 100), run('World', 24.5, 100)])).toEqual([]);
+  });
+
+  it('a line drawn into the line above overlaps; ordinary line spacing does not; blank runs never count', () => {
+    expect(overlappingRuns([run('abcdef', 0, 100), run('ghijkl', 0, 97)])).toHaveLength(1);
+    expect(overlappingRuns([run('abcdef', 0, 100), run('ghijkl', 0, 88)])).toEqual([]);
+    expect(overlappingRuns([run('abcdef', 0, 100), run('      ', 0, 100)])).toEqual([]);
+  });
+
+  it('is a failure for the native renderer and INFO for Chromium', () => {
+    const x = extraction([['a']]);
+    x.overlaps = [[{ a: 'a', b: 'b', overlapX: 5, dy: 0 }]];
+    const e: DocumentExpectation = { kind: 'approved-shift-statement', spec: DOCUMENT_SPECS['approved-shift-statement'], values: [], qrPayloads: [], rowMarkers: [], multiLine: [], parseBack: { durations: [], breaks: [], fields: [] } };
+    expect(checkAgainstInput(e, x, 'native').find((f) => f.check === 'no-overlap(native)')).toMatchObject({ ok: false });
+    expect(checkAgainstInput(e, x, 'chromium').find((f) => f.check === 'no-overlap(chromium)')).toMatchObject({ ok: true, info: true });
+  });
+});
+
+describe('notes keep their line breaks (checker line-breaks; owner decision 2026-11-04)', () => {
+  const note = 'Black tie.\nReport to the staff entrance at 16:45.\r\n\r\nAsk for Jamie on arrival.';
+
+  it('every line of the note starts a printed line, in order: no problem', () => {
+    expect(lineBreakProblems(blockExtraction([['NOTES'], ['Black tie.', 'Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']]), note)).toEqual([]);
+  });
+
+  it('collapsed into running text (today\'s HTML white-space: normal), the later lines start mid-line: fails', () => {
+    const problems = lineBreakProblems(blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for', 'Jamie on arrival.']]), note);
+    expect(problems).toHaveLength(2);
+    expect(problems[0]).toMatch(/line 2 of 3/);
+  });
+
+  it('lines out of order fail', () => {
+    expect(lineBreakProblems(blockExtraction([['Report to the staff entrance at 16:45.'], ['Black tie.'], ['Ask for Jamie on arrival.']]), note)).toHaveLength(1);
+  });
+
+  it('a line wrapped inside its cell, or cut by a page break after its first printed line, still starts a line', () => {
+    const x = extraction([
+      ['Black tie.', 'Report to the staff'],
+      ['entrance at 16:45.', 'Ask for Jamie on arrival.'],
+    ]);
+    expect(lineBreakProblems(x, note)).toEqual([]);
+    expect(lineBreakProblems(blockExtraction([['Black tie.'], ['Report to the staff', 'entrance at 16:45.'], ['Ask for Jamie on', 'arrival.']]), note)).toEqual([]);
+  });
+
+  it('the note is counted line by line: once when every line is printed, zero when any line is missing or altered', () => {
+    const lines = [['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']];
+    expect(countValue(blockExtraction(lines), note)).toBe(1);
+    expect(countValue(blockExtraction([lines[0]!, lines[2]!]), note)).toBe(0);
+    expect(countValue(blockExtraction([lines[0]!, ['Report to the staff entrance at 16:46.'], lines[2]!]), note)).toBe(0);
+    expect(countValue(blockExtraction([...lines, ...lines]), note)).toBe(2);
+  });
+
+  it('checkAgainstInput fails line-breaks(<render>) for a collapsed note and passes a kept one', () => {
+    const e: DocumentExpectation = {
+      kind: 'approved-shift-statement',
+      spec: DOCUMENT_SPECS['approved-shift-statement'],
+      values: [],
+      qrPayloads: [],
+      rowMarkers: [],
+      multiLine: [{ label: 'shift notes', value: note, min: 1 }],
+      parseBack: { durations: [], breaks: [], fields: [] },
+    };
+    const kept = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']]);
+    const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
+    expect(checkAgainstInput(e, kept, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: true });
+    expect(checkAgainstInput(e, collapsed, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+  });
+});
+
+describe('PDF_EQUALITY_MODE (mode.ts): chosen by the workflow, never guessed', () => {
+  it('compare by default; native-only when asked; anything else refuses to run', () => {
+    expect(equalityMode({})).toBe('compare');
+    expect(equalityMode({ PDF_EQUALITY_MODE: 'compare' })).toBe('compare');
+    expect(equalityMode({ PDF_EQUALITY_MODE: 'native-only' })).toBe('native-only');
+    for (const value of ['native', 'NATIVE-ONLY', ' native-only', 'chromium', '1', 'true']) {
+      expect(() => equalityMode({ PDF_EQUALITY_MODE: value })).toThrow(/PDF_EQUALITY_MODE must be/);
+    }
+  });
+});
+
+describe('file kinds and filenames (documents.ts DOCUMENT_FILES) are exactly what the jobs store', () => {
+  const JOBS = join(__dirname, '..', '..', 'queues', 'rab-reports');
+  /** Every `files.putObject({ … })` of a job: its FileKind and the filename expression, from the job's source. */
+  const uploads = (job: string) =>
+    readFileSync(join(JOBS, job), 'utf8')
+      .split('putObject(')
+      .slice(1)
+      .map((call) => ({ kind: /kind:\s*FileKind\.(\w+)/.exec(call)?.[1] ?? '', filename: /filename:\s*('[^']*'|`[^`]*`)/.exec(call)?.[1] ?? '' }));
+
+  it.each(Object.keys(DOCUMENT_FILES) as DocumentKind[])('%s', (kind) => {
+    const spec = DOCUMENT_FILES[kind];
+    const doc = kind === 'approved-shift-statement' ? { kind, data: { statementReference: 'ASS-20261020-0F1E2D3C' } } : { kind };
+    const filename = spec.filename(doc as never);
+    const source = kind === 'approved-shift-statement' ? '`approved-shift-statement-${prepared.data.statementReference}.pdf`' : `'${filename}'`;
+    expect(uploads(spec.job)).toContainEqual({ kind: spec.fileKind, filename: source });
+    if (kind === 'approved-shift-statement') expect(filename).toBe('approved-shift-statement-ASS-20261020-0F1E2D3C.pdf');
   });
 });

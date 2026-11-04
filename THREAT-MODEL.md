@@ -5002,3 +5002,36 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
+## PDF renderer migration: native security coverage that replaces the Chromium-only tests (branch worker/pdf-test-harness, #51, not merged)
+
+When P5 removes Chromium (`integration/pdf-native`, #61), five Chromium-only specs go with it: `render-pdf.util.spec`,
+`render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and `final-timesheet-renderer-parity`.
+Their security and correctness assertions are kept, against the native renderer, so no control loses its test.
+
+- **Where:** `packages/rab-worker/src/__tests__/pdf-equality/pdf-native-security.spec.ts`. It renders real fixture documents,
+  hostile ones included, through the production seam: `renderReportPdf` → `renderNativePdf` → the render pool. The pool
+  call goes to a pool of the same class, with the production document registry and thread entry, and test-only
+  `allowProbe`. Correctness (every value, footer and "Page n of N", repeated headers, QR, logo, D4) stays in
+  `pdf-equality.native.spec.ts`, which in native-only mode compares against the document's own text, never Chromium.
+- **Asserted:**
+  - the render thread's environment is empty while the jobs process holds credential-shaped values;
+  - hostile URLs in the body, notes, footer and meta-refresh text cause zero connections to a local listener; the thread
+    guard refuses nothing and loads no network builtin;
+  - `file://` URLs and absolute paths print literally: no file content, and no image except the logo and the QR (a
+    positive control proves a 1×1 image would be seen);
+  - script, handler and `javascript:` text is printed, not run, and creates no PDF action, URI, form or attachment;
+  - the same data gives byte-identical output, dated `generatedAt` (D7);
+  - a real document past the deadline is terminated (`PdfRenderTimeoutError`), and one past a lowered heap cap kills only
+    its own thread; neither returns a PDF, and the pool recovers;
+  - on the native-only tree, no browser package is in the seam's import closure.
+- **Not equivalent, by design:** Chromium's sandbox flags (S-7) and launch environment allowlist (H6) have no native
+  counterpart, because there is no browser process. They are replaced by the thread isolation above. "No file access" is
+  proven by construction and content (images are bytes only; fonts are registered from memory), not by a syscall trace in
+  this suite. The image gate's strace (F5) covers that.
+- **Harness strictness (owner decisions, FINAL brief 2026-11-04):**
+  - D6 hyphen wraps are accepted only when the rejoined text is identical and every other check passes;
+  - notes must keep their line breaks;
+  - values printed as F1 □ markers are counted exactly, as whole fields;
+  - text drawn over other text fails the native renderer.
+  Regressions for each are in `pdf-harness.unit.spec.ts`.
