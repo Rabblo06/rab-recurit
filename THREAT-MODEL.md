@@ -5407,6 +5407,7 @@ them is a control that "passed".
 | Audit tampering (`audit_log` insert-only cannot be enforced in the database) | BC-07 / G-05 | HIGH |
 | Persistence through roles or definers that survives credential rotation | BC-09 / G-04 | CRITICAL |
 | Credential-exposure impact (the one URL is the owner) | BC-16 | HIGH |
+| Direct writes to 7 pre-auth tables within one tenant (X2; owner decision 2026-11-04, below) | BC-18 | MEDIUM |
 
 **NOT listed in §2, so STOPPED for explicit owner approval.** The code records each one. Nothing claims any of them is
 acceptable.
@@ -5437,6 +5438,34 @@ acceptable.
 9. **One statement can destroy everything.** Accepted (BC-06). PITR is the only recovery.
 10. **CLAUDE.md's own rules became false.** CLAUDE.md was rewritten for the single architecture the same day. Every
     changed rule is flagged in the PR.
+11. **Owner-accepted, 2026-11-04 (X2, catalogue BC-18):**
+
+    > "Under the owner login, the app can delete or change member invitations, login sessions and email-change requests
+    > within one tenant (7 tables). Accepted, like Twenty."
+
+    The 7 tables are `login_handoff`, `organisation_invitation`, `released_host_label`, `user_auth_identity`,
+    `user_session`, `member_invitation` and `email_change_request`.
+
+    - **Why:** `crewflow_app` held no DELETE on them, and on some of them no (or only column-level) INSERT or UPDATE, so
+      the database refused a direct write and SECURITY DEFINER functions were the only write path. The owner login
+      inherits the table owner `rab_secure_owner`, so on a normal code path the database no longer refuses such a write.
+      M-T1 (FORCE) still confines it to the bound tenant, and with no tenant context it affects 0 rows.
+    - **Decision:** no database guard (the proposed migration 1786721440000 was dropped by the owner). The protection is
+      app-level only, like Twenty: every write to these tables must stay in its reviewed owning service.
+      `tools/check-protected-table-writes.cjs` (CI job `protected-table-writes`) fails on any new direct write outside
+      the allow-list.
+    - **Write audit (27 sites, all in owning code):**
+      - the definer SQL in `host-label-namespace-sql.ts` and `login-handoff-sql.ts`;
+      - `RefreshTokenService`, `SessionValidityService` and `UserSessionBackfillService` for `user_session`;
+      - `UserAuthIdentityService`, `EmailChangeService` and `MemberInvitationService`.
+    - **Finding PTW-1 (LOW):** three security revocations write `user_session` directly instead of through
+      `RefreshTokenService`: `mfa-management.service.ts:220`, `admin-users.service.ts:181` and
+      `privileged-grant-session-reset.ts:28`. They touch `revoked_at`, `revoked_reason` and `security_version` only, are
+      scoped to one user and bound to the tenant. They are allow-listed so they stay visible; consolidation is
+      recommended.
+    - **Tests:** the member-invitation X2 test documents the difference per connected login. `crewflow_app` is still
+      refused (42501), the owner login is not, and RLS still leaves 0 rows without context. Catalogue test BC-18
+      reproduces it.
 
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 
