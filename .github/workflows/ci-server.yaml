@@ -66,23 +66,7 @@ jobs:
           eval "$test_env"
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
-          npx nx run-many -t test -p rab-server,rab-shared --runInBand --testTimeout=180000 --json --outputFile=/tmp/jest-results.json
-      - name: TEMPORARY DIAGNOSTIC (to be reverted) - failed rab-server test files and first assertion errors
-        if: always()
-        run: |
-          node -e '
-            const fs = require("fs");
-            if (!fs.existsSync("/tmp/jest-results.json")) { console.log("no /tmp/jest-results.json"); process.exit(0); }
-            const r = JSON.parse(fs.readFileSync("/tmp/jest-results.json", "utf8"));
-            console.log("suites", r.numTotalTestSuites, "failed suites", r.numFailedTestSuites, "failed tests", r.numFailedTests);
-            for (const s of r.testResults.filter((s) => s.status === "failed")) {
-              console.log("FAILED SUITE", s.name);
-              if (s.message) console.log(s.message.replace(/\x1b\[[0-9;]*m/g, "").slice(0, 3000));
-              for (const a of s.assertionResults.filter((a) => a.status === "failed").slice(0, 5)) {
-                console.log("  FAILED TEST", a.fullName);
-                console.log((a.failureMessages[0] || "").replace(/\x1b\[[0-9;]*m/g, "").slice(0, 2500));
-              }
-            }'
+          npx nx run-many -t test -p rab-server,rab-shared --runInBand --testTimeout=180000
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
