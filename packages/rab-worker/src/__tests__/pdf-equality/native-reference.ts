@@ -207,7 +207,7 @@ export async function htmlReference(doc: ReportDocument, x: PdfExtraction, trans
 /** Whether the document's text changes under F1 (it holds a character the bundled fonts cannot print). */
 export async function changedByF1(doc: ReportDocument, transform: GlyphTransform): Promise<boolean> {
   const { html, options } = renderCall(doc);
-  const texts = [htmlText(html), ...footerTexts(options.footerTemplate, 1)].map((t) => t.replace(/\r\n/g, '\n').replace(/\t/g, ' '));
+  const texts = [htmlText(html), ...footerTexts(options.footerTemplate, 1)].map((t) => t.replace(/\r\n?|[\u2028\u2029]/g, '\n').replace(/\t/g, ' '));
   const out = await transform(texts);
   return out.some((t, i) => t !== texts[i]);
 }

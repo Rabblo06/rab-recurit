@@ -10,6 +10,7 @@ import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
 import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
+import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -96,6 +97,19 @@ WORKER_SHIFT_SCAN_MODE=combined needs the greatest common divisor of ${COMBINED_
   // the Worker use) is the rule. Fail closed at boot, never on the first trigger.
   try {
     parseTimerTriggerKinds(validated.WORKER_TIMER_TRIGGER_KINDS);
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
+  }
+
+  // PDF renderer P1 (review M-3): the native render threads' heap caps must fit the budget (default half of the Worker's
+  // 1536m mem_limit), so concurrent oversized renders kill their own thread, never the whole Worker container. Checked in
+  // every mode (a configuration that would be unsafe once PDF_RENDERER=native is refused now, not on the switch).
+  try {
+    assertPdfNativeMemoryFits(
+      validated.PDF_NATIVE_CONCURRENCY === undefined ? PDF_NATIVE_CONCURRENCY_DEFAULT : Number(validated.PDF_NATIVE_CONCURRENCY),
+      parsePdfNativeMemoryBudgetMb(validated.PDF_NATIVE_MEMORY_BUDGET_MB),
+    );
   } catch (error) {
     throw new Error(`Invalid environment configuration:
 ${(error as Error).message}`);

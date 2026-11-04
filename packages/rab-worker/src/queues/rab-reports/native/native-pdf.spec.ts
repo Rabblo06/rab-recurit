@@ -91,7 +91,6 @@ const UNPRINTABLE: ReadonlyArray<readonly [string, string, number]> = [
   ['zero-width space (U+200B)', 'Zero\u200bWidth', 1],
   ['zero-width joiner (U+200D)', 'Join\u200dHere', 1],
   ['byte-order mark (U+FEFF)', 'BOM\ufeffHere', 1],
-  ['carriage return alone', 'Line\rBreak', 1],
   // Form feed: Chromium prints it as a visible control glyph (MEASURED, Agent C); native prints the F1 marker, never a space.
   ['form feed (U+000C)', 'Form\fFeed', 1],
   ['NUL', 'Nul\u0000Here', 1],
@@ -293,6 +292,7 @@ describe('whitespace is laid out like the Chromium templates', () => {
     expect(collapsePreLine('a\n\nb \t c\r\nd\fe')).toBe('a\n\nb c\nd e');
     expect(collapsePreLine('  lead   \n   trail  ')).toBe(' lead\ntrail ');
     expect(collapsePreLine('one\rtwo')).toBe('one\ntwo');
+    expect(collapsePreLine('one\u2028two\u2029three')).toBe('one\ntwo\nthree');
     expect(collapsePreLine('x\u00a0\u00a0y')).toBe('x\u00a0\u00a0y');
     expect(collapsePreLine('\n\n\n')).toBe('\n\n\n');
   });
@@ -317,6 +317,19 @@ describe('the shift notes keep their line breaks; nothing else does', () => {
     expect(at('Line two')).toBeLessThan(at('After a blank line'));
     // A table cell is white-space: normal: the name's LF is one space, never a line of its own.
     expect(doc.text).toContain('Ann Lee-Smith');
+  });
+
+  // Review L-6: a client that separates lines with a lone CR, U+2028 or U+2029 gets line breaks, never □ markers.
+  it('a lone CR, U+2028 and U+2029 in the notes are line breaks too: each line printed on its own, in order, no □ marker', async () => {
+    const notes = 'Gate B closed\rUse side entrance\u2028No entry after 21:00\u2029Ask for Jamie';
+    const base = FINAL_TIMESHEET_CASES['one-page']!;
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data: { ...base, notes } }));
+    const lines = doc.pageTexts.flatMap((page) => page.split(/\r?\n/)).map((l) => l.trim());
+    const wanted = ['Gate B closed', 'Use side entrance', 'No entry after 21:00', 'Ask for Jamie'];
+    for (const w of wanted) expect(lines).toContain(w);
+    const at = wanted.map((w) => lines.indexOf(w));
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(doc.text).not.toContain(MARKER);
   });
 });
 

@@ -5357,3 +5357,25 @@ grants, RLS, the renderer's isolation, or any money or worked-minutes value.
     their sign-off and total. Regenerating them is an owner decision.
   - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
     reported to the native-renderer owner.
+
+## PDF renderer review fixes M-3 and L-6 (branch integration/pdf-native-pre-removal, #62, not merged)
+
+No migration, role, grant, RLS or posture change; no money or worked-minutes value changes.
+
+- **M-3 — render memory bounded by the Worker container.** Asset: the Worker's availability for every tenant (all
+  consumers and scans share one container). Actor: any user whose text reaches a PDF (long notes, large rosters), or a
+  layout bug. Before: each native render thread could grow to a 512 MB old generation, independent of
+  `PDF_NATIVE_CONCURRENCY` and of the 1536m `mem_limit`, so concurrent oversized renders could get the whole container
+  OOM-killed instead of failing one thread with `error_PDF_NATIVE_OUT_OF_MEMORY`. Now: 384 MB per thread, and
+  `PDF_NATIVE_CONCURRENCY × 384 MB ≤ PDF_NATIVE_MEMORY_BUDGET_MB` (default 768 = half the default `mem_limit`; strict
+  integer 384–16384) is enforced, fail closed, by boot validation in both processes (every renderer mode), again at Worker
+  boot in native mode, and again by the process-wide pool before it creates any thread
+  (`engine/worker-shared/pdf-native-memory.contract.ts`, one rule). The launcher forwards the variable to the jobs child
+  only. Residual: the budget is a configured number, not read from the cgroup; an operator who raises it without raising
+  `mem_limit` defeats it (documented beside `mem_limit` in both compose files). Tests: `env.validation.pdf-renderer.spec`,
+  `render-pool.spec` (plan, process pool refuses), `pool-env-consistency.spec`, a 500-row roster at the default cap,
+  launcher test 34. The image-level OOM run (H6 M09 with two oversized renders) is still to be re-measured.
+- **L-6 — line separators in notes.** A lone CR, U+2028 and U+2029 are normalised to LF with CRLF in the render
+  thread's glyph guard (and in `collapsePreLine`), so notes keep their author's line breaks instead of printing □. Every
+  other control or format character keeps F1's □ and its count-only log. Tests: `render-pool.spec`, `native-pdf.spec`,
+  harness `pdf-harness.unit.spec` (transform and the `line-breaks` check).

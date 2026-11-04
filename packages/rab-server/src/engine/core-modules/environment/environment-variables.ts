@@ -665,6 +665,18 @@ export class EnvironmentVariables {
   @IsIn(['0', '1', '2', '3', '4'], { message: 'PDF_NATIVE_PREWARM must be an integer from 0 to 4' })
   PDF_NATIVE_PREWARM?: '0' | '1' | '2' | '3' | '4';
 
+  /**
+   * PDF renderer P1 (review M-3) — total MB the native render threads' heap caps may add up to
+   * (engine/worker-shared/pdf-native-memory.contract.ts). Unset (or empty) → 768, half of the Worker's default 1536m
+   * mem_limit; a plain integer from 384 to 16384; anything else refuses to boot. Boot also refuses (env.validation.ts)
+   * when PDF_NATIVE_CONCURRENCY × 384 MB exceeds it, so concurrent oversized renders fail their own thread with
+   * error_PDF_NATIVE_OUT_OF_MEMORY instead of getting the whole Worker container OOM-killed. Raise it only together with
+   * the Worker's mem_limit (CREWFLOW_WORKER_MEM_LIMIT).
+   */
+  @IsOptional()
+  @IsString()
+  PDF_NATIVE_MEMORY_BUDGET_MB?: string;
+
   // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
   // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
   // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot

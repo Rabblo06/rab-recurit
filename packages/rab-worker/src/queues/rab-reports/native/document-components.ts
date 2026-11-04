@@ -53,8 +53,8 @@ export function collapseWhitespace(text: string): string {
  * HTML's `white-space: pre-line` (owner decision 2026-11-04: notes keep their original line breaks; the Chromium
  * templates print the notes paragraph with the same property): every line break is kept, so a blank line stays a blank
  * line, while each run of spaces, TABs and FFs becomes one space and the spaces around a line break are dropped.
- * CRLF and a lone CR are line breaks, as in HTML (the render thread's glyph guard has already turned CRLF into LF and a
- * lone CR into the visible marker; handled here as well so the kit never depends on that order). NBSP is kept.
+ * CRLF, a lone CR, U+2028 and U+2029 are line breaks (the render thread's glyph guard has already turned each of them
+ * into LF, review L-6; handled here as well so the kit never depends on that order). NBSP is kept.
  * FF and every other control character never reach a layout in production: the guard prints them as the visible
  * marker □ (F1; Chromium prints FF as a visible control glyph too), so neither function ever turns one into a space.
  * Only for free text whose line breaks the author typed (the shift notes paragraph of the final timesheet and of the
@@ -62,7 +62,7 @@ export function collapseWhitespace(text: string): string {
  */
 export function collapsePreLine(text: string): string {
   return text
-    .replace(/\r\n?/g, '\n')
+    .replace(/\r\n?|[\u2028\u2029]/g, '\n')
     .replace(/[ \t\f]+/g, ' ')
     .replace(/ ?\n ?/g, '\n');
 }

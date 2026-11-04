@@ -19,14 +19,16 @@ import { chromiumRenderer, loadNativeRenderer, mapLimit, NativeNotConvertedError
  * other check passing), with its regressions in pdf-harness.unit.spec.ts; in native-only mode it is what accepts native's
  * wrap against the document's whole word.
  *
- * OWNER: page-count delta — PENDING, NOT ACCEPTED (NEEDS OWNER APPROVAL). In compare mode the long-text documents paginate
+ * OWNER-ACCEPTED page-count delta (owner decision 2026-11-04). In compare mode the long-text documents paginate
  * differently: final timesheet (both variants) Chromium 6 / native 7 pages, roster 5 / 6. Agent A measured the cause:
  * Chromium rounds Liberation Sans' line box to whole px (9.00 pt baseline-to-baseline), react-pdf does not (9.49 pt), and
  * the 56-paragraph pre-line note runs ~5% longer. A matching lineHeight was tried and reverted (react-pdf 4.9.0 then
- * dropped a paragraph). Until the owner decides, `page-count` stays a failure: these fixtures are `test.failing`, and the
- * evidence test pins that page-count is the ONLY failing check on them, with the measured page counts.
+ * dropped a paragraph). The owner accepted it as a rule (checker.ts `extraPageAccepted` / `acceptOneExtraPage`): the
+ * native render may print at most ONE page more than Chromium (beyond D4), and only when every other check passes. It
+ * applies to every fixture, and the evidence test below pins that on these three the page count is the only difference,
+ * at exactly the measured counts.
  */
-const OWNER_PAGE_COUNT_DELTA = 'OWNER: page-count delta (long note paginates one page longer natively) — NEEDS OWNER APPROVAL';
+const OWNER_PAGE_COUNT_DELTA = 'OWNER-ACCEPTED page-count delta (long note paginates one page longer natively)';
 const OWNER_PAGE_COUNT_FIXTURES: Readonly<Record<string, { chromium: number; native: number }>> = Object.freeze({
   'long-text/final-timesheet-original': { chromium: 6, native: 7 },
   'long-text/final-timesheet': { chromium: 6, native: 7 },
@@ -156,6 +158,8 @@ if ('unavailable' in native) {
           documentWords: { a: words, b: reference ? reference.tokens : words },
           // Chromium only, and only while this tree's template collapses notes (pinned in the self-test); never native.
           lineBreaksInfo: NOTES_LINE_BREAKS_IN_TEMPLATE ? [] : ['chromium'],
+          // Owner-accepted (2026-11-04): native may print one page more than Chromium, only with every other check passing.
+          extraPageAccepted: 'native',
         });
         if (known) {
           // F-PDF-1: Chromium's own input checks fail exactly as pinned in the self-test (known-findings.ts) — INFO here;
@@ -191,23 +195,24 @@ if ('unavailable' in native) {
       const result = await compare(id);
       if (result && !result.ok) throw new Error(formatReport([result]));
     };
-    // Compare mode only: the owner-pending page-count delta (see OWNER_PAGE_COUNT_DELTA above). Native-only mode has no
-    // Chromium page count, so there these fixtures are plain tests.
-    const pagePinned = NATIVE_ONLY ? [] : Object.keys(OWNER_PAGE_COUNT_FIXTURES);
-    it.each(IDS.filter((id) => !pagePinned.includes(id)))('%s', assertEqual);
+    // Every fixture is a plain test; the owner-accepted page-count delta is a checker rule (see OWNER_PAGE_COUNT_DELTA).
+    it.each(IDS)('%s', assertEqual);
 
-    if (pagePinned.length) {
-      // OWNER: page-count delta. The full comparison, unchanged: RED the day the counts agree or the owner's decision is
-      // implemented — then make these plain tests again.
-      test.failing.each(pagePinned)(`%s — ${OWNER_PAGE_COUNT_DELTA}`, assertEqual);
-
-      // …and page-count is the ONLY failing check there, at exactly the measured counts (test.failing hides nothing else).
-      it.each(pagePinned)(`%s: ${OWNER_PAGE_COUNT_DELTA} — evidence, and no other failure`, async (id) => {
+    // Compare mode only (native-only mode has no Chromium page count): on the long-text fixtures the page count is the
+    // ONLY difference, at exactly the measured counts, and it is accepted only because every other check passed.
+    const pageAccepted = NATIVE_ONLY ? [] : Object.keys(OWNER_PAGE_COUNT_FIXTURES);
+    if (pageAccepted.length) {
+      it.each(pageAccepted)(`%s: ${OWNER_PAGE_COUNT_DELTA} — evidence: page count is the only difference`, async (id) => {
         const result = await compare(id);
         if (!result) throw new Error(`${id}: native not converted`);
-        expect(result.findings.filter((x) => !x.ok && !x.info).map((x) => x.check)).toEqual(['page-count']);
+        expect(result.ok).toBe(true);
+        const page = result.findings.find((x) => x.check === 'page-count')!;
         const want = OWNER_PAGE_COUNT_FIXTURES[id]!;
-        expect(result.findings.find((x) => x.check === 'page-count')!.detail).toBe(`chromium ${want.chromium}, native ${want.native}`);
+        expect(page).toMatchObject({ ok: false, info: true });
+        expect(page.detail).toBe(`chromium ${want.chromium}, native ${want.native} — ACCEPTED (owner 2026-11-04): native prints one page more; every other check passed`);
+        // Nothing else failed and nothing else was waved through as INFO by this rule.
+        expect(result.findings.filter((x) => !x.ok && x !== page && !x.info).map((x) => x.check)).toEqual([]);
+        expect(result.findings.filter((x) => x.detail.includes('ACCEPTED (owner 2026-11-04)')).map((x) => x.check)).toEqual(['page-count']);
         expect(result.findings.find((x) => x.check === 'tokens')).toMatchObject({ ok: true });
       });
     }

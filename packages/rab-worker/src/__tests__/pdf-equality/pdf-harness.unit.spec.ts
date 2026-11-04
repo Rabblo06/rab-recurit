@@ -2,7 +2,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 import { layoutLines, TextRun } from '../helpers/pdf-layout';
-import { checkAgainstDocument, checkAgainstInput, compareExtractions, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
+import { acceptOneExtraPage, checkAgainstDocument, checkAgainstInput, compareExtractions, Finding, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
 import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
 import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
 import { loadGlyphTransform } from './glyph-transform';
@@ -165,6 +165,62 @@ function blockExtraction(blocks: string[][]): PdfExtraction {
   return x;
 }
 
+describe('OWNER-ACCEPTED page-count delta (2026-11-04): native may print one page more, only when every other check passes', () => {
+  const finding = (check: string, ok: boolean, info?: boolean): Finding => ({ check, ok, ...(info === undefined ? {} : { info }), detail: check });
+  const accepted = (fs: Finding[]) => fs.find((f) => f.check === 'page-count')!;
+
+  it('exactly one extra page with everything else passing: page-count becomes INFO, marked ACCEPTED', () => {
+    const fs = [finding('values-equal', true), finding('page-text', true, true), finding('page-count', false)];
+    acceptOneExtraPage(fs, 1, 'native');
+    expect(accepted(fs)).toMatchObject({ ok: false, info: true });
+    expect(accepted(fs).detail).toMatch(/ACCEPTED \(owner 2026-11-04\): native prints one page more; every other check passed$/);
+  });
+
+  it.each([
+    ['two extra pages', 2],
+    ['one page FEWER', -1],
+    ['an equal count that still failed', 0],
+  ])('%s: stays a failure', (_label, over) => {
+    const fs = [finding('values-equal', true), finding('page-count', false)];
+    acceptOneExtraPage(fs, over, 'native');
+    expect(accepted(fs).info).toBeUndefined();
+  });
+
+  it('one extra page together with ANY other failing check: stays a failure (nothing else is waved through)', () => {
+    for (const other of ['values-equal', 'line-breaks(native)', 'footer-numbering(native)', 'tokens', 'no-overlap(native)']) {
+      const fs = [finding(other, false), finding('page-count', false)];
+      acceptOneExtraPage(fs, 1, 'native');
+      expect([other, accepted(fs).info]).toEqual([other, undefined]);
+      expect(fs[0]).toMatchObject({ ok: false });
+    }
+  });
+
+  it('compareExtractions applies it only to the named render, never to Chromium, and only for +1 page', () => {
+    const e: DocumentExpectation = { kind: 'approved-shift-statement', spec: DOCUMENT_SPECS['approved-shift-statement'], values: [], qrPayloads: [], rowMarkers: [], multiLine: [], parseBack: { durations: [], breaks: [], fields: [] } };
+    const withLogo = (x: PdfExtraction): PdfExtraction => ({ ...x, imageCount: 1, images: [{ width: 166, height: 70 } as PdfExtraction['images'][number]] });
+    const one = withLogo(extraction([['same words']]));
+    const two = withLogo(extraction([['same'], ['words']]));
+    const three = withLogo(extraction([['same'], ['words'], []]));
+    const page = (r: ReturnType<typeof compareExtractions>) => r.findings.find((f) => f.check === 'page-count')!;
+    // Without the option: a failure, as before.
+    expect(page(compareExtractions('t', e, one, two, ['chromium', 'native']))).toMatchObject({ ok: false });
+    expect(page(compareExtractions('t', e, one, two, ['chromium', 'native'])).info).toBeUndefined();
+    // With it, for the native render printing one page more: accepted when nothing else fails.
+    const ok = compareExtractions('t', e, one, two, ['chromium', 'native'], { extraPageAccepted: 'native' });
+    expect(ok.findings.filter((f) => f.check !== 'page-count' && !f.ok && !f.info).map((f) => f.check)).toEqual([]);
+    expect(page(ok)).toMatchObject({ ok: false, info: true });
+    expect(ok.ok).toBe(true);
+    // The same pair with one other failing check (a value printed by Chromium only): page-count is not accepted either.
+    const withValue: DocumentExpectation = { ...e, values: [{ label: 'staff name', value: 'Zed Only', min: 1 }] };
+    const lost = compareExtractions('t', withValue, withLogo(extraction([['same words Zed Only']])), two, ['chromium', 'native'], { extraPageAccepted: 'native' });
+    expect(page(lost).info).toBeUndefined();
+    expect(lost.ok).toBe(false);
+    // Chromium printing the extra page, or native printing two more: never accepted.
+    expect(page(compareExtractions('t', e, two, one, ['chromium', 'native'], { extraPageAccepted: 'native' })).info).toBeUndefined();
+    expect(page(compareExtractions('t', e, one, three, ['chromium', 'native'], { extraPageAccepted: 'native' })).info).toBeUndefined();
+  });
+});
+
 describe('F1 on the native side: □ for each unprintable character (owner decision F1)', () => {
   const nativeValue = 'Nul□l By□te'; // F1 of "Nul\u0000l By\u0000te"
 
@@ -183,12 +239,15 @@ describe('F1 on the native side: □ for each unprintable character (owner decis
       return;
     }
     expect(glyphs.marker).toBe('□');
-    const [nul, arabic, emoji, crlf, latin] = await glyphs.transform(['Nul\u0000l', 'محمد', 'Chef 👩‍🍳', 'a\r\nb\tc', 'Zażółć Ŵyn']);
+    const [nul, arabic, emoji, crlf, latin, cr, ls, ps, ff] = await glyphs.transform(['Nul\u0000l', 'محمد', 'Chef 👩‍🍳', 'a\r\nb\tc', 'Zażółć Ŵyn', 'a\rb', 'a\u2028b', 'a\u2029b', 'a\fb']);
     expect(nul).toBe('Nul□l');
     expect(arabic).toBe('□□□□');
     expect(emoji).toBe('Chef □□□');
     expect(crlf).toBe('a\nb c');
     expect(latin).toBe('Zażółć Ŵyn');
+    // Review L-6: a lone CR, U+2028 and U+2029 are line breaks (LF), never □; every other control character keeps F1's □.
+    expect([cr, ls, ps]).toEqual(['a\nb', 'a\nb', 'a\nb']);
+    expect(ff).toBe('a□b');
   });
 });
 
@@ -524,6 +583,14 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     expect(problems[0]).toMatch(/line 2 of 3/);
   });
 
+  it('a lone CR, U+2028 and U+2029 separate lines too (review L-6): kept when each line starts a printed line, a failure when collapsed', () => {
+    const odd = 'Black tie.\rReport to the staff entrance at 16:45.\u2028Ask for Jamie\u2029on arrival.';
+    const kept = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie'], ['on arrival.']]);
+    expect(lineBreakProblems(kept, odd)).toEqual([]);
+    const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
+    expect(lineBreakProblems(collapsed, odd)).toHaveLength(3);
+  });
+
   it('lines out of order fail', () => {
     expect(lineBreakProblems(blockExtraction([['Report to the staff entrance at 16:45.'], ['Black tie.'], ['Ask for Jamie on arrival.']]), note)).toHaveLength(1);
   });
@@ -576,6 +643,11 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     });
     const x = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']]);
     expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, '\n')) })).not.toThrow();
+    // Review L-6: a lone CR, U+2028 or U+2029 printed as LF is not a printed difference either.
+    for (const sep of ['\r', '\u2028', '\u2029']) {
+      const stored = note.replace(/\r\n/g, sep);
+      expect(() => compareExtractions('t', base(stored), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, '\n')) })).not.toThrow();
+    }
     expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace('tie', 't□e')) })).toThrow(/referenceB is required/);
     expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, ' ')) })).toThrow(/referenceB is required/);
   });

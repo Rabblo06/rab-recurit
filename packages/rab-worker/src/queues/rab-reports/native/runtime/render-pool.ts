@@ -6,6 +6,12 @@ import { Worker } from 'worker_threads';
 import { Logger } from '@nestjs/common';
 
 import {
+  assertPdfNativeMemoryFits,
+  parsePdfNativeMemoryBudgetMb,
+  PDF_NATIVE_HEAP_LIMIT_MB,
+} from '@rab/server/engine/worker-shared/pdf-native-memory.contract';
+
+import {
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
 } from './render-timeout';
@@ -40,8 +46,11 @@ import {
  *    `maxQueue`; a full queue refuses the render rather than buffering without bound.
  *  - DEADLINE: 30 s per render (`PDF_RENDER_STEP_TIMEOUT_MS`, the same bound the Chromium path had), enforced by
  *    `worker.terminate()`: a hung layout cannot outlive it. The caller gets `PdfRenderTimeoutError('native-render')`.
- *  - MEMORY: `resourceLimits.maxOldGenerationSizeMb` (default 512) per thread. Exceeding it kills only that thread
+ *  - MEMORY: `resourceLimits.maxOldGenerationSizeMb` (default 384) per thread. Exceeding it kills only that thread
  *    (`PdfNativeThreadCrashError`, code `error_PDF_NATIVE_OUT_OF_MEMORY`); the jobs process and the other thread live on.
+ *    The process-wide pool refuses to exist unless size × 384 MB ≤ `PDF_NATIVE_MEMORY_BUDGET_MB` (default 768, half of
+ *    the Worker's 1536m mem_limit; review M-3, `pdfNativeMemoryPlan`), so the threads together can never outgrow the
+ *    container and get the whole Worker OOM-killed.
  *  - NO CREDENTIALS: `env: {}`. The thread's `process.env` is an empty object, so no DATABASE_URL, REDIS_URL,
  *    APP_SECRET, S3 or SMTP value can reach the code that parses fonts, images and text. No `SHARE_ENV`, no stdin, no
  *    inherited execArgv.
@@ -60,7 +69,8 @@ import {
 
 export const PDF_NATIVE_POOL_SIZE_DEFAULT = 2;
 export const PDF_NATIVE_POOL_SIZE_MAX = 4;
-export const PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT = 512;
+/** Per-thread old-generation cap (MB): the shared contract's 384 (review M-3; was 512). */
+export const PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT = PDF_NATIVE_HEAP_LIMIT_MB;
 export const PDF_NATIVE_QUEUE_MAX_DEFAULT = 256;
 export const PDF_NATIVE_RENDERS_PER_THREAD_DEFAULT = 200;
 export const PDF_NATIVE_IDLE_MS_DEFAULT = 60_000;
@@ -108,6 +118,28 @@ export function pdfNativePrewarm(
   );
 }
 
+/** What the process-wide pool is created with (review M-3). */
+export interface PdfNativeMemoryPlan {
+  size: number;
+  heapLimitMb: number;
+  budgetMb: number;
+}
+
+/**
+ * The process-wide pool's size and per-thread heap cap, checked against `PDF_NATIVE_MEMORY_BUDGET_MB` (unset or empty →
+ * 768; strict integer 384..16384): throws `PdfNativeMemoryBudgetError` when size × 384 MB exceeds the budget, or for an
+ * invalid budget / concurrency. The same rule as boot validation (env.validation.ts, one shared contract); the Worker
+ * calls it at boot (native mode) and the pool again before it creates any thread — fail closed both times.
+ */
+export function pdfNativeMemoryPlan(
+  env: NodeJS.ProcessEnv = process.env,
+): PdfNativeMemoryPlan {
+  const size = pdfNativeConcurrency(env);
+  const budgetMb = parsePdfNativeMemoryBudgetMb(env.PDF_NATIVE_MEMORY_BUDGET_MB);
+  assertPdfNativeMemoryFits(size, budgetMb);
+  return { size, heapLimitMb: PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT, budgetMb };
+}
+
 /** The logging surface the pool uses (Nest's Logger by default). */
 export interface RenderPoolLogger {
   log(message: string): void;
@@ -121,7 +153,7 @@ export interface NativeRenderPoolOptions {
   timeoutMs?: number;
   /** Deadline for a thread to become ready, 1 000..30 000 ms. Default 30 000 (independent of the render deadline). */
   startTimeoutMs?: number;
-  /** Per-thread V8 old-space cap in MB, 32..2048. Default 512. */
+  /** Per-thread V8 old-space cap in MB, 32..2048. Default 384 (the process-wide pool always uses the default). */
   maxOldGenerationSizeMb?: number;
   /** Waiting requests beyond the running ones, 1..10 000. Default 256. */
   maxQueue?: number;
@@ -743,9 +775,13 @@ export class NativeRenderPool {
 let defaultPool: NativeRenderPool | undefined;
 
 function processPool(): NativeRenderPool {
-  defaultPool ??= new NativeRenderPool({
-    size: pdfNativeConcurrency(process.env),
-  });
+  if (!defaultPool) {
+    const plan = pdfNativeMemoryPlan(process.env); // throws before any thread exists when it does not fit (M-3)
+    defaultPool = new NativeRenderPool({
+      size: plan.size,
+      maxOldGenerationSizeMb: plan.heapLimitMb,
+    });
+  }
   return defaultPool;
 }
 

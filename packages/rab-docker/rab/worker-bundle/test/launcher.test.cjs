@@ -794,16 +794,20 @@ test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and
 });
 
 test('34 the jobs allowlist forwards PDF_RENDERER and PDF_NATIVE_CONCURRENCY (PDF renderer P1; otherwise they would silently never reach the child) and never to the provisioner', () => {
-  for (const key of ['PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY', 'PDF_NATIVE_PREWARM']) {
+  // PDF_NATIVE_MEMORY_BUDGET_MB (review M-3): an operator who raised the budget with the container's mem_limit must reach
+  // the jobs child, or its boot check would refuse a pool the operator sized deliberately.
+  for (const key of ['PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY', 'PDF_NATIVE_PREWARM', 'PDF_NATIVE_MEMORY_BUDGET_MB']) {
     assert.ok(JOBS_ENV_KEYS.includes(key), key);
     assert.ok(!PROVISIONER_ENV_KEYS.includes(key), key);
   }
-  const [jobs, provisioner] = makePlan({ ...env(), PDF_RENDERER: 'native', PDF_NATIVE_CONCURRENCY: '2', PDF_NATIVE_PREWARM: '1' });
+  const [jobs, provisioner] = makePlan({ ...env(), PDF_RENDERER: 'native', PDF_NATIVE_CONCURRENCY: '2', PDF_NATIVE_PREWARM: '1', PDF_NATIVE_MEMORY_BUDGET_MB: '1024' });
   assert.equal(jobs.env.PDF_RENDERER, 'native');
   assert.equal(jobs.env.PDF_NATIVE_PREWARM, '1');
   assert.equal(jobs.env.PDF_NATIVE_CONCURRENCY, '2');
+  assert.equal(jobs.env.PDF_NATIVE_MEMORY_BUDGET_MB, '1024');
   assert.equal(provisioner.env.PDF_RENDERER, undefined);
   assert.equal(provisioner.env.PDF_NATIVE_CONCURRENCY, undefined);
+  assert.equal(provisioner.env.PDF_NATIVE_MEMORY_BUDGET_MB, undefined);
 });
 
 test('35 the jobs allowlist forwards the 7b budget and rate names (T7-W1) and never to the provisioner', () => {

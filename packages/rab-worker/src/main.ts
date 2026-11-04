@@ -47,7 +47,7 @@ import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
+import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
 import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
@@ -159,6 +159,8 @@ function refuseStartup(error: unknown): never {
               ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
+              ? '[worker-pdf] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
@@ -321,10 +323,15 @@ async function bootstrap(): Promise<void> {
   );
   // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
   // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
-  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start.
+  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start, and so
+  // does a pool whose threads' heap caps would not fit PDF_NATIVE_MEMORY_BUDGET_MB (review M-3, fail closed).
   try {
     logger.log(describePdfRendering());
-    if (pdfRendererMode() === 'native') prewarmRenderPool();
+    if (pdfRendererMode() === 'native') {
+      const plan = pdfNativeMemoryPlan();
+      logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
+      prewarmRenderPool();
+    }
   } catch (error) {
     refuseStartup(error);
   }

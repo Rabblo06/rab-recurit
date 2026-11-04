@@ -1,6 +1,6 @@
 import { validate } from '@rab/server/engine/core-modules/environment/env.validation';
 
-import { pdfNativeConcurrency, pdfNativePrewarm } from './render-pool';
+import { pdfNativeConcurrency, pdfNativeMemoryPlan, pdfNativePrewarm } from './render-pool';
 
 /**
  * The render pool reads PDF_NATIVE_CONCURRENCY / PDF_NATIVE_PREWARM from process.env at use, AFTER the Worker's boot
@@ -22,10 +22,23 @@ const accepts = (fn: () => unknown): boolean => {
 const VALUES = ['', ' ', '0', '1', '2', '3', '4', '5', '02', '2.0', ' 2', '2 ', '-1', 'two'];
 
 describe('native pool configuration agrees with boot validation', () => {
+  // The process-wide pool is created from pdfNativeMemoryPlan (size AND the M-3 memory budget), so that is what must agree
+  // with boot: "3" / "4" refuse in both under the default 768 MB budget, and are accepted by both with a budget that fits.
   it.each(VALUES)('PDF_NATIVE_CONCURRENCY=%p: boot and pool accept or refuse it alike', (value) => {
     const env = { ...base, PDF_NATIVE_CONCURRENCY: value };
-    expect(accepts(() => pdfNativeConcurrency(env))).toBe(accepts(() => validate(env)));
+    expect(accepts(() => pdfNativeMemoryPlan(env))).toBe(accepts(() => validate(env)));
+    const roomy = { ...env, PDF_NATIVE_MEMORY_BUDGET_MB: '1536' };
+    expect(accepts(() => pdfNativeMemoryPlan(roomy))).toBe(accepts(() => validate(roomy)));
+    expect(accepts(() => pdfNativeConcurrency(env))).toBe(accepts(() => validate(roomy)));
   });
+
+  it.each(['', ' ', '0', '383', '384', '767', '768', '1536', '16384', '16385', '0768', '768.0', ' 768', '-768', '1e3', 'big'])(
+    'PDF_NATIVE_MEMORY_BUDGET_MB=%p (with the default pool of 2): boot and pool accept or refuse it alike',
+    (value) => {
+      const env = { ...base, PDF_NATIVE_MEMORY_BUDGET_MB: value };
+      expect(accepts(() => pdfNativeMemoryPlan(env))).toBe(accepts(() => validate(env)));
+    },
+  );
 
   // PDF_NATIVE_CONCURRENCY unset → pool size 2; the pool additionally refuses a pre-warm larger than its size ("3", "4"),
   // which boot validation cannot see on its own: stricter at use, never looser.

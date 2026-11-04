@@ -12,7 +12,9 @@ import { F1_MARKER, joinLineBreaks, markerOccurrences, TextReference, tokensJoin
  *                  names) is printed, and printed the same number of times by both renderers            (§5.2 4(a), 4(c))
  *   parse-back     every "Xh Ym" parses back to the STORED minutes and every "£…" to the exact pence, with a bigint string
  *                  parser (no float); totals, counts and "To be confirmed" ×2                           (§5.2 4(b))
- *   page-count     equal; under D4 (40-row table segments) it may differ by at most one page per segment boundary
+ *   page-count     equal; under D4 (40-row table segments) it may differ by at most one page per segment boundary;
+ *                  OWNER-ACCEPTED (2026-11-04): the render named in `extraPageAccepted` (native) may print exactly ONE page
+ *                  more than that, and only when every other check of the comparison passes (`acceptOneExtraPage`)
  *   footer         "Page n of N" on every page with N = that render's page count; the footer text (workspace, reference,
  *                  generatedAt) identical between renderers; a footer-less document has none           (§5.2 4(d))
  *   table-header   the header line on every page that carries table rows
@@ -46,6 +48,12 @@ export interface CheckOptions {
   pageCountTolerance?: number;
   /** D4: table segment size of the native renderer (40, owner-approved). Each segment boundary may add one page. */
   segmentRows?: number;
+  /**
+   * OWNER-ACCEPTED page-count delta (2026-11-04, long notes: react-pdf's 9.49 pt line box vs Chromium's 9.00 pt): the render
+   * of this name (the second, i.e. native) may print exactly one page MORE than the first plus the allowed difference,
+   * and only when every other finding of the comparison passes. Never fewer pages, never two more. Default: none.
+   */
+  extraPageAccepted?: string;
   /** Fail (instead of INFO) when a page's words differ although the document's words are equal. */
   strictPagePlacement?: boolean;
   /** Render names held to the page geometry: no text outside the page, no text over other text (default: ['native']). */
@@ -544,9 +552,10 @@ export function compareExtractions(
   const tolerance = (options.pageCountTolerance ?? 0) + d4;
   const expectB = options.expectB ?? expect;
   const ref = options.referenceB;
-  // Printed text, not stored text: F1 turns CRLF into LF, which prints the same line break, so a value that differs only
-  // in the form of its line breaks is not a printed difference (a □, a dropped or an added character still is).
-  const asPrinted = (v: string | undefined) => (v === undefined ? undefined : v.replace(/\r\n/g, '\n'));
+  // Printed text, not stored text: F1 turns CRLF, a lone CR, U+2028 and U+2029 into LF, which prints the same line break,
+  // so a value that differs only in the form of its line breaks is not a printed difference (a □, a dropped or an added
+  // character still is).
+  const asPrinted = (v: string | undefined) => (v === undefined ? undefined : v.replace(/\r\n?|[\u2028\u2029]/g, '\n'));
   if (!ref && (expectB.values.length !== expect.values.length || expectB.values.some((v, i) => asPrinted(v.value) !== asPrinted(expect.values[i]?.value)))) {
     throw new Error('compareExtractions: expectB changes printed values, so a referenceB is required (the two renders are meant to differ)');
   }
@@ -652,8 +661,23 @@ export function compareExtractions(
     });
   }
   applyD6Conditions(findings, tokenFinding);
+  if (options.extraPageAccepted === nb) acceptOneExtraPage(findings, b.pageCount - a.pageCount - tolerance, nb);
 
   return { label: label_, names, ok: findings.every((f) => f.ok || f.info), findings };
+}
+
+/**
+ * OWNER-ACCEPTED page-count delta (2026-11-04): a failing `page-count` becomes INFO, marked ACCEPTED, only when `over`
+ * (pages of `name` beyond the first render's count plus the allowed difference) is exactly 1 AND every other finding
+ * passes (ok, or INFO by its own rule). Anything else leaves it a failure: fewer pages, two or more extra pages, or an
+ * extra page together with any other failing check (a dropped value, a missing footer, a lost line break...).
+ */
+export function acceptOneExtraPage(findings: Finding[], over: number, name: string): void {
+  const page = findings.find((f) => f.check === 'page-count');
+  if (!page || page.ok || over !== 1) return;
+  if (findings.some((f) => f !== page && !f.ok && !f.info)) return;
+  page.info = true;
+  page.detail = `${page.detail} — ACCEPTED (owner 2026-11-04): ${name} prints one page more; every other check passed`;
 }
 
 /**

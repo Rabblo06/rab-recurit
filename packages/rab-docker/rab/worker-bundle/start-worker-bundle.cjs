@@ -202,6 +202,7 @@ const JOBS_ENV_KEYS = Object.freeze([
   'MEMBER_INVITE_RATE_ORGANISATION_PER_DAY', 'MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR',
   // PDF rendering (system Chromium; the image sets these), the renderer switch and the native pool size (PDF renderer P1)
   'CHROMIUM_EXECUTABLE_PATH', 'CHROMIUM_NO_SANDBOX', 'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD', 'PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY', 'PDF_NATIVE_PREWARM',
+  'PDF_NATIVE_MEMORY_BUDGET_MB',
 ]);
 
 /**
