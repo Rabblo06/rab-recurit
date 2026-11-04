@@ -239,6 +239,24 @@ export function installSigtermSelfCancel(
   return () => process.off('SIGTERM', handler);
 }
 
+/**
+ * The owner-login release step and any other owner-login command without DB_TARGET: the target authority derived from the
+ * deployment environment exactly as the child derives it (synthesiseGuardEnv over the live marker state), in memory only.
+ * Returns null when DB_TARGET is set explicitly or the URL's login is not crewflow_owner (the legacy path is unchanged).
+ */
+export async function deriveOwnerLoginGuardEnv(env: Record<string, string | undefined>, generatedId: string = randomUUID()): Promise<Record<string, string | undefined> | null> {
+  if (env.DB_TARGET?.trim()) return null;
+  let login = '';
+  try {
+    login = decodeURIComponent(new URL(env.PG_DATABASE_URL ?? '').username);
+  } catch {
+    return null;
+  }
+  if (login !== 'crewflow_owner') return null;
+  const { marker, database } = await readMarkerState(env);
+  return synthesiseGuardEnv(env, marker, database, generatedId).guardEnv;
+}
+
 export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: MigrateOnStartDeps = {}): Promise<MigrateOnStartResult> {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((line: string) => console.log(`[migrate-on-start] ${line}`)); // eslint-disable-line no-console

@@ -44,7 +44,7 @@ import {
   readMigrationApproval,
 } from './migrate/migration-approval';
 import { MigrationIdentityError, MigrationIdentityFacts } from '../core/migration-identity';
-import { outcomeOf } from './migrate/owner-login/migrate-on-start';
+import { deriveOwnerLoginGuardEnv, outcomeOf } from './migrate/owner-login/migrate-on-start';
 import { STARTUP_EXIT_CODES } from '../../owner-login/runtime-db-config';
 import { runCacheFlush } from './cache-flush';
 
@@ -85,6 +85,7 @@ export interface DeployPrepareDeps {
   log?: (message: string) => void;
   runner?: typeof runLockedMigrations;
   cacheFlush?: typeof runCacheFlush;
+  deriveGuardEnv?: typeof deriveOwnerLoginGuardEnv;
 }
 
 /** The whole command; resolves to the exit code (0, or 3 for "pending but not approved"); a refusal rejects (exit 1). */
@@ -111,9 +112,14 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
       ? `apply run: ${MIGRATION_APPROVAL_VAR} is set; it must be the token of the set pending after the lock`
       : `check run (${MIGRATION_APPROVAL_VAR} not set): nothing will be applied`,
   );
+  // Owner login without DB_TARGET: the release step derives its target authority from the deployment environment, like
+  // the migrate-on-start child (ST-3), re-derived after the lock; every apply still needs the F5 token (always token mode).
+  const derived = await (deps.deriveGuardEnv ?? deriveOwnerLoginGuardEnv)(env);
+  if (derived) log(`owner login without DB_TARGET: target ${derived.DB_TARGET} derived from CREWFLOW_DEPLOYMENT_ENVIRONMENT (in memory)`);
   const result = await runner({
     label: 'deploy-prepare',
-    env,
+    env: derived ?? env,
+    ...(derived ? { refreshGuardEnv: async () => (await (deps.deriveGuardEnv ?? deriveOwnerLoginGuardEnv)(env)) ?? derived } : {}),
     log,
     mode: approved ? 'apply' : 'check',
     requireMigrationIdentity: true,

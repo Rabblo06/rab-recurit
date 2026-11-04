@@ -681,6 +681,20 @@ async function transitionScenario(): Promise<void> {
   check(post.length === 0, 'transition: deploy post-checks pass as crewflow_owner', post);
   const again = await inProcess(db);
   check(again.outcome === 'ok' && again.state === 'CURRENT', 'transition: second boot CURRENT');
+
+  // MIX-1 (Agent 5): a FRESH install on a cluster that still has the separated roles must be refused by the bootstrap's
+  // role-shape check (it would otherwise re-run the role migrations and reset crewflow / crewflow_app passwords).
+  const pw = async () => (await rows('postgres', `SELECT rolname, md5(coalesce(rolpassword, '')) AS h FROM pg_authid WHERE rolname IN ('crewflow', 'crewflow_app') ORDER BY 1`)).map((r) => `${r.rolname}:${r.h}`).join(',');
+  const pwBefore = await pw();
+  const mix = `owl_mix_${RUN}`;
+  await providerAdminStep(mix);
+  const mr = await inProcess(mix);
+  const [mu] = await rows(mix, `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'core') AS ok`);
+  check(
+    mr.outcome === 'identity' && mu.ok === true && (await pw()) === pwBefore,
+    'MIX-1: a fresh install on a cluster with separated-layout roles is refused (exit 67), nothing created, no password changed',
+    [mr.reason],
+  );
 }
 
 async function unsupportedScenario(major: number): Promise<void> {

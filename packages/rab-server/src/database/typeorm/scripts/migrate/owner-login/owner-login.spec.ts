@@ -18,11 +18,11 @@ import {
 import { selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
-import { blockingPostCheckProblems, codeMigrationNames, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
+import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
 import { Migration } from 'typeorm/migration/Migration';
 
-import { LAST_ROLE_MIGRATION_TIMESTAMP, needsCoreCreateWindow, ROLE_SPLIT_TIMESTAMP, selectPhaseBMigration } from './owner-login-chain';
+import { LAST_ROLE_MIGRATION_TIMESTAMP, needsCoreCreateWindow, needsSplitReassignWindow, ROLE_SPLIT_TIMESTAMP, selectPhaseBMigration } from './owner-login-chain';
 import { TENANT_EVIDENCE_SQL } from './fresh-install';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityFacts } from './owner-login-identity';
 import {
@@ -419,5 +419,40 @@ describe('regression found by the PG16 lifecycle run: the pre-0b CREATE window f
     expect(needsCoreCreateWindow({ phase0bApplied: false, secureOwnerHasCreate: false })).toBe(true);
     expect(needsCoreCreateWindow({ phase0bApplied: false, secureOwnerHasCreate: true })).toBe(false);
     expect(needsCoreCreateWindow({ phase0bApplied: true, secureOwnerHasCreate: false })).toBe(false);
+  });
+});
+
+describe('regression found by the PG16 BOOTSTRAP-PARTIAL run: the role split REASSIGN is made order-independent', () => {
+  it('crewflow gets CREATE on core before the split only (the split grants it itself; Phase 0b removes it)', () => {
+    expect(needsSplitReassignWindow({ roleSplitApplied: false, crewflowHasCreate: false })).toBe(true);
+    expect(needsSplitReassignWindow({ roleSplitApplied: false, crewflowHasCreate: true })).toBe(false);
+    expect(needsSplitReassignWindow({ roleSplitApplied: true, crewflowHasCreate: false })).toBe(false);
+  });
+});
+
+describe('regression found by the PG16 three-replica run: a waiting run never blocks in pg_advisory_lock', () => {
+  it('acquireMigrationLock only polls pg_try_advisory_lock and never changes lock_timeout', async () => {
+    const { acquireMigrationLock } = await import('../migration-lock');
+    const sql: string[] = [];
+    let tries = 0;
+    const runner = { query: async (q: string) => (sql.push(q), [{ ok: ++tries >= 3 }]) } as never;
+    const ds = { query: async () => [] } as never;
+    const r = await acquireMigrationLock(runner, ds, 5, () => undefined);
+    expect(r.waitedMs).toBeGreaterThan(0);
+    expect(sql.every((q) => /pg_try_advisory_lock/.test(q))).toBe(true);
+    expect(sql.some((q) => /pg_advisory_lock\(|lock_timeout/.test(q))).toBe(false);
+  });
+  it('gives up after the bound with MigrationLockError, nothing applied', async () => {
+    const { acquireMigrationLock, MigrationLockError } = await import('../migration-lock');
+    const runner = { query: async () => [{ ok: false }] } as never;
+    await expect(acquireMigrationLock(runner, { query: async () => [] } as never, 1, () => undefined)).rejects.toBeInstanceOf(MigrationLockError);
+  });
+});
+
+describe('Agent 5 finding 2: deploy-prepare derives target authority for the owner login only, never over an explicit DB_TARGET', () => {
+  it('null (legacy path unchanged, no connection) for an explicit DB_TARGET, another login, or no URL', async () => {
+    await expect(deriveOwnerLoginGuardEnv({ DB_TARGET: 'production', PG_DATABASE_URL: 'postgres://crewflow_owner:x@127.0.0.1:1/db' })).resolves.toBeNull();
+    await expect(deriveOwnerLoginGuardEnv({ PG_DATABASE_URL: 'postgres://crewflow_migrator:x@127.0.0.1:1/db' })).resolves.toBeNull();
+    await expect(deriveOwnerLoginGuardEnv({})).resolves.toBeNull();
   });
 });

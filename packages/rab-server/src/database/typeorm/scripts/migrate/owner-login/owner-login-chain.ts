@@ -126,6 +126,19 @@ export function needsCoreCreateWindow(facts: { phase0bApplied: boolean; secureOw
   return !facts.phase0bApplied && !facts.secureOwnerHasCreate;
 }
 
+/**
+ * The role split (1786682000000) runs `REASSIGN OWNED BY rab_owner TO crewflow`. For a non-superuser, PostgreSQL checks, per
+ * object, that the NEW owner holds CREATE on the object's schema; whether `core` itself is reassigned before the objects in
+ * it depends on the physical order of pg_shdepend (a cluster-wide catalog, so free space left by other databases changes
+ * it). A superuser skips the check, so the historical chain never saw it; the owner login failed it on a cluster with
+ * history (found by the PG16 BOOTSTRAP-PARTIAL run). Granting crewflow CREATE on core first makes the REASSIGN
+ * order-independent; the split itself grants `USAGE, CREATE ON SCHEMA core TO crewflow` right after, and Phase 0b removes it
+ * (golden posture: `schema-create|core|crewflow|false`). Pure; regression spec in owner-login.spec.ts.
+ */
+export function needsSplitReassignWindow(facts: { roleSplitApplied: boolean; crewflowHasCreate: boolean }): boolean {
+  return !facts.roleSplitApplied && !facts.crewflowHasCreate;
+}
+
 export interface OwnerLoginChainOptions {
   dataSource: DataSource;
   session: QueryRunner;
@@ -203,12 +216,18 @@ export async function runOwnerLoginChain(options: OwnerLoginChainOptions): Promi
   if (remaining.length === 0) return { ...result, applied: [...result.phaseA] };
   const [window] = (await query(
     `SELECT EXISTS (SELECT 1 FROM core.migrations WHERE name = $1) AS "phase0b",
-            has_schema_privilege('rab_secure_owner', 'core', 'CREATE') AS "has"`,
-    [PHASE_0B],
-  )) as Array<{ phase0b: boolean; has: boolean }>;
+            EXISTS (SELECT 1 FROM core.migrations WHERE name = $2) AS "split",
+            has_schema_privilege('rab_secure_owner', 'core', 'CREATE') AS "has",
+            has_schema_privilege('crewflow', 'core', 'CREATE') AS "crewflowHas"`,
+    [PHASE_0B, ROLE_SPLIT_MIGRATION],
+  )) as Array<{ phase0b: boolean; split: boolean; has: boolean; crewflowHas: boolean }>;
   if (needsCoreCreateWindow({ phase0bApplied: window!.phase0b, secureOwnerHasCreate: window!.has })) {
     await query(`GRANT CREATE ON SCHEMA core TO rab_secure_owner`);
     log('ST-2: GRANT CREATE ON SCHEMA core TO rab_secure_owner (for the pre-Phase-0b hand-overs; merges into the owner at Phase 0b)');
+  }
+  if (needsSplitReassignWindow({ roleSplitApplied: window!.split, crewflowHasCreate: window!.crewflowHas })) {
+    await query(`GRANT CREATE ON SCHEMA core TO crewflow`);
+    log('ST-2: GRANT CREATE ON SCHEMA core TO crewflow (the role split REASSIGN OWNED must not depend on pg_shdepend order; the split grants the same itself)');
   }
 
   // ── Phase B, as crewflow_owner, random discarded bootstrap passwords ─────────────────────────────────────────────
