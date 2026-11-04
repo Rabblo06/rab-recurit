@@ -1,0 +1,4 @@
+user default off resetpass resetkeys ~* resetchannels &* +@all -@admin -@dangerous +info +client|setname +client|getname +client|id +client|info +client|list -flushall -flushdb -keys -swapdb
+user crewflow on #<sha256-hex-of-the-redis-app-password> resetkeys ~* resetchannels &* +@all -@admin -@dangerous +info +client|setname +client|getname +client|id +client|info +client|list -flushall -flushdb -keys -swapdb
+user healthcheck on nopass resetkeys resetchannels -@all +ping
+user ops off resetpass resetkeys ~* resetchannels -@all +ping +info
