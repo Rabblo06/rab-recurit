@@ -59,7 +59,16 @@ function clockOffset() {
   return Math.round((a + b) / 2 - db);
 }
 
+/** Fail closed if this label was used before (rows or output files): results would mix. Nothing is deleted. */
+function assertLabelUnused() {
+  const used = Number(psql(`select (select count(*) from core.notification where type = 'dq6' and title = ${lit(label)})
+    + (select count(*) from core.email_outbox where ${EMAIL_MATCH}) + (select count(*) from core.realtime_event where ${RT_MATCH})`));
+  const files = ['json', 'gen.jsonl', 'pubsub.txt'].filter((x) => fs.existsSync(path.join(OUT, `dq6-${label}.${x}`)));
+  if (used || files.length) throw new Error(`label ${label} was already used (${used} tagged rows, files: ${files.join(', ') || 'none'}); use a new repetition number`);
+}
+
 function targets() {
+  assertLabelUnused();
   const rows = psql(`
     select o.id, u.id, d.id, w.id
       from core.organisation o

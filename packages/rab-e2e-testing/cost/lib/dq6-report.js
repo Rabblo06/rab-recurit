@@ -104,6 +104,8 @@ const METRICS = [
 ];
 // A loaded resource window is valid only if the generator's own recorded [start, end] covers the window's [t-start, t-end]
 // (dq6-<label>.gen-window.json, written by dq6-load.js on success and on failure). Missing record or gap -> INVALID, excluded.
+const MAX_INSERT_GAP_MS = 3000; // one tick is 1 s
+const MIN_OFFERED_SHARE = 0.9;
 const invalidLoaded = [];
 for (const r of list) {
   if (!r.windows.loaded) continue;
@@ -113,7 +115,23 @@ for (const r of list) {
   const ts = rdT('t-start');
   const te = rdT('t-end');
   const why = !gw ? 'no generator window record' : ts == null || te == null ? 'no window timestamps' : gw.start > ts ? `generator started ${((gw.start - ts) / 1000).toFixed(1)} s after the window` : gw.end < te ? `generator stopped ${((te - gw.end) / 1000).toFixed(1)} s before the window ended${gw.error ? ` (${gw.error.slice(0, 80)})` : ''}` : null;
-  if (why) { invalidLoaded.push(`${r.arm} r${r.rep}: ${why}`); r.loadedInvalid = why; delete r.windows.loaded; }
+  let why2 = why;
+  if (!why2) {
+    const genF = path.join(OUT, `dq6-${label}.gen.jsonl`);
+    const ins = fs.existsSync(genF) ? fs.readFileSync(genF, 'utf8').split('\n').filter((x) => x.trim()).map((x) => JSON.parse(x)).filter((e) => e.kind === 'insert' && e.t >= ts && e.t <= te) : [];
+    const rate = r.scen.loaded && r.scen.loaded.offered ? r.scen.loaded.offered.notificationsPerSecond : null;
+    const pts = [ts, ...ins.map((e) => e.t), te];
+    let gap = 0;
+    for (let i = 1; i < pts.length; i++) gap = Math.max(gap, pts[i] - pts[i - 1]);
+    const delivered = ins.reduce((a, e) => a + (e.n || 0), 0);
+    const expected = rate ? (rate * (te - ts)) / 1000 : null;
+    if (!ins.length) why2 = 'no generator inserts inside the window';
+    else if (gap > MAX_INSERT_GAP_MS) why2 = `load stalled inside the window (largest gap between inserts ${(gap / 1000).toFixed(1)} s > ${MAX_INSERT_GAP_MS / 1000} s)`;
+    else if (expected == null) why2 = 'no offered rate recorded (dq6-<label>.json missing)';
+    else if (delivered < MIN_OFFERED_SHARE * expected) why2 = `insufficient load inside the window (${delivered} of ${Math.round(expected)} notifications, < ${MIN_OFFERED_SHARE * 100} %)`;
+    else r.loadedCoverage = { insertsInWindow: ins.length, notificationsInWindow: delivered, expected: Math.round(expected), largestGapMs: gap };
+  }
+  if (why2) { invalidLoaded.push(`${r.arm} r${r.rep}: ${why2}`); r.loadedInvalid = why2; delete r.windows.loaded; }
 }
 if (invalidLoaded.length) md.push('**Loaded windows excluded as INVALID** (the load did not cover the whole resource window):', '', ...invalidLoaded.map((x) => `- ${x}`), '');
 for (const w of ['idle-off', 'idle-on', 'loaded']) {

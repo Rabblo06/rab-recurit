@@ -150,8 +150,13 @@ do_setup() {
 }
 
 do_arm() {
-  local arm="$1" rep="$2" L
+  local arm="$1" rep="$2" L used
   L="$arm-r$rep"
+  case "$rep" in '' | *[!0-9]*) die "rep must be a number" ;; esac
+  # Fail closed on label reuse: the scenarios select rows and files by label, so a second run under the same label would
+  # merge with the first. Nothing is deleted; rerun under a new repetition number instead.
+  used="$(cd "$OUT" && ls -d "idle-$L-"* "dq6-$L-"* 2>/dev/null | head -3 | tr '\n' ' ')"
+  [ -z "$used" ] || die "arm $L already has results ($used...): rerun with a new repetition number"
   clock_guard
   set_arm "$arm"
   stamp "arm $L: start (rate ${RATE}/s, burst $BURST, idle ${IDLE_S}s)"

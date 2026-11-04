@@ -237,13 +237,15 @@ OUT=$OUT bash scripts/dq6-bench.sh report                                       
 | `global` | `WORKER_CLAIM_MODE=global`, Worker as `crewflow_worker` (Phase D) |
 | `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
 
-Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. Each arm repetition runs, in order:
+Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. A label is never reused: `arm` refuses an
+arm-repetition that already has results, and the load generator refuses a label that already has tagged rows, so rerun
+under a new repetition number (nothing is deleted). Each arm repetition runs, in order:
 
 | Window | What |
 |---|---|
 | `idle-off` | realtime + push off (production default), drained, `DQ6_IDLE_S` (300 s) idle window |
 | `idle-on` | realtime + push on, drained, idle window |
-| `loaded` | `DQ6_RATE` (10) notifications/s for 390 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The 300 s resource window starts 15 s in; the generator's own transactions are subtracted, and the report accepts the window only if the generator's own recorded run (start and end, written on success and on failure) covers all of it |
+| `loaded` | `DQ6_RATE` (10) notifications/s for 390 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The 300 s resource window starts 15 s in; the generator's own transactions are subtracted, and the report accepts the window only if the generator's own recorded run (start and end, written on success and on failure) covers all of it, its inserts inside the window never pause for more than 3 s, and they deliver at least 90 % of the offered rate |
 | `burst` | `DQ6_BURST` (2,000) notifications inserted at once: drain time, rows/s, per-organisation completion, fairness |
 | `rworker` | 5/s load; graceful Worker stop, 30 s down, start, 60 s more load: time to ready, first delivery, backlog cleared, stuck rows, duplicates |
 | `rredis` | the same with Redis stopped. Redis runs without persistence, so it comes back empty: a Redis data loss |
