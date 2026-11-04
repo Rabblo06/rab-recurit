@@ -30,6 +30,9 @@ jobs:
     env:
       NODE_ENV: test
       PDF_EQUALITY_OUT: ${{ github.workspace }}/pdf-equality-out
+      # All three documents are converted on this tree (final timesheet, pre-shift roster, Approved Shift Statement):
+      # an unavailable native renderer or a NOT CONVERTED document is a failure, never a skip.
+      PDF_EQUALITY_REQUIRE_NATIVE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

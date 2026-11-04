@@ -1,20 +1,22 @@
 import * as renderPdfUtil from '../../queues/rab-reports/render-pdf.util';
-import { renderCall, ReportDocument } from './documents';
+import { ReportDocument } from './documents';
 
 /**
  * RENDERER SELECTION for the harness: `chromium` or `native`, plugged in HERE and nowhere else.
  *
- * Contract (the native agent's switch, worker/pdf-without-chromium, P0 plan §5.1 / D1): `render-pdf.util.ts` exports
- *   `renderPdf(doc: { kind; viewModel }, env?: NodeJS.ProcessEnv): Promise<Buffer>`   — picks the renderer from
- *       `env.PDF_RENDERER` ('chromium' default | 'native'; anything else refuses);
- *   `chromiumRenderInput(doc): { html, options }`                                   — what the Chromium path renders;
- * and each converted document has a rab-server view-model builder `build<Doc>ViewModel(data)` beside its template.
- * When `renderPdf` exists, BOTH renderers go through it (P0 §5.2 step 2: "the same renderReportPdf(doc)"), with
- * PDF_RENDERER passed per call in `env` (never by mutating process.env, so concurrent renders cannot race).
+ * Contract: the data-in seam that landed on worker/pdf-without-chromium (P0 plan §5.1 / D1), `render-pdf.util.ts`:
+ *   `renderReportPdf(doc: { kind; data }, env?)` — picks the renderer from `env.PDF_RENDERER` ('chromium' default |
+ *       'native'; anything else refuses); the job passes the template's DATA, and each renderer derives its output from
+ *       it through the document's rab-server view-model builder;
+ *   `htmlFor(doc)` — the HTML the Chromium path renders for it;
+ *   `NATIVE_KINDS` — the kinds with a native layout. IN NATIVE MODE `renderReportPdf` RENDERS ANY OTHER KIND THROUGH
+ *       CHROMIUM, so the native renderer below refuses a kind outside NATIVE_KINDS (NOT CONVERTED) instead of letting a
+ *       Chromium-vs-Chromium comparison pass as Chromium-vs-native.
+ * BOTH renderers go through `renderReportPdf` (P0 §5.2 step 2), with PDF_RENDERER passed per call in `env` (never by
+ * mutating process.env, so concurrent renders cannot race).
  *
- * A document kind without a view-model builder yet (P1 converts the final timesheet first) is rendered for Chromium by
- * today's `renderHtmlToPdf(renderCall(doc))` and reported as NOT CONVERTED for native (`NativeNotConvertedError`).
- * Before the switch lands (origin/main), `loadNativeRenderer()` reports why it is unavailable.
+ * (Integration of #51 with #55: the harness was written against a provisional `renderPdf(doc: { kind; viewModel })` /
+ * `chromiumRenderInput` contract and therefore skipped the native suite against the seam that actually landed.)
  */
 export type RendererName = 'chromium' | 'native';
 
@@ -30,70 +32,41 @@ export class NativeNotConvertedError extends Error {
   }
 }
 
-type RequestDoc = { kind: string; viewModel: unknown };
-type SwitchModule = {
-  renderPdf?: (doc: RequestDoc, env?: NodeJS.ProcessEnv) => Promise<Buffer>;
-  chromiumRenderInput?: (doc: RequestDoc) => { html: string; options: renderPdfUtil.RenderPdfOptions };
-};
-const switchModule = renderPdfUtil as unknown as SwitchModule;
-
-/** Where each document's view-model builder lives (P0 plan §5.1 naming), and the switch's `kind` for it. */
-const VIEW_MODELS: Record<ReportDocument['kind'], { kind: string; module: string; builder: string }> = {
-  'final-timesheet-original': { kind: 'final-timesheet', module: '@rab/server/modules/attendance/templates/final-timesheet.view-model', builder: 'buildFinalTimesheetViewModel' },
-  'final-timesheet': { kind: 'final-timesheet', module: '@rab/server/modules/attendance/templates/final-timesheet.view-model', builder: 'buildFinalTimesheetViewModel' },
-  'pre-shift-report': { kind: 'pre-shift-report', module: '@rab/server/modules/attendance/templates/pre-shift-report.view-model', builder: 'buildPreShiftReportViewModel' },
-  'approved-shift-statement': {
-    kind: 'approved-shift-statement',
-    module: '@rab/server/modules/payroll/templates/approved-shift-statement.view-model',
-    builder: 'buildApprovedShiftStatementViewModel',
-  },
-};
-
-/** The switch's request for a document, or why there is none (no switch yet / no view-model builder for this kind). */
-export function switchRequest(doc: ReportDocument): RequestDoc | string {
-  if (typeof switchModule.renderPdf !== 'function' || typeof switchModule.chromiumRenderInput !== 'function') return 'render-pdf.util has no renderPdf/chromiumRenderInput switch';
-  const vm = VIEW_MODELS[doc.kind];
-  let mod: Record<string, unknown>;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    mod = require(vm.module) as Record<string, unknown>;
-  } catch {
-    return `no view-model module ${vm.module}`;
+/** The seam document the production job passes to `renderReportPdf` for this harness document (same data, same kind). */
+export function seamDocument(doc: ReportDocument): renderPdfUtil.ReportDocument {
+  switch (doc.kind) {
+    case 'final-timesheet-original':
+      // final-timesheet.job.ts: renderReportPdf({ kind: 'final-timesheet', data: { ...prepared.template, unsigned: true } })
+      return { kind: 'final-timesheet', data: { ...doc.data, unsigned: true } };
+    case 'final-timesheet':
+      return { kind: 'final-timesheet', data: doc.data };
+    case 'pre-shift-report':
+      return { kind: 'pre-shift', data: doc.data };
+    case 'approved-shift-statement':
+      return { kind: 'approved-shift-statement', data: doc.data };
   }
-  const build = mod[vm.builder];
-  if (typeof build !== 'function') return `${vm.module} exports no ${vm.builder}`;
-  return { kind: vm.kind, viewModel: (build as (d: unknown) => unknown)(doc.data) };
 }
 
 /**
- * The HTML the Chromium path renders for this document through the switch, when the switch covers it — the harness
- * asserts it equals today's template output (the view-model refactor must keep the HTML byte-identical, P0 §5.1).
+ * The HTML the Chromium path renders for this document through the seam — the harness asserts it equals today's
+ * template output (the view-model refactor must keep the HTML byte-identical, P0 §5.1).
  */
 export function switchChromiumHtml(doc: ReportDocument): string | null {
-  const req = switchRequest(doc);
-  return typeof req === 'string' ? null : switchModule.chromiumRenderInput!(req).html;
+  return renderPdfUtil.htmlFor(seamDocument(doc));
 }
 
 export const chromiumRenderer: Renderer = {
   name: 'chromium',
-  render: async (doc) => {
-    const req = switchRequest(doc);
-    if (typeof req !== 'string') return switchModule.renderPdf!(req, { ...process.env, PDF_RENDERER: 'chromium' });
-    const { html, options } = renderCall(doc);
-    return renderPdfUtil.renderHtmlToPdf(html, options);
-  },
+  render: async (doc) => renderPdfUtil.renderReportPdf(seamDocument(doc), { ...process.env, PDF_RENDERER: 'chromium' }),
 };
 
 export function loadNativeRenderer(): Renderer | { unavailable: string } {
-  if (typeof switchModule.renderPdf !== 'function') {
-    return { unavailable: 'render-pdf.util.ts exports no renderPdf(doc, env) switch yet (worker/pdf-without-chromium not merged into this tree)' };
-  }
   return {
     name: 'native',
     render: async (doc) => {
-      const req = switchRequest(doc);
-      if (typeof req === 'string') throw new NativeNotConvertedError(doc.kind, req);
-      return switchModule.renderPdf!(req, { ...process.env, PDF_RENDERER: 'native' });
+      const seam = seamDocument(doc);
+      if (!renderPdfUtil.NATIVE_KINDS.has(seam.kind)) throw new NativeNotConvertedError(doc.kind, `"${seam.kind}" is not in NATIVE_KINDS`);
+      return renderPdfUtil.renderReportPdf(seam, { ...process.env, PDF_RENDERER: 'native' });
     },
   };
 }
