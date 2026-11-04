@@ -77,8 +77,8 @@ jobs:
           # (behaviour-change catalogue / schema-role test / removed in PR #9) is made from these, not from truncated output.
           status=0
           mkdir -p "${RUNNER_TEMP}/jest-results"
-          npx nx run-many -t test -p rab-shared --runInBand --output-style=stream \n            --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-shared.json" || status=$?
-          npx nx run-many -t test -p rab-server --runInBand --testTimeout=180000 --output-style=stream \n            --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server.json" || status=$?
+          npx nx run-many -t test -p rab-shared --runInBand --output-style=stream --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-shared.json" || status=$?
+          npx nx run-many -t test -p rab-server --runInBand --testTimeout=180000 --output-style=stream --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
