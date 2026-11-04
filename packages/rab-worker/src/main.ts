@@ -32,6 +32,9 @@ import { QrImageService } from '@rab/server/modules/attendance/services/qr-image
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
 import {
+  PROVISIONER_CYCLE_DURATIONS_KEY,
+  PROVISIONER_HEARTBEAT_KEY,
+  PROVISIONER_STATS_KEY,
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
@@ -46,6 +49,8 @@ import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
 import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
 import { resolveSchemaWaitMs, waitForCompatibleSchema } from './core/runtime/schema-wait';
+import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
+import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
@@ -161,6 +166,8 @@ function refuseStartup(error: unknown): never {
               ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && (error.name === 'ProvisionerConfigError' || error.name === 'ProvisioningIdentityError')
+              ? '[workspace-provisioning] refused: '
             : error instanceof Error && error.name === 'WatchdogConfigError'
               ? '[worker-watchdog] refused: '
             : error instanceof Error && error.name === 'RuntimeIsolationError'
@@ -244,7 +251,7 @@ async function bootstrap(): Promise<void> {
   await waitForWorkerSchema(pg).catch(refuseStartup);
   // ---- Phase B (A2): database boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending
   // migrations), before any queue consumer or pool. ----
-  await runDatabaseBootGates('worker').catch(refuseStartup);
+  const gateReport = await runDatabaseBootGates('worker').catch(refuseStartup);
   // ---- end Phase B (A2) ----
   // Phase B (P4): the session-lock connection must be session-stable — a live two-connection probe (pg-session-probe.ts),
   // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof; the URL denylist already ran above.
@@ -514,6 +521,42 @@ async function bootstrap(): Promise<void> {
   beat();
   runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
 
+  // ---- Owner-login architecture (T4): workspace provisioning IN-PROCESS, on the one owner login. ----
+  // The SAME loops the superseded separate provisioner ran (workspace-provisioning.loops.ts): its own session-affine
+  // ReconnectingPgClient acting as crewflow (SET ROLE), the per-cycle provisioner-strict schema check, the bounded
+  // provisioning advisory lock with shouldAbort, the daily drift check; ledger / readiness / createFor unchanged. Its own
+  // WorkerRuntime keeps the provisioner's own stats and heartbeat keys (Admin queue health, E2E 5.3 read them) and its own
+  // drain on shutdown. Two Worker replicas exclude each other through the provisioning advisory lock.
+  const provisioningInterval = (() => {
+    try {
+      return resolveInProcessProvisioningInterval(process.env);
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const provisioningRuntime = new WorkerRuntime(redis, {
+    statsKey: PROVISIONER_STATS_KEY,
+    mirrorKey: WORKER_STATS_KEY,
+    durationsKey: PROVISIONER_CYCLE_DURATIONS_KEY,
+  });
+  const provisioningBeat = () => {
+    redis.set(PROVISIONER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30).catch(() => undefined);
+  };
+  provisioningBeat();
+  provisioningRuntime.interval(provisioningBeat, 15_000);
+  const provisioningLoops: WorkspaceProvisioningLoopsHandle = await startWorkspaceProvisioningLoops({
+    pg,
+    endpoint: 'primary',
+    runtime: provisioningRuntime,
+    logger,
+    intervalMs: provisioningInterval.intervalMs,
+    expectedMigrations: gateReport.expectedMigrations ?? [],
+    production: isProductionProcess('worker', process.env),
+    actAsCrewflow: true,
+  }).catch(refuseStartup);
+  logger.log(`workspace provisioning: in-process on the owner login (interval ${provisioningInterval.intervalSeconds}s)`);
+  // ---- end T4 ----
+
   if (schedulerMode === 'bullmq') {
     // ONE cluster-wide job scheduler per scan; this replica consumes whichever ticks it wins. Redis preflight
     // (noeviction, API support) and the dedicated scan-lock connection come first — any failure refuses to start.
@@ -622,6 +665,7 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      provisioningRuntime.beginShutdown(); // the in-process provisioner too (a waiting provisioning lock is abandoned at once)
       // Phase D: no new wake-up or claim run; the LISTEN session closes (its in-flight runs are runtime cycles → drained below).
       coordinator?.stop();
       notificationQueueMonitor?.stop();
@@ -649,8 +693,11 @@ async function bootstrap(): Promise<void> {
       }
       await shiftStatementQueue.closeBounded();
       const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;
-      const { drained, pending } = await runtime.drain(remaining); // 3. in-flight cycles (a PDF render, an email claim)
+      const [{ drained, pending }, provisioningDrain] = await Promise.all([runtime.drain(remaining), provisioningRuntime.drain(remaining)]); // 3. in-flight cycles (a PDF render, an email claim, a workspace being provisioned)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
+      if (!provisioningDrain.drained) logger.warn(`${provisioningDrain.pending} provisioning cycle(s) still running — closing anyway (the advisory lock releases with the connection; CREATING/FAILED states make the retry safe)`);
+      await provisioningRuntime.flushMetrics();
+      await provisioningLoops.close();
       await runtime.flushMetrics();
       if (scheduler) {
         await scheduler.manager.close();

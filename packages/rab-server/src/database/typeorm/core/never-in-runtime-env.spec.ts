@@ -127,13 +127,16 @@ describe('never-in-runtime-env (security review L-4): one list, three enforcers'
     expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);
   });
 
-  it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {
+  it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API and the Worker by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {
     expect(forbiddenRuntimeEnvPrefixes('api')).toEqual(['CREWFLOW_PROVISIONER_']);
     expect(sorted(prestartPrefixes())).toEqual(sorted(forbiddenRuntimeEnvPrefixes('api')));
     expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'false', CREWFLOW_PROVISIONER_A: 'x' }, 'api')?.name).toBe('CREWFLOW_PROVISIONER_A');
     expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'true' }, 'api')?.name).toBe('CREWFLOW_PROVISIONER_ENABLED');
     expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: ' ' }, 'api')).toBeNull();
-    // The Worker's rule comes with in-process provisioning (T4); the provisioner child legitimately receives its switch.
+    // T4: the Worker provisions in-process, always, so it refuses every CREWFLOW_PROVISIONER_* name too; the superseded
+    // provisioner child legitimately receives its switch.
+    expect(forbiddenRuntimeEnvPrefixes('worker')).toEqual(['CREWFLOW_PROVISIONER_']);
+    expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'false' }, 'worker')?.name).toBe('CREWFLOW_PROVISIONER_ENABLED');
     expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'true' }, 'provisioner')).toBeNull();
   });
 
