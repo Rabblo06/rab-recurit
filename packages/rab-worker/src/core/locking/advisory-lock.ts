@@ -4,7 +4,7 @@ export type AdvisoryLockResult<T> = { acquired: true; value: T } | { acquired: f
 
 /**
  * Per-resource, session-level PostgreSQL advisory lock for work that is too
- * long to hold a transaction open (a Playwright PDF render + email enqueue).
+ * long to hold a transaction open (a PDF render + email enqueue).
  *
  * WHY this and not `pg_advisory_xact_lock` in the scan transaction: an xact
  * lock is released the instant that scan transaction commits, i.e. BEFORE any

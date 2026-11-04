@@ -1,26 +1,26 @@
 import { validate } from './env.validation';
 
 /**
- * PDF renderer P1: PDF_RENDERER fails closed at boot. Unset or empty → chromium (the default); exactly "chromium" or
- * "native" otherwise; any other value — a different case, surrounding spaces, another word — refuses to boot.
+ * PDF renderer P5 (D10): PDF_RENDERER is kept for one release and accepts only "native" (unset or empty = native).
+ * "chromium" refuses to boot: the Worker has no browser, so it can never be a silent choice.
  */
 const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('PDF_RENDERER environment variable', () => {
-  it('defaults to chromium', () => {
-    expect(validate({ ...base }).PDF_RENDERER).toBe('chromium');
+  it('defaults to native', () => {
+    expect(validate({ ...base }).PDF_RENDERER).toBe('native');
   });
 
-  it('treats an empty value as unset (the runtime parser then uses chromium)', () => {
-    expect(validate({ ...base, PDF_RENDERER: '' }).PDF_RENDERER ?? 'chromium').toBe('chromium');
+  it('treats an empty value as unset (native)', () => {
+    expect(validate({ ...base, PDF_RENDERER: '' }).PDF_RENDERER ?? 'native').toBe('native');
   });
 
-  it.each(['chromium', 'native'])('accepts %p', (value) => {
-    expect(validate({ ...base, PDF_RENDERER: value }).PDF_RENDERER).toBe(value);
+  it('accepts exactly native', () => {
+    expect(validate({ ...base, PDF_RENDERER: 'native' }).PDF_RENDERER).toBe('native');
   });
 
-  it.each(['Native', 'CHROMIUM', ' native', 'native ', ' ', 'chrome', 'pdfkit', 'true', '1'])('refuses to boot with PDF_RENDERER=%p', (value) => {
-    expect(() => validate({ ...base, PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly chromium or native/);
+  it.each(['chromium', 'CHROMIUM', 'Native', ' native', 'native ', ' ', 'chrome', 'pdfkit', 'true', '1'])('refuses to boot with PDF_RENDERER=%p', (value) => {
+    expect(() => validate({ ...base, PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly native/);
   });
 
   describe('PDF_NATIVE_CONCURRENCY', () => {

@@ -113,7 +113,7 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  *
  * Lifecycle: no loop overlaps itself; on SIGTERM/SIGINT the worker stops
  * scheduling, lets BullMQ finish its active email jobs, waits (bounded) for
- * in-flight cycles — including a Playwright render — and only then closes
+ * in-flight cycles — including a PDF render — and only then closes
  * Nest, Postgres and Redis. Report jobs hold per-report session advisory
  * locks, which Postgres releases automatically if the process is killed
  * before it can drain, so a hard kill can never wedge a report.
