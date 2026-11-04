@@ -1,9 +1,9 @@
-import { Document, Page, Text, View } from '@react-pdf/renderer';
+import { Document, Page, View } from '@react-pdf/renderer';
 import { ReactElement } from 'react';
 
 import type { ApprovedShiftStatementViewModel, StatementRowView } from '@rab/server/modules/payroll/templates/approved-shift-statement.view-model';
 
-import { COLOR, DocumentHeader, h, mm, pageStyle, px } from './document-components';
+import { COLOR, DocumentHeader, h, mm, pageStyle, px, Text } from './document-components';
 
 /**
  * APPROVED SHIFT STATEMENT, native layout (PDF_RENDERER=native). Prints the shared view-model

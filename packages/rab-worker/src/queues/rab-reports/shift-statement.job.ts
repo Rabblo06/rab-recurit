@@ -310,9 +310,22 @@ async function notifyStaff(m: EntityManager, notifications: NotificationService,
   return rows.length > 0;
 }
 
+/**
+ * The fixed, non-personal code stored in `statement_error` and the SHIFT_STATEMENT_FAILED audit metadata for a failed
+ * generation: `error_<CODE>` for an error carrying an upper-case `code` (a driver code such as "23505", or a renderer
+ * code), the renderer's own code when it already has that shape (the native renderer's `error_PDF_NATIVE_*`,
+ * `error_PDF_RENDER_TIMEOUT`, …: a native failure stays visible and attributable, never a silent Chromium fallback), and
+ * `generation_failed` for anything else. Never a message, never caller-controlled free text.
+ */
+export function statementFailureCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  if (typeof code !== 'string') return 'generation_failed';
+  if (/^error_[A-Z0-9_]{1,40}$/.test(code)) return code;
+  return /^[A-Z0-9_]{1,40}$/.test(code) ? `error_${code}` : 'generation_failed';
+}
+
 async function recordFailure(job: ShiftStatementJobData, deps: ShiftStatementProcessorDeps, error: unknown): Promise<void> {
-  const code = (error as { code?: string })?.code;
-  const safe = typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? `error_${code}`.slice(0, 64) : 'generation_failed';
+  const safe = statementFailureCode(error);
   await deps.tenantContext.runInTenantContext(workerCtx(job.organisationId, job.workspaceId), async (m) => {
     const [, n] = (await m.query(
       `UPDATE payroll_record SET statement_status = 'failed', statement_attempts = statement_attempts + 1, statement_error = $3, updated_at = now()

@@ -16,8 +16,8 @@ import { inspectPdf as inspectRaw } from '../../../__tests__/helpers/pdf-inspect
 
 /** pdf-inspect, reading pdfkit's indirect page /Resources too (see inlinePageResources). */
 const inspectPdf = (pdf: Buffer) => inspectRaw(inlinePageResources(pdf));
-import { collapseWhitespace, DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
-import { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './fonts';
+import { collapsePreLine, collapseWhitespace, DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
+import { OVERLONG_TOKEN_CHARS, wordBreakParts } from './fonts';
 import { renderNativePdf } from './render-native';
 import { shutdownRenderPool } from './runtime/render-pool';
 
@@ -281,24 +281,116 @@ describe('a note taller than a page is printed in full (I-9 long-text)', () => {
   });
 });
 
-describe('whitespace is laid out like the Chromium templates (HTML white-space: normal)', () => {
-  it('collapses runs of ASCII whitespace, keeps NBSP', () => {
+describe('whitespace is laid out like the Chromium templates', () => {
+  it('white-space: normal (every field but the notes): collapses runs of ASCII whitespace, keeps NBSP', () => {
     expect(collapseWhitespace('a\n\nb \t c\r\nd\fe')).toBe('a b c d e');
     expect(collapseWhitespace('x\u00a0\u00a0y')).toBe('x\u00a0\u00a0y');
   });
+
+  it('white-space: pre-line (the notes): keeps every line break and blank line, collapses spaces, drops spaces at a break', () => {
+    expect(collapsePreLine('a\n\nb \t c\r\nd\fe')).toBe('a\n\nb c\nd e');
+    expect(collapsePreLine('  lead   \n   trail  ')).toBe(' lead\ntrail ');
+    expect(collapsePreLine('one\rtwo')).toBe('one\ntwo');
+    expect(collapsePreLine('x\u00a0\u00a0y')).toBe('x\u00a0\u00a0y');
+    expect(collapsePreLine('\n\n\n')).toBe('\n\n\n');
+  });
 });
 
-describe('word breaking (fonts.ts)', () => {
+/**
+ * Notes keep their original line breaks (owner decision 2026-11-04): the notes paragraph is laid out `pre-line`, every
+ * other field `normal`. Through the real pool (its glyph guard turns CRLF into LF first).
+ */
+describe('the shift notes keep their line breaks; nothing else does', () => {
+  it('each typed line of the notes is its own printed line, in order, spaces collapsed; a name with a line break stays one line', async () => {
+    const notes = 'Line one: arrive at 08:00\r\nLine two:   bring   ID\n\nAfter a blank line';
+    const base = FINAL_TIMESHEET_CASES['one-page']!;
+    const data: FinalTimesheetData = { ...base, notes, staff: base.staff.map((r, i) => (i === 0 ? { ...r, name: 'Ann\nLee-Smith' } : r)) };
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data }));
+    const lines = doc.pageTexts.flatMap((page) => page.split(/\r?\n/)).map((l) => l.trim());
+    const at = (text: string) => lines.findIndex((l) => l.includes(text));
+    expect(lines).toContain('Line one: arrive at 08:00');
+    expect(lines).toContain('Line two: bring ID');
+    expect(lines).toContain('After a blank line');
+    expect(at('Line one')).toBeLessThan(at('Line two'));
+    expect(at('Line two')).toBeLessThan(at('After a blank line'));
+    // A table cell is white-space: normal: the name's LF is one space, never a line of its own.
+    expect(doc.text).toContain('Ann Lee-Smith');
+  });
+});
+
+describe('word breaking (word-breaking.ts)', () => {
   it('keeps ordinary words whole (Chromium never hyphenates these templates)', () => {
-    for (const w of ['Staff', 'Maximilian-Alexander', 'internationalization', 'x'.repeat(OVERLONG_TOKEN_CHARS)]) expect(breakOnlyOverlongTokens(w)).toEqual([w]);
+    for (const w of ['Staff', 'internationalization', 'x'.repeat(OVERLONG_TOKEN_CHARS), '2026-11-04', '-5', 'trailing-', '-leading', 'double--dash', 'RAB-0001'])
+      expect(wordBreakParts(w)).toEqual([w]);
+  });
+
+  it('D6: a hyphenated name may break after its own hyphen through an empty part (zero-width glue: no second "-")', () => {
+    expect(wordBreakParts('Maximilian-Alexander')).toEqual(['Maximilian-', '', 'Alexander']);
+    expect(wordBreakParts("O'Brien-Ållström")).toEqual(["O'Brien-", '', 'Ållström']);
+    expect(wordBreakParts('Jean\u2010Luc')).toEqual(['Jean\u2010', '', 'Luc']);
   });
 
   it('lets a token longer than the limit break between any two code points (never inside a surrogate pair)', () => {
     const long = `${'A'.repeat(OVERLONG_TOKEN_CHARS)}😀B`;
-    const parts = breakOnlyOverlongTokens(long);
+    const parts = wordBreakParts(long);
     expect(parts.join('')).toBe(long);
     expect(parts).toContain('😀');
     expect(parts).toHaveLength(OVERLONG_TOKEN_CHARS + 2);
+  });
+
+  it('an over-long hyphenated token: glue after each hyphen, never a forced break next to a hyphen (no "--" at a line end)', () => {
+    const word = `Over-long-hyphenated-${'x'.repeat(30)}`;
+    const parts = wordBreakParts(word);
+    expect(parts.join('')).toBe(word);
+    expect(parts.slice(0, 8)).toEqual(['Over-', '', 'long-', '', 'hyphenated-', '', 'x', 'x']);
+    // A long hyphenated name whose parts each fit has no forced break at all: it can only wrap at its own hyphens.
+    expect(wordBreakParts('Fitzgerald-Montgomery-Worthington')).toEqual(['Fitzgerald-', '', 'Montgomery-', '', 'Worthington']);
+    // A part that ends in "-" is always followed by the empty (glue) part; no part starts with "-".
+    for (const w of [word, `${'y'.repeat(30)}-z`, `a-${'y'.repeat(30)}--b`])
+      wordBreakParts(w).forEach((p, i, all) => {
+        if (p.endsWith('-') && i < all.length - 1) expect(all[i + 1]).toBe('');
+        expect(p.startsWith('-')).toBe(false);
+      });
+  });
+
+  it('never adds, drops or reorders a character', () => {
+    for (const w of ['Maximilian-Alexander', 'a-b-c-d', '--x--', 'A1b2C3d4E5'.repeat(30), `${'é'.repeat(30)}-${'ß'.repeat(30)}`, '😀-😀', '-', ''])
+      expect(wordBreakParts(w).join('')).toBe(w);
+  });
+});
+
+/**
+ * D6 (owner-approved with conditions, 2026-11-04): a long hyphenated name in a narrow column wraps after its OWN hyphen
+ * and stays complete and readable: every character printed, in order; nothing added (no second "-", no forced break
+ * inside a name part that fits), nothing dropped or truncated. Through the real render pool. Geometry (nothing outside
+ * the page or its column, nothing overlapping) is pinned for all three documents by native/d6-layout.spec.ts on the
+ * integration branch, which has the position-aware PDF reader.
+ */
+describe('D6: long hyphenated names wrap after their own hyphen, complete and readable', () => {
+  const NAMES = [
+    'Maximilian-Alexander Bartholomew Fitzgerald-Montgomery-Worthington III',
+    'Anna-Katharina Schmidt-Müller von Hohenzollern-Sigmaringen',
+    'Jean-Baptiste Worthington-Smythe',
+    // No space at all and wider than the Staff column: it can only wrap at its own hyphens.
+    'Fitzgerald-Montgomery-Worthington-Hohenzollern-Sigmaringen',
+  ];
+
+  it('every name is printed in full, exactly once, and wraps at its own hyphens in the Staff column', async () => {
+    const base = FINAL_TIMESHEET_CASES['one-page']!;
+    const data: FinalTimesheetData = { ...base, staff: staffRows(NAMES.length, (i) => NAMES[i]!) };
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data }));
+    const all = strip(doc.pageTexts.join(''));
+    for (const name of NAMES) expect(all.split(strip(name)).length - 1).toBe(1);
+    expect(all).not.toContain('--');
+    const lines = doc.pageTexts.flatMap((page) => page.split(/\r?\n/)).map((l) => l.trim());
+    // The narrow Staff column really wraps them, at a hyphen of the name itself ...
+    const hyphenEnded = lines.filter((l) => l.endsWith('-'));
+    expect(hyphenEnded.length).toBeGreaterThan(0);
+    // ... and only there: every line that ends in "-" ends in a name part that is followed by "-" in the name.
+    for (const l of hyphenEnded) {
+      const stem = l.split(' ').pop()!;
+      expect(NAMES.some((n) => n.includes(stem))).toBe(true);
+    }
   });
 });
 

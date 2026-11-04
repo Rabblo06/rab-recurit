@@ -84,8 +84,10 @@ export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): stri
  * Renders a report PDF natively. Resolves to the PDF bytes; a render that does not finish within
  * `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError` (step `native-render`, enforced by the render pool,
  * which terminates the render thread; a timer here could not stop a thread). Native failures carry a stable `code`
- * (runtime/render-protocol.ts). An unknown kind is refused (fail closed); a native failure is thrown as is (T3: no
- * fallback; the job's normal failure / retry path handles it).
+ * (native/runtime/render-protocol.ts, e.g. error_PDF_NATIVE_RENDER; a timeout carries error_PDF_RENDER_TIMEOUT). An
+ * unknown kind is refused (fail closed); a native failure is thrown as is (T3: no fallback) — the job's normal failure /
+ * retry path handles it (warning log with the code; for the statement, `statement_error` and the SHIFT_STATEMENT_FAILED
+ * audit row carry it).
  */
 export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
   pdfRendererMode(env);
@@ -96,4 +98,14 @@ export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEn
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
   return renderNativePdf(doc as NativeReportDocument);
+}
+
+/**
+ * " [<code>]" for a report-job failure log line when the error carries a stable code of the renderers' shape
+ * (`error_PDF_NATIVE_RENDER`, `error_PDF_RENDER_TIMEOUT`, …), else "": a failed native render is attributable in the
+ * Worker log, never silent. Only a code of that fixed shape is printed, never free text.
+ */
+export function errorCodeSuffix(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^error_[A-Z0-9_]{1,40}$/.test(code) ? ` [${code}]` : '';
 }

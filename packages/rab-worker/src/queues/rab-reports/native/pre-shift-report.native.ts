@@ -1,4 +1,4 @@
-import { Document, Text, View } from '@react-pdf/renderer';
+import { Document, View } from '@react-pdf/renderer';
 import { ReactElement, ReactNode } from 'react';
 
 import type { PreShiftReportRowView, PreShiftReportViewModel } from '@rab/server/modules/attendance/templates/pre-shift-report.view-model';
@@ -19,6 +19,7 @@ import {
   SignOffBlock,
   StaffCell,
   TableColumn,
+  Text,
 } from './document-components';
 
 /**
@@ -119,7 +120,8 @@ export function PreShiftReportDocument(props: { vm: PreShiftReportViewModel; cre
           key: 'bottom',
           mayBreak: bottomMayBreak(vm),
           children: [
-            h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [vm.notes, { text: vm.qrScopeNote, muted: true }] }),
+            // The shift notes keep the line breaks their author typed (pre-line, owner decision 2026-11-04).
+            h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [{ ...vm.notes, whiteSpace: 'pre-line' }, { text: vm.qrScopeNote, muted: true }] }),
             h(SignOffBlock, { heading: vm.beforeShiftHeading, paragraphs: vm.beforeShiftLines.map((text) => ({ text, muted: false })) }),
           ],
         }),

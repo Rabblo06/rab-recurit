@@ -34,29 +34,50 @@ export type Style = Styles[string];
  * textkit's penalty for breaking inside a word, set to its "never" (linebreak.infinity = 10000). Knuth-Plass then never
  * breaks inside a word; only when it finds no feasible paragraph (a token wider than its box) does textkit fall back to
  * its greedy best fit, which breaks inside that token only where the line would overflow, preferring any space. With the
- * word-breaking rule in fonts.ts (only tokens longer than 24 characters are breakable at all) a hyphenated name that fits
- * stays whole, as in Chromium (MEASURED: at textkit's default 600, and at 9999, "Fitzgerald-…" became "Fitzg-erald").
+ * word-breaking rule (word-breaking.ts: only tokens longer than 24 characters are force-breakable at all; a hyphenated
+ * name may break after its own hyphen through zero-width glue, which is not a penalty) a name that fits stays whole, as
+ * in Chromium (MEASURED: at textkit's default 600, and at 9999, "Fitzgerald-…" became "Fitzg-erald").
  */
 export const IN_WORD_BREAK_PENALTY = 10000;
 
 /**
- * HTML's `white-space: normal`, which the Chromium templates print with: every run of ASCII whitespace (space, TAB, LF,
- * CR, FF) is one space; NBSP and other Unicode spaces are kept. Applied to every string a layout prints, so both
- * renderers lay out the same characters (MEASURED: a note's blank lines are collapsed by Chromium; printing them natively
- * made 56 paragraphs out of Chromium's one, and 7 pages instead of 5). Preserving line breaks in notes would be a
- * template change for BOTH renderers (`white-space: pre-line`), an owner decision.
+ * HTML's `white-space: normal`, which the Chromium templates print with by default: every run of ASCII whitespace
+ * (space, TAB, LF, CR, FF) is one space; NBSP and other Unicode spaces are kept. Applied to every string a layout prints
+ * except free-text notes (`collapsePreLine`), so both renderers lay out the same characters.
  */
 export function collapseWhitespace(text: string): string {
   return text.replace(/[ \t\n\r\f]+/g, ' ');
 }
 
 /**
- * The ONLY text primitive layouts use (instead of react-pdf's `Text`): the same component with IN_WORD_BREAK_PENALTY, and
- * string children collapsed like HTML (`collapseWhitespace`). Children are plain strings (view-model values), never markup.
+ * HTML's `white-space: pre-line` (owner decision 2026-11-04: notes keep their original line breaks; the Chromium
+ * templates print the notes paragraph with the same property): every line break is kept, so a blank line stays a blank
+ * line, while each run of spaces, TABs and FFs becomes one space and the spaces around a line break are dropped.
+ * CRLF and a lone CR are line breaks, as in HTML (the render thread's glyph guard has already turned CRLF into LF and a
+ * lone CR into the visible marker; handled here as well so the kit never depends on that order). NBSP is kept.
+ * Only for free text whose line breaks the author typed (the shift notes paragraph of the final timesheet and of the
+ * pre-shift roster); never for table cells, names or generated lines.
  */
-export function Text(props: PropsWithChildren<TextProps>): ReactElement {
-  const children = typeof props.children === 'string' ? collapseWhitespace(props.children) : props.children;
-  return h(PdfText, { hyphenationPenalty: IN_WORD_BREAK_PENALTY, ...props }, children);
+export function collapsePreLine(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t\f]+/g, ' ')
+    .replace(/ ?\n ?/g, '\n');
+}
+
+/** How a Text lays out the whitespace of its string child: `normal` (the default) or `pre-line` (notes). */
+export type WhiteSpace = 'normal' | 'pre-line';
+
+/**
+ * The ONLY text primitive layouts use (instead of react-pdf's `Text`): the same component with IN_WORD_BREAK_PENALTY, and
+ * string children collapsed like HTML: `collapseWhitespace` by default, `collapsePreLine` with `whiteSpace: 'pre-line'`.
+ * Children are plain strings (view-model values), never markup.
+ */
+export function Text(props: PropsWithChildren<TextProps & { whiteSpace?: WhiteSpace }>): ReactElement {
+  const { whiteSpace, ...rest } = props;
+  const collapse = whiteSpace === 'pre-line' ? collapsePreLine : collapseWhitespace;
+  const children = typeof rest.children === 'string' ? collapse(rest.children) : rest.children;
+  return h(PdfText, { hyphenationPenalty: IN_WORD_BREAK_PENALTY, ...rest }, children);
 }
 
 /** CSS px → PDF pt (96 px = 72 pt), so sizes read exactly as in DOCUMENT_CSS. */
@@ -329,6 +350,8 @@ export function SegmentedTablePages(props: {
 export interface Paragraph {
   text: string;
   muted: boolean;
+  /** Free text whose line breaks the author typed (the shift notes) is laid out `pre-line`; the default is `normal`. */
+  whiteSpace?: WhiteSpace;
 }
 
 /** A headed block of paragraphs (NOTES, MANAGER SIGN-OFF, …): the template's `.bottom h3` + `.bottom p`. */
@@ -337,7 +360,7 @@ export function SignOffBlock(props: { heading: string; paragraphs: Paragraph[] }
     View,
     null,
     h(Text, { minPresenceAhead: px(40), style: { fontSize: px(10.5), fontWeight: 700, letterSpacing: px(0.3), marginBottom: px(8) } }, props.heading),
-    ...props.paragraphs.map((p, i) => h(Text, { key: `p${i}`, style: { marginBottom: px(6), color: p.muted ? COLOR.muted : undefined } }, p.text)),
+    ...props.paragraphs.map((p, i) => h(Text, { key: `p${i}`, whiteSpace: p.whiteSpace, style:{ marginBottom: px(6), color: p.muted ? COLOR.muted : undefined } }, p.text)),
   );
 }
 

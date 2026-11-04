@@ -124,9 +124,11 @@ describe('vendored fonts', () => {
     for (const r of registered)
       for (const f of r.fonts)
         expect(f.src.startsWith('data:font/ttf;base64,')).toBe(true);
-    // Word breaking (../word-breaking.ts): ordinary words stay whole; only an over-long token (> 24) becomes breakable.
-    expect(hyphenate!('Maximilian-Alexander')).toEqual(['Maximilian-Alexander']);
-    expect(hyphenate!('Unbreakable-Wordinglongword')).toEqual(Array.from('Unbreakable-Wordinglongword'));
+    // Word breaking (../word-breaking.ts): ordinary words stay whole; a hyphenated name may wrap after its own hyphen
+    // (the empty part is textkit's zero-width glue: no second "-"); only an over-long token (> 24) is force-breakable.
+    expect(hyphenate!('Internationalization')).toEqual(['Internationalization']);
+    expect(hyphenate!('Maximilian-Alexander')).toEqual(['Maximilian-', '', 'Alexander']);
+    expect(hyphenate!('A1b2C3d4E5A1b2C3d4E5A1b2C3')).toEqual(Array.from('A1b2C3d4E5A1b2C3d4E5A1b2C3'));
   });
 
   it('refuses to register a family twice (no silent second source for the same name)', () => {

@@ -16,7 +16,7 @@ import { PreShiftReportData } from '@rab/server/modules/attendance/templates/pre
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderReportPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { renderRosterEmail } from './report-email-content';
 import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
@@ -105,7 +105,7 @@ export async function runShiftReportSchedulerCycle(
       else if (outcome.value) generated += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 

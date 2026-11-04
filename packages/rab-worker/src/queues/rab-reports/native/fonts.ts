@@ -5,4 +5,4 @@
  * glyph guard and the fonts that draw agree.
  */
 export { FONT_DIR, FONT_FAMILY_STACK, PRIMARY_FONT_FAMILY as FONT_FAMILY } from './runtime/native-fonts';
-export { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './word-breaking';
+export { OVERLONG_TOKEN_CHARS, wordBreakParts } from './word-breaking';
