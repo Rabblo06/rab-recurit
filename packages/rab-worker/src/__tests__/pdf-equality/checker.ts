@@ -80,17 +80,64 @@ function occurrences(hay: string, needle: string): number {
   return n;
 }
 
+/** Explicit bidi formatting characters: embeddings, overrides, isolates (LRE RLE PDF LRO RLO, LRI RLI FSI PDI). */
+const BIDI_CONTROLS = /[‪-‮⁦-⁩]/;
+
+/**
+ * Non-overlapping windows of `hay` that hold exactly the characters of `needle`, in any order. Only for values carrying
+ * explicit bidi controls (see `countValue`): the window is contiguous and of the value's exact length, and each character
+ * occurs in it exactly as often as in the value.
+ */
+export function permutedOccurrences(hay: string, needle: string): number {
+  const h = [...hay];
+  const n = [...needle];
+  if (n.length === 0 || h.length < n.length) return 0;
+  const want = new Map<string, number>();
+  for (const c of n) want.set(c, (want.get(c) ?? 0) + 1);
+  let count = 0;
+  for (let i = 0; i + n.length <= h.length; ) {
+    const have = new Map(want);
+    let ok = true;
+    for (let k = i; k < i + n.length && ok; k++) {
+      const left = (have.get(h[k]!) ?? 0) - 1;
+      ok = left >= 0;
+      have.set(h[k]!, left);
+    }
+    if (ok) {
+      count++;
+      i += n.length;
+    } else i++;
+  }
+  return count;
+}
+
 /**
  * How many times a value is printed: per page over lines AND over blocks (a value wrapped across lines of one cell is
- * found in its block), taking the larger, so wrapping never hides a value.
+ * found in its block), taking the larger, so wrapping never hides a value; plus the printings that straddle a page break
+ * inside one paragraph (`x.continuations`: matched over the joined parts, minus those already inside a single part).
+ *
+ * Matching is whitespace-insensitive (`compact`), because that is all wrapping changes. It is never order-insensitive,
+ * with ONE exception: a value that itself carries explicit bidi controls (U+202A–U+202E, U+2066–U+2069). Those are
+ * reordering instructions and the renderer obeys them, so the text layer holds the value's characters in the order they
+ * are SEEN, and that order depends on how the producer split the text into runs (Skia splits at every font fallback,
+ * which differs between Windows and Linux fonts). For such a value, a contiguous window holding exactly its characters
+ * counts as one printing (`permutedOccurrences`).
  */
 export function countValue(x: PdfExtraction, value: string): number {
   const needle = compact(value);
-  return x.pages.reduce((sum, p) => {
-    const byLine = p.lines.reduce((s, l) => s + occurrences(compact(l), needle), 0);
-    const byBlock = p.blocks.reduce((s, b) => s + occurrences(compact(b), needle), 0);
+  const count = BIDI_CONTROLS.test(value)
+    ? (hay: string) => Math.max(occurrences(hay, needle), permutedOccurrences(hay, needle))
+    : (hay: string) => occurrences(hay, needle);
+  const perPage = x.pages.reduce((sum, p) => {
+    const byLine = p.lines.reduce((s, l) => s + count(compact(l)), 0);
+    const byBlock = p.blocks.reduce((s, b) => s + count(compact(b)), 0);
     return sum + Math.max(byLine, byBlock);
   }, 0);
+  const straddling = x.continuations.reduce((sum, c) => {
+    const parts = c.parts.map(compact);
+    return sum + Math.max(0, count(parts.join('')) - parts.reduce((s, part) => s + count(part), 0));
+  }, 0);
+  return perPage + straddling;
 }
 
 export function tokens(text: string): string[] {

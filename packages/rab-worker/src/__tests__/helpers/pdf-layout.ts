@@ -766,45 +766,93 @@ export interface LayoutLine {
 /** Vertically stacked, left-aligned segments (a wrapped cell or paragraph), joined with spaces. */
 export interface LayoutBlock {
   x: number;
+  /** Baseline of the first line. */
   top: number;
+  /** Baseline of the last line. */
+  bottom: number;
   text: string;
 }
 export interface LayoutPage {
   width: number;
   height: number;
   runs: TextRun[];
-  /** Top to bottom. */
+  /** Top to bottom; right-to-left phrases in logical order (see `logicalOrder`). */
   lines: LayoutLine[];
   /** Reading order: top to bottom, then left to right. */
   blocks: LayoutBlock[];
   images: ImagePlacement[];
 }
 
+/** Strong right-to-left letters: Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, their presentation forms, RTL SMP blocks. */
+const RTL_CHAR = /[֐-ࣿיִ-﷿ﹰ-ﻼ\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u;
+/** Strong left-to-right: any other letter, and digits (treated as L: see `logicalOrder`). */
+const LTR_CHAR = /(?![֐-ࣿיִ-﷿ﹰ-ﻼ\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}])[\p{L}\p{N}]/u;
+
+/** A run's bidi class at the granularity the producer drew it: R (RTL letters only), L (any other letter or digit), N. */
+function runDirection(text: string): 'R' | 'L' | 'N' {
+  if (LTR_CHAR.test(text)) return 'L';
+  return RTL_CHAR.test(text) ? 'R' : 'N';
+}
+
+/**
+ * Visual → logical order of one segment's pieces, for a left-to-right page (every document in scope is LTR). A PDF draws
+ * glyphs where they are SEEN: a right-to-left phrase ("محمد عبد الله") is drawn as separate runs (one per word or font
+ * run, each already logical inside thanks to ActualText / ReversedChars) placed right to left, so reading runs by x
+ * gives its words in reverse. As in the Unicode Bidi Algorithm for an LTR paragraph, a maximal span that starts and ends
+ * with an R run and holds only R and neutral runs (spaces, punctuation) is one RTL run: its pieces are read in reverse.
+ * Neutrals between R and L take the paragraph direction and stay where they are. Limitation: digits inside RTL text count
+ * as L (they end the span), so an Arabic "name 12 name" reads as drawn; no fixture has that.
+ */
+export function logicalOrder(pieces: ReadonlyArray<{ text: string; sep: string }>): string {
+  const dir = pieces.map((p) => runDirection(p.text));
+  let out = '';
+  for (let i = 0; i < pieces.length; ) {
+    if (dir[i] !== 'R') {
+      out += pieces[i]!.sep + pieces[i]!.text;
+      i++;
+      continue;
+    }
+    // [i, j]: R … R with only R / N between (no L).
+    let j = i;
+    for (let k = i + 1; k < pieces.length && dir[k] !== 'L'; k++) if (dir[k] === 'R') j = k;
+    // Visual  sep_i P_i sep_i+1 P_i+1 … sep_j P_j   →   logical  sep_i P_j sep_j P_j-1 … sep_i+1 P_i
+    out += pieces[i]!.sep;
+    for (let k = j; k >= i; k--) out += pieces[k]!.text + (k > i ? pieces[k]!.sep : '');
+    i = j + 1;
+  }
+  return out;
+}
+
 function joinRuns(items: TextRun[]): LayoutSegment[] {
+  type Open = { x: number; y: number; endX: number; size: number; pieces: Array<{ text: string; sep: string }> };
   const segments: LayoutSegment[] = [];
-  let cur: LayoutSegment | null = null;
+  const open = (r: TextRun): Open => ({ x: r.x, y: r.y, endX: r.endX, size: r.size, pieces: [{ text: r.text, sep: '' }] });
+  const close = (c: Open) => segments.push({ x: c.x, endX: c.endX, y: c.y, size: c.size, text: logicalOrder(c.pieces) });
+  let cur: Open | null = null;
   for (const r of items) {
     if (!cur) {
-      cur = { ...r };
+      cur = open(r);
       continue;
     }
     const gap = r.x - cur.endX;
     const size = Math.max(cur.size, r.size, 1);
     if (gap > 1.2 * size) {
-      segments.push(cur);
-      cur = { ...r };
+      close(cur);
+      cur = open(r);
       continue;
     }
-    const needsSpace = gap > 0.15 * size && !/\s$/.test(cur.text) && !/^\s/.test(r.text);
-    cur.text += (needsSpace ? ' ' : '') + r.text;
+    const prev = cur.pieces[cur.pieces.length - 1]!.text;
+    const needsSpace = gap > 0.15 * size && !/\s$/.test(prev) && !/^\s/.test(r.text);
+    cur.pieces.push({ text: r.text, sep: needsSpace ? ' ' : '' });
     cur.endX = Math.max(cur.endX, r.endX);
     cur.size = size;
   }
-  if (cur) segments.push(cur);
+  if (cur) close(cur);
   return segments;
 }
 
-function layoutLines(runs: TextRun[]): LayoutLine[] {
+/** Runs → lines, top to bottom; within a line, segments left to right, each in logical (reading) order. */
+export function layoutLines(runs: TextRun[]): LayoutLine[] {
   const sorted = runs.filter((r) => r.text.length > 0).sort((a, b) => b.y - a.y || a.x - b.x);
   const groups: TextRun[][] = [];
   for (const r of sorted) {
@@ -819,7 +867,8 @@ function layoutLines(runs: TextRun[]): LayoutLine[] {
   });
 }
 
-function layoutBlocks(lines: LayoutLine[]): LayoutBlock[] {
+/** Lines → blocks: vertically stacked, left-aligned segments (a wrapped cell or paragraph), in reading order. */
+export function layoutBlocks(lines: LayoutLine[]): LayoutBlock[] {
   type Open = { x: number; top: number; lastY: number; size: number; parts: string[] };
   const open: Open[] = [];
   const done: Open[] = [];
@@ -835,7 +884,7 @@ function layoutBlocks(lines: LayoutLine[]): LayoutBlock[] {
     }
   }
   done.push(...open);
-  return done.sort((a, b) => b.top - a.top || a.x - b.x).map((b) => ({ x: b.x, top: b.top, text: b.parts.join(' ') }));
+  return done.sort((a, b) => b.top - a.top || a.x - b.x).map((b) => ({ x: b.x, top: b.top, bottom: b.lastY, text: b.parts.join(' ') }));
 }
 
 /**

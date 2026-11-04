@@ -1,8 +1,16 @@
-import * as dns from 'dns';
-import * as http from 'http';
-import * as https from 'https';
-import * as net from 'net';
-import * as tls from 'tls';
+/*
+ * The guard must patch the REAL module objects. `import * as net from 'net'` compiles (esModuleInterop) to a
+ * `__importStar` copy whose properties are getter-only bindings: assigning `net.connect` throws "Cannot set property
+ * connect of #<Object> which has only a getter", and patching a copy would not intercept callers of the real module
+ * anyway. `require` returns the module object every other caller (http's Agent, undici, Playwright) uses.
+ */
+/* eslint-disable @typescript-eslint/no-require-imports */
+const dns = require('dns') as typeof import('dns');
+const http = require('http') as typeof import('http');
+const https = require('https') as typeof import('https');
+const net = require('net') as typeof import('net');
+const tls = require('tls') as typeof import('tls');
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 /**
  * Node-level network guard for a render: records (and in `deny` mode refuses) every outbound network attempt made by
@@ -48,14 +56,21 @@ export function guardNetwork(mode: 'record' | 'deny'): NetworkGuard {
   const restores: Array<() => void> = [];
   const patch = <T extends object>(obj: T, key: keyof T & string, api: string) => {
     const original = obj[key] as unknown as (...args: unknown[]) => unknown;
-    if (typeof original !== 'function') return;
     const wrapped = function (this: unknown, ...args: unknown[]) {
       const target = describeTarget(args);
       attempts.push({ api, target });
       if (mode === 'deny') throw new NetworkDeniedError(api, target);
       return original.apply(this, args);
     };
-    (obj as Record<string, unknown>)[key] = wrapped;
+    // Fail closed: a guard that silently did not install proves nothing.
+    try {
+      if (typeof original !== 'function') throw new Error('not a function');
+      (obj as Record<string, unknown>)[key] = wrapped;
+      if (obj[key] !== (wrapped as unknown)) throw new Error('assignment did not take');
+    } catch (error) {
+      for (const r of restores.reverse()) r();
+      throw new Error(`network guard: cannot patch ${api}: ${(error as Error).message}`);
+    }
     restores.push(() => {
       (obj as Record<string, unknown>)[key] = original;
     });
