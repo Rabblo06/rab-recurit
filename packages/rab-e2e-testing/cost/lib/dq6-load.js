@@ -271,19 +271,32 @@ async function steady() {
   const sub = startSubscriber(path.join(OUT, `dq6-${label}.pubsub.txt`));
   const c0 = cpuNow();
   const x0 = pgXact();
+  // Generation window, written by the generator itself on success AND failure: dq6-report.js accepts the loaded resource
+  // window only if [start, end] covers its [t-start, t-end] (a generator that stopped early leaves an uncovered window).
+  const windowFile = path.join(OUT, `dq6-${label}.gen-window.json`);
+  fs.rmSync(windowFile, { force: true });
   const t0 = Date.now();
   let seq = 0;
   let nextDepth = t0;
   let late = 0;
-  for (let tick = 0; Date.now() - t0 < seconds * 1000; tick++) {
-    const due = t0 + tick * 1000;
-    if (Date.now() > due + 1000) late++;
-    seq = insertBatch(T, seq, rate);
-    if (Date.now() >= nextDepth) { sampleDepth(); nextDepth += 10000; }
-    const wait = t0 + (tick + 1) * 1000 - Date.now();
-    if (wait > 0) await sleep(wait);
+  let genEnd = null;
+  let genError = null;
+  try {
+    for (let tick = 0; Date.now() - t0 < seconds * 1000; tick++) {
+      const due = t0 + tick * 1000;
+      if (Date.now() > due + 1000) late++;
+      seq = insertBatch(T, seq, rate);
+      if (Date.now() >= nextDepth) { sampleDepth(); nextDepth += 10000; }
+      const wait = t0 + (tick + 1) * 1000 - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+  } catch (e) {
+    genError = String(e.message).slice(0, 300);
+    throw e;
+  } finally {
+    genEnd = Date.now();
+    fs.writeFileSync(windowFile, JSON.stringify({ start: t0, end: genEnd, completed: genError == null, error: genError, notifications: seq }));
   }
-  const genEnd = Date.now();
   const c = await collect(sinceIso, opt('cap', 600), path.join(OUT, `dq6-${label}.pubsub.txt`));
   sub.stop();
   const c1 = cpuNow();

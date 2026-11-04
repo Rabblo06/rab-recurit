@@ -243,7 +243,7 @@ Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never ena
 |---|---|
 | `idle-off` | realtime + push off (production default), drained, `DQ6_IDLE_S` (300 s) idle window |
 | `idle-on` | realtime + push on, drained, idle window |
-| `loaded` | `DQ6_RATE` (10) notifications/s for 330 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The resource window is the middle 300 s; the generator's own transactions are subtracted |
+| `loaded` | `DQ6_RATE` (10) notifications/s for 390 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The 300 s resource window starts 15 s in; the generator's own transactions are subtracted, and the report accepts the window only if the generator's own recorded run (start and end, written on success and on failure) covers all of it |
 | `burst` | `DQ6_BURST` (2,000) notifications inserted at once: drain time, rows/s, per-organisation completion, fairness |
 | `rworker` | 5/s load; graceful Worker stop, 30 s down, start, 60 s more load: time to ready, first delivery, backlog cleared, stuck rows, duplicates |
 | `rredis` | the same with Redis stopped. Redis runs without persistence, so it comes back empty: a Redis data loss |
@@ -259,8 +259,8 @@ completion spread), errors (failed rows and Worker log error lines), and host co
 Setup seeds with `COST_SEED_NOW=2026-10-27T22:05:00Z` (`DQ6_SEED_NOW`) and marks the last shifts' post-shift stamps as
 processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. Before every
 window and scenario (after its drain) and at the end of each arm, `arm` refuses to go on once a published shift starts
-within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. The margin is longer than the longest scenario (a recovery with its
-900 s collection cap, about 18 min), so roster PDF renders can never enter a window silently. Usable budget: about 4 h 15 min.
+within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. A margin shorter than the longest window or scenario (computed from
+`DQ6_IDLE_S` and the fixed caps; about 22 min with the defaults) is refused, so roster PDF renders can never enter a window silently. Usable budget: about 4 h 15 min.
 
 ## Phases (`scripts/run.sh`)
 

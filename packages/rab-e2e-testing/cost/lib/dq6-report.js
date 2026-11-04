@@ -75,11 +75,12 @@ const ms = (x) => (x == null ? '—' : `${(x / 1000).toFixed(1)} s`);
 // the state it can see (email: SENT rows have one LOGGER line each; realtime: completed events were published). Below
 // COVERAGE_MIN the cell is marked LOW: the duplicate count is then not evidence of anything.
 const COVERAGE_MIN = 95;
-const cov = (seen, eligible) => (seen == null ? null : eligible ? Math.round((seen / eligible) * 100) : null);
+// Unrounded percentage: the LOW threshold is applied to it; only the displayed value is rounded (down, so 94.5 never shows 95).
+const cov = (seen, eligible) => (seen == null ? null : eligible ? (seen / eligible) * 100 : null);
 const dupCell = (s) => {
   const e = cov(s.email.rowsWithLoggerSendLine, s.email.status.SENT || 0);
   const r = cov(s.realtime.distinctEventsSeenOnPubSub, s.realtime.status.completed || 0);
-  const one = (dup, c) => `${fmt(dup)} (seen ${c == null ? '—' : `${c} %`}${c != null && c < COVERAGE_MIN ? ' LOW' : ''})`;
+  const one = (dup, c) => `${fmt(dup)} (seen ${c == null ? '—' : `${Math.floor(c * 10) / 10} %`}${c != null && c < COVERAGE_MIN ? ' LOW' : ''})`;
   return `${one(s.email.duplicateSends, e)} / ${one(s.realtime.duplicatePublishes, r)}`;
 };
 const lat = (l) => (l && l.n ? `${l.p50} / ${l.p95} / ${l.p99} / ${l.max}` : '—');
@@ -101,6 +102,20 @@ const METRICS = [
   ['workerCgroupMiB', 'Worker cgroup memory MiB'],
   ['hostOtherCpuPct', 'Host: other containers CPU % (contention)'],
 ];
+// A loaded resource window is valid only if the generator's own recorded [start, end] covers the window's [t-start, t-end]
+// (dq6-<label>.gen-window.json, written by dq6-load.js on success and on failure). Missing record or gap -> INVALID, excluded.
+const invalidLoaded = [];
+for (const r of list) {
+  if (!r.windows.loaded) continue;
+  const label = `${r.arm}-r${r.rep}-loaded`;
+  const gw = read(path.join(OUT, `dq6-${label}.gen-window.json`));
+  const rdT = (f) => { const p = path.join(OUT, `idle-${label}`, f); return fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8').trim()) * 1000 : null; };
+  const ts = rdT('t-start');
+  const te = rdT('t-end');
+  const why = !gw ? 'no generator window record' : ts == null || te == null ? 'no window timestamps' : gw.start > ts ? `generator started ${((gw.start - ts) / 1000).toFixed(1)} s after the window` : gw.end < te ? `generator stopped ${((te - gw.end) / 1000).toFixed(1)} s before the window ended${gw.error ? ` (${gw.error.slice(0, 80)})` : ''}` : null;
+  if (why) { invalidLoaded.push(`${r.arm} r${r.rep}: ${why}`); r.loadedInvalid = why; delete r.windows.loaded; }
+}
+if (invalidLoaded.length) md.push('**Loaded windows excluded as INVALID** (the load did not cover the whole resource window):', '', ...invalidLoaded.map((x) => `- ${x}`), '');
 for (const w of ['idle-off', 'idle-on', 'loaded']) {
   md.push(`## ${w === 'idle-off' ? 'Idle, realtime + push OFF (production default)' : w === 'idle-on' ? 'Idle, realtime + push ON' : 'Loaded (steady notifications, realtime + push ON)'}`, '');
   md.push(`| Metric | ${list.map((r) => `${r.arm} r${r.rep}`).join(' | ')} | ${arms.map((a) => `${a} mean (spread)`).join(' | ')} |`);

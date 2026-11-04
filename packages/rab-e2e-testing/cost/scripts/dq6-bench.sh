@@ -21,7 +21,8 @@
 #   idle-off   realtime + push OFF (production default), drained, DQ6_IDLE_S idle window          (measure.sh idle)
 #   idle-on    realtime + push ON, drained, idle window                                           (measure.sh idle)
 #   loaded     realtime + push ON; DQ6_RATE notifications/s (each = notification + realtime + push + email rows) round-robin
-#              over every organisation for DQ6_IDLE_S + 30 s; the resource window is the middle DQ6_IDLE_S
+#              over every organisation for DQ6_IDLE_S + 90 s; the resource window is DQ6_IDLE_S starting 15 s in, and the
+#              report accepts it only if the generator's own recorded run covers it
 #              (measure.sh idle, generator transactions subtracted); latency/depth/duplicates/fairness (lib/dq6-load.js)
 #   burst      DQ6_BURST notifications inserted at once (500 per transaction): drain time, rows/s, per-org completion
 #   rworker    DQ6_REC_RATE/s for 60 s, graceful Worker stop, 30 s down, start, 60 s more: recovery timings
@@ -95,6 +96,14 @@ set_arm() {
 
 CLOCK_MARGIN_MIN="${DQ6_CLOCK_MARGIN_MIN:-45}"
 case "$CLOCK_MARGIN_MIN" in '' | *[!0-9]*) die "DQ6_CLOCK_MARGIN_MIN must be whole minutes" ;; esac
+# The margin must outlast the longest single window or scenario that follows one guard check, with today's settings:
+#   idle window IDLE_S (+15 s sampling overrun); loaded: 15 s + generator (IDLE_S + LOADED_EXTRA_S) + 600 s collection cap;
+#   burst: 60 s inserts + 900 s cap; recovery: 60 + 30 + 60 s + 180 s readiness cap + 900 s cap.
+LOADED_EXTRA_S=90
+longest_s=$(( IDLE_S + 15 ))
+for s in $(( 15 + IDLE_S + LOADED_EXTRA_S + 600 )) $(( 60 + 900 )) $(( 60 + 30 + 60 + 180 + 900 )); do [ "$s" -le "$longest_s" ] || longest_s=$s; done
+need_min=$(( (longest_s + 59) / 60 + 1 ))
+[ "$CLOCK_MARGIN_MIN" -ge "$need_min" ] || die "DQ6_CLOCK_MARGIN_MIN=$CLOCK_MARGIN_MIN is shorter than the longest window/scenario (${longest_s} s with DQ6_IDLE_S=$IDLE_S): use at least $need_min"
 clock_guard() { # [where]: before every window/scenario; the roster window is 180 min
   local n where="${1:-}"
   n="$(q "select count(*) from core.shift where status not in ('cancelled','completed','draft') and starts_at > now() and starts_at <= now() + make_interval(mins => 180 + $CLOCK_MARGIN_MIN)")"
@@ -150,11 +159,12 @@ do_arm() {
   idle_window "$L-idle-off"
   ensure_flags on; record_mode "$L-idle-on"
   idle_window "$L-idle-on"
-  # loaded: generator runs IDLE_S + 30 s; the resource window is its middle IDLE_S seconds
+  # loaded: generator runs IDLE_S + 90 s; the resource window (IDLE_S) starts 15 s in, leaving 75 s for overrun
   stamp "arm $L: loaded"
   host_snapshot "$L-loaded start"
   clock_guard "$L-loaded"
-  node_env "$LOAD" steady "$L-loaded" --seconds $((IDLE_S + 30)) --rate "$RATE" > "$OUT/dq6-$L-loaded.log" 2>&1 &
+  rm -f "$OUT/dq6-$L-loaded.gen-window.json" # a rerun must not reuse a stale coverage record
+  node_env "$LOAD" steady "$L-loaded" --seconds $((IDLE_S + LOADED_EXTRA_S)) --rate "$RATE" > "$OUT/dq6-$L-loaded.log" 2>&1 &
   local gen=$!
   sleep 15
   bash "$M" idle "$L-loaded" "$IDLE_S"
