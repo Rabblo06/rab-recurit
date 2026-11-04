@@ -247,6 +247,11 @@ export interface BullmqSchedulerDeps {
   /** Phase A enable predicate (default: all enabled). `jobs` stays the FULL list so disabled scans' schedulers get removed. */
   isEnabled?: (def: ScanJobDefinition) => boolean;
   logger: Logger;
+  /**
+   * Phase D-Q4a (Lane A): receives the scan lock as soon as it is open, BEFORE any scan Worker is created, so the combined
+   * scan's member locks exist for the very first job this replica takes (main.ts `combinedMemberLock`).
+   */
+  onScanLock?: (scanLock: ScanLock) => void;
 }
 
 export interface BullmqScheduler {
@@ -301,6 +306,7 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   runtime.enableSchedulerProgress();
 
   const scanLock = await ScanLock.open(deps.lockConnection, logger);
+  deps.onScanLock?.(scanLock);
   const isEnabled = deps.isEnabled ?? (() => true);
   const manager = new CrewflowSchedulerManager({ connection: redis, prefix: deps.prefix, jobs: deps.jobs, intervalOf: deps.intervalOf, isEnabled, logger });
   const instance = `${os.hostname()}:${process.pid}`;

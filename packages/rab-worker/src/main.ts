@@ -43,13 +43,14 @@ import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
+import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { assertCombinedShiftScanTick, isScanJobEnabled, resolveIntervalMs, resolveShiftScanMode, SCAN_JOBS } from './core/scheduler/scan-jobs';
-import { COMBINED_SHIFT_SCAN_JOB, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
+import { COMBINED_SHIFT_SCAN_JOB, combinedMemberLock, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
 import { DispatchWakeListener } from './core/wake/dispatch-listener';
@@ -377,6 +378,8 @@ async function bootstrap(): Promise<void> {
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
   let scheduler: BullmqScheduler | null = null;
+  // Phase D-Q4a Lane A: the scan lock as soon as startBullmqScheduler opens it (onScanLock), before its first scan Worker.
+  let memberScanLock: ScanLock | null = null;
 
   // Phase D (D1): global claim mode. The four dispatch scans call the coordinator (reconciliation sweep when due + global
   // claim through core.worker_claim_*); wake-ups (event mode) run through runtime.runOnce so they take a scan slot, are
@@ -428,10 +431,9 @@ async function bootstrap(): Promise<void> {
       intervalOf,
       tickMs: intervalOf(combinedDef),
       runtime,
-      memberLock: (schedulerId) => {
-        const lock = scheduler?.scanLock;
-        return lock ? (work) => lock.run(schedulerId, work) : undefined;
-      },
+      // Lane A: the member's own scan lock, from onScanLock (set before any scan Worker exists); fail closed
+      // (skipped-locked) if a job ever arrives before it. Interval mode: no member lock, as today.
+      memberLock: combinedMemberLock(schedulerMode === 'bullmq' ? 'bullmq' : 'interval', () => memberScanLock ?? scheduler?.scanLock),
     });
     scanRegistry = withCombinedShiftScan(scanRegistry, combined);
     logger.log(`shift scans: WORKER_SHIFT_SCAN_MODE=combined tick=${intervalOf(combinedDef) / 1000}s members=shift-monitor,attendance-monitor,shift-report-scheduler,final-timesheet`);
@@ -466,6 +468,9 @@ async function bootstrap(): Promise<void> {
       intervalOf,
       isEnabled,
       logger,
+      onScanLock: (lock) => {
+        memberScanLock = lock;
+      },
     }).catch(refuseStartup);
     beat();
   } else {

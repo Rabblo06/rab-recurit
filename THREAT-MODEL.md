@@ -5063,9 +5063,9 @@ shift report scheduler, final timesheet) find their work: ONE workspace walk per
 - **Multi-replica.** Interval mode: each replica runs the combined scan, as each scan today; cross-replica safety is the
   same worker_event UNIQUE keys, compare-and-sets and per-shift advisory locks (two concurrent combined scanners → each
   key exactly once, tested). Lane A (`WORKER_SCHEDULER=bullmq`): one cluster scheduler and scan lock for the walk, plus
-  each member's own scan lock for its processing once the scheduler exists. **Residual:** the first combined job a
-  replica processes before its bullmq scheduler finishes starting runs its members without their member locks
-  (correctness still held by the keys/CAS/locks above; only duplicate work).
+  each member's own scan lock for its processing. The scan lock reaches the combined scan (`onScanLock`) before any
+  scan Worker exists, and a member that finds no lock under bullmq is `skipped-locked`, never run unlocked (fail
+  closed; `cf56382d`, unit + integration tested). The earlier first-tick residual is closed.
 - **Redis.** Interval mode needs no Redis to find or process work (tested with Redis unreachable); stats writes stay
   best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the next periodic reconcile, within
   one `WORKER_SCHEDULER_RECONCILE_SECONDS` (default 60 s, configurable up to 3 600 s). In Lane A a member's scan lock

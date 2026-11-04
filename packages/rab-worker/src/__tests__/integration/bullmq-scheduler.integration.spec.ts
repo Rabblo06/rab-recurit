@@ -254,9 +254,14 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
           { queue: defs[1]!.queue, jobName: defs[1]!.jobName, source: 'slow', handler: handler('shift-monitor', 2_500) },
           { queue: defs[2]!.queue, jobName: defs[2]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
         ]);
+        // D-Q4a Lane A: onScanLock hands main.ts the scan lock (combined-scan member locks) once, the same one returned.
+        const lockSeen: unknown[] = [];
         const scheduler = await startBullmqScheduler({
           redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
+          onScanLock: (lock) => lockSeen.push(lock),
         });
+        expect(lockSeen).toHaveLength(1);
+        expect(lockSeen[0]).toBe(scheduler.scanLock);
         replicas.push({ name, redis: conn, runtime, scheduler });
       }
       await new Promise((r) => setTimeout(r, 12_000));

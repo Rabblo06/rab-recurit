@@ -15,7 +15,7 @@ import {
   SCAN_JOBS,
   ScanJobDefinition,
 } from '../../core/scheduler/scan-jobs';
-import { CombinedShiftScan, COMBINED_SHIFT_SCAN_JOB, withCombinedShiftScan } from './shift-scan-combined.job';
+import { combinedMemberLock, CombinedShiftScan, COMBINED_SHIFT_SCAN_JOB, withCombinedShiftScan } from './shift-scan-combined.job';
 import { ShiftScanProcessor } from './shift.processors';
 
 /**
@@ -322,5 +322,45 @@ describe('D-Q4a combined tick: one walk, each member its own cycle and Health ke
     ]);
     expect(outcomes).toEqual(['succeeded', 'succeeded', 'succeeded', 'skipped-locked']);
     expect(h.processed.map((p) => p.member)).not.toContain('final-timesheet');
+  });
+});
+
+describe('D-Q4a Lane A first tick: combinedMemberLock (main.ts wiring) never runs a member unlocked under bullmq', () => {
+  const lockRecorder = () => {
+    const asked: string[] = [];
+    const lock = {
+      run: async <T>(schedulerId: string, work: () => Promise<T>) => {
+        asked.push(schedulerId);
+        return { acquired: true as const, value: await work() };
+      },
+    };
+    return { asked, lock };
+  };
+
+  it('interval scheduler: no member lock at all (as each separate interval scan today)', () => {
+    const { lock } = lockRecorder();
+    expect(combinedMemberLock('interval', () => lock)('crewflow:crewflow-scan-shifts:shift-monitor')).toBeUndefined();
+  });
+
+  it('bullmq, scan lock not available yet (a job taken before startBullmqScheduler returned): every member is skipped-locked, nothing processed', async () => {
+    const h = harness({ memberLock: combinedMemberLock('bullmq', () => null) as never });
+    const outcomes = await Promise.all((await h.scan.tick()).started);
+    expect(outcomes).toEqual(['skipped-locked', 'skipped-locked', 'skipped-locked', 'skipped-locked']);
+    expect(h.processed).toHaveLength(0);
+  });
+
+  it('bullmq, scan lock available: each member runs under ITS OWN scheduler id, read at tick time (not when wired)', async () => {
+    const { asked, lock } = lockRecorder();
+    let current: typeof lock | null = null;
+    const h = harness({ memberLock: combinedMemberLock('bullmq', () => current) as never });
+    current = lock; // the lock appears after wiring, before the tick (startBullmqScheduler's onScanLock)
+    const outcomes = await Promise.all((await h.scan.tick()).started);
+    expect(outcomes).toEqual(['succeeded', 'succeeded', 'succeeded', 'succeeded']);
+    expect(asked).toEqual([
+      'crewflow:crewflow-scan-shifts:shift-monitor',
+      'crewflow:crewflow-scan-shifts:attendance-monitor',
+      'crewflow:crewflow-scan-reports:shift-report-scheduler',
+      'crewflow:crewflow-scan-reports:final-timesheet',
+    ]);
   });
 });
