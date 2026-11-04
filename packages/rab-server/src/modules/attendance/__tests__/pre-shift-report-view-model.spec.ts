@@ -116,7 +116,7 @@ describe('pre-shift attendance sheet: view-model', () => {
     expect(v.details.role).toBe('Department / role: Events & <Ops> · R&D <ops>');
     expect(v.rows[0]).toMatchObject({ name: '<script>alert(1)</script> Smith', sub: '<i>ref</i> · R&D <ops>' });
     const html = renderPreShiftReportHtml(PRE_SHIFT_FIXTURES.hostile!);
-    expect(html).not.toMatch(/<script|<img src="http|<link|<i>ref/);
+    expect(html).not.toMatch(/<script|<img src="http|<link|<i>ref/i); // case-insensitive: no raw tag in any case
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt; Smith');
   });
 
