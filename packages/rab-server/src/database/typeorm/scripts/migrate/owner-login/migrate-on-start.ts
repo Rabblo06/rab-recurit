@@ -161,6 +161,34 @@ async function readMarkerState(env: Record<string, string | undefined>): Promise
   });
 }
 
+/**
+ * M0-C (VERIFIED on PG16): a killed migrator keeps the lock until its running statement ends (up to 900 s). On SIGTERM the
+ * child cancels its own migration statement through a second connection of the SAME login (pg_cancel_backend is allowed
+ * on one's own backends), so the transaction rolls back and the session's lock is released at once; then it exits 143.
+ * client_connection_check_interval = 1 s (set on the session) covers SIGKILL. Returns the uninstaller.
+ */
+export function installSigtermSelfCancel(
+  env: Record<string, string | undefined>,
+  getPid: () => number | null,
+  log: (line: string) => void,
+  exit: (code: number) => void = (code) => process.exit(code),
+): () => void {
+  let handling = false;
+  const handler = () => {
+    if (handling) return;
+    handling = true;
+    const pid = getPid();
+    log(`SIGTERM: ${pid ? `cancelling the migration statement of backend ${pid}` : 'no migration session yet'}; exiting`);
+    const done = () => exit(143);
+    if (!pid) return done();
+    withLoginClient(env, (query) => query('SELECT pg_catalog.pg_cancel_backend($1)', [pid]))
+      .catch(() => undefined)
+      .finally(done);
+  };
+  process.on('SIGTERM', handler);
+  return () => process.off('SIGTERM', handler);
+}
+
 export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: MigrateOnStartDeps = {}): Promise<MigrateOnStartResult> {
   const env = deps.env ?? process.env;
   const log = deps.log ?? ((line: string) => console.log(`[migrate-on-start] ${line}`)); // eslint-disable-line no-console

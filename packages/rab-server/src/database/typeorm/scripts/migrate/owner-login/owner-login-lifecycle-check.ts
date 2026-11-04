@@ -41,7 +41,7 @@ import { secureOwnerInvariantViolations } from '../../../core/secure-owner-invar
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import { runLockedMigrations } from '../locked-migration-runner';
 import { MIGRATION_LOCK_KEY } from '../migration-lock';
-import { MigrateOnStartResult, RESULT_LINE_PREFIX, runMigrateOnStart, StartupOutcome } from './migrate-on-start';
+import { installSigtermSelfCancel, MigrateOnStartResult, RESULT_LINE_PREFIX, runMigrateOnStart, StartupOutcome } from './migrate-on-start';
 import { PRIVILEGED_COPY_MIGRATION, SHIMMED_MIGRATIONS } from './row-copy-shim';
 
 /** Mirror of Agent 2's STARTUP_EXIT_CODES (runtime-db-config.ts); the real entry uses theirs. */
@@ -79,12 +79,14 @@ function check(ok: boolean, label: string, detail: readonly string[] = []): void
 
 // ── Child mode ─────────────────────────────────────────────────────────────────────────────────────────────────────
 async function childMain(): Promise<void> {
+  let pid: number | null = null;
+  installSigtermSelfCancel(process.env, () => pid, (l) => console.log(`[migrate-on-start] ${l}`)); // eslint-disable-line no-console
   const result = await runMigrateOnStart(
     {
       migrationApprovalMode: (process.env.OWNER_LOGIN_CHILD_APPROVAL as 'none' | 'token') ?? 'none',
       upgradeFailurePolicy: (process.env.OWNER_LOGIN_CHILD_POLICY as 'refuse' | 'continue-if-compatible') ?? 'refuse',
     },
-    { env: process.env },
+    { env: process.env, onSession: (p) => (pid = p) },
   );
   const code = EXIT[result.outcome];
   console.log(`${RESULT_LINE_PREFIX} ${JSON.stringify({ ...result, exitCode: code })}`); // eslint-disable-line no-console
