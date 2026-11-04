@@ -173,7 +173,8 @@ function checkVariant(variant, production, variantFiles = variant) {
       if (services[other] && envOf(services[other]).PG_DATABASE_URL !== envOf(migrate).PG_DATABASE_URL) fail(`rab-migrate: PG_DATABASE_URL differs from ${other}'s (one login)`);
     }
     if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'APP_SECRET')) fail('rab-migrate: reads the runtime secrets (runtime.env)');
-    if (envOf(migrate).CREWFLOW_MIGRATION_APPROVAL_MODE !== 'token') fail('rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE is not "token"');
+    // deploy-prepare.js is always in token mode; an approval mode on it would only suggest it can be switched off.
+    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'CREWFLOW_MIGRATION_APPROVAL_MODE')) fail('rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE (deploy-prepare.js is always in token mode)');
     if (migrate.restart !== 'no') fail('rab-migrate: restart is not "no"');
     if ((migrate.profiles ?? []).length) fail('rab-migrate: has a profile (it must run on every up)');
     if (!/deploy-prepare\.js$/.test(stable(migrate.command).replace(/"\]$/, ''))) fail('rab-migrate: does not run deploy-prepare.js');

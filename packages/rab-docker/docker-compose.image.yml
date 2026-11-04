@@ -25,10 +25,11 @@
 #
 # LIFECYCLE (this file = the CONTROLLED RELEASE, production's default). The API never changes the schema
 # (CREWFLOW_MIGRATE_ON_START=false): at start it only verifies code<->schema compatibility and refuses to serve otherwise.
-# The one-off rab-migrate (deploy-prepare.js, the SAME API image, the SAME login, approval mode TOKEN) runs to completion
+# The one-off rab-migrate (deploy-prepare.js, the SAME API image, the SAME login, ALWAYS token mode) runs to completion
 # first; rab-api waits for it (service_completed_successfully), the Worker waits for a healthy API. Exit codes of
 # rab-migrate: 0 nothing pending / applied; 3 pending and not approved (lists them, prints pending-<n>-<sha256>); 64-69 per
-# M0 section 7 (config, behind, failed, identity, post-check, lock timeout); 1 refused/stale token. Approve with
+# M0 section 7 by kind (config, behind, failed, identity, post-check, lock timeout). Without a token it is a check run that
+# applies nothing; an apply run needs CREWFLOW_MIGRATION_APPROVED=<token>. Approve with
 # `run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate` (runbook 3.4): the token is never in a file.
 #
 # SECURITY POSTURE. The runtime login owns the schema (PT-01; M0 G-01..G-04 and the rest: runbook section 1, THREAT-MODEL.md).
@@ -270,9 +271,9 @@ services:
 
     environment:
       NODE_ENV: production
-      CREWFLOW_MIGRATION_APPROVAL_MODE: token
       CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
 
+    # Always token mode: no token = check run (0 current, 3 pending); CREWFLOW_MIGRATION_APPROVED = apply run; 64-69 by kind.
     command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
 
     restart: "no"

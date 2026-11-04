@@ -21,8 +21,9 @@
 #
 # LIFECYCLE: the controlled release. The API never migrates (CREWFLOW_MIGRATE_ON_START=false; read-only compatibility
 # check, then main.js). rab-migrate (deploy-prepare.js, same image, same login, approval mode token) runs to completion
-# first; exit 0 nothing pending / applied, 3 pending and not approved (prints the token), 64-69 per M0 section 7, 1 a
-# refused/stale token. The Worker never migrates and starts after a healthy API.
+# first. It is ALWAYS in token mode: without a token it is a check run (exit 0 current, 3 pending: prints the token); an
+# apply run needs CREWFLOW_MIGRATION_APPROVED=<token>; failures exit 64-69 by kind (M0 section 7). The Worker never
+# migrates and starts after a healthy API.
 #
 # ENTER FOR rab-api AND rab-worker (identical values): PG_DATABASE_URL, PG_SSL_CA_CERT_PATH (mount the CA read-only),
 # PG_EXPECTED_DATABASE_NAME, CREWFLOW_DEPLOYMENT_ENVIRONMENT=production, CREWFLOW_DEPLOYMENT_ID, the connection budget
@@ -189,7 +190,6 @@ services:
       dockerfile: packages/rab-docker/rab/Dockerfile
     environment:
       NODE_ENV: production
-      CREWFLOW_MIGRATION_APPROVAL_MODE: token
       CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
     command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
     restart: "no"

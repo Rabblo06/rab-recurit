@@ -117,7 +117,7 @@ test('controlled release: API never migrates, token, waits for the same-image on
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].image = `x/y@sha256:${'9'.repeat(64)}`; }), /rab-migrate: image differs from rab-api/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].restart = 'unless-stopped'; }), /rab-migrate: restart/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].command = ['node', 'x.js']; }), /not deploy-prepare\.js/);
-  assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }), /rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE/);
+  assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'token'; }), /rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].profiles = ['release']; }), /rab-migrate: has profiles/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].volumes = s['rab-migrate'].volumes.filter((v) => v.type !== 'tmpfs'); }), /long-form tmpfs/);
   assertRefused(problemsAfter('release', (s) => { delete s['rab-migrate']; }), /services are/);

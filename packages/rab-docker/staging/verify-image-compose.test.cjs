@@ -92,7 +92,7 @@ const weakenings = [
   ['rab-migrate reads runtime.env', (v, f) => { v.services['rab-migrate'].environment.APP_SECRET = 'x'; f.services['rab-migrate'].env_file = [{ path: '/s/database.env' }, { path: '/s/runtime.env' }]; }, /rab-migrate: (reads the runtime secrets|must read database.env only)/],
   ['rab-migrate back on .env.migrate', (_v, f) => { f.services['rab-migrate'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-migrate: must read database.env only/],
   ['rab-migrate with DB_TARGET', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'production'; }, /rab-migrate: sets DB_TARGET/],
-  ['rab-migrate without token approval', (v) => { v.services['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }, /rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE/],
+  ['an approval mode on rab-migrate', (v) => { v.services['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }, /rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE/],
   ['API migrates on start', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'true'; }, /rab-api\.environment\.CREWFLOW_MIGRATE_ON_START differs/],
   ['a provisioner URL on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_PROVISIONER_DATABASE_URL = 'postgresql://crewflow:x@h/rab'; }, /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/],
   ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
