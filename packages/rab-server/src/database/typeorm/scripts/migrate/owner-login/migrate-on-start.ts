@@ -50,7 +50,7 @@ import { deployPostCheckProblems } from '../deploy-post-checks';
 import { GuardedTarget, Query, runLockedMigrations } from '../locked-migration-runner';
 import { assertMigrationApproval, readMigrationApproval } from '../migration-approval';
 import { resolveMigrationConnection } from '../migration-database-url';
-import type { Classification, FreshInstallProof } from './fresh-install';
+import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './fresh-install';
 import { assessUpgradeFailure, UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
@@ -90,6 +90,13 @@ export function readTestSeams(env: Record<string, string | undefined>, ctx: { pr
 }
 
 const CORE_MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
+/** The code's migration class names, from the migration file names (`<13 digits>-<Name>.ts|js` holds class `<Name><13 digits>`). */
+export function codeMigrationNames(dir: string = CORE_MIGRATIONS_DIR): string[] {
+  return readdirSync(dir)
+    .filter((f) => /^[0-9]{13}-[^.]+[.](ts|js)$/.test(f))
+    .sort()
+    .map((f) => `${f.slice(14).replace(/[.](ts|js)$/, '')}${f.slice(0, 13)}`);
+}
 function migrationFilesBefore(stopBefore: number): string[] {
   return readdirSync(CORE_MIGRATIONS_DIR)
     .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f) && Number(f.slice(0, 13)) < stopBefore)
@@ -240,7 +247,6 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
   let classification: Classification | null = null;
   let proof: FreshInstallProof | null = null;
   let applied: string[] = [];
-  let expected: string[] = [];
   let production = false;
   let guardEnvUsed: Record<string, string | undefined> = env;
   const result = (outcome: StartupOutcome, extra: Partial<MigrateOnStartResult> = {}): MigrateOnStartResult => ({
@@ -284,7 +290,6 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       onClassified: (c, p) => {
         classification = c;
         proof = p;
-        expected = [...c.pending, ...c.applied.filter((n) => !c.newer.includes(n))];
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
       afterMigrations: async ({ queryRunner, applied: done, guarded }) => {
@@ -306,16 +311,30 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const outcome = outcomeOf(error);
     const message = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
     log(`FAILED (${outcome}): ${message.replace(/postgres(ql)?:\/\/\S+/gi, '<url>')}`);
-    const c = classification as Classification | null;
-    const p = proof as FreshInstallProof | null;
+    let c = classification as Classification | null;
+    let p = proof as FreshInstallProof | null;
+    const code = codeMigrationNames();
+    if (c === null) {
+      // The run failed before it classified (e.g. a lock timeout): classify now, read-only, on a fresh session. Unknown
+      // stays "first install" (never serves).
+      try {
+        await withLoginClient(env, async (query) => {
+          c = await classifyDatabaseState(query, code);
+          p = await readFreshInstallProof(query, c.state);
+        });
+      } catch {
+        c = null;
+      }
+    }
     const freshInstall = c === null || c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p?.fresh === true;
+    if (c !== null) classification = c;
     let pending: string[] = [];
     let failedMigration: string | null = null;
     try {
       pending = await withLoginClient(env, async (query) => {
         const [{ has }] = (await query(`SELECT to_regclass('core.migrations') IS NOT NULL AS "has"`)) as Array<{ has: boolean }>;
         const done = new Set(has ? ((await query('SELECT name FROM core.migrations')) as Array<{ name: string }>).map((r) => r.name) : []);
-        return (c?.pending ?? []).filter((n) => !done.has(n));
+        return code.filter((n) => !done.has(n));
       });
       if (outcome === 'migrationFailed' && pending.length) failedMigration = pending[0]!;
     } catch {
@@ -330,7 +349,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         policy: config.upgradeFailurePolicy,
         freshInstall,
         failedMigration,
-        expectedMigrations: expected,
+        expectedMigrations: code,
         query,
         production,
         deploymentIdentityCheck: async (q) => {

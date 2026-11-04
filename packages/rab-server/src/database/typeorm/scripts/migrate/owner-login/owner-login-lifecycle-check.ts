@@ -331,7 +331,11 @@ async function rlsGateAsApp(db: string, label: string): Promise<void> {
   const pw = randomBytes(18).toString('hex');
   await rows('postgres', `ALTER ROLE crewflow_app PASSWORD '${pw}'`);
   try {
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, DATABASE_URL: dbUrl(db, { user: 'crewflow_app', password: pw }) };
+    // The child gets the crewflow_app URL it needs and none of the cluster's admin or test secrets.
+    const env: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: dbUrl(db, { user: 'crewflow_app', password: pw }) };
+    for (const k of ['OWNER_LOGIN_CHECK_ADMIN_URL', 'FINGERPRINT_ADMIN_URL', 'MIGRATION_SECURITY_ADMIN_URL', 'PG_DATABASE_URL', 'DATABASE_URL_UNPOOLED',
+      'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'TEST_DATABASE_WORKER_URL', 'APP_SECRET',
+      'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete env[k];
     const r = spawnSync('yarn', ['check-rls'], { cwd: ROOT, env, encoding: 'utf8', shell: process.platform === 'win32' });
     check(r.status === 0, `${label}: RLS coverage gate passes as crewflow_app`, sanitise(`${r.stdout ?? ''}${r.stderr ?? ''}`).trim().split('\n').slice(-8));
   } finally {

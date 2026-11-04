@@ -17,7 +17,7 @@ import {
 import { selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
-import { blockingPostCheckProblems, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
+import { blockingPostCheckProblems, codeMigrationNames, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
 import { LAST_ROLE_MIGRATION_TIMESTAMP, ROLE_SPLIT_TIMESTAMP } from './owner-login-chain';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityFacts } from './owner-login-identity';
@@ -372,5 +372,17 @@ describe('deploy-prepare failure exit codes are the startup exit codes', () => {
     expect(deployPrepareFailureExitCode(named('MigrationApprovalError'))).toBe(65);
     expect(deployPrepareFailureExitCode(named('PgConfigError'))).toBe(64);
     expect(deployPrepareFailureExitCode(named('QueryFailedError'))).toBe(66);
+  });
+});
+
+describe('the code migration list read from the files (the assessment of a run that failed before classifying)', () => {
+  it('class names in timestamp order, the gated 1786721330000 never among them', () => {
+    const names = codeMigrationNames();
+    expect(names.length).toBeGreaterThanOrEqual(250);
+    expect(names).toContain('HwsHistoricalRowsPrivilegedCopy1786719520000');
+    expect(names).toContain('CrewflowSingleCredentialRoleArchitecture1786682000000');
+    expect(names.some((n) => n.endsWith('1786721330000'))).toBe(false);
+    const ts = names.map((n) => Number(n.slice(-13)));
+    expect([...ts].sort((a, b) => a - b)).toEqual(ts);
   });
 });
