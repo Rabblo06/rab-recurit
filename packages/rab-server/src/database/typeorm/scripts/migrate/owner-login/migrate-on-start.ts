@@ -27,6 +27,8 @@
  * runtime-db-config.ts and maps outcomes to STARTUP_EXIT_CODES).
  */
 import { randomUUID } from 'node:crypto';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { createPgClient } from '../../../../postgres';
 import {
@@ -52,6 +54,47 @@ import type { Classification, FreshInstallProof } from './fresh-install';
 import { assessUpgradeFailure, UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
+
+/** Test seams (Agent 5's harness). Honoured only with NODE_ENV=test on a disposable test database outside production. */
+export const TEST_FAIL_AT_VAR = 'CREWFLOW_MIGRATION_TEST_FAIL_AT';
+export const TEST_STOP_BEFORE_VAR = 'CREWFLOW_MIGRATION_TEST_STOP_BEFORE';
+
+export class TestSeamRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TestSeamRefusal';
+  }
+}
+
+export interface TestSeams {
+  failAt: string | null;
+  stopBefore: number | null;
+}
+
+/**
+ * Pure: the test seams of this run. Any seam set outside (NODE_ENV=test AND a database carrying the server-side
+ * crewflow.disposable_test_database setting AND a non-production target) is a configuration refusal (exit 64), never a
+ * silent no-op. FAIL_AT names one migration (class name); STOP_BEFORE is a 13-digit timestamp: the run loads only the
+ * migrations before it (a database "behind head" for the pending scenarios).
+ */
+export function readTestSeams(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): TestSeams {
+  const failAt = env[TEST_FAIL_AT_VAR]?.trim() || null;
+  const stopRaw = env[TEST_STOP_BEFORE_VAR]?.trim() || null;
+  if (!failAt && !stopRaw) return { failAt: null, stopBefore: null };
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal(`${TEST_FAIL_AT_VAR} / ${TEST_STOP_BEFORE_VAR} are test seams: only NODE_ENV=test on a disposable test database, never production. Refusing.`);
+  }
+  if (failAt !== null && !/^[A-Za-z][A-Za-z0-9]*\d{13}$/.test(failAt)) throw new TestSeamRefusal(`${TEST_FAIL_AT_VAR} must be a migration class name. Refusing.`);
+  if (stopRaw !== null && !/^\d{13}$/.test(stopRaw)) throw new TestSeamRefusal(`${TEST_STOP_BEFORE_VAR} must be a 13-digit migration timestamp. Refusing.`);
+  return { failAt, stopBefore: stopRaw === null ? null : Number(stopRaw) };
+}
+
+const CORE_MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
+function migrationFilesBefore(stopBefore: number): string[] {
+  return readdirSync(CORE_MIGRATIONS_DIR)
+    .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f) && Number(f.slice(0, 13)) < stopBefore)
+    .map((f) => join(CORE_MIGRATIONS_DIR, f));
+}
 
 export type StartupOutcome = 'ok' | 'config' | 'behind' | 'migrationFailed' | 'identity' | 'postCheck' | 'lockTimeout' | 'degradedContinue';
 
@@ -82,7 +125,7 @@ export class PostCheckFailure extends Error {
 /** Error → outcome, by error name (the classes live in many modules; a name never carries a value). Unknown = migration failure. */
 export function outcomeOf(error: unknown): StartupOutcome {
   const name = error instanceof Error ? error.name : '';
-  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError'].includes(name)) return 'config';
+  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal'].includes(name)) return 'config';
   if (name === 'MigrationLockError') return 'lockTimeout';
   if (
     ['MigrationIdentityError', 'OwnerLoginIdentityError', 'DbTargetError', 'DeploymentIdentityError', 'BindIdentityError', 'DatabaseStateError', 'BootstrapRefusal'].includes(name)
@@ -154,10 +197,10 @@ async function withLoginClient<T>(env: Record<string, string | undefined>, fn: (
   }
 }
 
-async function readMarkerState(env: Record<string, string | undefined>): Promise<{ marker: MarkerState; database: string }> {
+async function readMarkerState(env: Record<string, string | undefined>): Promise<{ marker: MarkerState; database: string; disposableTestDatabase: boolean }> {
   return withLoginClient(env, async (query) => {
-    const { marker, database } = await readDeploymentMarker(query as never);
-    return { marker: marker.state, database };
+    const { marker, database, disposableTestDatabase } = await readDeploymentMarker(query as never);
+    return { marker: marker.state, database, disposableTestDatabase };
   });
 }
 
@@ -219,6 +262,8 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     guardEnvUsed = first.guardEnv;
     production = first.guardEnv.DB_TARGET === 'production';
     const approval = config.migrationApprovalMode === 'token' ? readMigrationApproval(env) : null;
+    const seams = readTestSeams(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
+    if (seams.failAt || seams.stopBefore) log(`TEST SEAMS ACTIVE: failAt=${seams.failAt ?? '-'} stopBefore=${seams.stopBefore ?? '-'}`);
 
     const run = await runner({
       label: 'migrate-on-start',
@@ -228,6 +273,8 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       approvalMode: config.migrationApprovalMode,
       connectionCheckIntervalSeconds: 1,
       onSession: deps.onSession,
+      testFailAt: seams.failAt,
+      ...(seams.stopBefore ? { dataSourceOverrides: { migrations: migrationFilesBefore(seams.stopBefore) } } : {}),
       refreshGuardEnv: async () => {
         const now = await readMarkerState(env);
         const again = synthesiseGuardEnv(env, now.marker, now.database, generatedId);

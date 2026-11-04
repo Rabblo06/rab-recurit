@@ -178,6 +178,8 @@ export interface LockedMigrationOptions {
   onClassified?: (classification: Classification, proof: FreshInstallProof) => void;
   /** Test seam for the golden-equivalence reference build (owner-login-chain.ts rowCopyOverride). Never set in production. */
   rowCopyOverride?: (name: string) => Promise<void>;
+  /** Test seam (migrate-on-start.ts gates it; owner login only): this migration fails inside its transaction. */
+  testFailAt?: string | null;
   /**
    * The child: re-derives the target-guard environment AFTER the lock (the deployment-identity bootstrap flag depends on
    * the marker state, which another run may have changed while this one waited). Default: the same environment as before.
@@ -430,7 +432,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       const state = ownerState.classification.state;
       if (mode === 'apply' && (state === 'EMPTY' || state === 'BOOTSTRAP-PARTIAL')) bootstrap = await runOwnerLoginBootstrap(query, { log });
       if (mode === 'apply' && pendingBefore.length > 0) {
-        applied = (await runOwnerLoginChain({ dataSource, session, log, freshInstall: ownerState.proof.fresh, rowCopyOverride: options.rowCopyOverride }))
+        applied = (await runOwnerLoginChain({ dataSource, session, log, freshInstall: ownerState.proof.fresh, rowCopyOverride: options.rowCopyOverride, testFailAt: options.testFailAt }))
           .applied;
       }
     } else if (mode === 'apply' && pendingBefore.length > 0) {

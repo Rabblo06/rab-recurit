@@ -47,11 +47,29 @@ export class OwnerLoginChainError extends Error {
 const timestampOf = (name: string) => Number(/(\d{13})$/.exec(name)?.[1] ?? Number.NaN);
 
 /** A MigrationExecutor over a filtered, optionally re-instanced, subset of the loaded migrations. */
+/** One stable, machine-readable line per migration (tests kill at exact points; operators see progress). Never a value. */
+export const MIGRATION_EVENT_PREFIX = 'MIGRATION_EVENT';
+
+/** Test seam only (migrate-on-start.ts gates it: NODE_ENV=test, a disposable test database, never production). */
+export class InjectedMigrationFailure extends Error {
+  constructor(name: string) {
+    super(`${name}: failure injected by the test seam CREWFLOW_MIGRATION_TEST_FAIL_AT (rolled back with its transaction)`);
+    this.name = 'InjectedMigrationFailure';
+  }
+}
+
+/**
+ * A MigrationExecutor over a filtered, optionally re-instanced, subset of the loaded migrations, logging
+ * `MIGRATION_EVENT {"event":"start"|"recorded","name","phase"}` around each one ("recorded" = the ledger row is written in
+ * the migration's own transaction, which commits right after; for a transaction=false migration, after its own commits).
+ */
 class SelectedMigrationExecutor extends MigrationExecutor {
   constructor(
     dataSource: DataSource,
     queryRunner: QueryRunner,
     private readonly select: (migration: Migration) => Migration | null,
+    private readonly event: (event: 'start' | 'recorded', name: string) => void,
+    private readonly failAt: string | null,
   ) {
     super(dataSource, queryRunner);
   }
@@ -60,7 +78,28 @@ class SelectedMigrationExecutor extends MigrationExecutor {
     return super
       .getMigrations()
       .map((m) => this.select(m))
-      .filter((m): m is Migration => m !== null);
+      .filter((m): m is Migration => m !== null)
+      .map((m) => {
+        const inner = m.instance!;
+        const event = this.event;
+        const failAt = this.failAt;
+        const instance = {
+          name: inner.name,
+          transaction: (inner as { transaction?: boolean }).transaction,
+          async up(runner: QueryRunner) {
+            event('start', m.name);
+            if (failAt === m.name) throw new InjectedMigrationFailure(m.name);
+            return inner.up(runner);
+          },
+          down: (runner: QueryRunner) => inner.down(runner),
+        };
+        return new Migration(m.id, m.timestamp, m.name, instance as never, m.transaction);
+      });
+  }
+
+  protected override async insertExecutedMigration(queryRunner: QueryRunner, migration: Migration): Promise<void> {
+    await super.insertExecutedMigration(queryRunner, migration);
+    this.event('recorded', migration.name);
   }
 }
 
@@ -75,6 +114,8 @@ export interface OwnerLoginChainOptions {
    * runs them as a superuser, M0 Agent A replay B). Never set by the production child.
    */
   rowCopyOverride?: (name: string) => Promise<void>;
+  /** Test seam (gated by the caller): this migration throws inside its transaction instead of running. */
+  testFailAt?: string | null;
   /** Where the role migrations read the bootstrap passwords from (default process.env; the values are random and discarded). */
   env?: NodeJS.ProcessEnv;
 }
@@ -111,8 +152,10 @@ export async function runOwnerLoginChain(options: OwnerLoginChainOptions): Promi
   if (start.current !== start.session) throw new OwnerLoginChainError(`the session starts as ${start.current}, not its login. Refusing.`);
 
   const result: OwnerLoginChainResult = { applied: [], phaseA: [], phaseB: [], shimmed: [] };
+  let phase: 'A' | 'B' = 'A';
+  const event = (kind: 'start' | 'recorded', name: string) => log(`${MIGRATION_EVENT_PREFIX} ${JSON.stringify({ event: kind, name, phase })}`);
   const run = async (select: (m: Migration) => Migration | null) => {
-    const executor = new SelectedMigrationExecutor(dataSource, session, select);
+    const executor = new SelectedMigrationExecutor(dataSource, session, select, event, options.testFailAt ?? null);
     executor.transaction = dataSource.options.migrationsTransactionMode ?? 'each';
     return (await executor.executePendingMigrations()).map((m) => m.name);
   };
@@ -144,6 +187,7 @@ export async function runOwnerLoginChain(options: OwnerLoginChainOptions): Promi
   }
 
   // ── Phase B, as crewflow_owner, random discarded bootstrap passwords ─────────────────────────────────────────────
+  phase = 'B';
   const saved = { a: env.CREWFLOW_BOOTSTRAP_PASSWORD, b: env.CREWFLOW_APP_BOOTSTRAP_PASSWORD };
   env.CREWFLOW_BOOTSTRAP_PASSWORD = randomBytes(32).toString('hex');
   env.CREWFLOW_APP_BOOTSTRAP_PASSWORD = randomBytes(32).toString('hex');
