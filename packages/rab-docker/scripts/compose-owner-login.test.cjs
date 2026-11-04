@@ -116,6 +116,14 @@ test('runtime env: PG_DATABASE_URL is refused there (it lives in database.env on
   assertRefused(lintEnvText('runtime', 'WORKER_INVITE_AUTO_DELETE_ENABLED=true'), /WORKER_INVITE_AUTO_DELETE_ENABLED/);
 });
 
+test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
+  for (const kind of ['database', 'runtime', 'compose']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
+      assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: `));
+    }
+  }
+});
+
 test('compose env: interpolation values only, digests, never a secret, never every interface', () => {
   const ok = `CREWFLOW_API_IMAGE_DIGEST=sha256:${'a'.repeat(64)}\nCREWFLOW_REDIS_IMAGE=redis@sha256:${'b'.repeat(64)}\nCREWFLOW_SECRETS_DIR=/etc/crewflow/secrets`;
   assert.deepEqual(lintEnvText('compose', ok), []);
