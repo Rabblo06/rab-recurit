@@ -26,7 +26,7 @@ const ALLOW = ['MIT', 'ISC', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD
  * PDF renderer P1: png-js 2.0.0 (pdfkit's PNG decoder, via @react-pdf/renderer) ships an MIT LICENSE (Devon Govett).
  */
 const LICENCE_FROM_FILE = {
-  'png-js@2.0.0': { licence: 'MIT', file: 'LICENSE', mustContain: ['MIT License', 'Permission is hereby granted, free of charge'] },
+  'png-js@2.0.0': { licence: 'MIT', file: 'LICENSE', firstLine: 'MIT License', mustContain: ['MIT License', 'Permission is hereby granted, free of charge'] },
 };
 /** First-party workspaces whose production dependencies ship (server/worker images, the web bundle, shared libraries). */
 const SHIPPED = ['rab-server', 'rab-worker', 'rab-front', 'rab-shared', 'rab-ui', 'rab-emails', 'rab-utils'];
@@ -53,13 +53,29 @@ function licenceAllowed(expr) {
   return ALLOW.includes(e.trim());
 }
 
-function licenceOf(pkg) {
+/**
+ * The licence a reviewed LICENCE_FROM_FILE entry grants, or null. Exact name@version, and the file must still pass BOTH
+ * reviews (integration of worker/pdf-without-chromium and worker/pdf-native-runtime, which each added png-js@2.0.0):
+ * its first line is exactly `firstLine`, and every `mustContain` phrase is present. A new version or a changed file
+ * fails the gate again until someone re-reads it. Each entry is owner-vetoable.
+ */
+function licenceFromFile(dir, pkg) {
+  const reviewed = LICENCE_FROM_FILE[`${pkg.name}@${pkg.version}`];
+  if (!reviewed) return null;
+  const file = join(dir, reviewed.file);
+  if (!existsSync(file)) return null;
+  const text = readFileSync(file, 'utf8');
+  if (text.split(/\r?\n/)[0].trim() !== reviewed.firstLine) return null;
+  return reviewed.mustContain.every((needle) => text.includes(needle)) ? reviewed.licence : null;
+}
+
+function licenceOf(pkg, dir) {
   if (typeof pkg.license === 'string') return pkg.license;
   if (pkg.license && typeof pkg.license.type === 'string') return pkg.license.type;
   if (Array.isArray(pkg.licenses) && pkg.licenses.length) {
     return pkg.licenses.map((l) => (typeof l === 'string' ? l : l.type)).filter(Boolean).join(' OR ');
   }
-  return null;
+  return licenceFromFile(dir, pkg);
 }
 
 const seen = new Map(); // realpath -> { name, version, licence, firstParty, via }
@@ -69,14 +85,7 @@ function visit(dir, via) {
   const key = dir;
   if (seen.has(key)) return;
   const firstParty = pkg.private === true && (pkg.name?.startsWith('@rab/') || dir.startsWith(join(ROOT, 'packages')));
-  let licence = licenceOf(pkg);
-  const reviewed = LICENCE_FROM_FILE[`${pkg.name}@${pkg.version}`];
-  if (licence === null && reviewed) {
-    const file = join(dir, reviewed.file);
-    const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
-    if (reviewed.mustContain.every((needle) => text.includes(needle))) licence = reviewed.licence;
-  }
-  seen.set(key, { name: pkg.name, version: pkg.version, licence, firstParty, via });
+  seen.set(key, { name: pkg.name, version: pkg.version, licence: licenceOf(pkg, dir), firstParty, via });
   const deps = { ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}), ...(pkg.peerDependencies ?? {}) };
   for (const name of Object.keys(deps)) {
     const child = findPackageDir(dir, name);
