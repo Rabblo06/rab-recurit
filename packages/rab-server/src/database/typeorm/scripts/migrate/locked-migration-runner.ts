@@ -124,8 +124,11 @@ export interface LockedMigrationOptions {
    * runs. A throw refuses the run with nothing applied. Required in 'apply' mode when the target is production.
    */
   approvePending?: (pendingNames: readonly string[]) => void;
-  /** Runs while the lock is still held, after the run (post-checks, cache flush). A throw fails the run. */
-  afterMigrations?: (ctx: { queryRunner: QueryRunner; dataSource: DataSource; applied: string[] }) => Promise<void>;
+  /**
+   * Runs while the lock is still held, after the run (post-checks, cache flush), in both modes. `pendingBefore` is the set
+   * read on the locked session before step 4 (in 'check' mode it is still pending). A throw fails the run.
+   */
+  afterMigrations?: (ctx: { queryRunner: QueryRunner; dataSource: DataSource; applied: string[]; pendingBefore: readonly string[] }) => Promise<void>;
   /** Test seam: the target guard (default: database-target.ts assertDbTarget). Used to exercise the production approval gate. */
   assertTarget?: (
     purpose: string,
@@ -310,7 +313,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       const still = await pendingMigrationNames(query, dataSource);
       if (still.length) throw new Error(`${still.length} migration(s) are still pending after the run: ${still.join(', ')}`);
     }
-    if (options.afterMigrations) await options.afterMigrations({ queryRunner: session, dataSource, applied });
+    if (options.afterMigrations) await options.afterMigrations({ queryRunner: session, dataSource, applied, pendingBefore });
     return { target: guarded.target, pendingBefore, applied, waitedMs, currentUser: facts.currentUser };
   } finally {
     if (queryRunner) {

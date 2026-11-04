@@ -319,7 +319,7 @@ async function bootstrap(): Promise<void> {
   logger.log(
     inviteAutoDelete
       ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
-      : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
+      : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the cleanup cycle does nothing (no invite is expired, no account is deleted)',
   );
   // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
   // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
