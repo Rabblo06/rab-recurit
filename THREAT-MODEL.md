@@ -5066,3 +5066,28 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## PDF renderer P2 — native pre-shift attendance sheet (roster) behind `PDF_RENDERER` (branch worker/pdf-native-roster, not merged)
+
+Extends the P1 entry above to the pre-shift roster (`SHIFT_ROSTER_PDF`), which carries the signed Shift QR. Same job
+(`shift-report-scheduler.job.ts`), same two short tenant transactions around the render, same file kind, filename
+(`shift-attendance-sheet.pdf`), `ReportFilePolicy`, recipient selection and email attachment. The job now passes the
+template's data to `renderReportPdf({ kind: 'pre-shift', data })` instead of HTML.
+
+- **QR integrity / substitution.** Threat: the native path prints a different or re-encoded QR (a token for another
+  shift, a placeholder, or a payload rebuilt from data). Control: the token is still `AttendanceQrService.sign(shift)`
+  and the image still `QrImageService.generatePng(token)`, both in the job, unchanged; the view-model carries those PNG
+  bytes as-is and the native layout only decodes the base64 back into a Buffer for `QrCode` (`pngBytes` refuses
+  anything that is not a PNG). Nothing in the renderer encodes a payload. Tests: `pre-shift-report.native.spec.ts`
+  decodes the QR image out of the native PDF (jsQR) and gets the signed token byte-for-byte; the renderer comparison
+  decoded it from both PDFs (embedded image and 200/300 dpi raster) for every fixture and verified it with
+  `QrTokenService.verify` (an altered token is refused).
+- **Markup injection through venue, contact, notes, staff names or references.** Control: as P1 — text only; the
+  Chromium template still escapes every value. Test: the native element tree's text equals the Chromium HTML's text
+  for hostile fixtures (tags, entities, `javascript:`, quotes, accented names); only the logo and the QR are embedded;
+  no `/URI`, `/Launch`, `/JavaScript`, `/OpenAction`, `/AA`.
+- **Chromium path unchanged.** `renderPreShiftReportHtml` now renders from the shared view-model
+  (`buildPreShiftReportViewModel`); golden HTML captured from origin/main before the refactor is byte-identical
+  (`pre-shift-report-view-model.spec.ts`), and Chromium PDFs of the old and new HTML are identical after normalisation.
+- **No new exposure.** The QR is a shift-scoped bearer code exactly as before (no account token); who receives the PDF
+  is decided by the unchanged `selectReportRecipients` in the row-locked writing transaction.
