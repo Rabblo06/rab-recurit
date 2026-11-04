@@ -4,7 +4,7 @@ import { ComponentProps, createElement, Fragment, ReactElement, ReactNode } from
 import type { ShiftDetailsView } from '@rab/server/modules/attendance/templates/adolphus-document';
 import { ADOLPHUS_LOGO_DATA_URI } from '@rab/server/modules/attendance/templates/adolphus-logo';
 
-import { FONT_FAMILY } from './fonts';
+import { FONT_FAMILY_STACK } from './fonts';
 
 /**
  * Shared building blocks for the native (Chromium-free) PDF renderer — PDF renderer migration P1. ONE place for the
@@ -101,11 +101,13 @@ export function pngBytes(data: Buffer): ImageBytes {
 // ─── typography ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. No `lineHeight` here: react-pdf resolves a unitless line
+ * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. The family is the font stack (fonts.ts; with the render
+ * runtime: Liberation Sans, then the Noto Sans fallback): the glyph check accepts exactly what this stack draws, so no
+ * layout may name a family of its own. No `lineHeight` here: react-pdf resolves a unitless line
  * height against the font size where it is declared and inherits the absolute value, which would squash larger text;
  * left unset, every text uses the font's own line spacing, as Chromium's `line-height: normal` does.
  */
-export const BASE_TEXT = Object.freeze({ fontFamily: FONT_FAMILY, fontSize: px(11), color: COLOR.ink });
+export const BASE_TEXT = Object.freeze({ fontFamily: [...FONT_FAMILY_STACK], fontSize: px(11), color: COLOR.ink });
 
 // ─── page ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
