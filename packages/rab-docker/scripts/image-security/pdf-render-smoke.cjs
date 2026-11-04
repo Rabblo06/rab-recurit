@@ -49,6 +49,11 @@ function plan() {
 }
 
 async function render() {
+  // stdout carries exactly one JSON document, which the gate parses. The renderer logs through Nest's Logger, which
+  // writes to stdout (the render pool's thread start-up line, F1 substitution counts), so for the render every other
+  // stdout write goes to stderr and the result is written with the original writer.
+  const writeResult = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) => process.stderr.write(chunk, ...rest);
   const util = require(path.join(APP, 'packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js'));
   if (typeof util.renderHtmlToPdf === 'function') {
     throw new Error('render-pdf.util still exports the Chromium renderer (renderHtmlToPdf): P5 requires native-only');
@@ -84,7 +89,7 @@ async function render() {
   // switch; after D10 it accepts only native or is gone).
   const pdf = await util.renderReportPdf({ kind: 'pre-shift', data }, { ...process.env, PDF_RENDERER: 'native' });
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  process.stdout.write(JSON.stringify({
+  writeResult(JSON.stringify({
     marker: MARKER,
     renderer: 'native',
     render_ms: Math.round(ms),
