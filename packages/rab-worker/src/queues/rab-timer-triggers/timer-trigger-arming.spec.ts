@@ -1,6 +1,7 @@
 import type { TimerTriggerArm } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { TimerTriggerKind } from '@rab/server/engine/worker-shared/timer-trigger.contract';
-import { armShiftTimerTriggers, ShiftArmCandidate } from './timer-trigger-arming';
+import { TIMER_TRIGGER_OUTCOMES_KEY, TIMER_TRIGGER_OUTCOMES_TTL_SECONDS } from '@rab/server/engine/worker-shared/timer-trigger.contract';
+import { armShiftTimerTriggers, redisTimerTriggerOutcomeRecorder, ShiftArmCandidate } from './timer-trigger-arming';
 
 /**
  * Phase D-Q4b: no-show / late clock-in arming from shift-monitor's existing discovery rows (no extra query). Pins the
@@ -62,5 +63,41 @@ describe('armShiftTimerTriggers (D-Q4b)', () => {
     const recorded: string[] = [];
     await expect(armShiftTimerTriggers(p, [cand(1, 60_000)], { ...opts, recordOutcome: (k, o) => recorded.push(`${k}:${o}`) })).resolves.toEqual({ armed: 0, failed: 2 });
     expect(recorded).toEqual(['no-show:arm-failed', 'late-clock-in:arm-failed']);
+  });
+});
+
+describe('redisTimerTriggerOutcomeRecorder (D-Q4b outcome counters)', () => {
+  function fakeMulti(execResult: () => Promise<unknown>) {
+    const calls: unknown[][] = [];
+    const chain = {
+      hincrby: (...a: unknown[]) => (calls.push(['hincrby', ...a]), chain),
+      expire: (...a: unknown[]) => (calls.push(['expire', ...a]), chain),
+      exec: () => execResult(),
+    };
+    return { calls, redis: { multi: () => chain } as never };
+  }
+
+  it('HINCRBY <kind>:<outcome> on the Worker-owned hash with its TTL refreshed — counts only, no ids', async () => {
+    const { calls, redis } = fakeMulti(async () => []);
+    redisTimerTriggerOutcomeRecorder(redis)('no-show', 'acted');
+    await new Promise((r) => setImmediate(r));
+    expect(calls).toEqual([
+      ['hincrby', TIMER_TRIGGER_OUTCOMES_KEY, 'no-show:acted', 1],
+      ['expire', TIMER_TRIGGER_OUTCOMES_KEY, TIMER_TRIGGER_OUTCOMES_TTL_SECONDS],
+    ]);
+  });
+
+  it('REDIS DOWN at fire time: a failing counter write never throws into the consumer and leaves no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const { redis } = fakeMulti(() => Promise.reject(new Error('Connection is closed.')));
+      expect(() => redisTimerTriggerOutcomeRecorder(redis)('offer-expiry', 'acted')).not.toThrow();
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

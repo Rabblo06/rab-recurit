@@ -32,6 +32,7 @@ import { TIMER_TRIGGER_QUEUE_NAME, TimerTriggerJobData, TimerTriggerKind, TimerT
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
 import { OfferService } from '@rab/server/modules/offer/services/offer.service';
+import { SchedulingService } from '@rab/server/modules/scheduling/services/scheduling.service';
 import { JobRole } from '@rab/server/modules/scheduling/entities/job-role.entity';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
@@ -45,7 +46,7 @@ import { WorkerJobDependencies } from '../../core/scheduler/worker-dependencies'
 import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { discoverShiftMonitorInWorkspace, runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
-import { armShiftTimerTriggers } from '../../queues/rab-timer-triggers/timer-trigger-arming';
+import { armShiftTimerTriggers, redisTimerTriggerOutcomeRecorder } from '../../queues/rab-timer-triggers/timer-trigger-arming';
 import { handleTimerTrigger, TimerTriggerHandlerDeps } from '../../queues/rab-timer-triggers/timer-trigger.handler';
 import { buildTimerTriggerActions } from '../../queues/rab-timer-triggers/timer-trigger.processors';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -310,6 +311,71 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     await down.onModuleDestroy();
   });
 
+  it('CANCELLED (withdrawn offer / manager rejection): the old trigger fires and does nothing — no expiry, no auto-confirm', async () => {
+    const fx = await seedFx('dq4bCancelOffer');
+    // offer-expiry: withdrawn after arming, then its deadline passes.
+    const { offer } = await sendOffer(fx);
+    await offerService.withdraw(ctxOf(fx.manager), offer.id);
+    const expiry = await makeDue(fx, offer.id);
+    await expect(fire('offer-expiry', expiry)).resolves.toEqual({ outcome: 'noop' });
+    expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.WITHDRAWN);
+    expect(await sideEffects(fx, offer.id)).toEqual({ audits: 0, notifications: 0, realtime: 0 });
+    // manager-confirmation: staff accepted (trigger armed), the manager rejected it, then the deadline passes.
+    const second = await sendOffer(fx);
+    await offerService.staffAccept(ctxOf(second.staff, 'staff'), second.offer.id);
+    await offerService.managerReject(ctxOf(fx.manager), second.offer.id, {});
+    const timeout = env.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES');
+    const acceptedAt = new Date(Math.floor(Date.now() / 1000) * 1000 - (timeout + 1) * 60_000);
+    await withManager(fx, (m) => m.update(JobOffer, second.offer.id, { staffAcceptedAt: acceptedAt }));
+    const wake = { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: second.offer.id, dueAtEpochMs: acceptedAt.getTime() + timeout * 60_000 };
+    await expect(fire('manager-confirmation', wake)).resolves.toEqual({ outcome: 'noop' });
+    expect((await offerOf(fx, second.offer.id)).status).toBe(OfferStatus.MANAGER_REJECTED);
+  });
+
+  it('BULK SEND: a recipient whose SAVEPOINT rolls back does not drop the triggers of the recipients around it', async () => {
+    const fx = await seedFx('dq4bBulk');
+    const a = await factory.createStaff({ id: fx.manager.organisationId }, { owner: fx.manager, label: 'dq4bBulkA' });
+    const b = await factory.createStaff({ id: fx.manager.organisationId }, { owner: fx.manager, label: 'dq4bBulkB' });
+    const c = await factory.createStaff({ id: fx.manager.organisationId }, { owner: fx.manager, label: 'dq4bBulkC' });
+    const startsAt = new Date(Date.now() + 3 * 3600_000);
+    const shift = await withManager(fx, (m) =>
+      m.save(Shift, {
+        organisationId: fx.manager.organisationId, venueId: fx.venueId, jobRoleId: fx.jobRoleId, startsAt, endsAt: new Date(startsAt.getTime() + 8 * 3600_000),
+        breakMinutes: 0, requiredCount: 3, payRatePence: 1500, status: ShiftStatus.OPEN, createdBy: fx.manager.userId, workspaceId: fx.manager.workspaceId!,
+      }),
+    );
+    // B already holds an offer on this shift, so B fails inside its own SAVEPOINT (duplicate offer): AFTER A's trigger was
+    // registered on the same transaction and BEFORE C's.
+    const existing = await offerService.send(ctxOf(fx.manager), shift.id, { staffProfileId: b.profileId! });
+    const result = await offerService.sendBulk(ctxOf(fx.manager), shift.id, { staffProfileIds: [a.profileId!, b.profileId!, c.profileId!] } as never);
+    expect(result.results.map((r) => r.ok)).toEqual([true, false, true]);
+    for (const r of result.results.filter((x) => x.ok)) {
+      const offer = await offerOf(fx, r.offerId!);
+      const job = await until(async () => (await jobsFor(offer.id)).find((j) => j.name === 'offer-expiry-trigger'));
+      expect(job?.id).toBe(`offer-expiry.${offer.id}.${offer.expiresAt.getTime()}`);
+    }
+    // The failed recipient armed nothing new: its only trigger is the one from the earlier single send.
+    expect((await jobsFor(existing.id)).map((j) => j.id)).toEqual([`offer-expiry.${existing.id}.${existing.expiresAt.getTime()}`]);
+  });
+
+  it('REDIS DOWN at fire time: the trigger is not delivered, the backstop scan acts; delivered after Redis returns it is a no-op', async () => {
+    const fx = await seedFx('dq4bRedisFire');
+    const { offer } = await sendOffer(fx);
+    const payload = await makeDue(fx, offer.id);
+    // The scan needs no Redis to find or act (interval mode): it expires the offer while the trigger is stuck in Redis.
+    await runOfferExpiryCycle(dataSource, tenantContext, notificationService, auditService, realtimeEventService);
+    expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.EXPIRED);
+    // Delivered late, with the outcome counter itself failing (Redis still flapping): no-op, nothing thrown, nothing twice.
+    const down = new Redis('redis://127.0.0.1:1', { lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, retryStrategy: () => null });
+    try {
+      const deps = { ...handlerDeps('on'), recordOutcome: redisTimerTriggerOutcomeRecorder(down) };
+      await expect(handleTimerTrigger(fakeJob('offer-expiry', payload), undefined, deps)).resolves.toEqual({ outcome: 'noop' });
+    } finally {
+      down.disconnect();
+    }
+    expect((await sideEffects(fx, offer.id)).audits).toBe(1);
+  });
+
   describe('real BullMQ consumers', () => {
     const workers: Worker[] = [];
     const consumerFor = (mode: 'shadow' | 'on', include = true) =>
@@ -402,6 +468,30 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       for (const p of payloads) expect((await offerOf(fx, p.subjectId)).status).toBe(OfferStatus.EXPIRED);
     });
 
+    it('CRASH / RESTART: a delayed trigger outlives its consumer Worker; the restarted Worker acts once; a redelivery is a no-op', async () => {
+      const fx = await seedFx('dq4bRestart');
+      const { offer } = await sendOffer(fx);
+      const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_000);
+      await withManager(fx, (m) => m.update(JobOffer, offer.id, { expiresAt }));
+      const payload = { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offer.id, dueAtEpochMs: expiresAt.getTime() };
+      const first = consumerFor('on');
+      const job = await triggers.add('offer-expiry-trigger', payload, { jobId: `restart.${offer.id}`, delay: Math.max(0, expiresAt.getTime() - Date.now()) });
+      // The Worker process goes away before the due time (crash / deploy): force-closed, nothing in flight.
+      for (const w of first.values()) await w.close(true);
+      await new Promise((r) => setTimeout(r, Math.max(0, expiresAt.getTime() - Date.now()) + 1_000));
+      expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.PENDING); // nobody consumed it while down
+      // Restarted Worker: the job was kept in Redis and runs once.
+      workers.push(...consumerFor('on').values());
+      await until(async () => ((await job.getState()) === 'completed' ? true : undefined), 30_000);
+      expect((await Job.fromId(triggers, job.id!))!.returnvalue).toEqual({ outcome: 'acted' });
+      expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.EXPIRED);
+      // A crash AFTER the action committed but before the ack makes BullMQ deliver the job again: the redelivery is a no-op.
+      const again = await triggers.add('offer-expiry-trigger', payload, { jobId: `restart-redelivered.${offer.id}` });
+      await until(async () => ((await again.getState()) === 'completed' ? true : undefined));
+      expect((await Job.fromId(triggers, again.id!))!.returnvalue).toEqual({ outcome: 'noop' });
+      expect((await sideEffects(fx, offer.id)).audits).toBe(1);
+    });
+
     it('EARLY by ≤ 5 min: re-delayed once to due + 1 s, then acts', async () => {
       const fx = await seedFx('dq4bRedelay');
       const { offer } = await sendOffer(fx);
@@ -416,10 +506,10 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
   });
 
   describe('shift triggers (no-show, late clock-in) and the manager-confirmation wake', () => {
-    async function confirmedSeat(fx: Fx, startsAt: Date): Promise<{ assignmentId: string; payload: (kind: 'no-show' | 'late-clock-in', graceMin: number) => TimerTriggerJobData }> {
+    async function confirmedSeat(fx: Fx, startsAt: Date): Promise<{ assignmentId: string; shiftId: string; payload: (kind: 'no-show' | 'late-clock-in', graceMin: number) => TimerTriggerJobData }> {
       const staff = await factory.createStaff({ id: fx.manager.organisationId }, { owner: fx.manager, label: 'dq4bSeat' });
       const endsAt = new Date(startsAt.getTime() + 8 * 3600_000);
-      const assignmentId = await withManager(fx, async (m) => {
+      const { assignmentId, shiftId } = await withManager(fx, async (m) => {
         const shift = await m.save(Shift, {
           organisationId: fx.manager.organisationId, venueId: fx.venueId, jobRoleId: fx.jobRoleId, startsAt, endsAt, breakMinutes: 0, requiredCount: 1,
           payRatePence: 1500, status: 'confirmed', createdBy: fx.manager.userId, workspaceId: fx.manager.workspaceId!,
@@ -428,10 +518,11 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
           organisationId: fx.manager.organisationId, shiftId: shift.id, staffProfileId: staff.profileId!, status: ShiftAssignmentStatus.CONFIRMED,
           payRateSnapshotPence: 1500, assignedBy: fx.manager.userId, confirmedAt: new Date(), period: toTstzRange(startsAt, endsAt), workspaceId: fx.manager.workspaceId!,
         });
-        return a.id;
+        return { assignmentId: a.id, shiftId: shift.id };
       });
       return {
         assignmentId,
+        shiftId,
         payload: (_kind, graceMin) => ({ organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: assignmentId, dueAtEpochMs: startsAt.getTime() + graceMin * 60_000 }),
       };
     }
@@ -460,6 +551,55 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       await expect(fire('no-show', { ...seat.payload('no-show', 30), dueAtEpochMs: startsAt.getTime() - 3600_000 })).resolves.toEqual({ outcome: 'stale' });
       const future = await confirmedSeat(fx, new Date(Math.floor(Date.now() / 1000) * 1000 + 3600_000));
       await expect(fire('no-show', future.payload('no-show', 30))).resolves.toEqual({ outcome: 'early' });
+      expect(await statusOf(fx, seat.assignmentId)).toBe(ShiftAssignmentStatus.CONFIRMED);
+    });
+
+    it('CANCELLED shift: its no-show and late clock-in triggers fire and do nothing (no flag, no worker_event); the scans agree', async () => {
+      const fx = await seedFx('dq4bShiftCancel');
+      const grace = env.get('LATE_CLOCK_IN_GRACE_MINUTES');
+      const startsAt = new Date(Math.floor(Date.now() / 1000) * 1000 - 45 * 60_000);
+      const seat = await confirmedSeat(fx, startsAt);
+      await app.get(SchedulingService).cancel(ctxOf(fx.manager), seat.shiftId, 'dq4b cancellation');
+      await expect(fire('no-show', seat.payload('no-show', 30))).resolves.toEqual({ outcome: 'noop' });
+      await expect(fire('late-clock-in', seat.payload('late-clock-in', grace))).resolves.toEqual({ outcome: 'noop' });
+      expect(await statusOf(fx, seat.assignmentId)).toBe(ShiftAssignmentStatus.CONFIRMED);
+      await runShiftMonitorCycle(dataSource, tenantContext, notificationService, auditService, env.get('CLOCK_IN_EARLY_MINUTES'));
+      await runLateClockInCycle(dataSource, tenantContext, notificationService, auditService, grace);
+      expect(await eventCount(fx, `no-show:${seat.assignmentId}`)).toBe(0);
+      expect(await eventCount(fx, `late-clock-in:${seat.assignmentId}`)).toBe(0);
+    });
+
+    it('RESCHEDULED start: the next arming adds the NEW due time as a new job; the old job is stale, the new one waits for its time', async () => {
+      const fx = await seedFx('dq4bResched');
+      const grace = env.get('LATE_CLOCK_IN_GRACE_MINUTES');
+      const oldStart = new Date(Math.floor(Date.now() / 1000) * 1000 + 4 * 60_000);
+      const seat = await confirmedSeat(fx, oldStart);
+      const arm = async () => {
+        const discoveries = await runScopedForOrg(tenantContext, fx.manager.organisationId, fx.manager.workspaceId, async (m) => {
+          await m.query('SET TRANSACTION READ ONLY');
+          return discoverShiftMonitorInWorkspace(m);
+        });
+        await armShiftTimerTriggers(producer, discoveries.flatMap((d) => d.assignments), { nowMs: Date.now(), horizonMs: 10 * 60_000, lateClockInGraceMinutes: grace });
+      };
+      await arm();
+      // The seat moves 3 minutes later (assignment.period is the effective start).
+      const newStart = new Date(oldStart.getTime() + 3 * 60_000);
+      await withManager(fx, (m) => m.update(ShiftAssignment, seat.assignmentId, { period: toTstzRange(newStart, new Date(newStart.getTime() + 8 * 3600_000)) }));
+      await arm();
+      const ids = (await jobsFor(seat.assignmentId)).map((j) => j.id).sort();
+      expect(ids).toEqual(
+        [
+          `no-show.${seat.assignmentId}.${oldStart.getTime() + 30 * 60_000}`,
+          `late-clock-in.${seat.assignmentId}.${oldStart.getTime() + grace * 60_000}`,
+          `no-show.${seat.assignmentId}.${newStart.getTime() + 30 * 60_000}`,
+          `late-clock-in.${seat.assignmentId}.${newStart.getTime() + grace * 60_000}`,
+        ].sort(),
+      );
+      const at = (start: Date, minutes: number) => ({ ...seat.payload('no-show', 0), dueAtEpochMs: start.getTime() + minutes * 60_000 });
+      await expect(fire('no-show', at(oldStart, 30))).resolves.toEqual({ outcome: 'stale' });
+      await expect(fire('late-clock-in', at(oldStart, grace))).resolves.toEqual({ outcome: 'stale' });
+      await expect(fire('no-show', at(newStart, 30))).resolves.toEqual({ outcome: 'early' });
+      await expect(fire('late-clock-in', at(newStart, grace))).resolves.toEqual({ outcome: 'early' });
       expect(await statusOf(fx, seat.assignmentId)).toBe(ShiftAssignmentStatus.CONFIRMED);
     });
 
