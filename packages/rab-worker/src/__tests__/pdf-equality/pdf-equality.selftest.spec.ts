@@ -1,8 +1,10 @@
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 
 import { renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
-import { checkAgainstInput, compareExtractions, ComparisonResult, formatReport } from './checker';
+import { checkAgainstInput, compareExtractions, ComparisonResult, countValue, formatReport } from './checker';
 import { expectationFor, renderCall, ReportDocument } from './documents';
+import { compact } from './extract';
+import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
 import { buildFixtures, FixtureDocument, fixtureAttendanceQr, fixtureIds, fixtureQrTokens, scenarioSeeds, shiftEntity } from './fixtures';
 import { extractFixture, outDir, RENDER_CONCURRENCY, saveArtifact, verifyShiftQr } from './harness';
 import { chromiumRenderer, mapLimit } from './renderers';
@@ -47,12 +49,53 @@ it('builds exactly the documented fixture matrix', () => {
 });
 
 describe('Chromium vs Chromium: every fixture compares equal (the checker is not flaky)', () => {
-  it.each(IDS)('%s', (id) => {
+  const selfCompare = (id: string) => {
     const f = fixtures.get(id)!;
     const [a, b] = renders.get(id)!;
     const r = compareExtractions(id, expectationFor(f.doc), extractFixture(f, a), extractFixture(f, b), ['chromium#1', 'chromium#2']);
     results.push(r);
     if (!r.ok) throw new Error(formatReport([r]));
+  };
+  it.each(IDS.filter((id) => !(id in F_PDF_1_FIXTURES)))('%s', selfCompare);
+
+  // KNOWN FINDING F-PDF-1 (known-findings.ts): Chromium drops the notes' tail and the right-hand column. The assertion is
+  // unchanged; `test.failing` turns RED the day the template stops dropping text — then make these plain `it`s again.
+  test.failing.each(Object.keys(F_PDF_1_FIXTURES))(`%s — KNOWN FINDING ${F_PDF_1}`, selfCompare);
+
+  // …and exactly that, nothing else, fails on those fixtures (so `test.failing` cannot hide another defect).
+  it.each(Object.entries(F_PDF_1_FIXTURES))(`%s: ${F_PDF_1} — evidence, and no other failure`, (id, known) => {
+    const f = fixtures.get(id)!;
+    for (const [k, pdf] of renders.get(id)!.entries()) {
+      const name = `chromium#${k + 1}`;
+      const e = clippingEvidence(f.doc, extractFixture(f, pdf), name, known.droppedHeading);
+      expect(e.failing).toEqual([`values-present(${name})`, ...(known.parseBack ? [`parse-back(${name})`] : [])]);
+      expect(e.missing).toEqual(known.missing);
+      expect(e.parseBack).toBe(known.parseBack);
+      expect(e.tokenCharsPrinted).toBeGreaterThan(0);
+      expect(e.tokenCharsPrinted).toBeLessThan(1000);
+      expect(e.droppedHeadingPrinted).toBe(false);
+    }
+  });
+});
+
+describe('extraction regressions on real Chromium output', () => {
+  it('long-text: the 10 KB note flows over a page break and is counted exactly once, across it', () => {
+    const f = fixtures.get('long-text/final-timesheet')!;
+    if (f.doc.kind !== 'final-timesheet' || !f.doc.data.notes) throw new Error('long-text/final-timesheet: expected a final timesheet with notes');
+    const notes = f.doc.data.notes;
+    const x = extractFixture(f, renders.get(f.id)![0]);
+    // Not inside any one page, so only the continuation can find it …
+    expect(x.pages.some((p) => p.blocks.some((b) => compact(b).includes(compact(notes))) || compact(p.lines.join('')).includes(compact(notes)))).toBe(false);
+    expect(x.continuations.length).toBeGreaterThan(0);
+    // … and it is found exactly once, across the page break.
+    expect(countValue(x, notes)).toBe(1);
+  });
+
+  it('unicode: a multi-word Arabic name (drawn right to left, one run per word) reads in logical order', () => {
+    const f = fixtures.get('unicode/approved-shift-statement')!;
+    const x = extractFixture(f, renders.get(f.id)![0]);
+    expect(countValue(x, 'محمد عبد الله')).toBeGreaterThan(0);
+    expect(countValue(x, 'الله عبد محمد')).toBe(0); // the visual (left-to-right) word order
   });
 });
 

@@ -5,9 +5,10 @@ import { Logger } from '@nestjs/common';
 
 import { checkAgainstInput } from './checker';
 import { expectationFor } from './documents';
-import { compact } from './extract';
+import { compact, PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureIds } from './fixtures';
 import { extractFixture, outDir, saveArtifact } from './harness';
+import { F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
 import { renderGuarded } from './network-guard';
 import { chromiumRenderer, loadNativeRenderer, NativeNotConvertedError, Renderer } from './renderers';
 
@@ -65,8 +66,8 @@ beforeEach(() => {
 
 const IDS = fixtureIds({ hostileBase: 'http://127.0.0.1:9' }).filter((id) => SCENARIOS.some((s) => id.startsWith(`${s}/`)));
 
-async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): Promise<void> {
-  const f = fixtures.get(id)!;
+/** Renders under the network guard and asserts the security properties: no request, no network attempt, no active content. */
+async function renderSafely(renderer: Renderer, f: FixtureDocument, mode: 'record' | 'deny'): Promise<PdfExtraction> {
   const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   let rendered: Awaited<ReturnType<typeof renderGuarded>>;
   try {
@@ -82,22 +83,43 @@ async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): P
   expect(rendered.attempts).toEqual([]);
   expect(blocked).toEqual([]);
   expect(x.activeContentKeys).toEqual([]);
+  expect(compact(x.text)).not.toContain('HOSTILE-REMOTE-MARKER');
+  return x;
+}
 
+/** Every business value (hostile strings included) printed literally; markup printed as text, never interpreted. */
+function assertPrintedLiterally(renderer: Renderer, f: FixtureDocument, x: PdfExtraction): void {
   const failing = checkAgainstInput(expectationFor(f.doc), x, renderer.name, { boundsStrict: ['native'] }).filter((r) => !r.ok && !r.info);
   expect(failing.map((r) => `${r.check}: ${r.detail}`)).toEqual([]);
-
   if (f.scenario === 'hostile') {
     const text = compact(x.text);
     for (const literal of ["<script>document.title='pwned'</script>Venue <b>Bold</b>", '<style>*{display:none}</style>Bar']) {
       expect(text).toContain(compact(literal));
     }
-    expect(text).not.toContain('HOSTILE-REMOTE-MARKER');
   }
 }
 
+async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): Promise<void> {
+  const f = fixtures.get(id)!;
+  assertPrintedLiterally(renderer, f, await renderSafely(renderer, f, mode));
+}
+
 describe('hostile text — Chromium', () => {
-  it.each(IDS)('%s: printed literally, no request, no active content', async (id) => {
+  it.each(IDS.filter((id) => !(id in F_PDF_1_FIXTURES)))('%s: printed literally, no request, no active content', async (id) => {
     await check(chromiumRenderer, id, 'record');
+  });
+
+  // KNOWN FINDING F-PDF-1 (known-findings.ts; its exact shape is pinned in pdf-equality.selftest.spec.ts): the security
+  // assertions stay plain tests; only "printed literally" is `test.failing`, and turns RED once the template is fixed.
+  const findingRenders = new Map<string, PdfExtraction>();
+  const findingIds = IDS.filter((id) => id in F_PDF_1_FIXTURES);
+  it.each(findingIds)('%s: no request, no active content', async (id) => {
+    findingRenders.set(id, await renderSafely(chromiumRenderer, fixtures.get(id)!, 'record'));
+  });
+  test.failing.each(findingIds)(`%s: printed literally — KNOWN FINDING ${F_PDF_1}`, (id) => {
+    const x = findingRenders.get(id);
+    if (!x) throw new Error(`${id}: not rendered (see the test above)`);
+    assertPrintedLiterally(chromiumRenderer, fixtures.get(id)!, x);
   });
 });
 

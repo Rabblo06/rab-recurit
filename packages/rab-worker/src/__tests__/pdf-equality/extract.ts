@@ -3,11 +3,12 @@ import { inflateSync } from 'zlib';
 import jsQR from 'jsqr';
 
 import { inspectPdf } from '../helpers/pdf-inspect';
-import { ImagePlacement, inspectPdfLayout, PdfDict, PdfName, pdfNumber, PdfReader, PdfRef, PdfString, PdfValue } from '../helpers/pdf-layout';
+import { ImagePlacement, inspectPdfLayout, LayoutBlock, PdfDict, PdfName, pdfNumber, PdfReader, PdfRef, PdfString, PdfValue } from '../helpers/pdf-layout';
 
 /**
  * PDF EXTRACTOR for the renderer migration (Chromium → native). Text, positions and images come from
- * `helpers/pdf-layout.ts` (`inspectPdfLayout`), so any producer's PDF reads in visual order; the repo's own
+ * `helpers/pdf-layout.ts` (`inspectPdfLayout`), so any producer's PDF reads in reading order (top to bottom, left to
+ * right, right-to-left phrases in logical order) and paragraphs split by a page break are rejoined; the repo's own
  * `helpers/pdf-inspect.ts` (`inspectPdf`) runs on the same bytes as an independent cross-check (`oracle`).
  * Given a PDF it returns: normalised text per page (order-stable: top to bottom, left to right), the page count, each page's footer line and its "Page n of N" numbering, the table header
  * lines found on each page, the embedded image count and every decoded QR payload (jsQR, a pure-JS decoder, devDependency
@@ -75,6 +76,11 @@ export interface PdfExtraction {
   images: ExtractedImage[];
   /** Every decoded QR payload, sorted. */
   qrPayloads: string[];
+  /**
+   * Text that flows over a page break: a paragraph (e.g. a 10 KB note) whose last block on page n carries on as the first
+   * block of page n+1, in the same column. `parts` are the normalised per-page blocks, in order. See `pageContinuations`.
+   */
+  continuations: Continuation[];
   /** Dictionary keys that make a PDF active (scripts, actions, links, attachments, forms), wherever they occur. */
   activeContentKeys: string[];
   /** Text drawn past the page's right edge, or left of its left edge (per page: count of runs). */
@@ -91,6 +97,55 @@ export interface PdfExtraction {
 const ACTIVE_KEYS = ['JavaScript', 'JS', 'OpenAction', 'Launch', 'URI', 'EmbeddedFile', 'EmbeddedFiles', 'AA', 'AcroForm', 'SubmitForm', 'GoToR', 'RichMedia'];
 
 const PAGE_OF = /Page\s*(\d+)\s*of\s*(\d+)/i;
+
+export interface Continuation {
+  /** 1-based page numbers, consecutive. */
+  pages: number[];
+  parts: string[];
+}
+
+/** What `pageContinuations` needs of one page. */
+export interface ContinuationPage {
+  blocks: ReadonlyArray<Pick<LayoutBlock, 'x' | 'top' | 'bottom' | 'text'>>;
+  /** Baseline of the page footer ("Page n of N"), which is not part of the flow; null when the page has none. */
+  footerY: number | null;
+  /** The page repeats the table header: the table carries on there, and table rows never split (`tr` avoids breaks). */
+  hasTableHeader: boolean;
+}
+
+/**
+ * Paragraphs that a page break splits. Block P (the LOWEST block of page n, footer excluded) continues as block Q (the
+ * HIGHEST block of page n+1, footer excluded) when both stand in the same column (left edges within 1.5 pt) and page n+1
+ * does not repeat the table header (then the table carries on, and its rows never break). A chain goes on while each
+ * continuation is also the lowest block of its own page. Anything else (two columns that both break, a centred line)
+ * yields no continuation, so a value split that way is reported missing, never found by a guess.
+ */
+export function pageContinuations(pages: readonly ContinuationPage[]): Continuation[] {
+  type Block = ContinuationPage['blocks'][number];
+  const body = (p: ContinuationPage) => p.blocks.filter((b) => p.footerY === null || Math.abs(b.top - p.footerY) > 0.5);
+  const lowest = (p: ContinuationPage) => body(p).reduce<Block | null>((m, b) => (!m || b.bottom < m.bottom ? b : m), null);
+  const highest = (p: ContinuationPage) => body(p).reduce<Block | null>((m, b) => (!m || b.top > m.top ? b : m), null);
+  const out: Continuation[] = [];
+  let open: Continuation | null = null;
+  for (let i = 0; i + 1 < pages.length; i++) {
+    const from = lowest(pages[i]!);
+    const next = pages[i + 1]!;
+    const to = next.hasTableHeader ? null : highest(next);
+    if (!from || !to || Math.abs(from.x - to.x) > 1.5) {
+      open = null;
+      continue;
+    }
+    if (!open) {
+      open = { pages: [i + 1], parts: [normaliseText(from.text)] };
+      out.push(open);
+    }
+    open.pages.push(i + 2);
+    open.parts.push(normaliseText(to.text));
+    // The chain carries on to page i+3 only if this block is also where page i+2's text ends.
+    if (lowest(next) !== to) open = null;
+  }
+  return out;
+}
 
 export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
   const { reader, pages } = inspectPdfLayout(pdf);
@@ -119,6 +174,17 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
       imagePlacements: p.images.length,
     };
   });
+
+  const continuations = pageContinuations(
+    pages.map((p, i) => {
+      const footerLine = [...p.lines].reverse().find((l) => PAGE_OF.test(normaliseText(l.text)));
+      return {
+        blocks: p.blocks.filter((b) => normaliseText(b.text).length > 0),
+        footerY: footerLine ? footerLine.y : null,
+        hasTableHeader: outPages[i]!.tableHeaderLines.length > 0,
+      };
+    }),
+  );
 
   // Distinct images: an XObject by object number; every inline image is its own.
   const distinct = new Map<string, { placement: ImagePlacement; placements: number }>();
@@ -181,6 +247,7 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
     imageCount: images.length,
     images,
     qrPayloads: images.map((i) => i.qrPayload).filter((q): q is string => q !== null).sort(),
+    continuations,
     activeContentKeys: [...active].sort(),
     outOfPageRuns: pages.map((p) => p.runs.filter((r) => r.text.trim() && (r.endX > p.width + 0.5 || r.x < -0.5)).length),
     pageSizes: pages.map((p): [number, number] => [Math.round(p.width * 100) / 100, Math.round(p.height * 100) / 100]),
