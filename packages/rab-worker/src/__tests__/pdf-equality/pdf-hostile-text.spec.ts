@@ -8,7 +8,9 @@ import { expectationFor } from './documents';
 import { compact, PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureIds } from './fixtures';
 import { extractFixture, outDir, saveArtifact } from './harness';
+import { loadGlyphTransform } from './glyph-transform';
 import { F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { nativeExpectation } from './native-reference';
 import { renderGuarded } from './network-guard';
 import { chromiumRenderer, loadNativeRenderer, NativeNotConvertedError, Renderer } from './renderers';
 
@@ -87,9 +89,19 @@ async function renderSafely(renderer: Renderer, f: FixtureDocument, mode: 'recor
   return x;
 }
 
-/** Every business value (hostile strings included) printed literally; markup printed as text, never interpreted. */
-function assertPrintedLiterally(renderer: Renderer, f: FixtureDocument, x: PdfExtraction): void {
-  const failing = checkAgainstInput(expectationFor(f.doc), x, renderer.name, { boundsStrict: ['native'] }).filter((r) => !r.ok && !r.info);
+/**
+ * Every business value (hostile strings included) printed literally; markup printed as text, never interpreted. The
+ * native side is held to owner decision F1 (each unprintable character printed as □, from the runtime's GlyphCoverage)
+ * and may draw react-pdf's forced-break hyphen at the end of a line (checker.ts `countValue`).
+ */
+async function assertPrintedLiterally(renderer: Renderer, f: FixtureDocument, x: PdfExtraction): Promise<void> {
+  let expectation = expectationFor(f.doc);
+  if (renderer.name === 'native') {
+    const glyphs = await loadGlyphTransform();
+    if ('unavailable' in glyphs) throw new Error(`native renderer present but its F1 glyph transform is not: ${glyphs.unavailable}`);
+    expectation = await nativeExpectation(expectation, glyphs.transform);
+  }
+  const failing = checkAgainstInput(expectation, x, renderer.name, { boundsStrict: ['native'], forcedBreakHyphens: ['native'] }).filter((r) => !r.ok && !r.info);
   expect(failing.map((r) => `${r.check}: ${r.detail}`)).toEqual([]);
   if (f.scenario === 'hostile') {
     const text = compact(x.text);
@@ -101,7 +113,7 @@ function assertPrintedLiterally(renderer: Renderer, f: FixtureDocument, x: PdfEx
 
 async function check(renderer: Renderer, id: string, mode: 'record' | 'deny'): Promise<void> {
   const f = fixtures.get(id)!;
-  assertPrintedLiterally(renderer, f, await renderSafely(renderer, f, mode));
+  await assertPrintedLiterally(renderer, f, await renderSafely(renderer, f, mode));
 }
 
 describe('hostile text — Chromium', () => {
@@ -116,10 +128,10 @@ describe('hostile text — Chromium', () => {
   it.each(findingIds)('%s: no request, no active content', async (id) => {
     findingRenders.set(id, await renderSafely(chromiumRenderer, fixtures.get(id)!, 'record'));
   });
-  test.failing.each(findingIds)(`%s: printed literally — KNOWN FINDING ${F_PDF_1}`, (id) => {
+  test.failing.each(findingIds)(`%s: printed literally — KNOWN FINDING ${F_PDF_1}`, async (id) => {
     const x = findingRenders.get(id);
     if (!x) throw new Error(`${id}: not rendered (see the test above)`);
-    assertPrintedLiterally(chromiumRenderer, fixtures.get(id)!, x);
+    await assertPrintedLiterally(chromiumRenderer, fixtures.get(id)!, x);
   });
 });
 

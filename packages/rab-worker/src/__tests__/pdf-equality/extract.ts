@@ -48,6 +48,8 @@ export interface PageExtraction {
   text: string;
   /** Wrapped cells / paragraphs joined (reading order). Used to find values that wrap over several lines. */
   blocks: string[];
+  /** Each block's normalised lines, aligned with `blocks` (for line-end rules such as forced-break hyphens). */
+  blockLines: string[][];
   /** The page's footer line (the lowest line carrying "Page n of N"), normalised; null when the page has none. */
   footer: string | null;
   footerNumbering: { page: number; of: number } | null;
@@ -168,6 +170,7 @@ export function extractPdf(pdf: Buffer, spec: ExtractSpec = {}): PdfExtraction {
       lines,
       text: lines.join('\n'),
       blocks: p.blocks.map((b) => normaliseText(b.text)).filter((b) => b.length > 0),
+      blockLines: p.blocks.filter((b) => normaliseText(b.text).length > 0).map((b) => b.lines.map(normaliseText).filter((l) => l.length > 0)),
       footer,
       footerNumbering,
       tableHeaderLines: header ? lines.filter((l) => compact(l).includes(header)) : [],
