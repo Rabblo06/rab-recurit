@@ -98,10 +98,10 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
 
     const registry = moduleRef.get(ProcessorExplorer).explore();
     expect(() => validateHandlerRegistry(registry)).not.toThrow();
-    // By name, not just a count: exactly these 25 handlers (21 scans incl. ai-retention and workspace-provisioning-health + 4 consumers incl. rab-ai).
+    // By name, not just a count: exactly these 26 handlers (22 scans incl. ai-retention, workspace-provisioning-health and D-Q2's ai-stale-turn-sweep + 4 consumers incl. rab-ai).
     const discovered = [...registry.handlers.values()].map((h) => `${h.queue}/${h.jobName}`);
     expect(discovered.sort()).toEqual([...EXPECTED_HANDLERS].sort());
-    expect(registry.handlers.size).toBe(25);
+    expect(registry.handlers.size).toBe(26);
     expect(registry.get('crewflow-scan-maintenance', 'ai-retention')).toBeDefined();
     expect(registry.get('rab-ai', 'ai-turn')).toBeDefined();
     // ...and every scan that will be scheduled is exactly the expected set.
@@ -122,9 +122,12 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     // Same contract for AI retention (AI_RETENTION_MODE=off by default ⇒ the cycle returns false, never stamped).
     expect(Object.keys(outcomes).sort()).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.map((id) => id.split(':')[2]!).sort());
     expect(outcomes['ai-retention']).toBe('idle');
+    // D-Q2: the AI stale-turn sweep is off by default (AI_STALE_TURN_SWEEP=false ⇒ the cycle returns false, never stamped).
+    expect(outcomes['ai-stale-turn-sweep']).toBe('idle');
     const stats = await redis.hgetall('lane-a-it:stats');
     expect(stats.lastOutboxRetentionAt).toBeUndefined();
     expect(stats.lastAiRetentionAt).toBeUndefined();
+    expect(stats.lastAiStaleTurnSweepAt).toBeUndefined();
     expect(Number(stats.lastShiftMonitorAt)).toBeGreaterThan(0);
     await redis.del('lane-a-it:stats');
   });

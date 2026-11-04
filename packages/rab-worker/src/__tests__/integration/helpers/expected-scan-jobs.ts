@@ -29,6 +29,8 @@ export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-maintenance:outbox-retention',
   'crewflow:crewflow-scan-maintenance:ai-retention',
   'crewflow:crewflow-scan-maintenance:workspace-provisioning-health',
+  // Phase D-Q2: the AI stale-queued-turn sweep (off by default; registered only when AI_STALE_TURN_SWEEP=true).
+  'crewflow:crewflow-scan-maintenance:ai-stale-turn-sweep',
 ]);
 
 /** `<queue>/<jobName>` of every consumer handler (legacy `bull` prefix queues). */
@@ -39,7 +41,7 @@ export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
   'rab-ai/ai-turn',
 ]);
 
-/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 21 scans + 4 consumers = 25. */
+/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 22 scans + 4 consumers = 26. */
 export const EXPECTED_HANDLERS: readonly string[] = Object.freeze([
   ...EXPECTED_SCAN_SCHEDULER_IDS.map((id) => {
     const [, queue, jobName] = id.split(':');
