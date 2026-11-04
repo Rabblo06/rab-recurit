@@ -55,7 +55,9 @@ describe('Phase A scan interval settings', () => {
       const expected =
         def.interval.kind === 'constant'
           ? 86_400_000
-          : def.interval.kind === 'env-seconds'
+          : def.interval.kind === 'combined-shift-scan'
+            ? 300_000 // D-Q4a: gcd of its four 300-s members (registered only in combined mode)
+            : def.interval.kind === 'env-seconds'
             ? HISTORICAL_SECONDS[def.jobName]! * 1000
             : { 'login-handoff-cleanup': 15, 'outbox-retention': 60, 'ai-retention': 60, 'ai-stale-turn-sweep': 5 }[def.jobName]! * 60_000;
       expect([def.jobName, resolveIntervalMs(def, env)]).toEqual([def.jobName, expected]);
