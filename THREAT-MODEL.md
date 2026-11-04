@@ -5084,3 +5084,9 @@ is delivered twice). **Actor:** the Worker, without a request; a replica racing 
   error name/code only, never the error object (a `QueryFailedError` holds the bound fencing token). A job whose own BullMQ attempts run out before the cumulative cap (attempts
   spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
   republishes it until the cumulative cap.
+- **Independent verification (2026-11-04, "V" tests in the same two integration specs).** A real crash loop (every claim
+  dies after the provider call; a restart's redelivery inside the lease claims, counts and sends nothing; lease recovery
+  republishes) stops at the 5th cumulative attempt with `DELIVERY_UNCERTAIN` and five provider calls on one key, and the
+  dead Workers' late outcomes are fenced out; the `DELIVERY_UNCERTAIN` rows this change produces (SMTP below the cap,
+  Resend at the cap) are refused by `core.replay_failed_email` without the allow-uncertain flag; the counting claim and
+  the reclassification UPDATE change nothing with no tenant context or another organisation bound (email and push).

@@ -18,7 +18,7 @@ import 'reflect-metadata';
 import { Test } from '@nestjs/testing';
 import { UnrecoverableError } from 'bullmq';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
@@ -201,5 +201,171 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
     await Promise.all([processor()(jobOf(deliveryId, org.id, 2)), processor()(jobOf(deliveryId, org.id, 0))]);
     expect(sends(token)).toBe(1);
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'ACCEPTED', count: 3 });
+  });
+
+  // ------------------------------------------------------------------------------------------------ verification gaps
+  // Added by the independent D-Q5b verification (2026-11-04): crash mid-send / restart / lease expiry / zombie, a confirmed
+  // push whose ACCEPTED write fails, dispatcher replicas at the cap, and RLS on the counting statements.
+  const waitFor = async (predicate: () => boolean, what: string) => {
+    const deadline = Date.now() + 10_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+  type Deferred = { resolve: (r: { provider: string; providerMessageId?: string }) => void; reject: (e: unknown) => void };
+  /** The real PushService, except `send` never returns until the test settles it: the Worker "dies" mid-send. */
+  function hangingPushService() {
+    const pending: Deferred[] = [];
+    const service = new Proxy(pushService, {
+      get(target, prop) {
+        if (prop === 'send') return () => new Promise((resolve, reject) => pending.push({ resolve, reject } as Deferred));
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    return { service, pending };
+  }
+  /** The real TenantContextService, except every attempt to write ACCEPTED fails (connection lost after the provider accepted). */
+  function acceptedWriteFails(real: TenantContextService): TenantContextService {
+    const wrapManager = (manager: EntityManager): EntityManager =>
+      new Proxy(manager, {
+        get(target, prop) {
+          if (prop === 'createQueryBuilder') {
+            return (...args: unknown[]) => {
+              const qb = (target.createQueryBuilder as (...a: unknown[]) => any)(...args);
+              const update = qb.update.bind(qb);
+              qb.update = (...u: unknown[]) => {
+                const uqb = update(...u);
+                const set = uqb.set.bind(uqb);
+                uqb.set = (values: Record<string, unknown>) => {
+                  const next = set(values);
+                  if (values.status === 'ACCEPTED') {
+                    next.execute = async () => {
+                      throw new Error('simulated: connection terminated while persisting ACCEPTED');
+                    };
+                  }
+                  return next;
+                };
+                return uqb;
+              };
+              return qb;
+            };
+          }
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+    return new Proxy(real, {
+      get(target, prop) {
+        if (prop === 'runInTenantContext') {
+          return (c: AuthContext, fn: (m: EntityManager) => Promise<unknown>) => target.runInTenantContext(c, (m) => fn(wrapManager(m)));
+        }
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+  }
+  const processingSince = async (id: string) =>
+    (await adminDataSource.query(`SELECT provider_call_started_at, provider_message_id FROM core.push_delivery WHERE id = $1`, [id]))[0] as {
+      provider_call_started_at: Date | null;
+      provider_message_id: string | null;
+    };
+
+  it('V1: Worker crash mid-send — a restart redelivery inside the lease is a no-op; lease expiry → DELIVERY_UNCERTAIN with the cumulative count, never a second push; the dead Worker\'s late acceptance is fenced', async () => {
+    const { org, token, deliveryId } = await seed('dq5bpv1');
+    const hanging = hangingPushService();
+    const deps = { tenantContext, pushService: hanging.service, secretEncryption, pushDeviceService };
+    const zombie = createPushSendProcessor(deps)(jobOf(deliveryId, org.id, 0)).catch(() => undefined);
+    await waitFor(() => hanging.pending.length === 1, 'the provider call');
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'PROCESSING', count: 1 });
+    expect((await processingSince(deliveryId)).provider_call_started_at).toBeTruthy();
+
+    // Restart: BullMQ redelivers the stalled job. PROCESSING is not claimable: no count, no provider call.
+    await expect(createPushSendProcessor(deps)(jobOf(deliveryId, org.id, 1))).resolves.toBeUndefined();
+    expect(hanging.pending).toHaveLength(1);
+    expect((await rowOf(deliveryId)).count).toBe(1);
+
+    const early = await dispatch(org.id);
+    expect(early.result.deliveryUncertain).toBe(0);
+    expect((await rowOf(deliveryId)).status).toBe('PROCESSING');
+
+    await setRow(deliveryId, `processing_at = now() - interval '20 minutes'`);
+    const { publish, republish, result } = await dispatch(org.id);
+    expect(publish).not.toHaveBeenCalled();
+    expect(republish).not.toHaveBeenCalled();
+    expect(result.deliveryUncertain).toBe(1);
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 1 });
+
+    hanging.pending[0]!.resolve({ provider: 'FCM', providerMessageId: 'late-accept' });
+    await zombie;
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 1 });
+    expect((await processingSince(deliveryId)).provider_message_id).toBeNull();
+    expect(sends(token)).toBe(0);
+  });
+
+  it('V2: a confirmed push whose ACCEPTED write fails is never re-sent — BullMQ\'s retry of the same job sends nothing, lease recovery → DELIVERY_UNCERTAIN, one push in total', async () => {
+    const { org, token, deliveryId } = await seed('dq5bpv2');
+    const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(
+        createPushSendProcessor({ tenantContext: acceptedWriteFails(tenantContext), pushService, secretEncryption, pushDeviceService })(jobOf(deliveryId, org.id, 0)),
+      ).rejects.toThrow(/persisting ACCEPTED/);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(sends(token)).toBe(1);
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'PROCESSING', count: 1 });
+
+    // BullMQ retries the same job (the error was not UnrecoverableError); the database is healthy again.
+    await expect(processor()(jobOf(deliveryId, org.id, 1))).resolves.toBeUndefined();
+    expect(sends(token)).toBe(1);
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'PROCESSING', count: 1 });
+
+    await setRow(deliveryId, `processing_at = now() - interval '20 minutes'`);
+    const { republish } = await dispatch(org.id);
+    expect(republish).not.toHaveBeenCalled();
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 1 });
+    expect(sends(token)).toBe(1);
+  });
+
+  it('V3: five dispatcher replicas race one PROCESSING row at the cap with the provider marker: exactly one DELIVERY_UNCERTAIN, none exhausted, no republish', async () => {
+    const { org, token, deliveryId } = await seed('dq5bpv3');
+    await setRow(
+      deliveryId,
+      `status = 'PROCESSING', processing_at = now() - interval '20 minutes', processing_token = gen_random_uuid(),
+       provider_call_started_at = now() - interval '20 minutes', attempt_count = 5`,
+    );
+    const runs = await Promise.all(Array.from({ length: 5 }, () => dispatch(org.id)));
+    expect(runs.reduce((n, r) => n + r.result.deliveryUncertain, 0)).toBe(1);
+    expect(runs.reduce((n, r) => n + r.result.failedExhausted, 0)).toBe(0);
+    expect(runs.some((r) => r.republish.mock.calls.length > 0 || r.publish.mock.calls.length > 0)).toBe(false);
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 5 });
+    expect(sends(token)).toBe(0);
+  });
+
+  it('V4: RLS — with no tenant context, or another organisation bound, the counting claim and the reclassification change nothing; the same claim under the row organisation does (positive control)', async () => {
+    const { org, deliveryId } = await seed('dq5bpv4');
+    const other = await factory.createOrganisation();
+    const otherCtx: AuthContext = { organisationId: other.id, workspaceId: null, userId: '', role: '' };
+    await setRow(deliveryId, `status = 'RETRY', attempt_count = 2`);
+    const CLAIM = `UPDATE core.push_delivery
+                      SET status = 'PROCESSING', processing_at = now(), processing_token = gen_random_uuid(), attempt_count = attempt_count + 1
+                    WHERE id = $1 AND status IN ('PENDING', 'RETRY') AND attempt_count < max_attempts
+                RETURNING attempt_count`;
+    const RECLASSIFY = `UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN' WHERE id = $1 RETURNING id`;
+    const affected = (r: unknown) => (r as [unknown[], number])[1];
+
+    expect(affected(await dataSource.query(CLAIM, [deliveryId]))).toBe(0);
+    expect(affected(await dataSource.query(RECLASSIFY, [deliveryId]))).toBe(0);
+    expect(affected(await tenantContext.runInTenantContext(otherCtx, (m) => m.query(CLAIM, [deliveryId])))).toBe(0);
+    expect(affected(await tenantContext.runInTenantContext(otherCtx, (m) => m.query(RECLASSIFY, [deliveryId])))).toBe(0);
+    expect(await rowOf(deliveryId)).toMatchObject({ status: 'RETRY', count: 2 });
+
+    const ownCtx: AuthContext = { organisationId: org.id, workspaceId: null, userId: '', role: '' };
+    const [rows, count] = (await tenantContext.runInTenantContext(ownCtx, (m) => m.query(CLAIM, [deliveryId]))) as [Array<{ attempt_count: number }>, number];
+    expect(count).toBe(1);
+    expect(rows).toEqual([{ attempt_count: 3 }]);
+    await setRow(deliveryId, `status = 'CANCELLED', cancelled_at = now()`); // leave nothing claimable behind
   });
 });

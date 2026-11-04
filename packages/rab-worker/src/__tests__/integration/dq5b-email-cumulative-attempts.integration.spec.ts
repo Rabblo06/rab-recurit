@@ -389,4 +389,155 @@ describeIfDb('D-Q5b email: cumulative attempt cap, no resend after a confirmed s
       expect((await auditActions(row.id)).filter((a: string) => a === 'email.delivery_uncertain')).toHaveLength(1);
     });
   });
+
+  // ================================================================================================ 5. Verification gaps
+  // Added by the independent D-Q5b verification (2026-11-04): Worker crash mid-send + restart + lease expiry + recovery as
+  // one real loop, the replay guard on a DELIVERY_UNCERTAIN row this PR produces, and RLS on the counting statements.
+  describe('5. V: crash, restart, lease recovery, replay guard and RLS on the counting statements', () => {
+    const waitFor = async (predicate: () => boolean, what: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    /** A provider whose calls never return until the test settles them: the Worker "dies" mid-send. */
+    function hangingProvider() {
+      const calls: Array<{ idempotencyKey: string }> = [];
+      const pending: Array<{ resolve: (r: EmailSendResult) => void; reject: (e: unknown) => void }> = [];
+      const send = (options: { idempotencyKey: string }) => {
+        calls.push({ idempotencyKey: options.idempotencyKey });
+        return new Promise<EmailSendResult>((resolve, reject) => pending.push({ resolve, reject }));
+      };
+      return { service: { send, ambiguousDeliverySafeToRetry: true } as unknown as EmailService, calls, pending };
+    }
+    const asPlatformAdmin = async () => {
+      const admin = await factory.createInternalManager(org, { platformAdmin: true });
+      return <T>(fn: (m: EntityManager) => Promise<T>) =>
+        tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: null, userId: admin.userId, role: '' }, fn);
+    };
+
+    it('V1 crash loop (Resend): every claim dies after the provider call; a restart redelivery inside the lease is a no-op; lease recovery republishes until the 5th cumulative attempt, which ends DELIVERY_UNCERTAIN — five provider calls on one key, never a sixth; late zombie outcomes are fenced', async () => {
+      const row = await seedRow();
+      const p = hangingProvider();
+      const processor = createEmailSendProcessor({ tenantContext, emailService: p.service, auditService });
+      const zombies: Array<Promise<void>> = [];
+      for (let generation = 0; generation < 5; generation += 1) {
+        zombies.push(processor(fakeJob(row.id, 0, generation)).catch(() => undefined));
+        await waitFor(() => p.calls.length === generation + 1, `provider call ${generation + 1}`);
+        const crashed = await rowOf(row.id);
+        expect(crashed).toMatchObject({ status: 'PROCESSING', count: generation + 1, generation });
+        expect(crashed.provider_call_started_at).toBeTruthy();
+
+        // Worker restart: BullMQ redelivers the stalled job (attemptsMade + 1). The row is PROCESSING: no claim, no count, no send.
+        await expect(processor(fakeJob(row.id, 1, generation))).resolves.toBeUndefined();
+        expect(p.calls).toHaveLength(generation + 1);
+        expect((await rowOf(row.id)).count).toBe(generation + 1);
+
+        // Inside the 10-minute lease the dispatcher leaves it alone.
+        const early = await dispatch(true);
+        expect(early.republish).not.toHaveBeenCalledWith(row.id, expect.anything(), expect.anything());
+
+        // Lease expiry.
+        await setRow(row.id, `processing_at = now() - interval '20 minutes'`);
+        const { publish, republish } = await dispatch(true);
+        expect(publish).not.toHaveBeenCalledWith(row.id, expect.anything());
+        if (generation < 4) {
+          expect(republish).toHaveBeenCalledWith(row.id, org.id, generation + 1);
+          expect(await rowOf(row.id)).toMatchObject({ status: 'QUEUED', count: generation + 1, generation: generation + 1 });
+        } else {
+          expect(republish).not.toHaveBeenCalledWith(row.id, expect.anything(), expect.anything());
+          expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 5, generation: 4 });
+        }
+      }
+      // Terminal: a further cycle and a further job change nothing.
+      const after = await dispatch(true);
+      expect(after.republish).not.toHaveBeenCalledWith(row.id, expect.anything(), expect.anything());
+      await expect(processor(fakeJob(row.id, 0, 5))).resolves.toBeUndefined();
+      expect(p.calls).toHaveLength(5);
+      expect(new Set(p.calls.map((c) => c.idempotencyKey))).toEqual(new Set([deliveryKeyFor(row.id)]));
+
+      // The dead Workers' provider calls finally return (some accepted, some failed): every late write is fenced out.
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        p.pending.forEach((call, i) =>
+          i % 2 === 0 ? call.resolve({ provider: 'RESEND', providerMessageId: `msg_late_${i}` }) : call.reject(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })),
+        );
+        await Promise.all(zombies);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: 5, provider_message_id: null });
+      expect((await auditActions(row.id)).filter((a: string) => a === 'email.delivery_uncertain')).toHaveLength(1);
+      expect(await auditActions(row.id)).not.toContain('email.sent');
+    });
+
+    it.each([
+      { driver: 'Resend at the cap (prior 4)', safe: true, prior: 4, generation: 1 },
+      { driver: 'SMTP below the cap (prior 0)', safe: false, prior: 0, generation: 0 },
+    ])(
+      'V2 replay guard ($driver): the DELIVERY_UNCERTAIN row left by a confirmed send whose SENT write failed is refused without the allow-uncertain flag; with it the operator replay gets a fresh budget and sends once',
+      async ({ safe, prior, generation }) => {
+        const row = await seedRow();
+        await setRow(row.id, `status = 'QUEUED', queued_at = now(), infrastructure_attempt_count = ${prior}, dispatch_generation = ${generation}`);
+        const p = provider('ok', safe);
+        const errors = quietErrors();
+        try {
+          await expect(
+            createEmailSendProcessor({ tenantContext: sentWriteFails(tenantContext), emailService: p.service, auditService })(fakeJob(row.id, 0, generation)),
+          ).rejects.toBeInstanceOf(UnrecoverableError);
+        } finally {
+          errors.mockRestore();
+        }
+        expect(await rowOf(row.id)).toMatchObject({ status: 'PROCESSING', count: prior + 1 });
+        await setRow(row.id, `processing_at = now() - interval '20 minutes'`);
+        await dispatch(safe);
+        expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: prior + 1, generation });
+
+        const asAdmin = await asPlatformAdmin();
+        const replay = (allow: boolean) => asAdmin(async (m) => (await m.query('SELECT core.replay_failed_email($1, $2) AS r', [row.id, allow]))[0].r as string);
+        expect(await replay(false)).toBe('UNCERTAIN');
+        expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', last_error_code: 'DELIVERY_UNCERTAIN', count: prior + 1, generation });
+        expect(await auditActions(row.id)).not.toContain('email.replay_requested');
+        expect(p.calls).toHaveLength(1);
+
+        expect(await replay(true)).toBe('REPLAYED');
+        expect(await rowOf(row.id)).toMatchObject({ status: 'RETRY', count: 0, generation: generation + 1 });
+        const [audit] = await adminDataSource.query(
+          `SELECT metadata->>'allowUncertain' AS allow FROM core.audit_log WHERE action = 'email.replay_requested' AND entity_id = $1`,
+          [row.id],
+        );
+        expect(audit).toEqual({ allow: 'true' });
+        // The operator accepted the duplicate risk explicitly: the replayed row is claimable again and sends once.
+        await createEmailSendProcessor({ tenantContext, emailService: p.service, auditService })(fakeJob(row.id, 0, generation + 1));
+        expect(await rowOf(row.id)).toMatchObject({ status: 'SENT', count: 1 });
+        expect(p.calls).toHaveLength(2);
+      },
+    );
+
+    it('V3 RLS: with no tenant context, or another organisation bound, the counting claim and the cap reclassification change nothing; the same statements under the row organisation do (positive control)', async () => {
+      const row = await seedRow();
+      await setRow(row.id, `status = 'RETRY', infrastructure_attempt_count = 2`);
+      const CLAIM = `UPDATE core.email_outbox
+                        SET status = 'PROCESSING', processing_at = now(), processing_token = gen_random_uuid(),
+                            infrastructure_attempt_count = infrastructure_attempt_count + 1
+                      WHERE id = $1 AND status IN ('PENDING', 'QUEUED', 'RETRY') AND infrastructure_attempt_count < max_infrastructure_attempts
+                  RETURNING infrastructure_attempt_count`;
+      const RECLASSIFY = `UPDATE core.email_outbox SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN'
+                           WHERE id = ANY($1::uuid[]) RETURNING id`;
+      const affected = (result: unknown) => (result as [unknown[], number])[1];
+
+      expect(affected(await dataSource.query(CLAIM, [row.id]))).toBe(0);
+      expect(affected(await dataSource.query(RECLASSIFY, [[row.id]]))).toBe(0);
+      expect(affected(await tenantContext.runInTenantContext(otherCtx, (m) => m.query(CLAIM, [row.id])))).toBe(0);
+      expect(affected(await tenantContext.runInTenantContext(otherCtx, (m) => m.query(RECLASSIFY, [[row.id]])))).toBe(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'RETRY', count: 2 });
+
+      // Positive control: the identical claim bound to the row's own organisation does count.
+      const [rows, count] = (await tenantContext.runInTenantContext(ctx, (m) => m.query(CLAIM, [row.id]))) as [Array<{ infrastructure_attempt_count: number }>, number];
+      expect(count).toBe(1);
+      expect(rows).toEqual([{ infrastructure_attempt_count: 3 }]);
+      await setRow(row.id, `status = 'CANCELLED', cancelled_at = now()`); // leave nothing claimable behind
+    });
+  });
 });
