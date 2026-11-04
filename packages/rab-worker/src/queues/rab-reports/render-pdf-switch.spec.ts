@@ -44,8 +44,10 @@ describe('pdfRendererMode (strict PDF_RENDERER parsing)', () => {
   });
 
   it('the boot line names the native kinds, and refuses a bad value the same way', () => {
-    expect([...NATIVE_KINDS]).toEqual(['final-timesheet', 'pre-shift']);
-    expect(describePdfRendering({ PDF_RENDERER: 'native' })).toBe('PDF_RENDERER=native: native final-timesheet, pre-shift; Chromium for every other report kind');
+    expect([...NATIVE_KINDS]).toEqual(['final-timesheet', 'pre-shift', 'approved-shift-statement']);
+    expect(describePdfRendering({ PDF_RENDERER: 'native' })).toBe(
+      'PDF_RENDERER=native: native final-timesheet, pre-shift, approved-shift-statement; Chromium for every other report kind',
+    );
     expect(describePdfRendering({})).toBe('PDF_RENDERER=chromium: native none; Chromium for every other report kind');
     expect(() => describePdfRendering({ PDF_RENDERER: 'Native' })).toThrow(/PDF_RENDERER must be exactly/);
   });
@@ -81,18 +83,29 @@ describe('renderReportPdf dispatch', () => {
     expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
   });
 
-  it('native: a kind without a native layout (the shift statement) still goes to Chromium', async () => {
-    const statement = {
-      kind: 'approved-shift-statement',
-      data: {
-        statementReference: 'ASS-20261020-1A2B3C4D', employerName: 'Adolphus Group Ltd', workspaceName: 'Adolphus Events', staffName: 'Alex Example',
-        staffRef: 'ST-1001', venueName: 'The Grand Hall', roleName: 'Bar Staff', scheduledStart: '2026-10-20T17:00:00.000Z', scheduledEnd: '2026-10-21T01:00:00.000Z',
-        clockInAt: '2026-10-20T16:58:00.000Z', clockOutAt: '2026-10-21T01:03:00.000Z', breakMinutes: 30, breakPaid: false, payableMinutes: 455, payRatePence: 1250,
-        amountPence: 9479, approvedAt: '2026-10-22T10:00:00.000Z', approvedByName: 'Pat Payroll', payrollPeriodLabel: '13 Oct – 26 Oct 2026', paydayLabel: 'Fri 30 Oct 2026',
-        timezone: 'Europe/London', generatedAt: '2026-10-22T10:05:00.000Z',
-      },
-    } as ReportDocument;
-    await expect(renderReportPdf(statement, { PDF_RENDERER: 'native' })).rejects.toBeInstanceOf(LaunchIntercepted);
+  // Integration of #59 (roster) with #57 (payroll): the statement now has a native layout too, so no kind is left without
+  // one. Both directions are pinned for it instead: native renders it natively, chromium still sends it to Chromium.
+  const statement = {
+    kind: 'approved-shift-statement',
+    data: {
+      statementReference: 'ASS-20261020-1A2B3C4D', employerName: 'Adolphus Group Ltd', workspaceName: 'Adolphus Events', staffName: 'Alex Example',
+      staffRef: 'ST-1001', venueName: 'The Grand Hall', roleName: 'Bar Staff', scheduledStart: '2026-10-20T17:00:00.000Z', scheduledEnd: '2026-10-21T01:00:00.000Z',
+      clockInAt: '2026-10-20T16:58:00.000Z', clockOutAt: '2026-10-21T01:03:00.000Z', breakMinutes: 30, breakPaid: false, payableMinutes: 455, payRatePence: 1250,
+      amountPence: 9479, approvedAt: '2026-10-22T10:00:00.000Z', approvedByName: 'Pat Payroll', payrollPeriodLabel: '13 Oct – 26 Oct 2026', paydayLabel: 'Fri 30 Oct 2026',
+      timezone: 'Europe/London', generatedAt: '2026-10-22T10:05:00.000Z',
+    },
+  } as ReportDocument;
+
+  it('native: the shift statement renders natively, without ever launching Chromium', async () => {
+    const pdf = await renderReportPdf(statement, { PDF_RENDERER: 'native' });
+    expect(launch).not.toHaveBeenCalled();
+    expect(native).toHaveBeenCalledWith(statement);
+    expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  });
+
+  it('chromium: the shift statement still goes to Chromium, never the native renderer', async () => {
+    await expect(renderReportPdf(statement, { PDF_RENDERER: 'chromium' })).rejects.toBeInstanceOf(LaunchIntercepted);
+    expect(launch).toHaveBeenCalledTimes(1);
     expect(native).not.toHaveBeenCalled();
   });
 
