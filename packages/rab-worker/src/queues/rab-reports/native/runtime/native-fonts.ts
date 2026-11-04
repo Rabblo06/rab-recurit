@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 /**
- * Embedded fonts for the native PDF renderer (PDF renderer migration P1; owner decisions D11 and D3).
+ * Embedded fonts for the native PDF renderer (PDF renderer migration P1; owner decisions D11, F1 and F3).
  *
  * Every file is vendored in `../assets/fonts/` (beside the compiled code in `dist` too), pinned by the sha256 below,
  * read from disk ONCE, verified, and handed to react-pdf as in-memory bytes (a `data:` source, so react-pdf never opens
@@ -15,14 +15,15 @@ import { join } from 'path';
  *    (github.com/liberationfonts/liberation-fonts/files/7261482, tarball sha256
  *    7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0). No italic: no template uses one.
  *
- *  Fallback (D3): Noto Sans 2.015 Regular + Bold, unhinted TTF (SIL OFL 1.1, `noto-sans/OFL.txt`): the Latin, Greek
+ *  Fallback: Noto Sans 2.015 Regular + Bold, unhinted TTF (SIL OFL 1.1, `noto-sans/OFL.txt`): the Latin, Greek
  *    and Cyrillic member of the Noto family. Source: github.com/notofonts/latin-greek-cyrillic release NotoSans-v2.015
  *    (NotoSans-v2.015.zip sha256 0c34df072a3fa7efbb7cbf34950e1f971a4447cffe365d3a359e2d4089b958f5, files
  *    NotoSans/unhinted/ttf/NotoSans-{Regular,Bold}.ttf and OFL.txt).
- *    ASSUMPTION for owner confirmation: the plan (§7, §14 D3) approves "Noto fallback subsets for the agreed scripts" but
- *    does not list the scripts, so the agreed set is taken to be Latin Extended, Greek and Cyrillic. Everything else
- *    (CJK, Arabic, Hebrew, Devanagari, emoji, ...) fails closed in the glyph-coverage guard until the owner adds a
- *    script; adding one = vendor its Noto subset, pin it here, add the family to FONT_FAMILY_STACK.
+ *    Owner decision F1 (plan §15): exactly these two families. Any character outside them (CJK, Arabic, Devanagari,
+ *    emoji, ...) is printed as a visible replacement marker and logged as a count (glyph-coverage.ts); more Noto
+ *    families only if counted data shows a need, and then loaded lazily. Liberation Sans itself maps Hebrew (MEASURED;
+ *    react-pdf's bidi prints it in correct right-to-left order, render-pool.spec.ts "F2").
+ *    The fallback is parsed lazily: only when a string or a layout first needs it in a thread (F3).
  *
  * `fontWeight` 600 resolves to Bold (react-pdf picks the nearest registered weight), as Chromium did with Liberation.
  */

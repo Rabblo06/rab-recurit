@@ -1,6 +1,6 @@
 /**
  * Native PDF render runtime: the request shape, the messages between the jobs process and a render thread, and the
- * errors both sides raise (PDF renderer migration P1, plan §4.2-§4.4, owner decisions D3/D7, trade-off T1).
+ * errors both sides raise (PDF renderer migration P1, plan §4.2-§4.4, owner decisions D7 and F1, trade-off T1).
  *
  * This module is imported by BOTH sides, so it imports nothing but Node's `util` types: never react-pdf, never the
  * Chromium renderer, never anything that opens a socket.
@@ -49,18 +49,34 @@ export interface SerializedRenderError {
   name: string;
   code: string;
   message: string;
-  field?: string;
 }
 
 export interface RenderTimings {
-  /** Glyph-coverage pre-check of every string in the view-model. */
+  /** F1 glyph pass over every string of the view-model (normalise + replace unprintable characters). */
   coverageMs: number;
   /** Element build + react-pdf layout + PDF serialisation. */
   renderMs: number;
 }
 
+/** One field whose unprintable characters were replaced by the marker: path and count ONLY (F1). */
+export interface GlyphSubstitutionCount {
+  field: string;
+  count: number;
+}
+
+/** Where a render thread's start-up time went (F3), in ms. */
+export interface ThreadInitBreakdown {
+  guardMs?: number;
+  modulesMs?: number;
+  fontFilesVerifyMs?: number;
+  fontRegisterMs?: number;
+  registryLoadMs?: number;
+  primaryFontParseMs?: number;
+  warmupRenderMs?: number;
+}
+
 export type FromThreadMessage =
-  | { type: 'ready'; initMs: number }
+  | { type: 'ready'; initMs: number; breakdown: ThreadInitBreakdown }
   | { type: 'init-error'; error: SerializedRenderError }
   | {
       type: 'result';
@@ -68,6 +84,7 @@ export type FromThreadMessage =
       ok: true;
       pdf: ArrayBuffer;
       timings: RenderTimings;
+      substitutions: GlyphSubstitutionCount[];
     }
   | { type: 'result'; id: number; ok: false; error: SerializedRenderError }
   | { type: 'probe-result'; id: number; report: ThreadProbeReport };
@@ -88,6 +105,8 @@ export interface ThreadProbeReport {
   rendersServed: number;
   /** `Date.now()` inside the thread right now (the frozen render clock, D7). */
   clockNowMs: number;
+  /** Times the fallback font family was parsed by the glyph pass in this thread (lazy: 0 until needed, then 1). */
+  fallbackFontLoads: number;
 }
 
 /** Data passed as `workerData` when a render thread is created. */
@@ -106,25 +125,6 @@ export class PdfNativeRenderError extends Error {
   ) {
     super(message);
     this.name = 'PdfNativeRenderError';
-  }
-}
-
-/**
- * D3: a string in the view-model contains a character none of the embedded fonts can draw. The render is refused
- * (never a silent blank). `field` is the structural path inside the view-model (`rows[3].name`); the VALUE and the
- * offending character are never included, because the value may be personal data.
- */
-export class PdfGlyphCoverageError extends PdfNativeRenderError {
-  constructor(
-    readonly field: string,
-    readonly unsupportedCount: number,
-  ) {
-    super(
-      `native PDF renderer: field "${field}" contains ${unsupportedCount} character(s) the embedded fonts cannot draw; ` +
-        'render refused (D3, never dropped silently)',
-      'error_PDF_GLYPH_UNSUPPORTED',
-    );
-    this.name = 'PdfGlyphCoverageError';
   }
 }
 
@@ -172,14 +172,6 @@ export class PdfRenderPoolClosedError extends PdfNativeRenderError {
 }
 
 export function serializeRenderError(err: unknown): SerializedRenderError {
-  if (err instanceof PdfGlyphCoverageError) {
-    return {
-      name: err.name,
-      code: err.code,
-      message: err.message,
-      field: err.field,
-    };
-  }
   if (err instanceof PdfNativeRenderError)
     return { name: err.name, code: err.code, message: err.message };
   const e = err instanceof Error ? err : new Error(String(err));
@@ -194,10 +186,6 @@ export function serializeRenderError(err: unknown): SerializedRenderError {
 export function deserializeRenderError(
   s: SerializedRenderError,
 ): PdfNativeRenderError {
-  if (s.code === 'error_PDF_GLYPH_UNSUPPORTED' && typeof s.field === 'string') {
-    const m = /contains (\d+) character/.exec(s.message);
-    return new PdfGlyphCoverageError(s.field, m ? Number(m[1]) : 1);
-  }
   if (s.code === 'error_PDF_NATIVE_INPUT')
     return new PdfNativeInputError(s.message);
   const e = new PdfNativeRenderError(s.message, s.code);
