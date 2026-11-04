@@ -5,6 +5,7 @@ import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templat
 
 import { FINAL_TIMESHEET_CASES } from '../../__tests__/helpers/final-timesheet-fixtures';
 import * as nativeModule from './native/render-native';
+import * as renderTimeout from './native/runtime/render-timeout';
 import {
   describePdfRendering,
   htmlFor,
@@ -50,6 +51,14 @@ describe('pdfRendererMode (strict PDF_RENDERER parsing)', () => {
     );
     expect(describePdfRendering({})).toBe('PDF_RENDERER=chromium: native none; Chromium for every other report kind');
     expect(() => describePdfRendering({ PDF_RENDERER: 'Native' })).toThrow(/PDF_RENDERER must be exactly/);
+  });
+});
+
+describe('one deadline error class for both renderers', () => {
+  it('render-pdf.util re-exports the dependency-free runtime/render-timeout class and constant (instanceof holds everywhere)', () => {
+    expect(PdfRenderTimeoutError).toBe(renderTimeout.PdfRenderTimeoutError);
+    expect(PDF_RENDER_STEP_TIMEOUT_MS).toBe(renderTimeout.PDF_RENDER_STEP_TIMEOUT_MS);
+    expect(new renderTimeout.PdfRenderTimeoutError('native-render', 1)).toBeInstanceOf(PdfRenderTimeoutError);
   });
 });
 

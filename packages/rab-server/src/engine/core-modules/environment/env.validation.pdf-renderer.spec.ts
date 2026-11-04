@@ -37,4 +37,19 @@ describe('PDF_RENDERER environment variable', () => {
       expect(() => validate({ ...base, PDF_NATIVE_CONCURRENCY: value })).toThrow(/PDF_NATIVE_CONCURRENCY must be an integer from 1 to 4/);
     });
   });
+
+  describe('PDF_NATIVE_PREWARM', () => {
+    it('is optional; an empty value is unset', () => {
+      expect(validate({ ...base }).PDF_NATIVE_PREWARM).toBeUndefined();
+      expect(validate({ ...base, PDF_NATIVE_PREWARM: '' }).PDF_NATIVE_PREWARM).toBeUndefined();
+    });
+
+    it.each(['0', '1', '2', '3', '4'])('accepts %p', (value) => {
+      expect(validate({ ...base, PDF_NATIVE_PREWARM: value }).PDF_NATIVE_PREWARM).toBe(value);
+    });
+
+    it.each([' ', '5', '-1', '1.0', 'two'])('refuses to boot with PDF_NATIVE_PREWARM=%p', (value) => {
+      expect(() => validate({ ...base, PDF_NATIVE_PREWARM: value })).toThrow(/PDF_NATIVE_PREWARM must be an integer from 0 to 4/);
+    });
+  });
 });
