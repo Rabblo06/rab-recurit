@@ -41,6 +41,14 @@
         "command": "tsc --noEmit -p packages/rab-worker/tsconfig.app.json"
       }
     },
+    "test-pdf-equality": {
+      "executor": "@nx/jest:jest",
+      "dependsOn": ["^build"],
+      "options": {
+        "jestConfig": "packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts",
+        "runInBand": true
+      }
+    },
     "test": {
       "executor": "@nx/jest:jest",
       "dependsOn": ["^build"],

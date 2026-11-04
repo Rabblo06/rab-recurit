@@ -27,6 +27,7 @@ export default {
   // + dist/*.d.ts is what this package's imports actually resolve to).
   transformIgnorePatterns: ['/node_modules/', '/dist-cjs/', '/dist-esm/', '/rab-server/dist/'],
   // Opt-in load tests (RAB_LOAD_TEST=1, see src/__tests__/load) never run in the default suite — same convention as rab-server's own jest.config.ts.
-  testPathIgnorePatterns: ['/node_modules/', '/__tests__/load/'],
+  // The PDF renderer-migration harness (src/__tests__/pdf-equality) has its own database-free config: `test-pdf-equality`.
+  testPathIgnorePatterns: ['/node_modules/', '/__tests__/load/', '/__tests__/pdf-equality/'],
   coverageDirectory: '../../coverage/packages/rab-worker',
 };
