@@ -247,6 +247,8 @@ describe('pre-shift attendance sheet, native PDF bytes', () => {
 interface PlacedLine {
   /** Page x (PDF points from the left edge) where the BT…ET text object starts. */
   x: number;
+  /** Page y of the text origin (PDF points from the bottom edge). */
+  y: number;
   text: string;
 }
 
@@ -310,9 +312,9 @@ function placedLines(pdf: Buffer): PlacedLine[][] {
       if (tok === 'q') stack.push(ctm);
       else if (tok === 'Q') ctm = stack.pop()!;
       else if (tok === 'cm') ctm = mul(nums(), ctm);
-      else if (tok === 'BT') line = { x: NaN, text: '' };
+      else if (tok === 'BT') line = { x: NaN, y: NaN, text: '' };
       else if (tok === 'Tf') font = fonts.get(operands[0]!.slice(1)) ?? new Map();
-      else if (tok === 'Tm' && line) line.x = mul(nums(), ctm)[4];
+      else if (tok === 'Tm' && line) [line.x, line.y] = mul(nums(), ctm).slice(4) as [number, number];
       else if ((tok === 'TJ' || tok === 'Tj') && line) {
         for (const h of operands.join(' ').matchAll(/<([0-9a-fA-F]*)>/g)) for (const c of h[1]!.match(/.{4}/g) ?? []) line.text += font.get(parseInt(c, 16)) ?? '�';
       } else if (tok === 'ET' && line) {
@@ -365,5 +367,69 @@ describe('F-PDF-1: a long unbroken token in the shift notes keeps every column (
 
     // Nothing is lost: all 1,000 characters print, in order, once react-pdf's inserted break hyphens are ignored.
     expect(last.map((l) => l.text).join('').replace(/[\s-]/g, '')).toContain(`Token:${TOKEN}`);
+  });
+});
+
+describe('long-text roster (#51 harness fixture): rows paginate, the header repeats, every page has its footer, the note flows', () => {
+  // The #51 equality harness "long-text" scenario as a roster: long venue / address / contact / role / workspace, twelve
+  // ~90-character names with agency references, and a 10 KB note of 56 paragraphs separated by blank lines.
+  const FIRST = ['Amelia', 'Benedict', 'Clementine', 'Dominic', 'Eleanor', 'Frederick'];
+  const LAST = ['Ashworth', 'Blackwood', 'Cavendish', 'Davenport', 'Ellingham', 'Fairweather'];
+  const base = PRE_SHIFT_FIXTURES['four-staff']!;
+  const ROLE = 'Senior Hospitality Supervisor (Banqueting, Silver Service and Private Dining)';
+  const data: PreShiftReportData = {
+    ...base,
+    venueName: 'The Royal Grand Exhibition and Conference Centre — North Hall, Level Three, Members Entrance and Terrace Suites',
+    venueAddress: 'Unit 14B, The Old Ropeworks Industrial Estate, 221 Long Acre Lane, Stoke Newington, London N16 7XY, United Kingdom',
+    roleName: ROLE,
+    contactName: 'Bartholomew Alexander Fitzgerald-Worthington, Senior Duty Operations Manager',
+    contactPhone: '+44 (0) 20 7946 0000 ext. 4471',
+    workspaceName: 'Adolphus Events — London & South East Corporate Hospitality Division',
+    notes: Array.from(
+      { length: 56 },
+      (_, k) => `Paragraph ${k + 1}: arrive via the loading bay, sign the visitor book, collect lanyards from security, and brief the team on allergens, fire exits and the running order.`,
+    ).join('\n\n'),
+    staff: Array.from({ length: 12 }, (_, i) => ({
+      name: `Maximilian-Alexander Christopher ${FIRST[i % 6]} Montgomery-Fitzgerald Worthington-Smythe ${LAST[i % 6]} ${['III', 'IV', 'V', 'VI'][i % 4]}`,
+      staffRef: `AGENCY-REF-2026-LONDON-${900000 + i}`,
+      roleName: ROLE,
+      scheduledStart: base.startsAt,
+      scheduledEnd: base.endsAt,
+      breakMinutes: 30,
+    })),
+  };
+  const PAGE_HEIGHT = 595.28;
+
+  it('nothing is lost or drawn off the page (it used to be: 2 pages, 29 of 56 paragraphs and the page-2 footer missing)', async () => {
+    const pages = placedLines(await renderNativePdf({ kind: 'pre-shift', data }));
+    const vm = buildPreShiftReportViewModel(data);
+    const flat = (lines: PlacedLine[]) => lines.map((l) => l.text).join('').replace(/\s+/g, '');
+
+    // Every page has its own footer, numbered against the real page count.
+    expect(pages.length).toBeGreaterThanOrEqual(3);
+    pages.forEach((lines, i) => expect([i + 1, flat(lines).includes(`Page${i + 1}of${pages.length}`)]).toEqual([i + 1, true]));
+
+    // Every text line is inside the page (no row or paragraph drawn below the bottom edge or above the top).
+    for (const [p, lines] of pages.entries()) {
+      for (const l of lines) expect([p + 1, l.text, l.y >= 0 && l.y <= PAGE_HEIGHT]).toEqual([p + 1, l.text, true]);
+    }
+
+    // Every row's reference and every name word is printed; the 56 note paragraphs each appear exactly once, in order.
+    const all = pages.map(flat).join('');
+    for (const r of vm.rows) expect([r.sub.split(' · ')[0], all.includes(r.sub.split(' · ')[0]!)]).toEqual([r.sub.split(' · ')[0], true]);
+    for (let k = 1; k <= 56; k++) expect([k, all.split(`Paragraph${k}:`).length - 1]).toEqual([k, 1]);
+    const order = Array.from({ length: 56 }, (_, k) => all.indexOf(`Paragraph${k + 1}:`));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    for (const text of ['BEFORE-SHIFT DOCUMENT', 'Use the QR above to clock in and clock out.', vm.qrScopeNote]) expect(all).toContain(text.replace(/\s+/g, ''));
+
+    // On every page that carries roster rows, the table header comes before the first row on that page.
+    for (const lines of pages) {
+      const firstRow = lines.findIndex((l) => /AGENCY-REF-2026-LONDON-9000\d\d/.test(l.text));
+      if (firstRow < 0) continue;
+      const header = lines.findIndex((l) => l.text.trim() === 'Assigned staff');
+      expect(header).toBeGreaterThanOrEqual(0);
+      expect(header).toBeLessThan(firstRow);
+      expect(lines[header]!.y).toBeGreaterThan(lines[firstRow]!.y); // drawn above it (PDF y grows upwards)
+    }
   });
 });
