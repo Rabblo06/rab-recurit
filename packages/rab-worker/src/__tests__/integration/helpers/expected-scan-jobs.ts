@@ -5,7 +5,7 @@
  *
  * 21 periodic scans: the 19 pre-migration jobs-process loops + `ai-retention` (AI Phase 1, 304937a4) + Phase B P8's
  * `workspace-provisioning-health` (owner decision C; the runtime drift scan is deferred, not registered).
- * 4 consumers: email, push, shift statements + `rab-ai` (AI Phase 1, 304937a4).
+ * 5 consumers: email, push, shift statements + `rab-ai` (AI Phase 1, 304937a4) + `crewflow-timer-triggers` (D-Q4b).
  */
 export const EXPECTED_SCAN_SCHEDULER_IDS: readonly string[] = Object.freeze([
   'crewflow:crewflow-scan-maintenance:account-invite-cleanup',
@@ -46,9 +46,11 @@ export const EXPECTED_CONSUMER_HANDLERS: readonly string[] = Object.freeze([
   'rab-push/send-push',
   'rab-shift-statements/generate-shift-statement',
   'rab-ai/ai-turn',
+  // Phase D-Q4b: the timer-trigger consumer handler (always registered; its BullMQ Worker exists only when the flag is not off).
+  'crewflow-timer-triggers/offer-expiry-trigger',
 ]);
 
-/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 23 scans + 4 consumers = 27. */
+/** `<queue>/<jobName>` of every handler the real WorkerModule must discover: 23 scans + 5 consumers = 28. */
 export const EXPECTED_HANDLERS: readonly string[] = Object.freeze([
   ...EXPECTED_SCAN_SCHEDULER_IDS.map((id) => {
     const [, queue, jobName] = id.split(':');
