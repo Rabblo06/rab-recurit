@@ -184,7 +184,7 @@
       "id": "AI-1",
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: AI execution/skill governance enforced by grants)",
-      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable.",
+      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard).",
       "test": "twenty-behaviour-catalogue (TW-D: ai-agents.integration.spec.ts, ai-skill T4-R5)",
       "keptControl": "the EX-3 CHECK constraint still refuses enabled=true without approval for every login (23514)",
       "bc": []
@@ -227,66 +227,142 @@
   },
   "migratedTests": {
     "$comment": "Existing suites that assert restricted-runtime-login behaviour. Each must end as: 'catalogue:<id>' (migrated, the difference is above), 'schema-role' (kept: it tests a schema role that still exists, e.g. a definer running as rab_secure_owner), or 'unchanged' (passes as the owner login without asserting a weaker property). Filled from the TW-D differential (run the suite with TEST_DATABASE_URL = crewflow_owner).",
-    "status": "PARTIAL: TW-D first pass on PG16 (owner fixture) ran 8 of the 44 denial-asserting server suites before it was stopped to free the shared heavy-run token; the remaining 36 server suites and 5 worker suites are NOT TESTED yet.",
+    "status": "First pass from the owner-login CI (deploy e6c768f3; worker complete, server 62/300 suites). Classes: I = identity expectation -> crewflow_owner (BC-02/BC-08); P = schema-role test (superuser SET LOCAL ROLE crewflow_app/crewflow_worker -> 42501) PLUS an owner-side assertion labelled with its catalogue id; M = M-T1 posture effect (reviewed update); L = legacy separate provisioner, skipped by name 'remove in PR #9'. Agent 3 reviews every changed security assertion.",
     "entries": [
       {
-        "suite": "w45-db5-schema.integration.spec.ts",
-        "result": "FAIL as owner",
+        "suite": "rab-worker helpers/verified-role-database.ts + verified-role-database",
+        "class": "I",
         "classification": [
-          "catalogue:MFA-RC",
-          "catalogue:OUTBOX-1",
-          "catalogue:G-01"
-        ],
-        "keep": "schema-role assertions (guard trigger as rab_secure_owner) to be split out"
+          "BC-02"
+        ]
       },
       {
-        "suite": "ai-agents.integration.spec.ts",
-        "result": "FAIL as owner",
+        "suite": "worker-scan-adapters, worker-runtime-cutover, ai-worker, realtime-push-gating, workspace-provisioning-health, manager-confirmation-timeout-correctness K2, offer-lifecycle-correctness L34/35, report-worker-concurrency PRE-01, scan-lock, realtime-outbox-publisher #19, provisioning-drafts",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "phase-d-{account-invite-cleanup-worker,backlog-reconciliation,dispatch-recovery,first-cutover-reconciliation,global-dispatch,storage-cleanup-worker-login}, push-dispatch-global-publish-failure, phase-d-dispatch-pointer (beforeAll)",
+        "class": "I",
+        "classification": [
+          "BC-08"
+        ]
+      },
+      {
+        "suite": "workspace-provisioner-resilience, workspace-provisioner-optin, workspace-provisioner-entrypoint, provisioner-db-connection-loss",
+        "class": "L",
+        "classification": [
+          "remove in PR #9"
+        ],
+        "t4Gaps": "R5a, R5b, opt-in 1, 3a, 3b, 4, entrypoint (routed to Agent 2)"
+      },
+      {
+        "suite": "login-handoff-cleanup",
+        "class": "P",
+        "classification": [
+          "catalogue:MFA-RC",
+          "BC-13"
+        ],
+        "owner": "direct read not refused (measured)"
+      },
+      {
+        "suite": "outbox-retention-replay",
+        "class": "P",
+        "classification": [
+          "catalogue:OUTBOX-1"
+        ],
+        "owner": "row-level grant-parity guard must refuse a VISIBLE row (strict check; fails if the guard does not hold)"
+      },
+      {
+        "suite": "account-invite-cleanup-off-means-off 5a / 3",
+        "class": "M / I",
+        "classification": [
+          "M-T1 control holds",
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "w45-db5-schema §1 / §2 / §5",
+        "class": "P",
+        "classification": [
+          "BC-13 (PENDING OWNER APPROVAL)",
+          "catalogue:MFA-RC",
+          "catalogue:OUTBOX-1"
+        ],
+        "kept": "MFA column WRITE guards still refuse the runtime login (unchanged)"
+      },
+      {
+        "suite": "identity-security-table-rls (password_hash, totp_secret_encrypted, column ACL)",
+        "class": "P / I",
+        "classification": [
+          "BC-13 HIGH PENDING OWNER APPROVAL (never accepted)"
+        ]
+      },
+      {
+        "suite": "user-session-correctness 20 / 21",
+        "class": "P",
+        "classification": [
+          "schema-role 42501",
+          "runtime login refused by trigger (P0001), row unchanged"
+        ]
+      },
+      {
+        "suite": "ai-agents (DELETE standard agent), ai-skill (TRUNCATE), ai-input-requests (DELETE), ai-dev-real-provider (synthetic_data marker)",
+        "class": "P",
         "classification": [
           "catalogue:AI-1"
         ]
       },
       {
-        "suite": "ai-skill.integration.spec.ts",
-        "result": "FAIL as owner",
-        "classification": [
-          "catalogue:AI-1",
-          "catalogue:C2/column-grants"
-        ]
-      },
-      {
-        "suite": "member-invitation.integration.spec.ts",
-        "result": "FAIL as owner",
-        "classification": [
-          "catalogue:INV-1"
-        ]
-      },
-      {
-        "suite": "initial-manager-replacement.integration.spec.ts",
-        "result": "FAIL as owner",
+        "suite": "initial-manager-replacement (provisioner-only functions)",
+        "class": "P",
         "classification": [
           "catalogue:PROV-1"
         ]
       },
       {
-        "suite": "user-deletion-abuse-cases.integration.spec.ts",
-        "result": "PASS as owner",
+        "suite": "manager-workspace-abuse-cases (policy count 3: the M-T1 owner-only definer policy)",
+        "class": "M",
         "classification": [
-          "unchanged"
+          "M-T1"
         ]
       },
       {
-        "suite": "user-session-correctness.integration.spec.ts",
-        "result": "FAIL as owner",
+        "suite": "phase-d-due-work-cutover",
+        "class": "I / P",
         "classification": [
-          "catalogue:SESS-1"
+          "BC-08"
+        ],
+        "note": "retitled 'under one login'; BEFORE expectations as schema-role checks (approved)"
+      },
+      {
+        "suite": "payroll-runs :410, payroll-approval :440",
+        "class": "DEFECT",
+        "classification": [
+          "catalogue:PAY-1 OPEN (HIGH), routed to Agent 3; tests unchanged"
         ]
       },
       {
-        "suite": "payroll-runs.integration.spec.ts",
-        "result": "FAIL as owner",
+        "suite": "server-path-provisioning-db",
+        "class": "OWNER DECISION",
         "classification": [
-          "catalogue:PAY-1"
+          "routed to Agent 2 (rework vs remove in PR #9)"
+        ]
+      },
+      {
+        "suite": "worker-identity-boot-gates",
+        "class": "OWNER DECISION",
+        "classification": [
+          "routed to Agent 3 (rewrite vs remove in PR #9)"
+        ]
+      },
+      {
+        "suite": "ai-agents functional failures (prompt PATCH 404, audit, role flags, T6-P3)",
+        "class": "DEFECT?",
+        "classification": [
+          "suspected grant-parity UPDATE allow-list vs a server-maintained column; routed to Agent 3"
         ]
       }
     ]

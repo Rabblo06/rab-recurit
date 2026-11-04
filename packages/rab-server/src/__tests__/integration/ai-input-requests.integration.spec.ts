@@ -11,6 +11,7 @@ import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service'
 import { ctxOf, venueAndRole, windowFromNow } from './helpers/ai-proposal-fixtures';
 import { parallelToolCallParts, scriptedModel, textParts, toolCallParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * Batch 3 S7 — Phase 5c questions and forms (`ask_question` / `request_form`) on the real AppModule + Worker step loop
@@ -332,7 +333,11 @@ describeIfDb('AI S7: questions and forms pause the turn (integration)', () => {
     // Not grantable to the runtime role: the spec, the turn, the expiry; no DELETE / TRUNCATE.
     expect(pgCode(await asOwner((m) => m.query(`UPDATE core.ai_input_request SET spec = '{}'::jsonb WHERE id = $1`, [requestId])).catch((e) => e))).toBe('42501');
     expect(pgCode(await asOwner((m) => m.query(`UPDATE core.ai_input_request SET expires_at = now() + interval '1 day' WHERE id = $1`, [requestId])).catch((e) => e))).toBe('42501');
-    expect(pgCode(await asOwner((m) => m.query(`DELETE FROM core.ai_input_request WHERE id = $1`, [requestId])).catch((e) => e))).toBe('42501');
+    // P-class (owner-login architecture): the schema role crewflow_app is refused the DELETE (42501); the runtime login's
+    // attempt must leave the request in place (RLS / the ai_input_request DELETE grant-parity guard).
+    expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.orgId, workspaceId: null, userId: org.ceo.userId }, [{ sql: `DELETE FROM core.ai_input_request WHERE id = $1`, params: [requestId] }])).toBe('42501');
+    await asOwner((m) => m.query(`DELETE FROM core.ai_input_request WHERE id = $1`, [requestId])).catch(() => undefined);
+    expect(await kit.owner.query(`SELECT 1 FROM core.ai_input_request WHERE id = $1`, [requestId])).toHaveLength(1);
     // Insert only as awaiting_input (state / answer are not insertable columns).
     expect(
       pgCode(

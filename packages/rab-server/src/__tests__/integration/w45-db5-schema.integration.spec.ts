@@ -72,6 +72,27 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       await c.end().catch(() => undefined); // one short-lived connection per call (the suite opens hundreds)
     }
   };
+  /**
+   * P-class (owner-login architecture): the same transaction as asApp, but as the SCHEMA ROLE crewflow_app (the fixture
+   * superuser's connection with `SET LOCAL ROLE crewflow_app`). crewflow_app is no longer a login; its grants are still the
+   * reviewed boundary the definers are written against, so "crewflow_app cannot X" stays asserted here. Always rolled back.
+   */
+  const asSchemaApp = async <T>(ctx: { org?: string; ws?: string; uid?: string }, fn: (c: Client) => Promise<T>): Promise<T> => {
+    const c = new Client({ connectionString: adminUrl });
+    await c.connect();
+    await c.query('BEGIN');
+    try {
+      await c.query(`SELECT set_config('role', 'crewflow_app', true)`);
+      await c.query(
+        `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`,
+        [ctx.org ?? '', ctx.ws ?? '', ctx.uid ?? ''],
+      );
+      return await fn(c);
+    } finally {
+      await c.query('ROLLBACK').catch(() => undefined);
+      await c.end().catch(() => undefined);
+    }
+  };
   const newOrgUser = async (tag: string) => {
     const r = await admin.query(
       `WITH o AS (INSERT INTO core.organisation(name, slug) VALUES ($1::text, $1::text) RETURNING id)
@@ -120,9 +141,17 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       b = await newOrgUser('mfa-b');
     });
 
-    it('the runtime role can neither read the secret nor write any MFA column directly (guard trigger, 42501)', async () => {
-      await asApp({ org: a.org, uid: a.user }, async (c) => {
+    // P-class (owner-login architecture). Secret READ: the schema role crewflow_app is still refused (42501). The runtime
+    // login crewflow_owner is NOT: catalogue BC-13 (column-level secret grants lost), PENDING OWNER APPROVAL — asserted as a
+    // recorded difference, never as a passed control. Every MFA column WRITE below is still refused for the runtime login
+    // (guard trigger, 42501): that control holds.
+    it('MFA secret: schema role crewflow_app cannot read it (42501); the runtime login can (BC-13, PENDING OWNER APPROVAL); no runtime MFA column write (guard trigger, 42501)', async () => {
+      await asSchemaApp({ org: a.org, uid: a.user }, async (c) => {
         expect(await spq(c, 'SELECT totp_secret_encrypted FROM core."user" WHERE id = $1', [a.user])).toBe('42501');
+      });
+      await asApp({ org: a.org, uid: a.user }, async (c) => {
+        // OWNER-LOGIN DIFFERENCE BC-13 (PENDING OWNER APPROVAL): the secret column is readable by the runtime login.
+        expect(await spq(c, 'SELECT totp_secret_encrypted FROM core."user" WHERE id = $1', [a.user])).toBe('ACCEPTED');
       }, false);
       for (const sql of [
         `UPDATE core."user" SET totp_enabled = false WHERE id = $1`,
@@ -314,10 +343,16 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       expect(await consume(sha(secret), ws.label)).toEqual([]);
     });
 
-    it('the runtime role has no table privilege; a probe role subject to the policy sees zero rows with no context', async () => {
-      await asApp({ org: ws.org }, async (c) => {
+    // P-class (owner-login architecture): the schema role crewflow_app still has no table privilege (42501). The runtime
+    // login crewflow_owner is NOT refused: catalogue MFA-RC / BC-13 (PENDING OWNER APPROVAL), asserted as a recorded difference.
+    it('schema role crewflow_app has no table privilege on login_handoff (42501); the runtime login is not refused (MFA-RC / BC-13); a probe role subject to the policy sees zero rows with no context', async () => {
+      await asSchemaApp({ org: ws.org }, async (c) => {
         expect(await spq(c, 'SELECT 1 FROM core.login_handoff')).toBe('42501');
         expect(await spq(c, `DELETE FROM core.login_handoff`)).toBe('42501');
+      });
+      await asApp({ org: ws.org }, async (c) => {
+        // OWNER-LOGIN DIFFERENCE MFA-RC / BC-13 (PENDING OWNER APPROVAL); rolled back.
+        expect(await spq(c, 'SELECT 1 FROM core.login_handoff')).toBe('ACCEPTED');
       }, false);
       await create(session, hex64());
       await admin.query('BEGIN');
@@ -635,10 +670,17 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       b = await newOrgUser('ob-b');
     });
 
-    it('the runtime role can no longer DELETE outbox rows directly (42501) on any of the four tables', async () => {
+    // P-class (owner-login architecture): the schema role crewflow_app can no longer DELETE outbox rows directly (42501).
+    // For the runtime login crewflow_owner the same DELETE is covered by the ROW-level grant-parity guard
+    // (OwnerLoginGrantParityGuards1786721420000; catalogue OUTBOX-1 mitigated): asserted on a row the runtime login can see.
+    it('schema role crewflow_app can no longer DELETE outbox rows directly (42501) on any of the four tables; the runtime login is refused on a visible row (grant parity)', async () => {
       for (const t of ['email_outbox', 'push_delivery', 'realtime_event', 'worker_event']) {
-        expect(await asApp({ org: a.org }, (c) => spq(c, `DELETE FROM core.${t}`), false)).toBe('42501');
+        // sql-injection-reviewed: t comes from the constant table list above
+        expect(await asSchemaApp({ org: a.org }, (c) => spq(c, `DELETE FROM core.${t}`))).toBe('42501');
       }
+      const row = await email(a.org, 'SENT', 40);
+      expect(await asApp({ org: a.org }, async (c) => (await c.query(`SELECT 1 FROM core.email_outbox WHERE id = $1`, [row])).rowCount, false)).toBe(1);
+      expect(await asApp({ org: a.org }, (c) => spq(c, `DELETE FROM core.email_outbox WHERE id = $1`, [row]), false)).toBe('42501');
     });
 
     it('purge removes only old TERMINAL rows of the bound tenant; never pending/retry/processing; floors enforced', async () => {

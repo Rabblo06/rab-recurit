@@ -25,6 +25,7 @@ import {
   runOutboxRetentionCycle,
 } from '../../queues/rab-maintenance/outbox-retention.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -209,11 +210,25 @@ describeIfDb('outbox retention + FAILED email replay (G6)', () => {
     expect(n).toBe(0);
   });
 
-  it('crewflow_app cannot DELETE outbox/event rows directly (only the definer functions can)', async () => {
+  // P-class (owner-login architecture): kept as a SCHEMA-ROLE test. crewflow_app is no longer a login; its grants are the
+  // reviewed boundary the purge definers are written against, and it still cannot DELETE outbox/event rows directly.
+  it('schema role crewflow_app cannot DELETE outbox/event rows directly (only the definer functions can)', async () => {
     const id = await email('SENT', 400);
     for (const t of ['email_outbox', 'push_delivery', 'realtime_event', 'worker_event']) {
-      await expect(tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${t} WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
+      // sql-injection-reviewed: t comes from the constant table list above
+      expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: `DELETE FROM core.${t} WHERE id = $1`, params: [id] }])).toBe('42501');
     }
+    expect(await exists('email_outbox', id)).toBe(true);
+  });
+
+  // The runtime login (owner-login architecture): core.email_outbox DELETE is covered by the grant-parity guard
+  // (OwnerLoginGrantParityGuards1786721420000, catalogue OUTBOX-1 mitigated), a ROW-level trigger. So the row is first proven
+  // VISIBLE to the runtime login (a zero-row DELETE would pass any row trigger), then its direct DELETE must be refused.
+  it('runtime login: a direct DELETE of a VISIBLE outbox row is refused by the grant-parity guard (42501); the row survives', async () => {
+    const id = await email('SENT', 400);
+    const visible = await tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT 1 FROM core.email_outbox WHERE id = $1`, [id]));
+    expect(visible).toHaveLength(1);
+    await expect(tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.email_outbox WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
     expect(await exists('email_outbox', id)).toBe(true);
   });
 

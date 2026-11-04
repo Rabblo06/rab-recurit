@@ -23,6 +23,7 @@ import { AiUsageService } from '../../modules/ai/services/ai-usage.service';
 import { countingDeterministicModel } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
 import { insertMembership } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Part A (docs/ai/PART_A_PLAN.md) + Phase 1 "real models only" on the REAL database (crewflow_app, FORCE RLS) and the
@@ -68,7 +69,17 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       const org = await kit.factory.createOrganisation('ai-synth-grant');
       const admin = await kit.factory.createCeo(org, { permissions: 'production', platformAdmin: true });
       const ctx = { organisationId: org.id, workspaceId: null, userId: admin.userId };
-      expect(pgCode(await asTenant(ctx, `INSERT INTO core.organisation_ai_setting (organisation_id, enabled, synthetic_data) VALUES ($1, false, true)`, [org.id]).catch((e) => e))).toBe('42501');
+      // P-class (owner-login architecture): the column grant still refuses the SCHEMA ROLE crewflow_app (42501). The runtime
+      // login is NOT refused an INSERT that sets the marker (organisation_ai_setting has no INSERT parity guard):
+      // OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL), asserted inside a rolled-back transaction only.
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctx, [{ sql: `INSERT INTO core.organisation_ai_setting (organisation_id, enabled, synthetic_data) VALUES ($1, false, true)`, params: [org.id] }])).toBe('42501');
+      const rollback = new Error('rollback');
+      await expect(
+        tenant.runInTenantContext({ ...ctx, role: '' }, async (m) => {
+          await m.query(`INSERT INTO core.organisation_ai_setting (organisation_id, enabled, synthetic_data) VALUES ($1, false, true)`, [org.id]);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
       await asTenant(ctx, `INSERT INTO core.organisation_ai_setting (organisation_id, enabled) VALUES ($1, false)`, [org.id]); // the admin switch's own columns still work
       const update = await asTenant(ctx, `UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [org.id]).catch((e) => e);
       expect(pgCode(update)).toBe('42501');
@@ -103,7 +114,15 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
           return m.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [org.id]);
         })
         .catch((e) => e);
-      expect(pgCode(result)).toBe('42501');
+      // Owner-login architecture: the schema role crewflow_app is refused (42501) even with the GUC set; for the runtime
+      // login the property that matters is the state: the marker is NOT set.
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.id, workspaceId: null, userId: admin.userId }, [
+        { sql: `SELECT set_config('rab.ai_synthetic_marker', 'on', true)` },
+        { sql: `UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, params: [org.id] },
+      ])).toBe('42501');
+      void result;
+      const marked = await kit.owner.query(`SELECT 1 FROM core.organisation_ai_setting WHERE organisation_id = $1 AND synthetic_data`, [org.id]);
+      expect(marked).toHaveLength(0);
     });
   });
 

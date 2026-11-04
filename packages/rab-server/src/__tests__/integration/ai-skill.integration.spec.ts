@@ -15,6 +15,7 @@ import { builtinSkill } from '../../modules/ai/skills/builtin-skills';
 import { LoadSkillsTool } from '../../modules/ai/skills/load-skills.tool';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Phase 4 — organisation skills on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis
@@ -408,7 +409,19 @@ describeIfDb('AI skills (integration)', () => {
       ]) {
         expect({ sql, code: pgCode(await asTenant(org.ceo, sql, [org.orgId]).catch((e) => e)) }).toEqual({ sql, code: '42501' });
       }
-      expect(pgCode(await asTenant(org.ceo, `TRUNCATE core.ai_skill`).catch((e) => e))).toBe('42501');
+      // P-class (owner-login architecture): the schema role crewflow_app is refused TRUNCATE (42501). For the runtime login
+      // TRUNCATE is NOT refused (no TRUNCATE parity guard on ai_skill; TRUNCATE ignores RLS, so it would empty EVERY tenant):
+      // OWNER-LOGIN DIFFERENCE AI-1 / BC-06 (§2 object deletion; injection with owner privileges), asserted only inside a
+      // transaction that is always rolled back.
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId }, [{ sql: `TRUNCATE core.ai_skill` }])).toBe('42501');
+      const rollback = new Error('rollback');
+      await expect(
+        kit.runtime.transaction(async (m) => {
+          await m.query(`TRUNCATE core.ai_skill`);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
+      expect((await rows(org.orgId)).length).toBeGreaterThan(0);
       expect(pgCode(await asTenant(org.ceo, `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`, [org.orgId, org.ceo.userId]).catch((e) => e))).toBe('42501');
       const [owner] = await kit.owner.query(`SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced, pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'core' AND c.relname = 'ai_skill'`);
       expect(owner).toEqual({ rls: true, forced: true, owner: 'crewflow' });

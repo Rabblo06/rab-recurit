@@ -14,6 +14,7 @@ import { AiAgentPrincipalService } from '../../modules/ai/services/ai-agent-prin
 import { AiAgentService } from '../../modules/ai/services/ai-agent.service';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Phase 6a — agent DEFINITIONS AND STORAGE on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis
@@ -373,7 +374,10 @@ describeIfDb('AI agents — Phase 6a storage, execution off (integration)', () =
       expect(await asTenant(org.ceo, `UPDATE core.ai_agent SET deleted_at = now(), updated_by = $2 WHERE id = $1 RETURNING id`, [id, org.ceo.userId])).toEqual([[], 0]);
     }
     expect(pgCode(await insertAgentAs(org.ceo, { kind: 'standard' }).catch((e) => e))).toBe('42501');
-    expect(pgCode(await asTenant(org.ceo, `DELETE FROM core.ai_agent WHERE id = $1`, [ids.standard]).catch((e) => e))).toBe('42501');
+    // P-class (owner-login architecture): the schema role crewflow_app is refused the DELETE (42501). The runtime login's
+    // attempt must change nothing (RLS / the grant-parity guard): the row check below is the state assertion (AI-1).
+    expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId }, [{ sql: `DELETE FROM core.ai_agent WHERE id = $1`, params: [ids.standard] }])).toBe('42501');
+    await asTenant(org.ceo, `DELETE FROM core.ai_agent WHERE id = $1`, [ids.standard]).catch(() => undefined);
     expect((await agentRows(org.orgId)).map((r: { label: string; deleted_at: unknown }) => [r.label, r.deleted_at])).toEqual([
       ['Helper', null],
       ['Helper', null],
