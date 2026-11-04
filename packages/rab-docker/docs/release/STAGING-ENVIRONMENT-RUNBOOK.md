@@ -1,5 +1,7 @@
 # Isolated staging environment runbook (owner decision R4)
 
+> **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; they are removed in the final clean-up PR (#9). Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5).
+
 Status: **PLAN, 2026-11-03. Nothing is provisioned.** This runbook creates no host, database, bucket, DNS record or secret.
 Every numbered phase below needs its own owner approval. The temporary OpenShip/Neon deployment is not touched by any
 step (R4), and no production credential, host or bucket is used anywhere.

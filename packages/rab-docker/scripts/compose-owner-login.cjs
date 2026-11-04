@@ -269,11 +269,13 @@ function checkModel(model, combo) {
   const envOf = (s) => s?.environment ?? {};
   for (const name of appServices) {
     const e = envOf(services[name]);
-    const want = { NODE_ENV: 'production', CREWFLOW_RUNTIME_ISOLATION: 'enforce', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' };
+    const want = { NODE_ENV: 'production', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' };
     for (const [k, v] of Object.entries(want)) if (e[k] !== v) p(`${name}: ${k} is "${e[k] ?? ''}", expected "${v}"`);
   }
   for (const name of ['rab-api', 'rab-worker']) {
     const e = envOf(services[name]);
+    // The long-running services refuse to start when a declared isolation control is missing (H6 enforce).
+    if (e.CREWFLOW_RUNTIME_ISOLATION !== 'enforce') p(`${name}: CREWFLOW_RUNTIME_ISOLATION is "${e.CREWFLOW_RUNTIME_ISOLATION ?? ''}", expected "enforce"`);
     if (e.RAB_RUNTIME_ENV !== 'production') p(`${name}: RAB_RUNTIME_ENV is not production`);
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
   }

@@ -412,28 +412,23 @@ test(
 );
 
 test(
-  'H6 rab-worker: root launcher with ONLY SETUID/SETGID/KILL, no-new-privileges, read-only root, per-child tmpfs, bounded PIDs/memory/CPU',
+  'H6 rab-worker (owner login): ONE process as 1000:1000, no capability, no-new-privileges, read-only root, jobs tmpfs, bounded PIDs/memory/CPU',
   { skip },
   () => {
     const svc = loadCompose('packages/rab-docker/docker-compose.production.yml').services['rab-worker'];
-    // The launcher must start as root to give each child its own UID/GID (start-worker-bundle.cjs preflight refuses otherwise).
-    assert.equal(svc.user, '0:0');
+    // Owner login (2026-11-04): the root launcher and its per-child identities are retired; the Worker runs main.js directly
+    // as the image's non-root `node` user, so it needs no capability at all.
+    assert.equal(svc.user, '1000:1000');
+    assert.deepEqual(svc.command, ['node', 'packages/rab-worker/dist/main.js']);
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
-    assert.deepEqual([...(svc.cap_add ?? [])].sort(), ['KILL', 'SETGID', 'SETUID'], 'the launcher needs exactly setgid/setuid (child identities) and kill (signal them)');
+    assert.deepEqual(svc.cap_add ?? [], [], 'no capability: there is no identity switch any more');
     assert.ok((svc.security_opt ?? []).includes('no-new-privileges:true'));
     const tmpfs = Object.fromEntries((svc.tmpfs ?? []).map((t) => { const [p, o = ''] = String(t).split(/:(.*)/s); return [p, o]; }));
-    assert.deepEqual(Object.keys(tmpfs).sort(), [
-      '/run/crewflow-health/jobs',
-      '/run/crewflow-health/provisioner',
-      '/tmp/crewflow-jobs',
-      '/tmp/crewflow-provisioner',
-    ]);
+    assert.deepEqual(Object.keys(tmpfs).sort(), ['/run/crewflow-health/jobs', '/tmp/crewflow-jobs']);
     for (const [p, uid, mode] of [
       ['/tmp/crewflow-jobs', 1000, '0700'],
-      ['/tmp/crewflow-provisioner', 10001, '0700'],
       ['/run/crewflow-health/jobs', 1000, '0755'],
-      ['/run/crewflow-health/provisioner', 10001, '0755'],
     ]) {
       const o = tmpfs[p].split(',');
       assert.ok(o.includes(`uid=${uid}`) && o.includes(`gid=${uid}`) && o.includes(`mode=${mode}`), `${p}: ${tmpfs[p]}`);
@@ -443,8 +438,8 @@ test(
     const mem = sizeMiB(interpolate(svc.mem_limit, {}));
     assert.ok(mem >= 1024 && mem <= 8192, `mem_limit ${mem} MiB`);
     assert.ok(Number(interpolate(svc.cpus, {})) > 0, `cpus ${svc.cpus}`);
-    // The platform stop timeout must exceed the launcher's default grace (30 s jobs drain + 12 s = 42 s).
-    assert.ok(durationMs(svc.stop_grace_period) > 42_000, `stop_grace_period ${svc.stop_grace_period}`);
+    // The stop timeout must exceed the 30 s jobs drain with margin (>= 45 s).
+    assert.ok(durationMs(svc.stop_grace_period) >= 45_000, `stop_grace_period ${svc.stop_grace_period}`);
     assertNoHostAccess('rab-worker', svc);
   },
 );

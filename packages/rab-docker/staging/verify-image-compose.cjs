@@ -2,11 +2,15 @@
 'use strict';
 /**
  * Verifies packages/rab-docker/docker-compose.image.yml, the image-based, digest-pinned variant of the production compose
- * file (owner decisions R1/R5, 2026-11-03). Two modes:
+ * file (owner decisions R1/R5, 2026-11-03), on the OWNER LOGIN (owner's final decision 2026-11-04: one crewflow_owner login
+ * for rab-api, rab-worker and rab-migrate, from ONE shared database.env; runtime.env for rab-api / rab-worker only; no
+ * .env.migrate, no provisioner/migrator/worker URL, no root launcher). The owner-login contract itself (one identical URL,
+ * no second identity, the lifecycle) is scripts/compose-owner-login.cjs; this file keeps the image <-> production H6
+ * equivalence and the operator's deployed-model preflight. Two modes:
  *
  *   node packages/rab-docker/staging/verify-image-compose.cjs
  *     STATIC: renders the variant and docker-compose.production.yml with `docker compose config --format json` in a
- *     throw-away project directory (sentinel .env.migrate / .env.ops, dummy digests; no real .env of this machine is read)
+ *     throw-away project directory (sentinel database.env / runtime.env / .env.ops, dummy digests; no real .env is read)
  *     and checks the rendered models (checkVariant below).
  *
  *   node packages/rab-docker/staging/verify-image-compose.cjs --environment [--env-file <file>]... [--compose <extra file>]...
@@ -46,20 +50,40 @@ const RUNTIME_KEYS = [
 /** Committed environment keys that must keep the production file's value on rab-api / rab-worker. */
 const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
-  'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER'];
+  'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
+  'CREWFLOW_UPGRADE_FAILURE_POLICY'];
 const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_DATABASE_URL', 'CREWFLOW_MIGRATION_PHASE',
   'ALLOW_PRODUCTION_DB_COMMANDS', 'DATABASE_URL_UNPOOLED', 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
-  'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD'];
+  'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'CREWFLOW_MIGRATOR_PASSWORD',
+  // Owner login: no second database identity and no mode switch on any service.
+  'CREWFLOW_PROVISIONER_DATABASE_URL', 'PG_WORKER_DATABASE_URL', 'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL', 'DB_TARGET',
+  'CREWFLOW_DB_MODE'];
+/** The one runtime login. */
+const OWNER_LOGIN = 'crewflow_owner';
 const OPS_ONLY = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 const LEGACY_DB = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'];
 
 const SENTINEL_MIGRATOR_PW = 'SENTINEL-IMAGE-MIGRATOR-PW-5b1e'; // gitleaks:allow (synthetic marker planted by this check)
 const SENTINEL_OPS_PW = 'SENTINEL-IMAGE-OPS-PW-93ad'; // gitleaks:allow (synthetic marker planted by this check)
+const SENTINEL_OWNER_PW = 'SENTINEL-IMAGE-OWNER-PW-c41d'; // gitleaks:allow (synthetic marker planted by this check)
+const SENTINEL_RUNTIME_REDIS_URL = 'redis://crewflow:sentinel-runtime-c41d@rab-redis:6379'; // gitleaks:allow (synthetic)
 const SENTINEL_DIGEST = `sha256:${'5e'.repeat(32)}`;
 
 const stable = (v) => JSON.stringify(v ?? null, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
 const envOf = (svc) => svc?.environment ?? {};
 const baseName = (p) => String(p).split(/[\\/]/).pop();
+/** The one bind every app service has: the PostgreSQL CA, read-only (verify-full). */
+const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
+const withoutCa = (vols) => {
+  const rest = (vols ?? []).filter((v) => !caMount(v));
+  return rest.length ? rest : undefined;
+};
+/** The Redis command must carry these flag/value pairs (AOF, never evicting, ACL file). */
+const REDIS_FLAGS = [['--appendonly', 'yes'], ['--maxmemory-policy', 'noeviction'], ['--aclfile', '/run/secrets/redis-users.acl']];
+const redisFlagProblems = (redis, where) => {
+  const c = (redis.command ?? []).map(String);
+  return REDIS_FLAGS.filter(([f, v]) => !c.some((t, i) => t === f && c[i + 1] === v)).map(([f, v]) => `rab-redis: command lacks ${f} ${v}${where}`);
+};
 
 /**
  * Pure checks on the rendered models (`docker compose config --format json` output). `variant`: env files resolved with
@@ -103,7 +127,10 @@ function checkVariant(variant, production, variantFiles = variant) {
       continue;
     }
     for (const key of RUNTIME_KEYS) {
-      if (stable(a[key]) !== stable(b[key])) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(a[key])} vs ${stable(b[key])}`);
+      // The read-only PostgreSQL CA bind is the one allowed difference (the image file mounts it from the host).
+      const av = key === 'volumes' ? withoutCa(a.volumes) : a[key];
+      const bv = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
     for (const key of PINNED_ENV) {
       if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} differs from docker-compose.production.yml`);
@@ -113,8 +140,9 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (stable(deps(a)) !== stable(deps(b))) fail(`${name}.depends_on differs from docker-compose.production.yml: ${stable(deps(a))} vs ${stable(deps(b))}`);
     // 3. Fail-closed isolation.
     if (envOf(a).CREWFLOW_RUNTIME_ISOLATION !== 'enforce') fail(`${name}: CREWFLOW_RUNTIME_ISOLATION is not "enforce"`);
-    // 4. Infrastructure hardening: REDIS_URL is never committed (it carries the ACL password).
-    if (Object.prototype.hasOwnProperty.call(envOf(a), 'REDIS_URL')) fail(`${name}: REDIS_URL is committed (enter it from the secret store)`);
+    // 4. Infrastructure hardening: REDIS_URL is never committed (it carries the ACL password). It must come from runtime.env:
+    // a committed `environment:` value would override the env file, so anything but the sentinel means it is committed.
+    if (envOf(a).REDIS_URL !== SENTINEL_RUNTIME_REDIS_URL) fail(`${name}: REDIS_URL is committed (enter it from the secret store)`);
   }
   // The isolation variable belongs to the long-running runtime services only.
   for (const name of ['rab-migrate', 'rab-ops', 'rab-redis']) {
@@ -131,20 +159,25 @@ function checkVariant(variant, production, variantFiles = variant) {
     if ((redis.ports ?? []).length) fail('rab-redis: publishes a port');
     const vols = redis.volumes ?? [];
     if (!vols.some((v) => v.target === '/run/secrets/redis-users.acl' && v.read_only)) fail('rab-redis: ACL file not mounted read-only at /run/secrets/redis-users.acl');
-    if (!vols.some((v) => v.target === '/usr/local/etc/redis/redis.conf' && v.read_only)) fail('rab-redis: config file not mounted read-only');
-    if (stable(redis.command) !== stable(['redis-server', '/usr/local/etc/redis/redis.conf'])) fail('rab-redis: not started from the reviewed config file');
+    for (const pr of redisFlagProblems(redis, '')) fail(pr);
     if (!redis.mem_limit) fail('rab-redis: no memory limit');
   }
 
-  // 7. Credential isolation (same rules as scripts/compose-credential-isolation.cjs for the production file).
+  // 7. Credential model (owner login): rab-migrate reads ONLY the shared database.env, holding the same crewflow_owner URL as
+  // rab-api and rab-worker; nothing reads .env.migrate.
   const migrate = services['rab-migrate'];
   if (migrate) {
-    if (!envFiles('rab-migrate').some((f) => baseName(f) === '.env.migrate')) fail('rab-migrate: does not read .env.migrate');
-    if (!String(envOf(migrate).PG_DATABASE_URL ?? '').includes(SENTINEL_MIGRATOR_PW)) fail('rab-migrate: the .env.migrate credential does not reach it');
+    if (stable(envFiles('rab-migrate').map(baseName)) !== stable(['database.env'])) fail('rab-migrate: must read database.env only');
+    if (!String(envOf(migrate).PG_DATABASE_URL ?? '').includes(SENTINEL_OWNER_PW)) fail('rab-migrate: the shared database.env credential does not reach it');
+    for (const other of ['rab-api', 'rab-worker']) {
+      if (services[other] && envOf(services[other]).PG_DATABASE_URL !== envOf(migrate).PG_DATABASE_URL) fail(`rab-migrate: PG_DATABASE_URL differs from ${other}'s (one login)`);
+    }
+    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'APP_SECRET')) fail('rab-migrate: reads the runtime secrets (runtime.env)');
+    if (envOf(migrate).CREWFLOW_MIGRATION_APPROVAL_MODE !== 'token') fail('rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE is not "token"');
     if (migrate.restart !== 'no') fail('rab-migrate: restart is not "no"');
     if ((migrate.profiles ?? []).length) fail('rab-migrate: has a profile (it must run on every up)');
     if (!/deploy-prepare\.js$/.test(stable(migrate.command).replace(/"\]$/, ''))) fail('rab-migrate: does not run deploy-prepare.js');
-    if (envOf(migrate).DB_TARGET !== 'production') fail('rab-migrate: DB_TARGET is not production');
+    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'DB_TARGET')) fail('rab-migrate: sets DB_TARGET (command authority is gone with the owner login)');
     if (!migrate.read_only || stable(migrate.cap_drop) !== stable(['ALL']) || !(migrate.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-migrate: not read-only / cap_drop ALL / no-new-privileges');
     if (!(migrate.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) fail('rab-migrate: the long-form tmpfs /tmp (OpenShip import guard) is missing');
   }
@@ -160,6 +193,7 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (!svc) continue;
     const files = envFiles(name).map(baseName);
     if (files.includes('.env.migrate') || files.includes('.env.ops')) fail(`${name}: names .env.migrate or .env.ops`);
+    if (stable(files) !== stable(['database.env', 'runtime.env'])) fail(`${name}: must read database.env and runtime.env (got ${files.join(', ') || 'none'})`);
     const env = envOf(svc);
     for (const [k, v] of Object.entries(env)) {
       const value = String(v ?? '');
@@ -206,7 +240,7 @@ function checkResolvedImages(model, allowed = [DEFAULT_APP_REPOSITORY]) {
  * `envFileKeys`: { service: { names: [variable names], dbUsers: { VAR: login } } } read from the services' env files (names
  * and the login part of database URLs only, never a value), or omitted when the files are not readable here.
  */
-function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
+function checkDeployment(merged, production, envFileKeys = {}) {
   const problems = [];
   const fail = (m) => problems.push(m);
   const services = merged?.services ?? {};
@@ -222,16 +256,13 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
     }
     if (Object.prototype.hasOwnProperty.call(envOf(svc), 'REDIS_URL')) fail(`${name}: REDIS_URL is committed in a compose file (enter it in the env file)`);
     for (const k of envFileKeys[name]?.unfilled ?? []) fail(`${name}: ${k} still holds a template <placeholder>`);
-    for (const k of ['PG_DATABASE_URL', 'REDIS_URL', ...(name === 'rab-worker' ? ['CREWFLOW_PROVISIONER_DATABASE_URL'] : [])]) {
+    for (const k of ['PG_DATABASE_URL', 'REDIS_URL']) {
       if (envFileKeys[name] && !fromFiles.includes(k)) fail(`${name}: ${k} is missing from its env file`);
     }
-    if (name === 'rab-api' && fromFiles.includes('CREWFLOW_PROVISIONER_DATABASE_URL')) fail('rab-api: sets CREWFLOW_PROVISIONER_DATABASE_URL (rab-worker launcher only)');
     for (const [k, login] of Object.entries(envFileKeys[name]?.dbUsers ?? {})) {
-      const allowed = k === 'CREWFLOW_PROVISIONER_DATABASE_URL' ? ['crewflow'] : name === 'rab-api' ? ['crewflow_app'] : ['crewflow_app', 'crewflow_worker'];
-      if (!allowed.includes(login)) fail(`${name}: ${k} logs in as "${login}" (allowed: ${allowed.join(', ')})`);
+      if (login !== OWNER_LOGIN) fail(`${name}: ${k} logs in as "${login}" (allowed: ${OWNER_LOGIN})`);
     }
   }
-  const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
   for (const name of ['rab-api', 'rab-worker']) {
     const a = services[name];
     const b = production?.services?.[name];
@@ -240,11 +271,9 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
       continue;
     }
     for (const key of RUNTIME_KEYS) {
-      const value = key === 'volumes' ? (a.volumes ?? []).filter((v) => !caMount(v)) : a[key];
-      const expected = key === 'volumes' ? b.volumes ?? [] : b[key];
-      if (stable(key === 'volumes' && !value.length ? undefined : value) !== stable(key === 'volumes' && !expected.length ? undefined : expected)) {
-        fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
-      }
+      const value = key === 'volumes' ? withoutCa(a.volumes) : a[key];
+      const expected = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
     for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX')) {
       if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
@@ -262,8 +291,8 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
   const fileNames = (svc) => (svc?.env_file ?? []).map((e) => baseName(typeof e === 'string' ? e : e.path));
   if (migrate) {
     if (migrate.image !== services['rab-api']?.image) fail('rab-migrate: image differs from rab-api\'s in the deployed model');
-    if (envOf(migrate).DB_TARGET !== 'production') fail('rab-migrate: DB_TARGET is not production in the deployed model');
-    if (!fileNames(migrate).includes('.env.migrate')) fail('rab-migrate: does not read .env.migrate in the deployed model');
+    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'DB_TARGET')) fail('rab-migrate: sets DB_TARGET in the deployed model');
+    if (stable(fileNames(migrate)) !== stable(['database.env'])) fail('rab-migrate: must read database.env only in the deployed model');
     if (migrate.restart !== 'no' || (migrate.profiles ?? []).length) fail('rab-migrate: restart is not "no" or it has a profile in the deployed model');
   }
   const ops = services['rab-ops'];
@@ -278,8 +307,7 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
   if (redis) {
     if ((redis.ports ?? []).length) fail('rab-redis: publishes a port');
     if (!(redis.volumes ?? []).some((v) => v.target === '/run/secrets/redis-users.acl' && v.read_only)) fail('rab-redis: ACL file not mounted read-only');
-    if (!(redis.volumes ?? []).some((v) => v.target === '/usr/local/etc/redis/redis.conf' && v.read_only)) fail('rab-redis: config file not mounted read-only in the deployed model');
-    if (stable(redis.command) !== stable(['redis-server', '/usr/local/etc/redis/redis.conf'])) fail('rab-redis: not started from the reviewed config file in the deployed model');
+    for (const pr of redisFlagProblems(redis, ' in the deployed model')) fail(pr);
     if (!redis.mem_limit) fail('rab-redis: no memory limit in the deployed model');
   }
   // Service-wide, as in the static mode: no privileged container, no host namespace, no Docker socket, no build.
@@ -290,18 +318,8 @@ function checkDeployment(merged, production, redisConf, envFileKeys = {}) {
     for (const v of svc.volumes ?? []) {
       if (/docker\.sock/.test(String(v.source ?? '')) || /docker\.sock/.test(String(v.target ?? ''))) fail(`${name}: mounts the Docker socket in the deployed model`);
     }
-    if ((svc.devices ?? []).length || (svc.cap_add ?? []).some((c) => !['SETUID', 'SETGID', 'KILL'].includes(String(c).replace(/^CAP_/, '')))) {
-      fail(`${name}: adds devices or capabilities beyond the Worker launcher's SETUID/SETGID/KILL in the deployed model`);
-    }
-  }
-  if (redisConf === null) {
-    fail('rab-redis: the mounted config file cannot be read on this host');
-  } else {
-    const lines = redisConf.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
-    if (!lines.includes('aclfile /run/secrets/redis-users.acl')) fail('rab-redis config: no `aclfile /run/secrets/redis-users.acl`');
-    if (!lines.includes('maxmemory-policy noeviction')) fail('rab-redis config: maxmemory-policy is not noeviction');
-    if (!lines.includes('appendonly yes')) fail('rab-redis config: AOF is not on');
-    if (lines.some((l) => /^user\s+default\s+.*\bon\b/.test(l) || /^requirepass\b/.test(l))) fail('rab-redis config: enables the default user or requirepass (use the ACL file)');
+    // The root launcher (and its SETUID/SETGID/KILL) is retired: no service adds a capability or a device.
+    if ((svc.devices ?? []).length || (svc.cap_add ?? []).length) fail(`${name}: adds devices or capabilities in the deployed model`);
   }
   return problems;
 }
@@ -318,7 +336,10 @@ function render(files, { projectDirectory, env, resolveEnvFiles }) {
  * entries under --no-env-resolution, while v2.38/v2.39 resolve the files even then and omit the key. A marker in the
  * RESOLVED environment proves which file a service really reads, whatever the Compose version.
  */
-const ENV_FILE_MARKERS = Object.freeze({ '.env.migrate': 'CREWFLOW_VERIFY_FROM_ENV_MIGRATE', '.env.ops': 'CREWFLOW_VERIFY_FROM_ENV_OPS' });
+const ENV_FILE_MARKERS = Object.freeze({
+  'database.env': 'CREWFLOW_VERIFY_FROM_DATABASE_ENV', 'runtime.env': 'CREWFLOW_VERIFY_FROM_RUNTIME_ENV',
+  '.env.migrate': 'CREWFLOW_VERIFY_FROM_ENV_MIGRATE', '.env.ops': 'CREWFLOW_VERIFY_FROM_ENV_OPS',
+});
 
 /**
  * Normalises `files` (a --no-env-resolution render) in place: a service with no env_file entries, whose resolved
@@ -339,6 +360,12 @@ function attachEnvFilesFromMarkers(files, resolved, dir) {
 function renderModels(variantPath = VARIANT) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
   try {
+    // Owner login: the shared database.env and runtime.env in a sentinel secret directory. A separated-mode .env.migrate
+    // (migrator sentinel) still exists in the project directory, so a file that names it renders and then fails.
+    const secrets = path.join(dir, 'secrets');
+    fs.mkdirSync(secrets);
+    fs.writeFileSync(path.join(secrets, 'database.env'), `PG_DATABASE_URL=postgresql://${OWNER_LOGIN}:${SENTINEL_OWNER_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['database.env']}=1\n`);
+    fs.writeFileSync(path.join(secrets, 'runtime.env'), `APP_SECRET=sentinel-runtime\nREDIS_URL=${SENTINEL_RUNTIME_REDIS_URL}\n${ENV_FILE_MARKERS['runtime.env']}=1\n`);
     fs.writeFileSync(path.join(dir, '.env.migrate'), `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.migrate']}=1\n`);
     fs.writeFileSync(path.join(dir, '.env.ops'), `CREWFLOW_OPS_RUN=one-off\nPG_OPS_APP_DATABASE_URL=postgresql://crewflow_app:${SENTINEL_OPS_PW}@db-direct.example:5432/rab?sslmode=verify-full\n${ENV_FILE_MARKERS['.env.ops']}=1\n`);
     // Only what the files require; nothing inherited from this machine's CREWFLOW_* / DATABASE_* / REDIS_URL.
@@ -348,8 +375,8 @@ function renderModels(variantPath = VARIANT) {
       CREWFLOW_API_IMAGE_DIGEST: SENTINEL_DIGEST,
       CREWFLOW_WORKER_IMAGE_DIGEST: `sha256:${'7a'.repeat(32)}`,
       CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0c'.repeat(32)}`,
-      CREWFLOW_SECRETS_DIR: '/etc/crewflow/secrets',
-      CREWFLOW_BOOTSTRAP_PASSWORD: 'dummy',
+      CREWFLOW_SECRETS_DIR: secrets.split(path.sep).join('/'),
+      CREWFLOW_PG_CA_FILE: '/etc/crewflow/pg-ca.crt',
     };
     const variant = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     const rawFiles = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: false });
@@ -401,13 +428,6 @@ function environmentMode(argv) {
   const model = render(files, { projectDirectory, env, resolveEnvFiles: false });
   const images = checkResolvedImages(model, allowed);
   const production = probe.production;
-  const confSource = (model.services?.['rab-redis']?.volumes ?? []).find((v) => v.target === '/usr/local/etc/redis/redis.conf')?.source;
-  let redisConf = null;
-  try {
-    redisConf = confSource ? fs.readFileSync(confSource, 'utf8') : null;
-  } catch {
-    redisConf = null;
-  }
   // The runtime services' env files: variable NAMES, unfilled placeholders, and the login part of database URLs only.
   const envFileKeys = {};
   const skippedEnvFiles = [];
@@ -415,7 +435,7 @@ function environmentMode(argv) {
     const paths = (model.services?.[name]?.env_file ?? []).map((e) => (typeof e === 'string' ? e : e.path));
     if (!paths.length) {
       // G7: never skip these checks silently. Without an env file the service would also start without credentials.
-      skippedEnvFiles.push(`${name}: no env_file in the deployed model, so its credential checks cannot run (pass --compose staging/docker-compose.staging.yml)`);
+      skippedEnvFiles.push(`${name}: no env_file in the deployed model, so its credential checks cannot run (the image compose names database.env and runtime.env)`);
       continue;
     }
     const entry = { names: [], unfilled: [], dbUsers: {} };
@@ -443,7 +463,7 @@ function environmentMode(argv) {
     }
     envFileKeys[name] = entry;
   }
-  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, redisConf, envFileKeys)], lines: images.lines };
+  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, envFileKeys)], lines: images.lines };
 }
 
 if (require.main === module) {
@@ -470,4 +490,4 @@ if (require.main === module) {
   console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, renderModels, staticMode };
+module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

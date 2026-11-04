@@ -1,122 +1,65 @@
-# Production stack for OpenShip (Oracle VPS, arm64) — FOUR core services:
-# rab-api, rab-worker (jobs + workspace provisioner, two supervised processes),
-# rab-redis, and PostgreSQL (a managed provider, outside this file) — plus the
-# one-off rab-migrate release step that runs BEFORE rab-api and rab-worker start.
-# No Postgres, no frontend, no Adminer: the database and the web console are
-# outside this stack. Database runbook: docs/runbooks/database.md. The local reference topology for
-# every service below is packages/rab-docker/docker-compose.yml
-# (server/worker/migrate).
+# Production stack, BUILD-BASED (the file OpenShip imports), on the OWNER LOGIN (owner's final decision 2026-11-04: ONE
+# schema-owning login, crewflow_owner, for the API, the Worker and the release step; no mode switch).
 #
-# OpenShip does not support Compose `build.target` — this Dockerfile's final
-# (and last-declared) stage is `rab` (see packages/rab-docker/rab/Dockerfile),
-# which Docker/Compose builds by default when no `target` is given, so
-# omitting it here still produces the correct image for rab-api/rab-migrate.
-# rab-worker builds packages/rab-docker/rab/Dockerfile.worker-bundle, a SEPARATE
-# Dockerfile layered on that same image (so the shared Dockerfile's default
-# final stage is unchanged).
+# !!! OPENSHIP CANNOT RUN THIS STACK SAFELY (M0 D11) !!!
+# OpenShip drops `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on`
+# conditions (docs/release/OPENSHIP-COMPATIBILITY.md). The separated Worker relied on a root launcher that dropped each
+# child to its own uid; that launcher is retired, so on OpenShip the Worker image's root default user would run the
+# Worker ITSELF AS ROOT. The supported deployment is docker-compose.image.yml with plain `docker compose`
+# (docs/release/OWNER-LOGIN-DEPLOYMENT.md, OWNER-LOGIN-ORACLE-VM-PLAN.md). A push to main may redeploy the temporary
+# OpenShip deployment from this file: before this version merges, the owner must disable that auto-deploy or accept that
+# the temporary deployment stops (its database has no crewflow_owner). NEEDS OWNER APPROVAL.
 #
-# THE API AND THE WORKER NEVER MIGRATE (Phase B P7). Schema changes run ONLY in
-# the one-off `rab-migrate` service (deploy-prepare.js, below), which compose
-# runs to completion first: rab-api and rab-worker `depends_on` it with
-# `condition: service_completed_successfully`, so a failed or refused migration
-# step (or pending migrations that were not approved for this release) leaves
-# the previous release running and never promotes the new one. The API image's
-# default command is api-prestart.sh (refuses migration credentials, read-only
-# "no pending migrations" check, then main.js); it never migrates.
-# Runbooks: docs/runbooks/database.md, docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md.
+# This file mirrors docker-compose.image.yml's runtime contract (same services, commands, isolation keys, environment
+# keys) with `build:` instead of digests, for local reference builds. Where the two differ, docker-compose.image.yml wins.
 #
-# DATABASE IDENTITIES (enforced in code, not by convention). Every process takes
-# ONE variable, PG_DATABASE_URL, holding ITS OWN credential (the legacy names
-# DATABASE_URL / DATABASE_URL_UNPOOLED / DATABASE_DIRECT_URL / DB_POOL_MAX are
-# refused in production):
-#   crewflow_app  restricted runtime login (owns nothing, no DDL). rab-api and
-#                 rab-worker's jobs process ONLY, as their PG_DATABASE_URL.
-#                 assert-runtime-db-role.ts refuses anything else.
-#   crewflow      privileged provisioning login (owns business tables, can
-#                 CREATE SCHEMA). rab-worker's provisioner process ONLY: entered
-#                 as CREWFLOW_PROVISIONER_DATABASE_URL (until gate G2), handed by
-#                 the launcher to that child alone as ITS PG_DATABASE_URL.
-#   crewflow_migrator  migration-only login (member of rab_secure_owner +
-#                 crewflow, owns nothing; created by the reviewed operator
-#                 bootstrap script, never by a migration). rab-migrate ONLY, as
-#                 its PG_DATABASE_URL in packages/rab-docker/.env.migrate (chmod
-#                 600, git-ignored, excluded from the image build context). Never
-#                 on any runtime service.
-# Every connection is a DIRECT (session) connection with TLS verify-full: a
-# transaction pooler (Neon -pooler, Supabase :6543, DigitalOcean :25061, RDS
-# Proxy) is refused for the Worker and the migration step, and PgBouncer-style
-# poolers may reject the per-session startup options. Every process compares
-# the database's protected deployment identity marker with
-# CREWFLOW_DEPLOYMENT_ENVIRONMENT / CREWFLOW_DEPLOYMENT_ID and refuses to start
-# on a mismatch (B3; PG_EXPECTED_DATABASE_NAME is the optional secondary check).
+# ONE DATABASE CREDENTIAL. rab-api, rab-worker and rab-migrate each take PG_DATABASE_URL = crewflow_owner at the provider's
+# DIRECT host, sslmode=verify-full — the SAME value on all three (entered per service on a platform without env_file).
+# There is no migrator, provisioner, worker, ops or replica URL, no .env.migrate and no role password. Created by the
+# provider admin with Agent 1's postgres-init/owner-login/01-crewflow-owner.sql (fresh) or transition-from-separated.sql
+# (existing separated database): a URL alone never works.
 #
-# No secrets live in this file and no `env_file` is used. Each service's
-# comment lists exactly which variables must be entered in OpenShip's
-# environment-variable UI for THAT service, and which must NOT be. OpenShip's
-# UI values override the committed `environment:` values below, so never
-# re-enter a committed key there (a wrong override silently wins).
+# LIFECYCLE: the controlled release. The API never migrates (CREWFLOW_MIGRATE_ON_START=false; read-only compatibility
+# check, then main.js). rab-migrate (deploy-prepare.js, same image, same login, approval mode token) runs to completion
+# first; exit 0 nothing pending / applied, 3 pending and not approved (prints the token), 64-69 per M0 section 7, 1 a
+# refused/stale token. The Worker never migrates and starts after a healthy API.
 #
-# STORAGE: this topology intentionally has NO shared volume between rab-api
-# and rab-worker (they are independently restarted/rescheduled containers on
-# the same host today, and must not assume that stays true — see
-# docs/architecture/api-and-worker.md). Object storage is Cloudflare R2
-# (S3-compatible), bucket `rab-production-storage`, entered manually in
-# OpenShip identically on rab-api and rab-worker:
+# ENTER FOR rab-api AND rab-worker (identical values): PG_DATABASE_URL, PG_SSL_CA_CERT_PATH (mount the CA read-only),
+# PG_EXPECTED_DATABASE_NAME, CREWFLOW_DEPLOYMENT_ENVIRONMENT=production, CREWFLOW_DEPLOYMENT_ID, the connection budget
+# (PG_POOL_MAX_CONNECTIONS / PG_EXPECTED_* — one login, so all pools share crewflow_owner's limit), REDIS_URL, APP_SECRET
+# (+ keyrings if used; CURRENT values unchanged in a transition), CORS_ORIGINS, APP_URL, ACCOUNTS_URL (https only),
+# TRUSTED_PROXY_CIDRS, EMAIL_* / RESEND_API_KEY, S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT,
+# SENTRY_DSN / APP_VERSION (optional), AUTH_GOOGLE_* / AUTH_MICROSOFT_* (if enabled), WORKSPACE_BASE_DOMAIN (owner decision).
+# ENTER FOR rab-migrate: PG_DATABASE_URL (the same value), PG_SSL_CA_CERT_PATH, PG_EXPECTED_DATABASE_NAME,
+# CREWFLOW_DEPLOYMENT_ENVIRONMENT, CREWFLOW_DEPLOYMENT_ID — nothing else.
+# MUST NOT BE ENTERED ANYWHERE: DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX, PG_WORKER_DATABASE_URL,
+# CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
+# CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
+# ALLOW_PRODUCTION_DB_COMMANDS, DB_TARGET, CREWFLOW_DB_MODE, CREWFLOW_PROVISIONER_ENABLED, libpq PG* variables, NODE_OPTIONS,
+# BOOTSTRAP_ADMIN_*, TEST_*, ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
+# WORKER_INVITE_AUTO_DELETE_ENABLED, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED; CREWFLOW_MIGRATION_APPROVED except as a
+# one-run `run -e` on rab-migrate; and any override of the keys committed below.
 #
-#   S3_BUCKET=rab-production-storage
-#   S3_REGION=auto
-#   S3_ACCESS_KEY_ID=<R2 access key id>
-#   S3_SECRET_ACCESS_KEY=<R2 secret access key>
-#   S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-#
-# STORAGE_DRIVER/STORAGE_KEY_PREFIX/S3_FORCE_PATH_STYLE/
-# S3_SERVER_SIDE_ENCRYPTION below are fixed decisions for this topology, not
-# secrets, so they're committed directly rather than re-entered per deploy.
-#
-# PRODUCTION CONFIG REFUSALS (env.validation.ts productionConfigurationProblems,
-# applies to rab-api AND rab-worker): the process refuses to boot unless
-# EMAIL_DRIVER is SMTP or RESEND (not LOGGER), STORAGE_DRIVER is S3, APP_URL and
-# ACCOUNTS_URL are https:// non-localhost, CORS_ORIGINS lists only https://
-# origins, and TRUSTED_PROXY_CIDRS is non-empty and narrow (IPv4 /16 or
-# narrower). TRUSTED_PROXY_CIDRS is NEW since the last healthy deploy.
-#
-# HWS RUNTIME ROUTING: OFF. HWS_RUNTIME_ENABLED is committed "false" on rab-api and
-# rab-worker; both children get "false" (Phase A: the launcher no longer forces it
-# for the provisioner child). The provisioner child provisions because rab-worker
-# commits CREWFLOW_PROVISIONER_ENABLED "true" (the explicit opt-in), not because of
-# HWS. Turning routing on is the separate HWS
-# production cutover (gate G4: production rehearsal + hws:backfill + owner
-# approval). Never override it in OpenShip.
-#
-# WORKSPACE PROVISIONING PATH (Wave 1 lane D reconciliation, 2026-10-23):
-# production keeps the PRIVILEGED RECONCILER, here the provisioner child of
-# rab-worker. Server-path provisioning (core.provision_workspace with EXECUTE for
-# crewflow_app, migration 1786719500000, gate G1) is NOT approved for production.
-# It is not on the N1 list (production-migration-approval.ts,
-# PRODUCTION_APPROVED_MIGRATIONS is empty), so the function does not exist there.
-# The API's call then fails with SQLSTATE 42883 and returns DEFERRED, and the
-# workspace stays CREATING until the reconciler builds it. Even after G1, the
-# reconciler stays because `createFor` (Initial Manager) workspaces are built only
-# by it, and removing it (gate G2) is unapproved. Do not deploy a topology without
-# a provisioner.
-#
-# RELEASE CONTENT: this file builds only from a commit that contains
-# rab/Dockerfile.worker-bundle and rab/worker-bundle/** (this branch, not
-# origin/main 5968fc52). The N1 runner refuses the WHOLE production migration
-# run while any pending migration after 1786719300000 is unapproved, and this
-# branch carries eight (1786719400000..1786719620000). So an image from this
-# branch cannot migrate production until the owner approves each one by name (or
-# the release excludes them). The role-cutover release cut from origin/main
-# 5968fc52 uses the FIVE-SERVICE compose instead (separate rab-provisioner). See
-# docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md, sections 0a and 12.
+# SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). SUPERSEDED, KEPT UNTIL THE FINAL CLEAN-UP PR (#9, owner
+# approval): rab-ops (profile "ops") and the retired Worker bundle launcher (rab/worker-bundle/start-worker-bundle.cjs,
+# still the Worker image's default CMD; this file overrides it).
 
 name: rab-production
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '5'
 
 services:
 
   rab-redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes
+    # AOF + noeviction (an evicting policy can drop BullMQ jobs and locks). No ACL file here: a platform without a host
+    # secret directory cannot mount one, so this Redis is unauthenticated and must stay unpublished (docker-compose.image.yml
+    # has the ACL).
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
       - rab-redis-data:/data
     healthcheck:
@@ -125,137 +68,44 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *logging
 
-  # ---------------------------------------------------------------------------
-  # rab-api — the HTTP API. Runtime only: never migrates, never bootstraps an
-  # admin (bootstrap-admin is a one-off operator command now).
-  #
-  # ENTER IN OPENSHIP (rab-api):
-  #   PG_DATABASE_URL       crewflow_app @ the provider's DIRECT host (no
-  #                         transaction pooler), sslmode=verify-full
-  #   PG_SSL_CA_CERT_PATH   the provider CA bundle, when it is not in the system
-  #                         store (mount it read-only)
-  #   CREWFLOW_DEPLOYMENT_ENVIRONMENT=production, CREWFLOW_DEPLOYMENT_ID=<the id
-  #                         the database is bound to>, PG_EXPECTED_DATABASE_NAME
-  #   CONNECTION BUDGET (recommended shape, operator guidance; docs/runbooks/database.md):
-  #     PG_POOL_MAX_CONNECTIONS=9  and  PG_EXPECTED_API_POOL_MAX=9 on rab-api
-  #     PG_EXPECTED_API_INSTANCES=2 (peak incl. rolling-deploy overlap),
-  #     PG_EXPECTED_WORKER_INSTANCES=1, PG_EXPECTED_WORKER_POOL_MAX=12 — the
-  #     SAME four values on rab-api AND rab-worker. Worst case on the primary:
-  #     API 2x9 + Worker 12 + lock pool 6 + scan/storage locks 2 + provisioner 2
-  #     + rab-migrate 3 + boot probes 3 = 46 connections; every process refuses to
-  #     start when the declared total exceeds the server's usable capacity. Not
-  #     committed here: undeclared instance counts only warn.
-  #   APP_SECRET            the CURRENT production value, unchanged (it derives
-  #                         the encryption + JWT keys; changing it breaks
-  #                         sessions and stored encrypted secrets)
-  #   APP_ENCRYPTION_KEYRING / APP_ENCRYPTION_ACTIVE_KID /
-  #   APP_JWT_SIGNING_KEYRING / APP_JWT_ACTIVE_KID
-  #                         only if production already uses keyrings (same values)
-  #   CORS_ORIGINS, APP_URL, ACCOUNTS_URL   https:// only
-  #   TRUSTED_PROXY_CIDRS   exact address/range of the proxy that connects to
-  #                         this container (OpenShip's OpenResty). REQUIRED.
-  #   EMAIL_DRIVER (SMTP|RESEND) + EMAIL_SMTP_* or RESEND_API_KEY,
-  #   EMAIL_FROM_ADDRESS, EMAIL_REPLY_TO (optional)
-  #   S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT
-  #   SENTRY_DSN, APP_VERSION                                    (optional)
-  #   WORKSPACE_BASE_DOMAIN  OWNER DECISION (runbook section 13, D6). Recommended
-  #                         UNSET until the release contains the D-C1 fix
-  #                         (WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED, default
-  #                         false). Without that fix, setting it makes CORS/CSRF
-  #                         trust every shape-valid <label>.<base> origin. Never
-  #                         enter WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED=true
-  #                         without a separate owner approval.
-  #   AUTH_GOOGLE_* / AUTH_MICROSOFT_*   only if that provider is enabled
-  #
-  # MUST NOT BE ENTERED ON rab-api (boot refused for most of them):
-  #   DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX,
-  #   libpq PG* variables (PGHOST, PGPASSWORD, ...), the migration login or
-  #   anything from .env.migrate, DB_TARGET, ALLOW_PRODUCTION_DB_COMMANDS,
-  #   CREWFLOW_MIGRATION_*, CREWFLOW_*_BOOTSTRAP_PASSWORD,
-  #   CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP, CREWFLOW_PROVISIONER_DATABASE_URL
-  #   (rab-worker's launcher only), BOOTSTRAP_ADMIN_*, any value of
-  #   HWS_RUNTIME_ENABLED (committed "false"; the HWS runtime cutover is a
-  #   separate, unapproved change, gate G4), any TEST_*
-  #   or ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, and any override of
-  #   the committed keys below (NODE_ENV, RAB_RUNTIME_ENV, REDIS_URL,
-  #   HWS_RUNTIME_ENABLED, STORAGE_*, S3_FORCE_PATH_STYLE, S3_SERVER_SIDE_ENCRYPTION).
-  # ---------------------------------------------------------------------------
+  # rab-api — the HTTP API. Never migrates (controlled release).
   rab-api:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
-
-    # The image's default command, stated explicitly: api-prestart.sh refuses any
-    # migration credential in this environment, checks (read-only, as
-    # crewflow_app) that no migration is pending, then execs main.js. Never migrates.
     command: ["./api-prestart.sh"]
-
     ports:
-      - "3000:3000"
-
+      - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
     environment:
       NODE_ENV: production
-      # Required by the runtime guard (runtime-database-guard.ts): NODE_ENV=production
-      # without RAB_RUNTIME_ENV=production refuses to boot. Not a secret.
       RAB_RUNTIME_ENV: production
-      # AI stays OFF in production regardless of the code default (owner decision EX-2,
-      # 2026-10-25): change only after docs/ai/CREWFLOW_AI_RELEASE_CHECKLIST.md is complete.
       AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
-      # OFF until gate G4 (see header). Never override in OpenShip.
       HWS_RUNTIME_ENABLED: "false"
-      # See the STORAGE comment block above — S3_BUCKET/S3_REGION/
-      # S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY/S3_ENDPOINT are entered in
-      # OpenShip, identically here and on rab-worker.
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
-      # R2 encrypts at rest automatically; it does not accept AWS's SSE
-      # request headers, so this must stay NONE for R2 (see S3StorageDriver —
-      # NONE sends no ServerSideEncryption/SSEKMSKeyId fields at all).
       S3_SERVER_SIDE_ENCRYPTION: NONE
-
+      CREWFLOW_MIGRATE_ON_START: "false"
+      CREWFLOW_MIGRATION_APPROVAL_MODE: token
+      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
     depends_on:
       rab-redis:
         condition: service_healthy
-      # Phase B P7: never promoted onto a schema the release step did not prepare.
       rab-migrate:
         condition: service_completed_successfully
-
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 30s
-
     restart: unless-stopped
-
-    # Runtime isolation (Docker hardening H6). REQUIRED, not decoration — if the
-    # platform cannot apply one of these, stop and report it; never relax it to
-    # make a deploy pass. Measured in the H6 runtime matrix (PR "H6 — Production
-    # API and Worker runtime isolation"):
-    #   - the image's non-root `node` user (uid/gid 1000), stated explicitly;
-    #   - no Linux capabilities at all and no-new-privileges (the API binds 3000,
-    #     an unprivileged port, and never changes identity);
-    #   - a READ-ONLY root filesystem and NO tmpfs: the API writes nothing to its
-    #     own filesystem in production (uploads are buffered in memory and stored
-    #     in R2/S3; production refuses STORAGE_DRIVER=LOCAL, so /app/storage is
-    #     unused; logs go to stdout). Any write fails with EROFS, except in
-    #     Docker's default /dev/shm (64 MiB, noexec), which the API never uses;
-    #   - a PID/thread cap and memory/CPU limits above the measured peak, and a
-    #     stop grace above the measured SIGTERM drain (Nest shutdown hooks).
-    #     `cpus` may not exceed the host's CPU count (Docker refuses to start the
-    #     container): the planned hosts have >= 2 vCPUs (docs/hosting/07); on a
-    #     smaller host set CREWFLOW_API_CPUS / CREWFLOW_WORKER_CPUS lower.
-    # api-prestart.sh logs what was actually applied at every start ("runtime
-    # isolation as declared", or a WARNING naming each control a platform dropped).
-    # CREWFLOW_RUNTIME_ISOLATION=enforce makes it REFUSE to start instead (exit 64)
-    # when any of these controls is missing; strict: only warn|enforce. This file
-    # leaves it unset (= warn) so a platform that drops these keys still starts
-    # and says so; a deployment definition that must never run degraded sets enforce.
-    # No Docker socket, host namespace or host mount is ever added here.
+    logging: *logging
+    # Runtime isolation (H6). REQUIRED; a platform that drops these keys runs the API degraded (warn mode: api-prestart.sh
+    # logs each missing control) — the reason this file is not the supported deployment.
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
@@ -265,95 +115,8 @@ services:
     cpus: ${CREWFLOW_API_CPUS:-2}
     stop_grace_period: 35s
 
-  # ---------------------------------------------------------------------------
-  # rab-worker — the Worker SERVICE (2026-10-22 four-core-service packaging):
-  # ONE container, TWO supervised OS processes, two non-root identities:
-  #   jobs         packages/rab-worker/dist/main.js  (uid/gid 1000) — background
-  #                jobs (email, push, reminders, reports/PDF, cleanup), restricted
-  #                `crewflow_app` only, exactly as before.
-  #   provisioner  packages/rab-worker/dist/workspace-provisioner.main.js
-  #                (uid/gid 10001) — drives new workspaces CREATING/FAILED -> READY
-  #                with the privileged `crewflow` direct connection, exactly as the
-  #                former separate rab-provisioner service did.
-  # The root process is only the dependency-free supervisor
-  # (packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs): it builds an
-  # explicit, allowlisted environment per child (the provisioning URL reaches the
-  # provisioner child ONLY), fails the whole service if either child exits
-  # (including exit 0), forwards SIGTERM so both existing 30 s drains complete,
-  # and cross-checks that both children's live identity probes reached the same
-  # cluster. Every existing guard (runtime-database-guard, assert-runtime-db-role,
-  # hws-startup-guard) still runs inside each child.
-  #
-  # Image: packages/rab-docker/rab/Dockerfile.worker-bundle, built FROM the same
-  # shared image as rab-api (passed as the named build context `crewflow-app`).
-  # It adds the Worker-only npm packages (the native PDF renderer; no browser,
-  # no system fonts since P5: the build fails if Chromium or its libraries
-  # return, and below the security-floors.env minimums),
-  # verifies /app is root-owned (true since H1), removes the API entry scripts,
-  # adds the provisioner identity and tini. OPENSHIP: if its compose import cannot honour
-  # `additional_contexts: service:`, build the shared image once, push it to a
-  # registry pinned by digest, and set CREWFLOW_BASE_IMAGE to that reference —
-  # see docs/PRODUCTION_RELEASE_RUNBOOK_2026-10-22.md section 12.
-  #
-  # Security settings below are REQUIRED, not decoration: user 0:0 (launcher
-  # only — both children drop to their own UID/GID), read_only root, per-child
-  # tmpfs, cap_drop ALL + only SETUID/SETGID/KILL, no-new-privileges. If the
-  # platform cannot apply them, do NOT collapse both processes to one UID and do
-  # NOT remove guards: the launcher refuses to start without root/its dirs, and
-  # the limitation must be reported (CREWFLOW_FOUR_SERVICE_WORKER_BUNDLE_REPORT.md).
-  # H6: the launcher logs what it actually received at every start —
-  # "[worker-bundle] runtime isolation as declared: CapBnd=00000000000000e0
-  # NoNewPrivs=1 root=read-only tmpfs=4/4", or a WARNING naming each control
-  # the platform dropped (it still starts; report it, THREAT-MODEL.md H6).
-  # CREWFLOW_RUNTIME_ISOLATION=enforce (strict: warn|enforce; unset = warn, as
-  # here) makes the launcher refuse to start instead when any control is missing.
-  #
-  # ENTER IN OPENSHIP (rab-worker): everything listed for rab-api (same values;
-  # the jobs process validates the same production config, including
-  # CORS_ORIGINS, APP_URL, ACCOUNTS_URL and TRUSTED_PROXY_CIDRS), PLUS:
-  #   (PG_DATABASE_URL is the SAME crewflow_app direct connection as rab-api:
-  #   it is also the session-lock connection, so it must not be a transaction
-  #   pooler; DATABASE_DIRECT_URL is gone)
-  #   CREWFLOW_PROVISIONER_DATABASE_URL
-  #                         crewflow @ the DIRECT host, sslmode=verify-full.
-  #                         Read ONLY by the launcher, handed ONLY to the
-  #                         provisioner child, as that child's PG_DATABASE_URL.
-  #                         Stays until gate G2 retires the privileged provisioner.
-  #   SENTRY_DSN, APP_VERSION                                    (optional)
-  #
-  # Phase D (global worker claims) — NOT enabled by this file. It sets none of
-  # WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE, WORKER_DISPATCH_BACKSTOP_SECONDS,
-  # WORKER_DISPATCH_RECONCILE_SECONDS, WORKER_DISPATCH_CLAIM_BATCH, so the code
-  # defaults apply (per_scope / poll / 30 / 900 / 100). The later cutover is a
-  # reviewed change: rab-worker's PG_DATABASE_URL (same name) then holds the
-  # operator-created crewflow_worker login @ the DIRECT host (rab-api keeps
-  # crewflow_app; rab-api REFUSES crewflow_worker), and WORKER_CLAIM_MODE=global
-  # requires it (the boot gate refuses otherwise). WORKER_DISPATCH_MODE=event
-  # needs global and adds one listener connection per Worker replica — set it
-  # on rab-api too (with WORKER_CLAIM_MODE=global, same pair as rab-worker): rab-api's sessions then carry
-  # crewflow.dispatch_notify=on so its outbox writes NOTIFY the Worker, and its
-  # connection budget counts the listeners. Unset (poll) = no NOTIFY at all.
-  #
-  # WORKER_INVITE_AUTO_DELETE_ENABLED — NOT set by this file (code default
-  # false: the account-invite cleanup never deletes user accounts). Do not
-  # enter true: production refuses to boot with it until the owner approves a
-  # retention policy for automatic account deletion (env.validation.ts).
-  #
-  # MUST NOT BE ENTERED ON rab-worker (the launcher refuses to start if any is
-  # non-empty): DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL,
-  # DB_POOL_MAX, CREWFLOW_MIGRATION_APPROVED, CREWFLOW_MIGRATION_DATABASE_URL,
-  # CREWFLOW_MIGRATION_PHASE, CREWFLOW_BOOTSTRAP_PASSWORD,
-  # CREWFLOW_APP_BOOTSTRAP_PASSWORD, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
-  # ALLOW_PRODUCTION_DB_COMMANDS; nor the migration login or anything from
-  # .env.migrate. Also never: any override of the committed
-  # HWS_RUNTIME_ENABLED "false" (provisioning is enabled by the committed
-  # CREWFLOW_PROVISIONER_ENABLED "true"; HWS on the jobs child would switch
-  # runtime routing — a separate, unapproved cutover), any override of the
-  # committed CREWFLOW_PROVISIONER_ENABLED "true" (an override to "false" starts
-  # no provisioner and REFUSES to start while CREWFLOW_PROVISIONER_DATABASE_URL is
-  # set — production has no other path that builds workspaces), NODE_OPTIONS (never forwarded anyway), DB_TARGET, BOOTSTRAP_ADMIN_*,
-  # TEST_*, AUTH_*_ISSUER_URL, and any override of the committed keys below.
-  # ---------------------------------------------------------------------------
+  # rab-worker — background jobs, ONE process as uid/gid 1000 (no root launcher, no per-child credentials, in-process
+  # provisioning). Never migrates; starts after a healthy API.
   rab-worker:
     build:
       context: ../..
@@ -362,80 +125,50 @@ services:
         crewflow-app: service:rab-api
       args:
         CREWFLOW_BASE_IMAGE: ${CREWFLOW_BASE_IMAGE:-crewflow-app}
-
-    # The image's own ENTRYPOINT (tini) + CMD (the launcher). Never start.sh.
-    command: ["node", "/opt/crewflow-bundle/start-worker-bundle.cjs"]
-    user: "0:0"
+    command: ["node", "packages/rab-worker/dist/main.js"]
+    working_dir: /app
+    user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ["no-new-privileges:true"]
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    # > launcher grace (42 s = 30 s jobs drain + margin) so no drain is cut short.
-    stop_grace_period: 55s
-    # H6: limits above the measured worst case. pids_limit counts threads. They
-    # were sized for Chromium (one render peaked at ~130 tasks, up to 4 at once
-    # = 551 tasks measured; 512 made renders fail). P5 renders natively in the
-    # jobs process, which needs far fewer; both limits are KEPT until the H6
-    # matrix (M09 records the peak) re-measures them with the native renderer.
+    stop_grace_period: 45s
+    # Kept from the separated sizing until the H6 matrix re-measures with the native renderer (#61).
     pids_limit: 1024
     # Native PDF render threads (review M-3): PDF_NATIVE_CONCURRENCY x 384 MB heap cap must fit
-    # PDF_NATIVE_MEMORY_BUDGET_MB (default 768 = half of this 1536m; the rest is the jobs process, the
-    # threads' young generations and WASM, and the provisioner), else the Worker refuses to boot. Raising
-    # CREWFLOW_WORKER_MEM_LIMIT does not raise the budget: set both together.
+    # PDF_NATIVE_MEMORY_BUDGET_MB (default 768 = half of this 1536m), else the Worker refuses to boot. Set both together.
     mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
     cpus: ${CREWFLOW_WORKER_CPUS:-2}
-
+    logging: *logging
     environment:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
-      # AI OFF in production (owner decision EX-2); see the rab-api note.
       AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
-      # HWS routing OFF until gate G4. Forwarded unchanged to both children
-      # (Phase A: no longer forced to "true" for the provisioner child).
       HWS_RUNTIME_ENABLED: "false"
-      # Phase A (pa-provisioner): the provisioner switch. Production needs the
-      # provisioner (the privileged reconciler is the only path that builds new
-      # workspaces here — see WORKSPACE PROVISIONING PATH above), so it is
-      # enabled explicitly. Without this line the launcher keeps the
-      # pre-Phase-A behaviour (provisioner on, 5 s); "false" would stop
-      # workspace provisioning AND make the launcher refuse to start while
-      # CREWFLOW_PROVISIONER_DATABASE_URL is entered.
-      CREWFLOW_PROVISIONER_ENABLED: "true"
-      # Polling interval (5..120 s; the code default became 60 s in Phase A).
-      # Pinned to the pre-Phase-A 5 s here because this reconciler IS the
-      # self-service onboarding path in production (WorkspacePreparationScreen
-      # waits on it; owner "feel instant" requirement, see
-      # workspace-provisioner.main.ts). OWNER DECISION to relax it (e.g. remove
-      # this line → 60 s worst-case wait for a new workspace).
+      # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: "5"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
-      # Phase B (B5): the Worker runtime pool (2 consumer slots + 4 capped scans + 2 spare + headroom; connection-budget.ts).
       PG_POOL_MAX_CONNECTIONS: "12"
-      # Lane A (BullMQ migration): pinned to the historical per-replica timers. Switching to `bullmq` is a reviewed
-      # change to this file (rollout stages C/D in CREWFLOW_BULLMQ_WORKER_MIGRATION_REPORT.md), after confirming the
-      # production Redis is authenticated, AOF-backed and maxmemory-policy=noeviction (the worker refuses otherwise).
       WORKER_SCHEDULER: interval
-
-    # Per-INSTANCE health of BOTH roles (fresh event-loop heartbeat, recent
-    # settled + successful cycles, recent Redis write, no hung cycle) from files
-    # only this container's children write — not the global Redis keys (which a
-    # healthy replica would keep fresh) and never rab-api's /healthz.
+      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
+      CREWFLOW_MIGRATE_ON_START: "false"
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
     healthcheck:
-      test: ["CMD", "node", "/opt/crewflow-bundle/worker-bundle-health.cjs"]
+      test: ["CMD", "env", "CREWFLOW_PROVISIONER_ENABLED=false", "node", "/opt/crewflow-bundle/worker-bundle-health.cjs"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 120s
-
     depends_on:
       rab-redis:
         condition: service_healthy
@@ -443,104 +176,30 @@ services:
         condition: service_completed_successfully
       rab-api:
         condition: service_healthy
-
     restart: unless-stopped
 
-  # rab-provisioner (the former fifth always-on service) is REMOVED from the
-  # default topology: workspace provisioning now runs inside rab-worker (above).
-  # Its entrypoint (workspace-provisioner.main.ts) is unchanged and reusable. At
-  # the approved cutover, stop and delete the old rab-provisioner deployment
-  # deliberately (runbook section 12) — two provisioners would still be safe
-  # (session advisory lock), but nothing should run unaccounted for.
-
-  # ---------------------------------------------------------------------------
-  # rab-migrate — the one-off release step (Phase B P7, `deploy:prepare`). It
-  # runs to completion BEFORE rab-api and rab-worker start (they depend on it
-  # with service_completed_successfully) and then exits; restart "no".
-  #
-  # Credential: ONLY from packages/rab-docker/.env.migrate (template:
-  # .env.migrate.example next to this file): PG_DATABASE_URL = the
-  # migration-only login crewflow_migrator at the DIRECT host, verify-full.
-  # The file is chmod 600, git-ignored, excluded by .dockerignore (never in an
-  # image layer) and referenced by THIS service only; rab-api and rab-worker
-  # never see it (packages/rab-docker/scripts/compose-credential-isolation.cjs asserts that in CI).
-  #
-  # What it does (deploy-prepare.ts), on ONE session holding the migration
-  # advisory lock: target guard (DB_TARGET=production +
-  # ALLOW_PRODUCTION_DB_COMMANDS=true + the deployment identity marker),
-  # N1 production approval (production-migration-approval.ts: any pending
-  # migration not approved by name refuses the WHOLE run), CF-41 migration
-  # identity, then:
-  #   not approved, nothing pending                         exit 0 (release proceeds)
-  #   not approved, something pending                       exit 3 (release NOT promoted; the log lists every
-  #                                                         pending migration and prints the approval token)
-  #   CREWFLOW_MIGRATION_APPROVED=<that token>              apply, post-checks, exit 0
-  #   approval stale / for another set / malformed /
-  #     the retired apply-pending-migrations                exit 1, nothing applied (prints the token to use)
-  #   any other refusal or failure                          exit 1 (release NOT promoted)
-  # The approval is per release (security review L-2) and names the exact
-  # pending set (final review F5): run rab-migrate once without it, review
-  # the list, then `run --rm -e CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256>
-  # rab-migrate`. The token is recomputed after the migration lock, so it
-  # applies that set or nothing; a token left in .env.migrate approves
-  # nothing later. Back up first (docs/runbooks/database.md), and make sure the
-  # image is the release commit (migrations ship inside the image).
-  #
-  # MUST NOT be in .env.migrate: DATABASE_URL, DATABASE_URL_UNPOOLED,
-  # DATABASE_DIRECT_URL, APP_SECRET or any runtime secret, BOOTSTRAP_ADMIN_*,
-  # TEST_*, libpq PG* variables.
-  # ---------------------------------------------------------------------------
+  # rab-migrate — the one-off release step (deploy-prepare.js, in place for the owner login). Same image and same login as
+  # rab-api; it reads only the five database entries listed in the header.
   rab-migrate:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
-
-    env_file:
-      - .env.migrate
-
     environment:
       NODE_ENV: production
-      # Declares the target; production authority additionally needs
-      # ALLOW_PRODUCTION_DB_COMMANDS=true and the deployment identity from
-      # .env.migrate, checked by database-target.ts against the database marker.
-      DB_TARGET: production
-
+      CREWFLOW_MIGRATION_APPROVAL_MODE: token
+      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
     command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
-
     restart: "no"
+    logging: *logging
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp
 
-  # ---------------------------------------------------------------------------
-  # rab-ops — the ONE-OFF owner operations container (Phase B, owner decision).
-  # Never started by `up` (profile "ops"); run once per approved operation and
-  # removed:
-  #   docker compose -f packages/rab-docker/docker-compose.production.yml   #     --profile ops run --rm rab-ops <command> [args]
-  # It runs ONLY containment:suspend-test-accounts, hws:backfill and
-  # user-session:backfill (command/ops/ops-run.ts refuses anything else, and
-  # those three refuse to run anywhere else). Same image as rab-api / rab-migrate.
-  #
-  # Environment: ONLY packages/rab-docker/.env.ops (template .env.ops.example;
-  # chmod 600, git-ignored, excluded from the build context), created for one
-  # approved run and deleted after it — or, preferred, injected by a protected
-  # CI/deployment job (runbook: docs/runbooks/database.md, "Owner operations
-  # container"). It holds:
-  #   CREWFLOW_OPS_RUN=one-off
-  #   PG_OPS_APP_DATABASE_URL  the ordinary crewflow_app login (primary: boot
-  #                            gates, tenant-context writes, audit rows)
-  #   PG_DATABASE_URL          ONLY for containment and user-session:backfill
-  #                            --dry-run/--apply: the migration identity, used
-  #                            only by the VERIFIED elevated session (SET LOCAL
-  #                            ROLE rab_secure_owner, frozen statements). Every
-  #                            other mode refuses it.
-  #   CREWFLOW_OPS_ACTOR_SOURCE / _ACTOR_ID / CREWFLOW_OPS_CHANGE_REF  the
-  #                            operational audit label (required; NOT a
-  #                            database-verified identity)
-  #   + DB_TARGET=production, ALLOW_PRODUCTION_DB_COMMANDS=true, the deployment
-  #     identity, and the runtime configuration the CLI validates at boot.
-  # No new long-lived credential: the migration login is rab-migrate's, enabled
-  # only for the run. rab-api, rab-worker and rab-migrate never name .env.ops and
-  # refuse every CREWFLOW_OPS_* / PG_OPS_* variable
-  # (scripts/compose-credential-isolation.cjs asserts this in CI).
-  # ---------------------------------------------------------------------------
+  # rab-ops — SUPERSEDED (separated mode), kept unchanged and never started by `up` until the final clean-up PR (#9, owner
+  # approval). Do not run it against an owner-login deployment.
   rab-ops:
     build:
       context: ../..

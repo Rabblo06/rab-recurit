@@ -43,7 +43,16 @@ test('the committed variant passes every check', { skip }, () => {
 test('the variant and the production file declare the same runtime keys for rab-api and rab-worker', { skip }, () => {
   const m = fresh();
   for (const svc of ['rab-api', 'rab-worker']) {
-    for (const key of RUNTIME_KEYS) assert.deepEqual(m.variant.services[svc][key], m.production.services[svc][key], `${svc}.${key}`);
+    // The read-only PostgreSQL CA bind (image file only) is the one intended difference.
+    const noCa = (vols) => {
+      const rest = (vols ?? []).filter((v) => !(v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true));
+      return rest.length ? rest : undefined;
+    };
+    for (const key of RUNTIME_KEYS) {
+      const a = key === 'volumes' ? noCa(m.variant.services[svc][key]) : m.variant.services[svc][key];
+      const b = key === 'volumes' ? noCa(m.production.services[svc][key]) : m.production.services[svc][key];
+      assert.deepEqual(a, b, `${svc}.${key}`);
+    }
   }
 });
 
@@ -58,7 +67,8 @@ const weakenings = [
   ['rab-api healthcheck removed', (v) => { delete v.services['rab-api'].healthcheck; }, /rab-api\.healthcheck differs/],
   ['rab-api stop grace shortened', (v) => { v.services['rab-api'].stop_grace_period = '5s'; }, /rab-api\.stop_grace_period differs/],
   ['rab-worker tmpfs dropped', (v) => { v.services['rab-worker'].tmpfs = v.services['rab-worker'].tmpfs.slice(1); }, /rab-worker\.tmpfs differs/],
-  ['rab-worker extra capability', (v) => { v.services['rab-worker'].cap_add.push('CHOWN'); }, /rab-worker\.cap_add differs/],
+  ['rab-worker extra capability', (v) => { v.services['rab-worker'].cap_add = ['CHOWN']; }, /rab-worker\.cap_add differs/],
+  ['rab-worker back on the root launcher', (v) => { v.services['rab-worker'].user = '0:0'; }, /rab-worker\.user differs/],
   ['rab-worker privileged', (v) => { v.services['rab-worker'].privileged = true; }, /rab-worker: privileged/],
   ['rab-worker host PID namespace', (v) => { v.services['rab-worker'].pid = 'host'; }, /host namespace/],
   ['a build section', (v) => { v.services['rab-worker'].build = { context: '.' }; }, /rab-worker: has a build section/],
@@ -78,6 +88,16 @@ const weakenings = [
   ['API does not wait for rab-migrate', (v) => { delete v.services['rab-api'].depends_on['rab-migrate']; }, /rab-api: does not wait for rab-migrate|rab-api\.depends_on differs/],
   ['rab-migrate restarts', (v) => { v.services['rab-migrate'].restart = 'always'; }, /rab-migrate: restart/],
   ['rab-migrate writable root', (v) => { v.services['rab-migrate'].read_only = false; }, /rab-migrate: not read-only/],
+  ['rab-migrate on another login than the API', (v) => { v.services['rab-migrate'].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:other@h:5432/rab'; }, /PG_DATABASE_URL differs from rab-api's|credential does not reach it/],
+  ['rab-migrate reads runtime.env', (v, f) => { v.services['rab-migrate'].environment.APP_SECRET = 'x'; f.services['rab-migrate'].env_file = [{ path: '/s/database.env' }, { path: '/s/runtime.env' }]; }, /rab-migrate: (reads the runtime secrets|must read database.env only)/],
+  ['rab-migrate back on .env.migrate', (_v, f) => { f.services['rab-migrate'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-migrate: must read database.env only/],
+  ['rab-migrate with DB_TARGET', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'production'; }, /rab-migrate: sets DB_TARGET/],
+  ['rab-migrate without token approval', (v) => { v.services['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }, /rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE/],
+  ['API migrates on start', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'true'; }, /rab-api\.environment\.CREWFLOW_MIGRATE_ON_START differs/],
+  ['a provisioner URL on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_PROVISIONER_DATABASE_URL = 'postgresql://crewflow:x@h/rab'; }, /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/],
+  ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
+  ['Redis evicting', (v) => { const c = v.services['rab-redis'].command; c[c.indexOf('--maxmemory-policy') + 1] = 'allkeys-lru'; }, /rab-redis: command lacks --maxmemory-policy noeviction/],
+  ['Redis without the ACL file', (v) => { const c = v.services['rab-redis'].command; c.splice(c.indexOf('--aclfile'), 2); }, /rab-redis: command lacks --aclfile/],
   ['OpenShip import guard removed', (v) => { v.services['rab-migrate'].volumes = []; }, /OpenShip import guard/],
   ['rab-ops started by up', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
 ];
@@ -99,11 +119,10 @@ test('environment mode: digest references from the release repository pass; tags
 });
 
 const { checkDeployment } = require('./verify-image-compose.cjs');
-const CONF = ['aclfile /run/secrets/redis-users.acl', 'appendonly yes', 'maxmemory-policy noeviction', ''].join('\n');
-const deployed = (mutate = () => {}, conf = CONF) => {
+const deployed = (mutate = () => {}) => {
   const m = fresh();
   mutate(m.variantFiles);
-  return checkDeployment(m.variantFiles, m.production, conf);
+  return checkDeployment(m.variantFiles, m.production);
 };
 test('environment mode: the deployed model passes, with the staging CA bind and prefix allowed', { skip }, () => {
   assert.deepEqual(deployed((v) => {
@@ -124,28 +143,30 @@ const deployedWeakenings = [
 for (const [name, mutate, pattern] of deployedWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
-test('environment mode refuses a Redis config without the ACL file, with the default user on, or unreadable', { skip }, () => {
-  assertRefused(deployed(undefined, CONF.replace('aclfile /run/secrets/redis-users.acl', '')), /no `aclfile/);
-  assertRefused(deployed(undefined, `${CONF}user default on nopass ~* +@all\n`), /default user or requirepass/);
-  assertRefused(deployed(undefined, CONF.replace('maxmemory-policy noeviction', 'maxmemory-policy allkeys-lru')), /noeviction/);
-  assertRefused(deployed(undefined, null), /cannot be read/);
+test('environment mode refuses a Redis without AOF, noeviction or the ACL file', { skip }, () => {
+  const set = (flag, value) => (v) => { const c = v.services['rab-redis'].command; c[c.indexOf(flag) + 1] = value; };
+  assertRefused(deployed(set('--aclfile', '/tmp/other.acl')), /command lacks --aclfile/);
+  assertRefused(deployed(set('--maxmemory-policy', 'allkeys-lru')), /noeviction/);
+  assertRefused(deployed(set('--appendonly', 'no')), /--appendonly yes/);
 });
 
 test('environment mode refuses migration/ops authority, foreign logins and unfilled templates in the runtime env files', { skip }, () => {
-  const ok = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_app' } };
-  const worker = { names: [...ok.names, 'CREWFLOW_PROVISIONER_DATABASE_URL'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_worker', CREWFLOW_PROVISIONER_DATABASE_URL: 'crewflow' } };
+  const ok = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_owner' } };
+  const worker = { ...ok };
   const run = (keys, mutate = () => {}) => {
     const m = fresh();
     mutate(m.variantFiles);
-    return checkDeployment(m.variantFiles, m.production, CONF, keys);
+    return checkDeployment(m.variantFiles, m.production, keys);
   };
   assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': worker }), []);
   assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, 'CREWFLOW_MIGRATION_APPROVED'] }, 'rab-worker': worker }), /rab-api: sets CREWFLOW_MIGRATION_APPROVED/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: [...worker.names, 'DATABASE_URL'] } }), /rab-worker: sets DATABASE_URL/);
   assertRefused(run({ 'rab-api': { ...ok, dbUsers: { PG_DATABASE_URL: 'crewflow_migrator' } }, 'rab-worker': worker }), /logs in as "crewflow_migrator"/);
-  assertRefused(run({ 'rab-api': { ...ok, dbUsers: { PG_DATABASE_URL: 'crewflow_worker' } }, 'rab-worker': worker }), /rab-api: PG_DATABASE_URL logs in as "crewflow_worker"/);
+  assertRefused(run({ 'rab-api': { ...ok, dbUsers: { PG_DATABASE_URL: 'crewflow_app' } }, 'rab-worker': worker }), /rab-api: PG_DATABASE_URL logs in as "crewflow_app"/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, dbUsers: { PG_DATABASE_URL: 'crewflow_worker' } } }), /rab-worker: PG_DATABASE_URL logs in as "crewflow_worker"/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: [...worker.names, 'CREWFLOW_PROVISIONER_DATABASE_URL'] } }), /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/);
   assertRefused(run({ 'rab-api': { ...ok, unfilled: ['APP_SECRET'] }, 'rab-worker': worker }), /APP_SECRET still holds a template/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: ['PG_DATABASE_URL', 'REDIS_URL'] } }), /CREWFLOW_PROVISIONER_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: ['PG_DATABASE_URL'] } }), /rab-worker: REDIS_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }), /rab-api: names \.env\.migrate/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
 });
@@ -154,16 +175,17 @@ test('environment mode refuses migration/ops authority, foreign logins and unfil
 const otherWeakenings = [
   ['rab-redis privileged', (v) => { v.services['rab-redis'].privileged = true; }, /rab-redis: privileged/],
   ['rab-redis on the host network', (v) => { v.services['rab-redis'].network_mode = 'host'; }, /rab-redis: host namespace/],
-  ['rab-redis started without the reviewed config', (v) => { v.services['rab-redis'].command = ['redis-server', '--appendonly', 'yes']; }, /rab-redis: not started from the reviewed config/],
+  ['rab-redis started without noeviction and the ACL', (v) => { v.services['rab-redis'].command = ['redis-server', '--appendonly', 'yes']; }, /rab-redis: command lacks --maxmemory-policy noeviction/],
   ['rab-redis without a memory limit', (v) => { delete v.services['rab-redis'].mem_limit; }, /rab-redis: no memory limit/],
   ['the Docker socket in rab-migrate', (v) => { v.services['rab-migrate'].volumes.push({ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' }); }, /rab-migrate: mounts the Docker socket/],
   ['rab-migrate on another image', (v) => { v.services['rab-migrate'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-migrate: image differs/],
-  ['rab-migrate with DB_TARGET=local', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'local'; }, /rab-migrate: DB_TARGET/],
-  ['rab-migrate without .env.migrate', (v) => { v.services['rab-migrate'].env_file = []; }, /rab-migrate: does not read \.env\.migrate/],
+  ['rab-migrate with DB_TARGET=local', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'local'; }, /rab-migrate: sets DB_TARGET/],
+  ['rab-migrate without database.env', (v) => { v.services['rab-migrate'].env_file = []; }, /rab-migrate: must read database.env only/],
   ['rab-ops without its profile', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
   ['rab-ops with a writable root', (v) => { v.services['rab-ops'].read_only = false; }, /rab-ops: not read-only/],
   ['rab-ops privileged', (v) => { v.services['rab-ops'].privileged = true; }, /rab-ops: privileged/],
   ['an extra capability on rab-redis', (v) => { v.services['rab-redis'].cap_add = ['SYS_ADMIN']; }, /rab-redis: adds devices or capabilities/],
+  ['the retired launcher capabilities back on the Worker', (v) => { v.services['rab-worker'].cap_add = ['SETUID', 'SETGID', 'KILL']; }, /rab-worker: adds devices or capabilities/],
 ];
 for (const [name, mutate, pattern] of otherWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
@@ -172,11 +194,12 @@ for (const [name, mutate, pattern] of otherWeakenings) {
 // Compose-version independence (CI runs Compose v2.38, which resolves env files and drops env_file even under
 // --no-env-resolution). A REAL variant file in which rab-migrate / rab-ops no longer read their env file must still fail.
 test('a variant file whose rab-migrate and rab-ops read no env file fails, whatever the Compose version', { skip }, () => {
+  const migrateEnvFile = /(\n  rab-migrate:\n[\s\S]*?)\n    env_file:\n      - path: [^\n]*\/database\.env\n        required: true\n/;
   const fsx = require('node:fs');
   const os = require('node:os');
   const pathx = require('node:path');
   const src = fsx.readFileSync(pathx.join(__dirname, '../docker-compose.image.yml'), 'utf8');
-  const weakened = src.replace(/\n    env_file:\n      - \.env\.migrate\n/, '\n').replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
+  const weakened = src.replace(migrateEnvFile, '$1\n').replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
   assert.notEqual(weakened, src, 'the fixture edit did not apply');
   const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'crewflow-image-verify-test-'));
   try {
@@ -186,9 +209,9 @@ test('a variant file whose rab-migrate and rab-ops read no env file fails, whate
     try {
       const m = renderModels(copy);
       const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /rab-migrate: does not read \.env\.migrate/);
+      assertRefused(problems, /rab-migrate: must read database.env only/);
       assertRefused(problems, /rab-ops: must read \.env\.ops only/);
-      assertRefused(checkDeployment(m.variantFiles, m.production, CONF), /rab-migrate: does not read \.env\.migrate in the deployed model/);
+      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-migrate: must read database.env only in the deployed model/);
     } finally {
       fsx.rmSync(copy, { force: true });
     }

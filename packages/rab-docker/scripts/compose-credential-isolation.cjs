@@ -171,10 +171,19 @@ function main() {
       }
     }
     const migrate = services[migrateName];
+    // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
+    const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml';
     check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
     if (migrate) {
-      check(envOf(migrate).PG_DATABASE_URL === SENTINEL_URL, `${rel}: ${migrateName} receives PG_DATABASE_URL from .env.migrate`);
-      if (raw) check(namesMigrateFile(migrateName), `${rel}: ${migrateName} names .env.migrate as its env_file`);
+      if (ownerLogin) {
+        // Owner-login deployment (owner's final decision 2026-11-04): ONE login, no .env.migrate. The owner-login contract
+        // (one identical PG_DATABASE_URL, no second identity) is scripts/compose-owner-login.cjs; here: nothing reads it.
+        check(envOf(migrate).PG_DATABASE_URL !== SENTINEL_URL, `${rel}: ${migrateName} does not read .env.migrate (owner login)`);
+        if (raw) check(!namesMigrateFile(migrateName), `${rel}: ${migrateName} names no .env.migrate (owner login)`);
+      } else {
+        check(envOf(migrate).PG_DATABASE_URL === SENTINEL_URL, `${rel}: ${migrateName} receives PG_DATABASE_URL from .env.migrate`);
+        if (raw) check(namesMigrateFile(migrateName), `${rel}: ${migrateName} names .env.migrate as its env_file`);
+      }
       check(String(migrate.restart ?? 'no') === 'no', `${rel}: ${migrateName} restart is "no"`);
     }
     for (const name of runtimeNames) {
@@ -199,7 +208,8 @@ function main() {
     if (production && migrate) {
       check(!migrate.profiles || migrate.profiles.length === 0, `${rel}: ${migrateName} has no profile (it always runs first)`);
       check(JSON.stringify(migrate.command ?? []).includes('deploy-prepare.js'), `${rel}: ${migrateName} runs deploy-prepare.js`);
-      check(services['rab-worker']?.environment?.CREWFLOW_PROVISIONER_ENABLED === 'true', `${rel}: rab-worker keeps CREWFLOW_PROVISIONER_ENABLED "true" (gate G2 not passed)`);
+      if (ownerLogin) check(!('CREWFLOW_PROVISIONER_ENABLED' in (services['rab-worker']?.environment ?? {})), `${rel}: rab-worker sets no separated provisioner switch (in-process provisioning, owner login)`);
+      else check(services['rab-worker']?.environment?.CREWFLOW_PROVISIONER_ENABLED === 'true', `${rel}: rab-worker keeps CREWFLOW_PROVISIONER_ENABLED "true" (gate G2 not passed)`);
     }
   }
   console.log(`[compose-isolation] ${failures === 0 ? 'all checks passed' : `${failures} check(s) failed`}`);
