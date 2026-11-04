@@ -82,8 +82,10 @@ export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): stri
 
 /**
  * Renders a report PDF natively. Resolves to the PDF bytes; a render that does not finish within
- * `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError`. An unknown kind is refused (fail closed); a native
- * failure is thrown as is (T3: no fallback; the job's normal failure / retry path handles it).
+ * `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError` (step `native-render`, enforced by the render pool,
+ * which terminates the render thread; a timer here could not stop a thread). Native failures carry a stable `code`
+ * (runtime/render-protocol.ts). An unknown kind is refused (fail closed); a native failure is thrown as is (T3: no
+ * fallback; the job's normal failure / retry path handles it).
  */
 export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
   pdfRendererMode(env);
@@ -93,5 +95,5 @@ export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEn
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
-  return withRenderStepTimeout('native', PDF_RENDER_STEP_TIMEOUT_MS, renderNativePdf(doc as NativeReportDocument));
+  return renderNativePdf(doc as NativeReportDocument);
 }

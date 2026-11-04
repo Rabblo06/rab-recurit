@@ -3,6 +3,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 
+import { Logger } from '@nestjs/common';
 import { Document, Page, renderToBuffer } from '@react-pdf/renderer';
 import jsQR from 'jsqr';
 
@@ -15,14 +16,17 @@ import { inspectPdf as inspectRaw } from '../../../__tests__/helpers/pdf-inspect
 
 /** pdf-inspect, reading pdfkit's indirect page /Resources too (see inlinePageResources). */
 const inspectPdf = (pdf: Buffer) => inspectRaw(inlinePageResources(pdf));
-import { DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
-import { breakOnlyOverlongTokens, ensureNativePdfFonts, OVERLONG_TOKEN_CHARS } from './fonts';
+import { collapseWhitespace, DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
+import { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './fonts';
 import { renderNativePdf } from './render-native';
+import { shutdownRenderPool } from './runtime/render-pool';
 
 /**
  * Native renderer (PDF renderer migration P1) — security properties, without a browser or a database:
  *   - user-supplied text is printed literally, never interpreted as markup (react-pdf lays out text; there is no HTML,
- *     CSS or script engine), including RTL / bidi overrides, zero-width characters, emoji and very long names;
+ *     CSS or script engine), including entities, URLs, Hebrew, Latin diacritics and very long names; characters that
+ *     cannot be printed visibly (bidi controls, zero-width, C0 controls, emoji, unsupported scripts) are replaced by a
+ *     visible marker by the render pool (owner decision F1), with counts only in the log, never the value;
  *   - nothing leaves the process: a counting TCP listener that every hostile URL points at receives no connection and
  *     no http(s) request is made while rendering (positive control: a real fetch IS counted);
  *   - only the expected image (the 166x70 logo) is embedded, whatever URLs the text contains;
@@ -56,10 +60,10 @@ afterAll(async () => {
   await new Promise<void>((resolve) => listener.server.close(() => resolve()));
 });
 
-type HostileKey = 'script' | 'img' | 'link' | 'entity' | 'jsUrl' | 'file' | 'css' | 'rtlArabic' | 'rtlHebrew' | 'bidiOverride' | 'zeroWidth' | 'emoji' | 'long' | 'control';
+type PrintableKey = 'script' | 'img' | 'link' | 'entity' | 'jsUrl' | 'file' | 'css' | 'rtlHebrew' | 'latin' | 'long';
 
-/** Hostile values; URLs point at the counting listener. Invisible characters are written as escapes on purpose. */
-function hostile(): Readonly<Record<HostileKey, string>> {
+/** Hostile values the renderer must PRINT literally; URLs point at the counting listener. */
+function hostile(): Readonly<Record<PrintableKey, string>> {
   const o = listener.origin;
   return {
     script: `<script>fetch("${o}/script")</script>`,
@@ -69,17 +73,33 @@ function hostile(): Readonly<Record<HostileKey, string>> {
     jsUrl: 'javascript:alert(1)',
     file: 'file:///etc/passwd',
     css: `<style>@import url(${o}/i.css)</style>`,
-    rtlArabic: 'مرحبا بالعالم',
-    rtlHebrew: 'שלום עולם',
-    bidiOverride: 'abc‮dcba‬ xyz ⁦isolate⁩',
-    zeroWidth: 'Zero​Width‌‍Join﻿BOM',
-    emoji: `Party \u{1F389} Staff \u{1F469}‍\u{1F373} ${o}/emoji.png`,
+    rtlHebrew: '\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd',
+    latin: '\u0141ukasz \u017B\u00f3\u0142\u0107 \u00b7 \u00d1and\u00fa \u2014 \u201cquoted\u201d \u2026 \u20ac\u00a3$',
     long: 'Wolfeschlegelsteinhausenbergerdorff'.repeat(9),
-    control: 'Tab\there\nNewline',
   };
 }
 
-/** Every printed field of the final timesheet carries hostile text. */
+/**
+ * Characters the render pool cannot print visibly (owner decision F1, runtime/glyph-coverage.ts): each is REPLACED by the
+ * visible marker U+25A1, the render still succeeds, and only counts are logged. Without this react-pdf would draw nothing
+ * (or reorder text, for bidi controls). TAB is normalised to a space (not counted). Invisible characters are written as
+ * escapes on purpose. [label, value, markers expected]
+ */
+const UNPRINTABLE: ReadonlyArray<readonly [string, string, number]> = [
+  ['bidi override (U+202E, U+202C)', 'abc\u202edcba\u202c xyz', 2],
+  ['bidi isolate (U+2066, U+2069)', 'a\u2066isolated\u2069b', 2],
+  ['zero-width space (U+200B)', 'Zero\u200bWidth', 1],
+  ['zero-width joiner (U+200D)', 'Join\u200dHere', 1],
+  ['byte-order mark (U+FEFF)', 'BOM\ufeffHere', 1],
+  ['carriage return alone', 'Line\rBreak', 1],
+  ['NUL', 'Nul\u0000Here', 1],
+  ['emoji (no font draws it)', 'Party \u{1F389}', 1],
+  ['Arabic (no glyphs in the font stack)', '\u0645\u0631\u062d\u0628\u0627', 5],
+];
+
+const MARKER = '\u25a1';
+
+/** Every printed field of the final timesheet carries printable hostile text. */
 function hostileTimesheet(): FinalTimesheetData {
   const H = hostile();
   const values = Object.values(H);
@@ -90,13 +110,13 @@ function hostileTimesheet(): FinalTimesheetData {
     contactName: H.jsUrl,
     contactPhone: H.file,
     workspaceName: H.css,
-    notes: `${H.entity} ${H.rtlArabic} ${H.bidiOverride}`,
+    notes: `${H.entity} ${H.latin}`,
     unsigned: false,
     finalisedByName: H.rtlHebrew,
     finalisedAt: '2026-10-21T09:30:00.000Z',
-    signedOffName: H.zeroWidth,
+    signedOffName: H.latin,
     breakConfirmed: true,
-    staff: staffRows(values.length, (i) => values[i]!).map((s, i) => ({ ...s, staffRef: i % 2 ? H.emoji : H.long, roleName: H.control })),
+    staff: staffRows(values.length, (i) => values[i]!).map((s, i) => ({ ...s, staffRef: i % 2 ? H.css : H.long, roleName: 'Bar Staff' })),
   };
 }
 
@@ -119,6 +139,7 @@ function expectNoNetwork(w: NetworkWatch): void {
 }
 
 afterEach(() => jest.restoreAllMocks());
+afterAll(() => shutdownRenderPool());
 
 describe('network detector (positive control)', () => {
   it('counts a real fetch from this process, so a blind detector cannot pass the tests below', async () => {
@@ -128,13 +149,12 @@ describe('network detector (positive control)', () => {
   });
 });
 
-describe('hostile text is printed, never interpreted', () => {
+describe('hostile text is printed, never interpreted (through the render pool)', () => {
   let pdf: Buffer;
   let connections: number;
   let requests: number;
 
   beforeAll(async () => {
-    ensureNativePdfFonts(); // fonts are read from the committed files; only the render itself is observed below
     const watch = watchNetwork();
     pdf = await renderNativePdf({ kind: 'final-timesheet', data: hostileTimesheet() });
     connections = listener.connections - watch.connectionsBefore;
@@ -150,7 +170,7 @@ describe('hostile text is printed, never interpreted', () => {
     const doc = inspectPdf(pdf);
     expect(doc.images).toEqual([LOGO]);
     const raw = pdf.toString('latin1');
-    expect(raw).not.toMatch(/\/URI|\/Launch|\/JavaScript|\/JS\b|\/Annots|\/OpenAction|\/AA\b/);
+    expect(raw).not.toMatch(/\/URI|\/Launch|\/JavaScript|\/JS\b|\/Annots|\/OpenAction|\/AA\b|\/EmbeddedFile|\/AcroForm/);
   });
 
   it.each([
@@ -161,24 +181,44 @@ describe('hostile text is printed, never interpreted', () => {
     ['javascript: URL', 'jsUrl'],
     ['file:// URL', 'file'],
     ['<style>@import', 'css'],
+    ['Latin with diacritics and typographic punctuation', 'latin'],
   ] as const)('%s prints literally, character for character', (_label, key) => {
     expect(strip(inspectPdf(pdf).pageTexts.join(''))).toContain(strip(hostile()[key]));
   });
 
   it('a very long unbroken token is wrapped inside its cell, not drawn over its neighbours, and nothing is dropped', () => {
     const text = strip(inspectPdf(pdf).pageTexts.join(''));
-    // Broken across lines (react-pdf draws a "-" at each forced break: owner-visible delta, see fonts.ts) ...
+    // Broken across lines (react-pdf draws a "-" at each forced break: owner-visible delta, see word-breaking.ts) ...
     expect(text).not.toContain(hostile().long);
     // ... and every character is still there, in order.
     expect(text.replace(/-/g, '')).toContain(hostile().long);
   });
+});
 
-  it('zero-width characters, RTL scripts, bidi overrides and emoji do not break the render', () => {
-    const text = inspectPdf(pdf).text;
-    expect(text).toContain('Zero');
-    expect(text).toContain('BOM');
-    expect(text).toContain('Party');
-    expect(text).toContain('xyz');
+describe('characters that cannot be printed visibly become a visible marker, never a blank (F1)', () => {
+  it.each(UNPRINTABLE)('%s → the render succeeds with the marker in place; the log carries counts only', async (_label, value, markers) => {
+    const watch = watchNetwork();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes: `Before ${value} after` };
+    const pdf = await renderNativePdf({ kind: 'final-timesheet', data });
+    const text = strip(inspectPdf(pdf).pageTexts.join(''));
+    const at = text.indexOf('Before');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const printed = text.slice(at, text.indexOf('after', at) + 'after'.length);
+    expect([...printed].filter((c) => c === MARKER)).toHaveLength(markers);
+    // Nothing invisible (controls, format characters) reached the text layer.
+    expect(printed).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u);
+    const lines = warn.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes(`${markers} unprintable character(s) replaced by the visible marker`))).toBe(true);
+    for (const l of lines) expect(l).not.toContain(value);
+    expectNoNetwork(watch);
+  });
+
+  it('TAB is laid out as a space (normalised, not a marker)', async () => {
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes: 'Tab\tthere' };
+    const text = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data })).text; // whitespace collapsed
+    expect(text).toContain('Tab there');
+    expect(text).not.toContain(MARKER);
   });
 });
 
@@ -210,6 +250,41 @@ describe('F-PDF-1: an unbroken 1,000-character token in the notes stays inside t
     expect(all).toContain(strip(vm.signOffHeading));
     for (const line of vm.signOff) expect(all).toContain(strip(line.text));
     expect(all.split(strip(vm.totalWorked)).length - 1).toBe(1);
+  });
+});
+
+/**
+ * I-9 long-text (PDF equality harness): a note taller than a page. A react-pdf node that cannot wrap and is taller than
+ * the page is drawn unsplit and loses everything past the page (MEASURED: the note, both counts and every page footer
+ * were missing). The bottom section now starts a new page and continues across pages, as Chromium does with its
+ * page-break-inside: avoid block. Every paragraph, the counts and "Page n of N" on every page must be printed.
+ */
+describe('a note taller than a page is printed in full (I-9 long-text)', () => {
+  it('every paragraph, the corrected / missing counts, the sign-off and "Page n of N" on every page', async () => {
+    const notes = Array.from({ length: 56 }, (_, k) => `Paragraph ${k + 1}: arrive via the loading bay, sign the visitor book, collect lanyards from security, and brief the team on allergens, fire exits and the running order.`).join('\n\n');
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes };
+    const vm = buildFinalTimesheetViewModel(data);
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data }));
+    const all = strip(doc.pageTexts.join(''));
+    // Page-break-straddling paragraphs: drop each page's footer ("<left> <generated> · Page n of N") before joining.
+    // The NOTES column, in order: drop each page's footer and the MANAGER SIGN-OFF column (pdfkit writes one column after
+    // the other, so on the page where the section starts the sign-off text sits between two halves of a paragraph).
+    const other = [strip(vm.footer.left), strip(vm.signOffHeading), ...vm.signOff.map((l) => strip(l.text)), strip(vm.totalWorked)];
+    const body = doc.pageTexts
+      .map((t, i) => [...other, `${strip(vm.footer.generated)}·Page${i + 1}of${doc.pageCount}`].reduce((s, x) => s.split(x).join(''), strip(t)))
+      .join('');
+    for (let k = 1; k <= 56; k++) expect(body).toContain(strip(`Paragraph ${k}: arrive via the loading bay`));
+    expect(all).toContain(strip(vm.counts));
+    expect(all.split(strip(vm.totalWorked)).length - 1).toBe(1);
+    expect(doc.pageCount).toBeGreaterThan(1);
+    doc.pageTexts.forEach((t, i) => expect(strip(t)).toContain(`·Page${i + 1}of${doc.pageCount}`));
+  });
+});
+
+describe('whitespace is laid out like the Chromium templates (HTML white-space: normal)', () => {
+  it('collapses runs of ASCII whitespace, keeps NBSP', () => {
+    expect(collapseWhitespace('a\n\nb \t c\r\nd\fe')).toBe('a b c d e');
+    expect(collapseWhitespace('x\u00a0\u00a0y')).toBe('x\u00a0\u00a0y');
   });
 });
 
@@ -253,7 +328,6 @@ describe('QR component', () => {
   it('prints exactly the QR service PNG: the embedded image decodes to the same payload', async () => {
     const payload = 'rab-qr-v1.fixture-shift-0000.fixture-signature-ABCDEF';
     const png = await new QrImageService().generatePng(payload);
-    ensureNativePdfFonts();
     const watch = watchNetwork();
     const pdf = await renderToBuffer(h(Document, null, h(Page, { size: 'A4' }, h(QrCode, { png, sizePx: 128 }))) as Parameters<typeof renderToBuffer>[0]);
     expectNoNetwork(watch);
