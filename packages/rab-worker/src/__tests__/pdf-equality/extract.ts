@@ -127,7 +127,20 @@ type RunBox = Pick<TextRun, 'text' | 'x' | 'endX' | 'y' | 'size'>;
  * checker fails it for the native renderer (one of the D6 conditions: no overlap) and reports it for Chromium.
  */
 export function overlappingRuns(runs: readonly RunBox[]): TextOverlap[] {
-  const boxes = runs
+  // Producers draw text glyph by glyph or word by word, with kerning as a pen adjustment between runs ("Y" then "," pulled
+  // 1 pt left under it). So first rebuild what was drawn as ONE piece of text: runs CONSECUTIVE in the content stream, on
+  // the same baseline, each starting where the pen left off (within a quarter em either way: a kern or a word space).
+  // A run that starts further back (another cell, a footer, a second line drawn into this one) is never merged, so a real
+  // overlap still compares two separate pieces.
+  const merged: RunBox[] = [];
+  for (const r of runs) {
+    const cur = merged[merged.length - 1];
+    const size = Math.max(r.size, cur?.size ?? 0, 1);
+    if (cur && Math.abs(cur.y - r.y) <= 0.01 * size && r.x >= cur.endX - 0.25 * size && r.x <= cur.endX + 0.25 * size) {
+      merged[merged.length - 1] = { text: cur.text + r.text, x: cur.x, endX: Math.max(cur.endX, r.endX), y: cur.y, size: Math.max(cur.size, r.size) };
+    } else merged.push({ text: r.text, x: r.x, endX: r.endX, y: r.y, size: r.size });
+  }
+  const boxes = merged
     .map((r) => {
       // The ink, not the advance of blank edges: trim them in proportion to the characters.
       const chars = [...r.text];

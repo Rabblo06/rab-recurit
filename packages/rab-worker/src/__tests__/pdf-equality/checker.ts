@@ -544,7 +544,10 @@ export function compareExtractions(
   const tolerance = (options.pageCountTolerance ?? 0) + d4;
   const expectB = options.expectB ?? expect;
   const ref = options.referenceB;
-  if (!ref && expectB.values.some((v, i) => v.value !== expect.values[i]?.value)) {
+  // Printed text, not stored text: F1 turns CRLF into LF, which prints the same line break, so a value that differs only
+  // in the form of its line breaks is not a printed difference (a □, a dropped or an added character still is).
+  const asPrinted = (v: string | undefined) => (v === undefined ? undefined : v.replace(/\r\n/g, '\n'));
+  if (!ref && (expectB.values.length !== expect.values.length || expectB.values.some((v, i) => asPrinted(v.value) !== asPrinted(expect.values[i]?.value)))) {
     throw new Error('compareExtractions: expectB changes printed values, so a referenceB is required (the two renders are meant to differ)');
   }
   const hyphensA = (options.forcedBreakHyphens ?? []).includes(na);

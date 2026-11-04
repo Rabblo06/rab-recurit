@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { pathToFileURL } from 'url';
 
+import { openPdf, PdfDict, PdfString } from '../helpers/pdf-layout';
 import { checkAgainstInput } from './checker';
 import { expectationFor, ReportDocument } from './documents';
 import { compact } from './extract';
@@ -253,7 +254,17 @@ if ('unavailable' in native) {
       expect(a.equals(b)).toBe(true);
       expect(a.equals(c)).toBe(true);
       if (f.doc.kind !== 'approved-shift-statement') throw new Error('expected a statement');
-      expect(a.toString('latin1')).toContain(`/CreationDate (${pdfDate(f.doc.data.generatedAt)}`);
+      // The document information dictionary (pdfkit writes its values as indirect objects): every CreationDate / ModDate,
+      // resolved, is exactly generatedAt — never the wall clock.
+      const reader = openPdf(a);
+      const dates = reader
+        .objectNumbers()
+        .map((n) => reader.value(n))
+        .filter((v): v is PdfDict => v instanceof Map && (v.has('CreationDate') || v.has('ModDate')))
+        .flatMap((info) => ['CreationDate', 'ModDate'].filter((k) => info.has(k)).map((k) => reader.resolve(info.get(k)) as PdfString | undefined))
+        .map((s) => (s && Buffer.isBuffer(s.bytes) ? s.bytes.toString('latin1') : String(s)));
+      expect(dates.length).toBeGreaterThan(0);
+      expect(new Set(dates)).toEqual(new Set([pdfDate(f.doc.data.generatedAt)]));
     });
 
     // ─── replaces render-pdf-hardening (e) timeouts, and the bounded browser lifetime ─────────────────────────────────
@@ -327,8 +338,16 @@ if ('unavailable' in native) {
           } else packages.add(spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]!);
         }
       };
-      walk(join(root, 'queues', 'rab-reports', 'render-pdf.util.ts'));
-      expect(seen.size).toBeGreaterThan(5); // the native kit was really walked
+      // The seam, plus what the render THREAD loads by path rather than by import: its entry and the document registry
+      // (DEFAULT_DOCUMENTS_MODULE), which pulls in every layout.
+      const reports = join(root, 'queues', 'rab-reports');
+      for (const entry of [join(reports, 'render-pdf.util.ts'), join(reports, 'native', 'runtime', 'render-thread.ts'), join(reports, 'native', 'native-documents.ts')]) walk(entry);
+      // The walk really reached the kit (not an empty or truncated walk): every layout and the shared components.
+      const walked = [...seen].map((f) => f.replace(/\\/g, '/').split('/rab-reports/')[1]);
+      for (const file of ['render-pdf.util.ts', 'native/render-native.ts', 'native/runtime/render-pool.ts', 'native/runtime/render-thread.ts', 'native/native-documents.ts', 'native/final-timesheet.native.ts', 'native/pre-shift-report.native.ts', 'native/approved-shift-statement.native.ts', 'native/document-components.ts']) {
+        expect(walked).toContain(file);
+      }
+      expect(packages).toContain('@react-pdf/renderer'); // and its packages were recorded
       const browser = [...packages].filter((p) => /^(playwright|playwright-core|chromium-bidi|puppeteer)/.test(p));
       if (NATIVE_ONLY || chromiumUnavailable()) expect(browser).toEqual([]);
       else expect(browser).toContain('playwright'); // pre-removal: the Chromium path is still there (positive control)
