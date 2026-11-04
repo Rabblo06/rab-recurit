@@ -1,7 +1,7 @@
 import { Document, Text, View } from '@react-pdf/renderer';
 import { ReactElement, ReactNode } from 'react';
 
-import { PreShiftReportRowView, PreShiftReportViewModel } from '@rab/server/modules/attendance/templates/pre-shift-report.view-model';
+import type { PreShiftReportRowView, PreShiftReportViewModel } from '@rab/server/modules/attendance/templates/pre-shift-report.view-model';
 
 import {
   BottomSection,

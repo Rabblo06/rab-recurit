@@ -1,10 +1,10 @@
-import { Image, Page, Styles, Text as PdfText, View } from '@react-pdf/renderer';
-import { ComponentProps, createElement, Fragment, ReactElement, ReactNode } from 'react';
+import { Image, Page, Styles, Text as PdfText, TextProps, View } from '@react-pdf/renderer';
+import { createElement, Fragment, PropsWithChildren, ReactElement, ReactNode } from 'react';
 
 import type { ShiftDetailsView } from '@rab/server/modules/attendance/templates/adolphus-document';
 import { ADOLPHUS_LOGO_DATA_URI } from '@rab/server/modules/attendance/templates/adolphus-logo';
 
-import { FONT_FAMILY } from './fonts';
+import { FONT_FAMILY_STACK } from './fonts';
 
 /**
  * Shared building blocks for the native (Chromium-free) PDF renderer — PDF renderer migration P1. ONE place for the
@@ -40,11 +40,23 @@ export type Style = Styles[string];
 export const IN_WORD_BREAK_PENALTY = 10000;
 
 /**
- * The ONLY text primitive layouts use (instead of react-pdf's `Text`): the same component with IN_WORD_BREAK_PENALTY.
- * Children are plain strings (view-model values), never markup.
+ * HTML's `white-space: normal`, which the Chromium templates print with: every run of ASCII whitespace (space, TAB, LF,
+ * CR, FF) is one space; NBSP and other Unicode spaces are kept. Applied to every string a layout prints, so both
+ * renderers lay out the same characters (MEASURED: a note's blank lines are collapsed by Chromium; printing them natively
+ * made 56 paragraphs out of Chromium's one, and 7 pages instead of 5). Preserving line breaks in notes would be a
+ * template change for BOTH renderers (`white-space: pre-line`), an owner decision.
  */
-export function Text(props: ComponentProps<typeof PdfText>): ReactElement {
-  return h(PdfText, { hyphenationPenalty: IN_WORD_BREAK_PENALTY, ...props });
+export function collapseWhitespace(text: string): string {
+  return text.replace(/[ \t\n\r\f]+/g, ' ');
+}
+
+/**
+ * The ONLY text primitive layouts use (instead of react-pdf's `Text`): the same component with IN_WORD_BREAK_PENALTY, and
+ * string children collapsed like HTML (`collapseWhitespace`). Children are plain strings (view-model values), never markup.
+ */
+export function Text(props: PropsWithChildren<TextProps>): ReactElement {
+  const children = typeof props.children === 'string' ? collapseWhitespace(props.children) : props.children;
+  return h(PdfText, { hyphenationPenalty: IN_WORD_BREAK_PENALTY, ...props }, children);
 }
 
 /** CSS px → PDF pt (96 px = 72 pt), so sizes read exactly as in DOCUMENT_CSS. */
@@ -101,11 +113,13 @@ export function pngBytes(data: Buffer): ImageBytes {
 // ─── typography ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. No `lineHeight` here: react-pdf resolves a unitless line
+ * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. The family is the font stack (fonts.ts; with the render
+ * runtime: Liberation Sans, then the Noto Sans fallback): the glyph check accepts exactly what this stack draws, so no
+ * layout may name a family of its own. No `lineHeight` here: react-pdf resolves a unitless line
  * height against the font size where it is declared and inherits the absolute value, which would squash larger text;
  * left unset, every text uses the font's own line spacing, as Chromium's `line-height: normal` does.
  */
-export const BASE_TEXT = Object.freeze({ fontFamily: FONT_FAMILY, fontSize: px(11), color: COLOR.ink });
+export const BASE_TEXT = Object.freeze({ fontFamily: [...FONT_FAMILY_STACK], fontSize: px(11), color: COLOR.ink });
 
 // ─── page ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -322,15 +336,35 @@ export function SignOffBlock(props: { heading: string; paragraphs: Paragraph[] }
   return h(
     View,
     null,
-    h(Text, { style: { fontSize: px(10.5), fontWeight: 700, letterSpacing: px(0.3), marginBottom: px(8) } }, props.heading),
+    h(Text, { minPresenceAhead: px(40), style: { fontSize: px(10.5), fontWeight: 700, letterSpacing: px(0.3), marginBottom: px(8) } }, props.heading),
     ...props.paragraphs.map((p, i) => h(Text, { key: `p${i}`, style: { marginBottom: px(6), color: p.muted ? COLOR.muted : undefined } }, p.text)),
   );
 }
 
-/** Side-by-side blocks that never split across a page (the template's `.bottom { page-break-inside: avoid }`). */
-export function BottomSection(props: { children: ReactNode[] }): ReactElement {
+/**
+ * Side-by-side blocks (40 px gap, fixed equal shares of the width: a long word can never widen one column and push the
+ * other off the page, F-PDF-1). Like the template's `.bottom { page-break-inside: avoid }`, the section is kept on one
+ * page — EXCEPT when its text may be taller than a page (`mayBreak`, see `mayExceedUnsplitHeight`): a react-pdf node
+ * that cannot wrap and is taller than the page is drawn unsplit and everything past the page is lost (MEASURED: a 10 KB
+ * note dropped the note, the counts and the page footers). Then, as Chromium does with an avoid-block taller than a
+ * page, the section starts on a new page and continues across pages.
+ */
+export function BottomSection(props: { children: ReactNode[]; mayBreak?: boolean }): ReactElement {
   const spaced = props.children.map((c, i) => h(View, { key: `b${i}`, style: { flexGrow: 1, flexBasis: 0, marginLeft: i === 0 ? 0 : px(40) } }, c));
-  return h(View, { wrap: false, style: { flexDirection: 'row', marginTop: px(22) } }, ...spaced);
+  const keep = props.mayBreak ? { wrap: true, break: true } : { wrap: false };
+  return h(View, { ...keep, style: { flexDirection: 'row', marginTop: px(22) } }, ...spaced);
+}
+
+/**
+ * Layout-only estimate (no business rule): could these paragraphs, in a column `columnPt` wide at `fontPt`, be taller
+ * than `maxPt`? Deliberately pessimistic (assumes wide glyphs: 0.62 em per character, every newline a new line, 1.3
+ * line spacing), so a section that might not fit is allowed to break rather than lose text. Used for BottomSection.
+ */
+export function mayExceedUnsplitHeight(paragraphs: readonly string[], columnPt: number, fontPt: number, maxPt: number): boolean {
+  const charsPerLine = Math.max(1, Math.floor(columnPt / (fontPt * 0.62)));
+  let lines = 0;
+  for (const p of paragraphs) for (const line of p.split(/\n/)) lines += Math.max(1, Math.ceil(Array.from(line).length / charsPerLine));
+  return lines * fontPt * 1.3 + paragraphs.length * px(6) > maxPt;
 }
 
 // ─── QR ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
