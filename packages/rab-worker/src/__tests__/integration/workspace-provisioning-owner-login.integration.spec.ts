@@ -296,7 +296,12 @@ describeIfDb('T4: in-process workspace provisioning on the owner login (integrat
   });
 
   it('7. permission failures: a login that cannot SET crewflow, and crewflow_app, are refused before any cycle', async () => {
-    for (const url of [withUser(process.env.TEST_DATABASE_URL!, noSetRole, noSetPassword), process.env.TEST_DATABASE_URL!]) {
+    // The no-SET login always; crewflow_app only where the harness provides it (a separated-built fixture: on an owner-login
+    // database TEST_DATABASE_URL IS the owner login, and crewflow_app has no password).
+    const refusedUrls = [withUser(process.env.TEST_DATABASE_URL!, noSetRole, noSetPassword)];
+    if (process.env.TEST_DATABASE_SEPARATED_APP_URL) refusedUrls.push(process.env.TEST_DATABASE_SEPARATED_APP_URL);
+    else if (!process.env.TEST_DATABASE_URL!.includes('crewflow_owner')) refusedUrls.push(process.env.TEST_DATABASE_URL!);
+    for (const url of refusedUrls) {
       const client = new Client({ connectionString: url });
       await client.connect();
       try {
