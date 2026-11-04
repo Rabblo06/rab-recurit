@@ -31,10 +31,19 @@ function parseObjects(pdf: Buffer): Map<number, PdfObject> {
       const dataStart = bodyStart + streamAt + header.index + header[0].length;
       const dataEnd = text.indexOf('endstream', dataStart);
       const dict = body.slice(0, streamAt + 2);
-      let raw = pdf.subarray(dataStart, dataEnd);
-      // Trailing EOL before `endstream` is not part of the data.
-      if (raw.length && raw[raw.length - 1] === 0x0a) raw = raw.subarray(0, raw.length - 1);
-      if (raw.length && raw[raw.length - 1] === 0x0d) raw = raw.subarray(0, raw.length - 1);
+      // A direct /Length is authoritative when `endstream` really follows it. Stripping the trailing EOL instead also
+      // strips a data byte when compressed data happens to end in 0x0d; that font's ToUnicode map is then lost and every
+      // glyph of the font decodes as U+FFFD. Same rule as the full reader on worker/pdf-inspectors (#54).
+      const len = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+      let raw: Buffer;
+      if (len && /^\s*endstream/.test(text.slice(dataStart + Number(len[1]), dataStart + Number(len[1]) + 12))) {
+        raw = pdf.subarray(dataStart, dataStart + Number(len[1]));
+      } else {
+        raw = pdf.subarray(dataStart, dataEnd);
+        // Trailing EOL before `endstream` is not part of the data.
+        if (raw.length && raw[raw.length - 1] === 0x0a) raw = raw.subarray(0, raw.length - 1);
+        if (raw.length && raw[raw.length - 1] === 0x0d) raw = raw.subarray(0, raw.length - 1);
+      }
       let stream: Buffer = raw;
       if (/\/FlateDecode/.test(dict)) {
         try {
