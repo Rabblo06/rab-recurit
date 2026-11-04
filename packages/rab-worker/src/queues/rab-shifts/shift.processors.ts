@@ -1,20 +1,48 @@
+import { Optional } from '@nestjs/common';
+
+import { TimerTriggerQueueService } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
+import { TIMER_TRIGGER_ARM_HORIZON_INTERVALS } from '@rab/server/engine/worker-shared/timer-trigger.contract';
+import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { SCAN_QUEUES } from '../../core/scheduler/queue-registry';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runAttendanceMonitorCycle } from './attendance-monitor.job';
 import { runLateClockInCycle } from './late-clock-in.job';
 import { runShiftCancellationFollowupCycle } from './shift-cancellation-followup.job';
-import { runShiftMonitorCycle } from './shift-monitor.job';
+import { armShiftTimerTriggers } from '../rab-timer-triggers/timer-trigger-arming';
+import { discoverShiftMonitorInWorkspace, processShiftMonitorDiscoveries, runShiftMonitorCycle } from './shift-monitor.job';
 
 /** Thin adapters — the pre-migration main.ts loop bodies, verbatim (see rab-email/email.processors.ts). */
 @Processor(SCAN_QUEUES.shifts)
 export class ShiftScanProcessor {
-  constructor(private readonly deps: WorkerDependencies) {}
+  constructor(
+    private readonly deps: WorkerDependencies,
+    // Phase D-Q4b: no-show / late clock-in arming. Optional so unit constructions keep compiling (absent ⇒ never arms).
+    @Optional() private readonly timerTriggers?: TimerTriggerQueueService,
+  ) {}
 
   @Process('shift-monitor')
   async shiftMonitor(): Promise<void> {
-    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
-    const result = await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('CLOCK_IN_EARLY_MINUTES'));
+    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger, timerTriggerOutcomes } = this.deps.get();
+    const clockInEarlyMinutes = environmentService.get('CLOCK_IN_EARLY_MINUTES');
+    const triggers = this.timerTriggers;
+    const arming = Boolean(triggers && (triggers.enabled('no-show') || triggers.enabled('late-clock-in')));
+    // WORKER_TIMER_TRIGGERS=off (default), or neither shift kind enabled: exactly the pre-D-Q4b call.
+    // Otherwise the same two steps runShiftMonitorCycle runs (discover, then process), with D-Q4b's arming in between: it
+    // reuses the discovery rows (no extra query), never throws, and the processing that follows is unchanged.
+    const result = !arming
+      ? await runShiftMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, clockInEarlyMinutes)
+      : await (async () => {
+          const discoveries = await discoverInWorkspaces(runtimeDataSource, tenantContext, discoverShiftMonitorInWorkspace);
+          const armed = await armShiftTimerTriggers(triggers!, discoveries.flatMap((d) => d.assignments), {
+            nowMs: Date.now(),
+            horizonMs: environmentService.get('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS') * 1000 * TIMER_TRIGGER_ARM_HORIZON_INTERVALS,
+            lateClockInGraceMinutes: environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
+            recordOutcome: timerTriggerOutcomes,
+          }).catch(() => ({ armed: 0, failed: 0 }));
+          if (armed.failed) logger.warn(`shift monitor: timer-trigger arming failed for ${armed.failed} trigger(s); the scans are the backstop`);
+          return processShiftMonitorDiscoveries(tenantContext, { notificationService, auditService }, clockInEarlyMinutes, discoveries);
+        })();
     if (result.remindersSent || result.noShowsFlagged) {
       logger.log(`shift monitor: reminders=${result.remindersSent} noShows=${result.noShowsFlagged}`);
     }

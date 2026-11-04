@@ -378,6 +378,30 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       expect((await offerOf(a, offer.id)).status).toBe(OfferStatus.PENDING);
     });
 
+    it('POOL (D-Q4d): a burst of 20 due triggers through one concurrency-2 consumer holds at most 2 extra runtime connections', async () => {
+      const fx = await seedFx('dq4bPool');
+      const pool = (dataSource.driver as unknown as { master: { totalCount: number; idleCount: number; waitingCount: number } }).master;
+      const busy = () => pool.totalCount - pool.idleCount;
+      const baseline = busy();
+      const payloads: TimerTriggerJobData[] = [];
+      for (let i = 0; i < 20; i++) payloads.push(await makeDue(fx, (await sendOffer(fx)).offer.id));
+      workers.push(...consumerFor('on').values());
+      let peak = 0;
+      let peakWaiting = 0;
+      const sampler = setInterval(() => {
+        peak = Math.max(peak, busy());
+        peakWaiting = Math.max(peakWaiting, pool.waitingCount);
+      }, 5);
+      const jobs = await Promise.all(payloads.map((p) => triggers.add('offer-expiry-trigger', p, { jobId: `pool.${p.subjectId}` })));
+      for (const j of jobs) await until(async () => ((await j.getState()) === 'completed' ? true : undefined));
+      clearInterval(sampler);
+      // Measured, reported in the PR: the consumer adds at most its concurrency (2) checked-out connections; nothing waits.
+      // eslint-disable-next-line no-console
+      console.log(`[dq4b-pool] baseline busy=${baseline} peak busy=${peak} peak waiting=${peakWaiting} pool max=${(dataSource.driver as unknown as { master: { options: { max: number } } }).master.options.max}`);
+      expect(peak - baseline).toBeLessThanOrEqual(2);
+      for (const p of payloads) expect((await offerOf(fx, p.subjectId)).status).toBe(OfferStatus.EXPIRED);
+    });
+
     it('EARLY by ≤ 5 min: re-delayed once to due + 1 s, then acts', async () => {
       const fx = await seedFx('dq4bRedelay');
       const { offer } = await sendOffer(fx);

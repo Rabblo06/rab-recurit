@@ -5072,3 +5072,40 @@ shift report scheduler, final timesheet) find their work: ONE workspace walk per
   is taken after the shared walk, so a second replica may repeat a member's read-only discovery and then skip it.
 - **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
   worker_event keys and do nothing twice (tested).
+## Phase D-Q4b — delayed-job timer triggers, scans unchanged as backstop (branch phase-d/dq4b-timer-triggers, stacked on phase-d/dq4a-combined-scan, not merged)
+
+Flags `WORKER_TIMER_TRIGGERS=off|shadow|on` (default off = today exactly) and `WORKER_TIMER_TRIGGER_KINDS` (OD-3: on one
+kind at a time). No migration, no role, grant, RLS, definer or posture change; no payroll, attendance, staffing or
+permission rule change (same windows, same outcomes; with `on` a transition may happen EARLIER inside its existing window,
+plan §2.3 A2 — that is what `shadow` measures). Owner approval OD-3 / OD-4, 2026-11-04.
+
+- **Asset:** the timed transitions on another person's records — offer expiry (`job_offer`), manager-confirmation
+  auto-confirm, provisional no-show and late clock-in (`shift_assignment`, `core.worker_event`) and the notifications /
+  audit rows they produce. **Actor:** the API and Worker producers acting on committed rows; anyone able to roll a
+  transaction back, stall or wipe Redis, replay or forge a BullMQ job, or run two Workers.
+- **Change:** a new consumer queue `crewflow-timer-triggers` (legacy `bull` prefix, OD-4; organisation scope; payload
+  `{organisationId, workspaceId, subjectId, dueAtEpochMs}`; jobId `<kind>.<subjectId>.<dueAtEpochMs>`; concurrency 2).
+  Producers: `OfferService.sendOne` (offer expiry) and `staffAccept` (manager-confirmation wake) through the engine
+  `AfterCommitPublisher` (#35's mechanism, generalised — the notify fast path delegates to it unchanged); the Worker arms
+  no-show / late clock-in from shift-monitor's existing discovery rows (no API scheduling, withdraw or cancel code changed).
+- **Controls:** published only after the outermost commit; any rollback (or savepoint rollback) arms nothing (tested). A
+  refused job (bad id, mismatched scope) never throws into the business transaction. `registeredJob` refuses a missing,
+  system or mismatched organisation scope, extra payload keys and non-scalar values before Redis (tested). The consumer
+  re-checks the payload shape (exactly four keys, three UUIDs, an integer epoch) before any database access and fails
+  closed with UnrecoverableError (tested); it then binds the PAYLOAD organisation/workspace with SET LOCAL
+  (`runScopedForOrg`) and re-reads the subject under FORCE RLS in a READ ONLY transaction — a forged organisation sees no
+  row, another organisation's workspace fails routing or sees no row (ABUSE tests: no-op, offer untouched). Stale (row due
+  time ≠ payload), early (DB clock), duplicate (two replicas, re-adds) triggers are no-ops: `on` runs the scan's OWN
+  per-candidate body (`expireOfferCandidate`, `flagNoShowCandidate`, `flagLateClockInCandidate`; manager confirmation is a
+  wake of the existing definer claim cycle from the Worker only — DBA-01 grants untouched) with the same compare-and-set
+  and `worker_event` UNIQUE key (tested: three concurrent firings → one expiry, one audit row). `shadow` writes nothing
+  (tested: no status, audit, notification, realtime or worker_event row). `off`: no Redis connection, no consumer, no job
+  (tested). Rolling deploy: a new queue name, so a Worker without the consumer never takes a trigger (tested).
+- **Redis:** a lost trigger (wipe, publish failure, Redis down at commit) changes nothing — every backstop scan keeps its
+  interval and code (tested: wipe → scan expires once; Redis down → the business commit is not delayed, nothing armed).
+  Delayed jobs add Redis memory (≈ one job per pending offer / accepted offer / upcoming assignment × 2; ids only).
+- **Residual:** triggers ADD database work (one READ ONLY decision transaction per fired trigger, plus the action
+  transaction in `on`); no load reduction is claimed (owner rule §14.4). A bulk send whose per-recipient savepoint rolls
+  back discards all triggers registered on that transaction (conservative; the scan handles them). The Admin Panel queue
+  view does not list the trigger queue yet. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
+  carries the subject UUID (no personal data).

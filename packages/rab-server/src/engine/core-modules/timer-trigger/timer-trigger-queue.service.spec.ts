@@ -21,10 +21,17 @@ function make(values: Record<string, string | undefined>) {
   const env = { get: (key: string) => (key === 'REDIS_URL' ? UNREACHABLE : values[key]) };
   const service = new TimerTriggerQueueService(env as never);
   const internals = service as unknown as { queue: { add: jest.Mock } | null; connection: unknown };
-  const add = jest.fn(async () => undefined);
+  const add = jest.fn(async (..._args: unknown[]) => undefined);
   if (internals.queue) internals.queue.add = add;
-  // boundedPublish checks the connection status first; stub it as ready so the add mock decides the outcome.
-  if (internals.connection) (internals.connection as { status: string }).status = 'ready';
+  // boundedPublish checks the connection status first: give it a stand-in that reports `ready`, so the add mock decides the
+  // outcome (the real, unreachable client is put back for the bounded shutdown).
+  const real = internals.connection;
+  if (real) internals.connection = { status: 'ready' };
+  const destroy = async () => {
+    internals.connection = real;
+    await settle(service);
+    await service.onModuleDestroy();
+  };
   const subscribers: Sub[] = [];
   const runner = { isReleased: false, isTransactionActive: true };
   const manager = { queryRunner: runner, connection: { subscribers } } as never;
@@ -36,9 +43,14 @@ function make(values: Record<string, string | undefined>) {
     runner.isTransactionActive = false;
     subscribers.forEach((s) => s.afterTransactionRollback({ queryRunner: runner }));
   };
-  return { service, internals, add, subscribers, manager, runner, commit, rollback };
+  return { service, internals, add, subscribers, manager, runner, commit, rollback, destroy };
 }
 const flush = () => new Promise((r) => setImmediate(r));
+/** Lets the unreachable client fail its first connect BEFORE the queue is closed (a closed queue has no error listener). */
+const settle = (service: TimerTriggerQueueService) => {
+  const queue = (service as unknown as { queue: { waitUntilReady(): Promise<unknown> } | null }).queue;
+  return queue ? Promise.race([queue.waitUntilReady().catch(() => undefined), new Promise((r) => setTimeout(r, 1_000))]) : undefined;
+};
 const arm = (over: Partial<TimerTriggerArm> = {}): TimerTriggerArm => ({
   kind: 'offer-expiry',
   organisationId: ORG,
@@ -61,7 +73,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
       h.commit();
       await flush();
       expect(h.subscribers).toHaveLength(0);
-      await h.service.onModuleDestroy();
+      await h.destroy();
     }
   });
 
@@ -83,7 +95,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     expect(opts).toMatchObject({ jobId: `offer-expiry.${OFFER}.${dueAt.getTime()}`, ...bullmqJobOptionsOf(TIMER_TRIGGER_QUEUE_NAME) });
     expect(opts.delay).toBeGreaterThan(48 * 3600_000 - 5_000);
     expect(opts.delay).toBeLessThanOrEqual(48 * 3600_000);
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('rollback (of the whole transaction or a savepoint inside it): nothing is ever added', async () => {
@@ -93,7 +105,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     h.commit();
     await flush();
     expect(h.add).not.toHaveBeenCalled();
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('outside an open transaction nothing is registered (the backstop scan handles it)', async () => {
@@ -101,7 +113,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     expect(h.service.afterCommit({ queryRunner: undefined, connection: { subscribers: [] } } as never, arm())).toBe(false);
     h.runner.isTransactionActive = false;
     expect(h.service.afterCommit(h.manager, arm())).toBe(false);
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('a past due time is added with no delay (fires at once; the consumer decides on the database clock)', async () => {
@@ -109,7 +121,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     expect(await h.service.publishNow(arm({ kind: 'no-show', dueAt: new Date(Date.now() - 60_000) }))).toBe(true);
     const opts = h.add.mock.calls[0]![2] as { delay?: number };
     expect(opts.delay).toBeUndefined();
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('OD-3: a kind not in WORKER_TIMER_TRIGGER_KINDS is off for that kind', async () => {
@@ -121,7 +133,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     h.commit();
     await flush();
     expect(h.add).not.toHaveBeenCalled();
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('an invalid id is refused before Redis and NEVER throws into the business transaction', async () => {
@@ -132,7 +144,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     h.commit();
     await flush();
     expect(h.add).not.toHaveBeenCalled();
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it(`bounded per transaction (${TIMER_TRIGGER_MAX_PER_TRANSACTION}); beyond it the backstop scan handles the subject`, async () => {
@@ -141,7 +153,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     for (let i = 0; i < TIMER_TRIGGER_MAX_PER_TRANSACTION + 5; i++) if (h.service.afterCommit(h.manager, arm({ dueAt: new Date(Date.now() + 60_000 + i) }))) registered++;
     expect(registered).toBe(TIMER_TRIGGER_MAX_PER_TRANSACTION);
     expect(h.subscribers).toHaveLength(1);
-    await h.service.onModuleDestroy();
+    await h.destroy();
   });
 
   it('Redis down: publishNow resolves false quickly; an after-commit publish failure is swallowed (the commit never waits)', async () => {
@@ -156,6 +168,7 @@ describe('TimerTriggerQueueService (D-Q4b producer)', () => {
     runner.isTransactionActive = false;
     expect(() => subscribers.forEach((s) => s.afterTransactionCommit({ queryRunner: runner }))).not.toThrow();
     await new Promise((r) => setTimeout(r, 50));
+    await settle(service);
     await service.onModuleDestroy();
   });
 });

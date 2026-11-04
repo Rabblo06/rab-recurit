@@ -126,7 +126,7 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-stale-turn-sweep')).toBe(false);
   });
 
-  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as QueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
+  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
     expect(bullmqJobOptionsOf(name)).toEqual(PRE_DQ1_JOB_OPTIONS[name]);
     // No job timeout exists in bullmq 5.x; the registry records the absence and never emits one.
     expect(QUEUE_SETTINGS[name].job.timeoutMs).toBeNull();
