@@ -50,6 +50,7 @@ export class ProvisioningIdentityError extends Error {
  */
 export async function actAsProvisioningRole(client: Pick<Client, 'query'>): Promise<'unchanged' | 'set-role'> {
   const { rows } = await client.query<{ who: string; superuser: boolean; can_set: boolean }>(
+    // sql-injection-reviewed: PROVISIONING_ROLE is the module constant 'crewflow'; no request or row data reaches this statement.
     `SELECT current_user::text AS who,
             coalesce((SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user), false) AS superuser,
             EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '${PROVISIONING_ROLE}')
@@ -63,6 +64,7 @@ export async function actAsProvisioningRole(client: Pick<Client, 'query'>): Prom
       `workspace provisioning refuses the login "${me.who}": it cannot act as ${PROVISIONING_ROLE} (the schema-template owner). The owner login needs SET on ${PROVISIONING_ROLE} (M0 §3.1).`,
     );
   }
+  // sql-injection-reviewed: PROVISIONING_ROLE is the module constant 'crewflow', never input (SET ROLE takes no $n parameter).
   await client.query(`SET ROLE ${PROVISIONING_ROLE}`);
   const { rows: after } = await client.query<{ who: string }>('SELECT current_user::text AS who');
   if (after[0]?.who !== PROVISIONING_ROLE) throw new ProvisioningIdentityError(`workspace provisioning: SET ROLE ${PROVISIONING_ROLE} did not take effect.`);
