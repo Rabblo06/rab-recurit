@@ -1,6 +1,6 @@
 # Migration, preflight, backup/restore and rollback plan (owner decision R7)
 
-> **Owner login (2026-11-04).** Releases now run `rab-migrate` on the same `crewflow_owner` login as the API and Worker (no `crewflow_migrator`, no `.env.migrate`, no `DB_TARGET`), with token approval. The release, backup and rollback procedure, including the transition from today's separated deployment, is `OWNER-LOGIN-DEPLOYMENT.md` sections 3 and 5. The role-based sections below describe the separated deployment.
+> **Owner login (2026-11-04).** Releases now run `rab-migrate` on the same `crewflow_owner` login as the API and Worker (no `crewflow_migrator`, no `.env.migrate`, no `DB_TARGET`), with token approval. In production the release step's authority is the deployment identity (`deploy-prepare.js` derives its target from `CREWFLOW_DEPLOYMENT_ENVIRONMENT` and re-derives it after the lock) plus the per-release `CREWFLOW_MIGRATION_APPROVED` token; `rab-migrate` carries no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. This extends security trade-off ST-3 to the release step (`OWNER-LOGIN-DEPLOYMENT.md` section 6). The release, backup and rollback procedure, including the transition from today's separated deployment, is `OWNER-LOGIN-DEPLOYMENT.md` sections 3 and 5. The role-based sections below describe the separated deployment.
 
 Status: **PLAN ONLY, 2026-11-03.** No database was changed for this plan, and nothing here authorises a migration. Each
 environment and each step needs its own owner approval: staging, the temporary OpenShip/Neon database (R4: never
