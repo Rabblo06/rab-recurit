@@ -42,6 +42,7 @@ import { createPushSendProcessor } from '../../queues/rab-push/push-send.process
 import { dispatchPushScope } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
 import { dispatchStatementScope, processShiftStatementJob } from '../../queues/rab-reports/shift-statement.job';
+import type { ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -628,7 +629,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     expect(c1).toMatchObject({ organisationId: m.organisationId, workspaceId: m.workspaceId });
     await dispatchStatementScope(tenantContext, m.organisationId, m.workspaceId!, [recordId], async (d) => void jobs.push(d));
     expect(jobs).toHaveLength(1);
-    const deps = (render: (html: string) => Promise<Buffer>) => ({
+    const deps = (render: (doc: ReportDocument) => Promise<Buffer>) => ({
       tenantContext, files: app.get(FileService), notifications: app.get(NotificationService), audit: app.get(AuditService), render,
     });
     expect(await processShiftStatementJob(jobs[0]!, deps(async () => { throw new Error('renderer crashed'); }))).toBe('failed');

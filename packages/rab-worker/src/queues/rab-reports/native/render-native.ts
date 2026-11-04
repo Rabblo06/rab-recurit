@@ -1,9 +1,10 @@
 import { renderToBuffer } from '@react-pdf/renderer';
 
 import { buildFinalTimesheetViewModel, FinalTimesheetData } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
-
 import { buildPreShiftReportViewModel, PreShiftReportData } from '@rab/server/modules/attendance/templates/pre-shift-report.view-model';
+import { ApprovedShiftStatementData, buildApprovedShiftStatementViewModel } from '@rab/server/modules/payroll/templates/approved-shift-statement.view-model';
 
+import { ApprovedShiftStatementDocument } from './approved-shift-statement.native';
 import { FinalTimesheetDocument } from './final-timesheet.native';
 import { PreShiftReportDocument } from './pre-shift-report.native';
 import { ensureNativePdfFonts } from './fonts';
@@ -18,7 +19,10 @@ import { h } from './document-components';
  * layout receives only that view-model. INTERIM: rendering runs in-process; the render-runtime agent's worker_threads
  * pool (size 2, 30 s terminate, heap cap, empty env, plan §4.2) replaces `renderInProcess` behind this same function.
  */
-export type NativeReportDocument = { kind: 'final-timesheet'; data: FinalTimesheetData } | { kind: 'pre-shift'; data: PreShiftReportData };
+export type NativeReportDocument =
+  | { kind: 'final-timesheet'; data: FinalTimesheetData }
+  | { kind: 'pre-shift'; data: PreShiftReportData }
+  | { kind: 'approved-shift-statement'; data: ApprovedShiftStatementData };
 
 /** Native rendering of one document; resolves to PDF bytes. The caller (renderReportPdf) applies the deadline. */
 export async function renderNativePdf(doc: NativeReportDocument): Promise<Buffer> {
@@ -40,6 +44,13 @@ async function renderInProcess(doc: NativeReportDocument): Promise<Buffer> {
       const vm = buildPreShiftReportViewModel(doc.data);
       // D7: deterministic metadata — the document's own generatedAt, never the wall clock.
       const element = h(PreShiftReportDocument, { vm, creationDate: new Date(doc.data.generatedAt) });
+      return renderToBuffer(element as Parameters<typeof renderToBuffer>[0]);
+    }
+    case 'approved-shift-statement': {
+      // The SAME view-model builder the Chromium template prints from (money via formatPence, stored minutes, org-timezone
+      // dates). D7: deterministic metadata from the statement's own generatedAt.
+      const vm = buildApprovedShiftStatementViewModel(doc.data);
+      const element = h(ApprovedShiftStatementDocument, { vm, creationDate: new Date(doc.data.generatedAt) });
       return renderToBuffer(element as Parameters<typeof renderToBuffer>[0]);
     }
     default: {
