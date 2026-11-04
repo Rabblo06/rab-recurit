@@ -60,7 +60,7 @@ export function finalTimesheetHtmlFromViewModel(vm: FinalTimesheetViewModel): st
   <section class="bottom">
     <div>
       <h3>${escapeHtml(vm.notesHeading)}</h3>
-      <p>${vm.notes.muted ? `<span class="muted">${escapeHtml(vm.notes.text)}</span>` : escapeHtml(vm.notes.text)}</p>
+      <p class="notes-text">${vm.notes.muted ? `<span class="muted">${escapeHtml(vm.notes.text)}</span>` : escapeHtml(vm.notes.text)}</p>
       ${p({ text: vm.counts, muted: true })}
     </div>
     <div>
