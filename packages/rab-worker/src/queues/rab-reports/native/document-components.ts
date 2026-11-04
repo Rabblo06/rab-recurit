@@ -101,8 +101,9 @@ export function pngBytes(data: Buffer): ImageBytes {
 // ─── typography ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. The family is the runtime's stack (Liberation Sans, then the
- * Noto Sans fallback): the glyph guard accepts exactly what this stack draws, so no layout may name a family of its own. No `lineHeight` here: react-pdf resolves a unitless line
+ * DOCUMENT_CSS's body: Arial-metric font, 11 px, ink colour. The family is the font stack (fonts.ts; with the render
+ * runtime: Liberation Sans, then the Noto Sans fallback): the glyph check accepts exactly what this stack draws, so no
+ * layout may name a family of its own. No `lineHeight` here: react-pdf resolves a unitless line
  * height against the font size where it is declared and inherits the absolute value, which would squash larger text;
  * left unset, every text uses the font's own line spacing, as Chromium's `line-height: normal` does.
  */

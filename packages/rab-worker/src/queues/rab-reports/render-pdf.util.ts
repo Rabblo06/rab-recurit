@@ -8,6 +8,7 @@ import { PreShiftReportData, renderPreShiftReportHtml } from '@rab/server/module
 import { ApprovedShiftStatementData, renderApprovedShiftStatementHtml } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
 
 import type { NativeReportDocument } from './native/render-native';
+import { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 /**
  * Per-call `chromium.launch()`/`close()` — not a persistent browser instance
@@ -51,18 +52,12 @@ export interface RenderPdfOptions {
   landscape?: boolean;
 }
 
-/** Upper bound for each render step (`setContent`, `pdf`). Real templates render in well under a second. */
-export const PDF_RENDER_STEP_TIMEOUT_MS = 30_000;
-
-export class PdfRenderTimeoutError extends Error {
-  constructor(
-    readonly step: string,
-    readonly timeoutMs: number,
-  ) {
-    super(`PDF render step "${step}" did not finish within ${timeoutMs} ms`);
-    this.name = 'PdfRenderTimeoutError';
-  }
-}
+/**
+ * The render deadline and its error class live in the dependency-free native/runtime/render-timeout.ts (shared with the
+ * native render runtime, which must never load this playwright-importing module). Re-exported here: ONE class, so
+ * `instanceof PdfRenderTimeoutError` holds for Chromium and native timeouts alike.
+ */
+export { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 export class PdfRenderNavigationError extends Error {
   constructor() {
