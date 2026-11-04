@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Phase B database boot gates: the RULES (pure decisions over an injected query function, and the bounded retry).
  * No DataSource, no connection options: unit-testable without a database. The entrypoint that opens the connection
@@ -6,27 +7,31 @@
 import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../deployment-identity/deployment-identity';
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
+import { OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
 export type BootProcess = 'api' | 'worker' | 'cli' | 'provisioner';
-export type BootRole = 'crewflow_app' | 'crewflow' | 'crewflow_worker';
+export type BootRole = 'crewflow_owner' | 'crewflow_app' | 'crewflow' | 'crewflow_worker';
 
-export const RUNTIME_ROLE: BootRole = 'crewflow_app';
 /**
- * Phase D (D1/D2, interface contract): the Worker-only login. Operator-created (never by a migration): LOGIN, INHERIT,
- * member of crewflow_app WITH INHERIT TRUE, SET FALSE; no SUPERUSER/BYPASSRLS/CREATEROLE/CREATEDB/REPLICATION; owns
- * nothing; no other membership. It alone holds EXECUTE on the dispatch-claim functions (and, after the D5 cutover
- * migration WorkerDueWorkClaimsToWorkerRole1786721330000, on the due-work functions). The API and every CLI command refuse it.
+ * Owner-login architecture (owner's final decision 2026-11-04, PERMANENT): every process — API, Worker (either claim
+ * mode), CLI, provisioner (in-process), replica validation and the migration child — connects as the ONE schema-owning
+ * login `crewflow_owner` (M0 §5.1 shape). A code constant, never env. The former per-process restricted logins
+ * (crewflow_app for the API/CLI, crewflow_worker for the global-mode Worker, crewflow for the provisioner) are SCHEMA roles
+ * now; a process that connects as one of them is refused (gate 1). Every behaviour that changed is catalogued with a test
+ * and a severity in owner-login-behaviour-catalogue.ts.
+ */
+export const OWNER_LOGIN: BootRole = OWNER_LOGIN_ROLE as BootRole;
+/** The runtime login every gate expects (the owner login). Kept under its historical name for existing importers. */
+export const RUNTIME_ROLE: BootRole = OWNER_LOGIN;
+/**
+ * Phase D: the Worker-only SCHEMA role (created by the operator / rolemaker bootstrap, never by a migration). It still holds
+ * EXECUTE on the dispatch-claim functions and must have ZERO members (WorkerDispatchPointer1786721300000 preflight,
+ * secure-owner invariant 8); no process connects as it any more.
  */
 export const WORKER_ROLE: BootRole = 'crewflow_worker';
-/** WORKER_CLAIM_MODE (environment-variables.ts). The expected Worker roles per mode are the constants below, never env. */
+/** WORKER_CLAIM_MODE (environment-variables.ts): still selects the Worker's claim behaviour; it no longer selects a login. */
 export type WorkerClaimMode = 'per_scope' | 'global';
-export const WORKER_ROLES_BY_CLAIM_MODE: Readonly<Record<WorkerClaimMode, readonly BootRole[]>> = {
-  // Old runtime mode keeps working until every Worker has the crewflow_worker credential (owner decision D2).
-  per_scope: [RUNTIME_ROLE, WORKER_ROLE],
-  // Only crewflow_worker can EXECUTE the claim functions: a crewflow_app Worker in global mode would claim nothing.
-  global: [WORKER_ROLE],
-};
 /** The due-work functions every Worker calls (manager-confirmation timeouts). D5 moves their EXECUTE to crewflow_worker. */
 export const DUE_WORK_FUNCTIONS: readonly string[] = ['worker_claim_due_work', 'worker_complete_due_work', 'worker_reschedule_due_work'];
 /** The Phase D global-claim functions (migration WorkerDispatchPointer1786721300000). EXECUTE: crewflow_worker only. */
@@ -37,11 +42,6 @@ export const DISPATCH_CLAIM_FUNCTIONS: readonly string[] = [
   'worker_claim_statement_dispatch',
   'worker_release_dispatch_claim',
 ];
-/**
- * The Worker bundle's provisioner child holds the privileged provisioning identity (`crewflow`, until G2 narrows it): its
- * gate expects that login, never crewflow_app, and still refuses SUPERUSER / BYPASSRLS / owner-role membership.
- */
-export const PROVISIONER_ROLE: BootRole = 'crewflow';
 export const MIN_SERVER_VERSION_NUM = 160000;
 export const REQUIRED_EXTENSIONS: readonly string[] = ['btree_gist', 'citext', 'pg_trgm', 'pgcrypto', 'unaccent'];
 /** Tenant tables that must be ENABLE + FORCE on every install (verified on a migrations-only database, 242 migrations). */
@@ -58,25 +58,8 @@ export const FORCE_RLS_SPOT_CHECK_TABLES: readonly string[] = [
   'user_role',
   'venue',
 ];
-/** Roles a gated login must never be able to act as (any membership). */
+/** The owner SCHEMA roles. The owner login is a member of them by design; any OTHER login that is, is refused (gate 1). */
 export const OWNER_ROLES: readonly string[] = ['crewflow', 'rab_owner', 'rab_secure_owner'];
-
-/**
- * CLI identity per command. Every command's DATABASE_URL login must be crewflow_app unless listed here. The operator
- * commands below are documented to run with DATABASE_URL = the `crewflow` operator identity (bootstrap-admin, seed-ai-demo,
- * grant-platform-admin, the seeds, secret rotation, ping); they may use either login. A migration identity (a member of
- * rab_secure_owner), a superuser or a BYPASSRLS login is refused for every command: migrations and `db:bind-identity` are
- * separate entrypoints that never go through the CLI.
- */
-export const CLI_COMMAND_ROLES: Readonly<Record<string, readonly BootRole[]>> = {
-  'bootstrap-admin': ['crewflow', 'crewflow_app'],
-  'grant-platform-admin': ['crewflow', 'crewflow_app'],
-  'seed-ai-demo': ['crewflow', 'crewflow_app'],
-  seed: ['crewflow', 'crewflow_app'],
-  'seed-qa': ['crewflow', 'crewflow_app'],
-  'secret:rotate': ['crewflow', 'crewflow_app'],
-  ping: ['crewflow', 'crewflow_app'],
-};
 
 export class DatabaseBootGateError extends Error {
   constructor(
@@ -94,6 +77,8 @@ export interface BootGateFacts {
   super: boolean;
   bypassrls: boolean;
   loginPrivileged: boolean;
+  /** The LOGIN role has REPLICATION or CREATEDB (owner-login shape: neither). */
+  loginReplicationOrCreatedb: boolean;
   /** Comma-separated owner roles the current role is a member of (other than itself), or null. */
   ownerRoles: string | null;
   serverVersionNum: number;
@@ -122,6 +107,7 @@ SELECT current_user::text AS who,
        r.rolsuper AS super,
        r.rolbypassrls AS bypassrls,
        (SELECT s.rolsuper OR s.rolbypassrls FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_privileged,
+       (SELECT s.rolreplication OR s.rolcreatedb FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_repl_createdb,
        (SELECT pg_catalog.string_agg(o.rolname::text, ',' ORDER BY o.rolname)
           FROM pg_catalog.pg_roles o
          WHERE o.rolname IN ('crewflow', 'rab_owner', 'rab_secure_owner') AND o.rolname <> current_user
@@ -147,15 +133,12 @@ SELECT c.relname::text AS relname
  ORDER BY 1`;
 
 /**
- * Gate 1's expected logins per process — code constants only (an env var naming the role would let a misconfigured
- * deployment redefine "the restricted role"). The Worker's set depends on WORKER_CLAIM_MODE, which only CHOOSES between
- * the two constant sets above (workerClaimModeFrom validates it, fail closed).
+ * Gate 1's expected login — a code constant (an env var naming the role would let a misconfigured deployment redefine it).
+ * The owner login for every process, every CLI command and every WORKER_CLAIM_MODE. The parameters are kept so callers
+ * keep compiling; they no longer change the answer.
  */
-export function expectedRolesFor(processName: BootProcess, cliCommand?: string, workerClaimMode: WorkerClaimMode = 'per_scope'): readonly BootRole[] {
-  if (processName === 'provisioner') return [PROVISIONER_ROLE];
-  if (processName === 'worker') return WORKER_ROLES_BY_CLAIM_MODE[workerClaimMode];
-  if (processName !== 'cli') return [RUNTIME_ROLE];
-  return (cliCommand && CLI_COMMAND_ROLES[cliCommand]) || [RUNTIME_ROLE];
+export function expectedRolesFor(_processName: BootProcess, _cliCommand?: string, _workerClaimMode: WorkerClaimMode = 'per_scope'): readonly BootRole[] {
+  return [OWNER_LOGIN];
 }
 
 /**
@@ -183,6 +166,7 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
     super: row.super === true,
     bypassrls: row.bypassrls === true,
     loginPrivileged: row.login_privileged === true,
+    loginReplicationOrCreatedb: row.login_repl_createdb === true,
     ownerRoles: row.owner_roles ? String(row.owner_roles) : null,
     serverVersionNum: Number(row.server_version_num),
     database: String(row.database),
@@ -192,29 +176,24 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
   };
 }
 
-/** Gate 1. */
+/**
+ * Gate 1 (synchronous part, from BOOT_FACTS_SQL): the connection is the owner login itself — never a legacy schema-role
+ * login (crewflow_app, crewflow_worker, crewflow), never through SET ROLE — and the login is not SUPERUSER, BYPASSRLS,
+ * REPLICATION or CREATEDB, and not a member of crewflow_worker (that role must have zero members). Membership of the owner
+ * roles is EXPECTED now (catalogue entry BC-01); the exact role layout and the reachability walk are the asynchronous part
+ * (assertOwnerLoginRoleGate), run after the version gate.
+ */
 export function assertRoleGate(facts: BootGateFacts, expected: readonly BootRole[], label: string): void {
-  const workerAllowed = (expected as readonly string[]).includes(WORKER_ROLE);
-  if (facts.who === WORKER_ROLE && !workerAllowed) {
-    // Phase D (D2): the API (and every CLI command, the replica and the provisioner) must never run with the Worker-only
-    // login — it holds the cross-tenant dispatch-claim grants.
+  if (facts.who === WORKER_ROLE || facts.login === WORKER_ROLE) {
     throw new DatabaseBootGateError(
       'role',
-      `the ${label} connects as "${WORKER_ROLE}", the Worker-only login that holds the dispatch-claim grants; expected ${expected.join(' or ')}. ` +
-        'Give this process its own credential (the API: crewflow_app), never the Worker\'s.',
-    );
-  }
-  if (facts.who === RUNTIME_ROLE && expected.length === 1 && expected[0] === WORKER_ROLE) {
-    throw new DatabaseBootGateError(
-      'role',
-      `the ${label} connects as "${RUNTIME_ROLE}" but WORKER_CLAIM_MODE=global requires "${WORKER_ROLE}" (the only login that can EXECUTE the claim functions). ` +
-        "Point this Worker's PG_DATABASE_URL at the crewflow_worker login, or set WORKER_CLAIM_MODE=per_scope.",
+      `the ${label} connects as "${WORKER_ROLE}", a schema role that holds the Worker-only dispatch-claim grants; every process connects as ${expected.join(' or ')}.`,
     );
   }
   if (!(expected as readonly string[]).includes(facts.who)) {
     throw new DatabaseBootGateError(
       'role',
-      `the ${label} connects as "${facts.who}"; expected ${expected.join(' or ')}. Point its database URL at that login (never a migration or owner login).`,
+      `the ${label} connects as "${facts.who}"; expected ${expected.join(' or ')}. Point PG_DATABASE_URL at the owner login (the legacy logins crewflow_app / crewflow / crewflow_worker are schema roles now).`,
     );
   }
   if (facts.login !== facts.who) {
@@ -223,66 +202,43 @@ export function assertRoleGate(facts: BootGateFacts, expected: readonly BootRole
   if (facts.super || facts.bypassrls || facts.loginPrivileged) {
     throw new DatabaseBootGateError('role', `the ${label} login "${facts.who}" has SUPERUSER or BYPASSRLS; row-level security would not apply. Remove the attribute.`);
   }
-  if (facts.ownerRoles) {
-    throw new DatabaseBootGateError(
-      'role',
-      `the ${label} login "${facts.who}" is a member of ${facts.ownerRoles}, which own tables and bypass row-level security. Revoke the membership.`,
-    );
+  if (facts.loginReplicationOrCreatedb) {
+    throw new DatabaseBootGateError('role', `the ${label} login "${facts.who}" has REPLICATION or CREATEDB. Remove the attribute (ALTER ROLE … NOREPLICATION NOCREATEDB).`);
   }
-  if (!workerAllowed && facts.workerMember) {
+  if (facts.workerMember) {
     throw new DatabaseBootGateError(
       'role',
-      `the ${label} login "${facts.who}" is a member of ${WORKER_ROLE} and would inherit the Worker-only dispatch-claim grants. Revoke the membership.`,
+      `the ${label} login "${facts.who}" is a member of ${WORKER_ROLE}, which must have zero members. Revoke the membership (GRANT/REVOKE as the role's administrator).`,
     );
   }
 }
 
 /**
- * Phase D: the reviewed shape of the crewflow_worker login (interface contract), read only when the gate's login IS
- * crewflow_worker and after the version gate (PG16 `pg_auth_members.inherit_option / set_option`). PG16 may hold several
- * grant rows for one (role, member) pair (one per grantor): the effective option is true when ANY row grants it.
- * Objects owned are counted in this database (relations, functions, schemas, types).
+ * Gate 1 (asynchronous part, after gate 2 — it reads PG16 pg_auth_members columns): nothing dangerous is reachable from
+ * the owner login (MEMBER semantics: INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) and
+ * the role layout is exactly the reviewed owner-login inventory (owner-login-posture.ts).
  */
-export const WORKER_LOGIN_SHAPE_SQL = `
-SELECT r.rolcreaterole AS createrole,
-       r.rolcreatedb AS createdb,
-       r.rolreplication AS replication,
-       r.rolinherit AS inherit,
-       (SELECT pg_catalog.bool_or(m.inherit_option) FROM pg_catalog.pg_auth_members m
-          JOIN pg_catalog.pg_roles a ON a.oid = m.roleid WHERE m.member = r.oid AND a.rolname = 'crewflow_app') AS app_inherit,
-       (SELECT pg_catalog.bool_or(m.set_option) FROM pg_catalog.pg_auth_members m
-          JOIN pg_catalog.pg_roles a ON a.oid = m.roleid WHERE m.member = r.oid AND a.rolname = 'crewflow_app') AS app_set,
-       (SELECT pg_catalog.string_agg(DISTINCT g.rolname::text, ',') FROM pg_catalog.pg_auth_members m
-          JOIN pg_catalog.pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid AND g.rolname <> 'crewflow_app') AS other_memberships,
-       ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.relowner = r.oid)
-        + (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p WHERE p.proowner = r.oid)
-        + (SELECT pg_catalog.count(*) FROM pg_catalog.pg_namespace n WHERE n.nspowner = r.oid)
-        + (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type t WHERE t.typowner = r.oid))::int AS owned_objects
-  FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
-
-/** Gate 1b (crewflow_worker only). Pure. */
-export function assertWorkerLoginShape(row: Record<string, unknown> | undefined, label: string): void {
-  if (!row) throw new DatabaseBootGateError('role', `the ${label} login "${WORKER_ROLE}" could not be read.`);
-  const problems: string[] = [];
-  if (row.createrole === true) problems.push('has CREATEROLE');
-  if (row.createdb === true) problems.push('has CREATEDB');
-  if (row.replication === true) problems.push('has REPLICATION');
-  if (row.inherit !== true) problems.push('is NOINHERIT (it must inherit crewflow_app)');
-  if (row.app_inherit === null || row.app_inherit === undefined) problems.push('is not a member of crewflow_app');
-  else {
-    if (row.app_inherit !== true) problems.push('is a member of crewflow_app WITH INHERIT FALSE (needs INHERIT TRUE)');
-    if (row.app_set !== false) problems.push('is a member of crewflow_app WITH SET TRUE (needs SET FALSE)');
-  }
-  if (row.other_memberships) problems.push(`is also a member of ${String(row.other_memberships)}`);
-  if (Number(row.owned_objects ?? 0) !== 0) problems.push(`owns ${Number(row.owned_objects)} database object(s)`);
+export async function assertOwnerLoginRoleGate(query: Query, label: string): Promise<void> {
+  const problems = await ownerLoginRolePostureProblems(query);
   if (problems.length) {
-    throw new DatabaseBootGateError(
-      'role',
-      `the ${label} login "${WORKER_ROLE}" does not have the reviewed shape: it ${problems.join('; ')}. ` +
-        'Expected: LOGIN, INHERIT, member of crewflow_app WITH INHERIT TRUE, SET FALSE only; no CREATEROLE/CREATEDB/REPLICATION; owns nothing.',
-    );
+    throw new DatabaseBootGateError('role', `the ${label} role posture is not the reviewed owner-login layout: ${problems.join('; ')}. Do not serve; investigate the roles.`);
   }
 }
+
+/** After gate 7: FORCE (tenant, M-T1 pre-auth, deployment identity) and the expected object ownership. */
+export async function assertOwnerLoginObjectGate(query: Query): Promise<void> {
+  const problems = await ownerLoginObjectPostureProblems(query);
+  if (problems.length) {
+    throw new DatabaseBootGateError('objects', `the owner-login object posture drifted: ${problems.join('; ')}. Do not serve; investigate the schema.`);
+  }
+}
+
+/*
+ * Former gate 1b (the crewflow_worker LOGIN shape) is gone: no process connects as crewflow_worker any more (gate 1 refuses
+ * it). The role's reviewed SCHEMA shape — LOGIN, member of exactly crewflow_app WITH INHERIT TRUE / SET FALSE, ZERO members,
+ * owns nothing — is still enforced where it matters: the WorkerDispatchPointer1786721300000 preflight (workerRoleProblems),
+ * secure-owner invariant 8, tools/check-rls-coverage.ts and the owner-login inventory (owner-login-posture.ts).
+ */
 
 /**
  * Gate 1c "dispatch-notify" (Phase D wave 3, owner-approved). The dispatch-pointer triggers NOTIFY only when the session
@@ -409,13 +365,14 @@ function grantDetail(g: { missing: string[]; denied: string[] }, missingHint = '
 }
 
 /**
- * Gate 8 (Phase D; D5 cutover visibility). Pure.
+ * Gate 8 (Phase D). Pure.
  *  - Worker (any mode): must be able to EXECUTE every due-work function (it always runs manager-confirmation timeouts).
- *    After WorkerDueWorkClaimsToWorkerRole1786721330000 only crewflow_worker can — an old Worker still on the
- *    crewflow_app credential then refuses to start with this message instead of failing that loop every cycle.
- *  - Worker in global mode: must be able to EXECUTE every dispatch-claim function (they exist and are granted to it).
- *  - Any other process: must NOT be able to EXECUTE any dispatch-claim function (the API never gains claim grants).
- *    The due-work grant is only reported for them (crewflow_app keeps it until the D5 cutover — open finding E7).
+ *  - Worker in global mode: must be able to EXECUTE every dispatch-claim function (the owner login can, through its
+ *    ownership of them via rab_secure_owner).
+ *  - Any other process (the API, the CLI): it CAN execute the dispatch-claim functions — with one login it always can.
+ *    That is the loss of the DBA-01 API/Worker separation, NOT listed among the protections the owner accepted in the
+ *    final prompt §2: it is catalogued as BC-08 (NEEDS OWNER APPROVAL) and RECORDED as a boot warning on every start
+ *    (ownerLoginGrantWarnings), never silently treated as passing. It no longer refuses: no single-login process could boot.
  */
 export function assertRoutineGrantsGate(
   rows: Array<Record<string, unknown>>,
@@ -439,14 +396,19 @@ export function assertRoutineGrantsGate(
           `(${grantDetail(dispatch, ' (apply the Phase D migrations)')}). Set WORKER_CLAIM_MODE=per_scope until the schema and the ${WORKER_ROLE} grants are in place.`,
       );
     }
-  } else if (dispatch.executable.length > 0) {
-    throw new DatabaseBootGateError(
-      'grants',
-      `the ${input.label} login "${input.who}" can EXECUTE core.${dispatch.executable.join(', core.')}: the dispatch-claim functions are for ${WORKER_ROLE} only. ` +
-        'Revoke the grant (or the membership that confers it) before serving.',
-    );
   }
   return { dueWork: dueWork.state, dispatchClaims: dispatch.state };
+}
+
+/** Gate 8 record for a non-Worker process (BC-08, NEEDS OWNER APPROVAL): which Worker-only functions it can EXECUTE. Pure. */
+export function ownerLoginGrantWarnings(rows: Array<Record<string, unknown>>, input: { processName: BootProcess; who: string; label: string }): string[] {
+  if (input.processName === 'worker') return [];
+  const dispatch = routineGrantState(rows, DISPATCH_CLAIM_FUNCTIONS);
+  if (dispatch.executable.length === 0) return [];
+  return [
+    `BC-08 (DBA-01 API/Worker separation lost — PENDING OWNER APPROVAL): the ${input.label} login "${input.who}" can EXECUTE the ` +
+      `Worker-only functions core.${dispatch.executable.join(', core.')}.`,
+  ];
 }
 
 /** Gate 2. */
@@ -537,11 +499,8 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const facts = parseBootFacts(factsRow);
   assertRoleGate(facts, expectedRolesFor(processName, input.cliCommand, claimMode), label);
   assertVersionGate(facts);
-  if (facts.who === WORKER_ROLE) {
-    // After the version gate: the shape query reads PG16-only pg_auth_members columns.
-    const [shapeRow] = await query(WORKER_LOGIN_SHAPE_SQL);
-    assertWorkerLoginShape(shapeRow, label);
-  }
+  // After the version gate: the walk and the inventory read PG16-only pg_auth_members columns (D10: < 16 is refused).
+  await assertOwnerLoginRoleGate(query, label);
   // Gate 1c (Phase D wave 3): no stored crewflow.dispatch_notify; the session value matches the process's mode.
   const dispatchNotify = assertDispatchNotifyGate(await query(DISPATCH_NOTIFY_STORED_SQL), (await query(DISPATCH_NOTIFY_SESSION_SQL))[0], {
     expectOn: expectDispatchNotify,
@@ -580,13 +539,13 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
     throw new DatabaseBootGateError('pending-migrations', (error as Error).message);
   }
 
+  // FORCE and ownership after the schema gate, so a pending M-T1 is reported as a pending migration, not as drift.
+  await assertOwnerLoginObjectGate(query);
+
   // Gate 8 (Phase D), after the schema gate so a pending migration is reported as such, not as a missing function.
-  const grants = assertRoutineGrantsGate(await query(ROUTINE_GRANTS_SQL, [[...DUE_WORK_FUNCTIONS, ...DISPATCH_CLAIM_FUNCTIONS]]), {
-    processName,
-    who: facts.who,
-    claimMode,
-    label,
-  });
+  const grantRows = await query(ROUTINE_GRANTS_SQL, [[...DUE_WORK_FUNCTIONS, ...DISPATCH_CLAIM_FUNCTIONS]]);
+  const grants = assertRoutineGrantsGate(grantRows, { processName, who: facts.who, claimMode, label });
+  const grantWarnings = ownerLoginGrantWarnings(grantRows, { processName, who: facts.who, label });
 
   return {
     processName,
@@ -599,7 +558,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
     identity: identity.summary,
     tls: facts.ssl,
     forceRlsTables: FORCE_RLS_SPOT_CHECK_TABLES.length,
-    warnings: [...identity.warnings, ...compatibilityWarnings],
+    warnings: [...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
   };
 }
 
