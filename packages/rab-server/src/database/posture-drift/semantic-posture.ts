@@ -193,6 +193,9 @@ export function semanticDriftFromGolden(posture: SemanticPosture, golden: readon
   const out: SemanticDrift[] = [];
   const core = diff('core', g.core, posture.core);
   if (core) out.push(core);
+  // No workspace template in the golden (it was generated from a database with no workspace schema): workspaces are not
+  // compared here (the caller warns); the posture golden's ws| lines, check-rls-coverage and the fingerprints cover them.
+  if (g.workspace.length === 0) return out;
   for (const [schema, lines] of posture.workspaces) {
     const d = diff(schema, g.workspace, lines);
     if (d) out.push(d);

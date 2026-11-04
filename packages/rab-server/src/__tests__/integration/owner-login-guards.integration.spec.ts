@@ -256,7 +256,8 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       ['ALTER POLICY … USING (true)', `ALTER POLICY user_select ON core."user" USING (true)`, /\[core\] \+ policy\|user\|user_select/],
       [
         'a trojaned SECURITY DEFINER body',
-        `CREATE OR REPLACE FUNCTION core.auth_find_session_by_web_token_hash(p text) RETURNS SETOF core.user_session LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f$ SELECT * FROM core.user_session $f$`,
+        // Same signature and attributes, body changed (a comment is enough to change prosrc and the hash).
+        `TROJAN core.auth_find_session_by_web_token_hash(text)`,
         /function\|auth_find_session_by_web_token_hash/,
       ],
       ['an extra LOGIN member', `CREATE ROLE g_monitor_agent LOGIN; GRANT rab_secure_owner TO g_monitor_agent`, /\[roles\] \+ member\|rab_secure_owner\|g_monitor_agent/],
@@ -266,7 +267,10 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
     ])('%s', async (_label, plant, pattern) => {
       const baseline = await readSemanticPosture(q(owner));
       const drift = await tx(owner, async () => {
-        for (const sql of plant.split('; ')) await owner.query(sql);
+        if (plant.startsWith('TROJAN ')) {
+          const [{ def }] = await q(owner)(`SELECT pg_get_functiondef($1::regprocedure) AS def`, [plant.slice(7)]);
+          await owner.query(String(def).replace(/\$function\$\n?/, () => '$function$\n-- trojan: credential capture would go here\n'));
+        } else for (const sql of plant.split('; ')) await owner.query(sql);
         return semanticDriftFromSnapshot(baseline, await readSemanticPosture(q(owner), { ownTransaction: false }));
       });
       const text = drift.flatMap((d) => [...d.missing.map((l) => `[${d.section}] - ${l}`), ...d.unexpected.map((l) => `[${d.section}] + ${l}`)]).join('\n');

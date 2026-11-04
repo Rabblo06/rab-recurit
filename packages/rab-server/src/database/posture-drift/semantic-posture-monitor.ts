@@ -53,12 +53,16 @@ export async function assertSemanticPostureAtBoot(
     return { posture, warnings: [`semantic posture NOT verified at boot: ${message}`] };
   }
   const drifts = semanticDriftFromGolden(posture, golden);
+  const warnings: string[] = [];
+  if (posture.workspaces.size > 0 && !golden.some((l) => l.startsWith('ws|'))) {
+    warnings.push(`semantic posture: the PostgreSQL ${posture.serverMajor} golden has no workspace template; ${posture.workspaces.size} workspace schema(s) not compared (posture golden, RLS gate and fingerprints still apply)`);
+  }
   if (drifts.length) {
     throw new SemanticPostureError(
       `the ${input.label} refuses to start: the database's security objects differ from the reviewed posture (policies / functions / triggers / RLS / audit ACL / owners / settings): ${describeSemanticDrift(drifts)}. Do not serve; investigate — never "fix" by regenerating the golden from this database.`,
     );
   }
-  return { posture, warnings: [] };
+  return { posture, warnings };
 }
 
 export interface SemanticMonitorOptions {

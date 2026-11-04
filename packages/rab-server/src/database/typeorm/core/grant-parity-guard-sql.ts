@@ -12,9 +12,10 @@
  * WHAT. One trigger function, core.owner_login_grant_parity_guard() (owner crewflow, SECURITY INVOKER, pinned
  * search_path, no PUBLIC EXECUTE), attached BEFORE the operations crewflow_app lacked on each listed table:
  *   - INSERT  when crewflow_app holds no INSERT on any column of the table;
- *   - UPDATE  when crewflow_app lacks UPDATE: with NO trigger arguments when it held no UPDATE on any column (every update
- *             refused), otherwise with the exact columns it could NOT update as arguments (an update that changes one of
- *             them is refused; the columns it could update stay writable) — computed from the catalog at migration time;
+ *   - UPDATE  when crewflow_app lacks table UPDATE: with NO trigger arguments when it held no UPDATE on any column (every
+ *             update refused), otherwise with the exact columns it COULD update as arguments (an ALLOW-list: an update that
+ *             changes any other column is refused) — computed from the catalog at migration time for core; frozen literal
+ *             lists, verified against the catalog, for the workspace copies (workspace module 20);
  *   - DELETE  when crewflow_app lacked DELETE;
  *   - TRUNCATE (statement level) on the payroll family.
  * The guard lets through only `crewflow` and `rab_secure_owner` — i.e. their SECURITY DEFINER functions, foreign-key
@@ -97,8 +98,9 @@ BEGIN
     RETURN NEW;
   END IF;
   IF TG_OP = 'UPDATE' AND TG_NARGS > 0 THEN
-    FOREACH c IN ARRAY TG_ARGV LOOP
-      IF (pg_catalog.to_jsonb(NEW) -> c) IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) -> c) THEN
+    -- TG_ARGV = the columns crewflow_app may UPDATE (allow-list); a change to any other column is refused.
+    FOR c IN SELECT k FROM pg_catalog.jsonb_object_keys(pg_catalog.to_jsonb(NEW)) AS j(k) LOOP
+      IF NOT (c = ANY (TG_ARGV)) AND (pg_catalog.to_jsonb(NEW) -> c) IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) -> c) THEN
         RAISE EXCEPTION 'permission denied: column % of %.% is not writable by the runtime login (grant parity)', c, TG_TABLE_SCHEMA, TG_TABLE_NAME
           USING ERRCODE = '42501';
       END IF;
@@ -122,7 +124,7 @@ SELECT c.relname::text AS tbl, pg_catalog.pg_get_userbyid(c.relowner)::text AS o
        pg_catalog.has_table_privilege('crewflow_app', c.oid, 'TRUNCATE') AS app_truncate,
        coalesce((SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attnum) FROM pg_catalog.pg_attribute a
                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-                    AND NOT pg_catalog.has_column_privilege('crewflow_app', c.oid, a.attnum, 'UPDATE')), ARRAY[]::text[]) AS protected_columns,
+                    AND pg_catalog.has_column_privilege('crewflow_app', c.oid, a.attnum, 'UPDATE')), ARRAY[]::text[]) AS updatable_columns,
        coalesce((SELECT pg_catalog.count(*) FROM pg_catalog.pg_attribute a
                   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), 0)::int AS column_count
   FROM pg_catalog.pg_class c
@@ -137,7 +139,7 @@ export interface GrantParityFacts {
   app_update: boolean;
   app_delete: boolean;
   app_truncate: boolean;
-  protected_columns: string[];
+  updatable_columns: string[];
   column_count: number;
 }
 
@@ -159,9 +161,9 @@ export function grantParityTriggerSql(table: string, ops: readonly ParityOp[], f
       out.push(`CREATE TRIGGER ${name(op)} BEFORE INSERT ${on} FOR EACH ROW EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);
     } else if (op === 'UPDATE') {
       if (f.app_update) throw new Error(`core.${table}: crewflow_app holds table UPDATE; review the parity list`);
-      const all = f.protected_columns.length === f.column_count;
-      if (f.protected_columns.length === 0) throw new Error(`core.${table}: crewflow_app can update every column; review the parity list`);
-      const args = all ? '' : f.protected_columns.map(quoteLiteral).join(', ');
+      if (f.updatable_columns.length === f.column_count) throw new Error(`core.${table}: crewflow_app can update every column; review the parity list`);
+      // Allow-list: the columns crewflow_app could update; none = every update refused.
+      const args = f.updatable_columns.map(quoteLiteral).join(', ');
       out.push(`CREATE TRIGGER ${name(op)} BEFORE UPDATE ${on} FOR EACH ROW EXECUTE FUNCTION core.owner_login_grant_parity_guard(${args})`);
     } else if (op === 'DELETE') {
       if (f.app_delete) throw new Error(`core.${table}: crewflow_app holds DELETE; review the parity list`);
