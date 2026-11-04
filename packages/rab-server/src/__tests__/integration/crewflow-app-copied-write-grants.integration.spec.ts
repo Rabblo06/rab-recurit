@@ -209,9 +209,15 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
         a.id,
         a.owner,
       ]);
+      // 42501, or a statement that changed NO row (e.g. RLS has no DELETE policy for the row the SELECT policy shows):
+      // either way nothing is written. Measured on PR #74: workspace_membership DELETE is not an error for the runtime login,
+      // so the row count is the property asserted (and the final counts below must be unchanged).
       const code = async (sql: string, params: unknown[] = []) => {
         await runtime.query('SAVEPOINT r');
-        const out = await sqlstateOf(runtime.query(sql, params));
+        const out = await runtime.query(sql, params).then(
+          (res) => (res.rowCount ? `CHANGED ${res.rowCount}` : 'NO ROW'),
+          (e: { code?: string }) => e.code ?? 'ERROR',
+        );
         await runtime.query('ROLLBACK TO SAVEPOINT r');
         return out;
       };
@@ -230,7 +236,7 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
         ['DELETE FROM core.hws_backfill_checkpoint WHERE workspace_id = $1', [a.id]],
         ['DELETE FROM core.stored_file WHERE id = $1', [fileId]],
       ];
-      for (const [sql, params] of attempts) expect({ sql, code: await code(sql, params) }).toEqual({ sql, code: '42501' });
+      for (const [sql, params] of attempts) expect({ sql, refused: ['42501', 'NO ROW'].includes(await code(sql, params)) }).toEqual({ sql, refused: true });
       // A spoofed scope finds no row of another tenant (RLS), so nothing of b's changes.
       expect((await runtime.query('SELECT count(*)::int AS n FROM core.workspace_schema_registry WHERE workspace_id = $1', [b.id])).rows[0].n).toBe(0);
       expect((await runtime.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [b.id])).rowCount).toBe(0);

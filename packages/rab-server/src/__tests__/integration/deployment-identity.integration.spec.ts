@@ -301,7 +301,11 @@ describe('deployment identity marker (integration, migration DeploymentIdentity1
     });
     const declared = (id: string) => ({ NODE_ENV: 'test', CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: id });
     try {
-      await expect(runDatabaseBootGates('api', opts(declared(ID_A)))).resolves.toMatchObject({ identity: `ci/${ID_A}`, warnings: [] });
+      // Owner-login architecture: the only warnings allowed are the documented owner-login ones (BC-08, PENDING OWNER
+      // APPROVAL; the semantic-posture note for workspace schemas without a PostgreSQL-major template). Any other fails.
+      const matched = await runDatabaseBootGates('api', opts(declared(ID_A)));
+      expect(matched.identity).toBe(`ci/${ID_A}`);
+      expect(matched.warnings.filter((w) => !w.startsWith('BC-08 (DBA-01') && !w.startsWith('semantic posture: the PostgreSQL'))).toEqual([]);
       await expect(runDatabaseBootGates('api', opts(declared(ID_B)))).rejects.toBeInstanceOf(DatabaseBootGateError);
       await expect(runDatabaseBootGates('api', opts({ NODE_ENV: 'test' }))).resolves.toMatchObject({ identity: `ci/${ID_A}` });
       // The same marker bound only at OTHER hosts (what a restore / clone elsewhere, or a provider-issued new host name,
