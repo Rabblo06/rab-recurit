@@ -194,6 +194,12 @@ place by Agent 1, from the **same image digest** and the **same `database.env`**
   cp compose.env compose.env.<old-sha>
   ```
 
+**The release step's authority (Agent 1, a4ef9bf8).** In production, `rab-migrate` carries **no `DB_TARGET` and no `ALLOW_PRODUCTION_DB_COMMANDS`**; the compose files and the gate refuse both on it. Its authority is:
+- the **deployment identity**: `deploy-prepare.js` derives its target from `CREWFLOW_DEPLOYMENT_ENVIRONMENT` (in `database.env`), in memory, and re-derives it after the migration lock, the same way the migrate child does; the database's identity marker must agree with `CREWFLOW_DEPLOYMENT_ID`;
+- the **per-release token**: every apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>` for exactly the pending set (3.4). Without it, a run is only a check.
+
+An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the legacy (separated) behaviour. This extends security trade-off ST-3 to the release step (section 6).
+
 **3.2 Preflight (read-only).**
 1. Lint the env files and run `$P config -q`.
 2. `$P pull`.
@@ -392,6 +398,8 @@ production.** It stays supported for quick self-hosting only. In production it c
 6. **It does not reduce the owner-login blast radius.** Neither does the release step: both use the one login.
 
 > **SECURITY TRADE-OFF (ST-3, restated for veto).** The quick-start override sets `CREWFLOW_MIGRATE_ON_START=true` with approval `none`, trading per-release review for a one-command self-hosted install. **Production uses the in-place default:** API `false`, a token-approved `rab-migrate`, a backup, and one API replica. The gate fails CI if the default ever renders the API with migrate-on-start on, without the token, or without waiting for `rab-migrate`.
+>
+> **ST-3 extended to the release step.** `rab-migrate` no longer needs separately held command authority (`DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true`): its production authority is the deployment identity (`CREWFLOW_DEPLOYMENT_ENVIRONMENT`, re-derived after the lock, plus the database marker matching `CREWFLOW_DEPLOYMENT_ID`) and the per-release `CREWFLOW_MIGRATION_APPROVED` token, which still gates every apply. Anyone who can run the release step with the shared `database.env` can therefore run a check; an apply still needs the token for exactly the reviewed pending set. Mitigation: the token is never stored (one-run `run -e` only), `database.env` is root-only 0600, and the gate refuses `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS` on every service.
 
 **OpenShip is unsupported for the owner-login deployment (M0 D11).** OpenShip drops these keys: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on` conditions. Without the root launcher, the Worker image's root default user runs **the Worker itself as root**.
 - **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Merging its in-place edit would redeploy the temporary deployment into a shape that cannot start there: no `crewflow_owner` exists on its database, and the Worker would run as root.
