@@ -5105,7 +5105,11 @@ plan §2.3 A2 — that is what `shadow` measures). Owner approval OD-3 / OD-4, 2
   interval and code (tested: wipe → scan expires once; Redis down → the business commit is not delayed, nothing armed).
   Delayed jobs add Redis memory (≈ one job per pending offer / accepted offer / upcoming assignment × 2; ids only).
 - **Residual:** triggers ADD database work (one READ ONLY decision transaction per fired trigger, plus the action
-  transaction in `on`); no load reduction is claimed (owner rule §14.4). A bulk send whose per-recipient savepoint rolls
-  back discards all triggers registered on that transaction (conservative; the scan handles them). The Admin Panel queue
-  view does not list the trigger queue yet. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
+  transaction in `on`); no load reduction is claimed (owner rule §14.4). Bulk send: its per-recipient savepoints are
+  plain SQL (`SAVEPOINT sp_bulk_send`), which TypeORM does not broadcast, so one recipient's rollback does NOT drop the
+  other recipients' triggers (tested: BULK SEND). If a recipient failed after its trigger was registered, that trigger is
+  still published after the outer commit and is a `noop` on consume (its offer row was rolled back; the consumer re-reads
+  under RLS). Only a TypeORM nested-transaction rollback discards the transaction's triggers (the scan handles those).
+  The Admin Panel lists `crewflow-timer-triggers` read-only (counts, metrics, failed job ids; retry/delete → 409, tested),
+  like `rab-ai`. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
   carries the subject UUID (no personal data).
