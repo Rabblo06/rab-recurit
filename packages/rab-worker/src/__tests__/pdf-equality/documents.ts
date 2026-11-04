@@ -18,7 +18,17 @@ import {
   TO_BE_CONFIRMED,
 } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
 
-import type { RenderPdfOptions } from '../../queues/rab-reports/render-pdf.util';
+import { FileKind, FileKindType } from '@rab/server/engine/core-modules/storage/file-kinds';
+
+/**
+ * The Chromium `page.pdf()` options the job passed with the HTML (footer template, landscape). Declared here rather than
+ * imported, because render-pdf.util.ts stops exporting them when Chromium is removed (P5, native only), and the harness
+ * must compile on both trees.
+ */
+export interface RenderPdfOptions {
+  footerTemplate?: string;
+  landscape?: boolean;
+}
 
 /**
  * THE DOCUMENTS IN SCOPE — verified in code (2026-11-04, db053b92). `renderHtmlToPdf` has exactly three production
@@ -73,6 +83,22 @@ export const DOCUMENT_SPECS: Readonly<Record<DocumentKind, DocumentSpec>> = Obje
   'approved-shift-statement': { title: APPROVED_SHIFT_STATEMENT_TITLE.toUpperCase(), tableHeader: null, hasFooter: false },
 });
 
+/**
+ * How the production job stores each document: its FileKind (which decides the storage content rule, size ceiling and
+ * download policy) and the filename it passes to `files.putObject`. Pinned against the job sources by
+ * pdf-harness.unit.spec.ts, so this map cannot drift from what the jobs do.
+ */
+export const DOCUMENT_FILES: Readonly<Record<DocumentKind, { job: string; fileKind: FileKindType; filename(doc: ReportDocument): string }>> = Object.freeze({
+  'final-timesheet-original': { job: 'final-timesheet.job.ts', fileKind: FileKind.FINAL_TIMESHEET_PDF, filename: () => 'original-timesheet.pdf' },
+  'final-timesheet': { job: 'final-timesheet.job.ts', fileKind: FileKind.FINAL_TIMESHEET_PDF, filename: () => 'final-timesheet.pdf' },
+  'pre-shift-report': { job: 'shift-report-scheduler.job.ts', fileKind: FileKind.SHIFT_ROSTER_PDF, filename: () => 'shift-attendance-sheet.pdf' },
+  'approved-shift-statement': {
+    job: 'shift-statement.job.ts',
+    fileKind: FileKind.APPROVED_SHIFT_STATEMENT_PDF,
+    filename: (doc) => (doc.kind === 'approved-shift-statement' ? `approved-shift-statement-${doc.data.statementReference}.pdf` : 'n/a'),
+  },
+});
+
 /** The `(html, options)` the production job passes to `renderHtmlToPdf` for this document. */
 export function renderCall(doc: ReportDocument): { html: string; options: RenderPdfOptions } {
   switch (doc.kind) {
@@ -105,6 +131,11 @@ export interface DocumentExpectation {
   qrPayloads: string[];
   /** Text that marks a page as carrying table rows (each staff member's name): such a page must repeat the header. */
   rowMarkers: string[];
+  /**
+   * Free-text fields whose value holds line breaks (owner decision 2026-11-04: notes keep their original line breaks).
+   * Every line of such a value must start a printed line, in order (checker.ts `line-breaks`).
+   */
+  multiLine: BusinessValue[];
   /**
    * Parse-back (P0 plan §5.2 4(b)): numbers printed as text must parse back to the source exactly. `durations` is the
    * multiset of every "Xh Ym" the document prints, `breaks` of every "N min"; `fields` are labelled single values.
@@ -140,6 +171,20 @@ function add(values: BusinessValue[], label: string, value: string | null | unde
     existing.min += min;
     if (!existing.label.includes(label)) existing.label = `${existing.label}; ${label}`;
   } else values.push({ label, value, min });
+}
+
+/** A line break in stored text: LF, CRLF or a lone CR (all three are line ends in HTML and in the native layouts). */
+export const LINE_BREAK = /\r\n|\r|\n/;
+
+/**
+ * The free-text fields each document prints that keep their line breaks — the shift notes, on the final timesheet (both
+ * variants) and on the pre-shift roster (the Approved Shift Statement has no free text). Owner decision 2026-11-04:
+ * notes keep their original line breaks; the field list agreed with the renderer agents is NOTES-FIELDS.md.
+ */
+export function multiLineFields(doc: ReportDocument): BusinessValue[] {
+  if (doc.kind === 'approved-shift-statement') return [];
+  const notes = doc.data.notes;
+  return nonEmpty(notes) && LINE_BREAK.test(notes) ? [{ label: 'shift notes', value: notes, min: 1 }] : [];
 }
 
 function shiftValues(values: BusinessValue[], s: DocumentShiftInfo): void {
@@ -265,5 +310,5 @@ export function expectationFor(doc: ReportDocument): DocumentExpectation {
       break;
     }
   }
-  return { kind: doc.kind, spec, values, qrPayloads, rowMarkers, parseBack };
+  return { kind: doc.kind, spec, values, qrPayloads, rowMarkers, multiLine: multiLineFields(doc), parseBack };
 }

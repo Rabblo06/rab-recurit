@@ -50,16 +50,29 @@ export function swapOneGlyph(pdf: Buffer, nth = 25): Buffer {
     }
     const text = data.toString('latin1');
     if (!/\bBT\b/.test(text)) continue;
+    // Skia (Chromium) draws one glyph per `<XXXX> Tj`.
     const glyphs = [...text.matchAll(/<([0-9A-Fa-f]{4})>\s*Tj/g)];
-    if (glyphs.length <= nth + 1) continue;
-    const target = glyphs[nth]!;
-    const other = glyphs.slice(nth + 1).find((g) => g[1]!.toUpperCase() !== target[1]!.toUpperCase());
-    if (!other) continue;
-    const at = target.index! + 1;
-    const edited = text.slice(0, at) + other[1] + text.slice(at + 4);
+    if (glyphs.length > nth + 1) {
+      const target = glyphs[nth]!;
+      const other = glyphs.slice(nth + 1).find((g) => g[1]!.toUpperCase() !== target[1]!.toUpperCase());
+      if (other) {
+        const at = target.index! + 1;
+        const edited = text.slice(0, at) + other[1] + text.slice(at + 4);
+        return replaceStream(pdf, loc, Buffer.from(edited, 'latin1'));
+      }
+    }
+    // pdfkit (react-pdf, the native renderer) draws words as 2-byte glyph strings inside `[<…> kern <…>] TJ` arrays: in
+    // the `nth` such string of two or more glyphs, the first glyph code becomes the next DIFFERENT code of that string.
+    const strings = [...text.matchAll(/\[([^\]]*)\]\s*TJ/g)].flatMap((m) => [...m[1]!.matchAll(/<([0-9A-Fa-f]{8,})>/g)].map((s) => ({ hex: s[1]!, at: m.index! + 1 + s.index! + 1 })));
+    const candidates = strings.filter((s) => s.hex.length % 4 === 0 && new Set(s.hex.toUpperCase().match(/.{4}/g)).size > 1);
+    const target = candidates[Math.min(nth, candidates.length - 1)];
+    if (!target) continue;
+    const codes = target.hex.match(/.{4}/g)!;
+    const other = codes.slice(1).find((c) => c.toUpperCase() !== codes[0]!.toUpperCase())!;
+    const edited = text.slice(0, target.at) + other + text.slice(target.at + 4);
     return replaceStream(pdf, loc, Buffer.from(edited, 'latin1'));
   }
-  throw new Error('swapOneGlyph: no content stream with enough single-glyph Tj strings');
+  throw new Error('swapOneGlyph: no content stream with enough single-glyph Tj strings or multi-glyph TJ strings');
 }
 
 /** Removes the last page from the page tree (/Kids and /Count). */

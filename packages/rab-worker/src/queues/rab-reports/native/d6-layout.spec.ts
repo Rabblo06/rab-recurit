@@ -27,7 +27,7 @@ const tableKind = (d: ReportDocument) => d.kind === 'final-timesheet' || d.kind 
 
 /** The same document with the no-space hyphenated name on its first staff row (or as the statement's staff name) and multi-line notes. */
 function hyphenVariant(f: FixtureDocument): ReportDocument {
-  const doc = seamDocument(f.doc);
+  const doc = seamDocument(f.doc) as ReportDocument;
   switch (doc.kind) {
     case 'final-timesheet':
       return { kind: doc.kind, data: { ...doc.data, notes: NOTES_LINES.join('\n'), staff: doc.data.staff.map((r, i) => (i === 0 ? { ...r, name: NO_SPACE_NAME } : r)) } };
@@ -81,7 +81,7 @@ const rendered = new Map<string, { doc: ReportDocument; pages: LayoutPage[] }>()
 beforeAll(async () => {
   fixtures = await buildFixtures({ scenarios: ['long-text', 'unbroken-token'] });
   const docs: Array<[string, ReportDocument]> = [
-    ...fixtures.map((f): [string, ReportDocument] => [f.id, seamDocument(f.doc)]),
+    ...fixtures.map((f): [string, ReportDocument] => [f.id, seamDocument(f.doc) as ReportDocument]),
     ...fixtures.filter((f) => f.scenario === 'long-text').map((f): [string, ReportDocument] => [`${f.id}+no-space-hyphenated-name`, hyphenVariant(f)]),
   ];
   for (const [id, doc] of docs) {

@@ -9,12 +9,13 @@ import { normalisedPdfBytes } from '../helpers/pdf-inspect';
 import { buildFixtures, FixtureDocument } from './fixtures';
 import { extractFixture, outDir, saveArtifact } from './harness';
 import { percentile, ResourceSampler, ResourceSummary } from './load-metrics';
+import { NATIVE_ONLY } from './mode';
 import { loadNativeRenderer, chromiumRenderer, Renderer, RendererName } from './renderers';
 
 /**
  * PDF RENDER LOAD TEST (P0 plan §8 P3 performance; owner-approved D4: pool of 2). Opt-in: RAB_PDF_LOAD=1.
  *
- * For each renderer (PDF_LOAD_RENDERERS, default "chromium,native"; a missing native renderer is reported, not failed)
+ * For each renderer (PDF_LOAD_RENDERERS, default "chromium,native", "native" with PDF_EQUALITY_MODE=native-only; a missing native renderer is reported, not failed)
  * and each table size (PDF_LOAD_ROWS, default "5,40,300"; the final timesheet, finalised variant):
  *   1. one SERIAL render = the determinism reference;
  *   2. PDF_LOAD_RENDERS (default 50) render requests submitted AT ONCE into a pool of 2 — the `rab-shift-statements`
@@ -42,7 +43,8 @@ jest.setTimeout(2 * 60 * 60_000);
 
 const RENDERS = Number(process.env.PDF_LOAD_RENDERS) || 50;
 const ROWS = (process.env.PDF_LOAD_ROWS ?? '5,40,300').split(',').map((n) => Number(n.trim()));
-const RENDERER_NAMES = (process.env.PDF_LOAD_RENDERERS ?? 'chromium,native').split(',').map((n) => n.trim() as RendererName);
+// native-only mode (P5, mode.ts): the default is native alone; asking for chromium there fails loudly (ChromiumRemovedError).
+const RENDERER_NAMES = (process.env.PDF_LOAD_RENDERERS ?? (NATIVE_ONLY ? 'native' : 'chromium,native')).split(',').map((n) => n.trim() as RendererName);
 const VIA = process.env.PDF_LOAD_VIA === 'bullmq' ? 'bullmq' : 'direct';
 const POOL = bullmqWorkerOptionsOf(CONSUMER_QUEUES.shiftStatements.name).concurrency;
 const THRESHOLD_P95_MS: Record<number, number> = { 40: 1500, 500: 10_000 };
