@@ -412,7 +412,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 - **Logs:** `json-file`, 10 MB × 5 per container. Ship them off the host, because forensics depend on them.
 - **Redis:** AOF `everysec`, `noeviction`, an ACL; never published.
 - **Owner password rotation:** done by the admin at the provider. Then update `database.env` and restart rab-api and rab-worker. After a suspected compromise, rotation is **not** remediation: inventory roles, memberships, ADMIN rows, definers, policies and triggers first (M0 §6.4 item 9).
-- **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce must be ported into `rab-worker` (Agent 2). Until then compose **applies** the Worker's isolation but nothing **self-verifies** it at start. `CREWFLOW_RUNTIME_ISOLATION=enforce` is already set, so the port takes effect without a compose change.
+- **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce is ported into `rab-worker` itself (Agent 2). At start it logs `[worker-isolation] runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=… memory.max=… mode=enforce`, and with `CREWFLOW_RUNTIME_ISOLATION=enforce` (committed in `docker-compose.image.yml`) it **refuses to start** when any of these is missing: uid 1000, an empty capability bounding set, no-new-privileges, a read-only root, a PID limit, a memory limit.
 - **Resources:**
   - API: 1 GB (raised from 768 MB for the migration child under migrate-on-start; NOT MEASURED).
   - Worker: 1.5 GB, with the native PDF budget rule from #61 (`PDF_NATIVE_MEMORY_BUDGET_MB`).
