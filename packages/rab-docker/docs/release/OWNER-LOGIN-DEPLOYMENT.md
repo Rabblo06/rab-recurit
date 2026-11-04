@@ -144,14 +144,16 @@ PT-01 pointers:
 5. **Start.** Choose one:
    - **Quick start (migrate-on-start):** `$P $M [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks) and serves only after it succeeds. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The override gives the API a 900 s `start_period`. The Worker follows a healthy API.
    - **Controlled (production):** use section 3 from step 3.2. On an EMPTY database `rab-migrate` exits 3 with the full chain as the pending set; approve it with the token.
-6. **First platform admin.** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`) and the same runtime config (`runtime.env`). Its inputs come from your shell for this one run only (`-e NAME` with no value forwards them, so they never sit on a command line or in a file):
+6. **First platform admin (email only, activation link).** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`, which also supplies `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) and the same runtime config (`runtime.env`). The command creates the admin from an email address and sends an **activation link**; it takes no password (`BOOTSTRAP_ADMIN_PASSWORD` is ignored with a warning, so never set it).
+   - Inputs: `BOOTSTRAP_ADMIN_EMAIL` (required); optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG`, `BOOTSTRAP_ADMIN_ORG_NAME`.
+   - The CLI requires **per-invocation command authority**: `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true`, given on this one-off run ONLY, never in any service environment or env file.
    ```bash
-   export BOOTSTRAP_ADMIN_EMAIL=… BOOTSTRAP_ADMIN_PASSWORD=…        # the variable names the command documents
-   $P run --rm --no-deps -e BOOTSTRAP_ADMIN_EMAIL -e BOOTSTRAP_ADMIN_PASSWORD \
+   export BOOTSTRAP_ADMIN_EMAIL=admin@example.com     # optional: BOOTSTRAP_ADMIN_FIRST_NAME / _LAST_NAME / _ORG_SLUG / _ORG_NAME
+   $P run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -e BOOTSTRAP_ADMIN_EMAIL \
      rab-api node packages/rab-server/dist/command/main.js bootstrap-admin
-   unset BOOTSTRAP_ADMIN_EMAIL BOOTSTRAP_ADMIN_PASSWORD
+   unset BOOTSTRAP_ADMIN_EMAIL
    ```
-   `run` publishes no port, and `--no-deps` leaves the running stack alone. How the command's authority is checked under the owner login is being settled by Agent 1; follow its output. `BOOTSTRAP_ADMIN_*` never goes in an env file (the lint refuses it).
+   (Add `-e BOOTSTRAP_ADMIN_FIRST_NAME` and the others the same way when you set them.) `run` publishes no port, `--no-deps` leaves the running stack alone, and the command replaces `api-prestart.sh`, so the authority never reaches a long-running process. The env-file lint refuses `DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS` and every `BOOTSTRAP_ADMIN_*` in every file.
 
 **Optional startup and watchdog knobs** (code defaults; set in `runtime.env` only to change them):
 
@@ -195,13 +197,13 @@ place by Agent 1, from the **same image digest** and the **same `database.env`**
 **3.2 Preflight (read-only).**
 1. Lint the env files and run `$P config -q`.
 2. `$P pull`.
-3. Run the schema-compatibility check:
+3. Run the schema-compatibility check. `deploy-prepare.js` is **always in token mode**: run without a token it is a check run that applies nothing.
    ```bash
    $P run --rm rab-migrate
    ```
    - **0:** CURRENT or AHEAD. Nothing to apply; go to 3.5.
    - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
-   - **Anything else: STOP.** The M0 §7 codes are 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check and 69 lock timeout; 1 is a refused or stale token. Nothing was applied, and the running release is untouched.
+   - **64–69: STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7). Nothing was applied by a check run, and the running release is untouched.
 
    With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
@@ -227,9 +229,9 @@ $P run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate; rc=$?
 unset CREWFLOW_MIGRATION_APPROVED; echo "rab-migrate exit $rc"
 ```
 - **Exit 0:** applied, and the post-checks passed.
-- **Anything else:** see 3.6.
+- **64–69:** failed by kind (as in 3.2); see 3.6.
 
-The token is recomputed under the lock, so a changed pending set applies nothing.
+An apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>`; without it the run is only a check. The token is recomputed under the lock, so a changed pending set applies nothing.
 
 **3.5 Promote.**
 ```bash
@@ -414,10 +416,10 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 |---|---|
 | `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. | Agents 1 and 2 |
 | `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
-| `deploy-prepare.js` (in place) is the release step, with exit codes 0 / 3 / M0 §7 and token approval. It reads `PG_DATABASE_URL` only, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. | Agent 1 |
+| `deploy-prepare.js` (in place) is the release step and is **always in token mode**: no token = check run (0 current, 3 pending); `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run; failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1, confirmed.) | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
-| `01-crewflow-owner.sql` reads the password from `/run/secrets/crewflow-owner-password` inside the SQL, and fails on a missing or short password. A tested reference implementation was handed to the lead. | Agent 1 |
-| `bootstrap-admin` runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy (section 2, step 6); its command-authority handling. | Agent 1 |
+| `01-crewflow-owner.sql` reads the password file named by `-v owner_password_file=…` (default `/run/secrets/crewflow-owner-password`, at least 24 characters) inside psql, suppresses statement logging only for a superuser session, and grants on `:"DBNAME"`. (Agent 1, `twa/db-lifecycle`.) | Agent 1 |
+| `bootstrap-admin` is email-only with an activation link, runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy, with per-invocation `DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true` on that run only (section 2, step 6). (Agent 1, confirmed.) | Agent 1 |
 | The Worker refuses to run as PID 1 (watchdog SIGKILL); `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`, `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS`, `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` with the ranges above. | Agent 2 |
 
 **Tested here:**
