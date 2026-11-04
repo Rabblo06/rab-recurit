@@ -159,6 +159,8 @@ jobs:
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts
         env:
           OWNER_LOGIN_CHECK_SCENARIOS: ${{ matrix.scenarios }}
+          # The provider-admin psql scripts run for real inside the container (postgres-init/owner-login/*.sql).
+          OWNER_LOGIN_CHECK_CONTAINER: owner-login-postgres
 
       - name: Stop PostgreSQL
         if: always()

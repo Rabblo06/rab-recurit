@@ -82,13 +82,13 @@ async function buildDatabase(db: string): Promise<void> {
     await c.query(`CREATE DATABASE "${db}"`);
     const exists = (await c.query(`SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner'`)).rows.length > 0;
     if (!exists) {
-      const sql = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql'), 'utf8')
+      // The two statements of the committed provider-admin file (its psql wrapper reads a secret file; here the values are
+      // substituted directly, exactly as owner-login-lifecycle-check.ts does without a container).
+      const statements = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql'), 'utf8')
         .split('\n')
-        .filter((l) => !l.trim().startsWith('--'))
-        .join('\n')
-        .replace(/:'owner_password'/g, `'${OWNER_PASSWORD}'`)
-        .replace(/:"database"/g, `"${db}"`);
-      for (const s of sql.split(';').map((x) => x.trim()).filter(Boolean)) await c.query(s);
+        .filter((l) => /^(CREATE ROLE|GRANT) /.test(l.trim()))
+        .map((l) => l.replace(/:'owner_pw'/g, `'${OWNER_PASSWORD}'`).replace(/:"DBNAME"/g, `"${db}"`).replace(/;\s*$/, ''));
+      for (const s of statements) await c.query(s);
     } else {
       await c.query(`ALTER ROLE crewflow_owner PASSWORD '${OWNER_PASSWORD}'`);
       await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${db}" TO crewflow_owner WITH GRANT OPTION`);

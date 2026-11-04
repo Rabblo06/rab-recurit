@@ -27,7 +27,10 @@
  *      enabled on every core tenant table, the migration identity owns nothing;
  *   6. optional cache flush of the allow-listed `entitycache` namespace only (migrate/entity-cache-flush.ts), AFTER the
  *      migrations so the old API instances still serving cannot refill it with pre-migration rows;
- *   7. unlock, exit 0. Any failure exits 1 (3 for "pending but not approved").
+ *   7. unlock, exit 0. A failure exits with the startup exit code of its kind (deployPrepareFailureExitCode: 64 config,
+ *      65 behind / not approved, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout); 3 for "pending but not
+ *      approved" on a check run. The owner login (crewflow_owner) takes the owner-login lifecycle of the locked runner; the
+ *      release step always uses the F5 token (CREWFLOW_MIGRATION_APPROVAL_MODE=token semantics).
  * Deliberately does NOT import dotenv: production authority comes only from the deployment environment.
  */
 import { assertFlushableNamespace } from './migrate/entity-cache-flush';
@@ -41,6 +44,7 @@ import {
   readMigrationApproval,
 } from './migrate/migration-approval';
 import { MigrationIdentityError, MigrationIdentityFacts } from '../core/migration-identity';
+import { outcomeOf } from './migrate/owner-login/migrate-on-start';
 import { runCacheFlush } from './cache-flush';
 
 export const EXIT_PENDING_NOT_APPROVED = 3;
@@ -153,6 +157,17 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
   return 0;
 }
 
+/**
+ * Owner-login PR 3: the failure exit codes of the release step are the startup exit codes (Agent 2's STARTUP_EXIT_CODES):
+ * 64 config, 65 behind / not approved, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout; 3 stays "pending
+ * but not approved" (check run). Pure.
+ */
+export function deployPrepareFailureExitCode(error: unknown): number {
+  if (error instanceof Error && /post-migration checks failed/.test(error.message)) return 68;
+  const codes: Record<string, number> = { config: 64, behind: 65, migrationFailed: 66, identity: 67, postCheck: 68, lockTimeout: 69 };
+  return codes[outcomeOf(error)] ?? 66;
+}
+
 if (require.main === module) {
   deployPrepare().then(
     (code) => process.exit(code),
@@ -160,7 +175,7 @@ if (require.main === module) {
       const message = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
       // eslint-disable-next-line no-console
       console.error(`[deploy-prepare] FAILED: ${redactConnectionStrings(message)}`);
-      process.exit(1);
+      process.exit(deployPrepareFailureExitCode(error));
     },
   );
 }

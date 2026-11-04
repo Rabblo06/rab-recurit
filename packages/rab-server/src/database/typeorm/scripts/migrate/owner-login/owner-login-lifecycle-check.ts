@@ -143,17 +143,32 @@ async function assertDisposableCluster(): Promise<number> {
   return Math.floor(Number(r.num) / 10000);
 }
 
-/** Runs one of the committed provider-admin SQL files with its psql variables substituted (the file under test). */
+/**
+ * Runs one of the committed provider-admin SQL files (the file under test). With OWNER_LOGIN_CHECK_CONTAINER (the
+ * disposable cluster's container), the REAL psql script runs inside it, the password in a 0600 file written over stdin;
+ * otherwise its two statements are extracted and run with the variables substituted (the psql wrapper is then untested).
+ */
 async function runAdminSql(db: string, sql: string, database: string): Promise<void> {
-  const text = sql
+  const container = process.env.OWNER_LOGIN_CHECK_CONTAINER?.trim();
+  if (container) {
+    const su = decodeURIComponent(adminBase().username);
+    const write = spawnSync('docker', ['exec', '-i', container, 'sh', '-c', 'umask 077; cat > /tmp/owl-owner-pw'], { input: OWNER_PASSWORD, encoding: 'utf8' });
+    if (write.status !== 0) throw new Error('could not write the password file in the container');
+    const r = spawnSync('docker', ['exec', '-i', container, 'psql', '-X', '-q', '-U', su, '-d', db, '-v', 'owner_password_file=/tmp/owl-owner-pw', '-f', '-'], {
+      input: sql,
+      encoding: 'utf8',
+    });
+    spawnSync('docker', ['exec', container, 'rm', '-f', '/tmp/owl-owner-pw']);
+    if (r.status !== 0) throw new Error(`the provider-admin psql script failed: ${sanitise(`${r.stdout}${r.stderr}`).slice(0, 400)}`);
+    return;
+  }
+  const statements = sql
     .split('\n')
-    .filter((l) => !l.trim().startsWith('--'))
-    .join('\n')
-    .replace(/:'owner_password'/g, `'${OWNER_PASSWORD}'`)
-    .replace(/:"database"/g, `"${database.replace(/"/g, '""')}"`);
-  if (/:['"]?[a-z_]+['"]?/.test(text.replace(/'[^']*'/g, "''").replace(/::\w+/g, ''))) throw new Error('an unsubstituted psql variable is left in the admin SQL');
+    .filter((l) => /^(CREATE ROLE|GRANT) /.test(l.trim()))
+    .map((l) => l.replace(/:'owner_pw'/g, `'${OWNER_PASSWORD}'`).replace(/:"DBNAME"/g, `"${database.replace(/"/g, '""')}"`).replace(/;\s*$/, ''));
+  if (statements.length < 2 || statements.some((t) => /:['"]?[A-Za-z_]+/.test(t.replace(/'[^']*'/g, "''")))) throw new Error('unexpected provider-admin SQL shape');
   await admin(db, async (c) => {
-    for (const stmt of text.split(';').map((s) => s.trim()).filter(Boolean)) await c.query(stmt);
+    for (const stmt of statements) await c.query(stmt);
   });
 }
 
