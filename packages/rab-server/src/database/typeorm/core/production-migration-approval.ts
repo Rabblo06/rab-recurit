@@ -14,6 +14,12 @@
  *   - Anything later goes into PRODUCTION_APPROVED_MIGRATIONS by its exact migration name, with the owner gate that
  *     approved it, in the same change that updates the runbook.
  * A migration whose name has no 13-digit timestamp suffix is never covered by the baseline (fail closed).
+ *
+ * Owner-login architecture (owner decision 2026-11-04, PR 3): the locked runner WAIVES this list for the owner login on a
+ * proven fresh install only (scripts/migrate/owner-login/fresh-install.ts: no tenant data was ever written, decided
+ * physically) — "on EMPTY the full chain is allowed under the shim". On every existing database the list applies as
+ * before (plus the F5 token in token mode). NEEDS OWNER APPROVAL (M0-A): a fresh production install therefore applies the
+ * development-only 1786719500000 (G1 crewflow_app EXECUTE grant) and records 1786719520000 through the D3(b) shim.
  */
 import type { DbTarget } from './database-target';
 
