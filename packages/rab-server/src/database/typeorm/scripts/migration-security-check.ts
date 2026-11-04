@@ -176,10 +176,20 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   // (CURRENT_USER = rab_secure_owner, true only inside the SECURITY DEFINER functions) on each of the 16 pre-auth tables,
   // added only. Their FORCE flag is pinned by the golden posture snapshot and the migration's own post-condition; no
   // runtime login gains a table privilege. Derived from the migration's own table list, so the set stays exact.
-  '1786721400000-PreAuthTablesForceOwnerOnly': PREAUTH_FORCE_TABLES.map(
-    (t) =>
-      `+ policy|${t}|${preauthDefinerPolicyName(t)}|*|permissive=true|roles=rab_secure_owner|using=${PREAUTH_DEFINER_EXPRESSION}|check=${PREAUTH_DEFINER_EXPRESSION}`,
-  ),
+  // Plus the platform_admin recursion guard (fixed in place 2026-11-04, owner-approved): the three TO PUBLIC policies
+  // replaced by their CASE-guarded form. Lines as measured on PostgreSQL 16 and 18 (Test G), whitespace collapsed.
+  '1786721400000-PreAuthTablesForceOwnerOnly': [
+    ...PREAUTH_FORCE_TABLES.map(
+      (t) =>
+        `+ policy|${t}|${preauthDefinerPolicyName(t)}|*|permissive=true|roles=rab_secure_owner|using=${PREAUTH_DEFINER_EXPRESSION}|check=${PREAUTH_DEFINER_EXPRESSION}`,
+    ),
+    '- policy|platform_admin|platform_admin_select|r|permissive=true|roles=public|using=((user_id = core.current_uid()) OR core.is_active_platform_admin())|check=',
+    '- policy|platform_admin|platform_admin_update|w|permissive=true|roles=public|using=core.is_active_platform_admin()|check=core.is_active_platform_admin()',
+    '- policy|platform_admin|platform_admin_write|a|permissive=true|roles=public|using=|check=core.is_active_platform_admin()',
+    "+ policy|platform_admin|platform_admin_select|r|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE ((user_id = core.current_uid()) OR core.is_active_platform_admin()) END|check=",
+    "+ policy|platform_admin|platform_admin_update|w|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
+    "+ policy|platform_admin|platform_admin_write|a|permissive=true|roles=public|using=|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

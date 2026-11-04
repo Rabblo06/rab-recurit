@@ -5534,6 +5534,14 @@ Each control below is tested. None of them prevents injection.
   - `NOT_FORCED_ALLOWLIST` is now empty.
   - Consequence for later migrations and scripts: to read those tables as the owner login, use `SET LOCAL ROLE
     rab_secure_owner`. An "is the database empty?" row count run as the owner login would wrongly answer yes.
+  - Fixed in place on 2026-11-04 (owner-approved; M-T1 had run only on disposable databases). Under FORCE,
+    `core.platform_admin`'s three TO PUBLIC policies (`_select`, `_write`, `_update`) called
+    `core.is_active_platform_admin()`. That definer reads `core.platform_admin`, so policy and function called each other
+    until "stack depth limit exceeded", and every login failed once a second admin row existed (HIGH, fail-closed,
+    found on PR #72). Those policies are now `CASE WHEN CURRENT_USER = 'rab_secure_owner' THEN false ELSE <previous
+    predicate> END`, applied before FORCE. Definers keep every row through the owner-only policy. Every other role
+    keeps the previous predicate. No other policy on `core.platform_admin` calls the function, and a static scan of
+    the other 15 tables found no such loop. Test: `platform-admin-force-rls.integration.spec.ts`.
 - **M-T2** (`WorkspaceRegistryGuardAllowList1786721410000`): the registry versioning guard becomes an allow-list
   (crewflow, rab_secure_owner, superuser). The workspace migrator takes `SET LOCAL ROLE crewflow`.
 - **Grant parity, for PAY-1** (`OwnerLoginGrantParityGuards1786721420000`):
