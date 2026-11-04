@@ -331,7 +331,9 @@ function checkModel(model, combo) {
     if (m.image !== api.image) p('rab-migrate: image differs from rab-api (the release step must run the promoted image\'s migrations)');
     if (m.restart !== 'no') p(`rab-migrate: restart is "${m.restart}", expected "no" (one-off)`);
     if ((m.command ?? []).join(' ') !== `node ${MIGRATE_ENTRY}`) p('rab-migrate: command is not deploy-prepare.js');
-    if (mEnv.CREWFLOW_MIGRATION_APPROVAL_MODE !== 'token') p('rab-migrate: CREWFLOW_MIGRATION_APPROVAL_MODE must be "token"');
+    // deploy-prepare.js is ALWAYS in token mode (no token = check run; CREWFLOW_MIGRATION_APPROVED = apply run): an approval
+    // mode on the release step would only suggest it can be switched off.
+    if ('CREWFLOW_MIGRATION_APPROVAL_MODE' in mEnv) p('rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE (deploy-prepare.js is always in token mode)');
     if ('CREWFLOW_MIGRATE_ON_START' in mEnv) p('rab-migrate: must not carry CREWFLOW_MIGRATE_ON_START');
     if (!(m.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) p('rab-migrate: long-form tmpfs /tmp is missing (also the OpenShip import guard)');
   }
