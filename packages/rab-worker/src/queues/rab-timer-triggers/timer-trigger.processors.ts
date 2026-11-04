@@ -30,8 +30,8 @@ export function buildTimerTriggerActions(deps: WorkerJobDependencies): Readonly<
       scoped(p, (manager) =>
         expireOfferCandidate(manager, { notificationService, auditService, realtimeEventService }, { offer_id: p.subjectId, organisation_id: p.organisationId, workspace_id: p.workspaceId }),
       ),
-    'manager-confirmation': async () => {
-      const result = await runManagerConfirmationTimeoutCycle(
+    'manager-confirmation': async (p) => {
+      await runManagerConfirmationTimeoutCycle(
         runtimeDataSource,
         tenantContext,
         notificationService,
@@ -39,7 +39,14 @@ export function buildTimerTriggerActions(deps: WorkerJobDependencies): Readonly<
         realtimeEventService,
         environmentService.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES'),
       );
-      return result.confirmed > 0;
+      // The wake claims every due pointer, so its cycle-wide count says nothing about THIS trigger (CodeRabbit on #60):
+      // re-read the subject in the payload's own scope (READ ONLY, FORCE RLS). The decision step had just seen it
+      // staff_accepted and due, so manager_confirmed now means the wake confirmed it; missing / any other status → false.
+      return scoped(p, async (manager) => {
+        await manager.query('SET TRANSACTION READ ONLY');
+        const [row] = await manager.query<Array<{ status: string }>>(`SELECT status FROM job_offer WHERE id = $1`, [p.subjectId]);
+        return row?.status === 'manager_confirmed';
+      });
     },
     'no-show': (p) =>
       scoped(p, (manager) =>
