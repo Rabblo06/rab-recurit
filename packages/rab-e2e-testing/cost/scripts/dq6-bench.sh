@@ -148,12 +148,23 @@ idle_window() { # label
 
 do_setup() {
   local N="${1:-200}" now="${DQ6_SEED_NOW:-2026-10-27T22:05:00Z}" ok=0 i
-  stamp "setup: seed orgs 1-$N (COST_SEED_NOW=$now), Worker stopped during seed and history backfill"
+  local have run
+  run="$(date -u +%Y%m%dT%H%M%SZ)"
+  have="$(q "select count(*) from core.organisation where slug like 'costaudit-%'")"
   hdocker stop costaudit-worker
-  dc --profile ops run --rm -T -e ORG_FROM=1 -e ORG_TO="$N" -e COST_SEED_NOW="$now" tool node /cost/seed/seed.js > "$OUT/seed-1-$N.log" 2>&1 || die "seed failed (seed-1-$N.log)"
-  head -1 "$OUT/seed-1-$N.log" >&2 || true
+  if [ "$have" = "$N" ] && [ -f "$OUT/seed-1-$N.log" ] && grep -q "\"org\":\"costaudit-$N\"" "$OUT/seed-1-$N.log"; then
+    # Resume: a previous setup completed the seed and failed later (e.g. the history backfill). The seed is not re-run
+    # (it is not idempotent); everything after it is.
+    stamp "setup: seed of orgs 1-$N already complete (seed-1-$N.log); resuming at the history backfill, Worker stopped"
+  elif [ "$have" = 0 ]; then
+    stamp "setup: seed orgs 1-$N (COST_SEED_NOW=$now), Worker stopped during seed and history backfill"
+    dc --profile ops run --rm -T -e ORG_FROM=1 -e ORG_TO="$N" -e COST_SEED_NOW="$now" tool node /cost/seed/seed.js > "$OUT/seed-1-$N.log" 2>&1 || die "seed failed (seed-1-$N.log)"
+    head -1 "$OUT/seed-1-$N.log" >&2 || true
+  else
+    die "setup: $have costaudit organisations exist, expected 0 (fresh stack) or $N with a complete seed-1-$N.log; re-create the stack"
+  fi
   for i in 1 2 3; do
-    if dc --profile ops run --rm -T tool node /cost/seed/backfill-reports.js > "$OUT/backfill-1-$N-try$i.log" 2>&1; then ok=1; break; fi
+    if dc --profile ops run --rm -T tool node /cost/seed/backfill-reports.js > "$OUT/backfill-1-$N-$run-try$i.log" 2>&1; then ok=1; break; fi
   done
   [ "$ok" = 1 ] || die "history backfill failed after 3 tries"
   # The day's LAST shifts end just before the logical "now"; their post-shift stamps would otherwise fall due one and two
