@@ -16,6 +16,8 @@ import { WorkspaceHostResolverService } from './engine/core-modules/workspace-ho
 import { assertHwsStartupInvariants, HwsStartupError } from './database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeorm/core/runtime-database-guard';
 import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates';
+import { installSessionRoleResetOnDataSource } from './database/postgres/session-role-reset';
+import { startSecurityPostureMonitoring } from './engine/core-modules/health/security-readiness';
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
 function refuseStartup(error: unknown): never {
@@ -35,9 +37,18 @@ async function bootstrap(): Promise<void> {
   // RUNTIME boundary: the database identity is verified BEFORE NestFactory opens any connection or any listener.
   await assertRuntimeDatabaseIdentity('api').catch(refuseStartup);
   // Phase B boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending migrations), before Nest.
-  await runDatabaseBootGates('api').catch(refuseStartup);
+  const gateReport = await runDatabaseBootGates('api').catch(refuseStartup);
   const app = await NestFactory.create(AppModule);
   await assertRuntimeDbRole(app.get(DataSource), 'API server');
+  // Owner-login architecture (Agent 3's controls): RESET ROLE on every checkout of the request pool (idempotent; the
+  // tenant context installs it too), then the external security audit sink and the semantic posture monitor, whose drift
+  // turns /healthz unready (security-readiness.ts). An invalid audit-sink configuration refuses to start.
+  installSessionRoleResetOnDataSource(app.get(DataSource));
+  try {
+    startSecurityPostureMonitoring({ dataSource: app.get(DataSource), baseline: gateReport.semanticBaseline, processLabel: 'api process' });
+  } catch (error) {
+    refuseStartup(error);
+  }
   const environmentService = app.get(EnvironmentService);
   // HWS runtime cutover (Part 26): no-op unless HWS_RUNTIME_ENABLED=true, in which case a hole in the registry, the
   // entity/schema classification, or the migrations-table qualification is refused here, before any request or job.

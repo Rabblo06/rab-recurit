@@ -13,17 +13,15 @@ import { Logger as NestLogger } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
-import { pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
+import { isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import {
   PROVISIONER_CYCLE_DURATIONS_KEY,
   PROVISIONER_HEARTBEAT_KEY,
   PROVISIONER_STATS_KEY,
   WORKER_STATS_KEY,
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
-import { runWorkspaceProvisioningCycle } from './queues/rab-maintenance/workspace-provisioning.job';
-import { runWorkspaceSchemaDriftCycle } from './queues/rab-maintenance/workspace-schema-drift.job';
-import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
+import { startWorkspaceProvisioningLoops } from './queues/rab-maintenance/workspace-provisioning.loops';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { resolveProvisionerConfig } from './workspace-provisioner.config';
@@ -79,7 +77,6 @@ import { resolveProvisionerConfig } from './workspace-provisioner.config';
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 // Wave 2 lane S2 (B4): workspace-schema drift detector, alert-only. Daily is plenty (one catalog read per workspace); it
 // also runs once at start-up so a freshly deployed provisioner reports immediately.
-const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function refuseStartup(error: unknown): never {
   const message = error instanceof Error ? error.message : 'unknown error';
@@ -144,29 +141,6 @@ async function bootstrap(): Promise<void> {
     }
   })();
   const privilegedEndpoint = pg.elevated ? 'elevated' : 'primary';
-  // No statement or query timeout on the provisioning client, exactly as before (workspace DDL can run long); the drift
-  // check keeps its own 60 s statement timeout (set by the drift job, which wins over the startup option).
-  const provisioningConfig = pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'provisioning', sessionAffinity: true, statementTimeoutMs: 0, queryTimeoutMs: 0 });
-  const driftConfig = pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'drift', sessionAffinity: true, statementTimeoutMs: 60_000 });
-  // Security review L-3: the provisioning lock is a SESSION advisory lock held across the cycle's own BEGIN/COMMIT pairs,
-  // so its connection must be session-stable. Same live two-connection probe the Worker runs (pg-session-probe.ts), on the
-  // provisioning endpoint, before the first connection and cycle. The URL denylist above only knows documented shapes.
-  await probePgSessionAffinity(
-    pgClientConfig(pg, { endpoint: privilegedEndpoint, purpose: 'probe', sessionAffinity: true, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
-    { label: 'the provisioner session-lock connection' },
-  ).catch(refuseStartup);
-  // W6-E2E-05: the connection is long-lived, so it must survive the database going away (restart, failover, an idle kill,
-  // a network blip). A bare pg Client emitted an unhandled 'error' (57P01) on a Postgres restart, the process exited 1 and
-  // the Worker bundle failed the whole service. ReconnectingPgClient always listens for 'error', marks the client broken
-  // and reconnects on the next cycle with bounded exponential backoff (1 s doubling to 30 s). A cycle interrupted by the
-  // drop fails as a whole; the session advisory lock is released by the server with the dead session, and the durable
-  // CREATING/FAILED/READY states make the next cycle's retry safe. The first connection must still succeed at start-up.
-  const provisioning = new ReconnectingPgClient(
-    provisioningConfig,
-    { label: 'provisioning', logger, initialBackoffMs: 1_000, maxBackoffMs: 30_000 },
-  );
-  await provisioning.acquire();
-
   // Own stats identity (BullMQ migration, owner-approved interval-mode fix): the provisioner's full stats — including ITS
   // startedAt — go to rab:workspace-provisioner:stats. It used to HSET its whole object into rab:worker:stats every 5 s,
   // overwriting the jobs process's startedAt. For existing readers (E2E 5.3, Admin queue health) it still mirrors ONLY
@@ -189,65 +163,19 @@ async function bootstrap(): Promise<void> {
   beat();
   runtime.interval(beat, 15_000);
 
-  // Phase B: a release can migrate the database while this (older) provisioner keeps running. Before every cycle the ledger
-  // and the provision function are re-assessed (two catalog reads); an incompatible database skips the cycle — nothing is
-  // provisioned by this image — and is logged once per change, never once per tick.
-  const production = isProductionProcess('provisioner', process.env);
-  let lastCompatibilityRefusal: string | null = null;
-  const compatibleForThisCycle = async (): Promise<boolean> => {
-    const client = await provisioning.acquire();
-    try {
-      await checkSchemaCompatibility(async (sql, params) => (await client.query(sql, params as unknown[])).rows, {
-        process: 'provisioner',
-        production,
-        expected: gateReport.expectedMigrations ?? [],
-        label: 'provisioner process',
-      });
-      if (lastCompatibilityRefusal !== null) logger.log('workspace provisioning: the database is compatible with this image again; provisioning resumes');
-      lastCompatibilityRefusal = null;
-      return true;
-    } catch (error) {
-      if (error instanceof Error && error.name === 'SchemaCompatibilityError') {
-        if (error.message !== lastCompatibilityRefusal) logger.error(`workspace provisioning: skipped, ${error.message}`);
-        lastCompatibilityRefusal = error.message;
-        return false;
-      }
-      throw error;
-    }
-  };
-
-  runtime.every({
-    name: 'workspace provisioning',
+  // The provisioning and drift loops — the ONE implementation the Worker also runs in-process under the owner login
+  // (workspace-provisioning.loops.ts): session-affinity probe, ReconnectingPgClient, per-cycle provisioner-strict schema
+  // check, bounded lock with shouldAbort, daily drift. This superseded process's login already IS crewflow.
+  const loops = await startWorkspaceProvisioningLoops({
+    pg,
+    endpoint: privilegedEndpoint,
+    runtime,
+    logger,
     intervalMs: config.intervalMs,
-    statKeys: { lastRunAt: 'lastWorkspaceProvisioningAt', failures: 'workspaceProvisioningFailures' },
-    run: async () => {
-      if (!(await compatibleForThisCycle())) return false;
-      // Phase A: bounded lock wait (default 10 s), abandoned at once when shutdown begins; a busy lock skips this tick.
-      const result = await runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown });
-      if (!result.lockAcquired) {
-        logger.log('workspace provisioning: skipped — another provisioner held the provisioning lock for the whole bounded wait');
-        // Phase A review F6: `false` records the tick as idle (not stamped), so a wedged lock holder elsewhere is not
-        // hidden behind a fresh lastWorkspaceProvisioningAt on this replica.
-        return false;
-      }
-      if (result.attempted) logger.log(`workspace provisioning: attempted=${result.attempted} ready=${result.ready} failed=${result.failed}`);
-      return true;
-    },
-  });
-
-  runtime.every({
-    name: 'workspace schema drift',
-    intervalMs: WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
-    statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
-    run: async () => {
-      // Its own short-lived connection (never the provisioning client, whose BEGIN/COMMIT pairs must not interleave).
-      const drift = await runWorkspaceSchemaDriftCycle(driftConfig);
-      for (const f of drift.findings) {
-        logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
-      }
-      logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
-    },
-  });
+    expectedMigrations: gateReport.expectedMigrations ?? [],
+    production: isProductionProcess('provisioner', process.env),
+    actAsCrewflow: false,
+  }).catch(refuseStartup);
 
   // eslint-disable-next-line no-console
   console.log(
@@ -259,7 +187,7 @@ async function bootstrap(): Promise<void> {
     runtime.beginShutdown();
     const { drained, pending } = await runtime.drain(timeoutMs);
     if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (the advisory lock releases with the connection)`);
-    await provisioning.close();
+    await loops.close();
     await redis.quit();
     // eslint-disable-next-line no-console
     console.log('[workspace-provisioner] shut down cleanly');

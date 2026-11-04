@@ -98,3 +98,14 @@ export function resolveProvisionerConfig(env: NodeJS.ProcessEnv): ProvisionerCon
   }
   return { provision, enabledBy, hwsRuntimeEnabled: hws, intervalSeconds, intervalMs: intervalSeconds * 1000 };
 }
+
+/**
+ * Owner-login architecture (T4): the Worker runs workspace provisioning IN-PROCESS, always — it is the only path that builds
+ * `createFor` workspaces everywhere and any workspace in production. There is no on/off switch (CREWFLOW_PROVISIONER_* is
+ * refused on the Worker); only the interval: WORKSPACE_PROVISIONER_INTERVAL_SECONDS, the same rule and bounds as above
+ * (5..120, default 60; production and QA compose pin 5 for onboarding). Throws ProvisionerConfigError (names only).
+ */
+export function resolveInProcessProvisioningInterval(env: NodeJS.ProcessEnv): { intervalSeconds: number; intervalMs: number } {
+  const intervalSeconds = parseInterval(env, PROVISIONER_INTERVAL_DEFAULT_SECONDS);
+  return { intervalSeconds, intervalMs: intervalSeconds * 1000 };
+}
