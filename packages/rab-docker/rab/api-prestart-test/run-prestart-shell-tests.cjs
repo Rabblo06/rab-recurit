@@ -42,6 +42,23 @@ const STUBS = {
   command: '/app/packages/rab-server/dist/command/main.js',
 };
 for (const name of Object.keys(STUBS)) fs.writeFileSync(path.join(stubs, `${name}.js`), stub(name));
+// Owner-login architecture: the short-lived migrate child (Agent 1). It reports its environment like the other stubs, prints
+// /ctl/migrate-result (the TWENTY_MIGRATE_RESULT line) when present, and exits with the next code of /ctl/migrate-seq
+// (comma-separated; the attempt counter lives in the container's writable /tmp), so a 69-then-0 retry can be driven.
+const MIGRATE_CHILD = `${SCRIPTS_DIR}/migrate/twenty/twenty-migrate.js`;
+fs.writeFileSync(path.join(stubs, 'twentymigrate.js'), `
+const fs = require('fs');
+const keys = (p) => fs.readFileSync(p, 'utf8').split('\\0').filter(Boolean).map((kv) => kv.split('=')[0]).sort();
+const read = (f, d) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return d; } };
+const n = Number(read('/tmp/migrate-attempts', '0')) + 1;
+fs.writeFileSync('/tmp/migrate-attempts', String(n));
+const seq = read('/ctl/migrate-seq', '0').split(',');
+const code = Number(seq[Math.min(n, seq.length) - 1]);
+console.log('STUB twentymigrate attempt=' + n + ' approval=' + (process.env.CREWFLOW_MIGRATION_APPROVED || '') + ' self=' + keys('/proc/self/environ').join(','));
+const result = read('/ctl/migrate-result', '');
+if (result) console.log('TWENTY_MIGRATE_RESULT ' + result);
+process.exit(code);
+`);
 
 function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [] } = {}) {
   const ctlDir = path.join(work, `ctl-${name}`);
@@ -50,6 +67,7 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
   const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`];
   if (withPrestart) args.push('-v', `${PRESTART}:/app/api-prestart.sh:ro`);
   for (const [stubName, target] of Object.entries(STUBS)) args.push('-v', `${path.join(stubs, `${stubName}.js`)}:${target}:ro`);
+  args.push('-v', `${path.join(stubs, 'twentymigrate.js')}:${MIGRATE_CHILD}:ro`);
   args.push('-v', `${ctlDir}:/ctl:ro`);
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
   args.push(IMAGE, 'sh', `/app/${entry}`);
@@ -57,7 +75,15 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
 
-const BASE = { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), PG_DATABASE_URL: 'postgres://crewflow_app@db/rab' };
+// Owner-login architecture: CREWFLOW_MIGRATE_ON_START is required on the API; the failure delay is 0 except where a case
+// measures it.
+const BASE = {
+  NODE_ENV: 'production',
+  APP_SECRET: 'x'.repeat(40),
+  PG_DATABASE_URL: 'postgres://crewflow_owner@db/rab',
+  CREWFLOW_MIGRATE_ON_START: 'false',
+  CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS: '0',
+};
 let failures = 0;
 const check = (label, cond, detail) => {
   console.log(`${cond ? 'PASS' : 'FAIL'} | ${label}${cond ? '' : `\n${detail}`}`);
@@ -88,6 +114,9 @@ const FORBIDDEN = [
   'DB_TARGET', 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
   // Phase B (ops): the one-off operations container's variables.
   'CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF',
+  // Owner-login architecture: one PG_DATABASE_URL, no role password, no mode switch, no provisioner setting on the API.
+  'DATABASE_URL', 'DATABASE_DIRECT_URL', 'PG_DATABASE_REPLICA_URL', 'PG_WORKER_DATABASE_URL', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
+  'CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_DB_MODE', 'DISABLE_DB_MIGRATIONS', 'CREWFLOW_PROVISIONER_ENABLED', 'CREWFLOW_PROVISIONER_ANYTHING',
 ];
 // Final review F5: the approval is now a token naming the exact pending set (pending-<count>-<sha256>); a well-formed token
 // is refused on the API exactly like any other value (by name), and so is the retired constant.
@@ -164,6 +193,54 @@ for (const [n, value] of ['ENFORCE', 'Enforce', 'yes', 'true', 'strict'].entries
 }
 r = run('isolation-warn-explicit', { ...BASE, CREWFLOW_RUNTIME_ISOLATION: 'warn' }, { dockerArgs: without('--read-only') });
 check('7e warn (explicit) + a missing control -> starts and warns, naming it', r.code === 0 && line(r.out, 'main') && /api-prestart: WARNING runtime isolation weaker than docker-compose\.production\.yml declares \(root filesystem is writable\): .* mode=warn /.test(r.out), r.out);
+
+// 8. Owner-login architecture: the database start-up settings and the migrate-on-start child (M0 §7 exit codes).
+const MIGRATE_ON = { ...BASE, CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' };
+const migrated = (out) => line(out, 'twentymigrate');
+const RESULT = (o) => JSON.stringify({ state: 'CHAIN-PARTIAL', applied: [], pending: ['1786730000000-Broken'], ...o });
+const DEGRADED = RESULT({ exitCode: 70, serve: true, policy: 'continue-if-compatible', reason: 'migration 1786730000000-Broken failed: lock timeout', failedMigration: '1786730000000-Broken', checks: [] });
+r = run('cfg-missing', { ...BASE, CREWFLOW_MIGRATE_ON_START: '' });
+check('8a CREWFLOW_MIGRATE_ON_START unset on the API -> refused (64) naming it, nothing ran', r.code === 64 && /CREWFLOW_MIGRATE_ON_START is required on the API service/.test(r.out) && !line(r.out, 'check') && !migrated(r.out) && !line(r.out, 'main'), r.out);
+for (const [name, value] of [['CREWFLOW_MIGRATE_ON_START', 'yes'], ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'allowlist'], ['CREWFLOW_UPGRADE_FAILURE_POLICY', 'continue'], ['CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS', '301'], ['CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS', '5s']]) {
+  r = run(`cfg-bad-${name}-${value}`, { ...BASE, [name]: value });
+  check(`8b ${name}=${value} -> refused (64), value not echoed, nothing ran`, r.code === 64 && r.out.includes(name) && !r.out.includes(`=${value}`) && !line(r.out, 'main') && !migrated(r.out), r.out);
+}
+r = run('cfg-prod-approval', { ...BASE, CREWFLOW_MIGRATE_ON_START: 'true' });
+check('8c production + migrate-on-start without an explicit approval mode -> refused (64)', r.code === 64 && /must be set explicitly/.test(r.out) && !migrated(r.out), r.out);
+
+r = run('migrate-ok', MIGRATE_ON, { ctl: { 'migrate-seq': '0', 'migrate-result': RESULT({ exitCode: 0, serve: true }) } });
+check('8d migrate-on-start, child exit 0 -> main starts as PID 1; the read-only check is not needed; no retired migration entrypoint ran', r.code === 0 && migrated(r.out) && /STUB main pid=1 /.test(line(r.out, 'main')) && !line(r.out, 'check') && noMigration(r.out), r.out);
+r = run('migrate-70', { ...MIGRATE_ON, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
+check('8e exit 70 + continue-if-compatible + a verified result -> main starts with a loud WARNING naming the reason and the failing migration', r.code === 0 && line(r.out, 'main') &&
+  /WARNING DEGRADED START - the schema upgrade FAILED .* reason=migration 1786730000000-Broken failed: lock timeout failing_migration=1786730000000-Broken state=CHAIN-PARTIAL/.test(r.out) &&
+  /WARNING DEGRADED START - the upgrade failed and continue-if-compatible passed every check/.test(r.out), r.out);
+r = run('migrate-70-policy-refuse', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
+check('8f exit 70 while CREWFLOW_UPGRADE_FAILURE_POLICY=refuse -> no start (66)', r.code === 66 && !line(r.out, 'main'), r.out);
+r = run('migrate-70-fresh', { ...MIGRATE_ON, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }, { ctl: { 'migrate-seq': '70', 'migrate-result': JSON.stringify({ state: 'EMPTY', exitCode: 70, serve: true, policy: 'continue-if-compatible', reason: 'x' }) } });
+check('8g a 70 result naming a FRESH install (EMPTY) is vetoed -> 66: a fresh install never serves', r.code === 66 && /not a verified continue-if-compatible upgrade/.test(r.out) && !line(r.out, 'main'), r.out);
+r = run('migrate-70-noserve', { ...MIGRATE_ON, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED.replace('"serve":true', '"serve":false') } });
+check('8h a 70 result without serve:true is vetoed -> 66', r.code === 66 && !line(r.out, 'main'), r.out);
+r = run('migrate-66-fresh', MIGRATE_ON, { ctl: { 'migrate-seq': '66', 'migrate-result': JSON.stringify({ state: 'EMPTY', exitCode: 66, serve: false }) } });
+check('8i fresh-install failure (child 66) -> no start, exit 66, main never runs', r.code === 66 && /a migration failed/.test(r.out) && !line(r.out, 'main'), r.out);
+for (const code of [64, 65, 67, 68, 1]) {
+  r = run(`migrate-${code}`, MIGRATE_ON, { ctl: { 'migrate-seq': String(code) } });
+  check(`8j child exit ${code} -> no start, the same exit code`, r.code === code && !line(r.out, 'main'), r.out);
+}
+r = run('migrate-69-retry', MIGRATE_ON, { ctl: { 'migrate-seq': '69,0' } });
+check('8k exit 69 (lock timeout) is retried with backoff; the second attempt succeeds -> main starts', r.code === 0 && /attempt=2/.test(r.out) && /retrying in 10s/.test(r.out) && line(r.out, 'main'), r.out);
+r = run('migrate-delay', { ...MIGRATE_ON, CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS: '2' }, { ctl: { 'migrate-seq': '66' } });
+check('8l a failure waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS before exiting (bounded backoff)', r.code === 66 && /waiting 2s before exiting/.test(r.out), r.out);
+
+const TOKEN = `pending-1-${'a'.repeat(64)}`;
+r = run('migrate-token', { ...MIGRATE_ON, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_MIGRATION_APPROVED: TOKEN }, { ctl: { 'migrate-seq': '0' } });
+check('8m token mode: the approval reaches ONLY the migrate child; main.js never holds it', r.code === 0 && migrated(r.out).includes(`approval=${TOKEN}`) &&
+  !keysOf(line(r.out, 'main'), 'self').includes('CREWFLOW_MIGRATION_APPROVED') && !keysOf(line(r.out, 'main'), 'pid1').includes('CREWFLOW_MIGRATION_APPROVED'), r.out);
+r = run('token-none', { ...MIGRATE_ON, CREWFLOW_MIGRATION_APPROVED: TOKEN }, { ctl: { 'migrate-seq': '0' } });
+check('8n an approval with CREWFLOW_MIGRATION_APPROVAL_MODE=none -> refused (64), the child never ran', r.code === 64 && !migrated(r.out), r.out);
+r = run('token-no-migrate', { ...BASE, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_MIGRATION_APPROVED: TOKEN });
+check('8o an approval with CREWFLOW_MIGRATE_ON_START=false -> refused (64)', r.code === 64 && !line(r.out, 'main'), r.out);
+r = run('pending-no-migrate', { ...BASE }, { ctl: { check: 1 } });
+check('8p CREWFLOW_MIGRATE_ON_START=false and the schema behind -> 65, the child never ran', r.code === 65 && line(r.out, 'check') && !migrated(r.out), r.out);
 
 fs.rmSync(work, { recursive: true, force: true });
 console.log(failures === 0 ? 'ALL PASS' : `${failures} FAILED`);

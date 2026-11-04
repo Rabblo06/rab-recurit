@@ -24,7 +24,8 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
 import { createPgDataSource, pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
@@ -42,6 +43,9 @@ import { boundedPublish, createQueueProducerConnection, QUEUE_PRODUCER_REDIS_OPT
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
+import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
+import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
+import { resolveSchemaWaitMs, waitForCompatibleSchema } from './core/runtime/schema-wait';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
@@ -157,10 +161,56 @@ function refuseStartup(error: unknown): never {
               ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && error.name === 'WatchdogConfigError'
+              ? '[worker-watchdog] refused: '
+            : error instanceof Error && error.name === 'RuntimeIsolationError'
+              ? '[worker-isolation] refused: '
+            : error instanceof Error && (error.name === 'SchemaWaitConfigError' || error.name === 'SchemaCompatibilityError')
+              ? '[worker-schema-wait] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
+}
+
+/**
+ * The Worker's bounded wait for "schema current" (core/runtime/schema-wait.ts), on one short-lived boot-gate connection of
+ * its own login, with the same expected-migration list and policy the pending-migration boot gate uses.
+ */
+async function waitForWorkerSchema(pg: ReturnType<typeof resolvePgEnvironmentCached>): Promise<void> {
+  const maxWaitMs = resolveSchemaWaitMs(process.env);
+  const dataSource = createPgDataSource(
+    pg,
+    { endpoint: 'primary', purpose: 'boot-gates', max: 1 },
+    {
+      name: 'worker-schema-wait',
+      entities: [],
+      subscribers: [],
+      logging: false,
+      migrations: coreDataSourceOptions.migrations,
+      migrationsTableName: coreDataSourceOptions.migrationsTableName,
+    },
+  );
+  await dataSource.initialize();
+  try {
+    const expected = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
+    const production = isProductionProcess('worker', process.env);
+    await waitForCompatibleSchema({
+      maxWaitMs,
+      // eslint-disable-next-line no-console
+      log: (line) => console.log(line),
+      check: async () => {
+        await checkSchemaCompatibility((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
+          process: 'worker',
+          production,
+          expected,
+          label: 'worker process',
+        });
+      },
+    });
+  } finally {
+    await dataSource.destroy().catch(() => undefined);
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -175,9 +225,23 @@ async function bootstrap(): Promise<void> {
       return refuseStartup(error);
     }
   })();
+  // Owner-login architecture (no root launcher): the Worker itself now reports the container isolation it received (H6,
+  // CREWFLOW_RUNTIME_ISOLATION warn|enforce) and runs the event-loop watchdog the launcher used to provide (a stalled
+  // event loop is SIGKILLed so the restart policy replaces it; refused as PID 1, where the kernel ignores the kill — run
+  // the container with init: true). Both before any connection.
+  try {
+    enforceRuntimeIsolation(process.env, console);
+    startEventLoopWatchdog({ staleMs: resolveWatchdogStaleMs(process.env) });
+  } catch (error) {
+    refuseStartup(error);
+  }
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
   await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
+  // Owner-login architecture: the Worker NEVER migrates (the API start or the release step does). While the only schema
+  // finding is "pending" — that migration still running — it waits, bounded (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS), instead
+  // of the boot gate refusing it; anything else is refused exactly as before, by the wait or by the boot gates below.
+  await waitForWorkerSchema(pg).catch(refuseStartup);
   // ---- Phase B (A2): database boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending
   // migrations), before any queue consumer or pool. ----
   await runDatabaseBootGates('worker').catch(refuseStartup);

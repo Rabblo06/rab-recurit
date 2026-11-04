@@ -1933,4 +1933,26 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(10)
   PUSH_DELIVERY_MAX_ATTEMPTS: number = 5;
+
+  // ---------------------------------------------------------------------------------------------------------------------
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM; M0 §7). The full rules (required on the API service; an
+  // explicit approval mode for a production runtime that migrates on start; the removed CREWFLOW_DB_MODE) live in the one
+  // shared parser, database/owner-login/runtime-db-config.ts, which env.validation.ts runs too. These declarations give
+  // the values a type and their allowed sets. Strings, exactly as written.
+  // ---------------------------------------------------------------------------------------------------------------------
+
+  /** true: the API image entrypoint applies pending migrations on start (short-lived child, migration lock). false: a release step does. */
+  @IsOptional()
+  @IsIn(['true', 'false'], { message: 'CREWFLOW_MIGRATE_ON_START must be exactly true or false' })
+  CREWFLOW_MIGRATE_ON_START?: 'true' | 'false';
+
+  /** none | token: whether a migrate-on-start run needs the per-release approval token (CREWFLOW_MIGRATION_APPROVED). */
+  @IsOptional()
+  @IsIn(['none', 'token'], { message: 'CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly none or token' })
+  CREWFLOW_MIGRATION_APPROVAL_MODE?: 'none' | 'token';
+
+  /** refuse (default) | continue-if-compatible: what the API does when a schema upgrade fails (exit 70 = degraded continue). */
+  @IsOptional()
+  @IsIn(['refuse', 'continue-if-compatible'], { message: 'CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly refuse or continue-if-compatible' })
+  CREWFLOW_UPGRADE_FAILURE_POLICY?: 'refuse' | 'continue-if-compatible';
 }
