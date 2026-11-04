@@ -227,7 +227,7 @@
     {
       "id": "REF-1",
       "severity": "MEDIUM",
-      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT with the owner, parity guard proposed: the test stays strict and red, never accepted)",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-04, like Twenty: global reference tables writable by the runtime login; THREAT-MODEL entry by Agent 3)",
       "change": "core.permission (RBAC flag reference data) and core.migrations (TypeORM ledger) have no RLS and no organisation_id; the runtime login inherits crewflow's S,I,U,D,T on both (golden :926, :968), so one UPDATE / DELETE changes every tenant. Not in GRANT_PARITY_TARGETS. Before: crewflow_app S,I on permission and S on migrations.",
       "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture CF-09, rolled back, WHERE false)",
       "bc": []
@@ -425,7 +425,7 @@
         "class": "P",
         "classification": [
           "PROV-1",
-          "REF-1 OPEN DEFECT (strict, red)"
+          "catalogue:REF-1 (OWNER-ACCEPTED 2026-11-04)"
         ],
         "kept": "audit_log DML still 42501 for the runtime login (crewflow holds S,I only)"
       },
@@ -603,7 +603,7 @@
       {
         "id": "REF-1",
         "severity": "MEDIUM",
-        "ask": "add permission (UPDATE, DELETE, TRUNCATE) and migrations (INSERT, UPDATE, DELETE, TRUNCATE) to GRANT_PARITY_TARGETS (exempting the migrate child), then mark mitigated."
+        "ask": "add to the BC catalogue as accepted-owner (owner decision 2026-11-04, like Twenty); no parity guard."
       },
       {
         "id": "MFA-SESS-1",
