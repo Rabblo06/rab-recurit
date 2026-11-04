@@ -8,7 +8,7 @@ import { QrImageService } from '@rab/server/modules/attendance/services/qr-image
 import { buildFinalTimesheetViewModel, FinalTimesheetViewModel } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
 
 import { h, QrCode, TABLE_SEGMENT_ROWS } from '../../queues/rab-reports/native/document-components';
-import { ensureNativePdfFonts } from '../../queues/rab-reports/native/fonts';
+import { shutdownRenderPool } from '../../queues/rab-reports/native/runtime/render-pool';
 import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { FINAL_TIMESHEET_CASES, SHIFT_INFO } from '../helpers/final-timesheet-fixtures';
 import { inlinePageResources, rasterImages } from '../helpers/pdf-images';
@@ -77,7 +77,8 @@ function escapeRe(s: string): string {
 
 const timings: string[] = [];
 
-afterAll(() => {
+afterAll(async () => {
+  await shutdownRenderPool();
   // eslint-disable-next-line no-console
   console.log(`[renderer-parity] render times (ms, this host):\n${timings.join('\n')}`);
 });
@@ -146,7 +147,6 @@ describe('QR component parity', () => {
       { kind: 'pre-shift', data: { ...SHIFT_INFO, staff: [], qrPngBase64: png.toString('base64') } },
       { ...process.env, PDF_RENDERER: 'chromium' },
     );
-    ensureNativePdfFonts();
     const native = await renderToBuffer(h(Document, null, h(Page, { size: 'A4' }, h(QrCode, { png, sizePx: 128 }))) as Parameters<typeof renderToBuffer>[0]);
     if (OUT) {
       writeFileSync(join(OUT, 'qr-chromium.pdf'), chromium);

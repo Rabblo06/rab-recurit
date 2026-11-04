@@ -4,7 +4,11 @@ import { documentFooterTemplate } from '@rab/server/modules/attendance/templates
 import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
 
 import { FINAL_TIMESHEET_CASES } from '../../__tests__/helpers/final-timesheet-fixtures';
+import { inlinePageResources } from '../../__tests__/helpers/pdf-images';
+import { inspectPdf } from '../../__tests__/helpers/pdf-inspect';
 import * as nativeModule from './native/render-native';
+import * as renderPool from './native/runtime/render-pool';
+import { shutdownRenderPool } from './native/runtime/render-pool';
 import * as renderTimeout from './native/runtime/render-timeout';
 import {
   describePdfRendering,
@@ -69,6 +73,32 @@ describe('Chromium input is exactly what the job passed before the seam changed'
   });
 });
 
+/**
+ * I-1 regression: the PRODUCTION native path (renderReportPdf → renderNativePdf) renders in the worker-thread pool, not
+ * in-process. Evidence from the bytes, not only from a spy: the creation date is a valid PDF date built inside the
+ * thread (an in-process render under Jest writes `Date.toString()`), and an unprintable note becomes the F1 marker
+ * (only the thread's glyph guard does that).
+ */
+describe('native renders go through the render pool (I-1)', () => {
+  afterAll(() => shutdownRenderPool());
+
+  it('renderReportPdf(native) submits the view-model to the pool; the thread applies D7 and the F1 glyph guard', async () => {
+    const pooled = jest.spyOn(renderPool, 'renderInPool');
+    try {
+      const pdf = await renderReportPdf({ kind: 'final-timesheet', data: { ...data, notes: 'Arabic محمد end' } }, { PDF_RENDERER: 'native' });
+      expect(pooled).toHaveBeenCalledTimes(1);
+      expect(pooled.mock.calls[0]![0]).toMatchObject({ kind: 'final-timesheet', generatedAt: data.generatedAt });
+      const raw = pdf.toString('latin1');
+      expect(raw).toMatch(/\(D:20261020150000Z?\)/); // a real PDF date, built in the thread realm
+      expect(raw).not.toMatch(/GMT[+-]\d{4}/); // never Date.toString()
+      // F1: the four Arabic letters (no glyphs in the font stack) print as four visible markers, the rest as written.
+      expect(inspectPdf(inlinePageResources(pdf)).text).toContain('Arabic □□□□ end');
+    } finally {
+      pooled.mockRestore();
+    }
+  });
+});
+
 describe('renderReportPdf dispatch', () => {
   let launch: jest.SpyInstance;
   let native: jest.SpyInstance;
@@ -78,6 +108,7 @@ describe('renderReportPdf dispatch', () => {
     native = jest.spyOn(nativeModule, 'renderNativePdf');
   });
   afterEach(() => jest.restoreAllMocks());
+  afterAll(() => shutdownRenderPool());
 
   it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'chromium' }]])('%p: the Chromium path, never the native one', async (env) => {
     await expect(renderReportPdf(doc, env)).rejects.toBeInstanceOf(LaunchIntercepted);
@@ -124,18 +155,11 @@ describe('renderReportPdf dispatch', () => {
     expect(native).not.toHaveBeenCalled();
   });
 
-  it('native: a render that never settles is rejected with PdfRenderTimeoutError (step "native")', async () => {
-    jest.useFakeTimers();
-    try {
-      native.mockImplementation(() => new Promise<Buffer>(() => undefined));
-      const pending = renderReportPdf(doc, { PDF_RENDERER: 'native' });
-      const assertion = expect(pending).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
-      await jest.advanceTimersByTimeAsync(PDF_RENDER_STEP_TIMEOUT_MS + 1);
-      await assertion;
-      await expect(pending).rejects.toBeInstanceOf(PdfRenderTimeoutError);
-    } finally {
-      jest.useRealTimers();
-    }
+  it('native: the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
+    // The 30 s deadline itself is enforced by the render pool terminating the thread (runtime/render-pool.spec.ts).
+    native.mockRejectedValue(new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS));
+    await expect(renderReportPdf(doc, { PDF_RENDERER: 'native' })).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it('native: a renderer failure propagates unchanged — no runtime fallback to Chromium (T3)', async () => {
@@ -148,8 +172,7 @@ describe('renderReportPdf dispatch', () => {
     const a = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     const b = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     expect(a.equals(b)).toBe(true);
-    // The /CreationDate value itself (D:20261020150000Z) is checked outside Jest (the Worker-image run): under Jest the
-    // Date is created in the test realm and react-pdf runs in Node's realm (react-pdf-node-loader.ts), where pdfkit's
-    // `instanceof Date` does not recognise it.
+    // The creation date is the document's generatedAt (2026-10-20T15:00:00Z), built inside the render thread.
+    expect(a.toString('latin1')).toContain('D:20261020150000');
   });
 });

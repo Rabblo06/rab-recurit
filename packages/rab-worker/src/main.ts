@@ -46,7 +46,8 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { describePdfRendering } from './queues/rab-reports/render-pdf.util';
+import { prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
+import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
@@ -310,8 +311,11 @@ async function bootstrap(): Promise<void> {
       : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
   );
   // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
+  // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
+  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start.
   try {
     logger.log(describePdfRendering());
+    if (pdfRendererMode() === 'native') prewarmRenderPool();
   } catch (error) {
     refuseStartup(error);
   }
