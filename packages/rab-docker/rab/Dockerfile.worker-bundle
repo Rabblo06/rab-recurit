@@ -25,8 +25,8 @@
 #     path and version (so the API layers are reused unchanged) and every added package needs no install script or native
 #     build (that stage runs none). The final stage proves the Worker's closure: every import in the Worker, server, shared
 #     and emails dist resolves, and no build or test tool, browser driver (playwright, playwright-core) or SWC compiler is
-#     present (runtime-deps.cjs). `@swc/helpers` (a runtime helper library fontkit requires) is allowed by owner decision
-#     D5/T2; the SWC compiler packages stay banned by name;
+#     present (runtime-deps.cjs). The whole `@swc/*` scope is banned with one exact exception, `@swc/helpers` (a runtime
+#     helper library fontkit requires; owner decision D5/T2, review L-4);
 #   - nothing about /app ownership any more: since H1 the shared image already ships application code and dependencies
 #     root-owned and not group/other-writable, so neither child identity can rewrite code the other imports. This build
 #     re-verifies that and REFUSES a base image that does not meet it (e.g. one built from an older Dockerfile, which
@@ -129,19 +129,21 @@ RUN set -eux; \
 COPY --from=worker-modules /worker-delta/node_modules/ /app/node_modules/
 # H3 runtime-dependency gate for the Worker: every bare import in the code the two children run resolves, and no build
 # or test tool, browser driver or SWC compiler is anywhere in node_modules. P5: playwright, playwright-core and
-# chromium-bidi are forbidden here exactly as in the API image. D5/T2: '@swc/*' is replaced by the SWC compiler packages
-# by name, so the runtime helper library @swc/helpers (Apache-2.0, required by fontkit, a dependency of the native
-# renderer @react-pdf/renderer) is allowed and the compilers stay banned. The native renderer and its vendored fonts must
+# chromium-bidi are forbidden here exactly as in the API image. D5/T2 + review L-4: the whole '@swc/*' scope stays banned
+# (every SWC compiler, platform binary and future SWC package) with ONE exact exception, the runtime helper library
+# @swc/helpers (Apache-2.0, required by fontkit, a dependency of the native renderer @react-pdf/renderer), named by
+# runtime-deps.cjs --allow (directory and package.json name must both be exactly that).
+# The native renderer and its vendored fonts must
 # be present (the fonts are copied next to the compiled native module by the rab-worker build).
 RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
     set -eu; \
     node /tmp/runtime-deps.cjs check /app/node_modules \
       --scan /app/packages/rab-worker/dist /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
       --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint \
-        @swc/core '@swc/core-*' @swc/cli @swc/jest @swc/wasm @swc/wasm-web @swc/wasm-typescript @swc/register \
-        '@swc/plugin-*' '@swc-node/*' \
+        '@swc/*' '@swc-node/*' \
         webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
-        playwright playwright-core chromium-bidi; \
+        playwright playwright-core chromium-bidi \
+      --allow @swc/helpers; \
     test -f /app/node_modules/@react-pdf/renderer/package.json; \
     for f in LiberationSans-Regular.ttf LiberationSans-Bold.ttf OFL.txt fonts.sha256; do test -f "/app/packages/rab-worker/dist/queues/rab-reports/native/assets/fonts/$f"; done; \
     bad="$(find /app/node_modules ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \

@@ -4,7 +4,7 @@
  * security-floors.sh and module-paths-gate.cjs: this file is never copied into an image. Dependency-free (Node built-ins
  * only), because it runs in the final stages, which have no package manager.
  *
- *   node runtime-deps.cjs check <node_modules> --scan <dir>... [--forbid <name>|<prefix*>...]
+ *   node runtime-deps.cjs check <node_modules> --scan <dir>... [--forbid <name>|<prefix*>...] [--allow <name>...]
  *     Fails unless
  *       - every literal bare-specifier require("x") / import("x") / top-level `import … from "x"` in the .js/.cjs files
  *         under each --scan directory resolves, from that file, with Node's own resolver (package "exports" honoured).
@@ -12,7 +12,12 @@
  *         package some compiled file still loads fails the BUILD, not the first job that reaches that file;
  *       - no package directory anywhere in <node_modules> (nested node_modules included) is one of the --forbid names
  *         (build tooling, test runners, the browser driver). A name ending in `*` is a prefix: `@nx/*` is a whole scope,
- *         `@swc/core-*` every package whose name starts with `@swc/core-` (e.g. the per-platform SWC binaries).
+ *         `@swc/core-*` every package whose name starts with `@swc/core-` (e.g. the per-platform SWC binaries);
+ *       - `--allow` names EXACT packages exempt from a --forbid scope (review L-4: `--forbid '@swc/*' --allow @swc/helpers`
+ *         bans the whole SWC scope, future packages included, except the one runtime helper library). An allowed package
+ *         is exempt only when both its directory name and its package.json name are exactly the allowed name. An --allow
+ *         with a wildcard, or one that no --forbid entry covers, is refused (fail closed: an exception must be an
+ *         exception to something).
  *     Prints the package-directory count and the number of distinct name@version pairs (the image's package count).
  *
  *   node runtime-deps.cjs worker-delta <api node_modules> <worker node_modules> <out dir>
@@ -90,15 +95,22 @@ function check(args) {
   const nm = path.resolve(args[0]);
   const scan = [];
   const forbid = [];
+  const allow = [];
   let list = null;
   for (const a of args.slice(1)) {
     if (a === '--scan') list = scan;
     else if (a === '--forbid') list = forbid;
+    else if (a === '--allow') list = allow;
     else if (list) list.push(a);
     else throw new Error(`unexpected argument ${a}`);
   }
   if (!fs.existsSync(nm)) throw new Error(`${nm} does not exist`);
   if (scan.length === 0) throw new Error('nothing to --scan');
+  const forbidden = (n) => forbid.some((f) => (f.endsWith('*') ? n.startsWith(f.slice(0, -1)) : n === f));
+  for (const a of allow) {
+    if (a.includes('*')) throw new Error(`--allow takes exact package names only, not ${a}`);
+    if (!forbidden(a)) throw new Error(`--allow ${a} is not covered by any --forbid entry`);
+  }
 
   let files = 0;
   let specifiers = 0;
@@ -134,6 +146,7 @@ function check(args) {
     const name = nameOf(value);
     if (name) versions.add(value);
     const dirName = rel.replace(/^.*node_modules\//, '');
+    if (allow.includes(dirName) && name === dirName) continue; // an exact, named exception (both names must agree)
     for (const f of forbid) {
       const hit = f.endsWith('*') ? dirName.startsWith(f.slice(0, -1)) || (name || '').startsWith(f.slice(0, -1)) : dirName === f || name === f;
       if (hit) fail(`forbidden package in the runtime image: ${rel} (${value}) matches ${f}`);
@@ -141,7 +154,7 @@ function check(args) {
   }
   console.log(
     `runtime-deps: scanned ${files} files, ${specifiers} bare imports, ${unresolved.length} unresolved; ` +
-      `${tree.size} package directories, ${versions.size} distinct name@version; forbidden names checked: ${forbid.length}`,
+      `${tree.size} package directories, ${versions.size} distinct name@version; forbidden names checked: ${forbid.length}; exact exceptions: ${allow.length ? allow.join(', ') : 'none'}`,
   );
 }
 

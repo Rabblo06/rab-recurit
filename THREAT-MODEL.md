@@ -5417,3 +5417,15 @@ No migration, role, grant, RLS or posture change; no money or worked-minutes val
   thread's glyph guard (and in `collapsePreLine`), so notes keep their author's line breaks instead of printing □. Every
   other control or format character keeps F1's □ and its count-only log. Tests: `render-pool.spec`, `native-pdf.spec`,
   harness `pdf-harness.unit.spec` (transform and the `line-breaks` check).
+
+## Review L-4 — the Worker image bans the whole `@swc/*` scope again, with one exact exception (branch integration/pdf-native, #61/#63, not merged)
+
+- **Threat:** the P5 change had replaced `--forbid '@swc/*'` by an enumerated list of SWC compilers so that the runtime
+  helper library `@swc/helpers` (fontkit) could ship; a future SWC package not on that list (`@swc/html`, `@swc/css`,
+  their per-platform `.node` binaries, `@swc/minifier`) would then have reached the Worker runtime image unnoticed.
+- **Control:** `Dockerfile.worker-bundle` forbids `'@swc/*'` again and names one exception, `--allow @swc/helpers`.
+  `runtime-deps.cjs` exempts an allowed entry only when its directory name and its package.json name are both exactly
+  the allowed name; refuses a wildcard `--allow` and an `--allow` no `--forbid` entry covers; nested packages under the
+  allowed one are still checked. Regression: `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security
+  deployment-config job): `@swc/html-linux-x64-musl` and seven other SWC names fail, `@swc/helpers` passes, a disguised
+  package fails, and the Dockerfile gate keeps exactly one exception.

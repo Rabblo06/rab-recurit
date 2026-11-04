@@ -82,8 +82,8 @@ describe('PDF_RENDERER environment variable', () => {
       expect(() => validate(env)).toThrow(/CREWFLOW_WORKER_MEM_LIMIT/);
     });
 
-    it('is checked in chromium mode too: an unsafe native configuration is refused before anyone switches to native', () => {
-      expect(() => validate({ ...base, PDF_RENDERER: 'chromium', PDF_NATIVE_CONCURRENCY: '4' })).toThrow(/exceeds PDF_NATIVE_MEMORY_BUDGET_MB=768/);
+    it('is checked with PDF_RENDERER unset too (native is the only renderer on this tree)', () => {
+      expect(() => validate({ ...base, PDF_NATIVE_CONCURRENCY: '4' })).toThrow(/exceeds PDF_NATIVE_MEMORY_BUDGET_MB=768/);
     });
 
     it.each(['384', '768', '1536', '16384'])('accepts budget %p', (value) => {
