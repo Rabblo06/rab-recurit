@@ -77,7 +77,7 @@
       "forbidden_apk": ["chromium", "chromium-*", "nss", "nspr", "ffmpeg-*", "libsndfile", "alsa-lib", "libpulse", "pulseaudio*", "glib", "libxml2", "libxslt", "cups-libs", "cjson", "librist", "mesa", "mesa-*", "libdrm", "libepoxy", "libva", "libvdpau", "libvpl", "llvm*", "spirv-tools", "wayland-*", "libx*", "xkeyboard-config", "xprop", "xset", "xdg-utils", "mkfontscale", "libfontenc", "libice", "libsm", "pixman", "cairo", "cairo-*", "pango", "gdk-pixbuf", "gtk+3.0", "at-spi2-*", "libatk-*", "librsvg", "glycin-*", "libglycin", "gobject-introspection", "shared-mime-info", "hwdata-*", "libpciaccess", "eudev-libs", "libcamera*", "avahi-libs", "dbus-libs", "bubblewrap", "fontconfig", "freetype", "harfbuzz", "harfbuzz-*", "fribidi", "graphite2", "font-*", "ttf-*", "icu-data-*", "aom-libs", "libdav1d", "rav1e-libs", "libSvtAv1Enc", "x264-libs", "x265-libs", "xvidcore", "openh264", "libvpx", "libtheora", "libvorbis", "libogg", "opus", "lame-libs", "mpg123-libs", "libflac", "libopenmpt", "soxr", "speexdsp", "webrtc-audio-processing-*", "roc-toolkit-libs", "pipewire-libs", "libbluray", "libdvd*", "libudfread", "libwebp", "libwebp*", "libsharpyuv", "libjxl", "libhwy", "libyuv", "libjpeg-turbo", "libpng", "lcms2", "orc", "libsrt", "libzmq", "libssh", "gnutls", "nettle", "libtasn1", "p11-kit", "libidn2", "libunistring", "gmp", "mbedtls*", "libsodium"],
       "forbidden_npm": ["playwright", "playwright-core", "chromium-bidi", "@playwright/*", "puppeteer", "puppeteer-core"],
       "sbom_must_not_include": ["chromium", "playwright", "playwright-core"],
-      "min_sbom_packages": 100
+      "min_sbom_packages": 300
     }
   },
   "filesystem": {
