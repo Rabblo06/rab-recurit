@@ -241,6 +241,14 @@
       "bc": [
         "BC-01"
       ]
+    },
+    {
+      "id": "MFA-SESS-1",
+      "severity": "HIGH",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT routed to Agent 3: fix proposed, the test stays strict and red until it lands)",
+      "change": "The runtime login can UPDATE core.user_session.mfa_verified_at on its own sessions (measured ACCEPTED, PR #74 run 41910894672, w45-db5-schema:467): a session can be stamped MFA-verified without a factor check. Separated mode refused it by crewflow_app's column grant; user_session is not in GRANT_PARITY_TARGETS and no trigger covers the column after INSERT.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: w45-db5-schema mfa_verified_at, kept strict)",
+      "bc": []
     }
   ],
   "hardFloors": {
@@ -596,6 +604,11 @@
         "id": "REF-1",
         "severity": "MEDIUM",
         "ask": "add permission (UPDATE, DELETE, TRUNCATE) and migrations (INSERT, UPDATE, DELETE, TRUNCATE) to GRANT_PARITY_TARGETS (exempting the migrate child), then mark mitigated."
+      },
+      {
+        "id": "MFA-SESS-1",
+        "severity": "HIGH",
+        "ask": "fix (parity guard for user_session UPDATE mirroring crewflow_app's columns, or a trigger refusing any mfa_verified_at change after INSERT), then re-run w45-db5-schema."
       }
     ]
   }
