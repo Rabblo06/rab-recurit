@@ -267,7 +267,8 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
   it('18 selects the PG18 table; 17, 19 and below 16 are refused; a second, different major is refused', () => {
     selectWorkspaceFingerprintMajor(18);
     expect(workspaceFingerprintMajor()).toBe(18);
-    expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).not.toBe(EXPECTED_WORKSPACE_FINGERPRINTS_PG16[19]);
+    expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('af115ec7490665c7df38fbc78128e95e680e59764bb626e4c21d0c061fe699e6');
+    expect(missingFingerprintVersions(18)).toEqual([]);
     expect(() => selectWorkspaceFingerprintMajor(16)).toThrow(/cannot switch/);
     resetWorkspaceFingerprintSelectionForTests();
     expect(() => selectWorkspaceFingerprintMajor(17)).toThrow(UnsupportedPostgresVersionError);
