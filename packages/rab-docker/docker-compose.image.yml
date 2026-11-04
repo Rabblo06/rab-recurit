@@ -147,7 +147,10 @@ services:
     read_only: true
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, KILL]
-    security_opt: ["no-new-privileges:true"]
+    # Chromium OS sandbox REQUIRED (owner decision 2026-11-03): the Worker seccomp profile (Docker's default + user/PID/
+    # net/IPC namespaces + chroot). Relative to this file — copy rab/seccomp/chromium-worker.json next to it on the host.
+    # Without it every PDF render fails, and CREWFLOW_RUNTIME_ISOLATION=enforce refuses to start (see the production file).
+    security_opt: ["no-new-privileges:true", "seccomp=./rab/seccomp/chromium-worker.json"]
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
       - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700

@@ -466,3 +466,35 @@ test('H6 CREWFLOW_RUNTIME_ISOLATION in the production file: unset (= warn) or a 
     assert.ok(!launcher.JOBS_ENV_KEYS.includes('CREWFLOW_RUNTIME_ISOLATION') && !launcher.PROVISIONER_ENV_KEYS.includes('CREWFLOW_RUNTIME_ISOLATION'));
   }
 });
+
+// ---------------------------------------------------------------- Chromium OS sandbox required (owner decision 2026-11-03)
+
+test('Chromium sandbox: every Worker-bundle service applies the Worker seccomp profile, the file exists next to its compose file, and it is the generated profile', { skip }, () => {
+  const profile = require('../../seccomp/build-chromium-worker-profile.cjs');
+  const committed = fs.readFileSync(profile.OUT, 'utf8');
+  assert.equal(committed, profile.build(), 'chromium-worker.json is not the generated profile (node rab/seccomp/build-chromium-worker-profile.cjs)');
+  const parsed = JSON.parse(committed);
+  const extra = parsed.syscalls.filter((s) => /Crewflow H6/.test(s.comment || ''));
+  assert.deepEqual(extra.map((s) => s.names.join(',')), ['clone', 'unshare', 'chroot']);
+  // The two namespace rules keep CLONE_NEWNS / NEWCGROUP / NEWUTS refused.
+  for (const s of extra.slice(0, 2)) assert.deepEqual(s.args, [{ index: 0, value: profile.STILL_REFUSED, valueTwo: 0, op: 'SCMP_CMP_MASKED_EQ' }]);
+  const files = {
+    'packages/rab-docker/docker-compose.production.yml': ['rab-worker'],
+    'packages/rab-docker/docker-compose.image.yml': ['rab-worker'],
+    'packages/rab-docker/docker-compose.yml': ['worker'],
+    'packages/rab-docker/docker-compose.qa.yml': ['worker'],
+    'packages/rab-e2e-testing/system/docker-compose.e2e.yml': ['worker'],
+    'packages/rab-e2e-testing/cost/docker-compose.cost.yml': ['worker'],
+  };
+  for (const [rel, services] of Object.entries(files)) {
+    const doc = loadCompose(rel);
+    for (const name of services) {
+      const opts = doc.services?.[name]?.security_opt ?? [];
+      const seccomp = opts.filter((o) => /^seccomp[=:]/.test(o));
+      assert.equal(seccomp.length, 1, `${rel} ${name}: exactly one seccomp option`);
+      const target = path.resolve(path.dirname(path.join(REPO, rel)), seccomp[0].replace(/^seccomp[=:]/, ''));
+      assert.equal(target, profile.OUT, `${rel} ${name}: seccomp must be rab/seccomp/chromium-worker.json`);
+      assert.ok(opts.includes('no-new-privileges:true'), `${rel} ${name}: no-new-privileges`);
+    }
+  }
+});
