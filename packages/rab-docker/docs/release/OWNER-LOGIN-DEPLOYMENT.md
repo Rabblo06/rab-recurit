@@ -211,6 +211,8 @@ An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the leg
    - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
    - **64–69: STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7). Nothing was applied by a check run, and the running release is untouched.
 
+   **Approval rule (owner decision 2026-11-04):** with `CREWFLOW_MIGRATION_APPROVAL_MODE=token`, **every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target**: production, staging and test alike. Without it the run exits **65**. A proven fresh install, approval mode `none` (the migrate-on-start quick start) and check runs are unchanged.
+
    With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
@@ -422,7 +424,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 | Assumption | Owner |
 |---|---|
-| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. | Agents 1 and 2 |
+| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. Approval mode `token` = every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it); a proven fresh install, mode `none` and check runs are unchanged (owner decision; Agent 1, `approvalDecision`, f77fc9e5). | Agents 1 and 2 |
 | `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
 | `deploy-prepare.js` (in place) is the release step and is **always in token mode**: no token = check run (0 current, 3 pending); `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run; failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1, confirmed.) | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
