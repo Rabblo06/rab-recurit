@@ -311,13 +311,11 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
 });
 
 /**
- * KNOWN FINDING (P0 plan §5.2 1: values adjacent to Number.MAX_SAFE_INTEGER "must be refused, not rounded"). Today
- * `formatPence` divides by 100 in floating point: formatPence(9007199254740991) prints "£90,071,992,547,409.90" (1p
- * short) and nothing refuses it. Both renderers print the view-model's `formatPence` string, so the finding holds for
- * either. `test.failing` keeps the suite green while the defect exists and turns RED the day the amount is refused or
- * printed exactly — then change it to a plain `it`.
+ * P0 plan §5.2 1: values adjacent to Number.MAX_SAFE_INTEGER "must be refused, not rounded". FIXED on main by #66 (exact
+ * `formatPence` and the `assertSafePence` guards): formatPence(9007199254740991) used to print "£90,071,992,547,409.90"
+ * (1p short) and nothing refused it. Now a plain test: the amount is refused or printed exactly, never rounded.
  */
-test.failing('pence adjacent to MAX_SAFE_INTEGER are refused or printed exactly', async () => {
+it('pence adjacent to MAX_SAFE_INTEGER are refused or printed exactly', async () => {
   const f = fixtures.get('edge-values/approved-shift-statement-pence-1')!;
   const doc = mutate(f.doc, (d) => d.kind === 'approved-shift-statement' && ((d.data.amountPence = Number.MAX_SAFE_INTEGER), (d.data.payRatePence = Number.MAX_SAFE_INTEGER - 1)));
   const pdf = await renderer.render(doc).catch(() => null);
