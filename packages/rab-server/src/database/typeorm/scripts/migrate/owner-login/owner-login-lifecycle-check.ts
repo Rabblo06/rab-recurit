@@ -198,6 +198,7 @@ async function inProcess(db: string, config: { approval?: 'none' | 'token'; poli
 interface ChildHandle {
   done: Promise<{ code: number | null; result: (MigrateOnStartResult & { exitCode: number }) | null; out: string }>;
   kill: (signal: NodeJS.Signals) => void;
+  output: () => string;
 }
 function spawnChild(db: string, extra: Record<string, string> = {}): ChildHandle {
   const tsNode = require.resolve('ts-node/dist/bin.js');
@@ -214,7 +215,7 @@ function spawnChild(db: string, extra: Record<string, string> = {}): ChildHandle
       resolve({ code, result: line ? JSON.parse(line.slice(RESULT_LINE_PREFIX.length + 1)) : null, out });
     });
   });
-  return { done, kill: (signal) => p.kill(signal) };
+  return { done, kill: (signal) => p.kill(signal), output: () => out };
 }
 
 const ledgerCount = async (db: string): Promise<number> => {
@@ -423,16 +424,21 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
   const blocker = new Client({ connectionString: dbUrl(k, 'admin') });
   await blocker.connect();
   try {
-    const child = spawnChild(k);
-    await waitFor(async () => (await ledgerCount(k)) >= MIGRATIONS.filter((m) => m.ts < cut).length - 1, 240_000, 'ledger before 1786719920000');
+    // The lock is taken BEFORE the child starts (the gap between two migrations is milliseconds); the child's own
+    // MIGRATION_EVENT lines then prove WHICH migration it is blocked in.
     await blocker.query('BEGIN');
     await blocker.query('LOCK TABLE core.manager_profile IN ACCESS SHARE MODE');
-    const blocked = await waitFor(
+    const child = spawnChild(k);
+    const waiting = await waitFor(
       async () =>
         (await rows(k, `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'crewflow-migrate' AND wait_event_type = 'Lock'`))[0].n > 0,
       240_000,
-      'the child blocked inside 1786719920000',
+      'the child blocked on the lock',
     );
+    const starts = [...child.output().matchAll(/MIGRATION_EVENT (\{[^\n]*\})/g)].map((m) => JSON.parse(m[1]!) as { event: string; name: string });
+    const lastStart = [...starts].reverse().find((e) => e.event === 'start')?.name;
+    const blocked = waiting && lastStart === 'ArchiveAndSearchSchema1786719920000';
+    if (!blocked) log(`  blocked in ${lastStart ?? '(no MIGRATION_EVENT seen)'}`);
     const ledgerAt = await ledgerCount(k);
     child.kill('SIGKILL');
     await child.done;
