@@ -40,6 +40,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # P5 (PDF renderer migration): the Worker renders PDFs natively. Fails if @rab/worker or @rab/server declares or
+      # imports a browser package again (tests included). Scoped to those two packages only: the web e2e suite's own
+      # @playwright/test (ci-e2e) is not affected. Dependency-free, so it runs before the install.
+      - name: No browser dependency in the Worker or the server code it runs
+        run: node tools/check-no-browser-in-worker.cjs
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       # The lint target is `tsc --noEmit`, which resolves @rab/shared and @rab/emails through their built dist: build them
@@ -55,10 +60,8 @@ jobs:
           MIGRATION_SECURITY_SCENARIOS: fresh
           MIGRATION_SECURITY_KEEP_DATABASES: 'true'
           MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
-      # The worker renders report PDFs with Playwright's Chromium (queues/rab-reports/render-pdf.util.ts); ci-e2e installs it
-      # the same way. Without it reports stay pending and the report-email suites fail.
-      - name: Install Playwright Chromium for the PDF renderer
-        run: npx playwright install --with-deps chromium
+      # P5: no browser install. The Worker renders report PDFs natively (queues/rab-reports/render-pdf.util.ts); a test
+      # that needed Chromium here would fail, which is the point (check-no-browser-in-worker.cjs above also refuses one).
       - name: Worker tests
         run: |
           set -euo pipefail

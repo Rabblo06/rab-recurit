@@ -105,6 +105,22 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 this variant through OpenShip. The temporary OpenShip deployment stays as it is: not redeployed, not migrated, and
 no settings changed (R4).
 
+## 5a. PDF rendering after P5 (PDF renderer migration)
+
+Since P5 the Worker image contains no browser: PDFs are rendered by the native renderer (pure JavaScript, vendored
+fonts) inside the jobs process. For OpenShip this removes every **PDF-specific** concern:
+
+- no Chromium process tree, so `pids_limit` (DROPPED above) no longer has to budget for browser threads, and no browser
+  process can outlive a job;
+- no browser sandbox, seccomp profile, user namespace, `/dev/shm` sizing or setuid helper is needed, so there is no
+  security key a platform could drop that weakens PDF rendering in particular;
+- no system fonts, fontconfig cache or `CHROMIUM_*` / `PLAYWRIGHT_*` settings to carry over.
+
+This does **not** make the variant deployable on OpenShip. Every row of the matrix in §3 and the behaviour in §4 are
+unchanged: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt` and `pids_limit` are still dropped, and in enforce
+mode the API and the Worker still refuse to start without them. P5 removes Chromium from that list of problems; it does
+not remove the list.
+
 ## 6. Re-checking a newer OpenShip
 
 ```bash

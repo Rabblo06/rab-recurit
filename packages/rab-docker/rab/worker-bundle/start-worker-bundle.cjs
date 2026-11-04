@@ -65,9 +65,9 @@ const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 /**
  * Security review H1-M1: each child's HOME is a path it cannot create or write. Node's CommonJS loader searches
  * $HOME/.node_modules and $HOME/.node_libraries (require('module').globalPaths), so a writable HOME would let a child plant
- * a module (e.g. pg-native, which TypeORM tries to load at start) that runs again after a restart. Chromium's per-user
- * config/cache (crashpad database, fontconfig cache) go to XDG_* directories inside the child's own 0700 TMPDIR instead;
- * those are not module search paths.
+ * a module (e.g. pg-native, which TypeORM tries to load at start) that runs again after a restart. Any library that wants a
+ * per-user config/cache directory gets XDG_* directories inside the child's own 0700 TMPDIR instead; those are not module
+ * search paths. (Chromium was the reason for these until P5; they stay as generic hygiene.)
  */
 const CHILD_HOME = '/nonexistent';
 const xdgDirs = (tmp) => ({ XDG_CONFIG_HOME: path.join(tmp, '.config'), XDG_CACHE_HOME: path.join(tmp, '.cache') });
@@ -194,8 +194,10 @@ const JOBS_ENV_KEYS = Object.freeze([
   'LOCATION_EVIDENCE_MAX_AGE_SECONDS', 'LOCATION_EVIDENCE_MAX_FUTURE_SKEW_SECONDS', 'LATE_CLOCK_IN_GRACE_MINUTES',
   'MANAGER_CONFIRMATION_TIMEOUT_MINUTES', 'MEMBER_INVITE_RATE_RECIPIENT_PER_DAY', 'MEMBER_INVITE_RATE_ACTOR_PER_HOUR',
   'MEMBER_INVITE_RATE_ORGANISATION_PER_DAY', 'MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR',
-  // PDF rendering (system Chromium; the image sets these), the renderer switch and the native pool size (PDF renderer P1)
-  'CHROMIUM_EXECUTABLE_PATH', 'CHROMIUM_NO_SANDBOX', 'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD', 'PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY',
+  // P5: no browser settings. CHROMIUM_EXECUTABLE_PATH / CHROMIUM_NO_SANDBOX / PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD are no
+  // longer forwarded (the Worker renders PDFs natively; test 3c pins their absence). The renderer switch (kept for one
+  // release, D10) and the native pool size (PDF renderer P1) are.
+  'PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY',
 ]);
 
 /**
@@ -689,7 +691,7 @@ function supervise(specs, options = {}) {
         if (e.code !== 'ESRCH') log(`could not send ${signal} to process group ${pid} (${e.code})`);
       }
     };
-    /** Descendants that left the child's process group (Playwright starts Chromium detached) are found by UID. */
+    /** Descendants that left the child's process group (anything started detached, e.g. via setsid) are found by UID. */
     const sweep = () => {
       if (!sweepUids) return 0;
       const pids = processesOwnedBy(childUids);

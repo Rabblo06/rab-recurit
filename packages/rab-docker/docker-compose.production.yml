@@ -286,8 +286,9 @@ services:
   #
   # Image: packages/rab-docker/rab/Dockerfile.worker-bundle, built FROM the same
   # shared image as rab-api (passed as the named build context `crewflow-app`).
-  # It adds Chromium + fonts (the only image with a browser since Docker
-  # hardening H2; the build fails below the security-floors.env minimums),
+  # It adds the Worker-only npm packages (the native PDF renderer; no browser,
+  # no system fonts since P5: the build fails if Chromium or its libraries
+  # return, and below the security-floors.env minimums),
   # verifies /app is root-owned (true since H1), removes the API entry scripts,
   # adds the provisioner identity and tini. OPENSHIP: if its compose import cannot honour
   # `additional_contexts: service:`, build the shared image once, push it to a
@@ -376,10 +377,11 @@ services:
       - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
     # > launcher grace (42 s = 30 s jobs drain + margin) so no drain is cut short.
     stop_grace_period: 55s
-    # H6: limits above the measured worst case. pids_limit counts threads: one
-    # Chromium render peaks at ~130 tasks and up to 4 can run at once (shift
-    # reports, final timesheets, 2 statement consumers) = 551 tasks measured,
-    # plus tini, the launcher and both children; 512 made renders fail.
+    # H6: limits above the measured worst case. pids_limit counts threads. They
+    # were sized for Chromium (one render peaked at ~130 tasks, up to 4 at once
+    # = 551 tasks measured; 512 made renders fail). P5 renders natively in the
+    # jobs process, which needs far fewer; both limits are KEPT until the H6
+    # matrix (M09 records the peak) re-measures them with the native renderer.
     pids_limit: 1024
     mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
     cpus: ${CREWFLOW_WORKER_CPUS:-2}

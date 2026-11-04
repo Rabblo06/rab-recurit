@@ -2,7 +2,7 @@
 # The Dockerfile frontend is pinned by its OCI index digest (H5 release gate refuses an unpinned frontend). Verified
 # 2026-11-03 with `docker buildx imagetools inspect docker/dockerfile:1` (the :1 tag resolves to this digest).
 
-# Security floors (H1): the minimum Node, Chromium and libexpat versions, and the only Alpine branch apk may resolve from,
+# Security floors (H1): the minimum Node and libexpat versions, and the only Alpine branch apk may resolve from,
 # live in ONE place: packages/rab-docker/rab/security-floors.env. The stages below run security-floors.sh against it
 # through a build-time bind mount (nothing is copied into an image); a version below a floor FAILS the build, there is no
 # warn-only mode. A build argument of the same name can only RAISE a floor, never lower it.
@@ -77,8 +77,8 @@ RUN set -eu; \
 # server, the Playwright test runner, ...). `yarn workspaces focus @rab/server --production` prunes the deps stage's install
 # in place, from the same lockfile and the yarn cache already in that layer, keeping only @rab/server's `dependencies` and,
 # transitively, those of the workspaces it depends on (@rab/shared, @rab/emails); the lockfile is verified unchanged.
-# The Worker-only browser driver (playwright) is NOT in it: Dockerfile.worker-bundle adds the Worker's extra packages on
-# top of this image. The final stage proves the closure (runtime-deps.cjs: every compiled import resolves, no build or test
+# The Worker-only packages (the native PDF renderer's closure) are NOT in it: Dockerfile.worker-bundle adds the Worker's
+# extra packages on top of this image. The final stage proves the closure (runtime-deps.cjs: every compiled import resolves, no build or test
 # tool is present), so a package the runtime needs but the manifests misclassify fails the BUILD.
 # H1: any group/other write bit a package tarball shipped with is cleared here (only the offending entries are touched,
 # so this stage does not rewrite the whole tree); the final stage then re-verifies the whole of /app.
@@ -96,12 +96,10 @@ RUN set -eu; \
 # The same pinned Node image as `base`, WITHOUT base's native build toolchain (python3/make/g++/gcc): those are build-only
 # (image scan 2026-10-30: python3 3.14.8 = 4 CRITICAL) and the runtime compiles nothing. Keep the digest in step with `base`.
 #
-# H2: NO Chromium, fonts or PDF settings here. The only code that launches a browser is the Worker's PDF renderer
-# (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts); rab-server imports neither Playwright nor that file,
-# and the API only serves PDFs the Worker already stored. Chromium (with its fonts, the CHROMIUM_* settings and the
-# Chromium/libexpat floors) is installed by packages/rab-docker/rab/Dockerfile.worker-bundle, on top of this image, so
-# the Worker reuses every layer below and the API image carries none of Chromium's dependency tree (ffmpeg, libxml2,
-# cups, pulse, …) or its unfixable advisories.
+# H2/P5: NO browser, fonts or PDF settings here, and none in the Worker image either: since P5 the Worker renders PDFs
+# natively (@react-pdf/renderer, pure JavaScript, vendored fonts), and the API only serves PDFs the Worker already stored.
+# Neither image carries Chromium's dependency tree (ffmpeg, libxml2, cups, pulse, …) or its unfixable advisories; both
+# re-check apk-absent:chromium, and the image gate fails on any browser-stack package (policy.json forbidden_apk/_npm).
 FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS rab
 ARG MIN_NODE_VERSION
 ARG MIN_LIBEXPAT_VERSION
@@ -134,8 +132,8 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 # compromised process cannot persist by editing code it later re-imports. Only /app/storage (below) is writable by it.
 # packages/rab-worker/dist stays in this image although the API never loads it: the Worker bundle image is built FROM
 # this one (Dockerfile.worker-bundle builds no application code of its own), so this is where the Worker gets its code. It
-# is about 0.8 MB, and none of it runs in the API process; it cannot even start here, because its browser driver
-# (playwright) is a Worker-only dependency that this image does not contain (H3).
+# is about 0.8 MB, and none of it runs in the API process; it cannot even start here, because its PDF renderer is a
+# Worker-only dependency that this image does not contain (H3).
 COPY --from=runtime-modules /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
@@ -148,7 +146,8 @@ COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/pa
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Phase B P7: entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's
 # command is api-prestart.sh; start.sh is kept only as a forwarder to it (it never migrates either). start-worker.sh is
-# retired (H2): this image has no Chromium, so it only prints where the Worker image is and exits 1 (fail closed).
+# retired (H2): this image lacks the Worker's own dependencies and launcher, so it only prints where the Worker image is
+# and exits 1 (fail closed).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
 COPY --chmod=0555 packages/rab-docker/rab/start-worker.sh ./start-worker.sh

@@ -9,7 +9,7 @@ icon: "layer-group"
 | **Web console** | React 18, TypeScript 5.9, Vite 6, React Router 7, TanStack Query 5, Framer Motion |
 | **Mobile app** | Flutter (Dart 3.10), `local_auth` for biometrics, `mobile_scanner` for QR codes, Firebase Messaging (Android push, not yet configured) |
 | **API** | NestJS 11, TypeORM 0.3, class-validator, Argon2id password hashing |
-| **Background work** | BullMQ 5 on Redis, plus interval jobs with advisory locks; Playwright Chromium for PDF rendering |
+| **Background work** | BullMQ 5 on Redis, plus interval jobs with advisory locks; native PDF rendering (`@react-pdf/renderer`, no browser) |
 | **Database** | PostgreSQL 16 with Row-Level Security |
 | **Cache and queues** | Redis 7 |
 | **File storage** | Local disk or S3-compatible storage (Cloudflare R2 in production) |
