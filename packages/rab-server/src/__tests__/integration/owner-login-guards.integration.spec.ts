@@ -108,6 +108,26 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       });
     });
 
+    // Agent 5's negative controls NEG-1..NEG-5 (twenty-refusals.integration.spec.ts, same setup SQL), run through the
+    // REAL in-place gate rules (the function the boot gate, assertRuntimeDbRole and check-rls-coverage call).
+    it.each([
+      ['NEG-1', ['CREATE ROLE twa_t7_fake_bypass NOLOGIN BYPASSRLS', 'GRANT twa_t7_fake_bypass TO crewflow_owner WITH INHERIT FALSE, SET TRUE'], /"twa_t7_fake_bypass" has BYPASSRLS/],
+      ['NEG-2', ['CREATE ROLE twa_t7_fake_super NOLOGIN SUPERUSER', 'GRANT twa_t7_fake_super TO crewflow WITH ADMIN TRUE, INHERIT FALSE, SET FALSE'], /"twa_t7_fake_super" has SUPERUSER and is reachable from crewflow_owner \(crewflow_owner>crewflow>twa_t7_fake_super\)/],
+      ['NEG-3', ['GRANT pg_read_all_data TO crewflow_owner WITH ADMIN TRUE, INHERIT FALSE, SET FALSE'], /predefined role "pg_read_all_data"/],
+      ['NEG-4', ['CREATE ROLE neon_superuser NOLOGIN CREATEROLE', 'GRANT neon_superuser TO crewflow_owner'], /provider administrator role "neon_superuser"/],
+      ['NEG-5', ['GRANT pg_execute_server_program TO rab_secure_owner'], /predefined role "pg_execute_server_program" is reachable from crewflow_owner \(crewflow_owner>rab_secure_owner>pg_execute_server_program\)/],
+    ] as const)('%s: the boot-gate role rules refuse the planted path', async (_id, setup, pattern) => {
+      await tx(admin, async () => {
+        for (const sql of setup) await admin.query(sql);
+        // Evaluated for the owner login inside the superuser's open transaction (it sees the uncommitted grants).
+        const out = await ownerLoginRolePostureProblems(async (sql, params) =>
+          (await admin.query(sql.replace(/session_user/g, `'crewflow_owner'::name`).replace(/current_user/g, `'crewflow_owner'::name`), params as unknown[] | undefined)).rows,
+        );
+        expect(out.join('; ')).toMatch(pattern);
+      });
+      expect(await ownerLoginRolePostureProblems(q(owner))).toEqual([]);
+    });
+
     it('the object posture refuses NO FORCE on a pre-auth table, a dropped definer policy and an object owned by the login', async () => {
       await tx(owner, async () => {
         await owner.query(`ALTER TABLE core.user_session NO FORCE ROW LEVEL SECURITY`);
