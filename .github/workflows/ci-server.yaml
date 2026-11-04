@@ -67,6 +67,15 @@ jobs:
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
           npx nx run-many -t test -p rab-server,rab-shared --runInBand --testTimeout=180000
+      # TEMPORARY (PDF integration branch, to be reverted): nx truncates the captured Jest output of a failed task, so the
+      # failing suite is invisible. Jest's own result cache (perf-cache-*) marks each test file it ran as passed (0) or
+      # failed (1); print the failed ones. Read-only, runs only after a failure; the test run above is unchanged.
+      - name: Failing test files (from Jest's result cache)
+        if: failure()
+        run: |
+          find /tmp -maxdepth 3 -type f -name 'perf-cache-*' 2>/dev/null | while read -r f; do
+            node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); for (const [file,[status,ms]] of Object.entries(c)) if (status===1) console.log(`FAILED ${file} (${ms} ms)`)' "$f"
+          done
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()
