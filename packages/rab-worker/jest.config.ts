@@ -28,5 +28,6 @@ export default {
   transformIgnorePatterns: ['/node_modules/', '/dist-cjs/', '/dist-esm/', '/rab-server/dist/'],
   // Opt-in load tests (RAB_LOAD_TEST=1, see src/__tests__/load) never run in the default suite — same convention as rab-server's own jest.config.ts.
   testPathIgnorePatterns: ['/node_modules/', '/__tests__/load/'],
+  testSequencer: '<rootDir>/src/__tests__/helpers/diagnostic-sequencer.cjs', // TEMPORARY CI DIAGNOSTIC (revert)
   coverageDirectory: '../../coverage/packages/rab-worker',
 };
