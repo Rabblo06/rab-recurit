@@ -21,9 +21,10 @@ permissions:
 #   web-ai-visual  web/ai/run-ai-visual.sh        AI visual / a11y suites, each against its own Vite with the rab-docs fixtures
 #   web-live       playwright.live.config.ts      a REAL API (built server) + PostgreSQL + Redis, seeded, via live/run-live.sh
 #
-# `yarn playwright`, never `npx playwright`: npx resolves node_modules/.bin/playwright, which is the hoisted `playwright` that
-# rab-server/rab-worker depend on (a different version from this package's @playwright/test). Yarn resolves the bin from this
-# workspace's own @playwright/test, so the browser revision installed is the one the test runner actually launches.
+# `yarn playwright`, never `npx playwright`: npx resolves node_modules/.bin/playwright, whichever hoisted `playwright` the
+# install happens to link (until P5 the Worker's own, a different version from this package's @playwright/test; since P5
+# no runtime package depends on playwright at all). Yarn resolves the bin from this workspace's own @playwright/test, so the
+# browser revision installed is the one the test runner actually launches.
 
 jobs:
   changed:

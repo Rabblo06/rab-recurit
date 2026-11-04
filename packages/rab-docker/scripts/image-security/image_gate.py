@@ -10,12 +10,12 @@ exact generated name.
 
   static                                   Dockerfile base-image pins, floors file, decision register, watch list
   config     <role> <image> --revision SHA --platform os/arch   runtime user, entrypoint, labels, env, architecture
-  container  <role> <image>                security-floors.sh (Node/Chromium/libexpat floors, Alpine repositories) and
-                                           module-paths-gate.cjs as every runtime identity, run inside the image; Chromium
-                                           binary version
+  container  <role> <image>                security-floors.sh (Node/libexpat floors, Chromium absent, Alpine repositories)
+                                           and module-paths-gate.cjs as every runtime identity, run inside the image
   fs         <role> <image>                exported filesystem: setuid/setgid, file capabilities, world-writable entries,
                                            code ownership, HOME, accounts, apk sources, test/env/.git files, dev packages,
-                                           npm floors; writes the apk package list and size measurements
+                                           forbidden browser-stack apk/npm packages (P5), npm floors; writes the apk
+                                           package list and size measurements
   worker-base <api-image> <worker-image>   the Worker's lower layers are exactly the API image's layers
   scan       <role> <image> --image-id ID  Trivy (vuln, secret, CycloneDX, SARIF) + Grype, both pinned by digest; proves
                                            the scanned image ID and DB freshness
@@ -195,7 +195,8 @@ def parse_npm_floor(spec: str) -> tuple[str, str]:
 
 
 def name_matches(name: str, patterns: list[str]) -> bool:
-    return any(name == p or (p.endswith('/*') and name.startswith(p[:-1])) for p in patterns)
+    """Exact name, or a prefix pattern ending in '*' ('@nx/*' = a whole scope, 'ffmpeg-*' = every ffmpeg library)."""
+    return any(name == p or (p.endswith('*') and name.startswith(p[:-1])) for p in patterns)
 
 
 def today(mode: str = 'release') -> dt.date:
@@ -355,21 +356,28 @@ def cmd_static(a, c: Check) -> None:
     for role, rp in policy()['roles'].items():
         if rp['dockerfile'] not in files:
             c.fail(f'policy role {role}: {rp["dockerfile"]} is not a tracked Dockerfile')
+        for key in ('forbidden_apk', 'forbidden_npm', 'sbom_must_not_include'):
+            if not isinstance(rp.get(key), list) or not rp[key]:
+                c.fail(f'policy role {role}: {key} must be a non-empty list (P5: Chromium must never return)')
+        if 'apk-absent:chromium' not in rp.get('floors_checks', []):
+            c.fail(f'policy role {role}: floors_checks must include apk-absent:chromium (P5)')
+        if 'chromium_binary' in rp:
+            c.fail(f'policy role {role}: chromium_binary is retired (P5: no image ships Chromium)')
     values, npm, problems = read_floors()
     for p in problems:
         c.fail(p)
-    for key in ('MIN_NODE_VERSION', 'MIN_CHROMIUM_VERSION', 'MIN_LIBEXPAT_VERSION', 'ALPINE_BRANCH'):
+    for key in ('MIN_NODE_VERSION', 'MIN_LIBEXPAT_VERSION', 'ALPINE_BRANCH'):
         if not values.get(key):
             c.fail(f'security-floors.env: {key} missing or empty')
+    # P5: no image installs Chromium any more (both roles run apk-absent:chromium), so a Chromium floor would be dead
+    # configuration that suggests a browser is expected. Refuse it rather than silently carry it.
+    if 'MIN_CHROMIUM_VERSION' in values:
+        c.fail('security-floors.env: MIN_CHROMIUM_VERSION is retired (P5: no image installs Chromium); delete it')
     try:
         if len(numeric_version(values.get('MIN_NODE_VERSION', ''))) != 3:
             raise ValueError
     except ValueError:
         c.fail(f'security-floors.env: MIN_NODE_VERSION {values.get("MIN_NODE_VERSION")!r} is not X.Y.Z')
-    try:
-        numeric_version(values.get('MIN_CHROMIUM_VERSION', ''))
-    except ValueError:
-        c.fail(f'security-floors.env: MIN_CHROMIUM_VERSION {values.get("MIN_CHROMIUM_VERSION")!r} is not a version')
     if not re.fullmatch(r'v\d+\.\d+', values.get('ALPINE_BRANCH', '')):
         c.fail('security-floors.env: ALPINE_BRANCH must be vMAJOR.MINOR')
     for spec in npm:
@@ -379,7 +387,7 @@ def cmd_static(a, c: Check) -> None:
             c.fail(f'security-floors.env: {e}')
     c.data['floors'] = values
     c.data['npm_floors'] = npm
-    c.info(f'floors: node>={values.get("MIN_NODE_VERSION")} chromium>={values.get("MIN_CHROMIUM_VERSION")} '
+    c.info(f'floors: node>={values.get("MIN_NODE_VERSION")} '
            f'libexpat>={values.get("MIN_LIBEXPAT_VERSION")} alpine={values.get("ALPINE_BRANCH")} npm={npm or "none"}')
     validate_decisions(c)
     wl = validate_watchlist(c)
@@ -468,26 +476,7 @@ def cmd_container(a, c: Check) -> None:
     else:
         for line in out.splitlines():
             c.info(line)
-    # 2. Chromium: the binary itself must report a version at or above the floor (independent of apk metadata).
-    if rp['chromium_binary']:
-        floors, _, _ = read_floors()
-        p = docker(*base, '--read-only', '--tmpfs', '/tmp', '--user', '1000:1000', '-e', 'HOME=/tmp',
-                   '--entrypoint', rp['chromium_binary'], a.image, '--version', check=False, timeout=120)
-        m = re.search(r'Chromium\s+(\d+(?:\.\d+){3})', p.stdout)
-        if p.returncode != 0 or not m:
-            c.fail(f'{rp["chromium_binary"]} --version failed or unparsable (exit {p.returncode}): '
-                   f'{(p.stdout + p.stderr).strip()[-300:]}')
-        else:
-            have, floor = m[1], floors['MIN_CHROMIUM_VERSION']
-            try:
-                if numeric_version(have) < numeric_version(floor):
-                    c.fail(f'Chromium binary reports {have}, below the floor {floor} (MIN_CHROMIUM_VERSION)')
-                else:
-                    c.info(f'Chromium binary {have} >= {floor}')
-                c.data['chromium_binary_version'] = have
-            except ValueError as e:
-                c.fail(f'cannot compare Chromium {have!r} with floor {floor!r}: {e}')
-    # 3. The H1-M1 module-path gate as every runtime identity (not read-only: it must see real writability).
+    # 2. The H1-M1 module-path gate as every runtime identity (not read-only: it must see real writability).
     for ident in rp['module_path_identities']:
         env = ['-e', f'HOME={ident["home"]}'] if ident['home'] else []
         p = docker(*base, '--user', ident['user'], *env, '--entrypoint', 'node',
@@ -681,6 +670,13 @@ def cmd_fs(a, c: Check) -> None:
     if dev_found:
         c.hold(f'{len(dev_found)} development-only packages are in the runtime image (H3 production-only node_modules '
                f'must remove them): {", ".join(dev_found)}')
+    # P5: the browser driver must never return (fails in every mode, not a HOLD).
+    bad_npm = sorted(f'{n} ({", ".join(sorted(p for _, p in packages[n]))[:200]})' for n in packages
+                     if name_matches(n, rp['forbidden_npm']))
+    if bad_npm:
+        c.fail(f'forbidden browser package(s) in the runtime image (P5: native PDF rendering only): {"; ".join(bad_npm)}')
+    else:
+        c.info(f'no forbidden browser npm package ({", ".join(rp["forbidden_npm"])})')
     c.data['dev_packages'] = dev_found
 
     apk = {}
@@ -694,6 +690,16 @@ def cmd_fs(a, c: Check) -> None:
             cur.setdefault(line[0], line[2:])
     if not apk:
         c.fail('/lib/apk/db/installed is missing or empty: cannot list OS packages')
+    # P5: Chromium and every OS package that only Chromium pulled in (ffmpeg, libsndfile, alsa-lib, glib, libxml2, ...)
+    # must never return to a runtime image: FAIL in every mode, never a HOLD.
+    bad_apk = sorted(f'{n} {v}' for n, v in apk.items() if name_matches(n, rp['forbidden_apk']))
+    if bad_apk:
+        c.fail(f'forbidden browser-stack OS package(s) in the runtime image (P5): {", ".join(bad_apk)}')
+    elif apk:
+        c.info(f'no forbidden browser-stack OS package ({len(rp["forbidden_apk"])} names/prefixes checked)')
+    for path in ('/usr/lib/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser'):
+        if path in seen_paths:
+            c.fail(f'{path} exists in the runtime image (P5: no browser)')
     c.data.update(apk=apk, npm_package_dirs=sum(len(v) for v in packages.values()),
                   npm_package_names=len(packages), stats=stats)
     c.info(f'{stats["files"]} files, {stats["bytes"] / 1e6:.1f} MB uncompressed, node_modules '
@@ -1066,7 +1072,16 @@ def inspect_pdf(pdf: bytes) -> dict:
     texts = []
     for d in pages:
         fonts = {}
-        fd = re.search(r'/Font\s*<<(.*?)>>', d, re.S)
+        # Skia (Chromium) inlines /Resources and /Font in the page; pdfkit (the native renderer) references /Resources
+        # indirectly (/Resources 7 0 R), and a writer may do the same for /Font. Resolve either form.
+        res = d
+        rr = ref(d, 'Resources')
+        if rr is not None and rr in objs:
+            res = objs[rr][0]
+        fr = ref(res, 'Font')
+        if fr is not None and fr in objs:
+            res = '/Font ' + objs[fr][0].strip()
+        fd = re.search(r'/Font\s*<<(.*?)>>', res, re.S)
         for name, fid in re.findall(r'/(\w+)\s+(\d+)\s+0\s+R', fd[1] if fd else ''):
             f = objs.get(int(fid))
             tu = ref(f[0], 'ToUnicode') if f else None
@@ -1097,16 +1112,17 @@ def inspect_pdf(pdf: bytes) -> dict:
 
 
 def cmd_pdf(a, c: Check) -> None:
-    """Native PDF render of a real report template inside the exact gated Worker image, as the launcher's jobs child."""
+    """PDF render of a real report through the production (native, Chromium-free) renderer inside the exact gated Worker
+    image, as the launcher's jobs child, on a host of the image's own architecture."""
     import base64
     rp = role_policy(a.role)
-    if not rp['chromium_binary']:
-        c.fail(f'role {a.role} has no Chromium; the PDF render gate applies to the Worker image')
+    if not rp.get('pdf_render'):
+        c.fail(f'role {a.role} does not render PDFs; the PDF render gate applies to the Worker image')
         return
     smoke = os.path.join(HERE, 'pdf-render-smoke.cjs')
     hard = ['run', '--rm', '--pull', 'never', '--network', 'none', '--cap-drop', 'ALL', '--security-opt',
             'no-new-privileges', '--read-only', *_mount(smoke, '/gate/pdf-render-smoke.cjs')]
-    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH, CHROMIUM_*).
+    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH).
     p = docker(*hard, '--user', '1000:1000', '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'plan',
                check=False, timeout=120)
     try:
@@ -1119,14 +1135,16 @@ def cmd_pdf(a, c: Check) -> None:
         c.fail(f'unexpected jobs-child environment from the launcher: HOME={env.get("HOME")} TMPDIR={env.get("TMPDIR")}')
     c.info(f'jobs child per launcher plan: uid {plan["uid"]} gid {plan["gid"]} HOME={env.get("HOME")} '
            f'TMPDIR={env.get("TMPDIR")} XDG_CONFIG_HOME={env.get("XDG_CONFIG_HOME")} '
-           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")} CHROMIUM_NO_SANDBOX={env.get("CHROMIUM_NO_SANDBOX")}')
+           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")}')
+    leaked = sorted(k for k in env if k.startswith(('CHROMIUM_', 'PLAYWRIGHT_')))
+    if leaked:
+        c.fail(f'the launcher still forwards browser settings to the jobs child: {leaked} (P5: no browser)')
     uid, gid = plan['uid'], plan['gid']
-    # 2. Runtime facts: the kernel architecture the image ran on and the Chromium that rendered.
+    # 2. Runtime facts: the kernel architecture the image ran on and the Node that rendered (the renderer is JavaScript).
     u = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--entrypoint', 'uname', a.image, '-m',
                check=False).stdout.strip()
-    cv = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--tmpfs', '/tmp',
-                '--user', f'{uid}:{gid}', '-e', 'HOME=/tmp', '--entrypoint', rp['chromium_binary'], a.image,
-                '--version', check=False).stdout.strip()
+    nv = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--user', f'{uid}:{gid}',
+                '--entrypoint', 'node', a.image, '--version', check=False).stdout.strip()
     img = inspect_image(a.image)
     # Native, not emulated: inside a QEMU-emulated container `uname -m` also says aarch64, so compare the image's
     # architecture with the Docker host's own.
@@ -1134,7 +1152,7 @@ def cmd_pdf(a, c: Check) -> None:
     native = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(host) == img.get('Architecture')
     facts = dict(image=a.image, image_id=img['Id'], repo_digests=img.get('RepoDigests'),
                  platform=f'{img.get("Os")}/{img.get("Architecture")}', uname_m=u, docker_host_arch=host,
-                 native=native, chromium=cv)
+                 native=native, node=nv)
     c.data.update(facts)
     if not native:
         c.fail(f'the {img.get("Architecture")} image ran on a {host!r} Docker host (emulated): not a native render')
@@ -1180,7 +1198,7 @@ def cmd_pdf(a, c: Check) -> None:
             c.fail(f'expected text not found in the PDF: {needle!r}')
     if info['images'] < 1:
         c.fail('no embedded image (logo / QR) in the PDF')
-    c.info(f'{u}: {cv}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
+    c.info(f'{u}: node {nv}, renderer {run.get("renderer")}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
            f'{run["render_ms"]} ms as uid {run["uid"]} (HOME={run["home"]}, TMPDIR={run["tmpdir"]}); markup in the '
            'synthetic names came out as literal text')
 
@@ -1289,6 +1307,9 @@ def cmd_attest(a, c: Check) -> None:
                 if p.get('name'):
                     names.add(p['name'])
         missing = [n for n in rp['sbom_must_include'] if n not in names]
+        present = sorted(n for n in names if name_matches(n, rp['sbom_must_not_include']))
+        if present:
+            c.fail(f'SBOM lists {present}, which must never be in this image (P5: native PDF rendering only)')
         if len(names) < rp['min_sbom_packages']:
             c.fail(f'SBOM lists only {len(names)} package names (expected >= {rp["min_sbom_packages"]})')
         if missing:
@@ -1493,7 +1514,7 @@ def cmd_release_manifest(a) -> int:
             if role == 'worker' and os.path.exists(pdf):
                 r = load_json(pdf)
                 entry['native_pdf_render'] = {k: r.get(k) for k in (
-                    'native', 'uname_m', 'docker_host_arch', 'chromium', 'render_ms', 'pdf_pages', 'pdf_sha256')}
+                    'native', 'uname_m', 'docker_host_arch', 'node', 'renderer', 'render_ms', 'pdf_pages', 'pdf_sha256')}
             platforms[p] = entry
         out['images'][role] = {'tag': f'{role}-{a.commit}', 'index_digest': d['index_digest'],
                                'reference': f'{a.repo}@{d["index_digest"]}', 'platforms': platforms}
@@ -1566,7 +1587,7 @@ def cmd_summary(a) -> int:
         if r and name.endswith('-pdf') and r['data'].get('uname_m'):
             d = r['data']
             lines += ['', f'#### {name}: native={d.get("native")} uname -m={d.get("uname_m")} '
-                          f'(Docker host {d.get("docker_host_arch")}), {d.get("chromium")}, render '
+                          f'(Docker host {d.get("docker_host_arch")}), node {d.get("node")}, {d.get("renderer")}, render '
                           f'{d.get("render_ms", "n/a")} ms, {d.get("pdf_pages", 0)} page(s), image {d.get("image_id")}']
         if r and r.get('holds') and not name.endswith('-vulns'):
             lines += ['', f'#### {name}: held items', ''] + [f'- {h}' for h in r['holds'][:40]]

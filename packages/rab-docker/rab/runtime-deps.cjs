@@ -4,14 +4,15 @@
  * security-floors.sh and module-paths-gate.cjs: this file is never copied into an image. Dependency-free (Node built-ins
  * only), because it runs in the final stages, which have no package manager.
  *
- *   node runtime-deps.cjs check <node_modules> --scan <dir>... [--forbid <name>|<@scope/*>...]
+ *   node runtime-deps.cjs check <node_modules> --scan <dir>... [--forbid <name>|<prefix*>...]
  *     Fails unless
  *       - every literal bare-specifier require("x") / import("x") / top-level `import … from "x"` in the .js/.cjs files
  *         under each --scan directory resolves, from that file, with Node's own resolver (package "exports" honoured).
  *         This is the runtime closure of the code the image starts: a production-only node_modules that dropped a
  *         package some compiled file still loads fails the BUILD, not the first job that reaches that file;
  *       - no package directory anywhere in <node_modules> (nested node_modules included) is one of the --forbid names
- *         (build tooling, test runners, and for the API the Worker-only browser driver).
+ *         (build tooling, test runners, the browser driver). A name ending in `*` is a prefix: `@nx/*` is a whole scope,
+ *         `@swc/core-*` every package whose name starts with `@swc/core-` (e.g. the per-platform SWC binaries).
  *     Prints the package-directory count and the number of distinct name@version pairs (the image's package count).
  *
  *   node runtime-deps.cjs worker-delta <api node_modules> <worker node_modules> <out dir>
@@ -20,7 +21,8 @@
  *     name@version / link target (the Worker's production closure is a strict superset of the API's, laid out
  *     identically, so the API layer can be reused unchanged); fails if a package the Worker adds has an install script
  *     or a native build (binding.gyp), because the stage that resolved it ran with lifecycle scripts disabled. Copies
- *     only the added package directories (symlinks verbatim) into <out dir>, at the same relative paths.
+ *     only the added package directories (symlinks verbatim) into <out dir>, at the same relative paths. <out dir>/node_modules
+ *     always exists afterwards, empty when the Worker adds nothing (the Dockerfile COPYs it unconditionally).
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -133,7 +135,7 @@ function check(args) {
     if (name) versions.add(value);
     const dirName = rel.replace(/^.*node_modules\//, '');
     for (const f of forbid) {
-      const hit = f.endsWith('/*') ? dirName.startsWith(f.slice(0, -1)) || (name || '').startsWith(f.slice(0, -1)) : dirName === f || name === f;
+      const hit = f.endsWith('*') ? dirName.startsWith(f.slice(0, -1)) || (name || '').startsWith(f.slice(0, -1)) : dirName === f || name === f;
       if (hit) fail(`forbidden package in the runtime image: ${rel} (${value}) matches ${f}`);
     }
   }
@@ -159,7 +161,7 @@ function workerDelta([apiNm, workerNm, outDir]) {
   const added = [...worker.keys()].filter((rel) => !api.has(rel)).sort();
   // Copy only the top-most added directories: a nested one is copied with its parent.
   const roots = added.filter((rel) => !added.some((other) => other !== rel && rel.startsWith(`${other}/`)));
-  fs.mkdirSync(outDir, { recursive: true });
+  fs.mkdirSync(path.join(outDir, 'node_modules'), { recursive: true });
   for (const rel of roots) {
     const src = path.join(path.resolve(workerNm), '..', rel);
     const value = worker.get(rel);

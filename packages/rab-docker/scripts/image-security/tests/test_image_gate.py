@@ -56,6 +56,71 @@ class Versions(unittest.TestCase):
         self.assertFalse(g.name_matches('@jestx/core', ['@jest/*']))
         self.assertTrue(g.name_matches('jest', ['jest']))
         self.assertFalse(g.name_matches('jest-worker', ['jest']))
+        # P5: a trailing * is a plain prefix too (OS package families, per-platform binaries)
+        self.assertTrue(g.name_matches('ffmpeg-libavcodec', ['ffmpeg-*']))
+        self.assertTrue(g.name_matches('chromium-swiftshader', ['chromium', 'chromium-*']))
+        self.assertTrue(g.name_matches('chromium', ['chromium', 'chromium-*']))
+        self.assertFalse(g.name_matches('chromium-bidix', ['chromium-bidi']))
+        self.assertFalse(g.name_matches('libxml2-utils', ['libxml2']))
+
+
+class P5NoBrowser(unittest.TestCase):
+    """P5: Chromium, Playwright and the OS packages only Chromium pulled in must never return to a runtime image."""
+
+    BROWSER_APK = ['chromium', 'chromium-swiftshader', 'nss', 'ffmpeg-libavcodec', 'ffmpeg-libavformat',
+                   'ffmpeg-libavutil', 'ffmpeg-libswresample', 'libsndfile', 'alsa-lib', 'libpulse', 'glib', 'libxml2',
+                   'cups-libs', 'cjson', 'librist', 'harfbuzz', 'fontconfig', 'font-noto', 'ttf-liberation']
+    BROWSER_NPM = ['playwright', 'playwright-core', 'chromium-bidi', '@playwright/test']
+    # Present in the node:24-alpine base / API image today: must stay allowed, or every build would fail.
+    BASE_APK = ['musl', 'busybox', 'alpine-baselayout', 'apk-tools', 'libgcc', 'libstdc++', 'tini', 'zlib',
+                'libcrypto3', 'libssl3', 'ca-certificates-bundle']
+
+    def test_every_role_forbids_the_browser_stack(self):
+        for role, rp in g.policy()['roles'].items():
+            for n in self.BROWSER_APK:
+                self.assertTrue(g.name_matches(n, rp['forbidden_apk']), f'{role}: apk {n} not forbidden')
+            for n in self.BASE_APK:
+                self.assertFalse(g.name_matches(n, rp['forbidden_apk']), f'{role}: base apk {n} must stay allowed')
+            for n in self.BROWSER_NPM:
+                self.assertTrue(g.name_matches(n, rp['forbidden_npm']), f'{role}: npm {n} not forbidden')
+            # D5/T2: the runtime helper library fontkit needs stays allowed
+            self.assertFalse(g.name_matches('@swc/helpers', rp['forbidden_npm']), role)
+            for n in ('chromium', 'playwright', 'playwright-core'):
+                self.assertIn(n, rp['sbom_must_not_include'], role)
+            self.assertIn('apk-absent:chromium', rp['floors_checks'], role)
+            self.assertNotIn('apk-required:chromium', rp['floors_checks'], role)
+            self.assertNotIn('chromium_binary', rp, role)
+        self.assertTrue(g.policy()['roles']['worker']['pdf_render'])
+        self.assertNotIn('/usr/lib/chromium', g.policy()['filesystem']['code_paths'])
+        self.assertNotIn('MIN_CHROMIUM_VERSION', g.policy()['provenance']['allowed_build_args'])
+
+    def test_static_refuses_a_chromium_floor_or_a_missing_forbidden_list(self):
+        values, _, _ = g.read_floors()
+        self.assertNotIn('MIN_CHROMIUM_VERSION', values)
+        d = tempfile.mkdtemp()
+        floors = os.path.join(d, 'security-floors.env')
+        with open(g.FLOORS_ENV, encoding='utf-8') as f, open(floors, 'w', encoding='utf-8') as o:
+            o.write(f.read() + 'MIN_CHROMIUM_VERSION=156.0.8078.79-r0\n')
+        with mock.patch.object(g, 'FLOORS_ENV', floors):
+            rc, _ = run(['--mode', 'pr', '--results', d, 'static'])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('MIN_CHROMIUM_VERSION is retired' in f for f in result(d, 'static')['fails']))
+        pol = g.policy()
+        del pol['roles']['worker']['forbidden_apk']
+        pol['roles']['api']['floors_checks'] = ['node', 'alpine']
+        d = tempfile.mkdtemp()
+        with mock.patch.object(g, 'policy', lambda: pol):
+            rc, _ = run(['--mode', 'pr', '--results', d, 'static'])
+        fails = result(d, 'static')['fails']
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('worker: forbidden_apk must be a non-empty list' in f for f in fails), fails)
+        self.assertTrue(any('api: floors_checks must include apk-absent:chromium' in f for f in fails), fails)
+
+    def test_pdf_gate_refuses_a_role_without_pdf_render(self):
+        d = tempfile.mkdtemp()
+        rc, _ = run(['--mode', 'pr', '--results', d, 'pdf', 'api', 'crewflow-gate/api:none'])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('does not render PDFs' in f for f in result(d, 'api-pdf')['fails']))
 
 
 class Decisions(unittest.TestCase):
@@ -333,7 +398,42 @@ def minimal_pdf(text: str, truncate: bool = False) -> bytes:
 
 
 
+def pdfkit_shaped_pdf(text: str) -> bytes:
+    """A tiny pdfkit-shaped PDF (the native renderer's writer): /Resources and /Font are INDIRECT objects, text is a TJ
+    array of lower-case hex glyph ids with kerning, decoded through a ToUnicode bfrange with an array destination."""
+    import zlib
+    n = len(text)
+    dst = ' '.join('<%04x>' % ord(ch) for ch in text)
+    cmap = (f'begincmap\n1 begincodespacerange\n<0000><ffff>\nendcodespacerange\n1 beginbfrange\n'
+            f'<0001> <{n:04x}> [{dst}]\nendbfrange\nendcmap')
+    tj = ' -26.666667 '.join('<%04x>' % (i + 1) for i in range(n))
+    content = zlib.compress(f'BT 1 0 0 1 0 595 Tm /F2 11.25 Tf [{tj}] TJ ET'.encode())
+    tu = zlib.compress(cmap.encode())
+
+    def stream(data: bytes) -> bytes:
+        return b'<< /Filter /FlateDecode /Length ' + str(len(data)).encode() + b' >>\nstream\n' + data + b'\nendstream'
+
+    objs = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        b'<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources 5 0 R /UserUnit 1 >>',
+        stream(content),
+        b'<< /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] /Font 6 0 R >>',
+        b'<< /F2 7 0 R >>',
+        b'<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode 8 0 R >>',
+        stream(tu),
+    ]
+    out = b'%PDF-1.3\n' + b''.join(str(i + 1).encode() + b' 0 obj\n' + o + b'\nendobj\n' for i, o in enumerate(objs))
+    return out + b'trailer << /Root 1 0 R >>\n%%EOF\n'
+
+
 class Pdf(unittest.TestCase):
+    def test_native_renderer_shape(self):
+        # P5: the gate's oracle must read the native renderer's output (indirect /Resources and /Font, TJ arrays).
+        info = g.inspect_pdf(pdfkit_shaped_pdf('<img src="http://example.invalid/x.png">'))
+        self.assertEqual(info['pages'], 1)
+        self.assertEqual(info['text'], '<img src="http://example.invalid/x.png">')
+
     def test_text_and_pages(self):
         info = g.inspect_pdf(minimal_pdf('H5 <script>'))
         self.assertEqual(info['pages'], 1)

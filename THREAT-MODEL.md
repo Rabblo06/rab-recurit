@@ -5002,3 +5002,41 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
+## PDF renderer migration P5 — Chromium and Playwright removed from the Worker (branch worker/remove-chromium, not merged)
+
+Prepared only. It merges after the native renderer (P1/P2) passes every test (P3), staging signs off (P4) and the owner
+approves; the renderer-source half is a separate follow-up patch (native only, `PDF_RENDERER` accepts only `native`).
+
+- **Chromium (and its dependency tree) silently comes back.** Threat: a later change re-adds `chromium`, a font package
+  or Playwright to the Worker, and with it the 180-odd OS packages Chromium pulled in (ffmpeg and every codec, the
+  X11/Wayland/Mesa/GTK stack, `libxml2`, `glib`, `libsndfile`, `alsa-lib`, `cups-libs`, `cjson`, …) and their unfixable
+  advisories, without anyone deciding it. Controls, each failing closed: `Dockerfile.worker-bundle` runs
+  `apk-absent:chromium` (as the API image does) and refuses the browser-stack packages by name; its H3 `--forbid` now
+  includes `playwright playwright-core chromium-bidi`; `image_gate.py` `fs` FAILS (every mode, not HOLD) on any apk
+  matching `policy.json` `forbidden_apk` (110 names/prefixes derived from the MEASURED delta between the main 824f0824
+  Worker and API images) or npm package matching `forbidden_npm`, and `attest` fails on an SBOM naming `chromium`,
+  `playwright` or `playwright-core`; `static` fails if a role loses those lists or `MIN_CHROMIUM_VERSION` returns;
+  `tools/check-no-browser-in-worker.cjs` (ci-worker and the gate's static job) fails if `@rab/worker` / `@rab/server`
+  declares or imports a browser package (tests included, because the monorepo still installs playwright for the web
+  e2e suite, so such an import would resolve locally). Scope is deliberately the runtime images and those two packages:
+  the web e2e suite's `@playwright/test` is unaffected.
+- **Chromium-specific controls disappear with Chromium.** JavaScript off, the offline context, request interception, the
+  navigation refusal and the launch-environment allowlist (P0-pdf, H6 "browser env") contained a browser. The native
+  renderer interprets no markup, executes no document-supplied code and opens no URL or file path; the P3 native
+  security tests replace `render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and
+  `render-pdf.util.spec.ts`, which the follow-up patch deletes only after those tests are merged. The H5 `pdf` gate and
+  the bundle/H6 harnesses still render the hostile synthetic names (`<script>`, `<img src=http://…>`) and require them as
+  literal text; the H6 M21 case now requires an unknown document kind to be refused.
+- **Launcher.** `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` are no longer
+  forwarded to the jobs child (launcher test 3c); the H5 `pdf` gate fails if the launcher plan carries any `CHROMIUM_*` /
+  `PLAYWRIGHT_*` key. The XDG directories and the detached-descendant sweep stay as generic hygiene.
+- **Superseded:** the Chromium floor (H1), the Chromium-version check, the `--no-sandbox` residual (P0-pdf, H6 "Chromium OS
+  sandbox" trade-off) and the scanner-blind watch-list entries for Chromium-only packages no longer apply to any image.
+- **Residual (unchanged from T1, accepted):** the native renderer's font and image parsers (fontkit, png-js, jay-peg) run
+  in the jobs process with its credentials; they only ever receive vendored fonts and server-produced images, and user
+  data reaches them only as text. Remaining image findings are listed in the P5 PR body; none is claimed to be zero.
+- **Regression tests:** launcher test 3c (fails on main); `test_image_gate.py` `P5NoBrowser` (forbidden lists, retired
+  floor, PDF gate refusing a role without `pdf_render`) and `Pdf.test_native_renderer_shape` (the gate's PDF oracle reads
+  the native renderer's indirect `/Resources`; MEASURED: it extracted no text from a react-pdf PDF before this fix);
+  `check-no-browser-in-worker.cjs` (fails on main: the manifest and six imports).
