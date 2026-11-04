@@ -33,6 +33,7 @@ on:
       - '.github/actions/yarn-install/**'
       - '.github/actions/disposable-postgres/**'
       - '.github/workflows/ci-migration-security.yaml'
+      - 'packages/rab-docker/postgres-init/owner-login/**'
   push:
     branches: [main]
 
@@ -103,3 +104,62 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # Owner-login lifecycle (PR 3): bootstrap, classifier, phases, the D3(b) ROW_COPY shim with GOLDEN EQUIVALENCE against
+  # the superuser-run ROW_COPY chain, second boot, pending, four kill points, three concurrent children, lock timeout and
+  # the upgrade-failure policy, AHEAD rollback, FOREIGN, wrong role, the separated -> owner-login transition SQL, and the
+  # version refusal, on PostgreSQL 16 AND 18 (and 15 / 17 refused). One fresh cluster per group: roles are cluster-wide.
+  # See packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts.
+  owner-login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pg: 16, scenarios: 'fresh,lifecycle' }
+          - { pg: 18, scenarios: 'fresh,lifecycle' }
+          - { pg: 16, scenarios: 'transition' }
+          - { pg: 18, scenarios: 'transition' }
+          - { pg: 15, scenarios: 'unsupported' }
+          - { pg: 17, scenarios: 'unsupported' }
+    env:
+      NODE_ENV: test
+      NX_DAEMON: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+
+      - name: Build the workspace libraries the server imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+
+      - name: Start a disposable PostgreSQL ${{ matrix.pg }} (loopback, marked disposable, random masked password)
+        shell: bash
+        run: |
+          set -euo pipefail
+          su_pass="$(openssl rand -hex 24)"
+          echo "::add-mask::${su_pass}"
+          mkdir -p "${RUNNER_TEMP}/owl-pg"
+          printf '%s' "${su_pass}" > "${RUNNER_TEMP}/owl-pg/su_pass"
+          chmod 644 "${RUNNER_TEMP}/owl-pg/su_pass"
+          docker run -d --name owner-login-postgres -p 127.0.0.1:5432:5432             -v "${RUNNER_TEMP}/owl-pg/su_pass:/run/disposable/su_pass:ro"             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres             "postgres:${{ matrix.pg }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+          for i in $(seq 1 90); do
+            docker exec owner-login-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec owner-login-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1
+          admin_url="postgres://ci_bootstrap:${su_pass}@127.0.0.1:5432/postgres"
+          echo "::add-mask::${admin_url}"
+          echo "OWNER_LOGIN_CHECK_ADMIN_URL=${admin_url}" >> "$GITHUB_ENV"
+
+      - name: Owner-login lifecycle (${{ matrix.scenarios }}) on PostgreSQL ${{ matrix.pg }}
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts
+        env:
+          OWNER_LOGIN_CHECK_SCENARIOS: ${{ matrix.scenarios }}
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f owner-login-postgres > /dev/null 2>&1 || true

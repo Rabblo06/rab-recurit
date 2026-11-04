@@ -19,8 +19,10 @@
  *   - core.organisation, core.manager_workspace and core.workspace_schema_registry are absent or have ZERO pages
  *     (pg_relation_size = 0: no row was ever inserted, not even one later deleted or rolled back, until a VACUUM truncation);
  *   - no `workspace_<32 hex>` schema exists;
- *   - for CHAIN-PARTIAL, the cluster roles carry the owner-login bootstrap shape (crewflow_owner is an INHERIT/SET member of
- *     rab_owner): the interrupted chain was started by an owner-login fresh install, not an existing database being transitioned.
+ *   - for CHAIN-PARTIAL, rab_owner was CREATED by crewflow_owner: PostgreSQL 16+ records an implicit ADMIN membership row for
+ *     the creating non-superuser role, which no GRANT in the separated-to-owner-login transition SQL gives (it grants INHERIT
+ *     and SET only). So the interrupted chain was started by an owner-login fresh install, not an existing database being
+ *     transitioned.
  */
 import { compareLedger } from '../../../../boot-checks/schema-compatibility';
 import type { Query } from '../locked-migration-runner';
@@ -110,7 +112,7 @@ SELECT (SELECT CASE WHEN to_regclass('core.organisation') IS NULL THEN 0 ELSE pg
        EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members a
                 WHERE a.roleid = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'rab_owner')
                   AND a.member = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = $1)
-                  AND a.inherit_option AND a.set_option) AS "bootstrapRoles"`;
+                  AND a.admin_option) AS "bootstrapRoles"`;
 
 export interface FreshInstallProof {
   fresh: boolean;

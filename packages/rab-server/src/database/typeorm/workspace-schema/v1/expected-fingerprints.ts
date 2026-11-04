@@ -53,6 +53,7 @@ export const PENDING_FINGERPRINT_VERSIONS: readonly number[] = [];
  * the PostgreSQL 18 literal into core.provision_workspace(uuid), and the TypeScript provisioner compares against the same
  * major. A wrong selection fails closed: the fingerprint comparison refuses (FINGERPRINT_MISMATCH), it never passes.
  */
+export { EXPECTED_WORKSPACE_FINGERPRINTS_PG18 };
 export const SUPPORTED_FINGERPRINT_MAJORS = [16, 18] as const;
 export type FingerprintMajor = (typeof SUPPORTED_FINGERPRINT_MAJORS)[number];
 /** Below this, Twenty Mode refuses the server outright (M0 F-E1: CREATEROLE can grant pg_execute_server_program on <= 15). */
