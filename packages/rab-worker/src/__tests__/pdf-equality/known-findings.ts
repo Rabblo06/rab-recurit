@@ -45,7 +45,7 @@ export interface ClippingExpectation {
   droppedHeading: string;
 }
 
-const F_PDF_1_SHAPES: Readonly<Record<string, ClippingExpectation>> = Object.freeze({
+export const F_PDF_1_SHAPES: Readonly<Record<string, ClippingExpectation>> = Object.freeze({
   'unbroken-token/final-timesheet-original': {
     missing: ['shift notes'],
     parseBack: 'durations: stored minutes not printed 270; printed but not stored ; total worked hours: printed 0× (want exactly once)',
@@ -61,6 +61,34 @@ const F_PDF_1_SHAPES: Readonly<Record<string, ClippingExpectation>> = Object.fre
 
 /** The fixtures F-PDF-1 affects, with the exact shape of the clipping — empty once the template is fixed. */
 export const F_PDF_1_FIXTURES: Readonly<Record<string, ClippingExpectation>> = F_PDF_1_PRESENT ? F_PDF_1_SHAPES : Object.freeze({});
+
+/**
+ * The F-PDF-1 fixtures once the template IS fixed (F_PDF_1_PRESENT false): what the fix must deliver, asserted as plain
+ * tests on every Chromium render (pdf-equality.selftest.spec.ts, pdf-hostile-text.spec.ts). Problems (empty = fixed):
+ *   - the right-hand column is printed: its heading ("MANAGER SIGN-OFF" / "BEFORE-SHIFT DOCUMENT");
+ *   - final timesheet: "Total worked hours" printed exactly once and equal to the stored minutes, and on the finalised
+ *     variant the sign-off names ("Reviewed by …", the typed sign-off) — via `checkAgainstInput` (values, parse-back);
+ *   - all 1,000 characters of the token are printed, and no text is drawn outside the page.
+ */
+export function fixedColumnProblems(doc: ReportDocument, x: PdfExtraction, name: string, heading: string): string[] {
+  const problems = checkAgainstInput(expectationFor(doc), x, name)
+    .filter((f) => !f.ok && !f.info && /^(values-present|parse-back)\(/.test(f.check))
+    .map((f) => `${f.check}: ${f.detail}`);
+  if (!compact(x.text).includes(compact(heading))) problems.push(`the ${heading} column is not printed`);
+  const e = clippingEvidence(doc, x, name, heading);
+  if (e.tokenCharsPrinted !== 1000) problems.push(`${e.tokenCharsPrinted} of the 1,000 token characters printed in order after "Token:"`);
+  const outside = x.outOfPageRuns.reduce((a, b) => a + b, 0);
+  if (outside) problems.push(`${outside} text run(s) drawn outside the page`);
+  return problems;
+}
+
+/**
+ * Whether THIS tree's templates keep the notes' line breaks (owner decision 2026-11-04; Agent C's branch
+ * fix/pdf-notes-column-and-line-breaks: `.notes-text { white-space: pre-line }`). Where they do not (origin/main), the
+ * Chromium renders' `line-breaks` check is INFO and pinned by one `test.failing` (pdf-equality.selftest.spec.ts), so
+ * the gap stays visible; the native renderer is always held to it.
+ */
+export const NOTES_LINE_BREAKS_IN_TEMPLATE = /\.notes-text\s*\{[^}]*white-space\s*:\s*pre-line/.test(DOCUMENT_CSS);
 
 export interface ClippingEvidence {
   /** Failing (non-INFO) checks of `checkAgainstInput`. */

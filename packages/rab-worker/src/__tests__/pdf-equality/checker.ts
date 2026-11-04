@@ -52,6 +52,12 @@ export interface CheckOptions {
   boundsStrict?: string[];
   /** Render names whose renderer draws a "-" at a forced break of an over-long token (react-pdf): see `countValue`. */
   forcedBreakHyphens?: string[];
+  /**
+   * Render names whose `line-breaks` problems are INFO, not failures: ONLY the Chromium renders of a tree whose templates
+   * do not keep notes' line breaks yet (known-findings.ts NOTES_LINE_BREAKS_IN_TEMPLATE false, i.e. origin/main before
+   * the template change); that gap is pinned by its own `test.failing`. Never a native render.
+   */
+  lineBreaksInfo?: string[];
   /** The second render's own expectation (F1: the native values with □ for unprintable characters). Default: `expect`. */
   expectB?: DocumentExpectation;
   /**
@@ -435,11 +441,13 @@ export function checkAgainstInput(expect: DocumentExpectation, x: PdfExtraction,
   }
   const breakProblems = expect.multiLine.flatMap((f) => lineBreakProblems(x, f.value).map((p) => `${f.label}: ${p}`));
   const breakLines = expect.multiLine.reduce((s, f) => s + f.value.split(LINE_BREAK).filter((l) => l.trim()).length, 0);
+  const breaksPending = breakProblems.length > 0 && (options.lineBreaksInfo ?? []).includes(name);
   out.push({
     check: `line-breaks(${name})`,
-    ok: breakProblems.length === 0,
+    ok: breakProblems.length === 0 || breaksPending,
+    info: breaksPending,
     detail: breakProblems.length
-      ? `${breakProblems.length} line(s) of a multi-line note not printed on their own line: ${breakProblems.slice(0, 6).join('; ')}${breakProblems.length > 6 ? ` … (+${breakProblems.length - 6} more)` : ''}`
+      ? `${breaksPending ? 'PENDING (the template in this tree does not keep line breaks yet; pinned by test.failing): ' : ''}${breakProblems.length} line(s) of a multi-line note not printed on their own line: ${breakProblems.slice(0, 6).join('; ')}${breakProblems.length > 6 ? ` … (+${breakProblems.length - 6} more)` : ''}`
       : expect.multiLine.length
         ? `${breakLines} line(s) of ${expect.multiLine.length} multi-line field(s) each start a printed line, in order`
         : 'no multi-line field in this document',
@@ -536,7 +544,10 @@ export function compareExtractions(
   const tolerance = (options.pageCountTolerance ?? 0) + d4;
   const expectB = options.expectB ?? expect;
   const ref = options.referenceB;
-  if (!ref && expectB.values.some((v, i) => v.value !== expect.values[i]?.value)) {
+  // Printed text, not stored text: F1 turns CRLF into LF, which prints the same line break, so a value that differs only
+  // in the form of its line breaks is not a printed difference (a □, a dropped or an added character still is).
+  const asPrinted = (v: string | undefined) => (v === undefined ? undefined : v.replace(/\r\n/g, '\n'));
+  if (!ref && (expectB.values.length !== expect.values.length || expectB.values.some((v, i) => asPrinted(v.value) !== asPrinted(expect.values[i]?.value)))) {
     throw new Error('compareExtractions: expectB changes printed values, so a referenceB is required (the two renders are meant to differ)');
   }
   const hyphensA = (options.forcedBreakHyphens ?? []).includes(na);
@@ -610,9 +621,11 @@ export function compareExtractions(
   // renderer draws them. Then the same with D6 hyphen wraps rejoined on both sides (only where the document has the word).
   const docA = options.documentWords?.a;
   const docB = options.documentWords?.b ?? (ref ? ref.tokens : docA);
-  const refRaw = ref ? ref.tokens : tokens(a.text);
+  // The first render's own break joins that are not D6 (its forced breaks; Chromium's unhyphenated overflow-wrap breaks
+  // of an over-long token) belong to its raw words, decided by the document's words like every join.
+  const refRaw = ref ? ref.tokens : docA ? joinLineBreaks(a, docA, { forcedBreaks: hyphensA, d6: false, unhyphenated: !hyphensA }).tokens : tokens(a.text);
   const raw = hyphensB ? tokensJoiningForcedBreaks(b, docB ?? refRaw) : tokens(b.text);
-  const joinedA = ref || !docA ? { tokens: refRaw, d6: [] as string[] } : joinLineBreaks(a, docA, { forcedBreaks: hyphensA, d6: true });
+  const joinedA = ref || !docA ? { tokens: refRaw, d6: [] as string[] } : joinLineBreaks(a, docA, { forcedBreaks: hyphensA, d6: true, unhyphenated: !hyphensA });
   const joinedB = docB ? joinLineBreaks(b, docB, { forcedBreaks: hyphensB, d6: true }) : { tokens: raw, d6: [] as string[] };
   // Under a D4 page difference the extra pages repeat the header line and the footer: those words are not "extra values".
   const repeated = new Set(

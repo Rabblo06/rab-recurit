@@ -6,6 +6,7 @@ import { checkAgainstDocument, checkAgainstInput, compareExtractions, countValue
 import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
 import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
 import { loadGlyphTransform } from './glyph-transform';
+import { F_PDF_1_PRESENT, NOTES_LINE_BREAKS_IN_TEMPLATE } from './known-findings';
 import { equalityMode } from './mode';
 import { footerTexts, htmlText, htmlTextNodes, joinLineBreaks, markerOccurrences, tokensJoiningForcedBreaks } from './native-reference';
 import { guardNetwork, NetworkDeniedError, renderGuarded } from './network-guard';
@@ -450,6 +451,18 @@ describe('D6 hyphen wrap: accepted only when the joined text is identical and ev
     expect(joinLineBreaks(x, ['Reviewed', 'by', 'Morgan', 'Duty-Manager', 'today'], { forcedBreaks: false, d6: true }).d6).toEqual(['Duty-Manager']);
   });
 
+  it("Chromium's unhyphenated overflow-wrap break of a long token rejoins (not D6); whole words never merge", () => {
+    const token = 'A1b2C3d4E5'.repeat(3);
+    const x = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(12, 25), `${token.slice(25)} end`], ['go in', 'to town']]);
+    const doc = ['Token:', token, 'end', 'go', 'in', 'to', 'town', 'into'];
+    const joined = joinLineBreaks(x, doc, { forcedBreaks: false, d6: true, unhyphenated: true });
+    expect([...joined.tokens].sort()).toEqual(['Token:', token, 'end', 'go', 'in', 'to', 'town'].sort());
+    expect(joined.d6).toEqual([]);
+    const truncated = blockExtraction([[`Token: ${token.slice(0, 12)}`, token.slice(13, 25), `${token.slice(25)} end`]]); // one character dropped
+    expect(joinLineBreaks(truncated, doc, { forcedBreaks: false, d6: true, unhyphenated: true }).tokens).not.toContain(token);
+    expect(joinLineBreaks(x, doc, { forcedBreaks: false, d6: true }).tokens).not.toContain(token); // off unless asked
+  });
+
   it('native-only mode (checkAgainstDocument) applies the same rule against the document, never against Chromium', () => {
     const reference = { label: 'document', count: (v: string) => (v === name ? 1 : 0), tokens: words, footers: [] };
     const r = checkAgainstDocument('t', e, chromiumWrapped(), 'native', reference, { images: 1, forcedBreakHyphens: ['native'] });
@@ -468,6 +481,19 @@ describe('text drawn over other text (extract overlappingRuns; checker no-overla
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 15, 100)])).toHaveLength(1);
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 25, 100)])).toEqual([]);
     expect(overlappingRuns([run('Hello', 0, 100), run('World', 24.5, 100)])).toEqual([]);
+  });
+
+  it('a kerned pair drawn glyph by glyph (the measured "Y" / "," at 16.5 pt, 1.1 pt kern) is ONE piece of text, not an overlap', () => {
+    // As pdfkit and Skia both drew it on long-text page 1 (runs consecutive in the content stream, one baseline).
+    const y = { text: 'Y', x: 100, endX: 111, y: 484.83, size: 16.5 };
+    const comma = { text: ',', x: 109.9, endX: 114.48, y: 484.83, size: 16.5 };
+    expect(overlappingRuns([y, comma])).toEqual([]);
+    // Teeth: the same two glyphs are an overlap when they are NOT one continued piece of text — drawn apart in the
+    // stream (another run in between), or the second starting further back than a kern (one cell running into another).
+    const elsewhere = { text: 'Other', x: 300, endX: 340, y: 200, size: 10 };
+    expect(overlappingRuns([y, elsewhere, comma])).toHaveLength(1);
+    expect(overlappingRuns([run('Long cell text', 0, 100), run('Next', 50, 100)])).toHaveLength(1); // starts 20 pt back
+    expect(overlappingRuns([run('Hello', 0, 100), run('Wor', 25, 100), run('ld', 40, 100), run('Hello', 30, 100)])).toHaveLength(1);
   });
 
   it('a line drawn into the line above overlaps; ordinary line spacing does not; blank runs never count', () => {
@@ -533,6 +559,32 @@ describe('notes keep their line breaks (checker line-breaks; owner decision 2026
     const collapsed = blockExtraction([['Black tie. Report to the staff entrance at 16:45. Ask for Jamie on arrival.']]);
     expect(checkAgainstInput(e, kept, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: true });
     expect(checkAgainstInput(e, collapsed, 'native').find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+    // Only a render named in lineBreaksInfo (Chromium on a tree whose template does not keep them yet) reports it as INFO.
+    expect(checkAgainstInput(e, collapsed, 'chromium', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(chromium)')).toMatchObject({ ok: true, info: true });
+    expect(checkAgainstInput(e, collapsed, 'native', { lineBreaksInfo: ['chromium'] }).find((f) => f.check === 'line-breaks(native)')).toMatchObject({ ok: false });
+  });
+
+  it('F1 turning CRLF into LF is not a printed difference (no document reference needed); a □ or any other change still is', () => {
+    const base = (value: string): DocumentExpectation => ({
+      kind: 'approved-shift-statement',
+      spec: DOCUMENT_SPECS['approved-shift-statement'],
+      values: [{ label: 'shift notes', value, min: 1 }],
+      qrPayloads: [],
+      rowMarkers: [],
+      multiLine: [],
+      parseBack: { durations: [], breaks: [], fields: [] },
+    });
+    const x = blockExtraction([['Black tie.'], ['Report to the staff entrance at 16:45.'], ['Ask for Jamie on arrival.']]);
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, '\n')) })).not.toThrow();
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace('tie', 't□e')) })).toThrow(/referenceB is required/);
+    expect(() => compareExtractions('t', base(note), x, x, ['chromium', 'native'], { expectB: base(note.replace(/\r\n/g, ' ')) })).toThrow(/referenceB is required/);
+  });
+
+  it('the pending flag follows the template: origin/main collapses notes, the fixed template keeps them (known-findings.ts)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DOCUMENT_CSS } = require('@rab/server/modules/attendance/templates/adolphus-document') as { DOCUMENT_CSS: string };
+    expect(NOTES_LINE_BREAKS_IN_TEMPLATE).toBe(/\.notes-text\s*\{[^}]*white-space\s*:\s*pre-line/.test(DOCUMENT_CSS));
+    expect(F_PDF_1_PRESENT).toBe(!/\.bottom\s*>\s*div\s*\{[^}]*min-width\s*:\s*0/.test(DOCUMENT_CSS));
   });
 });
 
