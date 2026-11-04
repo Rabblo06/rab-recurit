@@ -2,9 +2,9 @@ name: ci-twenty-tests
 
 # T7 (Agent 5, independent tests): the owner-login (Option A, permanent) behaviour-change catalogue, injection simulation and
 # refusals on a REAL chain database, on PostgreSQL 16 AND 18, plus the lifecycle scenario driver (twenty-mode-check.ts).
-# Until the in-place lifecycle (PR 3) exists, the database is built by the existing restricted-migrator harness and given the
-# crewflow_owner login by `twenty-mode-check.ts owner-fixture` (a labelled PRE-T2 STAND-IN); the scenario driver reports
-# BLOCKED (never PASSED) for every scenario whose child is not built. Every credential is random per run and masked.
+# The database is a REAL owner-login install (`twenty-mode-check.ts ci-db`: 01-crewflow-owner.sql + Agent 1's migrate child +
+# head-state checks); the lifecycle step then runs every scenario of `twenty-mode-check.ts lifecycle` against the same
+# cluster. Every credential is random per run and masked.
 
 on:
   pull_request:
@@ -63,26 +63,21 @@ jobs:
             echo "CREWFLOW_OWNER_BOOTSTRAP_PASSWORD=$own"
             echo "APP_SECRET=$secret"
           } >> "$GITHUB_ENV"
-      - name: Build the chain database (restricted-migrator harness, fresh)
-        id: chain
+      # The migrate child runs from dist (built here once) for every scenario; the driver falls back to the source child.
+      - name: Build the server (the migrate child the scenarios spawn)
+        run: npx nx build rab-server
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
-            packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
+            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
         env:
-          MIGRATION_SECURITY_SCENARIOS: fresh
-          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
-          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
-      - name: 'Owner fixture (PRE-T2 STAND-IN - crewflow_owner with the M0 §3.1 memberships)'
-        run: |
-          set -euo pipefail
-          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
-          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
-            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts owner-fixture "$FRESH_DB"
+          TWENTY_PG_CONTAINER: twenty-pg
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
       - name: Behaviour-change catalogue, injection simulation, refusals (as crewflow_owner)
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
-          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$FRESH_DB" --source fixture)"
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
           eval "$test_env"
           export TWENTY_FINDINGS_FILE="${RUNNER_TEMP}/twenty-findings-pg${{ matrix.pg }}.jsonl"
           status=0
@@ -106,13 +101,14 @@ jobs:
             console.log(`findings: EXPECTED-RISK=${by("EXPECTED-RISK").length} CONTROL-HOLDS=${by("CONTROL-HOLDS").length} HARD-FLOOR=${by("HARD-FLOOR").length}`);
             for (const l of by("EXPECTED-RISK")) console.log(`  [${l.severity}] ${l.id}: ${l.acceptance}`);' "$TWENTY_FINDINGS_FILE"
           exit $status
-      - name: Lifecycle scenarios (BLOCKED until the migrate child exists; never reported as PASSED)
+      - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
         if: success() || failure()
         run: |
           set -euo pipefail
-          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
-          TWENTY_SEPARATED_TEMPLATE_DB="$FRESH_DB" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
-            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts scenario --report "${RUNNER_TEMP}/twenty-scenarios-pg${{ matrix.pg }}.json"
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts lifecycle --report "${RUNNER_TEMP}/twenty-scenarios-pg${{ matrix.pg }}.json"
+        env:
+          TWENTY_PG_CONTAINER: twenty-pg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

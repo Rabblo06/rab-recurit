@@ -48,6 +48,9 @@ export const MIGRATION_LOCK_KEY_SQL = `x'637265776d696772'::bigint`;
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..');
 const DIST = join(REPO_ROOT, 'packages', 'rab-server', 'dist', 'database', 'typeorm', 'scripts');
 const DEFAULT_ENTRYPOINT = join(DIST, 'migrate', 'twenty', 'twenty-migrate.js');
+/** The same child from source (ts-node), for CI jobs that build the test database before `nx build rab-server`. */
+const SOURCE_ENTRYPOINT = join(__dirname, 'migrate', 'twenty', 'twenty-migrate.ts');
+const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
 const DEPLOY_PREPARE = join(DIST, 'deploy-prepare.js');
 const OWNER_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql');
 const TRANSITION_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql');
@@ -138,8 +141,9 @@ function context(): Ctx {
   const ownerPassword = process.env.CREWFLOW_OWNER_BOOTSTRAP_PASSWORD?.trim();
   if (!ownerPassword || !/^[A-Za-z0-9_-]{24,128}$/.test(ownerPassword)) throw new Refusal('CREWFLOW_OWNER_BOOTSTRAP_PASSWORD (24-128 [A-Za-z0-9_-]) is required');
   const container = process.env.TWENTY_PG_CONTAINER?.trim() || null;
-  if (container && !/^twa-t5-pg1[6-9][a-z-]*$|^twenty-pg$/.test(container)) throw new Refusal('TWENTY_PG_CONTAINER is not a harness container name');
-  return { admin, ownerPassword, entrypoint: process.env.TWENTY_MIGRATE_ENTRYPOINT || DEFAULT_ENTRYPOINT, container };
+  // twa-t5-*: Agent 5's local clusters; twenty-pg / disposable-postgres: the CI containers (ci-twenty-tests, disposable-postgres action).
+  if (container && !/^twa-t5-pg1[6-9][a-z-]*$|^twenty-pg$|^disposable-postgres$/.test(container)) throw new Refusal('TWENTY_PG_CONTAINER is not a harness container name');
+  return { admin, ownerPassword, entrypoint: process.env.TWENTY_MIGRATE_ENTRYPOINT || (existsSync(DEFAULT_ENTRYPOINT) ? DEFAULT_ENTRYPOINT : SOURCE_ENTRYPOINT), container };
 }
 
 async function assertDisposableCluster(ctx: Ctx): Promise<{ major: number }> {
@@ -370,7 +374,10 @@ export function runChild(
 ): Promise<ChildResult> {
   const started = Date.now();
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // A .ts entrypoint (the source child, before the dist build) runs through ts-node --transpile-only, as the repo's
+    // migration entrypoints do (never tsx: decorator metadata, CLAUDE.md "Resolved gotchas").
+    const argv = script.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, script] : [script];
+    const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const lines: string[] = [];
     const events: ChildResult['events'] = [];
     let result: ChildResult['result'] = null;
@@ -929,6 +936,39 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// ci-db: the CI test database, built the owner-login way (replaces the separated restricted-migrator build for the suites)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * One EMPTY disposable database → the real provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) → Agent 1's
+ * migrate child with PG_DATABASE_URL = crewflow_owner only → the head-state assertions (ledger = chain, 1786721330000 absent,
+ * B3, reachability, golden posture) → `OWNER_DB=<name>` written to TWENTY_CI_DB_FILE for the test step, which then runs
+ * `eval "$(node twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"` (TEST_DATABASE_URL = crewflow_owner). Any failed
+ * assertion fails the step: the suites never run on a database the owner-login install did not build correctly.
+ */
+async function ciDatabase(ctx: Ctx, major: number): Promise<number> {
+  const out = process.env.TWENTY_CI_DB_FILE?.trim();
+  if (!out) throw new Refusal('TWENTY_CI_DB_FILE is required');
+  const entry = ctx.entrypoint;
+  const r: ScenarioReport = { id: 'CI-DB', title: 'owner-login test database for the CI suites', status: 'NOT TESTED', pgMajor: major, evidence: [], failures: [] };
+  const db = dbName('ci');
+  r.database = db;
+  await createEmptyDatabase(ctx, db);
+  await providerStep(ctx, db, r);
+  const c = await runChild(entry, childEnvironment(ownerUrl(ctx, db)));
+  r.evidence.push(`child (${entry === SOURCE_ENTRYPOINT ? 'source via ts-node' : 'dist'}): ${summary(c)}`);
+  expect(r, c.exitCode === EXIT.ok && c.result?.state === 'EMPTY' && c.result?.serve === true, 'fresh install: exit 0, EMPTY, serve=true');
+  neverLoadedGated(r, c);
+  if (c.exitCode === EXIT.ok) await assertHeadState(ctx, db, r);
+  else r.failures.push(...c.lines.slice(-8).map((l) => `child: ${l.slice(0, 240)}`));
+  r.status = r.failures.length ? 'FAIL' : 'PASS';
+  log(`${r.id} ${r.status} (${db})`);
+  for (const line of [...r.evidence, ...r.failures]) log(`  ${line}`);
+  if (r.status === 'PASS') writeFileSync(out, `OWNER_DB=${db}\n`);
+  return r.status === 'PASS' ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -955,7 +995,8 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === 'lifecycle' || command === 'scenario') return write(await lifecycle(ctx, major));
   if (command === 'transition') return write(await transition(ctx, major, rest[0] ?? ''));
-  process.stderr.write('usage: twenty-mode-check.ts list | owner-fixture <db> | lifecycle | transition <separated-db> [--report <file>]\n');
+  if (command === 'ci-db') return ciDatabase(ctx, major);
+  process.stderr.write('usage: twenty-mode-check.ts list | owner-fixture <db> | lifecycle | transition <separated-db> | ci-db [--report <file>]\n');
   return 2;
 }
 
