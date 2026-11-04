@@ -258,6 +258,22 @@ send lines per row; realtime: Pub/Sub messages per event from a `PSUBSCRIBE` lis
 driver, retried rows are reported), fairness (Jain's index of per-organisation mean latency, per-organisation p95 and
 completion spread), errors (failed rows and Worker log error lines), and host contention (other containers' CPU).
 
+Memory contention (added 2026-11-04). The Docker VM is 4 GB and shared, and it swaps. At both edges of every window and
+scenario, `dq6-bench.sh` appends the VM's `MemAvailable`, `SwapFree` and cumulative `pswpin`/`pswpout` (read from `/proc`
+inside `costaudit-pg`) to `vm-memory.txt`. A window does not start when `MemAvailable` is below `DQ6_MIN_AVAIL_MIB`
+(384). The report EXCLUDES a window, from its table and from every mean, if it:
+- swapped in more than `DQ6_MAX_SWAPIN_MIB` (16 MiB);
+- had less than `DQ6_MIN_AVAIL_MIB` available at an edge; or
+- has no complete record.
+
+The swap counters are VM-wide, so another container's swapping also excludes a window.
+
+Connection-pool waits are NOT measured. They are in-process (pg `Pool.waitingCount`), and the production Worker exposes
+no metric for them. As a proxy, the 10 s depth sample records the Worker container's PostgreSQL backends (all and
+non-idle, by its address on the harness network). The Worker's pool is 12 (`PG_POOL_MAX_CONNECTIONS`), and its
+consumers' concurrencies sum to more than that (email 5 + push 10 + shift statements 2 + AI 4), so a non-idle count at
+the cap means checkouts could have been waiting.
+
 Setup seeds with `COST_SEED_NOW=2026-10-27T22:05:00Z` (`DQ6_SEED_NOW`) and marks the last shifts' post-shift stamps as
 processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. Before every
 window and scenario (after its drain) and at the end of each arm, `arm` refuses to go on once a published shift starts
