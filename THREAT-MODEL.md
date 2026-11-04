@@ -5102,6 +5102,80 @@ The Approved Shift Statement job (`shift-statement.job.ts`) now hands the render
 - *Visible delta (owner-approved D9).* The native statement has 12 mm margins; Chromium's has 0 mm.
 - *Residual (open).* `formatPence` divides by 100 as a float. It prints `£90,071,992,547,409.90` for `9007199254740991` (exact value `.91`). This affects both renderers identically and only values far beyond any real amount; it is a `money.ts` change, reported and not made here. Native: a single token longer than its cell overflows instead of wrapping (kit hyphenation callback). That is a readability defect, not a disclosure; a fix is proposed to the kit owner.
 
+## PDF renderer migration: native security coverage that replaces the Chromium-only tests (branch worker/pdf-test-harness, #51, not merged)
+
+When P5 removes Chromium (`integration/pdf-native`, #61), five Chromium-only specs go with it: `render-pdf.util.spec`,
+`render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and `final-timesheet-renderer-parity`.
+Their security and correctness assertions are kept, against the native renderer, so no control loses its test.
+
+- **Where:** `packages/rab-worker/src/__tests__/pdf-equality/pdf-native-security.spec.ts`. It renders real fixture documents,
+  hostile ones included, through the production seam: `renderReportPdf` → `renderNativePdf` → the render pool. The pool
+  call goes to a pool of the same class, with the production document registry and thread entry, and test-only
+  `allowProbe`. Correctness (every value, footer and "Page n of N", repeated headers, QR, logo, D4) stays in
+  `pdf-equality.native.spec.ts`, which in native-only mode compares against the document's own text, never Chromium.
+- **Asserted:**
+  - the render thread's environment is empty while the jobs process holds credential-shaped values;
+  - hostile URLs in the body, notes, footer and meta-refresh text cause zero connections to a local listener; the thread
+    guard refuses nothing and loads no network builtin;
+  - `file://` URLs and absolute paths print literally: no file content, and no image except the logo and the QR (a
+    positive control proves a 1×1 image would be seen);
+  - script, handler and `javascript:` text is printed, not run, and creates no PDF action, URI, form or attachment;
+  - the same data gives byte-identical output, dated `generatedAt` (D7);
+  - a real document past the deadline is terminated (`PdfRenderTimeoutError`), and one past a lowered heap cap kills only
+    its own thread; neither returns a PDF, and the pool recovers;
+  - on the native-only tree, no browser package is in the seam's import closure.
+- **Not equivalent, by design:** Chromium's sandbox flags (S-7) and launch environment allowlist (H6) have no native
+  counterpart, because there is no browser process. They are replaced by the thread isolation above. "No file access" is
+  proven by construction and content (images are bytes only; fonts are registered from memory), not by a syscall trace in
+  this suite. The image gate's strace (F5) covers that.
+- **Harness strictness (owner decisions, FINAL brief 2026-11-04):**
+  - D6 hyphen wraps are accepted only when the rejoined text is identical and every other check passes;
+  - notes must keep their line breaks;
+  - values printed as F1 □ markers are counted exactly, as whole fields;
+  - text drawn over other text fails the native renderer.
+  Regressions for each are in `pdf-harness.unit.spec.ts`.
+
+## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
+
+Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
+grants, RLS, the renderer's isolation, or any money or worked-minutes value.
+
+- **Asset:** the final timesheet. It is the record of the manager's sign-off ("Reviewed by … Finalised at …", the typed
+  "Signed off as …") and of the shift's "Total worked hours". The pre-shift roster's BEFORE-SHIFT DOCUMENT column is
+  also affected.
+- **Actor:** anyone who can write shift notes, a free-text field. This can also be accidental: a pasted URL, reference
+  or token.
+- **Finding (Medium, integrity):**
+  - **Actor → action → consequence:** notes holding one long unbroken token → the NOTES column grows to the token's
+    width → the right-hand column is pushed off the page → Chromium omits it from the PDF.
+  - **What is lost:** MANAGER SIGN-OFF and the total disappear without any error or warning, and only 237 of a
+    1,000-character token print.
+  - **Where:** `adolphus-document.ts` `DOCUMENT_CSS`, `.bottom > div { flex: 1 }`.
+  - **Root cause:** a flex item's `min-width: auto` means its smallest width is its longest unbreakable word.
+- **Fix:** `.bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }`. Both columns keep half the width, and a
+  token too long for its column breaks at the column edge. Every character is printed.
+- **Owner decision applied in the same change:** notes keep their line breaks. The notes paragraph only (class
+  `notes-text`) gets `white-space: pre-line`. The native renderer applies the same rule to the same field (agreed
+  field list: shift notes in both final-timesheet variants and in the pre-shift roster). Every other field still
+  collapses whitespace, including names, so a line break typed into a name cannot reshape the sign-off block.
+- **Unchanged otherwise:** for ordinary notes the PDF is byte-identical to the pre-fix stylesheet (tested), and values
+  are still escaped (`escapeHtml`). `pre-line` changes whitespace handling only; it cannot turn text into markup.
+- **Regression test:** `render-pdf-notes-layout.integration.spec.ts` (real Chromium via `renderHtmlToPdf`).
+  - A 1,000-character token prints in full.
+  - The sign-off, the total and the before-shift column are each printed exactly once.
+  - Chromium's print layout places nothing past the printable width.
+  - Paragraphs stay on separate lines, with blank lines kept.
+  - Run against main's templates, the token and line-break cases fail.
+- **Test-helper fix:** the PDF text reader (`__tests__/helpers/pdf-inspect.ts`) now honours a stream's direct `/Length`.
+  Before, it stripped a final 0x0d data byte as if it were an end-of-line marker. That made a font's ToUnicode map
+  unreadable, so every glyph of that font decoded as U+FFFD, which hides text from assertions. The fuller reader on
+  `worker/pdf-inspectors` (#54) already uses the same rule.
+- **Residual:**
+  - **Already-stored PDFs:** final timesheets generated before the fix whose notes held such a token remain without
+    their sign-off and total. Regenerating them is an owner decision.
+  - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
+    reported to the native-renderer owner.
+
 ## PDF renderer migration P5 — Chromium and Playwright removed from the Worker (branch worker/remove-chromium, not merged)
 
 Prepared only. It merges after the native renderer (P1/P2) passes every test (P3), staging signs off (P4) and the owner

@@ -1,102 +1,137 @@
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 
-import { renderHtmlToPdf } from '../../queues/rab-reports/render-pdf.util';
-import { checkAgainstInput, compareExtractions, ComparisonResult, countValue, formatReport } from './checker';
-import { expectationFor, renderCall, ReportDocument } from './documents';
-import { compact } from './extract';
-import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { checkAgainstInput, CheckOptions, compareExtractions, ComparisonResult, countValue, formatReport } from './checker';
+import { DocumentExpectation, expectationFor, renderCall, ReportDocument } from './documents';
+import { compact, PdfExtraction } from './extract';
 import { buildFixtures, FixtureDocument, fixtureAttendanceQr, fixtureIds, fixtureQrTokens, scenarioSeeds, shiftEntity } from './fixtures';
+import { loadGlyphTransform } from './glyph-transform';
 import { extractFixture, outDir, RENDER_CONCURRENCY, saveArtifact, verifyShiftQr } from './harness';
-import { chromiumRenderer, mapLimit } from './renderers';
+import { clippingEvidence, F_PDF_1, F_PDF_1_FIXTURES } from './known-findings';
+import { MODE, NATIVE_ONLY } from './mode';
+import { nativeExpectation } from './native-reference';
+import { chromiumRenderer, loadNativeRenderer, mapLimit, Renderer, renderHtmlWithChromium } from './renderers';
 import { dropLastPage, swapOneGlyph } from './tamper';
 
 /**
- * SELF-TEST of the PDF equality harness (renderer migration Chromium → native). Proves the extractor + checker are
- *   (1) not flaky — two independent Chromium renders of every fixture compare EQUAL;
+ * SELF-TEST of the PDF equality harness. Proves the extractor + checker are
+ *   (1) not flaky — two independent renders of every fixture compare EQUAL;
  *   (2) not blind — a deliberately altered PDF (byte-level glyph swap, a dropped page, a lost footer, or a re-render from
  *       an input with one business value changed) compares UNEQUAL, on the check that should catch it.
  *
+ * The renderer under self-test follows PDF_EQUALITY_MODE (mode.ts): Chromium in `compare` mode (today's renderer, and the
+ * reference for native), the native renderer in `native-only` mode (P5: no Chromium; the two native renders must also be
+ * BYTE-IDENTICAL, D7 deterministic output). The native side is held to F1 (□ markers) and react-pdf's forced-break
+ * hyphens, exactly as in the equality suite.
+ *
  * Run (no database needed):
  *   bash C:/rab-ai-wt/setup/heavy-run.sh pdf-tests npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts pdf-equality.selftest
- * Switches: PDF_EQUALITY_OUT (artifact dir, default <tmp>/rab-pdf-equality), PDF_EQUALITY_CONCURRENCY (renders in flight,
- * default 3), CHROMIUM_EXECUTABLE_PATH (system Chromium, as in the Worker image). The PDFs and `report.txt` land in
- * <out>/selftest.
+ * Switches: PDF_EQUALITY_MODE, PDF_EQUALITY_OUT (artifact dir, default <tmp>/rab-pdf-equality), PDF_EQUALITY_CONCURRENCY
+ * (renders in flight, default 3), CHROMIUM_EXECUTABLE_PATH (system Chromium, as in the Worker image). The PDFs and
+ * `report.txt` land in <out>/selftest.
  */
 jest.setTimeout(30 * 60_000);
 
 const OUT = outDir('selftest');
 const IDS = fixtureIds();
+const nativeOrUnavailable = loadNativeRenderer();
+if (NATIVE_ONLY && 'unavailable' in nativeOrUnavailable) throw new Error(`PDF_EQUALITY_MODE=native-only but ${nativeOrUnavailable.unavailable}`);
+const renderer: Renderer = NATIVE_ONLY ? (nativeOrUnavailable as Renderer) : chromiumRenderer;
+const N1 = `${renderer.name}#1`;
+const N2 = `${renderer.name}#2`;
+const OPTIONS: CheckOptions = NATIVE_ONLY ? { boundsStrict: [N1, N2, 'original', 'altered'], forcedBreakHyphens: [N1, N2, 'original', 'altered'] } : {};
 let fixtures: Map<string, FixtureDocument>;
 const renders = new Map<string, [Buffer, Buffer]>();
+const expectations = new Map<string, DocumentExpectation>();
 const results: ComparisonResult[] = [];
+
+/** The expectation of the renderer under self-test: the input's values, F1-transformed for the native renderer. */
+async function expectationOf(doc: ReportDocument): Promise<DocumentExpectation> {
+  const e = expectationFor(doc);
+  if (!NATIVE_ONLY) return e;
+  const glyphs = await loadGlyphTransform();
+  if ('unavailable' in glyphs) throw new Error(`native-only mode but the F1 glyph transform is unavailable: ${glyphs.unavailable}`);
+  return nativeExpectation(e, glyphs.transform);
+}
 
 beforeAll(async () => {
   fixtures = new Map((await buildFixtures()).map((f) => [f.id, f]));
   await mapLimit([...fixtures.values()], RENDER_CONCURRENCY, async (f) => {
-    const first = await chromiumRenderer.render(f.doc);
-    const second = await chromiumRenderer.render(f.doc);
+    const first = await renderer.render(f.doc);
+    const second = await renderer.render(f.doc);
     renders.set(f.id, [first, second]);
-    saveArtifact(OUT, f.id, 'chromium-1.pdf', first);
+    expectations.set(f.id, await expectationOf(f.doc));
+    saveArtifact(OUT, f.id, `${renderer.name}-1.pdf`, first);
   });
 });
 
 afterAll(() => {
-  if (results.length) saveArtifact(OUT, 'report', 'txt', formatReport(results, 'PDF equality self-test (Chromium vs Chromium, then altered PDFs)'));
+  if (results.length) saveArtifact(OUT, 'report', 'txt', formatReport(results, `PDF equality self-test (${MODE}: ${renderer.name} vs ${renderer.name}, then altered PDFs)`));
 });
 
 it('builds exactly the documented fixture matrix', () => {
   expect([...fixtures.keys()].sort()).toEqual([...IDS].sort());
 });
 
-describe('Chromium vs Chromium: every fixture compares equal (the checker is not flaky)', () => {
+describe(`${renderer.name} vs ${renderer.name}: every fixture compares equal (the checker is not flaky)`, () => {
   const selfCompare = (id: string) => {
     const f = fixtures.get(id)!;
     const [a, b] = renders.get(id)!;
-    const r = compareExtractions(id, expectationFor(f.doc), extractFixture(f, a), extractFixture(f, b), ['chromium#1', 'chromium#2']);
+    const r = compareExtractions(id, expectations.get(id)!, extractFixture(f, a), extractFixture(f, b), [N1, N2], OPTIONS);
     results.push(r);
     if (!r.ok) throw new Error(formatReport([r]));
   };
-  it.each(IDS.filter((id) => !(id in F_PDF_1_FIXTURES)))('%s', selfCompare);
+  const findingIds = NATIVE_ONLY ? [] : Object.keys(F_PDF_1_FIXTURES);
+  it.each(IDS.filter((id) => !findingIds.includes(id)))('%s', selfCompare);
 
-  // KNOWN FINDING F-PDF-1 (known-findings.ts): Chromium drops the notes' tail and the right-hand column. The assertion is
-  // unchanged; `test.failing` turns RED the day the template stops dropping text — then make these plain `it`s again.
-  test.failing.each(Object.keys(F_PDF_1_FIXTURES))(`%s — KNOWN FINDING ${F_PDF_1}`, selfCompare);
+  if (NATIVE_ONLY) {
+    // D7: the native renderer's output is deterministic (creationDate = generatedAt, frozen thread clock).
+    it.each(IDS)('%s: the two native renders are byte-identical (D7)', (id) => {
+      const [a, b] = renders.get(id)!;
+      expect(a.equals(b)).toBe(true);
+    });
+  } else if (findingIds.length) {
+    // KNOWN FINDING F-PDF-1 (known-findings.ts): Chromium drops the notes' tail and the right-hand column. The assertion is
+    // unchanged; `test.failing` turns RED the day the template stops dropping text — then make these plain `it`s again.
+    test.failing.each(findingIds)(`%s — KNOWN FINDING ${F_PDF_1}`, selfCompare);
 
-  // …and exactly that, nothing else, fails on those fixtures (so `test.failing` cannot hide another defect).
-  it.each(Object.entries(F_PDF_1_FIXTURES))(`%s: ${F_PDF_1} — evidence, and no other failure`, (id, known) => {
-    const f = fixtures.get(id)!;
-    for (const [k, pdf] of renders.get(id)!.entries()) {
-      const name = `chromium#${k + 1}`;
-      const e = clippingEvidence(f.doc, extractFixture(f, pdf), name, known.droppedHeading);
-      expect(e.failing).toEqual([`values-present(${name})`, ...(known.parseBack ? [`parse-back(${name})`] : [])]);
-      expect(e.missing).toEqual(known.missing);
-      expect(e.parseBack).toBe(known.parseBack);
-      expect(e.tokenCharsPrinted).toBeGreaterThan(0);
-      expect(e.tokenCharsPrinted).toBeLessThan(1000);
-      expect(e.droppedHeadingPrinted).toBe(false);
-    }
-  });
+    // …and exactly that, nothing else, fails on those fixtures (so `test.failing` cannot hide another defect).
+    it.each(Object.entries(F_PDF_1_FIXTURES))(`%s: ${F_PDF_1} — evidence, and no other failure`, (id, known) => {
+      const f = fixtures.get(id)!;
+      for (const [k, pdf] of renders.get(id)!.entries()) {
+        const name = `chromium#${k + 1}`;
+        const e = clippingEvidence(f.doc, extractFixture(f, pdf), name, known.droppedHeading);
+        expect(e.failing).toEqual([`values-present(${name})`, ...(known.parseBack ? [`parse-back(${name})`] : [])]);
+        expect(e.missing).toEqual(known.missing);
+        expect(e.parseBack).toBe(known.parseBack);
+        expect(e.tokenCharsPrinted).toBeGreaterThan(0);
+        expect(e.tokenCharsPrinted).toBeLessThan(1000);
+        expect(e.droppedHeadingPrinted).toBe(false);
+      }
+    });
+  }
 });
 
-describe('extraction regressions on real Chromium output', () => {
-  it('long-text: the 10 KB note flows over a page break and is counted exactly once, across it', () => {
+describe(`extraction regressions on real ${renderer.name} output`, () => {
+  it('long-text: the 10 KB note spans pages and is counted exactly once, line by line, every line on its own printed line', () => {
     const f = fixtures.get('long-text/final-timesheet')!;
     if (f.doc.kind !== 'final-timesheet' || !f.doc.data.notes) throw new Error('long-text/final-timesheet: expected a final timesheet with notes');
     const notes = f.doc.data.notes;
     const x = extractFixture(f, renders.get(f.id)![0]);
-    // Not inside any one page, so only the continuation can find it …
+    // Not inside any one page …
     expect(x.pages.some((p) => p.blocks.some((b) => compact(b).includes(compact(notes))) || compact(p.lines.join('')).includes(compact(notes)))).toBe(false);
-    expect(x.continuations.length).toBeGreaterThan(0);
-    // … and it is found exactly once, across the page break.
-    expect(countValue(x, notes)).toBe(1);
+    // … found exactly once, and every one of its 56 paragraphs starts a printed line.
+    expect(countValue(x, notes, { forcedBreakHyphens: NATIVE_ONLY })).toBe(1);
+    expect(checkAgainstInput(expectations.get(f.id)!, x, 'r', OPTIONS).find((c) => c.check === 'line-breaks(r)')).toMatchObject({ ok: true });
   });
 
-  it('unicode: a multi-word Arabic name (drawn right to left, one run per word) reads in logical order', () => {
-    const f = fixtures.get('unicode/approved-shift-statement')!;
-    const x = extractFixture(f, renders.get(f.id)![0]);
-    expect(countValue(x, 'محمد عبد الله')).toBeGreaterThan(0);
-    expect(countValue(x, 'الله عبد محمد')).toBe(0); // the visual (left-to-right) word order
-  });
+  if (!NATIVE_ONLY) {
+    it('unicode: a multi-word Arabic name (drawn right to left, one run per word) reads in logical order', () => {
+      const f = fixtures.get('unicode/approved-shift-statement')!;
+      const x = extractFixture(f, renders.get(f.id)![0]);
+      expect(countValue(x, 'محمد عبد الله')).toBeGreaterThan(0);
+      expect(countValue(x, 'الله عبد محمد')).toBe(0); // the visual (left-to-right) word order
+    });
+  }
 });
 
 /** A clone of the input with one change: a test mutation of render INPUT, never a recomputation. */
@@ -109,38 +144,49 @@ function mutate(doc: ReportDocument, change: (d: ReportDocument) => void): Repor
 interface Alteration {
   name: string;
   fixture: string;
-  /** Produces the altered PDF from the fixture and its first Chromium render. */
-  alter: (f: FixtureDocument, original: Buffer) => Promise<Buffer>;
+  /** Produces the altered PDF (or, where only an extraction can express it, the altered extraction). */
+  alter: (f: FixtureDocument, original: Buffer, originalX: PdfExtraction) => Promise<Buffer | PdfExtraction>;
   /** Checks that must be among the failing ones. */
   mustFail: string[];
+}
+
+/** The pages of an extraction without their footer line: what a render that lost its footer prints (native-only mode). */
+function withoutFooters(x: PdfExtraction): PdfExtraction {
+  const pages = x.pages.map((p) => {
+    const lines = p.lines.filter((l) => l !== p.footer);
+    return { ...p, lines, lineSegments: p.lineSegments.filter((_s, i) => p.lines[i] !== p.footer), text: lines.join('\n'), blocks: p.blocks.filter((b) => b !== p.footer), footer: null, footerNumbering: null };
+  });
+  return { ...x, pages, text: pages.map((p) => p.text).join('\n\f\n') };
 }
 
 const ALTERATIONS: Alteration[] = [
   { name: 'byte-level: one glyph swapped in a content stream', fixture: 'one-row/final-timesheet', alter: async (_f, pdf) => swapOneGlyph(pdf), mustFail: ['tokens'] },
   { name: 'byte-level: last page removed from the page tree', fixture: 'rows-45/final-timesheet', alter: async (_f, pdf) => dropLastPage(pdf), mustFail: ['page-count', 'footer-numbering(altered)'] },
-  {
-    name: 'footer lost (rendered without the footer template)',
-    fixture: 'rows-45/pre-shift-report',
-    alter: async (f) => renderHtmlToPdf(renderCall(f.doc).html, { landscape: true }),
-    mustFail: ['footer-numbering(altered)'],
-  },
+  NATIVE_ONLY
+    ? { name: 'footer lost (every footer line removed from the extraction)', fixture: 'rows-45/pre-shift-report', alter: async (_f, _pdf, x) => withoutFooters(x), mustFail: ['footer-numbering(altered)'] }
+    : {
+        name: 'footer lost (rendered without the footer template)',
+        fixture: 'rows-45/pre-shift-report',
+        alter: async (f) => renderHtmlWithChromium(renderCall(f.doc).html, { landscape: true }),
+        mustFail: ['footer-numbering(altered)'],
+      },
   {
     name: 'worked minutes of row 10 changed by +1 minute',
     fixture: 'rows-45/final-timesheet',
-    alter: async (f) => chromiumRenderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.staff[9]!.workedMinutes = (d.data.staff[9]!.workedMinutes ?? 0) + 1))),
+    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.staff[9]!.workedMinutes = (d.data.staff[9]!.workedMinutes ?? 0) + 1))),
     mustFail: ['tokens'],
   },
   {
     name: 'approved gross changed by +1p',
     fixture: 'one-row/approved-shift-statement',
-    alter: async (f) => chromiumRenderer.render(mutate(f.doc, (d) => d.kind === 'approved-shift-statement' && (d.data.amountPence += 1))),
+    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'approved-shift-statement' && (d.data.amountPence += 1))),
     mustFail: ['values-present(altered)', 'values-equal', 'tokens'],
   },
   {
     name: 'clock-out time of row 1 moved by one minute',
     fixture: 'midnight/final-timesheet',
     alter: async (f) =>
-      chromiumRenderer.render(
+      renderer.render(
         mutate(f.doc, (d) => {
           if (d.kind !== 'final-timesheet') return;
           const s = d.data.staff[0]!;
@@ -152,13 +198,13 @@ const ALTERATIONS: Alteration[] = [
   {
     name: 'typed sign-off (signature name) changed',
     fixture: 'unicode/final-timesheet',
-    alter: async (f) => chromiumRenderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.signedOffName = 'Someone Else'))),
+    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.signedOffName = 'Someone Else'))),
     mustFail: ['values-present(altered)', 'values-equal', 'tokens'],
   },
   {
     name: 'last staff row removed',
     fixture: 'rows-45/pre-shift-report',
-    alter: async (f) => chromiumRenderer.render(mutate(f.doc, (d) => d.kind === 'pre-shift-report' && d.data.staff.pop())),
+    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'pre-shift-report' && d.data.staff.pop())),
     mustFail: ['values-present(altered)', 'values-equal', 'tokens'],
   },
   {
@@ -167,22 +213,30 @@ const ALTERATIONS: Alteration[] = [
     alter: async (f) => {
       const other = fixtureQrTokens.sign({ shiftId: '00000000-0000-4000-8000-000000000000', venueId: '00000000-0000-4000-8000-000000000001', ver: 2 }, 3600);
       const png = await new QrImageService().generatePng(other);
-      return chromiumRenderer.render(mutate(f.doc, (d) => d.kind === 'pre-shift-report' && (d.data.qrPngBase64 = png.toString('base64'))));
+      return renderer.render(mutate(f.doc, (d) => d.kind === 'pre-shift-report' && (d.data.qrPngBase64 = png.toString('base64'))));
     },
     mustFail: ['qr-payloads(altered)', 'qr-equal'],
   },
   {
-    name: 'Arabic name reversed (wrong bidi order)',
+    // Native prints Arabic as F1 markers (no glyphs), so a reversed Arabic name would print the same markers: native-only
+    // reverses a Latin name instead. Either way the wrong character order must be caught.
+    name: NATIVE_ONLY ? 'Polish name reversed (wrong character order)' : 'Arabic name reversed (wrong bidi order)',
     fixture: 'unicode/pre-shift-report',
     alter: async (f) =>
-      chromiumRenderer.render(
+      renderer.render(
         mutate(f.doc, (d) => {
           if (d.kind !== 'pre-shift-report') return;
-          const row = d.data.staff.find((s) => /[\u0600-\u06ff]/.test(s.name))!;
+          const row = d.data.staff.find((s) => (NATIVE_ONLY ? /Łukasz/ : /[\u0600-\u06ff]/).test(s.name))!;
           row.name = [...row.name].reverse().join('');
         }),
       ),
     mustFail: ['values-present(altered)', 'tokens'],
+  },
+  {
+    name: 'a multi-line note printed with its line breaks collapsed',
+    fixture: 'one-row/final-timesheet',
+    alter: async (f) => renderer.render(mutate(f.doc, (d) => d.kind === 'final-timesheet' && (d.data.notes = d.data.notes!.replace(/\s*[\r\n]+\s*/g, ' ')))),
+    mustFail: ['line-breaks(altered)'],
   },
 ];
 
@@ -190,9 +244,11 @@ describe('altered PDFs compare unequal (the checker catches differences)', () =>
   it.each(ALTERATIONS.map((a) => [a.name, a] as const))('%s', async (_name, alteration) => {
     const f = fixtures.get(alteration.fixture)!;
     const [original] = renders.get(alteration.fixture)!;
-    const altered = await alteration.alter(f, original);
-    saveArtifact(OUT, `${alteration.fixture}--altered--${alteration.name}`, 'pdf', altered);
-    const r = compareExtractions(`ALTERED ${alteration.fixture}: ${alteration.name}`, expectationFor(f.doc), extractFixture(f, original), extractFixture(f, altered), ['original', 'altered']);
+    const originalX = extractFixture(f, original);
+    const altered = await alteration.alter(f, original, originalX);
+    const alteredX = Buffer.isBuffer(altered) ? extractFixture(f, altered) : altered;
+    if (Buffer.isBuffer(altered)) saveArtifact(OUT, `${alteration.fixture}--altered--${alteration.name}`, 'pdf', altered);
+    const r = compareExtractions(`ALTERED ${alteration.fixture}: ${alteration.name}`, expectations.get(alteration.fixture)!, originalX, alteredX, ['original', 'altered'], OPTIONS);
     results.push(r);
     const failing = r.findings.filter((x) => !x.ok && !x.info).map((x) => x.check);
     expect(r.ok).toBe(false);
@@ -225,15 +281,16 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
 /**
  * KNOWN FINDING (P0 plan §5.2 1: values adjacent to Number.MAX_SAFE_INTEGER "must be refused, not rounded"). Today
  * `formatPence` divides by 100 in floating point: formatPence(9007199254740991) prints "£90,071,992,547,409.90" (1p
- * short) and nothing refuses it. `test.failing` keeps the suite green while the defect exists and turns RED the day
- * the amount is refused or printed exactly — then change it to a plain `it`.
+ * short) and nothing refuses it. Both renderers print the view-model's `formatPence` string, so the finding holds for
+ * either. `test.failing` keeps the suite green while the defect exists and turns RED the day the amount is refused or
+ * printed exactly — then change it to a plain `it`.
  */
 test.failing('pence adjacent to MAX_SAFE_INTEGER are refused or printed exactly', async () => {
   const f = fixtures.get('edge-values/approved-shift-statement-pence-1')!;
   const doc = mutate(f.doc, (d) => d.kind === 'approved-shift-statement' && ((d.data.amountPence = Number.MAX_SAFE_INTEGER), (d.data.payRatePence = Number.MAX_SAFE_INTEGER - 1)));
-  const pdf = await chromiumRenderer.render(doc).catch(() => null);
+  const pdf = await renderer.render(doc).catch(() => null);
   if (pdf === null) return; // refused: the required behaviour
-  const parse = checkAgainstInput(expectationFor(doc), extractFixture(f, pdf), 'chromium').find((r) => r.check === 'parse-back(chromium)')!;
+  const parse = checkAgainstInput(expectationFor(doc), extractFixture(f, pdf), renderer.name).find((r) => r.check === `parse-back(${renderer.name})`)!;
   expect(parse.detail).not.toMatch(/parses to/);
   expect(parse.ok).toBe(true);
 });

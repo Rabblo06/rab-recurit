@@ -372,7 +372,9 @@ export function scenarioSeeds(options: FixtureOptions = {}): ScenarioSeed[] {
   }
   // 2. One row.
   {
-    const s = baseSeed('one-row', 'a single staff member', d('2026-11-13T17:00:00Z'), d('2026-11-13T23:30:00Z'));
+    const s = baseSeed('one-row', 'a single staff member; a three-line note (LF, CRLF and a blank line)', d('2026-11-13T17:00:00Z'), d('2026-11-13T23:30:00Z'));
+    // Owner decision 2026-11-04: notes keep their line breaks. Each line must start a printed line (checker line-breaks).
+    s.shift.notes = 'Black tie.\nReport to the staff entrance at 16:45.\r\n\r\nAsk for Jamie on arrival.';
     s.staff = [{ first: 'Oliver', last: 'Jones', ref: 'ST-1001', assignmentStatus: 'confirmed', clockIn: d('2026-11-13T16:58:00Z'), clockOut: d('2026-11-13T23:34:00Z'), attendanceStatus: 'approved', corrected: true, review: REVIEW }];
     s.statements.push(statementFor(s, s.staff[0]!));
     seeds.push(s);

@@ -66,7 +66,7 @@ ${DOCUMENT_CSS}
   <section class="bottom">
     <div>
       <h3>${escapeHtml(vm.notesHeading)}</h3>
-      <p>${notes}</p>
+      <p class="notes-text">${notes}</p>
       <p class="muted">${escapeHtml(vm.qrScopeNote)}</p>
     </div>
     <div>

@@ -1,11 +1,12 @@
-import { DocumentExpectation, ParseBackField } from './documents';
+import { DocumentExpectation, LINE_BREAK, ParseBackField } from './documents';
 import { compact, normaliseText, PdfExtraction } from './extract';
-import { tokensJoiningForcedBreaks } from './native-reference';
+import { F1_MARKER, joinLineBreaks, markerOccurrences, TextReference, tokensJoiningForcedBreaks, valueLines } from './native-reference';
 
 /**
  * EQUALITY CHECKER — the P0 plan's §5.2 equality design (docs/PDF_RENDERER_P0_PLAN_2026-11-03.md, owner-approved
- * 2026-11-04). Compares two extractions of PDFs rendered from the SAME input (Chromium vs native; or Chromium vs
- * Chromium for the self-test), each against the input and against each other:
+ * 2026-11-04). Compares two extractions of PDFs rendered from the SAME input (Chromium vs native; or one renderer twice
+ * for the self-test), each against the input and against each other — or, in native-only mode (P5: no Chromium), one
+ * native extraction against the input and against the document's own text (`checkAgainstDocument`):
  *
  *   values         every business value (names, venue, dates, clock times, worked minutes, money, report ids, signature
  *                  names) is printed, and printed the same number of times by both renderers            (§5.2 4(a), 4(c))
@@ -18,18 +19,26 @@ import { tokensJoiningForcedBreaks } from './native-reference';
  *   qr             decoded payloads identical and equal to the signed token                             (§5.2 4(e))
  *   logo           the 166×70 logo is embedded                                                         (§5.2 4(f))
  *   tokens         no missing or extra words (multiset of normalised words over the document)
+ *   line-breaks    every line of a multi-line note starts a printed line, in order (owner decision 2026-11-04)
  *   active content no /JavaScript, /JS, /OpenAction, /Launch, /URI, /EmbeddedFile, /AA, /AcroForm      (§8 P3)
- *   bounds         no text drawn outside the page (strict for the native renderer; INFO for Chromium)  (§8 P3)
+ *   bounds         no text drawn outside the page, no text drawn over other text (strict for the native renderer;
+ *                  INFO for Chromium)                                                                  (§8 P3, D6)
  *   pdf-inspect    the repo's own oracle reads the same page count
  *
- * D6 (owner-approved format deltas: column widths, PDF version, file size, A4 point rounding) never fails a comparison:
- * page sizes and per-page word placement are reported as INFO, and golden rasters (pdf-equality.native.spec.ts) are the
- * visual reference.
+ * D6 (approved with conditions, FINAL brief 2026-11-04). Format deltas (column widths, PDF version, file size, A4 point
+ * rounding) never fail a comparison: page sizes and per-page word placement are INFO, and owner-reviewed golden rasters
+ * (pdf-equality.native.spec.ts) are the visual reference. The hyphen-wrap delta — Chromium breaks a line after a word's
+ * own hyphen ("Worthington-" / "Smythe"), react-pdf moves the whole word ("Worthington-Smythe"), or the other way round
+ * — is accepted by `tokens` ONLY when the text with those line breaks rejoined is identical (`joinLineBreaks`: a truncated
+ * name or a dropped character still differs), AND every other check of the comparison passes: nothing missing or added,
+ * no line outside the page, no overlap, footers and repeated headers correct, notes' line breaks kept. Otherwise the
+ * `tokens` finding fails and names the checks that blocked D6.
  *
  * The NATIVE side (CheckOptions `expectB` / `referenceB` / `forcedBreakHyphens`, built in native-reference.ts) is held
  * to owner decision F1 (□ for each unprintable character, from the runtime's GlyphCoverage) and may draw react-pdf's
  * forced-break hyphen at a line end; where F1 changes the document or Chromium drops text (F-PDF-1) its cross-checks
- * run against the document's own text instead of Chromium. The pending D6 hyphen-wrap delta is NOT absorbed.
+ * run against the document's own text instead of Chromium. A value holding □ is counted as a whole field only
+ * (`markerOccurrences`), so it keeps its exact count without matching inside another run of markers.
  */
 
 export interface CheckOptions {
@@ -39,7 +48,7 @@ export interface CheckOptions {
   segmentRows?: number;
   /** Fail (instead of INFO) when a page's words differ although the document's words are equal. */
   strictPagePlacement?: boolean;
-  /** Render names whose text must stay inside the page (default: ['native']). */
+  /** Render names held to the page geometry: no text outside the page, no text over other text (default: ['native']). */
   boundsStrict?: string[];
   /** Render names whose renderer draws a "-" at a forced break of an over-long token (react-pdf): see `countValue`. */
   forcedBreakHyphens?: string[];
@@ -50,7 +59,12 @@ export interface CheckOptions {
    * — where the first is not a valid reference for it (F1, F-PDF-1; native-reference.ts). Required when `expectB`
    * changes a value, because then the two renders are meant to print different text.
    */
-  referenceB?: { label: string; count(value: string): number; tokens: string[]; tokensB(x: PdfExtraction): string[] };
+  referenceB?: Pick<TextReference, 'label' | 'count' | 'tokens'>;
+  /**
+   * The document's words, per side (`documentWords` / the F1-transformed reference tokens): what decides where a line-end
+   * hyphen joins two pieces into one word (forced breaks; D6 hyphen wraps). Without them no D6 join is made.
+   */
+  documentWords?: { a?: readonly string[]; b?: readonly string[] };
 }
 
 export interface Finding {
@@ -88,9 +102,6 @@ export function parsePenceText(text: string): bigint | null {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-/** A value made only of F1's replacement marker U+25A1 (glyph-coverage.ts REPLACEMENT_MARKER; asserted in the unit spec). */
-const F1_OPAQUE = /^□+$/u;
 
 function occurrences(hay: string, needle: string): number {
   if (!needle) return 0;
@@ -182,6 +193,49 @@ export function forcedBreakOccurrences(lines: readonly string[], needle: string)
 }
 
 /**
+ * Consecutive WHOLE lines of one block (2+ lines) that together are exactly `value`: a field wrapped inside its cell.
+ * Each line break stands for the space it replaced (word wrap) or — with `forcedBreaks`, react-pdf's break of an over-long
+ * token — for nothing, its drawn "-" dropped. Nothing else is optional.
+ */
+function wrappedFieldOccurrences(lines: readonly string[], value: string, forcedBreaks: boolean): number {
+  const forms = (i: number, j: number): boolean => {
+    const go = (k: number, acc: string): boolean => {
+      if (!value.startsWith(acc) && !(forcedBreaks && k < j && acc.endsWith('-') && value.startsWith(acc.slice(0, -1)))) return false;
+      if (k === j) return acc === value;
+      const next = lines[k + 1]!;
+      return go(k + 1, `${acc} ${next}`) || (forcedBreaks && acc.endsWith('-') && go(k + 1, acc.slice(0, -1) + next));
+    };
+    return go(i, lines[i]!);
+  };
+  let count = 0;
+  for (let i = 0; i < lines.length; i++) {
+    for (let j = i + 1; j < lines.length; j++) {
+      if (forms(i, j)) {
+        count++;
+        i = j;
+        break;
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Printings of a value holding F1's marker □: per page, the delimited printings inside each FIELD (a line's column
+ * segment, `lineSegments`: one cell or field, located by its line and x position), plus a field wrapped over several
+ * whole lines of one cell. Never a raw substring count over the page, which would find "□ □□" inside "□□ □□□" or across
+ * two neighbouring cells (see `markerOccurrences`).
+ */
+export function markerFieldCount(x: PdfExtraction, value: string, options: { forcedBreakHyphens?: boolean } = {}): number {
+  const n = normaliseText(value);
+  return x.pages.reduce((sum, p) => {
+    const inFields = p.lineSegments.reduce((s, segments) => s + segments.reduce((t, g) => t + markerOccurrences(g, n), 0), 0);
+    const wrapped = p.blockLines.reduce((s, lines) => s + wrappedFieldOccurrences(lines, n, options.forcedBreakHyphens === true), 0);
+    return sum + inFields + wrapped;
+  }, 0);
+}
+
+/**
  * How many times a value is printed: per page over lines AND over blocks (a value wrapped across lines of one cell is
  * found in its block), taking the larger, so wrapping never hides a value; plus the printings that straddle a page break
  * inside one paragraph (`x.continuations`: matched over the joined parts, minus those already inside a single part).
@@ -193,18 +247,28 @@ export function forcedBreakOccurrences(lines: readonly string[], needle: string)
  * which differs between Windows and Linux fonts). For such a value, a contiguous window holding exactly its characters
  * counts as one printing (`permutedOccurrences`).
  *
+ * A value with LINE BREAKS (a multi-line note) counts as often as its rarest line is printed (each line divided by how
+ * often the value itself repeats it): the lines are separate printed lines, separate blocks once a blank line divides
+ * them, so the whole value is no longer one block. That every line starts a printed line, in order, is the
+ * `line-breaks` check.
+ *
+ * A value holding F1's marker □ counts whole fields only (`markerFieldCount`).
+ *
  * `forcedBreakHyphens` (the NATIVE side only): react-pdf/textkit draws a visible "-" where it force-breaks an over-long
  * unbroken token (word-breaking.ts; cannot be turned off). Inside a block, a "-" that ENDS a line, with the block (same
  * column) carrying on in the next line, may then be skipped when the value has no "-" there (`forcedBreakOccurrences`).
  * A "-" that is in the value is always required, and no other hyphen is ever optional.
  */
 export function countValue(x: PdfExtraction, value: string, options: { forcedBreakHyphens?: boolean } = {}): number {
+  const lines = valueLines(value);
+  if (lines.size > 1 || [...lines.values()].some((m) => m > 1)) return Math.min(...[...lines].map(([l, m]) => Math.floor(countValue(x, l, options) / m)));
+  if (value.includes(F1_MARKER)) return markerFieldCount(x, value, options);
   const needle = compact(value);
   const count = BIDI_CONTROLS.test(value)
     ? (hay: string) => Math.max(occurrences(hay, needle), permutedOccurrences(hay, needle))
     : (hay: string) => occurrences(hay, needle);
-  const countBlock = (block: string, lines: readonly string[] | undefined) =>
-    options.forcedBreakHyphens && lines && lines.length > 1 ? Math.max(count(compact(block)), forcedBreakOccurrences(lines.map(compact), needle)) : count(compact(block));
+  const countBlock = (block: string, blockLines: readonly string[] | undefined) =>
+    options.forcedBreakHyphens && blockLines && blockLines.length > 1 ? Math.max(count(compact(block)), forcedBreakOccurrences(blockLines.map(compact), needle)) : count(compact(block));
   const perPage = x.pages.reduce((sum, p) => {
     const byLine = p.lines.reduce((s, l) => s + count(compact(l)), 0);
     const byBlock = p.blocks.reduce((s, b, k) => s + countBlock(b, p.blockLines?.[k]), 0);
@@ -215,6 +279,37 @@ export function countValue(x: PdfExtraction, value: string, options: { forcedBre
     return sum + Math.max(0, count(parts.join('')) - parts.reduce((s, part) => s + count(part), 0));
   }, 0);
   return perPage + straddling;
+}
+
+/**
+ * Problems with a multi-line field's line breaks (empty = kept): every non-blank line of the value must START a printed
+ * line (a line of a block: one cell or paragraph), in reading order (pages, then blocks top to bottom, then lines), each
+ * after the previous one. From that line start the block must hold the value's line in full; only where the block ends
+ * first (the paragraph carries on after a page break) is the printed beginning, at least 10 characters, enough.
+ * A renderer that collapses the breaks prints line k+1 in the middle of a printed line, and fails here.
+ */
+export function lineBreakProblems(x: PdfExtraction, value: string): string[] {
+  const wanted = value.split(LINE_BREAK).map(compact).filter(Boolean);
+  if (wanted.length < 2) return [];
+  const starts: string[] = [];
+  for (const p of x.pages) {
+    for (const lines of p.blockLines) {
+      const c = lines.map(compact);
+      for (let k = 0; k < c.length; k++) starts.push(c.slice(k).join(''));
+    }
+  }
+  const problems: string[] = [];
+  let after = -1;
+  wanted.forEach((line, k) => {
+    let found = -1;
+    for (let i = after + 1; i < starts.length && found < 0; i++) {
+      const rest = starts[i]!;
+      if (rest.startsWith(line) || (rest.length >= Math.min(line.length, 10) && line.startsWith(rest))) found = i;
+    }
+    if (found < 0) problems.push(`line ${k + 1} of ${wanted.length} (${show(line, 40)}) does not start a printed line${k ? ` after line ${k}` : ''}`);
+    else after = found;
+  });
+  return problems;
 }
 
 export function tokens(text: string): string[] {
@@ -338,6 +433,17 @@ export function checkAgainstInput(expect: DocumentExpectation, x: PdfExtraction,
       detail: bad.length ? `table rows without the header on pages ${bad.map((p) => p.number).join(', ')}` : `header present on all ${required.length} page(s) with table rows`,
     });
   }
+  const breakProblems = expect.multiLine.flatMap((f) => lineBreakProblems(x, f.value).map((p) => `${f.label}: ${p}`));
+  const breakLines = expect.multiLine.reduce((s, f) => s + f.value.split(LINE_BREAK).filter((l) => l.trim()).length, 0);
+  out.push({
+    check: `line-breaks(${name})`,
+    ok: breakProblems.length === 0,
+    detail: breakProblems.length
+      ? `${breakProblems.length} line(s) of a multi-line note not printed on their own line: ${breakProblems.slice(0, 6).join('; ')}${breakProblems.length > 6 ? ` … (+${breakProblems.length - 6} more)` : ''}`
+      : expect.multiLine.length
+        ? `${breakLines} line(s) of ${expect.multiLine.length} multi-line field(s) each start a printed line, in order`
+        : 'no multi-line field in this document',
+  });
   const wantQr = [...expect.qrPayloads].sort();
   const qrOk = JSON.stringify(x.qrPayloads) === JSON.stringify(wantQr);
   out.push({ check: `qr-payloads(${name})`, ok: qrOk, detail: qrOk ? `${wantQr.length} QR payload(s) as encoded` : `decoded ${list(x.qrPayloads)}; expected ${list(wantQr)}` });
@@ -356,8 +462,64 @@ export function checkAgainstInput(expect: DocumentExpectation, x: PdfExtraction,
     info: !strict,
     detail: outside ? `${outside} text run(s) drawn outside the page (pages ${x.outOfPageRuns.map((n, i) => (n ? i + 1 : 0)).filter(Boolean).join(', ')})` : 'all text inside the page',
   });
+  const overlaps = x.overlaps.flatMap((o, i) => o.map((v) => ({ page: i + 1, ...v })));
+  out.push({
+    check: `no-overlap(${name})`,
+    ok: overlaps.length === 0 || !strict,
+    info: !strict,
+    detail: overlaps.length
+      ? `${overlaps.length} text run(s) drawn over other text: ${overlaps
+          .slice(0, 6)
+          .map((o) => `page ${o.page}: ${show(o.a, 30)} / ${show(o.b, 30)} (${o.overlapX} pt across, baselines ${o.dy} pt apart)`)
+          .join('; ')}`
+      : 'no text drawn over other text',
+  });
   out.push({ check: `pdf-inspect(${name})`, ok: x.oracle.pageCount === x.pageCount, info: x.oracle.pageCount === x.pageCount && !x.oracle.agrees, detail: x.oracle.detail });
   return out;
+}
+
+/** The `tokens` finding: words of the reference vs the render, with the D6 hyphen-wrap rule (see the file header). */
+function tokensFinding(
+  refName: string,
+  nb: string,
+  words: { refRaw: string[]; refJoined: string[]; raw: string[]; joined: string[]; d6: string[] },
+  repeated: ReadonlySet<string>,
+): Finding & { d6Needed: boolean } {
+  const residual = (ta: string[], tb: string[]) => {
+    const { onlyA, onlyB } = multisetDiff(ta, tb);
+    return { onlyA: onlyA.filter((t) => !repeated.has(t)), onlyB: onlyB.filter((t) => !repeated.has(t)), any: onlyA.length + onlyB.length > 0 };
+  };
+  const raw = residual(words.refRaw, words.raw);
+  const describe = (d: { onlyA: string[]; onlyB: string[] }) =>
+    [d.onlyA.length ? `only in ${refName} (missing from ${nb}): ${list(d.onlyA)}` : '', d.onlyB.length ? `only in ${nb} (extra): ${list(d.onlyB)}` : ''].filter(Boolean).join(' | ');
+  if (raw.onlyA.length === 0 && raw.onlyB.length === 0) {
+    return { check: 'tokens', ok: true, d6Needed: false, detail: `${words.refRaw.length} words, identical multiset${raw.any ? ' (apart from header/footer repeats on D4 extra pages)' : ''}` };
+  }
+  const joined = residual(words.refJoined, words.joined);
+  if (joined.onlyA.length === 0 && joined.onlyB.length === 0) {
+    return {
+      check: 'tokens',
+      ok: true,
+      d6Needed: true,
+      detail: `D6 hyphen wrap: the words differ only where a line breaks at a word's own hyphen (${describe(raw)}); with those breaks rejoined the text is identical (${list([...new Set(words.d6)], 8)})`,
+    };
+  }
+  return { check: 'tokens', ok: false, d6Needed: false, detail: describe(joined) };
+}
+
+/** D6 is accepted only when every other check of the comparison passes (FINAL brief conditions). */
+function applyD6Conditions(findings: Finding[], tokens: Finding & { d6Needed: boolean }): void {
+  const { d6Needed, ...finding } = tokens;
+  if (d6Needed) {
+    const blocking = findings.filter((f) => !f.ok && !f.info).map((f) => f.check);
+    if (blocking.length) {
+      finding.ok = false;
+      finding.detail = `D6 hyphen-wrap difference NOT accepted: other checks fail (${blocking.join(', ')}). ${finding.detail}`;
+    } else {
+      findings.push({ check: 'd6-hyphen-wrap', ok: true, info: true, detail: 'accepted: joined text identical; nothing missing or added, inside the page, no overlap, footers, headers and line breaks correct' });
+    }
+  }
+  findings.push(finding);
 }
 
 export function compareExtractions(
@@ -377,7 +539,8 @@ export function compareExtractions(
   if (!ref && expectB.values.some((v, i) => v.value !== expect.values[i]?.value)) {
     throw new Error('compareExtractions: expectB changes printed values, so a referenceB is required (the two renders are meant to differ)');
   }
-  const hyphensB = { forcedBreakHyphens: (options.forcedBreakHyphens ?? []).includes(nb) };
+  const hyphensA = (options.forcedBreakHyphens ?? []).includes(na);
+  const hyphensB = (options.forcedBreakHyphens ?? []).includes(nb);
   const findings: Finding[] = [...checkAgainstInput(expect, a, na, options), ...checkAgainstInput(expectB, b, nb, options)];
 
   findings.push({
@@ -389,16 +552,9 @@ export function compareExtractions(
   const pageDelta = Math.abs(a.pageCount - b.pageCount);
   const refName = ref ? ref.label : na;
   if (ref) {
-    // Against the document itself (built for b's own page count, so no D4 allowance is needed). A value that F1 turned
-    // into nothing but □ ("王 小明" → "□ □□") has no countable identity: as a substring it also matches inside any longer
-    // run of □ (a neighbouring cell on the same line, the avatar initials), so its count is not comparable. It is still
-    // required by values-present(native); here it is listed as not compared.
-    const opaque = expectB.values.filter((v) => F1_OPAQUE.test(compact(v.value)));
-    const diffs = expectB.values
-      .filter((v) => !opaque.includes(v))
-      .map((v) => ({ v, ca: ref.count(v.value), cb: countValue(b, v.value, hyphensB) }))
-      .filter((r) => r.ca !== r.cb);
-    const notCompared = opaque.length ? ` (${opaque.length} value(s) printed as only □ under F1, not count-compared: ${opaque.map((v) => label(v.label)).join('; ')})` : '';
+    // Against the document itself (built for b's own page count, so no D4 allowance is needed). Every value is compared,
+    // a value printed as nothing but □ under F1 included: both sides count it as a whole field (countValue / htmlReference).
+    const diffs = expectB.values.map((v) => ({ v, ca: ref.count(v.value), cb: countValue(b, v.value, { forcedBreakHyphens: hyphensB }) })).filter((r) => r.ca !== r.cb);
     findings.push({
       check: 'values-equal',
       ok: diffs.length === 0,
@@ -406,11 +562,13 @@ export function compareExtractions(
         ? `${diffs.length} business value(s) printed a different number of times than the ${refName}: ${diffs
             .slice(0, 20)
             .map((r) => `${label(r.v.label)} ${show(r.v.value, 60)}: ${refName} ${r.ca} / ${nb} ${r.cb}`)
-            .join('; ')}${notCompared}`
-        : `all ${expectB.values.length - opaque.length} business values printed as often as in the ${refName}${notCompared}`,
+            .join('; ')}`
+        : `all ${expectB.values.length} business values printed as often as in the ${refName}`,
     });
   } else {
-    const valueDiffs = expect.values.map((v) => ({ v, ca: countValue(a, v.value), cb: countValue(b, v.value, hyphensB) })).filter((r) => r.ca !== r.cb);
+    const valueDiffs = expect.values
+      .map((v) => ({ v, ca: countValue(a, v.value, { forcedBreakHyphens: hyphensA }), cb: countValue(b, v.value, { forcedBreakHyphens: hyphensB }) }))
+      .filter((r) => r.ca !== r.cb);
     // Under a D4 page-count difference, text repeated on every page (the footer, the table header) legitimately appears
     // that many more times; a value may differ by exactly (page difference × its occurrences in one footer + header).
     const perPage = (v: string) => occurrences(compact(a.pages[0]?.footer ?? ''), compact(v)) + occurrences(compact(a.pages[0]?.tableHeaderLines[0] ?? ''), compact(v));
@@ -448,29 +606,21 @@ export function compareExtractions(
   findings.push({ check: 'qr-equal', ok: qrEqual, detail: qrEqual ? `${a.qrPayloads.length} identical payload(s)` : `${na} ${list(a.qrPayloads)} / ${nb} ${list(b.qrPayloads)}` });
   findings.push({ check: 'image-count', ok: a.imageCount === b.imageCount, detail: `${na} ${a.imageCount}, ${nb} ${b.imageCount}` });
 
-  // The first render's words, or the document's own (referenceB); the second's with forced-break joins where its
-  // renderer draws them (resolved against that reference, native-reference.ts).
-  const ta = ref ? ref.tokens : tokens(a.text);
-  const tb = ref ? ref.tokensB(b) : hyphensB.forcedBreakHyphens ? tokensJoiningForcedBreaks(b, ta) : tokens(b.text);
-  const { onlyA, onlyB } = multisetDiff(ta, tb);
+  // Words: the first render's, or the document's own (referenceB); the second's with forced-break joins where its
+  // renderer draws them. Then the same with D6 hyphen wraps rejoined on both sides (only where the document has the word).
+  const docA = options.documentWords?.a;
+  const docB = options.documentWords?.b ?? (ref ? ref.tokens : docA);
+  const refRaw = ref ? ref.tokens : tokens(a.text);
+  const raw = hyphensB ? tokensJoiningForcedBreaks(b, docB ?? refRaw) : tokens(b.text);
+  const joinedA = ref || !docA ? { tokens: refRaw, d6: [] as string[] } : joinLineBreaks(a, docA, { forcedBreaks: hyphensA, d6: true });
+  const joinedB = docB ? joinLineBreaks(b, docB, { forcedBreaks: hyphensB, d6: true }) : { tokens: raw, d6: [] as string[] };
   // Under a D4 page difference the extra pages repeat the header line and the footer: those words are not "extra values".
   const repeated = new Set(
     pageDelta > 0 && !ref
       ? [...a.pages, ...b.pages].flatMap((p) => [...tokens(p.footer ?? ''), ...p.tableHeaderLines.flatMap(tokens)])
       : [],
   );
-  const tokOnlyA = onlyA.filter((t) => !repeated.has(t));
-  const tokOnlyB = onlyB.filter((t) => !repeated.has(t));
-  findings.push({
-    check: 'tokens',
-    ok: tokOnlyA.length === 0 && tokOnlyB.length === 0,
-    detail:
-      tokOnlyA.length || tokOnlyB.length
-        ? [tokOnlyA.length ? `only in ${refName} (missing from ${nb}): ${list(tokOnlyA)}` : '', tokOnlyB.length ? `only in ${nb} (extra): ${list(tokOnlyB)}` : '']
-            .filter(Boolean)
-            .join(' | ')
-        : `${ta.length} words, identical multiset${onlyA.length + onlyB.length ? ' (apart from header/footer repeats on D4 extra pages)' : ''}`,
-  });
+  const tokenFinding = tokensFinding(refName, nb, { refRaw, refJoined: joinedA.tokens, raw, joined: joinedB.tokens, d6: [...joinedA.d6, ...joinedB.d6] }, repeated);
 
   const sizesA = JSON.stringify(a.pageSizes[0]);
   const sizesB = JSON.stringify(b.pageSizes[0]);
@@ -488,8 +638,58 @@ export function compareExtractions(
         : 'every page carries the same words',
     });
   }
+  applyD6Conditions(findings, tokenFinding);
 
   return { label: label_, names, ok: findings.every((f) => f.ok || f.info), findings };
+}
+
+/**
+ * NATIVE-ONLY MODE (P5: the tree has no Chromium; INTEGRATION-ISSUES I-6). One render checked against the input
+ * (`checkAgainstInput`, every check) and against the DOCUMENT's own text (`reference`: the template HTML's text and footer,
+ * F1 applied; never a Chromium render): every business value printed exactly as often as the document prints it, the
+ * same words (D6 hyphen wraps and forced breaks rejoined only where the document has the word), each page's footer the
+ * document's footer for that page, and exactly the document's images (the logo, plus the Shift QR on the roster). The
+ * visual reference is the owner-reviewed golden rasters (pdf-equality.native.spec.ts).
+ */
+export function checkAgainstDocument(
+  label_: string,
+  expect: DocumentExpectation,
+  x: PdfExtraction,
+  name: string,
+  reference: TextReference,
+  options: CheckOptions & { images: number },
+): ComparisonResult {
+  const hyphens = (options.forcedBreakHyphens ?? []).includes(name);
+  const findings = checkAgainstInput(expect, x, name, options);
+  const diffs = expect.values.map((v) => ({ v, ca: reference.count(v.value), cb: countValue(x, v.value, { forcedBreakHyphens: hyphens }) })).filter((r) => r.ca !== r.cb);
+  findings.push({
+    check: 'values-equal',
+    ok: diffs.length === 0,
+    detail: diffs.length
+      ? `${diffs.length} business value(s) printed a different number of times than the ${reference.label}: ${diffs
+          .slice(0, 20)
+          .map((r) => `${label(r.v.label)} ${show(r.v.value, 60)}: document ${r.ca} / ${name} ${r.cb}`)
+          .join('; ')}`
+      : `all ${expect.values.length} business values printed as often as in the ${reference.label}`,
+  });
+  if (expect.spec.hasFooter) {
+    const wrong = x.pages.filter((p, i) => compact(p.footer ?? '') !== compact(reference.footers[i] ?? ''));
+    findings.push({
+      check: 'footer-text',
+      ok: wrong.length === 0,
+      detail: wrong.length
+        ? `pages whose footer is not the document's: ${wrong.map((p) => `${p.number}: ${show(p.footer ?? '(none)', 80)} / want ${show(reference.footers[p.number - 1] ?? '(none)', 80)}`).join('; ')}`
+        : `every page carries the document's footer (workspace, reference, generatedAt, "Page n of ${x.pageCount}")`,
+    });
+  }
+  findings.push({ check: 'image-count', ok: x.imageCount === options.images, detail: `${name} ${x.imageCount}, document ${options.images}` });
+  const docWords = options.documentWords?.b ?? reference.tokens;
+  const raw = hyphens ? tokensJoiningForcedBreaks(x, docWords) : tokens(x.text);
+  const joined = joinLineBreaks(x, docWords, { forcedBreaks: hyphens, d6: true });
+  const tokenFinding = tokensFinding(reference.label, name, { refRaw: reference.tokens, refJoined: reference.tokens, raw, joined: joined.tokens, d6: joined.d6 }, new Set());
+  findings.push({ check: 'page-size', ok: true, info: true, detail: `${JSON.stringify(x.pageSizes[0])} pt` });
+  applyD6Conditions(findings, tokenFinding);
+  return { label: label_, names: [reference.label, name], ok: findings.every((f) => f.ok || f.info), findings };
 }
 
 /** A plain-text diff report: one block per document, failures first, then a summary. */
