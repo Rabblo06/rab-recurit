@@ -358,6 +358,7 @@ export class SeedAiDemoCommand extends CommandRunner {
     await this.accountLifecycle.sendAccountInvite(m, adminCtx, { userId: ceoUserId, email: ceoEmail, createdBy: adminUserId });
 
     // 8. The synthetic marker — the only writer of `synthetic_data`; the database re-checks the @example.test rule.
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     await m.query(`SELECT ${MARKER_FN.replace('(uuid)', '($1)')} AS marked`, [organisationId]);
     await this.bind(m, adminCtx, 'core');
     await this.audit.record(m, adminCtx, AuditAction.AI_SYNTHETIC_DATA_MARKED, {

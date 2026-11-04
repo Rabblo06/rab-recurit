@@ -54,12 +54,14 @@ export function periodForDate(periods: readonly PeriodRef[], date: string): Peri
 
 export async function activePeriods(m: EntityManager, organisationId: string): Promise<PeriodRef[]> {
   const rows = await m.query(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT ${PERIOD_COLS} FROM core.payroll_calendar_period p WHERE p.organisation_id = $1 AND p.active ORDER BY p.period_start`, [organisationId]);
   return rows.map(toPeriod);
 }
 
 export async function periodsById(m: EntityManager, organisationId: string, ids: string[]): Promise<Map<string, PeriodRef>> {
   if (!ids.length) return new Map();
+  // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
   const rows = await m.query(`SELECT ${PERIOD_COLS} FROM core.payroll_calendar_period p WHERE p.organisation_id = $1 AND p.id = ANY($2::uuid[])`, [organisationId, ids]);
   return new Map(rows.map((r: Record<string, unknown>) => [r.id as string, toPeriod(r)]));
 }

@@ -99,10 +99,12 @@ export class AiUsageSettingsService {
     return this.tenantContext.runInTenantContext(bound, async (m) => {
       await this.authorizeTx(m, ctx);
       const [sum] = await m.query<TotalsRow[]>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT ${TOTALS} FROM core.ai_usage u WHERE u.organisation_id = $1 AND u.usage_date BETWEEN $2::date AND $3::date`,
         [organisationId, from, to],
       );
       const users = await m.query<Array<TotalsRow & { user_id: string; first_name: string | null; last_name: string | null; today_micros: string }>>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT u.user_id, p.first_name, p.last_name, ${TOTALS},
                 coalesce(sum(u.cost_usd_micros) FILTER (WHERE u.usage_date = $4::date), 0)::text AS today_micros
            FROM core.ai_usage u
@@ -113,6 +115,7 @@ export class AiUsageSettingsService {
         [organisationId, from, to, today],
       );
       const models = await m.query<Array<TotalsRow & { model: string }>>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT u.model, ${TOTALS} FROM core.ai_usage u
           WHERE u.organisation_id = $1 AND u.usage_date BETWEEN $2::date AND $3::date
           GROUP BY u.model ORDER BY sum(u.cost_usd_micros) DESC, u.model`,

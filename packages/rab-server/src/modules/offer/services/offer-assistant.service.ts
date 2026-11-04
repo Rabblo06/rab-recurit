@@ -51,8 +51,10 @@ export class OfferAssistantService {
         return `$${params.length}`;
       };
       const start = assignmentTimeSql().start;
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = [offerReadScopeCondition(scope, ctx, nextParam), `${start} >= ${nextParam(range.from)}`, `${start} < ${nextParam(range.to)}`].join(' AND ');
       const rows: Array<{ status: string; n: number; expiring: number; stale: number }> = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT o.status, count(*)::int AS n,
                 count(*) FILTER (WHERE o.status = 'pending' AND o.expires_at >= now() AND o.expires_at < now() + interval '24 hours')::int AS expiring,
                 count(*) FILTER (WHERE o.status = 'pending' AND o.sent_at < now() - interval '24 hours')::int AS stale
@@ -71,6 +73,7 @@ export class OfferAssistantService {
         out.pendingOver24h += Number(r.stale);
       }
       const [median] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM (o.responded_at - o.sent_at)) / 60))::int AS minutes
            FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
