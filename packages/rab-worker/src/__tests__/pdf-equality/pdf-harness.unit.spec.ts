@@ -1,6 +1,9 @@
 import { layoutLines, TextRun } from '../helpers/pdf-layout';
-import { countValue, permutedOccurrences } from './checker';
+import { compareExtractions, countValue, forcedBreakOccurrences, permutedOccurrences } from './checker';
+import { DOCUMENT_SPECS, DocumentExpectation } from './documents';
 import { Continuation, pageContinuations, PdfExtraction } from './extract';
+import { loadGlyphTransform } from './glyph-transform';
+import { footerTexts, htmlText, tokensJoiningForcedBreaks } from './native-reference';
 import { guardNetwork, NetworkDeniedError, renderGuarded } from './network-guard';
 
 // The real module object (what the guard patches), not an `import * as` copy.
@@ -28,6 +31,7 @@ function extraction(pages: string[][], continuations: Continuation[] = []): PdfE
       lines,
       text: lines.join('\n'),
       blocks: lines,
+      blockLines: lines.map((l) => [l]),
       footer: null,
       footerNumbering: null,
       tableHeaderLines: [],
@@ -143,6 +147,126 @@ describe('values with explicit bidi controls (checker permutedOccurrences)', () 
   it('a value WITHOUT bidi controls still has to be printed in order', () => {
     expect(countValue(extraction([['Morgan Manager']]), 'Manager Morgan')).toBe(0);
     expect(countValue(extraction([['naMorgan Mager']]), 'Morgan Manager')).toBe(0);
+  });
+});
+
+/** One page whose blocks are given as their lines (for line-end rules). */
+function blockExtraction(blocks: string[][]): PdfExtraction {
+  const x = extraction([blocks.flat()]);
+  x.pages[0]!.blocks = blocks.map((ls) => ls.join(' '));
+  x.pages[0]!.blockLines = blocks;
+  return x;
+}
+
+describe('F1 on the native side: □ for each unprintable character (owner decision F1)', () => {
+  const nativeValue = 'Nul□l By□te'; // F1 of "Nul\u0000l By\u0000te"
+
+  it('the □ is required, character for character: a wrong character or a missing □ fails', () => {
+    expect(countValue(extraction([[`row 5 ${nativeValue} REF-4`]]), nativeValue)).toBe(1);
+    expect(countValue(extraction([['row 5 Nul?l By□te REF-4']]), nativeValue)).toBe(0); // another character in its place
+    expect(countValue(extraction([['row 5 Null By□te REF-4']]), nativeValue)).toBe(0); // the □ missing
+    expect(countValue(extraction([['row 5 Nul\u0000l By□te REF-4']]), nativeValue)).toBe(0); // the raw NUL printed (invisible)
+    expect(countValue(extraction([['row 5 Nul□□l By□te REF-4']]), nativeValue)).toBe(0); // one □ too many
+  });
+
+  it('the transform is the runtime GlyphCoverage (when this tree has the native renderer)', async () => {
+    const glyphs = await loadGlyphTransform();
+    if ('unavailable' in glyphs) {
+      expect(glyphs.unavailable).toMatch(/no native glyph-coverage runtime/);
+      return;
+    }
+    expect(glyphs.marker).toBe('□');
+    const [nul, arabic, emoji, crlf, latin] = await glyphs.transform(['Nul\u0000l', 'محمد', 'Chef 👩‍🍳', 'a\r\nb\tc', 'Zażółć Ŵyn']);
+    expect(nul).toBe('Nul□l');
+    expect(arabic).toBe('□□□□');
+    expect(emoji).toBe('Chef □□□');
+    expect(crlf).toBe('a\nb c');
+    expect(latin).toBe('Zażółć Ŵyn');
+  });
+});
+
+describe("react-pdf's forced-break hyphen (native side only)", () => {
+  it('a "-" that ends a line inside a block may be skipped when the value has none there', () => {
+    const x = blockExtraction([['Token: A1b2C3-', 'd4E5A1b2-', 'C3d4E5']]);
+    expect(countValue(x, 'Token: A1b2C3d4E5A1b2C3d4E5', { forcedBreakHyphens: true })).toBe(1);
+    expect(countValue(x, 'Token: A1b2C3d4E5A1b2C3d4E5')).toBe(0); // Chromium side: never optional
+  });
+
+  it('a hyphen that IS in the value is required: present in the PDF passes, missing from it fails', () => {
+    expect(countValue(blockExtraction([['Montgomery Worthington-', 'Smythe III']]), 'Worthington-Smythe', { forcedBreakHyphens: true })).toBe(1);
+    expect(countValue(blockExtraction([['Montgomery Worthington', 'Smythe III']]), 'Worthington-Smythe', { forcedBreakHyphens: true })).toBe(0);
+  });
+
+  it('only a hyphen at the END of a line, with the block carrying on, is optional', () => {
+    expect(forcedBreakOccurrences(['ab-c', 'd'], 'abcd')).toBe(0); // mid-line
+    expect(forcedBreakOccurrences(['ab', 'cd-'], 'abcd')).toBe(1); // last line: its hyphen is not skipped, just not needed
+    expect(forcedBreakOccurrences(['ab', 'cd-'], 'abcd-x')).toBe(0);
+    expect(countValue(blockExtraction([['Token: A1b2C3-'], ['d4E5']]), 'Token: A1b2C3d4E5', { forcedBreakHyphens: true })).toBe(0); // two blocks
+    expect(forcedBreakOccurrences(['xA1-', 'B2yA1-', 'B2'], 'A1B2')).toBe(2);
+  });
+
+  it('words: a forced break is joined only when the document has the word without the hyphen', () => {
+    const x = blockExtraction([['Token: A1b2-', 'C3d4-', 'E5 end'], ['Worthington-', 'Smythe']]);
+    const words = tokensJoiningForcedBreaks(x, ['Token:', 'A1b2C3d4E5', 'end', 'Worthington-Smythe']).sort();
+    expect(words).toEqual(['A1b2C3d4E5', 'Smythe', 'Token:', 'Worthington-', 'end'].sort()); // the real hyphen is NOT joined away
+  });
+});
+
+describe('F-PDF-1 interplay: native counted against the document, not against Chromium', () => {
+  const expect_: DocumentExpectation = {
+    kind: 'final-timesheet',
+    spec: { ...DOCUMENT_SPECS['final-timesheet'], tableHeader: null, hasFooter: false },
+    values: [{ label: 'row 1 worked; total', value: '4h 30m', min: 1 }],
+    qrPayloads: [],
+    rowMarkers: [],
+    parseBack: { durations: [], breaks: [], fields: [] },
+  };
+  const chromium = extraction([['row 1 4h 30m']]); // the total is clipped away (F-PDF-1)
+  const native = extraction([['row 1 4h 30m', 'Total worked hours: 4h 30m']]);
+  const ref = (n: number, words: string[]) => ({ label: 'document', count: () => n, tokens: words, tokensB: (x: PdfExtraction) => x.text.split(/\s+/).filter(Boolean) });
+  const words = ['row', '1', '4h', '30m', 'Total', 'worked', 'hours:', '4h', '30m'];
+  const check = (r: ReturnType<typeof compareExtractions>, name: string) => r.findings.find((f) => f.check === name)!;
+
+  it('equal to the document passes even though Chromium printed it once', () => {
+    const r = compareExtractions('t', expect_, chromium, native, ['chromium', 'native'], { referenceB: ref(2, words) });
+    expect(check(r, 'values-equal').ok).toBe(true);
+    expect(check(r, 'tokens').ok).toBe(true);
+  });
+
+  it('a native count or word that differs from the document still fails', () => {
+    const r = compareExtractions('t', expect_, chromium, native, ['chromium', 'native'], { referenceB: ref(3, [...words, 'extra']) });
+    expect(check(r, 'values-equal').ok).toBe(false);
+    expect(check(r, 'tokens').ok).toBe(false);
+  });
+
+  it('without a reference, native is compared with Chromium (and the clipped total is a difference)', () => {
+    expect(check(compareExtractions('t', expect_, chromium, native), 'values-equal').ok).toBe(false);
+  });
+
+  it('a value that F1 makes all □ is not count-compared (no identity); any other value still is', () => {
+    const e = (value: string): DocumentExpectation => ({ ...expect_, values: [{ label: 'v', value, min: 1 }] });
+    const x = extraction([['□□ □□□ Kraków □']]);
+    const opaque = compareExtractions('t', e('□ □□'), x, x, ['chromium', 'native'], { referenceB: ref(1, ['□□', '□□□', 'Kraków', '□']) });
+    expect(check(opaque, 'values-equal').ok).toBe(true);
+    expect(check(opaque, 'values-equal').detail).toMatch(/not count-compared/);
+    const visible = compareExtractions('t', e('Kraków □'), x, x, ['chromium', 'native'], { referenceB: ref(2, ['□□', '□□□', 'Kraków', '□']) });
+    expect(check(visible, 'values-equal').ok).toBe(false);
+  });
+
+  it("the document's text-transform: uppercase classes are applied, as the template prints them", () => {
+    const html = '<html><head><style>.doc-title { font-weight: 700; text-transform: uppercase; } .x { color: red; }</style></head><body><div class="doc-title">Final timesheet</div><div class="x">Kept</div></body></html>';
+    expect(htmlText(html).replace(/\s+/g, ' ').trim()).toBe('FINAL TIMESHEET Kept');
+  });
+
+  it('the document text is the HTML body (no <title>, entities decoded) plus the footer once per page', () => {
+    const t = htmlText('<html><head><title>Venue X</title></head><body><p>Total worked hours: 4h 30m</p><p>Tom &amp; Jerry&#x3C;b&#62;</p></body></html>');
+    expect(t).not.toContain('Venue X');
+    expect(t.replace(/\s+/g, ' ')).toContain('Total worked hours: 4h 30m');
+    expect(t).toContain('Tom & Jerry<b>');
+    expect(footerTexts('<div><span>WS</span> Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>', 2).map((s) => s.replace(/\s+/g, ' ').trim())).toEqual([
+      'WS Page 1 of 2',
+      'WS Page 2 of 2',
+    ]);
   });
 });
 

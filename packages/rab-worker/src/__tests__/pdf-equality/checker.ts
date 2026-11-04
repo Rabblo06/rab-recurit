@@ -1,5 +1,6 @@
 import { DocumentExpectation, ParseBackField } from './documents';
 import { compact, normaliseText, PdfExtraction } from './extract';
+import { tokensJoiningForcedBreaks } from './native-reference';
 
 /**
  * EQUALITY CHECKER — the P0 plan's §5.2 equality design (docs/PDF_RENDERER_P0_PLAN_2026-11-03.md, owner-approved
@@ -24,6 +25,11 @@ import { compact, normaliseText, PdfExtraction } from './extract';
  * D6 (owner-approved format deltas: column widths, PDF version, file size, A4 point rounding) never fails a comparison:
  * page sizes and per-page word placement are reported as INFO, and golden rasters (pdf-equality.native.spec.ts) are the
  * visual reference.
+ *
+ * The NATIVE side (CheckOptions `expectB` / `referenceB` / `forcedBreakHyphens`, built in native-reference.ts) is held
+ * to owner decision F1 (□ for each unprintable character, from the runtime's GlyphCoverage) and may draw react-pdf's
+ * forced-break hyphen at a line end; where F1 changes the document or Chromium drops text (F-PDF-1) its cross-checks
+ * run against the document's own text instead of Chromium. The pending D6 hyphen-wrap delta is NOT absorbed.
  */
 
 export interface CheckOptions {
@@ -35,6 +41,16 @@ export interface CheckOptions {
   strictPagePlacement?: boolean;
   /** Render names whose text must stay inside the page (default: ['native']). */
   boundsStrict?: string[];
+  /** Render names whose renderer draws a "-" at a forced break of an over-long token (react-pdf): see `countValue`. */
+  forcedBreakHyphens?: string[];
+  /** The second render's own expectation (F1: the native values with □ for unprintable characters). Default: `expect`. */
+  expectB?: DocumentExpectation;
+  /**
+   * The reference for the second render's cross-checks (values printed as often; same words) INSTEAD of the first render
+   * — where the first is not a valid reference for it (F1, F-PDF-1; native-reference.ts). Required when `expectB`
+   * changes a value, because then the two renders are meant to print different text.
+   */
+  referenceB?: { label: string; count(value: string): number; tokens: string[]; tokensB(x: PdfExtraction): string[] };
 }
 
 export interface Finding {
@@ -72,6 +88,9 @@ export function parsePenceText(text: string): bigint | null {
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** A value made only of F1's replacement marker U+25A1 (glyph-coverage.ts REPLACEMENT_MARKER; asserted in the unit spec). */
+const F1_OPAQUE = /^□+$/u;
 
 function occurrences(hay: string, needle: string): number {
   if (!needle) return 0;
@@ -112,6 +131,57 @@ export function permutedOccurrences(hay: string, needle: string): number {
 }
 
 /**
+ * Non-overlapping occurrences of `needle` in a block given as its compacted LINES, where the "-" that ends any line but
+ * the last is optional: matched when the needle has a "-" there, skipped otherwise. Every other character, every other
+ * hyphen included, must match exactly.
+ */
+export function forcedBreakOccurrences(lines: readonly string[], needle: string): number {
+  const hay: string[] = [];
+  const optional: boolean[] = [];
+  lines.forEach((line, k) => {
+    const chars = [...line];
+    chars.forEach((c, i) => {
+      hay.push(c);
+      optional.push(c === '-' && i === chars.length - 1 && k < lines.length - 1);
+    });
+  });
+  const n = [...needle];
+  if (n.length === 0) return 0;
+  /** End index of a match of n[1..] starting at hay[i0], or -1 (iterative backtracking over optional hyphens). */
+  const matchFrom = (i0: number): number => {
+    const stack: Array<[number, number]> = [[i0, 1]];
+    while (stack.length) {
+      let [i, j] = stack.pop()!;
+      for (;;) {
+        if (j === n.length) return i;
+        if (i === hay.length) break;
+        if (optional[i]) {
+          if (hay[i] === n[j]) stack.push([i + 1, j]); // alternative: skip it
+          if (hay[i] === n[j]) {
+            i++;
+            j++;
+          } else i++;
+          continue;
+        }
+        if (hay[i] !== n[j]) break;
+        i++;
+        j++;
+      }
+    }
+    return -1;
+  };
+  let count = 0;
+  for (let i = 0; i < hay.length; ) {
+    const end = hay[i] === n[0] ? matchFrom(i + 1) : -1;
+    if (end >= 0) {
+      count++;
+      i = end;
+    } else i++;
+  }
+  return count;
+}
+
+/**
  * How many times a value is printed: per page over lines AND over blocks (a value wrapped across lines of one cell is
  * found in its block), taking the larger, so wrapping never hides a value; plus the printings that straddle a page break
  * inside one paragraph (`x.continuations`: matched over the joined parts, minus those already inside a single part).
@@ -122,15 +192,22 @@ export function permutedOccurrences(hay: string, needle: string): number {
  * are SEEN, and that order depends on how the producer split the text into runs (Skia splits at every font fallback,
  * which differs between Windows and Linux fonts). For such a value, a contiguous window holding exactly its characters
  * counts as one printing (`permutedOccurrences`).
+ *
+ * `forcedBreakHyphens` (the NATIVE side only): react-pdf/textkit draws a visible "-" where it force-breaks an over-long
+ * unbroken token (word-breaking.ts; cannot be turned off). Inside a block, a "-" that ENDS a line, with the block (same
+ * column) carrying on in the next line, may then be skipped when the value has no "-" there (`forcedBreakOccurrences`).
+ * A "-" that is in the value is always required, and no other hyphen is ever optional.
  */
-export function countValue(x: PdfExtraction, value: string): number {
+export function countValue(x: PdfExtraction, value: string, options: { forcedBreakHyphens?: boolean } = {}): number {
   const needle = compact(value);
   const count = BIDI_CONTROLS.test(value)
     ? (hay: string) => Math.max(occurrences(hay, needle), permutedOccurrences(hay, needle))
     : (hay: string) => occurrences(hay, needle);
+  const countBlock = (block: string, lines: readonly string[] | undefined) =>
+    options.forcedBreakHyphens && lines && lines.length > 1 ? Math.max(count(compact(block)), forcedBreakOccurrences(lines.map(compact), needle)) : count(compact(block));
   const perPage = x.pages.reduce((sum, p) => {
     const byLine = p.lines.reduce((s, l) => s + count(compact(l)), 0);
-    const byBlock = p.blocks.reduce((s, b) => s + count(compact(b)), 0);
+    const byBlock = p.blocks.reduce((s, b, k) => s + countBlock(b, p.blockLines?.[k]), 0);
     return sum + Math.max(byLine, byBlock);
   }, 0);
   const straddling = x.continuations.reduce((sum, c) => {
@@ -197,14 +274,15 @@ function checkField(x: PdfExtraction, f: ParseBackField): string | null {
 /** Checks of ONE render against the input (run on both sides, so a value missing from BOTH is still caught). */
 export function checkAgainstInput(expect: DocumentExpectation, x: PdfExtraction, name: string, options: CheckOptions = {}): Finding[] {
   const out: Finding[] = [];
-  const missing = expect.values.filter((v) => countValue(x, v.value) < v.min);
+  const hyphens = { forcedBreakHyphens: (options.forcedBreakHyphens ?? []).includes(name) };
+  const missing = expect.values.filter((v) => countValue(x, v.value, hyphens) < v.min);
   out.push({
     check: `values-present(${name})`,
     ok: missing.length === 0,
     detail: missing.length
       ? `${missing.length} of ${expect.values.length} expected values missing or printed too few times: ${missing
           .slice(0, 15)
-          .map((v) => `${label(v.label)} ${show(v.value, 60)} (want >= ${v.min}, got ${countValue(x, v.value)})`)
+          .map((v) => `${label(v.label)} ${show(v.value, 60)} (want >= ${v.min}, got ${countValue(x, v.value, hyphens)})`)
           .join('; ')}`
       : `all ${expect.values.length} expected values printed`,
   });
@@ -294,7 +372,13 @@ export function compareExtractions(
   const rows = expect.rowMarkers.length;
   const d4 = options.segmentRows && rows > 0 ? Math.max(0, Math.ceil(rows / options.segmentRows) - 1) : 0;
   const tolerance = (options.pageCountTolerance ?? 0) + d4;
-  const findings: Finding[] = [...checkAgainstInput(expect, a, na, options), ...checkAgainstInput(expect, b, nb, options)];
+  const expectB = options.expectB ?? expect;
+  const ref = options.referenceB;
+  if (!ref && expectB.values.some((v, i) => v.value !== expect.values[i]?.value)) {
+    throw new Error('compareExtractions: expectB changes printed values, so a referenceB is required (the two renders are meant to differ)');
+  }
+  const hyphensB = { forcedBreakHyphens: (options.forcedBreakHyphens ?? []).includes(nb) };
+  const findings: Finding[] = [...checkAgainstInput(expect, a, na, options), ...checkAgainstInput(expectB, b, nb, options)];
 
   findings.push({
     check: 'page-count',
@@ -302,22 +386,46 @@ export function compareExtractions(
     detail: `${na} ${a.pageCount}, ${nb} ${b.pageCount}${tolerance ? ` (allowed difference ${tolerance}${d4 ? `: D4, ${rows} rows in ${options.segmentRows}-row segments` : ''})` : ''}`,
   });
 
-  const valueDiffs = expect.values.map((v) => ({ v, ca: countValue(a, v.value), cb: countValue(b, v.value) })).filter((r) => r.ca !== r.cb);
-  // Under a D4 page-count difference, text repeated on every page (the footer, the table header) legitimately appears
-  // that many more times; a value may differ by exactly (page difference × its occurrences in one footer + header).
   const pageDelta = Math.abs(a.pageCount - b.pageCount);
-  const perPage = (v: string) => occurrences(compact(a.pages[0]?.footer ?? ''), compact(v)) + occurrences(compact(a.pages[0]?.tableHeaderLines[0] ?? ''), compact(v));
-  const realDiffs = valueDiffs.filter((r) => Math.abs(r.ca - r.cb) !== pageDelta * perPage(r.v.value) || pageDelta === 0);
-  findings.push({
-    check: 'values-equal',
-    ok: realDiffs.length === 0,
-    detail: realDiffs.length
-      ? `${realDiffs.length} business value(s) printed a different number of times: ${realDiffs
-          .slice(0, 20)
-          .map((r) => `${label(r.v.label)} ${show(r.v.value, 60)}: ${na} ${r.ca} / ${nb} ${r.cb}`)
-          .join('; ')}`
-      : `all ${expect.values.length} business values printed identically${valueDiffs.length ? ` (footer repeats differ only by the D4 page difference)` : ''}`,
-  });
+  const refName = ref ? ref.label : na;
+  if (ref) {
+    // Against the document itself (built for b's own page count, so no D4 allowance is needed). A value that F1 turned
+    // into nothing but □ ("王 小明" → "□ □□") has no countable identity: as a substring it also matches inside any longer
+    // run of □ (a neighbouring cell on the same line, the avatar initials), so its count is not comparable. It is still
+    // required by values-present(native); here it is listed as not compared.
+    const opaque = expectB.values.filter((v) => F1_OPAQUE.test(compact(v.value)));
+    const diffs = expectB.values
+      .filter((v) => !opaque.includes(v))
+      .map((v) => ({ v, ca: ref.count(v.value), cb: countValue(b, v.value, hyphensB) }))
+      .filter((r) => r.ca !== r.cb);
+    const notCompared = opaque.length ? ` (${opaque.length} value(s) printed as only □ under F1, not count-compared: ${opaque.map((v) => label(v.label)).join('; ')})` : '';
+    findings.push({
+      check: 'values-equal',
+      ok: diffs.length === 0,
+      detail: diffs.length
+        ? `${diffs.length} business value(s) printed a different number of times than the ${refName}: ${diffs
+            .slice(0, 20)
+            .map((r) => `${label(r.v.label)} ${show(r.v.value, 60)}: ${refName} ${r.ca} / ${nb} ${r.cb}`)
+            .join('; ')}${notCompared}`
+        : `all ${expectB.values.length - opaque.length} business values printed as often as in the ${refName}${notCompared}`,
+    });
+  } else {
+    const valueDiffs = expect.values.map((v) => ({ v, ca: countValue(a, v.value), cb: countValue(b, v.value, hyphensB) })).filter((r) => r.ca !== r.cb);
+    // Under a D4 page-count difference, text repeated on every page (the footer, the table header) legitimately appears
+    // that many more times; a value may differ by exactly (page difference × its occurrences in one footer + header).
+    const perPage = (v: string) => occurrences(compact(a.pages[0]?.footer ?? ''), compact(v)) + occurrences(compact(a.pages[0]?.tableHeaderLines[0] ?? ''), compact(v));
+    const realDiffs = valueDiffs.filter((r) => Math.abs(r.ca - r.cb) !== pageDelta * perPage(r.v.value) || pageDelta === 0);
+    findings.push({
+      check: 'values-equal',
+      ok: realDiffs.length === 0,
+      detail: realDiffs.length
+        ? `${realDiffs.length} business value(s) printed a different number of times: ${realDiffs
+            .slice(0, 20)
+            .map((r) => `${label(r.v.label)} ${show(r.v.value, 60)}: ${na} ${r.ca} / ${nb} ${r.cb}`)
+            .join('; ')}`
+        : `all ${expect.values.length} business values printed identically${valueDiffs.length ? ` (footer repeats differ only by the D4 page difference)` : ''}`,
+    });
+  }
 
   const fa = [...new Set(a.pages.map((p) => withoutNumbering(p.footer ?? '')))];
   const fb = [...new Set(b.pages.map((p) => withoutNumbering(p.footer ?? '')))];
@@ -340,12 +448,14 @@ export function compareExtractions(
   findings.push({ check: 'qr-equal', ok: qrEqual, detail: qrEqual ? `${a.qrPayloads.length} identical payload(s)` : `${na} ${list(a.qrPayloads)} / ${nb} ${list(b.qrPayloads)}` });
   findings.push({ check: 'image-count', ok: a.imageCount === b.imageCount, detail: `${na} ${a.imageCount}, ${nb} ${b.imageCount}` });
 
-  const ta = tokens(a.text);
-  const tb = tokens(b.text);
+  // The first render's words, or the document's own (referenceB); the second's with forced-break joins where its
+  // renderer draws them (resolved against that reference, native-reference.ts).
+  const ta = ref ? ref.tokens : tokens(a.text);
+  const tb = ref ? ref.tokensB(b) : hyphensB.forcedBreakHyphens ? tokensJoiningForcedBreaks(b, ta) : tokens(b.text);
   const { onlyA, onlyB } = multisetDiff(ta, tb);
   // Under a D4 page difference the extra pages repeat the header line and the footer: those words are not "extra values".
   const repeated = new Set(
-    pageDelta > 0
+    pageDelta > 0 && !ref
       ? [...a.pages, ...b.pages].flatMap((p) => [...tokens(p.footer ?? ''), ...p.tableHeaderLines.flatMap(tokens)])
       : [],
   );
@@ -356,7 +466,7 @@ export function compareExtractions(
     ok: tokOnlyA.length === 0 && tokOnlyB.length === 0,
     detail:
       tokOnlyA.length || tokOnlyB.length
-        ? [tokOnlyA.length ? `only in ${na} (missing from ${nb}): ${list(tokOnlyA)}` : '', tokOnlyB.length ? `only in ${nb} (extra): ${list(tokOnlyB)}` : '']
+        ? [tokOnlyA.length ? `only in ${refName} (missing from ${nb}): ${list(tokOnlyA)}` : '', tokOnlyB.length ? `only in ${nb} (extra): ${list(tokOnlyB)}` : '']
             .filter(Boolean)
             .join(' | ')
         : `${ta.length} words, identical multiset${onlyA.length + onlyB.length ? ' (apart from header/footer repeats on D4 extra pages)' : ''}`,
