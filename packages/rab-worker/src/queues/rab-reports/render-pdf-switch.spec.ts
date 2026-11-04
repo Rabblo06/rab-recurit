@@ -5,6 +5,7 @@ import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templat
 
 import { FINAL_TIMESHEET_CASES } from '../../__tests__/helpers/final-timesheet-fixtures';
 import * as nativeModule from './native/render-native';
+import { shutdownRenderPool } from './native/runtime/render-pool';
 import {
   describePdfRendering,
   htmlFor,
@@ -67,6 +68,7 @@ describe('renderReportPdf dispatch', () => {
     native = jest.spyOn(nativeModule, 'renderNativePdf');
   });
   afterEach(() => jest.restoreAllMocks());
+  afterAll(() => shutdownRenderPool());
 
   it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'chromium' }]])('%p: the Chromium path, never the native one', async (env) => {
     await expect(renderReportPdf(doc, env)).rejects.toBeInstanceOf(LaunchIntercepted);
@@ -93,18 +95,11 @@ describe('renderReportPdf dispatch', () => {
     expect(native).not.toHaveBeenCalled();
   });
 
-  it('native: a render that never settles is rejected with PdfRenderTimeoutError (step "native")', async () => {
-    jest.useFakeTimers();
-    try {
-      native.mockImplementation(() => new Promise<Buffer>(() => undefined));
-      const pending = renderReportPdf(doc, { PDF_RENDERER: 'native' });
-      const assertion = expect(pending).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
-      await jest.advanceTimersByTimeAsync(PDF_RENDER_STEP_TIMEOUT_MS + 1);
-      await assertion;
-      await expect(pending).rejects.toBeInstanceOf(PdfRenderTimeoutError);
-    } finally {
-      jest.useRealTimers();
-    }
+  it('native: the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
+    // The 30 s deadline itself is enforced by the render pool terminating the thread (runtime/render-pool.spec.ts).
+    native.mockRejectedValue(new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS));
+    await expect(renderReportPdf(doc, { PDF_RENDERER: 'native' })).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it('native: a renderer failure propagates unchanged — no runtime fallback to Chromium (T3)', async () => {
@@ -117,8 +112,7 @@ describe('renderReportPdf dispatch', () => {
     const a = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     const b = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     expect(a.equals(b)).toBe(true);
-    // The /CreationDate value itself (D:20261020150000Z) is checked outside Jest (the Worker-image run): under Jest the
-    // Date is created in the test realm and react-pdf runs in Node's realm (react-pdf-node-loader.ts), where pdfkit's
-    // `instanceof Date` does not recognise it.
+    // The creation date is the document's generatedAt (2026-10-20T15:00:00Z), built inside the render thread.
+    expect(a.toString('latin1')).toContain('D:20261020150000');
   });
 });

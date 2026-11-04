@@ -263,14 +263,16 @@ export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): stri
 /**
  * Renders a report PDF with the renderer PDF_RENDERER selects for its kind. Same contract either way: resolves to the
  * PDF bytes; a render that does not finish within `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError`
- * (step `native` here; Chromium bounds `setContent` and `pdf` itself). A native failure is thrown as is: there is NO
+ * (native: step `native-render`, enforced by the render pool; Chromium bounds `setContent` and `pdf` itself). Native
+ * failures carry a stable `code` (runtime/render-protocol.ts, e.g. error_PDF_GLYPH_UNSUPPORTED). A native failure is thrown as is: there is NO
  * runtime fallback to Chromium (T3) — the job's normal failure / retry path handles it, and rollback is the explicit
  * `PDF_RENDERER=chromium`.
  */
 export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
   if (pdfRendererMode(env) === 'chromium' || !isNative(doc)) return renderHtmlToPdf(htmlFor(doc), optionsFor(doc));
-  // Loaded on first native use only: a Chromium-mode Worker never loads react-pdf.
+  // Loaded on first native use only: a Chromium-mode Worker never starts the render pool. The pool enforces the 30 s
+  // deadline itself by terminating the render thread (a timer here could not stop a thread).
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
-  return withRenderStepTimeout('native', PDF_RENDER_STEP_TIMEOUT_MS, renderNativePdf(doc));
+  return renderNativePdf(doc);
 }

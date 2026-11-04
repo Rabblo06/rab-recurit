@@ -2,6 +2,8 @@ import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
+import { breakOnlyOverlongTokens } from '../word-breaking';
+
 /**
  * Embedded fonts for the native PDF renderer (PDF renderer migration P1; owner decisions D11, F1 and F3).
  *
@@ -145,9 +147,9 @@ export interface ReactPdfFontStore {
 }
 
 /**
- * Registers the verified fonts with react-pdf's (per-thread) font store, from memory. Also disables hyphenation:
- * Chromium never hyphenated these templates, and react-pdf would print an inserted "-". A word wider than its box is
- * broken at the box edge by react-pdf instead of overflowing.
+ * Registers the verified fonts with react-pdf's (per-thread) font store, from memory, and the word-breaking rule
+ * (../word-breaking.ts): ordinary words are never hyphenated (as in Chromium); only a token longer than 24 characters
+ * may break, and the layouts' Text makes that a last resort (it would otherwise overflow its box).
  */
 export function registerVendoredFonts(
   store: ReactPdfFontStore,
@@ -170,5 +172,5 @@ export function registerVendoredFonts(
       })),
     });
   }
-  store.registerHyphenationCallback((word) => [word]);
+  store.registerHyphenationCallback(breakOnlyOverlongTokens);
 }
