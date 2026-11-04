@@ -7,7 +7,7 @@ import { inflateSync } from 'zlib';
 import QRCode from 'qrcode';
 
 import { createInstanceHeartbeat } from '../../../../core/runtime/instance-heartbeat';
-import { PdfRenderTimeoutError } from '../../render-pdf.util';
+import { PdfRenderTimeoutError } from './render-timeout';
 
 import { REPLACEMENT_MARKER } from './glyph-coverage';
 
@@ -882,5 +882,20 @@ describe('pool behaviour', () => {
 
   it('layouts use the font stack the glyph pass checks', () => {
     expect(FONT_FAMILY_STACK).toEqual(['Liberation Sans', 'Noto Sans']);
+  });
+
+  it('the runtime never imports the Chromium renderer module or playwright (it must load in the no-Chromium image)', () => {
+    const files = readdirSync(__dirname).filter(
+      (f) => f.endsWith('.ts') && !f.endsWith('.spec.ts'),
+    );
+    expect(files.length).toBeGreaterThanOrEqual(7);
+    for (const file of files) {
+      const src = readFileSync(join(__dirname, file), 'utf8');
+      const imports =
+        /(?:from\s+|require\(\s*)['"](?:playwright[^'"]*|[^'"]*render-pdf\.util)['"]/.test(
+          src,
+        );
+      expect({ file, imports }).toEqual({ file, imports: false });
+    }
   });
 });

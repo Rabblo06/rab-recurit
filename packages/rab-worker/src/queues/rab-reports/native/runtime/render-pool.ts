@@ -8,7 +8,7 @@ import { Logger } from '@nestjs/common';
 import {
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
-} from '../../render-pdf.util';
+} from './render-timeout';
 
 import {
   assertPlainViewModel,
@@ -117,6 +117,8 @@ export interface NativeRenderPoolOptions {
   size?: number;
   /** Per-render deadline in ms, 100..30 000 (never above the 30 s production bound). Default 30 000. */
   timeoutMs?: number;
+  /** Deadline for a thread to become ready, 1 000..30 000 ms. Default 30 000 (independent of the render deadline). */
+  startTimeoutMs?: number;
   /** Per-thread V8 old-space cap in MB, 32..2048. Default 512. */
   maxOldGenerationSizeMb?: number;
   /** Waiting requests beyond the running ones, 1..10 000. Default 256. */
@@ -250,6 +252,7 @@ function threadEntry(): { filename: string; eval: boolean } {
 export class NativeRenderPool {
   readonly size: number;
   readonly timeoutMs: number;
+  readonly startTimeoutMs: number;
   readonly maxOldGenerationSizeMb: number;
   readonly maxQueue: number;
   readonly maxRendersPerThread: number;
@@ -290,6 +293,13 @@ export class NativeRenderPool {
       options.timeoutMs,
       PDF_RENDER_STEP_TIMEOUT_MS,
       100,
+      PDF_RENDER_STEP_TIMEOUT_MS,
+    );
+    this.startTimeoutMs = bounded(
+      'startTimeoutMs',
+      options.startTimeoutMs,
+      PDF_RENDER_STEP_TIMEOUT_MS,
+      1_000,
       PDF_RENDER_STEP_TIMEOUT_MS,
     );
     this.maxOldGenerationSizeMb = bounded(
@@ -518,16 +528,16 @@ export class NativeRenderPool {
       if (slot.state !== 'starting') return;
       const head = this.queue.shift();
       head?.reject(
-        new PdfRenderTimeoutError('native-thread-start', this.timeoutMs),
+        new PdfRenderTimeoutError('native-thread-start', this.startTimeoutMs),
       );
       this.counters.timedOut += head ? 1 : 0;
       this.startFailed = true;
       this.logger.warn(
-        `native PDF render thread did not start within ${this.timeoutMs} ms; terminated`,
+        `native PDF render thread did not start within ${this.startTimeoutMs} ms; terminated`,
       );
       void this.retire(slot);
       this.pump();
-    }, this.timeoutMs);
+    }, this.startTimeoutMs);
     slot.startTimer.unref();
 
     worker.on('message', (msg: FromThreadMessage) => this.onMessage(slot, msg));
