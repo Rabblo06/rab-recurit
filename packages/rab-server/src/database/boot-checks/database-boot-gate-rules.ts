@@ -482,6 +482,8 @@ export interface BootGateReport {
   grants: RoutineGrantsReport;
   /** Phase D wave 3 gate 1c: what the gate session carries ('on' only for an event-mode API/Worker). */
   dispatchNotify: 'on' | 'absent';
+  /** Set by runDatabaseBootGates: the semantic posture snapshot taken at boot (the posture monitor's baseline). */
+  semanticBaseline?: import('../posture-drift/semantic-posture').SemanticPosture;
 }
 
 /** All gates over one connection. Pure apart from the injected query / pending-migration functions. */

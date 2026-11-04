@@ -55,8 +55,18 @@ import { DataSourceOptions } from 'typeorm';
 
 import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
-import { BootGateReport, BootProcess, DatabaseBootGateError, evaluateBootGates, RetryOptions, withDatabaseRetry } from './database-boot-gate-rules';
+import {
+  BootGateReport,
+  BootProcess,
+  DatabaseBootGateError,
+  evaluateBootGates,
+  isProductionProcess,
+  RetryOptions,
+  withDatabaseRetry,
+} from './database-boot-gate-rules';
 import { checkSchemaCompatibility } from './schema-compatibility';
+import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
+import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
 export * from './database-boot-gate-rules';
 export * from './schema-compatibility';
@@ -143,7 +153,17 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
               workspaces: processName === 'provisioner',
             }),
         });
-        return { ...gateReport, expectedMigrations };
+        // Semantic posture (M0 §6.4 control 4): the database's security objects equal the reviewed golden for this major.
+        // Production refuses when no golden exists for the major; elsewhere that is a warning. The snapshot is the
+        // baseline for the posture monitor (SemanticPostureMonitor, started by the API / Worker after boot).
+        let semantic: { posture: SemanticPosture; warnings: string[] };
+        try {
+          semantic = await assertSemanticPostureAtBoot(query, { production: isProductionProcess(processName, env), label });
+        } catch (error) {
+          if (error instanceof SemanticPostureError) throw new DatabaseBootGateError('semantic-posture', error.message);
+          throw error;
+        }
+        return { ...gateReport, warnings: [...gateReport.warnings, ...semantic.warnings], expectedMigrations, semanticBaseline: semantic.posture };
       } finally {
         await session.release().catch(() => undefined);
         await dataSource.destroy().catch(() => undefined);
