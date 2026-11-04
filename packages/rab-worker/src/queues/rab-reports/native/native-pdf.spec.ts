@@ -8,7 +8,7 @@ import { Document, Page, renderToBuffer } from '@react-pdf/renderer';
 import jsQR from 'jsqr';
 
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
-import { FinalTimesheetData } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
+import { buildFinalTimesheetViewModel, FinalTimesheetData } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
 
 import { FINAL_TIMESHEET_CASES, SHIFT_INFO, staffRows } from '../../../__tests__/helpers/final-timesheet-fixtures';
 import { inlinePageResources, rasterImages } from '../../../__tests__/helpers/pdf-images';
@@ -219,6 +219,37 @@ describe('characters that cannot be printed visibly become a visible marker, nev
     const text = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data })).text; // whitespace collapsed
     expect(text).toContain('Tab there');
     expect(text).not.toContain(MARKER);
+  });
+});
+
+/**
+ * F-PDF-1 (found by the PDF equality harness, #51, in today's CHROMIUM output): a long unbroken token in the shift notes
+ * widens the NOTES flex column and pushes MANAGER SIGN-OFF (with "Total worked hours") off the page, silently. The native
+ * layout must not: its bottom columns have a fixed share of the width (flexBasis 0), and an over-long token is broken
+ * inside its column (word-breaking.ts + the kit's Text). Same fixture as the harness: "Token: " + 1,000 characters.
+ */
+describe('F-PDF-1: an unbroken 1,000-character token in the notes stays inside the NOTES column', () => {
+  const TOKEN = 'A1b2C3d4E5'.repeat(100);
+
+  it.each([
+    ['finalised', false],
+    ['original (unsigned)', true],
+  ] as const)('%s: every character printed, wrapped within the column; the sign-off column and the total are all present', async (_label, unsigned) => {
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, unsigned, notes: `Token: ${TOKEN}` };
+    const vm = buildFinalTimesheetViewModel(data);
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data }));
+    const all = strip(doc.pageTexts.join(''));
+    // Every character, in order (react-pdf draws a "-" at each forced break; the token itself has none) ...
+    expect(all.replace(/-/g, '')).toContain(TOKEN);
+    // ... broken across lines: no line carries more than a column's width of it (NOTES is about 370 pt wide).
+    expect(all).not.toContain(TOKEN);
+    const tokenLines = doc.pageTexts.flatMap((page) => page.split(/\r?\n/)).map((l) => l.replace(/[\s-]/g, '')).filter((l) => l.includes('A1b2'));
+    expect(tokenLines.length).toBeGreaterThanOrEqual(8);
+    for (const line of tokenLines) expect(line.length).toBeLessThanOrEqual(100);
+    // The right-hand column is all there: heading, every sign-off line and the total, exactly once.
+    expect(all).toContain(strip(vm.signOffHeading));
+    for (const line of vm.signOff) expect(all).toContain(strip(line.text));
+    expect(all.split(strip(vm.totalWorked)).length - 1).toBe(1);
   });
 });
 
