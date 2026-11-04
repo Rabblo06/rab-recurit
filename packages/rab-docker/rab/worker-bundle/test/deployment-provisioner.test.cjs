@@ -420,6 +420,8 @@ test(
     // as the image's non-root `node` user, so it needs no capability at all.
     assert.equal(svc.user, '1000:1000');
     assert.deepEqual(svc.command, ['node', 'packages/rab-worker/dist/main.js']);
+    // The watchdog's SIGKILL is ignored for PID 1: Docker's init must be PID 1.
+    assert.equal(svc.init, true);
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
     assert.deepEqual(svc.cap_add ?? [], [], 'no capability: there is no identity switch any more');

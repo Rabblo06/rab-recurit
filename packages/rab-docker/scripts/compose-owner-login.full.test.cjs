@@ -134,6 +134,7 @@ test('migrate-on-start: the API migrates with a fresh-install start_period and n
 
 test('Worker: 1000:1000, main.js, tmpfs, jobs-only health, after a healthy API, >= 45 s grace', { skip }, () => {
   assertRefused(problemsAfter('release', (s) => { s['rab-worker'].user = '10001:10001'; }), /rab-worker: user is "10001:10001"/);
+  for (const c of ['release', 'migrate-on-start', 'staging']) assertRefused(problemsAfter(c, (s) => { delete s['rab-worker'].init; }), /rab-worker: init: true is missing/);
   assertRefused(problemsAfter('release', (s) => { s['rab-worker'].command = ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']; }), /no root launcher/);
   assertRefused(problemsAfter('release', (s) => { s['rab-worker'].tmpfs = []; }), /tmpfs \/tmp\/crewflow-jobs is missing/);
   assertRefused(problemsAfter('release', (s) => { s['rab-worker'].healthcheck.test = ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']; }), /not jobs-only/);

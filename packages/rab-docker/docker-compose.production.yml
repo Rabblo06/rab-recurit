@@ -127,6 +127,9 @@ services:
         CREWFLOW_BASE_IMAGE: ${CREWFLOW_BASE_IMAGE:-crewflow-app}
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
+    # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
+    # so the Worker refuses to start as PID 1. Required (compose-owner-login.cjs).
+    init: true
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

@@ -180,6 +180,9 @@ services:
 
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
+    # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
+    # so the Worker refuses to start as PID 1. Required (compose-owner-login.cjs).
+    init: true
     env_file:
       - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/database.env
         required: true
