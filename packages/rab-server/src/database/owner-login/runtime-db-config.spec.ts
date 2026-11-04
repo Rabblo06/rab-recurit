@@ -81,6 +81,11 @@ const CASES: Array<[string, Env]> = [
   ['CREWFLOW_DB_MODE blank = absent', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: '' }],
   ['DISABLE_DB_MIGRATIONS (Twenty CRM)', { CREWFLOW_MIGRATE_ON_START: 'true', DISABLE_DB_MIGRATIONS: 'false' }],
   ['removed name wins over a bad value', { CREWFLOW_MIGRATE_ON_START: 'maybe', CREWFLOW_DB_MODE: 'twenty' }],
+  ['test seam STOP_BEFORE in production', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '1786700000000' }],
+  ['test seam FAIL_AT in development', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'development', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' }],
+  ['test seam FAIL_AT with NODE_ENV unset', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'x' }],
+  ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
+  ['DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS are not this parser's business (CLI authority; the runtime guard refuses them)', { CREWFLOW_MIGRATE_ON_START: 'false', DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }],
 ];
 
 describe('runtime-db-config (owner-login architecture)', () => {
@@ -107,6 +112,17 @@ describe('runtime-db-config (owner-login architecture)', () => {
       const [problem] = runtimeDbConfigProblems({ CREWFLOW_MIGRATE_ON_START: 'false', [name]: 'S3cret-value-do-not-print' });
       expect(problem).toBeDefined();
       expect(problem).not.toContain('S3cret-value-do-not-print');
+    }
+  });
+
+  it('migration test seams: allowed only under NODE_ENV=test; refused in production and everywhere else with an actionable message', () => {
+    for (const name of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT']) {
+      expect(runtimeDbConfigProblems({ NODE_ENV: 'test', [name]: '1786700000000' })).toEqual([]);
+      for (const NODE_ENV of ['production', 'development', undefined]) {
+        expect(runtimeDbConfigProblems({ NODE_ENV, [name]: '1786700000000' })).toEqual([
+          `${name} is a migration test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start.`,
+        ]);
+      }
     }
   });
 
