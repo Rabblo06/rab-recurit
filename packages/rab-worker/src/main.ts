@@ -51,6 +51,8 @@ import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
+import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
+import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { assertCombinedShiftScanTick, isScanJobEnabled, resolveIntervalMs, resolveShiftScanMode, SCAN_JOBS } from './core/scheduler/scan-jobs';
@@ -167,6 +169,8 @@ function refuseStartup(error: unknown): never {
               ? '[worker-isolation] refused: '
             : error instanceof Error && (error.name === 'SchemaWaitConfigError' || error.name === 'SchemaCompatibilityError')
               ? '[worker-schema-wait] refused: '
+            : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
+              ? '[worker-pdf] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
@@ -381,6 +385,20 @@ async function bootstrap(): Promise<void> {
       ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
       : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
   );
+  // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
+  // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
+  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start, and so
+  // does a pool whose threads' heap caps would not fit PDF_NATIVE_MEMORY_BUDGET_MB (review M-3, fail closed).
+  try {
+    logger.log(describePdfRendering());
+    if (pdfRendererMode() === 'native') {
+      const plan = pdfNativeMemoryPlan();
+      logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
+      prewarmRenderPool();
+    }
+  } catch (error) {
+    refuseStartup(error);
+  }
   // event mode: the four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS (the backstop); every other interval as before.
   const intervalOf = (def: (typeof SCAN_JOBS)[number]) => dispatchIntervalOf(def, resolveIntervalMs(def, environmentService), dispatchConfig);
   // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.

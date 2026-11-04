@@ -1,0 +1,97 @@
+name: ci-pdf-equality
+
+# PDF renderer migration harness (Chromium → native; docs/PDF_RENDERER_P0_PLAN_2026-11-03.md §5.2 / §8). Database-free:
+# its own Jest config (packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts). Runs the self-test (two renders
+# must be equal; deliberately altered PDFs must not be), the hostile-text suite, the native equality suite, the native
+# security suite and the opt-in load test, and uploads every PDF, report, raster and the load results as one artefact.
+#
+# PDF_EQUALITY_MODE (packages/rab-worker/src/__tests__/pdf-equality/mode.ts) is chosen HERE, never guessed by the harness:
+#   compare      while Chromium is in the tree: Chromium vs native, Chromium self-test, both halves of hostile text;
+#   native-only  after P5 removes Chromium (the native-only branch sets it): native against the input and the document's
+#                own text plus the owner-reviewed golden rasters; no Chromium is installed or called.
+# A mode that does not match the tree fails the job (compare without Chromium; native-only with Chromium still there).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-pdf-equality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    uses: ./.github/workflows/changed-files.yaml
+
+  pdf-equality:
+    needs: changed
+    if: needs.changed.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NODE_ENV: test
+      PDF_EQUALITY_OUT: ${{ github.workspace }}/pdf-equality-out
+      PDF_EQUALITY_MODE: compare
+      # All three documents are converted on this tree (final timesheet, pre-shift roster, Approved Shift Statement):
+      # an unavailable native renderer or a NOT CONVERTED document is a failure, never a skip.
+      PDF_EQUALITY_REQUIRE_NATIVE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the libraries the Worker imports
+        run: npx nx run-many -t build -p rab-shared,rab-emails,rab-server
+      - name: The harness mode matches the tree
+        run: |
+          set -euo pipefail
+          util=packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts
+          if grep -q 'export async function renderHtmlToPdf' "$util"; then chromium=present; else chromium=absent; fi
+          echo "PDF_EQUALITY_MODE=${PDF_EQUALITY_MODE}; Chromium renderer in the tree: ${chromium}"
+          case "${PDF_EQUALITY_MODE}:${chromium}" in
+            compare:present|native-only:absent) ;;
+            *) echo "::error::PDF_EQUALITY_MODE=${PDF_EQUALITY_MODE} does not match this tree (Chromium ${chromium})"; exit 1 ;;
+          esac
+      # compare mode only: the reference renderer is Playwright's Chromium (queues/rab-reports/render-pdf.util.ts);
+      # ci-worker installs it the same way.
+      - name: Install Playwright Chromium for the PDF renderer
+        if: ${{ env.PDF_EQUALITY_MODE == 'compare' }}
+        run: npx playwright install --with-deps chromium
+      - name: Self-test, hostile text, native equality and security
+        run: npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts --runInBand --json "--outputFile=${RUNNER_TEMP}/jest-pdf-equality.json"
+      - name: Load test (50 renders, pool 2; direct and through a real BullMQ consumer)
+        if: ${{ !cancelled() }}
+        env:
+          RAB_PDF_LOAD: '1'
+        run: |
+          set -euo pipefail
+          npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts --runInBand pdf-render.load
+          mv "${PDF_EQUALITY_OUT}/load" "${PDF_EQUALITY_OUT}/load-direct"
+          docker run -d --name pdf-load-redis -p 127.0.0.1:6390:6379 redis:7-alpine redis-server --save "" --appendonly no
+          for i in $(seq 1 30); do docker exec pdf-load-redis redis-cli ping | grep -q PONG && break; sleep 1; done
+          PDF_LOAD_VIA=bullmq PDF_LOAD_REDIS_URL=redis://127.0.0.1:6390 PDF_LOAD_ROWS=40 \
+            npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts --runInBand pdf-render.load
+          mv "${PDF_EQUALITY_OUT}/load" "${PDF_EQUALITY_OUT}/load-bullmq"
+      - name: Failing tests (from Jest's JSON report)
+        if: ${{ failure() }}
+        run: |
+          f="${RUNNER_TEMP}/jest-pdf-equality.json"
+          [ -f "$f" ] || { echo "no Jest JSON report at $f"; exit 0; }
+          node -e 'const r=require(process.argv[1]); console.log(`suites failed ${r.numFailedTestSuites}, tests failed ${r.numFailedTests}`); for (const s of r.testResults) for (const t of s.assertionResults) if (t.status === "failed") console.log(`FAILED: ${t.fullName}\n${String(t.failureMessages.join("\n")).slice(0, 3000)}`)' "$f"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: pdf-equality
+          path: pdf-equality-out
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: ./.github/actions/save-cache
+        if: always()
+      - name: Stop Redis
+        if: always()
+        run: docker rm -f pdf-load-redis > /dev/null 2>&1 || true

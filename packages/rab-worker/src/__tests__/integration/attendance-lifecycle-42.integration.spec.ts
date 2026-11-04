@@ -81,6 +81,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   let emailWorker: Worker;
   let workerRedis: Redis;
   let renderSpy: jest.SpyInstance;
+  let renderDocSpy: jest.SpyInstance;
   const renderedHtml: string[] = [];
 
   // ---- actors ---------------------------------------------------------
@@ -232,6 +233,13 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
       renderedHtml.push(html);
       return original(html);
     });
+    // The final timesheet goes through renderReportPdf (data-in seam, PDF_RENDERER switch): record the HTML its data
+    // renders to through the shared view-model, whichever renderer is selected, then render for real.
+    const originalRenderReportPdf = renderPdf.renderReportPdf;
+    renderDocSpy = jest.spyOn(renderPdf, 'renderReportPdf').mockImplementation(async (doc, env) => {
+      renderedHtml.push(renderPdf.htmlFor(doc));
+      return originalRenderReportPdf(doc, env);
+    });
 
     // ---- setup (not numbered): identities ---------------------------------
     org = await factory.createOrganisation('life');
@@ -255,6 +263,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
 
   afterAll(async () => {
     renderSpy?.mockRestore();
+    renderDocSpy?.mockRestore();
     await emailWorker?.close();
     await workerRedis?.quit();
     await app.close();

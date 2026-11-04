@@ -5003,6 +5003,39 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
 
+## PDF renderer P1 — native final timesheet behind `PDF_RENDERER` (branch worker/pdf-without-chromium, not merged)
+
+Owner decisions D1–D11, T1–T3 (`docs/PDF_RENDERER_P0_PLAN_2026-11-03.md` §14). The final timesheet (original and
+finalised) can be rendered in pure JavaScript (`@react-pdf/renderer` 4.9.0, pinned exactly) instead of
+Chromium. `PDF_RENDERER=chromium` (default) keeps today's path byte-for-byte. No endpoint, table, queue, storage key, file
+kind, policy or email changes: only the bytes' producer differs, and they still go through `FileService` (validated,
+SHA-256'd) to the same `stored_file` row and `ReportFilePolicy`.
+
+- **Markup / script injection through staff, venue or note text.** Threat: a name like `<script>…`, `<img src=http…>`
+  or `javascript:` is interpreted. Control: the native layout passes every value as a string child of `Text`; react-pdf
+  has no HTML/CSS/script engine, so it prints literally. The Chromium path keeps `escapeHtml` and its hardening. Both
+  render from ONE rab-server view-model (`buildFinalTimesheetViewModel`), so neither renderer re-implements a label,
+  date, minute or total. Tests: `native-pdf.spec.ts` (hostile text in every field: tags, entities, URLs, RTL/bidi
+  overrides, zero-width, emoji, a 315-character token; the PDF has no `/URI`, `/JavaScript`, `/OpenAction`, `/Launch`,
+  `/Annots`, `/AA`), `final-timesheet-renderer-parity.integration.spec.ts`.
+- **Renderer fetching remote or local resources (SSRF / file read).** Control: images enter only as in-memory bytes
+  (`ImageBytes`; `imageBytesFromDataUri` refuses URLs, paths, SVG and HTML); fonts are vendored files checked against
+  `fonts.sha256` (fail closed); no emoji source is registered (react-pdf would fetch emoji images). Tests: socket,
+  http(s) and DNS spies stay untouched while rendering, with a positive control proving the detector sees a real fetch.
+- **Silent fallback hiding native defects (T3).** A native failure fails the job and is retried like any render
+  failure; there is no retry in Chromium. Rollback is the explicit `PDF_RENDERER=chromium`.
+- **Misconfiguration.** `PDF_RENDERER` accepts exactly `chromium` / `native` (empty = default); anything else refuses to
+  boot (env validation) and is re-checked at render time. The worker-bundle launcher forwards it to the jobs child only.
+- **Dependency surface.** No native addon, no install script, no Chromium, no network (VERIFIED dependency walk; the
+  image gate's worker-delta refuses install scripts and `binding.gyp`). The H3 forbid list keeps every SWC compiler
+  package banned by name and allows only the runtime helper `@swc/helpers` (D5/T2).
+- **Residual (T1, accepted):** P1 renders in the jobs process (in-process until the worker_threads pool with an empty
+  env lands, plan §4.2). A parser bug in fontkit / png-js / jay-peg would run with the jobs child's privileges; the
+  inputs are server-produced bytes (vendored font, our logo JPEG, our QR PNG) and text strings. Same residual class as
+  today's same-uid, no-sandbox Chromium, with a far smaller parser surface.
+- **Visible delta (owner to confirm):** a token longer than 24 characters with no space may now break across lines, and
+  react-pdf draws a "-" at each such break (Chromium instead shrinks the whole page). No character is lost.
+
 ## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
 
 Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,
@@ -5033,6 +5066,74 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## PDF renderer P2 — native pre-shift attendance sheet (roster) behind `PDF_RENDERER` (branch worker/pdf-native-roster, not merged)
+
+Extends the P1 entry above to the pre-shift roster (`SHIFT_ROSTER_PDF`), which carries the signed Shift QR. Same job
+(`shift-report-scheduler.job.ts`), same two short tenant transactions around the render, same file kind, filename
+(`shift-attendance-sheet.pdf`), `ReportFilePolicy`, recipient selection and email attachment. The job now passes the
+template's data to `renderReportPdf({ kind: 'pre-shift', data })` instead of HTML.
+
+- **QR integrity / substitution.** Threat: the native path prints a different or re-encoded QR (a token for another
+  shift, a placeholder, or a payload rebuilt from data). Control: the token is still `AttendanceQrService.sign(shift)`
+  and the image still `QrImageService.generatePng(token)`, both in the job, unchanged; the view-model carries those PNG
+  bytes as-is and the native layout only decodes the base64 back into a Buffer for `QrCode` (`pngBytes` refuses
+  anything that is not a PNG). Nothing in the renderer encodes a payload. Tests: `pre-shift-report.native.spec.ts`
+  decodes the QR image out of the native PDF (jsQR) and gets the signed token byte-for-byte; the renderer comparison
+  decoded it from both PDFs (embedded image and 200/300 dpi raster) for every fixture and verified it with
+  `QrTokenService.verify` (an altered token is refused).
+- **Markup injection through venue, contact, notes, staff names or references.** Control: as P1 — text only; the
+  Chromium template still escapes every value. Test: the native element tree's text equals the Chromium HTML's text
+  for hostile fixtures (tags, entities, `javascript:`, quotes, accented names); only the logo and the QR are embedded;
+  no `/URI`, `/Launch`, `/JavaScript`, `/OpenAction`, `/AA`.
+- **Chromium path unchanged.** `renderPreShiftReportHtml` now renders from the shared view-model
+  (`buildPreShiftReportViewModel`); golden HTML captured from origin/main before the refactor is byte-identical
+  (`pre-shift-report-view-model.spec.ts`), and Chromium PDFs of the old and new HTML are identical after normalisation.
+- **No new exposure.** The QR is a shift-scoped bearer code exactly as before (no account token); who receives the PDF
+  is decided by the unchanged `selectReportRecipients` in the row-locked writing transaction.
+
+## PDF renderer P2 — Approved Shift Statement on the data-in seam, native layout; pence entry hardened (branch worker/pdf-native-payroll, not merged)
+
+The Approved Shift Statement job (`shift-statement.job.ts`) now hands the renderer **data**, not HTML: `renderReportPdf({ kind: 'approved-shift-statement', data })` (owner decision D1). Both renderers print ONE view-model, `buildApprovedShiftStatementViewModel` (rab-server, `payroll/templates/approved-shift-statement.view-model.ts`): money via `@rab/shared` `formatPence` from the record's frozen pence, payable minutes as stored, dates in the organisation timezone. The Chromium template prints from it and is byte-identical to before (sha256 golden, `approved-shift-statement.view-model.spec.ts`). The native layout (`native/approved-shift-statement.native.ts`) only lays it out. Same job, queue, file kind, filename, `stored_file` row, download policy and notification; no new endpoint, table or migration.
+
+- *Mis-stated pay (rounded bigint).* `pay_rate_pence` / `amount_pence` are `bigint` and arrive as strings. They were converted with a bare `Number()`, so a value outside ±2^53 printed a neighbouring, plausible amount (failing-first: `-9007199254740993` reached the renderer as `-9007199254740992`). They now enter through `assertSafePence` (money.ts, the same rule as the server's `bigintAsNumber` transformer). Such a statement fails closed (`generation_failed`, retried, audited) and is never rendered. Tested: `shift-statement.render.spec.ts`.
+- *Markup / script / fetch through user text (native).* Staff, venue, role, employer, workspace, approver and period strings are `<Text>` children only: no HTML, CSS or script engine. Images are the logo bytes only, and nothing is fetched (socket / DNS spies). The output contains no `/JavaScript`, `/OpenAction`, `/URI`, `/Launch` or `/AcroForm`. Tested: `approved-shift-statement.native.spec.ts`. The Chromium path keeps its Phase 0 hardening unchanged.
+- *Money drift between renderers.* There is none by construction: one view-model, and the native layout does no arithmetic. Measured on 10 synthetic fixtures (0p, 1p, £1,234,567,890.12, long and hostile text, multi-page): every printed amount is identical in both PDFs and parses back (bigint, no float) to the source pence.
+- *Visible delta (owner-approved D9).* The native statement has 12 mm margins; Chromium's has 0 mm.
+- *Residual (open).* `formatPence` divides by 100 as a float. It prints `£90,071,992,547,409.90` for `9007199254740991` (exact value `.91`). This affects both renderers identically and only values far beyond any real amount; it is a `money.ts` change, reported and not made here. Native: a single token longer than its cell overflows instead of wrapping (kit hyphenation callback). That is a readability defect, not a disclosure; a fix is proposed to the kit owner.
+
+## PDF renderer migration: native security coverage that replaces the Chromium-only tests (branch worker/pdf-test-harness, #51, not merged)
+
+When P5 removes Chromium (`integration/pdf-native`, #61), five Chromium-only specs go with it: `render-pdf.util.spec`,
+`render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and `final-timesheet-renderer-parity`.
+Their security and correctness assertions are kept, against the native renderer, so no control loses its test.
+
+- **Where:** `packages/rab-worker/src/__tests__/pdf-equality/pdf-native-security.spec.ts`. It renders real fixture documents,
+  hostile ones included, through the production seam: `renderReportPdf` → `renderNativePdf` → the render pool. The pool
+  call goes to a pool of the same class, with the production document registry and thread entry, and test-only
+  `allowProbe`. Correctness (every value, footer and "Page n of N", repeated headers, QR, logo, D4) stays in
+  `pdf-equality.native.spec.ts`, which in native-only mode compares against the document's own text, never Chromium.
+- **Asserted:**
+  - the render thread's environment is empty while the jobs process holds credential-shaped values;
+  - hostile URLs in the body, notes, footer and meta-refresh text cause zero connections to a local listener; the thread
+    guard refuses nothing and loads no network builtin;
+  - `file://` URLs and absolute paths print literally: no file content, and no image except the logo and the QR (a
+    positive control proves a 1×1 image would be seen);
+  - script, handler and `javascript:` text is printed, not run, and creates no PDF action, URI, form or attachment;
+  - the same data gives byte-identical output, dated `generatedAt` (D7);
+  - a real document past the deadline is terminated (`PdfRenderTimeoutError`), and one past a lowered heap cap kills only
+    its own thread; neither returns a PDF, and the pool recovers;
+  - on the native-only tree, no browser package is in the seam's import closure.
+- **Not equivalent, by design:** Chromium's sandbox flags (S-7) and launch environment allowlist (H6) have no native
+  counterpart, because there is no browser process. They are replaced by the thread isolation above. "No file access" is
+  proven by construction and content (images are bytes only; fonts are registered from memory), not by a syscall trace in
+  this suite. The image gate's strace (F5) covers that.
+- **Harness strictness (owner decisions, FINAL brief 2026-11-04):**
+  - D6 hyphen wraps are accepted only when the rejoined text is identical and every other check passes;
+  - notes must keep their line breaks;
+  - values printed as F1 □ markers are counted exactly, as whole fields;
+  - text drawn over other text fails the native renderer.
+  Regressions for each are in `pdf-harness.unit.spec.ts`.
 
 ## Phase D-Q4a — combined shift scan behind `WORKER_SHIFT_SCAN_MODE` (branch phase-d/dq4a-combined-scan, not merged)
 
@@ -5399,3 +5500,24 @@ Each control below is tested. None of them prevents injection.
 - PG18 has no semantic golden yet, so production on PG18 refuses at boot until one is generated and reviewed.
 - The workspace-schema copies of the payroll tables have no grant-parity guards yet (open; needs a workspace module).
 - The lint cannot follow SQL built across functions, or ORM `.where(string)` fragments.
+## PDF renderer review fixes M-3 and L-6 (branch integration/pdf-native-pre-removal, #62, not merged)
+
+No migration, role, grant, RLS or posture change; no money or worked-minutes value changes.
+
+- **M-3 — render memory bounded by the Worker container.** Asset: the Worker's availability for every tenant (all
+  consumers and scans share one container). Actor: any user whose text reaches a PDF (long notes, large rosters), or a
+  layout bug. Before: each native render thread could grow to a 512 MB old generation, independent of
+  `PDF_NATIVE_CONCURRENCY` and of the 1536m `mem_limit`, so concurrent oversized renders could get the whole container
+  OOM-killed instead of failing one thread with `error_PDF_NATIVE_OUT_OF_MEMORY`. Now: 384 MB per thread, and
+  `PDF_NATIVE_CONCURRENCY × 384 MB ≤ PDF_NATIVE_MEMORY_BUDGET_MB` (default 768 = half the default `mem_limit`; strict
+  integer 384–16384) is enforced, fail closed, by boot validation in both processes (every renderer mode), again at Worker
+  boot in native mode, and again by the process-wide pool before it creates any thread
+  (`engine/worker-shared/pdf-native-memory.contract.ts`, one rule). The launcher forwards the variable to the jobs child
+  only. Residual: the budget is a configured number, not read from the cgroup; an operator who raises it without raising
+  `mem_limit` defeats it (documented beside `mem_limit` in both compose files). Tests: `env.validation.pdf-renderer.spec`,
+  `render-pool.spec` (plan, process pool refuses), `pool-env-consistency.spec`, a 500-row roster at the default cap,
+  launcher test 34. The image-level OOM run (H6 M09 with two oversized renders) is still to be re-measured.
+- **L-6 — line separators in notes.** A lone CR, U+2028 and U+2029 are normalised to LF with CRLF in the render
+  thread's glyph guard (and in `collapsePreLine`), so notes keep their author's line breaks instead of printing □. Every
+  other control or format character keeps F1's □ and its count-only log. Tests: `render-pool.spec`, `native-pdf.spec`,
+  harness `pdf-harness.unit.spec` (transform and the `line-breaks` check).

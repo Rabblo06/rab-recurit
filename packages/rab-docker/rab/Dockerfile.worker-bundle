@@ -126,14 +126,17 @@ RUN set -eux; \
 # ownership gate above already covers everything under /app, and is repeated for these by the setuid/ownership check below.
 COPY --from=worker-modules /worker-delta/node_modules/ /app/node_modules/
 # H3 runtime-dependency gate for the Worker: every bare import in the code the two children run resolves, the browser
-# driver is present, and no build or test tool is anywhere in node_modules.
+# driver is present, and no build or test tool is anywhere in node_modules. PDF renderer P1 (owner decision D5 / T2): the
+# SWC *compiler* packages stay banned by name; the pure-JS runtime helper @swc/helpers (Apache-2.0, needed by fontkit,
+# a dependency of the native renderer @react-pdf/renderer) is allowed. The native renderer and its vendored fonts must be
+# present (the fonts are copied next to the compiled native module by the rab-worker build).
 RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
     set -eu; \
     node /tmp/runtime-deps.cjs check /app/node_modules \
       --scan /app/packages/rab-worker/dist /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
-      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint '@swc/*' \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint         '@swc/core' '@swc/core-linux-x64-musl' '@swc/core-linux-x64-gnu' '@swc/core-linux-arm64-musl' '@swc/core-linux-arm64-gnu'         '@swc/cli' '@swc/wasm' '@swc/jest' '@swc-node/*' \
         webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on; \
-    test -f /app/node_modules/playwright-core/package.json; \
+    test -f /app/node_modules/playwright-core/package.json;     test -f /app/node_modules/@react-pdf/renderer/package.json;     for f in LiberationSans-Regular.ttf LiberationSans-Bold.ttf OFL.txt fonts.sha256; do test -f "/app/packages/rab-worker/dist/queues/rab-reports/native/assets/fonts/$f"; done; \
     bad="$(find /app/node_modules ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
     if [ -n "$bad" ]; then echo "FATAL: Worker dependencies not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi
 
