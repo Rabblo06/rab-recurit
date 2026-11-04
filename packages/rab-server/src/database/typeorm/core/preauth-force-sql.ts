@@ -128,11 +128,18 @@ export interface PlatformAdminPolicyRow {
   chk: string;
 }
 
-const GUARD_PREFIX = `CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false`;
+const GUARD_PREFIX = `CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE `;
+
+/**
+ * pg_get_expr lays a CASE out over several lines even in non-pretty mode (PostgreSQL 16:
+ * "\nCASE\n    WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false\n    ELSE (…)\nEND"). Compare with every run of
+ * whitespace collapsed to one space and the ends trimmed; nothing else is rewritten.
+ */
+export const collapseWhitespace = (expr: string): string => expr.replace(/\s+/g, ' ').trim();
 
 /**
  * 'start': the three policies exist TO PUBLIC, call is_active_platform_admin and carry no guard yet.
- * 'end': every expression they have (USING and / or WITH CHECK) starts with the guard.
+ * 'end': every expression they have (USING and / or WITH CHECK) starts with the guard, whitespace collapsed.
  */
 export function platformAdminPolicyProblems(rows: PlatformAdminPolicyRow[], phase: 'start' | 'end'): string[] {
   const p: string[] = [];
@@ -147,8 +154,8 @@ export function platformAdminPolicyProblems(rows: PlatformAdminPolicyRow[], phas
     if (phase === 'start') {
       if (!exprs.some((e) => e.includes('is_active_platform_admin'))) p.push(`${name} does not call is_active_platform_admin (unexpected starting state)`);
       if (exprs.some((e) => e.includes('rab_secure_owner'))) p.push(`${name} already carries the rab_secure_owner guard`);
-    } else if (!exprs.length || !exprs.every((e) => e.startsWith(GUARD_PREFIX))) {
-      p.push(`${name} is not guarded for rab_secure_owner: using=${r.qual || '-'} check=${r.chk || '-'}`);
+    } else if (!exprs.length || !exprs.every((e) => collapseWhitespace(e).startsWith(GUARD_PREFIX))) {
+      p.push(`${name} is not guarded for rab_secure_owner: using=${collapseWhitespace(r.qual) || '-'} check=${collapseWhitespace(r.chk) || '-'}`);
     }
   }
   return p;

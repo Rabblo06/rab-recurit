@@ -31,6 +31,17 @@ describe('preauth-force-sql: platform_admin recursion guard checks', () => {
     expect(platformAdminPolicyProblems([{ ...original[0]!, to_public: false }, ...original.slice(1)], 'start').join('\n')).toMatch(/no longer applies TO PUBLIC/);
   });
 
+  it('accepts the guard as PostgreSQL 16 actually prints it (CASE laid out over several lines)', () => {
+    const pg16 = (inner: string) => `\nCASE\n    WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false\n    ELSE ${inner}\nEND`;
+    const printed = original.map((r) => ({ ...r, qual: r.qual ? pg16(r.qual) : '', chk: r.chk ? pg16(r.chk) : '' }));
+    expect(platformAdminPolicyProblems(printed, 'end')).toEqual([]);
+    // Only whitespace is normalised: a different guard is still refused.
+    const wrongRole = printed.map((r) => ({ ...r, qual: r.qual.replace('rab_secure_owner', 'crewflow'), chk: r.chk.replace('rab_secure_owner', 'crewflow') }));
+    expect(platformAdminPolicyProblems(wrongRole, 'end')).toHaveLength(3);
+    const trueBranch = printed.map((r) => ({ ...r, qual: r.qual.replace('THEN false', 'THEN true'), chk: r.chk.replace('THEN false', 'THEN true') }));
+    expect(platformAdminPolicyProblems(trueBranch, 'end')).toHaveLength(3);
+  });
+
   it('refuses an end state where any expression (USING or WITH CHECK) is unguarded', () => {
     const halfUpdate = guarded.map((r) => (r.name === 'platform_admin_update' ? { ...r, chk: original[1]!.chk } : r));
     expect(platformAdminPolicyProblems(halfUpdate, 'end')).toEqual([expect.stringMatching(/^platform_admin_update is not guarded/)]);

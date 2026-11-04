@@ -89,7 +89,10 @@ describeIfDb('M-T1 platform_admin under FORCE: no policy recursion, admin flows 
       'platform_admin_write:a',
     ]);
     for (const p of policies.filter((x) => x.name !== 'platform_admin_secure_owner_definer')) {
-      for (const e of [p.qual, p.chk].filter(Boolean)) expect(e).toMatch(/^CASE WHEN \(CURRENT_USER = 'rab_secure_owner'::name\) THEN false ELSE /);
+      // pg_get_expr lays CASE out over several lines: compare with whitespace collapsed (as the migration's end check does).
+      for (const e of [p.qual, p.chk].filter(Boolean)) {
+        expect(e.replace(/\s+/g, ' ').trim()).toMatch(/^CASE WHEN \(CURRENT_USER = 'rab_secure_owner'::name\) THEN false ELSE /);
+      }
     }
     const [forced] = (await admin.query(`SELECT relforcerowsecurity AS f FROM pg_class WHERE oid = 'core.platform_admin'::regclass`)) as Array<{ f: boolean }>;
     expect(forced!.f).toBe(true);
