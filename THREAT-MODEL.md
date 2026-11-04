@@ -5034,7 +5034,7 @@ grant, RLS or posture change.
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
 
-## Phase D-Q5b — cumulative email/push attempt cap, no resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
+## Phase D-Q5b — cumulative email/push attempt cap, no BullMQ resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
 
 Owner approval 2026-11-04 (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §10: OC-1 confirmed, OD-5 Option B, OD-6 no change;
 audit §13 #3 and #4). No migration, column, role, grant, RLS policy or posture change; no payroll / attendance /
@@ -5064,7 +5064,7 @@ is delivered twice). **Actor:** the Worker, without a request; a replica racing 
 - **Exhausted ambiguous lease.** Because the count now includes the in-flight attempt, a PROCESSING row whose lease
   expired at the cap means the last allowed attempt died. With the provider-call marker set (the message may have gone
   out — including the OD-5 case on the 5th attempt) both dispatchers now mark it `DELIVERY_UNCERTAIN` (email: for every
-  driver) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
+  driver, with its own "attempt cap reached" reason text) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
   it is never re-presented past the cap. Without the marker nothing was sent: `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, unchanged.
   For push this keeps the pre-change outcome (with the job-relative count that row sat one below the cap → uncertain).
 - **Unchanged (OD-6):** SMTP definite-rejection handling (the marker is still not cleared on RETRY), push uncertain
@@ -5077,7 +5077,10 @@ is delivered twice). **Actor:** the Worker, without a request; a replica racing 
   row; a query with no tenant context returns zero rows. **Replicas:** two consumers (old and republished generation) race
   one row → one claim, one provider call, count +1 once; five dispatchers race one exhausted ambiguous row → one
   `DELIVERY_UNCERTAIN` transition and one audit row.
-- **Residual:** an SMTP email whose SENT write failed after a confirmed send now needs manual review instead of going out
-  twice (owner-accepted trade-off of Option B). A job whose own BullMQ attempts run out before the cumulative cap (attempts
+- **Residual:** this is not exactly-once delivery. An SMTP email whose SENT write failed after a confirmed send now needs
+  manual review instead of going out twice (owner-accepted trade-off of Option B). A Resend row is re-presented once under
+  the same idempotency key; Resend deduplicates only inside its key window (24 h), so a recovery delayed past that window
+  (the Worker down for a day, the row untouched) could still send a second email. The log line for this case carries the
+  error name/code only, never the error object (a `QueryFailedError` holds the bound fencing token). A job whose own BullMQ attempts run out before the cumulative cap (attempts
   spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
   republishes it until the cumulative cap.

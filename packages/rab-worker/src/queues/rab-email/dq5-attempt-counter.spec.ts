@@ -206,6 +206,10 @@ describe('D-Q5b §13 #3 (OD-5 Option B): a failed SENT write after a confirmed s
 
     // The log now says what actually happens (it used to claim PROCESSING while the row was written RETRY).
     const logged = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    // Strings only (CodeRabbit on #52): a raw QueryFailedError would print its bound parameters, the fencing token included.
+    expect(errorSpy.mock.calls.flat().every((arg) => typeof arg === 'string')).toBe(true);
+    expect(logged).toMatch(/Last error: Error\./);
+    expect(logged).not.toContain(String(h.row.processingToken));
     errorSpy.mockRestore();
     expect(logged).toMatch(/PROVIDER SUCCEEDED/);
     expect(logged).toMatch(/left PROCESSING/);

@@ -181,7 +181,10 @@ function auditActionsForJobType(jobType: string): { sent: AuditActionType; faile
  *
  * D-Q5b: the claim counts the attempt (`infrastructure_attempt_count + 1`, cumulative across generations — see
  * `claimed-attempt.ts`) and refuses a row already at `max_infrastructure_attempts`; a failed SENT write after a confirmed
- * send never leads to a second provider call (see `SentWriteFailedError`).
+ * send is never retried by BullMQ and never written RETRY (see `SentWriteFailedError`). This is not exactly-once: lease
+ * recovery re-presents a Resend row once under the same idempotency key, which the provider deduplicates only inside its
+ * key window (24 h; the lease is 10 min) — a recovery delayed past that window could send a second email. SMTP rows go to
+ * DELIVERY_UNCERTAIN (manual review) instead.
  */
 export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
   return async function processEmailSendJob(job: Job<EmailQueueJobData>): Promise<void> {
@@ -436,10 +439,20 @@ async function persistSent(
   console.error(
     `email send: PROVIDER SUCCEEDED (provider=${result.provider}${result.providerMessageId ? `, messageId=${result.providerMessageId}` : ''}) but persisting SENT for outbox row ${row.id} failed after ${attempts.length} local attempts. ` +
       `The row is left PROCESSING with its provider-call marker and this job is not retried (no second send). After the ${LEASE_MINUTES_FOR_LOG}-minute lease, ` +
-      'recovery resolves it per driver: SMTP → FAILED DELIVERY_UNCERTAIN (manual review); Resend → one re-presentation under the same idempotency key (the provider returns the original message); at the attempt cap → DELIVERY_UNCERTAIN.',
-    lastError,
+      'recovery resolves it per driver: SMTP → FAILED DELIVERY_UNCERTAIN (manual review); Resend → one re-presentation under the same idempotency key (the provider returns the original message); at the attempt cap → DELIVERY_UNCERTAIN. ' +
+      // Name and code only: a QueryFailedError carries the bound parameters (the fencing token) as an own property.
+      `Last error: ${describeErrorForLog(lastError)}.`,
   );
   throw new SentWriteFailedError(row.id, lastError);
+}
+
+/** `Name/code` of an error for a log line — never its message or own properties (bound query parameters, tokens). */
+function describeErrorForLog(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === 'string' || typeof code === 'number' ? `${error.name}/${code}` : error.name;
+  }
+  return typeof error;
 }
 
 /** `code` is written to `email_outbox.last_error_code`; `auditReasonCode` (S-6) refines it in the audit row only. */

@@ -282,14 +282,32 @@ export async function dispatchEmailScope(
           (row) =>
             !row.provider_call_started_at || ambiguousDeliverySafeToRetry,
         );
-        const uncertain = [
-          ...exhaustedUncertain,
-          ...hadPriorAttempt.filter(
-            (row) =>
-              row.provider_call_started_at && !ambiguousDeliverySafeToRetry,
-          ),
-        ];
-        uncertainCount = uncertain.length;
+        const uncertain = hadPriorAttempt.filter(
+          (row) =>
+            row.provider_call_started_at && !ambiguousDeliverySafeToRetry,
+        );
+        uncertainCount = uncertain.length + exhaustedUncertain.length;
+
+        if (exhaustedUncertain.length > 0) {
+          // Its own reason text: the driver may well be able to dedupe (Resend) — the row stops because the cumulative
+          // cap was reached, not because a retry would be unsafe. Same code and audit action as every DELIVERY_UNCERTAIN.
+          await manager.query(
+            `UPDATE core.email_outbox
+              SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN',
+                  last_error_message_sanitized = 'The last allowed attempt reached the provider before its outcome was lost; the email may have been sent. Attempt cap reached; requires manual review.'
+            WHERE id = ANY($1::uuid[])`,
+            [exhaustedUncertain.map((row) => row.id)],
+          );
+          for (const row of exhaustedUncertain) {
+            await writeAuditRow(
+              manager,
+              row.organisation_id,
+              row.id,
+              'email.delivery_uncertain',
+              { errorCode: 'DELIVERY_UNCERTAIN' },
+            );
+          }
+        }
 
         if (uncertain.length > 0) {
           await manager.query(

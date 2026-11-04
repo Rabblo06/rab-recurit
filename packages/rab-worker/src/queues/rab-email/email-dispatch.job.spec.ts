@@ -112,8 +112,11 @@ describe('email dispatch — D-Q5b exhausted lease classification', () => {
       expect(publish).not.toHaveBeenCalled();
       expect(republish).not.toHaveBeenCalled();
       expect(result).toMatchObject({ deliveryUncertain: 1, failedExhausted: 0, published: 0 });
-      const uncertain = statements.find((s) => s.sql.includes("last_error_code = 'DELIVERY_UNCERTAIN'"));
-      expect(uncertain?.params).toEqual([[R1]]);
+      const uncertain = statements.filter((s) => s.sql.includes("last_error_code = 'DELIVERY_UNCERTAIN'"));
+      expect(uncertain).toHaveLength(1);
+      expect(uncertain[0]!.params).toEqual([[R1]]);
+      expect(uncertain[0]!.sql).toContain('Attempt cap reached'); // its own reason, not "the driver cannot safely retry"
+      expect(uncertain[0]!.sql).not.toContain('cannot safely confirm or retry');
       expect(statements.some((s) => s.sql.includes('STUCK_LEASE_ATTEMPTS_EXHAUSTED'))).toBe(false);
       expect(statements.some((s) => s.sql.includes('INSERT INTO core.audit_log') && String(s.params[1]) === 'email.delivery_uncertain')).toBe(true);
     });
