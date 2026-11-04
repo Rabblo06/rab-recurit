@@ -35,6 +35,7 @@ import {
   shimQueryRunner,
 } from './row-copy-shim';
 import { assessUpgradeFailure } from './upgrade-failure-policy';
+import { assertDeploymentIdentity, MARKER_PRESENT_SQL, MARKER_READ_SQL } from '../../../../deployment-identity/deployment-identity';
 
 const spec = (name: string) => BOOTSTRAP_ROLES.find((r) => r.name === name)!;
 const role = (name: string, over: Partial<RoleFacts> = {}): RoleFacts => ({
@@ -454,5 +455,33 @@ describe('Agent 5 finding 2: deploy-prepare derives target authority for the own
     await expect(deriveOwnerLoginGuardEnv({ DB_TARGET: 'production', PG_DATABASE_URL: 'postgres://crewflow_owner:x@127.0.0.1:1/db' })).resolves.toBeNull();
     await expect(deriveOwnerLoginGuardEnv({ PG_DATABASE_URL: 'postgres://crewflow_migrator:x@127.0.0.1:1/db' })).resolves.toBeNull();
     await expect(deriveOwnerLoginGuardEnv({})).resolves.toBeNull();
+  });
+});
+
+describe('derived-authority path (deploy-prepare / child, production): the bound marker must match CREWFLOW_DEPLOYMENT_ID', () => {
+  const ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
+  const OTHER = '0b9a8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d';
+  const HOST = 'db.example.internal';
+  const markerQuery = (boundId: string) =>
+    (async (sql: string) => {
+      if (sql === MARKER_PRESENT_SQL) return [{ present: true, database: 'crewflow', disposable_test: false }];
+      if (sql === MARKER_READ_SQL) {
+        return [{ environment: 'production', deployment_id: boundId, bound_database: 'crewflow', bound_hosts: [HOST], bound_system_identifier: null, current_system_identifier: null }];
+      }
+      return [];
+    }) as never;
+  const derived = (env: Record<string, string>) => synthesiseGuardEnv(env, 'bound', 'crewflow', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').guardEnv;
+  const check = (env: Record<string, string | undefined>, boundId: string) =>
+    assertDeploymentIdentity(markerQuery(boundId), { processLabel: 'migrations command', production: env.DB_TARGET === 'production', env, connectionHost: HOST, command: true });
+
+  it('the derived environment is production, keeps the declared id, and never adds the bootstrap flag on a bound database', () => {
+    const env = derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID });
+    expect(env).toMatchObject({ DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true', CREWFLOW_DEPLOYMENT_ID: ID });
+    expect(env.CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP).toBeUndefined();
+  });
+  it('passes when the marker is bound to the declared id; refuses another id and a missing id (the guard the runner runs before and after the lock)', async () => {
+    await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID }), ID)).resolves.toMatchObject({ summary: `production/${ID}` });
+    await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID }), OTHER)).rejects.toThrow(/bound to production\/0b9a8c7d/);
+    await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }), ID)).rejects.toThrow(/CREWFLOW_DEPLOYMENT_ID/);
   });
 });
