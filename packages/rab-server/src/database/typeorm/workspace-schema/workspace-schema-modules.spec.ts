@@ -14,6 +14,8 @@ import { composeServerPathTemplateV1PayrollRestrict } from './v1/server-path-tem
 import { composeServerPathTemplateV1VenueTeamAdmin, expectedWorkspacePolicyCount } from './v1/server-path-template-venue-team-admin';
 import { venueTeamOrgAdminSql } from './v1/venue-team-org-admin';
 import { composeServerPathTemplateV1StatementPointer } from './v1/server-path-template-statement-pointer';
+import { composeServerPathTemplateV1GrantParity } from './v1/server-path-template-grant-parity';
+import { workspaceGrantParitySql } from './v1/grant-parity-guards';
 import { statementDispatchPointerSql } from './v1/statement-dispatch-pointer';
 import { PENDING_FINGERPRINT_VERSIONS } from './v1/expected-fingerprints';
 import { errorClassOf, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
@@ -61,6 +63,8 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   ['v1.018-venue-team-org-admin', 'de2c5d96ac0d0637e8a2e876bf22c522c2847fa97c9c07b93dca43abdde24498'],
   // Phase D: frozen at the text the owner approved (SQL gate + v19 fingerprint sign-off, 2026-11-01).
   ['v1.019-statement-dispatch-pointer', '34da4890d853152677fc3e9fea3b8dee0b5ac59f4a6c79d68b845b36ab218c2a'],
+  // Owner-login PAY-1 (2026-11-04): grant-parity guards on the workspace payroll copies (WorkspaceGrantParityGuards1786721430000).
+  ['v1.020-grant-parity-guards', '9b932320ec5048a224060f939d1e91e93a8d58e398cf208168d3eb48fdb24a9f'],
 ];
 
 describe('workspace schema modules (B3 single source of truth)', () => {
@@ -101,16 +105,34 @@ describe('workspace schema modules (B3 single source of truth)', () => {
     expect(expectedWorkspacePolicyCount(19)).toBe(41);
   });
 
-  it('every module through LATEST carries a generated sha256 fingerprint and none is pending (module 19: Phase D rehearsal); the floor stays routable at 18', () => {
-    expect(PENDING_FINGERPRINT_VERSIONS).toEqual([]);
+  it('every module through LATEST carries a generated sha256 fingerprint unless it is listed as PENDING (module 20 until Agent 1 appends it); the floor is 19', () => {
+    // Module 20 (owner-login PAY-1) is pending until its fingerprint is generated on PG16 and PG18 (append mode). While it is
+    // pending, WorkspaceGrantParityGuards1786721430000 refuses to run and the M2 harness refuses a release (E-10).
+    expect(PENDING_FINGERPRINT_VERSIONS.every((v) => v === 20)).toBe(true);
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3');
-    for (let v = 14; v <= LATEST_WORKSPACE_MODULE_VERSION; v++) expect(EXPECTED_WORKSPACE_FINGERPRINTS[v]).toMatch(/^[0-9a-f]{64}$/);
-    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(18);
+    for (let v = 14; v <= LATEST_WORKSPACE_MODULE_VERSION; v++) {
+      if (!PENDING_FINGERPRINT_VERSIONS.includes(v)) expect(EXPECTED_WORKSPACE_FINGERPRINTS[v]).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
   });
 
-  it('REMINDER (E-10): the floor is LATEST - 1 only while LATEST is 19; the next module must reset it (to LATEST or a reviewed value)', () => {
-    if (LATEST_WORKSPACE_MODULE_VERSION === 19) expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(18);
-    else expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).not.toBe(18);
+  it('modules 1..20 compose exactly the frozen 1786721430000 server-path template (owner-login grant parity)', () => {
+    expect(composeModulesForSentinel(20)).toBe(composeServerPathTemplateV1GrantParity());
+  });
+
+  it('module 20 only (re)creates the grant-parity BEFORE triggers on the payroll copies, calling the reviewed core guard', () => {
+    const sql = workspaceGrantParitySql(SERVER_PATH_SENTINEL_SCHEMA);
+    const created = sql.match(/CREATE TRIGGER (\w+) BEFORE (UPDATE|DELETE|TRUNCATE) ON "[^"]+"\.(\w+)/g) ?? [];
+    expect(created).toHaveLength(16);
+    expect(sql.match(/EXECUTE FUNCTION ([\w.]+)\(/g)).toEqual(Array(16).fill('EXECUTE FUNCTION core.owner_login_grant_parity_guard('));
+    expect(sql).not.toMatch(/(ALTER TABLE|POLICY|GRANT|REVOKE|CREATE TABLE|CREATE INDEX|DROP TABLE|CREATE FUNCTION|SECURITY|BYPASSRLS)/);
+    expect(sql).toContain(`payroll_run_line_grant_parity_update BEFORE UPDATE ON "${SERVER_PATH_SENTINEL_SCHEMA}".payroll_run_line FOR EACH ROW EXECUTE FUNCTION core.owner_login_grant_parity_guard()`);
+    expect(() => workspaceGrantParitySql('core')).toThrow('Invalid workspace schema');
+  });
+
+  it('REMINDER (E-10): the floor is LATEST - 1 only while LATEST is 20 (reviewed 2026-11-04: module 20 adds triggers only); the next module must reset it', () => {
+    if (LATEST_WORKSPACE_MODULE_VERSION === 20) expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
+    else expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).not.toBe(19);
   });
 
   it('modules 1..18 compose exactly the frozen 1786721090000 server-path template (org-admin Assigned Staff)', () => {
@@ -346,6 +368,7 @@ describe('Phase B: provision_workspace body → module version map (schema-versi
       'ProvisionWorkspaceGuards1786721210000',
       'StatementDispatchPointer1786721320000',
       'VenueTeamOrgAdmin1786721090000',
+      'WorkspaceGrantParityGuards1786721430000',
     ]);
     for (const name of creators) expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${name}`]).toBeDefined();
     // The NEWEST creator is the body every fully migrated database carries: it must build exactly LATEST.
