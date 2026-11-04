@@ -14,6 +14,9 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json', isolatedModules: true }],
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
+  // @react-pdf/renderer is ESM-only; Jest 29's module runtime cannot load it. The mapping hands specs the same package
+  // loaded through Node's own require(esm), exactly as the compiled Worker loads it (see the helper's header).
+  moduleNameMapper: { '^@react-pdf/renderer$': '<rootDir>/src/__tests__/helpers/react-pdf-node-loader.ts' },
   // Fails the run before any fixture is written unless the TEST_* pair is valid and agrees (live identity proof included).
   globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],

@@ -1,128 +1,72 @@
 import { escapeHtml } from '../../../engine/utils/escape-html';
-import { DOCUMENT_CSS, DocumentShiftInfo, documentHeaderHtml, fmtDateTime, fmtMinutes, fmtTime, shiftDetailsHtml, staffCellHtml } from './adolphus-document';
+import { DOCUMENT_CSS, documentHeaderHtml, shiftDetailsHtmlFromView, staffCellHtmlFromView } from './adolphus-document';
+import { buildFinalTimesheetViewModel, FinalTimesheetData, FinalTimesheetViewModel, TextLine } from './final-timesheet.view-model';
+
+export type { FinalTimesheetData, FinalTimesheetStaffRow, StaffReviewScores } from './final-timesheet.view-model';
 
 /**
- * FINAL TIMESHEET (Adolphus Group template, owner design 2026-10-17). Two variants from the same data, as before: the
- * immutable unsigned ORIGINAL (`unsigned: true`, before manager review) and the finalised document.
+ * FINAL TIMESHEET (Adolphus Group template, owner design 2026-10-17), Chromium HTML. Two variants from the same data, as
+ * before: the immutable unsigned ORIGINAL (`unsigned: true`, before manager review) and the finalised document.
  *
- * Only recorded facts are printed: actual clock in/out, recorded break, worked minutes as stored by the attendance
- * service (`@rab/shared` duration rules — never recomputed here), correction / missing / no-show markers, real per-shift
- * staff reviews when one was saved (otherwise "Not reviewed"), and the typed sign-off with the server-recorded account
- * and time. Staff signatures are not collected by the product, so there is no signature column; the typed sign-off is
- * labelled as such and never presented as a handwritten or cryptographic signature.
+ * Every printed string comes from the shared view-model (`final-timesheet.view-model.ts`), which the native PDF renderer
+ * also consumes; this file only lays those strings out as HTML, escaping every one of them.
  */
-export interface StaffReviewScores {
-  grooming: number;
-  attitude: number;
-  skills: number;
-  attendance: number;
-  timeKeeping: number;
-}
-
-export interface FinalTimesheetStaffRow {
-  name: string;
-  staffRef?: string | null;
-  roleName: string;
-  scheduledStart: string;
-  scheduledEnd: string;
-  clockInAt: string | null;
-  clockOutAt: string | null;
-  breakMinutes: number | null;
-  workedMinutes: number | null;
-  /** Attendance status, or `absent` when no attendance row exists. */
-  status: string;
-  assignmentStatus?: string;
-  corrected: boolean;
-  review?: StaffReviewScores | null;
-}
-
-export interface FinalTimesheetData extends DocumentShiftInfo {
-  staff: FinalTimesheetStaffRow[];
-  unsigned?: boolean;
-  finalisedByName: string;
-  finalisedAt: string;
-  /** Typed full-name sign-off (1786718300000); absent on reports finalised before it existed. */
-  signedOffName?: string | null;
-  breakConfirmed?: boolean | null;
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  approved: 'Approved',
-  clocked_out: 'Clocked out',
-  under_review: 'Under review',
-  missing_clock_out: 'Missing clock-out',
-  clocked_in: 'Clocked in',
-  on_break: 'On break',
-  late: 'Late',
-  absent: 'No attendance',
-  disputed: 'Disputed',
-};
-
-function statusLabel(s: FinalTimesheetStaffRow): string {
-  if (s.assignmentStatus === 'no_show') return 'No-show';
-  return STATUS_LABEL[s.status] ?? s.status.replace(/_/g, ' ');
-}
-
-function reviewHtml(r: StaffReviewScores | null | undefined): string {
-  if (!r) return '<span class="muted">Not reviewed</span>';
-  return `Grooming ${r.grooming}/5 · Attitude ${r.attitude}/5 · Skills ${r.skills}/5<br>Attendance ${r.attendance}/5 · Time keeping ${r.timeKeeping}/5`;
-}
-
 export function renderFinalTimesheetHtml(data: FinalTimesheetData): string {
-  const tz = data.timezone;
-  const totalWorked = data.staff.reduce((sum, s) => sum + (s.workedMinutes ?? 0), 0);
-  const corrected = data.staff.filter((s) => s.corrected).length;
-  const missing = data.staff.filter((s) => s.assignmentStatus !== 'no_show' && !s.clockOutAt).length;
-  const rows = data.staff
+  return finalTimesheetHtmlFromViewModel(buildFinalTimesheetViewModel(data));
+}
+
+const COLUMN_WIDTH: Record<number, string> = { 0: '26%', 6: '28%' };
+
+function p(line: TextLine): string {
+  return line.muted ? `<p class="muted">${escapeHtml(line.text)}</p>` : `<p>${escapeHtml(line.text)}</p>`;
+}
+
+export function finalTimesheetHtmlFromViewModel(vm: FinalTimesheetViewModel): string {
+  const rows = vm.rows
     .map((s) => {
-      const isMissing = !s.clockOutAt && s.assignmentStatus !== 'no_show';
-      const out = s.clockOutAt ? fmtTime(s.clockOutAt, tz) : isMissing ? 'Missing' : '—';
+      const review = s.review.lines.map(escapeHtml).join('<br>');
       return `
       <tr>
-        <td>${staffCellHtml(s.name, [s.staffRef, s.roleName].filter(Boolean).join(' · '))}</td>
-        <td>${escapeHtml(fmtTime(s.clockInAt, tz))}</td>
-        <td${isMissing ? ' class="flag"' : ''}>${escapeHtml(out)}</td>
-        <td>${s.assignmentStatus !== 'no_show' && s.breakMinutes != null ? `${s.breakMinutes} min` : '—'}</td>
-        <td>${escapeHtml(fmtMinutes(s.workedMinutes))}</td>
-        <td>${escapeHtml(statusLabel(s))}${s.corrected ? '<br><small class="muted">(corrected)</small>' : ''}</td>
-        <td>${data.unsigned ? '<span class="muted">After manager review</span>' : reviewHtml(s.review)}</td>
+        <td>${staffCellHtmlFromView(s.initials, s.name, s.sub)}</td>
+        <td>${escapeHtml(s.clockIn)}</td>
+        <td${s.clockOutFlagged ? ' class="flag"' : ''}>${escapeHtml(s.clockOut)}</td>
+        <td>${escapeHtml(s.breakText)}</td>
+        <td>${escapeHtml(s.hours)}</td>
+        <td>${escapeHtml(s.status)}${s.correctedNote ? `<br><small class="muted">${escapeHtml(s.correctedNote)}</small>` : ''}</td>
+        <td>${s.review.muted ? `<span class="muted">${review}</span>` : review}</td>
       </tr>`;
     })
     .join('');
-
-  const summary = data.unsigned
-    ? `Original timesheet · unsigned · before manager review · ${data.staff.length} staff`
-    : `Manager reviewed: ${escapeHtml(fmtDateTime(data.finalisedAt, tz))} · ${data.staff.length} staff`;
+  const head = vm.columns.map((c, i) => `<th${COLUMN_WIDTH[i] ? ` style="width:${COLUMN_WIDTH[i]}"` : ''}>${escapeHtml(c)}</th>`).join('');
+  const [first, ...rest] = vm.signOff;
+  const signOff = vm.unsigned ? vm.signOff.map(p).join('') : `${first ? p(first) : ''}\n      ${rest.map(p).join('')}`;
 
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Final timesheet — ${escapeHtml(data.venueName)}</title>
+<title>${escapeHtml(vm.documentTitle)}</title>
 <style>${DOCUMENT_CSS}</style>
 </head>
 <body>
-  ${documentHeaderHtml(data.unsigned ? 'Original timesheet' : 'Final timesheet')}
-  <section class="top"><div>${shiftDetailsHtml(data)}</div></section>
-  <div class="summary">${summary}</div>
+  ${documentHeaderHtml(vm.title)}
+  <section class="top"><div>${shiftDetailsHtmlFromView(vm.details)}</div></section>
+  <div class="summary">${escapeHtml(vm.summary)}</div>
   <table>
-    <thead><tr><th style="width:26%">Staff member</th><th>Start</th><th>Finish</th><th>Break</th><th>Hours</th><th>Status</th><th style="width:28%">Staff review / 1–5</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="7" class="muted">No staff on this shift.</td></tr>'}</tbody>
+    <thead><tr>${head}</tr></thead>
+    <tbody>${rows || `<tr><td colspan="${vm.columns.length}" class="muted">${escapeHtml(vm.emptyText)}</td></tr>`}</tbody>
   </table>
-  <div class="note-line">5 Excellent · 4 Good · 3 Satisfactory · 2 Needs improvement · 1 Poor</div>
+  <div class="note-line">${escapeHtml(vm.scaleLegend)}</div>
   <section class="bottom">
     <div>
-      <h3>NOTES</h3>
-      <p>${data.notes && data.notes.trim() ? escapeHtml(data.notes) : '<span class="muted">No shift notes.</span>'}</p>
-      <p class="muted">Corrected entries: ${corrected} · Missing clock-outs: ${missing}</p>
+      <h3>${escapeHtml(vm.notesHeading)}</h3>
+      <p>${vm.notes.muted ? `<span class="muted">${escapeHtml(vm.notes.text)}</span>` : escapeHtml(vm.notes.text)}</p>
+      ${p({ text: vm.counts, muted: true })}
     </div>
     <div>
-      <h3>MANAGER SIGN-OFF</h3>
-      ${data.unsigned
-        ? '<p class="muted">Original Timesheet - Unsigned. Not yet reviewed by a manager.</p>'
-        : `<p>Reviewed by ${escapeHtml(data.finalisedByName)} - Finalised at ${escapeHtml(fmtDateTime(data.finalisedAt, tz))}</p>
-      ${data.signedOffName ? `<p>Signed off as "${escapeHtml(data.signedOffName)}"${data.breakConfirmed ? ' - break details confirmed accurate' : ''}</p><p class="muted">Typed sign-off recorded with the account above; not a handwritten signature.</p>` : ''}`}
-      <p class="muted">Total worked hours: ${escapeHtml(fmtMinutes(totalWorked))}</p>
+      <h3>${escapeHtml(vm.signOffHeading)}</h3>
+      ${signOff}
+      ${p({ text: vm.totalWorked, muted: true })}
     </div>
   </section>
 </body>
