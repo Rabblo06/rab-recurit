@@ -55,6 +55,8 @@ export function collapseWhitespace(text: string): string {
  * line, while each run of spaces, TABs and FFs becomes one space and the spaces around a line break are dropped.
  * CRLF and a lone CR are line breaks, as in HTML (the render thread's glyph guard has already turned CRLF into LF and a
  * lone CR into the visible marker; handled here as well so the kit never depends on that order). NBSP is kept.
+ * FF and every other control character never reach a layout in production: the guard prints them as the visible
+ * marker □ (F1; Chromium prints FF as a visible control glyph too), so neither function ever turns one into a space.
  * Only for free text whose line breaks the author typed (the shift notes paragraph of the final timesheet and of the
  * pre-shift roster); never for table cells, names or generated lines.
  */

@@ -92,6 +92,8 @@ const UNPRINTABLE: ReadonlyArray<readonly [string, string, number]> = [
   ['zero-width joiner (U+200D)', 'Join\u200dHere', 1],
   ['byte-order mark (U+FEFF)', 'BOM\ufeffHere', 1],
   ['carriage return alone', 'Line\rBreak', 1],
+  // Form feed: Chromium prints it as a visible control glyph (MEASURED, Agent C); native prints the F1 marker, never a space.
+  ['form feed (U+000C)', 'Form\fFeed', 1],
   ['NUL', 'Nul\u0000Here', 1],
   ['emoji (no font draws it)', 'Party \u{1F389}', 1],
   ['Arabic (no glyphs in the font stack)', '\u0645\u0631\u062d\u0628\u0627', 5],
