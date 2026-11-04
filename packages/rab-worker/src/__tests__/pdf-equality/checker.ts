@@ -192,14 +192,25 @@ export function forcedBreakOccurrences(lines: readonly string[], needle: string)
   return count;
 }
 
-/** Consecutive WHOLE lines of one block that together are exactly `value` (a field wrapped inside its cell), 2+ lines. */
-function wrappedFieldOccurrences(lines: readonly string[], value: string): number {
+/**
+ * Consecutive WHOLE lines of one block (2+ lines) that together are exactly `value`: a field wrapped inside its cell.
+ * Each line break stands for the space it replaced (word wrap) or — with `forcedBreaks`, react-pdf's break of an over-long
+ * token — for nothing, its drawn "-" dropped. Nothing else is optional.
+ */
+function wrappedFieldOccurrences(lines: readonly string[], value: string, forcedBreaks: boolean): number {
+  const forms = (i: number, j: number): boolean => {
+    const go = (k: number, acc: string): boolean => {
+      if (!value.startsWith(acc) && !(forcedBreaks && k < j && acc.endsWith('-') && value.startsWith(acc.slice(0, -1)))) return false;
+      if (k === j) return acc === value;
+      const next = lines[k + 1]!;
+      return go(k + 1, `${acc} ${next}`) || (forcedBreaks && acc.endsWith('-') && go(k + 1, acc.slice(0, -1) + next));
+    };
+    return go(i, lines[i]!);
+  };
   let count = 0;
   for (let i = 0; i < lines.length; i++) {
-    let joined = lines[i]!;
-    for (let j = i + 1; j < lines.length && joined.length < value.length; j++) {
-      joined = `${joined} ${lines[j]!}`;
-      if (joined === value) {
+    for (let j = i + 1; j < lines.length; j++) {
+      if (forms(i, j)) {
         count++;
         i = j;
         break;
@@ -215,11 +226,11 @@ function wrappedFieldOccurrences(lines: readonly string[], value: string): numbe
  * whole lines of one cell. Never a raw substring count over the page, which would find "□ □□" inside "□□ □□□" or across
  * two neighbouring cells (see `markerOccurrences`).
  */
-export function markerFieldCount(x: PdfExtraction, value: string): number {
+export function markerFieldCount(x: PdfExtraction, value: string, options: { forcedBreakHyphens?: boolean } = {}): number {
   const n = normaliseText(value);
   return x.pages.reduce((sum, p) => {
     const inFields = p.lineSegments.reduce((s, segments) => s + segments.reduce((t, g) => t + markerOccurrences(g, n), 0), 0);
-    const wrapped = p.blockLines.reduce((s, lines) => s + wrappedFieldOccurrences(lines, n), 0);
+    const wrapped = p.blockLines.reduce((s, lines) => s + wrappedFieldOccurrences(lines, n, options.forcedBreakHyphens === true), 0);
     return sum + inFields + wrapped;
   }, 0);
 }
@@ -251,7 +262,7 @@ export function markerFieldCount(x: PdfExtraction, value: string): number {
 export function countValue(x: PdfExtraction, value: string, options: { forcedBreakHyphens?: boolean } = {}): number {
   const lines = valueLines(value);
   if (lines.size > 1 || [...lines.values()].some((m) => m > 1)) return Math.min(...[...lines].map(([l, m]) => Math.floor(countValue(x, l, options) / m)));
-  if (value.includes(F1_MARKER)) return markerFieldCount(x, value);
+  if (value.includes(F1_MARKER)) return markerFieldCount(x, value, options);
   const needle = compact(value);
   const count = BIDI_CONTROLS.test(value)
     ? (hay: string) => Math.max(occurrences(hay, needle), permutedOccurrences(hay, needle))

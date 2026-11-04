@@ -360,6 +360,12 @@ describe('□-name assertion: F1 marker values are counted exactly, as whole fie
   it('a field wrapped over whole lines of one cell counts once; part of a cell does not', () => {
     const x = blockExtraction([['□', '□□'], ['□□ □', '□□ x']]);
     expect(markerFieldCount(x, '□ □□')).toBe(1);
+    expect(markerFieldCount(blockExtraction([['□□', '□']]), '□ □□')).toBe(0); // "□□ □" is not "□ □□"
+    // A forced break inside a long value (react-pdf's "-") may stand for nothing — native side only, whole lines only.
+    const forced = blockExtraction([['C1[□□] Lone[□]sur-', 'rogate']]);
+    expect(markerFieldCount(forced, 'C1[□□] Lone[□]surrogate', { forcedBreakHyphens: true })).toBe(1);
+    expect(markerFieldCount(forced, 'C1[□□] Lone[□]surrogate')).toBe(0);
+    expect(markerFieldCount(forced, 'C1[□□] Lone[□]surogate', { forcedBreakHyphens: true })).toBe(0);
   });
 
   it('unsupported-glyph detection is not weakened: the raw characters (no marker), a lost space or a missing marker fail', () => {
