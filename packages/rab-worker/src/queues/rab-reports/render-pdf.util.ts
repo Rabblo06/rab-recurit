@@ -1,6 +1,14 @@
 import { Logger } from '@nestjs/common';
 import { chromium, errors, Route } from 'playwright';
 
+import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
+import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
+import type { FinalTimesheetData } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
+import { PreShiftReportData, renderPreShiftReportHtml } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
+import { ApprovedShiftStatementData, renderApprovedShiftStatementHtml } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
+
+import type { NativeReportDocument } from './native/render-native';
+
 /**
  * Per-call `chromium.launch()`/`close()` — not a persistent browser instance
  * held across the whole worker process. Acceptable overhead at these jobs'
@@ -183,4 +191,86 @@ export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = 
     if (blockedRequests > 0) logger.warn(`PDF render blocked ${blockedRequests} external resource request(s)`);
     await browser.close();
   }
+}
+
+// ─── Renderer switch and data-in seam (PDF renderer P1, owner decisions D1 / T3) ─────────────────────────────────────
+
+/**
+ * `PDF_RENDERER` selects how a document whose kind is in `NATIVE_KINDS` is rendered:
+ *   - `chromium` (DEFAULT; also when unset or empty): the HTML template through `renderHtmlToPdf` above, as before;
+ *   - `native`: @react-pdf/renderer in the Worker process (`native/`), no browser at all.
+ * Anything else (a different case, surrounding spaces, another word) is refused: the Worker's env validation
+ * (`EnvironmentVariables.PDF_RENDERER`) stops the process at boot, and this parser throws at render time for any caller
+ * that did not boot through it. Never a silent choice of either renderer.
+ */
+export const PDF_RENDERER_MODES = Object.freeze(['chromium', 'native'] as const);
+export type PdfRendererMode = (typeof PDF_RENDERER_MODES)[number];
+
+export function pdfRendererMode(env: NodeJS.ProcessEnv = process.env): PdfRendererMode {
+  const raw = env.PDF_RENDERER;
+  if (raw === undefined || raw === '') return 'chromium';
+  if ((PDF_RENDERER_MODES as readonly string[]).includes(raw)) return raw as PdfRendererMode;
+  throw new Error('PDF_RENDERER must be exactly "chromium" (the default) or "native"');
+}
+
+/**
+ * The data-in seam (D1): every report PDF is requested as its kind plus the SAME data the job used to give the HTML
+ * template. Each renderer derives its output from that data through the document's rab-server view-model builder, so
+ * no business rule (minutes, money, dates, labels, QR, references) is ever re-implemented in a renderer.
+ */
+export type ReportDocument =
+  | { kind: 'pre-shift'; data: PreShiftReportData }
+  | { kind: 'final-timesheet'; data: FinalTimesheetData }
+  | { kind: 'approved-shift-statement'; data: ApprovedShiftStatementData };
+
+/** Kinds with a native layout. P1: the final timesheet only; every other kind renders through Chromium in either mode. */
+export const NATIVE_KINDS: ReadonlySet<ReportDocument['kind']> = new Set<ReportDocument['kind']>(['final-timesheet']);
+
+/** Chromium: today's template output for the document, unchanged. */
+export function htmlFor(doc: ReportDocument): string {
+  switch (doc.kind) {
+    case 'pre-shift':
+      return renderPreShiftReportHtml(doc.data);
+    case 'final-timesheet':
+      return renderFinalTimesheetHtml(doc.data);
+    case 'approved-shift-statement':
+      return renderApprovedShiftStatementHtml(doc.data);
+  }
+}
+
+/** Chromium: today's page.pdf() options for the document (roster and timesheet landscape with the footer; statement {}). */
+export function optionsFor(doc: ReportDocument): RenderPdfOptions {
+  switch (doc.kind) {
+    case 'pre-shift':
+    case 'final-timesheet':
+      return { footerTemplate: documentFooterTemplate(doc.data), landscape: true };
+    case 'approved-shift-statement':
+      return {};
+  }
+}
+
+function isNative(doc: ReportDocument): doc is ReportDocument & NativeReportDocument {
+  return NATIVE_KINDS.has(doc.kind);
+}
+
+/** One log line naming the renderer per kind (Worker boot); also re-validates PDF_RENDERER (throws on a bad value). */
+export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): string {
+  const mode = pdfRendererMode(env);
+  const native = mode === 'native' ? [...NATIVE_KINDS] : [];
+  return `PDF_RENDERER=${mode}: native ${native.length ? native.join(', ') : 'none'}; Chromium for every other report kind`;
+}
+
+/**
+ * Renders a report PDF with the renderer PDF_RENDERER selects for its kind. Same contract either way: resolves to the
+ * PDF bytes; a render that does not finish within `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError`
+ * (step `native` here; Chromium bounds `setContent` and `pdf` itself). A native failure is thrown as is: there is NO
+ * runtime fallback to Chromium (T3) — the job's normal failure / retry path handles it, and rollback is the explicit
+ * `PDF_RENDERER=chromium`.
+ */
+export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
+  if (pdfRendererMode(env) === 'chromium' || !isNative(doc)) return renderHtmlToPdf(htmlFor(doc), optionsFor(doc));
+  // Loaded on first native use only: a Chromium-mode Worker never loads react-pdf.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
+  return withRenderStepTimeout('native', PDF_RENDER_STEP_TIMEOUT_MS, renderNativePdf(doc));
 }
