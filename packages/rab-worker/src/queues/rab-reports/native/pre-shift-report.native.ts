@@ -8,6 +8,8 @@ import {
   COLOR,
   DocumentHeader,
   h,
+  mayExceedUnsplitHeight,
+  PAGE_MARGIN,
   PageFooter,
   pageStyle,
   px,
@@ -76,6 +78,23 @@ function rowCells(r: PreShiftReportRowView): ReactNode[] {
   return [h(StaffCell, { initials: r.initials, name: r.name, sub: r.sub }), h(Text, null, r.start), h(Text, null, r.finish), h(Text, null, r.breakText)];
 }
 
+/** A4 landscape: each bottom column's width and the page's content height, in pt (layout constants of this file). */
+const BOTTOM_COLUMN_PT = (841.89 - PAGE_MARGIN.left - PAGE_MARGIN.right - px(40)) / 2;
+const PAGE_CONTENT_PT = 595.28 - PAGE_MARGIN.top - PAGE_MARGIN.bottom;
+
+/**
+ * May the bottom section (NOTES / BEFORE-SHIFT DOCUMENT) be taller than what can stay unsplit on one page? Then it must
+ * be allowed to break (BottomSection `mayBreak`, the I-9 rule): react-pdf draws an unsplittable node taller than the
+ * page in one piece and loses everything past the page — MEASURED on the long-text roster (a 10 KB note): 2 pages
+ * instead of 4, 29 of 56 note paragraphs and the page-2 footer missing, text drawn below the page.
+ */
+function bottomMayBreak(vm: PreShiftReportViewModel): boolean {
+  const notes = [vm.notes.text, vm.qrScopeNote];
+  const beforeShift = [...vm.beforeShiftLines];
+  const max = PAGE_CONTENT_PT - px(22) - px(30); // minus the section's top margin and heading
+  return [notes, beforeShift].some((col) => mayExceedUnsplitHeight(col, BOTTOM_COLUMN_PT, px(11), max));
+}
+
 export function PreShiftReportDocument(props: { vm: PreShiftReportViewModel; creationDate: Date }): ReactElement {
   const vm = props.vm;
   if (vm.columns.length !== COLUMN_WIDTHS.length) throw new Error('native PDF renderer: pre-shift report column count changed');
@@ -98,6 +117,7 @@ export function PreShiftReportDocument(props: { vm: PreShiftReportViewModel; cre
         h(Text, { key: 'note-line', style: { color: COLOR.muted, fontSize: px(9.5), marginTop: px(8) } }, vm.noteLine),
         h(BottomSection, {
           key: 'bottom',
+          mayBreak: bottomMayBreak(vm),
           children: [
             h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [vm.notes, { text: vm.qrScopeNote, muted: true }] }),
             h(SignOffBlock, { heading: vm.beforeShiftHeading, paragraphs: vm.beforeShiftLines.map((text) => ({ text, muted: false })) }),
