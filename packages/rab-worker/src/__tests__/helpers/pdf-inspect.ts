@@ -426,7 +426,7 @@ function buildFont(doc: Doc, fontRef: PdfValue | undefined): FontInfo {
     };
   }
   // Simple font (Type1 / TrueType / MMType1 / Type3): one byte per code.
-  let base: TextDecoder = WIN_ANSI;
+  let base: InstanceType<typeof TextDecoder> = WIN_ANSI;
   const differences = new Map<number, string>();
   const enc = doc.resolve(font.get('Encoding'));
   const pick = (n: string | undefined) => (n === 'MacRomanEncoding' ? MAC_ROMAN : WIN_ANSI);
