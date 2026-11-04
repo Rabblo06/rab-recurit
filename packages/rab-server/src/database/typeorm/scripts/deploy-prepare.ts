@@ -24,9 +24,11 @@
  *      token, a token for another set, a malformed value or the retired constant `apply-pending-migrations` is refused
  *      (exit 1, nothing applied, the message prints the token to use);
  *   5. post-checks on the locked session (migrate/deploy-post-checks.ts): nothing pending, secure-owner invariants, RLS
- *      enabled on every core tenant table, the migration identity owns nothing;
+ *      enabled on every core tenant table, the migration identity owns nothing. They run on an apply run AND on a check run
+ *      with nothing pending (C-2): a check run after an apply run whose post-checks failed fails too (exit 1);
  *   6. optional cache flush of the allow-listed `entitycache` namespace only (migrate/entity-cache-flush.ts), AFTER the
- *      migrations so the old API instances still serving cannot refill it with pre-migration rows;
+ *      migrations and the post-checks (never after a failed post-check), so the old API instances still serving cannot
+ *      refill it with pre-migration rows;
  *   7. unlock, exit 0. Any failure exits 1 (3 for "pending but not approved").
  * Deliberately does NOT import dotenv: production authority comes only from the deployment environment.
  */
@@ -80,6 +82,7 @@ export interface DeployPrepareDeps {
   log?: (message: string) => void;
   runner?: typeof runLockedMigrations;
   cacheFlush?: typeof runCacheFlush;
+  postChecks?: typeof deployPostCheckProblems;
 }
 
 /** The whole command; resolves to the exit code (0, or 3 for "pending but not approved"); a refusal rejects (exit 1). */
@@ -88,6 +91,7 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
   const log = deps.log ?? defaultLog;
   const runner = deps.runner ?? runLockedMigrations;
   const cacheFlush = deps.cacheFlush ?? runCacheFlush;
+  const postChecks = deps.postChecks ?? deployPostCheckProblems;
   // F5: any non-empty value is an apply run; whether it approves anything is decided after the lock (assertMigrationApproval).
   const approval = readMigrationApproval(env);
   const approved = approval !== null;
@@ -122,10 +126,13 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
               log(`WARNING: ${MIGRATION_APPROVAL_VAR} is set but nothing is pending, so it approved nothing. Remove it: the next release refuses it.`);
             }
           },
-    afterMigrations: async ({ queryRunner, applied }) => {
-      if (!approved) return;
+    afterMigrations: async ({ queryRunner, applied, pendingBefore }) => {
+      // C-2: the post-checks run on every run that can succeed: an apply run, and a check run with nothing pending (so a
+      // check run after a failed apply run's post-checks cannot pass). A check run with something pending exits 3 below
+      // without judging a schema that is behind its code.
+      if (!approved && pendingBefore.length > 0) return;
       const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
-      const problems = await deployPostCheckProblems(query);
+      const problems = await postChecks(query);
       if (problems.length) throw new Error(`post-migration checks failed (${problems.length}): ${problems.slice(0, 20).join('; ')}`);
       log(`post-checks passed (${applied.length} applied, none pending)`);
       if (flush) await cacheFlush(flush, env);
@@ -146,7 +153,6 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
       return EXIT_PENDING_NOT_APPROVED;
     }
     log('schema is current; nothing to apply');
-    if (flush) await cacheFlush(flush, env);
     return 0;
   }
   log(`done: ${result.applied.length === 0 ? 'none pending' : `applied ${result.applied.join(', ')}`}`);
