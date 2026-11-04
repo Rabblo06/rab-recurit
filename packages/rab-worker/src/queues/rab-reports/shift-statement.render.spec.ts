@@ -1,6 +1,9 @@
+import { AuditAction } from '@rab/server/engine/core-modules/audit/audit.service';
 import { buildApprovedShiftStatementViewModel } from '@rab/server/modules/payroll/templates/approved-shift-statement.view-model';
 
 import { fakeTenant } from '../../__tests__/helpers/dispatch-fakes';
+import { PdfNativeRenderError } from './native/runtime/render-protocol';
+import { PdfRenderTimeoutError } from './native/runtime/render-timeout';
 import { ReportDocument } from './render-pdf.util';
 import { processShiftStatementJob } from './shift-statement.job';
 
@@ -80,5 +83,28 @@ describe('shift statement consumer: data-in renderer hand-off and pence entry', 
     const failure = h.failure();
     expect(failure).toBeDefined();
     expect(failure!.params).toEqual([REC, 3, 'generation_failed']);
+  });
+});
+
+/**
+ * A native renderer failure is visible and auditable, never a silent Chromium fallback (owner decision, FINAL): the
+ * statement is recorded as failed with the renderer's own code, and the SHIFT_STATEMENT_FAILED audit row carries it.
+ */
+describe('shift statement consumer: a native render failure keeps its code', () => {
+  it.each([
+    ['render error', () => new PdfNativeRenderError('native PDF render thread failed to start'), 'error_PDF_NATIVE_RENDER'],
+    ['deadline', () => new PdfRenderTimeoutError('native-render', 30_000), 'error_PDF_RENDER_TIMEOUT'],
+  ])('%s → statement_error and the audit metadata carry the renderer code', async (_label, make, code) => {
+    const h = harness(recordRow());
+    h.render.mockRejectedValueOnce(make());
+    const audit = { record: jest.fn(async () => undefined) };
+    expect(await processShiftStatementJob(JOB, { ...(h.deps as object), audit } as never)).toBe('failed');
+    expect(h.failure()!.params).toEqual([REC, 3, code]);
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      AuditAction.SHIFT_STATEMENT_FAILED,
+      expect.objectContaining({ entityId: REC, metadata: expect.objectContaining({ code }) }),
+    );
   });
 });
