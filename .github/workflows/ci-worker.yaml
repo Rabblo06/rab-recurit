@@ -74,7 +74,7 @@ jobs:
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"  # a helper refusal fails the step here, not later
           eval "$test_env"
           # The owner password is inside TEST_DATABASE_URL now; the raw value never reaches a test process or the live API.
-          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
           # worker-scan-adapters runs FIRST, alone, on the still-empty database: it drives every real scan cycle UNSCOPED
@@ -169,7 +169,7 @@ jobs:
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap --worker-login-is-owner)"
           eval "$test_env"
-          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
           # --skip-nx-cache: the opt-in lives in the environment, which is not part of nx's task hash; a replayed result
           # from a run without it would be a "skipped" run reported as green, the exact failure E5 exists to remove.
           status=0
@@ -183,7 +183,7 @@ jobs:
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap --worker-login-is-owner)"
           eval "$test_env"
-          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
           status=0
           npx nx run-many -t test -p rab-worker --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=(phase-d-|dq4b-timer-triggers\.integration|push-dispatch-global-publish-failure\.integration)' --json "--outputFile=${RUNNER_TEMP}/phase-d-worker.json" || status=$?
           node packages/rab-server/src/database/typeorm/scripts/phase-d-ci-suite-check.cjs worker "${RUNNER_TEMP}/phase-d-worker.json" || status=1
