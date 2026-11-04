@@ -124,27 +124,6 @@ export class WorkspaceSchemaMigrator {
     }
   }
 
-  /**
-   * Owner-login architecture (M-T2): inside an OWN transaction (never in 'savepoint' mode, which runs inside the migration
-   * runner's transaction and is the runner's business), act as `crewflow` for that transaction only — `SET LOCAL ROLE`, which
-   * ends with COMMIT/ROLLBACK — so the workspace-registry guard's allow-list (M-T2: crewflow, rab_secure_owner, superuser)
-   * admits the registry and ledger writes exactly as it admits the separate provisioner. Unchanged when the login already is
-   * crewflow or the bootstrap superuser (every existing caller), so behaviour there is byte-for-byte the same.
-   */
-  private async actAsCrewflowForThisTransaction(): Promise<void> {
-    const rows: Array<{ who: string; superuser: boolean; can_set: boolean }> = await this.db.query(
-      `SELECT current_user::text AS who,
-              coalesce((SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user), false) AS superuser,
-              EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow') AND pg_catalog.pg_has_role(current_user, 'crewflow', 'SET') AS can_set`,
-    );
-    const me = rows[0];
-    if (!me || me.who === 'crewflow' || me.superuser) return;
-    if (!me.can_set) {
-      throw new Error(`WorkspaceSchemaMigrator: "${me.who}" can act as crewflow but cannot SET it for the transaction (M-T2 needs current_user = crewflow).`);
-    }
-    await this.db.query('SET LOCAL ROLE crewflow');
-  }
-
   /** Every workspace (id + organisation), via the existing narrow discovery function (crewflow has EXECUTE). */
   async listWorkspaces(only?: readonly string[]): Promise<Array<{ workspaceId: string; organisationId: string }>> {
     const out: Array<{ workspaceId: string; organisationId: string }> = [];
@@ -188,7 +167,6 @@ export class WorkspaceSchemaMigrator {
     await this.db.query(savepoint ? 'SAVEPOINT workspace_schema_migrate' : 'BEGIN');
     try {
       if (!savepoint) await this.db.query(`SET LOCAL lock_timeout = '${lockTimeout}ms'`);
-      if (!savepoint) await this.actAsCrewflowForThisTransaction();
       await this.bind(organisationId, workspaceId);
       await this.db.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext($1))', [schemaName]);
       const reg: RegistryRow[] = await this.db.query(
@@ -399,7 +377,6 @@ export class WorkspaceSchemaMigrator {
     const module = WORKSPACE_SCHEMA_MODULES.find((m) => m.id === moduleId) ?? WORKSPACE_SCHEMA_MODULES[Math.min(fromVersion, through - 1)]!;
     await this.db.query(savepoint ? 'SAVEPOINT workspace_schema_failure' : 'BEGIN');
     try {
-      if (!savepoint) await this.actAsCrewflowForThisTransaction();
       await this.bind(organisationId, workspaceId);
       const started: Array<{ t: string }> = await this.db.query('SELECT pg_catalog.clock_timestamp()::text AS t');
       await this.insertLedger(workspaceId, organisationId, schemaName, module, fromVersion, through, status, started[0]!.t, errorClass, appVersion);
