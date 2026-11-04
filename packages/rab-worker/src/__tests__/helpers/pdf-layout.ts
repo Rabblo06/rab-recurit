@@ -770,7 +770,10 @@ export interface LayoutBlock {
   top: number;
   /** Baseline of the last line. */
   bottom: number;
+  /** `lines` joined with one space. */
   text: string;
+  /** The block's lines (one segment each), top to bottom. */
+  lines: string[];
 }
 export interface LayoutPage {
   width: number;
@@ -884,7 +887,7 @@ export function layoutBlocks(lines: LayoutLine[]): LayoutBlock[] {
     }
   }
   done.push(...open);
-  return done.sort((a, b) => b.top - a.top || a.x - b.x).map((b) => ({ x: b.x, top: b.top, bottom: b.lastY, text: b.parts.join(' ') }));
+  return done.sort((a, b) => b.top - a.top || a.x - b.x).map((b) => ({ x: b.x, top: b.top, bottom: b.lastY, text: b.parts.join(' '), lines: [...b.parts] }));
 }
 
 /**
