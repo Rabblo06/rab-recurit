@@ -219,7 +219,10 @@ function spawnChild(db: string, extra: Record<string, string> = {}): ChildHandle
 }
 
 const ledgerCount = async (db: string): Promise<number> => {
-  const [r] = await rows(db, `SELECT CASE WHEN to_regclass('core.migrations') IS NULL THEN 0 ELSE (SELECT count(*)::int FROM core.migrations) END AS n`);
+  // Two statements: a reference to core.migrations is resolved while the statement is planned, even in an untaken branch.
+  const [e] = await rows(db, `SELECT to_regclass('core.migrations') IS NOT NULL AS has`);
+  if (!e.has) return 0;
+  const [r] = await rows(db, `SELECT count(*)::int AS n FROM core.migrations`);
   return Number(r.n);
 };
 const lockHolders = async (db: string): Promise<number> => {

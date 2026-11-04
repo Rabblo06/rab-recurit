@@ -117,6 +117,15 @@ export function selectPhaseBMigration(m: Migration, ctx: { pending: ReadonlySet<
   return new Migration(m.id, m.timestamp, m.name, shimMigrationInstance(m.name, m.instance) as never, m.transaction);
 }
 
+/**
+ * ST-2's window is needed exactly while Phase 0b is NOT IN THE LEDGER (not "while it is loaded": a run that loads only part
+ * of the chain — the test seam CREWFLOW_MIGRATION_TEST_STOP_BEFORE — still applies pre-0b hand-overs; found by the PG16
+ * lifecycle run) and rab_secure_owner lacks CREATE on core. Pure; regression spec in owner-login.spec.ts.
+ */
+export function needsCoreCreateWindow(facts: { phase0bApplied: boolean; secureOwnerHasCreate: boolean }): boolean {
+  return !facts.phase0bApplied && !facts.secureOwnerHasCreate;
+}
+
 export interface OwnerLoginChainOptions {
   dataSource: DataSource;
   session: QueryRunner;
@@ -192,12 +201,14 @@ export async function runOwnerLoginChain(options: OwnerLoginChainOptions): Promi
   // ── The pre-0b hand-over window ───────────────────────────────────────────────────────────────────────────────────
   const remaining = await pendingMigrationNames(query, dataSource);
   if (remaining.length === 0) return { ...result, applied: [...result.phaseA] };
-  if (remaining.includes(PHASE_0B)) {
-    const [grant] = (await query(`SELECT has_schema_privilege('rab_secure_owner', 'core', 'CREATE') AS "has"`)) as Array<{ has: boolean }>;
-    if (!grant?.has) {
-      await query(`GRANT CREATE ON SCHEMA core TO rab_secure_owner`);
-      log('ST-2: GRANT CREATE ON SCHEMA core TO rab_secure_owner (for the pre-Phase-0b hand-overs; merges into the owner at Phase 0b)');
-    }
+  const [window] = (await query(
+    `SELECT EXISTS (SELECT 1 FROM core.migrations WHERE name = $1) AS "phase0b",
+            has_schema_privilege('rab_secure_owner', 'core', 'CREATE') AS "has"`,
+    [PHASE_0B],
+  )) as Array<{ phase0b: boolean; has: boolean }>;
+  if (needsCoreCreateWindow({ phase0bApplied: window!.phase0b, secureOwnerHasCreate: window!.has })) {
+    await query(`GRANT CREATE ON SCHEMA core TO rab_secure_owner`);
+    log('ST-2: GRANT CREATE ON SCHEMA core TO rab_secure_owner (for the pre-Phase-0b hand-overs; merges into the owner at Phase 0b)');
   }
 
   // ── Phase B, as crewflow_owner, random discarded bootstrap passwords ─────────────────────────────────────────────

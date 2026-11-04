@@ -22,7 +22,7 @@ import { blockingPostCheckProblems, codeMigrationNames, outcomeOf, readTestSeams
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
 import { Migration } from 'typeorm/migration/Migration';
 
-import { LAST_ROLE_MIGRATION_TIMESTAMP, ROLE_SPLIT_TIMESTAMP, selectPhaseBMigration } from './owner-login-chain';
+import { LAST_ROLE_MIGRATION_TIMESTAMP, needsCoreCreateWindow, ROLE_SPLIT_TIMESTAMP, selectPhaseBMigration } from './owner-login-chain';
 import { TENANT_EVIDENCE_SQL } from './fresh-install';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityFacts } from './owner-login-identity';
 import {
@@ -410,5 +410,13 @@ describe('regressions found by CI on PR #71', () => {
     expect(wrapped).not.toBe(m);
     expect(shimmed).toEqual([PRIVILEGED_COPY_MIGRATION]);
     expect(selectPhaseBMigration(new Migration(undefined, 1786681000000, 'PhaseA1786681000000', instance), { pending: new Set(), freshInstall: true, shimmed })).toBeNull();
+  });
+});
+
+describe('regression found by the PG16 lifecycle run: the pre-0b CREATE window follows the ledger, not the loaded set', () => {
+  it('open while Phase 0b is not applied and rab_secure_owner lacks CREATE; closed otherwise', () => {
+    expect(needsCoreCreateWindow({ phase0bApplied: false, secureOwnerHasCreate: false })).toBe(true);
+    expect(needsCoreCreateWindow({ phase0bApplied: false, secureOwnerHasCreate: true })).toBe(false);
+    expect(needsCoreCreateWindow({ phase0bApplied: true, secureOwnerHasCreate: false })).toBe(false);
   });
 });
