@@ -3,15 +3,18 @@ import { join } from 'path';
 import { performance } from 'perf_hooks';
 import { Worker } from 'worker_threads';
 
+import { Logger } from '@nestjs/common';
+
 import {
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
-} from '../../render-pdf.util';
+} from './render-timeout';
 
 import {
   assertPlainViewModel,
   deserializeRenderError,
   FromThreadMessage,
+  GlyphSubstitutionCount,
   NativeRenderRequest,
   PdfNativeInputError,
   PdfNativeRenderError,
@@ -21,11 +24,12 @@ import {
   RenderJobMessage,
   RenderThreadData,
   RenderTimings,
+  ThreadInitBreakdown,
   ThreadProbeReport,
 } from './render-protocol';
 
 /**
- * Native PDF render pool (PDF renderer migration P1, plan §4.2, trade-off T1 accepted by the owner).
+ * Native PDF render pool (PDF renderer migration P1, plan §4.2, trade-off T1 accepted by the owner; F1/F3 of §15).
  *
  * react-pdf lays out synchronously and its paginator is superlinear in table length (MEASURED: 500 rows in one table
  * took 17.6 s). Run in the jobs process's own event loop, one long render would stall BullMQ lock renewal and the email
@@ -35,8 +39,7 @@ import {
  *    integer from 1 to 4; anything else refuses (fail closed). Requests beyond the size wait in a FIFO queue of at most
  *    `maxQueue`; a full queue refuses the render rather than buffering without bound.
  *  - DEADLINE: 30 s per render (`PDF_RENDER_STEP_TIMEOUT_MS`, the same bound the Chromium path had), enforced by
- *    `worker.terminate()`: a hung layout cannot outlive it. The caller gets `PdfRenderTimeoutError('native-render')`;
- *    the slot is refilled by a fresh thread on the next request.
+ *    `worker.terminate()`: a hung layout cannot outlive it. The caller gets `PdfRenderTimeoutError('native-render')`.
  *  - MEMORY: `resourceLimits.maxOldGenerationSizeMb` (default 512) per thread. Exceeding it kills only that thread
  *    (`PdfNativeThreadCrashError`, code `error_PDF_NATIVE_OUT_OF_MEMORY`); the jobs process and the other thread live on.
  *  - NO CREDENTIALS: `env: {}`. The thread's `process.env` is an empty object, so no DATABASE_URL, REDIS_URL,
@@ -44,7 +47,12 @@ import {
  *    inherited execArgv.
  *  - NO NETWORK / NO PROCESSES / NO CLOCK: `thread-guard.ts`, installed before anything else in the thread.
  *  - NO STATE BETWEEN TENANTS: the thread receives one plain view-model per message, holds no DB handle or tenant
- *    context, and is recycled after `maxRendersPerThread` renders and after `idleMs` without work.
+ *    context, and is recycled after `maxRendersPerThread` renders and after `idleMs` without work (above `minThreads`).
+ *  - PRE-WARM (F3): `prewarm(n)` / `prewarmRenderPool()` starts `n` threads in the background and keeps at least `n`
+ *    alive (replacing recycled, timed-out or crashed ones), so a render rarely pays the thread start. Nothing ever
+ *    waits on it: it returns immediately, and its failures are logged, never thrown.
+ *  - UNPRINTABLE CHARACTERS (F1): replaced in the thread by a visible marker; the pool logs, per render, the document
+ *    kind and per-field COUNTS only (never text, characters or code points).
  *
  * The layouts (react-pdf components) run INSIDE the thread: the jobs process sends `{ kind, viewModel, generatedAt }`
  * and gets the PDF bytes back. The thread finds the layout in the document registry module (`native-documents`).
@@ -56,6 +64,9 @@ export const PDF_NATIVE_HEAP_LIMIT_MB_DEFAULT = 512;
 export const PDF_NATIVE_QUEUE_MAX_DEFAULT = 256;
 export const PDF_NATIVE_RENDERS_PER_THREAD_DEFAULT = 200;
 export const PDF_NATIVE_IDLE_MS_DEFAULT = 60_000;
+export const PDF_NATIVE_PREWARM_DEFAULT = 2;
+/** At most this many fields are named in one substitution log line; the total count is always given. */
+const MAX_LOGGED_FIELDS = 20;
 
 /** Default document registry: `native/native-documents` (owned by the documents agent; exports NATIVE_DOCUMENT_REGISTRY). */
 export const DEFAULT_DOCUMENTS_MODULE = join(
@@ -79,21 +90,47 @@ export function pdfNativeConcurrency(
   );
 }
 
+/**
+ * `PDF_NATIVE_PREWARM`: threads started at Worker boot. Unset → min(2, pool size); exactly "0".."4" → that number
+ * ("0" = no pre-warm); more than the pool size, or anything else, throws.
+ */
+export function pdfNativePrewarm(
+  env: NodeJS.ProcessEnv = process.env,
+  size = pdfNativeConcurrency(env),
+): number {
+  const raw = env.PDF_NATIVE_PREWARM;
+  if (raw === undefined) return Math.min(PDF_NATIVE_PREWARM_DEFAULT, size);
+  if (/^[0-4]$/.test(raw) && Number(raw) <= size) return Number(raw);
+  throw new Error(
+    `PDF_NATIVE_PREWARM must be an integer from 0 to PDF_NATIVE_CONCURRENCY (${size})`,
+  );
+}
+
+/** The logging surface the pool uses (Nest's Logger by default). */
+export interface RenderPoolLogger {
+  log(message: string): void;
+  warn(message: string): void;
+}
+
 export interface NativeRenderPoolOptions {
   /** Threads, 1..4. Default 2. */
   size?: number;
   /** Per-render deadline in ms, 100..30 000 (never above the 30 s production bound). Default 30 000. */
   timeoutMs?: number;
+  /** Deadline for a thread to become ready, 1 000..30 000 ms. Default 30 000 (independent of the render deadline). */
+  startTimeoutMs?: number;
   /** Per-thread V8 old-space cap in MB, 32..2048. Default 512. */
   maxOldGenerationSizeMb?: number;
   /** Waiting requests beyond the running ones, 1..10 000. Default 256. */
   maxQueue?: number;
   /** A thread is replaced after this many renders, 1..10 000. Default 200. */
   maxRendersPerThread?: number;
-  /** An idle thread is ended after this many ms, 1 000..3 600 000. Default 60 000. */
+  /** An idle thread above `minThreads` is ended after this many ms, 1 000..3 600 000. Default 60 000. */
   idleMs?: number;
   /** Absolute path of the document registry module. Default `native/native-documents`. */
   documentsModule?: string;
+  /** Where substitution counts and thread start-up times are logged. Default: Nest `Logger('NativePdfRender')`. */
+  logger?: RenderPoolLogger;
   /** Tests only: threads answer `probe()` (env keys, guard report, heap). Production threads never do. */
   allowProbe?: boolean;
   /** Tests only: called with the submission sequence number of each request as it is handed to a thread. */
@@ -103,10 +140,13 @@ export interface NativeRenderPoolOptions {
 export interface NativeRenderResult {
   pdf: Buffer;
   timings: RenderTimings & { queueMs: number; totalMs: number };
+  /** F1: fields whose unprintable characters were replaced by the marker, with counts. Empty when none. */
+  substitutions: GlyphSubstitutionCount[];
 }
 
 export interface NativeRenderPoolStats {
   size: number;
+  minThreads: number;
   live: number;
   starting: number;
   busy: number;
@@ -118,6 +158,11 @@ export interface NativeRenderPoolStats {
   failed: number;
   timedOut: number;
   crashed: number;
+  /** Start-up of the most recent thread that became ready: total and per step (F3). */
+  lastThreadStart?: ThreadInitBreakdown & {
+    initMs: number;
+    spawnToReadyMs: number;
+  };
 }
 
 interface Job {
@@ -135,6 +180,7 @@ interface Slot {
   state: 'starting' | 'idle' | 'busy' | 'gone';
   job?: Job;
   renders: number;
+  spawnedAt: number;
   startTimer?: NodeJS.Timeout;
   idleTimer?: NodeJS.Timeout;
   probes: Map<number, (r: ThreadProbeReport) => void>;
@@ -148,10 +194,11 @@ function bounded(
   max: number,
 ): number {
   if (value === undefined) return fallback;
-  if (!Number.isInteger(value) || value < min || value > max)
+  if (!Number.isInteger(value) || value < min || value > max) {
     throw new RangeError(
       `native PDF render pool: ${name} must be an integer from ${min} to ${max}`,
     );
+  }
   return value;
 }
 
@@ -205,6 +252,7 @@ function threadEntry(): { filename: string; eval: boolean } {
 export class NativeRenderPool {
   readonly size: number;
   readonly timeoutMs: number;
+  readonly startTimeoutMs: number;
   readonly maxOldGenerationSizeMb: number;
   readonly maxQueue: number;
   readonly maxRendersPerThread: number;
@@ -212,12 +260,17 @@ export class NativeRenderPool {
   private readonly documentsModule: string;
   private readonly allowProbe: boolean;
   private readonly onDispatch?: (seq: number) => void;
+  private readonly logger: RenderPoolLogger;
 
   private readonly slots = new Set<Slot>();
   private readonly queue: Job[] = [];
   private closed = false;
+  private minThreads = 0;
+  /** Set when a thread failed to start: eager (pre-warm) respawns stop until a request asks for a thread again. */
+  private startFailed = false;
   private seq = 0;
   private nextId = 1;
+  private lastThreadStart?: NativeRenderPoolStats['lastThreadStart'];
   private counters = {
     spawned: 0,
     exited: 0,
@@ -240,6 +293,13 @@ export class NativeRenderPool {
       options.timeoutMs,
       PDF_RENDER_STEP_TIMEOUT_MS,
       100,
+      PDF_RENDER_STEP_TIMEOUT_MS,
+    );
+    this.startTimeoutMs = bounded(
+      'startTimeoutMs',
+      options.startTimeoutMs,
+      PDF_RENDER_STEP_TIMEOUT_MS,
+      1_000,
       PDF_RENDER_STEP_TIMEOUT_MS,
     );
     this.maxOldGenerationSizeMb = bounded(
@@ -273,6 +333,7 @@ export class NativeRenderPool {
     this.documentsModule = options.documentsModule ?? DEFAULT_DOCUMENTS_MODULE;
     this.allowProbe = options.allowProbe === true;
     this.onDispatch = options.onDispatch;
+    this.logger = options.logger ?? new Logger('NativePdfRender');
   }
 
   /** Renders one document in a pool thread. Resolves to the PDF bytes (`%PDF-…`). */
@@ -280,15 +341,16 @@ export class NativeRenderPool {
     return (await this.renderWithTimings(request)).pdf;
   }
 
-  /** As `render`, plus where the time went (queue wait, glyph check, layout + serialisation). */
+  /** As `render`, plus where the time went (queue wait, glyph pass, layout + serialisation) and substitution counts. */
   renderWithTimings(request: NativeRenderRequest): Promise<NativeRenderResult> {
     if (this.closed) return Promise.reject(new PdfRenderPoolClosedError());
     let message: RenderJobMessage;
     try {
-      if (typeof request?.kind !== 'string' || !KIND.test(request.kind))
+      if (typeof request?.kind !== 'string' || !KIND.test(request.kind)) {
         throw new PdfNativeInputError(
           'native PDF renderer: kind must be a lowercase document type',
         );
+      }
       assertPlainViewModel(request.viewModel);
       message = {
         type: 'render',
@@ -302,6 +364,7 @@ export class NativeRenderPool {
     }
     if (this.queue.length >= this.maxQueue)
       return Promise.reject(new PdfRenderPoolSaturatedError(this.maxQueue));
+    this.startFailed = false; // a real request may always try to start a thread
     return new Promise<NativeRenderResult>((resolve, reject) => {
       this.queue.push({
         seq: this.seq++,
@@ -314,17 +377,38 @@ export class NativeRenderPool {
     });
   }
 
+  /**
+   * F3: starts up to `threads` render threads in the background and keeps at least that many alive from now on.
+   * Returns at once (never awaits a thread); a thread that fails to start is logged and not retried until a render
+   * request arrives. `threads` is clamped to the pool size.
+   */
+  prewarm(
+    threads: number = Math.min(PDF_NATIVE_PREWARM_DEFAULT, this.size),
+  ): void {
+    if (!Number.isInteger(threads) || threads < 0)
+      throw new RangeError(
+        'native PDF render pool: prewarm threads must be a non-negative integer',
+      );
+    if (this.closed) return;
+    this.minThreads = Math.min(threads, this.size);
+    this.ensureMinThreads();
+  }
+
   stats(): NativeRenderPoolStats {
     const by = (s: Slot['state']) =>
       [...this.slots].filter((x) => x.state === s).length;
     return {
       size: this.size,
+      minThreads: this.minThreads,
       live: this.slots.size,
       starting: by('starting'),
       busy: by('busy'),
       idle: by('idle'),
       queued: this.queue.length,
       ...this.counters,
+      ...(this.lastThreadStart
+        ? { lastThreadStart: this.lastThreadStart }
+        : {}),
     };
   }
 
@@ -336,13 +420,15 @@ export class NativeRenderPool {
       (s) => s.state === 'idle' || s.state === 'busy',
     );
     if (!slot) {
-      slot = this.spawn();
+      slot =
+        [...this.slots].find((s) => s.state === 'starting') ?? this.spawn();
+      const s0 = slot;
       await new Promise<void>((resolve, reject) => {
         const check = setInterval(() => {
-          if (slot!.state === 'gone') {
+          if (s0.state === 'gone') {
             clearInterval(check);
             reject(new Error('render thread failed to start'));
-          } else if (slot!.state !== 'starting') {
+          } else if (s0.state !== 'starting') {
             clearInterval(check);
             resolve();
           }
@@ -364,17 +450,22 @@ export class NativeRenderPool {
   /** Refuses new and queued work, terminates every thread, resolves when all have exited. */
   async destroy(): Promise<void> {
     this.closed = true;
+    this.minThreads = 0;
     for (const job of this.queue.splice(0))
       job.reject(new PdfRenderPoolClosedError());
-    const exits = [...this.slots].map((slot) =>
-      this.retire(slot, new PdfRenderPoolClosedError()),
+    await Promise.all(
+      [...this.slots].map((slot) =>
+        this.retire(slot, new PdfRenderPoolClosedError()),
+      ),
     );
-    await Promise.all(exits);
   }
 
   // ─── internals ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
   private pump(): void {
+    // A queued request waits on starting threads: those must keep the process alive (pre-warm threads start unref'd).
+    if (this.queue.length > 0)
+      for (const s of this.slots) if (s.state === 'starting') s.worker.ref();
     while (this.queue.length > 0 && !this.closed) {
       const idle = [...this.slots].find((s) => s.state === 'idle');
       if (idle) {
@@ -391,6 +482,15 @@ export class NativeRenderPool {
       }
       break;
     }
+    if (this.queue.length > 0)
+      for (const s of this.slots) if (s.state === 'starting') s.worker.ref();
+    this.ensureMinThreads();
+  }
+
+  /** Keeps `minThreads` threads alive (pre-warm), unless the pool is closed or the last start failed. */
+  private ensureMinThreads(): void {
+    if (this.closed || this.startFailed) return;
+    while (this.slots.size < this.minThreads) this.spawn();
   }
 
   private spawn(): Slot {
@@ -412,11 +512,13 @@ export class NativeRenderPool {
       },
       name: 'native-pdf-render',
     });
+    worker.unref(); // a pre-warm thread never keeps the process alive; pump() refs it once a request waits on it
     this.counters.spawned += 1;
     const slot: Slot = {
       worker,
       state: 'starting',
       renders: 0,
+      spawnedAt: performance.now(),
       probes: new Map(),
     };
     this.slots.add(slot);
@@ -426,12 +528,17 @@ export class NativeRenderPool {
       if (slot.state !== 'starting') return;
       const head = this.queue.shift();
       head?.reject(
-        new PdfRenderTimeoutError('native-thread-start', this.timeoutMs),
+        new PdfRenderTimeoutError('native-thread-start', this.startTimeoutMs),
       );
       this.counters.timedOut += head ? 1 : 0;
+      this.startFailed = true;
+      this.logger.warn(
+        `native PDF render thread did not start within ${this.startTimeoutMs} ms; terminated`,
+      );
       void this.retire(slot);
       this.pump();
-    }, this.timeoutMs);
+    }, this.startTimeoutMs);
+    slot.startTimer.unref();
 
     worker.on('message', (msg: FromThreadMessage) => this.onMessage(slot, msg));
     worker.on('error', (err: Error & { code?: string }) =>
@@ -459,16 +566,31 @@ export class NativeRenderPool {
   private onMessage(slot: Slot, msg: FromThreadMessage): void {
     if (slot.state === 'gone') return;
     switch (msg.type) {
-      case 'ready':
+      case 'ready': {
         clearTimeout(slot.startTimer);
-        slot.state = 'idle';
+        const spawnToReadyMs = Math.round(performance.now() - slot.spawnedAt);
+        this.lastThreadStart = {
+          ...msg.breakdown,
+          initMs: Math.round(msg.initMs),
+          spawnToReadyMs,
+        };
+        const b = msg.breakdown;
+        this.logger.log(
+          `native PDF render thread ready in ${spawnToReadyMs} ms (modules ${b.modulesMs} ms, font files ${b.fontFilesVerifyMs} ms, ` +
+            `primary font ${b.primaryFontParseMs} ms, warm-up ${b.warmupRenderMs} ms)`,
+        );
         this.markIdle(slot);
         this.pump();
         return;
+      }
       case 'init-error': {
         // e.g. a vendored font altered or missing: every render would fail the same way, so refuse what is queued.
         clearTimeout(slot.startTimer);
         const err = deserializeRenderError(msg.error);
+        this.startFailed = true;
+        this.logger.warn(
+          `native PDF render thread failed to start (${err.code}): ${err.message}`,
+        );
         for (const job of this.queue.splice(0)) {
           this.counters.failed += 1;
           job.reject(err);
@@ -497,6 +619,8 @@ export class NativeRenderPool {
             );
           } else {
             this.counters.completed += 1;
+            if (msg.substitutions.length > 0)
+              this.logSubstitutions(job.message.kind, msg.substitutions);
             const now = performance.now();
             job.resolve({
               pdf,
@@ -505,6 +629,7 @@ export class NativeRenderPool {
                 queueMs: (job.dispatchedAt ?? now) - job.submittedAt,
                 totalMs: now - job.submittedAt,
               },
+              substitutions: msg.substitutions,
             });
           }
         } else {
@@ -517,6 +642,22 @@ export class NativeRenderPool {
         return;
       }
     }
+  }
+
+  /** F1: counts only — the document kind (a code-defined type), structural field paths and numbers. */
+  private logSubstitutions(kind: string, subs: GlyphSubstitutionCount[]): void {
+    const total = subs.reduce((n, s) => n + s.count, 0);
+    const named = subs
+      .slice(0, MAX_LOGGED_FIELDS)
+      .map((s) => `${s.field}=${s.count}`)
+      .join(', ');
+    const more =
+      subs.length > MAX_LOGGED_FIELDS
+        ? `, +${subs.length - MAX_LOGGED_FIELDS} more field(s)`
+        : '';
+    this.logger.warn(
+      `native PDF render (kind=${kind}): ${total} unprintable character(s) replaced by the visible marker in ${subs.length} field(s): ${named}${more}`,
+    );
   }
 
   private dispatch(slot: Slot, job: Job): void {
@@ -542,7 +683,10 @@ export class NativeRenderPool {
     slot.worker.unref(); // an idle render thread never keeps the jobs process alive
     clearTimeout(slot.idleTimer);
     slot.idleTimer = setTimeout(() => {
-      if (slot.state === 'idle') void this.retire(slot);
+      // Pre-warmed threads (up to minThreads) stay; extra idle threads are ended.
+      if (slot.state === 'idle' && this.slots.size > this.minThreads)
+        void this.retire(slot);
+      else if (slot.state === 'idle') this.markIdle(slot);
     }, this.idleMs);
     slot.idleTimer.unref();
   }
@@ -550,6 +694,7 @@ export class NativeRenderPool {
   private onCrash(slot: Slot, code: string, detail: string): void {
     if (slot.state === 'gone') return;
     this.counters.crashed += 1;
+    if (slot.state === 'starting') this.startFailed = true;
     const job = slot.job;
     slot.job = undefined;
     if (job) {
@@ -581,10 +726,13 @@ export class NativeRenderPool {
       slot.job.reject(reason ?? new PdfRenderPoolClosedError());
       slot.job = undefined;
     }
-    return slot.worker.terminate().then(
+    const exited = slot.worker.terminate().then(
       () => undefined,
       () => undefined,
     );
+    // Recycled after maxRendersPerThread, timed out or crashed: keep the pre-warmed minimum (F3).
+    queueMicrotask(() => this.ensureMinThreads());
+    return exited;
   }
 }
 
@@ -592,23 +740,39 @@ export class NativeRenderPool {
 
 let defaultPool: NativeRenderPool | undefined;
 
+function processPool(): NativeRenderPool {
+  defaultPool ??= new NativeRenderPool({
+    size: pdfNativeConcurrency(process.env),
+  });
+  return defaultPool;
+}
+
 /**
  * THE entry point for `renderReportPdf` / `renderNativePdf` in native mode: renders `{ kind, viewModel, generatedAt }`
  * in the process-wide pool (created on first use with `PDF_NATIVE_CONCURRENCY` threads) and resolves to the PDF bytes.
+ * Unprintable characters are replaced by a visible marker and logged as counts (F1); they never fail the render.
  *
  * Rejects with:
  *  - `PdfRenderTimeoutError` (step `native-render`, 30 s): the thread was terminated;
- *  - `PdfGlyphCoverageError` (`error_PDF_GLYPH_UNSUPPORTED`, `.field`): a character no embedded font can draw (D3);
  *  - `PdfNativeThreadCrashError` (`error_PDF_NATIVE_OUT_OF_MEMORY` / `error_PDF_NATIVE_THREAD_CRASH`);
  *  - `PdfNativeInputError`: not plain data, unknown kind, bad generatedAt;
  *  - `PdfRenderPoolSaturatedError` / `PdfRenderPoolClosedError`; `PdfNativeRenderError` for anything else.
  * No fallback to Chromium (T3): every failure propagates to the job's normal failure and retry path.
  */
 export function renderInPool(request: NativeRenderRequest): Promise<Buffer> {
-  defaultPool ??= new NativeRenderPool({
-    size: pdfNativeConcurrency(process.env),
-  });
-  return defaultPool.render(request);
+  return processPool().render(request);
+}
+
+/**
+ * F3: call once at Worker boot, WITHOUT awaiting (it returns void): starts `PDF_NATIVE_PREWARM` threads (default 2, at
+ * most `PDF_NATIVE_CONCURRENCY`) in the background of the process-wide pool. Never throws for a thread problem (logged
+ * by the pool); throws only for an invalid `PDF_NATIVE_PREWARM` value, which the Worker's env validation also refuses.
+ * The health heartbeat never depends on it: no thread, ready or not, keeps or blocks the event loop.
+ */
+export function prewarmRenderPool(
+  threads: number = pdfNativePrewarm(process.env),
+): void {
+  processPool().prewarm(threads);
 }
 
 /** Graceful shutdown of the process-wide pool (Worker shutdown hook, tests). Safe to call when none exists. */
