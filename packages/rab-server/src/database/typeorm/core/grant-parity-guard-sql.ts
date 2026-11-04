@@ -37,28 +37,33 @@ export const GRANT_PARITY_FUNCTION = 'core.owner_login_grant_parity_guard()';
 
 export type ParityOp = 'INSERT' | 'UPDATE' | 'DELETE' | 'TRUNCATE';
 
-/** Derived from the posture golden at 1786721410000: crewflow-owned core tables and the operations crewflow_app lacked. */
+/**
+ * Derived from the posture golden at 1786721410000 (crewflow-owned core tables and the operations crewflow_app lacked), then
+ * corrected against the live catalog of an owner-login fresh install on PG16 (2026-11-04): crewflow_app holds COLUMN-level
+ * INSERT on the AI agent / proposal / input / skill / usage tables and the organisation AI settings tables, so those get no
+ * INSERT guard (column-level INSERT parity is not reproduced — recorded residual); their UPDATE / DELETE guards stay.
+ */
 export const GRANT_PARITY_TARGETS: Readonly<Record<string, readonly ParityOp[]>> = Object.freeze({
-  ai_action_proposal: ['INSERT', 'UPDATE', 'DELETE'],
-  ai_agent: ['INSERT', 'UPDATE', 'DELETE'],
+  ai_action_proposal: ['UPDATE', 'DELETE'],
+  ai_agent: ['UPDATE', 'DELETE'],
   ai_agent_event: ['INSERT', 'UPDATE', 'DELETE'],
-  ai_agent_trigger: ['INSERT', 'UPDATE'],
+  ai_agent_trigger: ['UPDATE'],
   ai_conversation: ['UPDATE'],
-  ai_input_request: ['INSERT', 'UPDATE', 'DELETE'],
+  ai_input_request: ['UPDATE', 'DELETE'],
   ai_message: ['UPDATE', 'DELETE'],
-  ai_skill: ['INSERT', 'UPDATE'],
-  ai_usage: ['INSERT', 'UPDATE', 'DELETE'],
+  ai_skill: ['UPDATE'],
+  ai_usage: ['UPDATE', 'DELETE'],
   ai_usage_daily: ['UPDATE', 'DELETE'],
   email_outbox: ['DELETE'],
   host_label_claim: ['INSERT', 'UPDATE', 'DELETE'],
   hws_backfill_checkpoint: ['DELETE'],
   navigation_layout: ['DELETE'],
   oauth_transaction_state: ['DELETE'],
-  organisation_ai_assistant: ['INSERT', 'UPDATE'],
-  organisation_ai_instruction: ['INSERT', 'UPDATE'],
-  organisation_ai_model_policy: ['INSERT', 'UPDATE'],
-  organisation_ai_model_preference: ['INSERT', 'UPDATE'],
-  organisation_ai_setting: ['INSERT', 'UPDATE', 'DELETE'],
+  organisation_ai_assistant: ['UPDATE'],
+  organisation_ai_instruction: ['UPDATE'],
+  organisation_ai_model_policy: ['UPDATE'],
+  organisation_ai_model_preference: ['UPDATE'],
+  organisation_ai_setting: ['UPDATE', 'DELETE'],
   payroll_calendar: ['UPDATE', 'DELETE', 'TRUNCATE'],
   payroll_calendar_period: ['UPDATE', 'DELETE', 'TRUNCATE'],
   payroll_record: ['UPDATE', 'DELETE', 'TRUNCATE'],

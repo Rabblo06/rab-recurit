@@ -185,9 +185,15 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
   });
 
   it('BC-11 (NEEDS OWNER APPROVAL): the runtime login passes the deployment-identity bind gate', async () => {
-    await rolledBack(owner, async () => {
-      await expect(owner.query(`SELECT core.deployment_identity_bind_gate()`)).resolves.toBeDefined();
-    });
+    // core.deployment_identity_bind refuses a login that is not a member of rab_secure_owner with 42501 BEFORE validating
+    // its arguments. As the owner login the call gets past that gate and fails only on the deliberately invalid
+    // environment (22023): the runtime could rebind the marker with valid arguments.
+    const outcome = await rolledBack(owner, () =>
+      owner
+        .query(`SELECT core.deployment_identity_bind('not-an-environment', gen_random_uuid(), 'catalogue BC-11 probe', 'bc11', NULL, ARRAY['localhost'])`)
+        .then(() => 'ok', (e: { code?: string }) => e.code ?? 'error'),
+    );
+    expect(outcome).toBe('22023');
   });
 
   it('BC-12 (NEEDS OWNER APPROVAL): no logical backup — row_security = off (what pg_dump sets) is refused for the NOBYPASSRLS owner', async () => {

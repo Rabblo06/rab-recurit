@@ -386,6 +386,8 @@ execute|organisation_is_suspended(uuid)|crewflow|true
 execute|organisation_slug_taken(citext,uuid)|PUBLIC|false
 execute|organisation_slug_taken(citext,uuid)|crewflow_app|true
 execute|organisation_slug_taken(citext,uuid)|crewflow|true
+execute|owner_login_grant_parity_guard()|crewflow_app|false
+execute|owner_login_grant_parity_guard()|crewflow|true
 execute|payroll_record_guard()|crewflow_app|true
 execute|payroll_record_guard()|crewflow|true
 execute|provision_workspace(uuid)|PUBLIC|false
@@ -625,6 +627,7 @@ owner|function|organisation_invitation_revoke(uuid)|rab_secure_owner|definer=tru
 owner|function|organisation_invitation_state(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|organisation_is_suspended(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|organisation_slug_taken(citext,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
+owner|function|owner_login_grant_parity_guard()|crewflow|definer=false
 owner|function|payroll_record_guard()|crewflow|definer=false
 owner|function|provision_workspace(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|provision_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp

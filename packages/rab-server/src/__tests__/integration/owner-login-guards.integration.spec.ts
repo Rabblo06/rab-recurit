@@ -83,9 +83,15 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
         expect(out).toMatch(/"g_admin_only" is a member of owner role "crewflow" \(admin=true inherit=false set=false\)/);
         expect(out).toMatch(/owner role "rab_owner" is LOGIN/);
       });
-      await tx(owner, async () => {
-        await owner.query('GRANT crewflow_worker TO crewflow_owner');
-        expect((await ownerLoginRolePostureProblems(q(owner))).join('; ')).toMatch(/member of "crewflow_worker"/);
+      // B3 (rolemaker bootstrap): the owner login holds no ADMIN on crewflow_worker, so it cannot even add itself.
+      expect(await tx(owner, () => code(owner.query('GRANT crewflow_worker TO crewflow_owner')))).toBe('42501');
+      // Planted by the superuser instead: the inventory refuses it.
+      await tx(admin, async () => {
+        await admin.query('GRANT crewflow_worker TO crewflow_owner WITH INHERIT FALSE, SET FALSE');
+        const out = await ownerLoginRolePostureProblems(async (sql, params) =>
+          (await admin.query(sql.replace(/session_user/g, `'crewflow_owner'::name`).replace(/current_user/g, `'crewflow_owner'::name`), params as unknown[] | undefined)).rows,
+        );
+        expect(out.join('; ')).toMatch(/crewflow_owner is a member of "crewflow_worker"/);
       });
     });
 
@@ -132,11 +138,12 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       await tx(owner, async () => {
         await owner.query(`ALTER TABLE core.user_session NO FORCE ROW LEVEL SECURITY`);
         await owner.query(`DROP POLICY member_invitation_secure_owner_definer ON core.member_invitation`);
-        await owner.query(`CREATE TABLE public.g_owned (id int)`);
+        // The provider grant gives the login CREATE on the database (not on public): a schema it creates is unexpected.
+        await owner.query(`CREATE SCHEMA g_owned_schema`);
         const out = (await ownerLoginObjectPostureProblems(q(owner))).join('; ');
         expect(out).toMatch(/not-forced\|core\.user_session/);
         expect(out).toMatch(/core\.member_invitation: owner-only definer policy member_invitation_secure_owner_definer is missing/);
-        expect(out).toMatch(/public-object\|public\.g_owned\|crewflow_owner/);
+        expect(out).toMatch(/unexpected-schema\|g_owned_schema\|crewflow_owner/);
       });
     });
   });

@@ -57,7 +57,7 @@ SELECT schema, line FROM (
   SELECT 'core',
          'function|' || p.proname || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')'
          || '|owner=' || pg_catalog.pg_get_userbyid(p.proowner) || '|definer=' || p.prosecdef || '|lang=' || l.lanname
-         || '|vol=' || p.provolatile || '|strict=' || p.proisstrict || '|leakproof=' || p.proleakproof
+         || '|vol=' || p.provolatile::text || '|strict=' || p.proisstrict || '|leakproof=' || p.proleakproof
          || '|config=' || coalesce(pg_catalog.array_to_string(p.proconfig, ';'), '-')
          || '|body=' || pg_catalog.md5(coalesce(p.prosrc, '') || '|' || coalesce(pg_catalog.pg_get_function_sqlbody(p.oid), ''))
     FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid = p.prolang
