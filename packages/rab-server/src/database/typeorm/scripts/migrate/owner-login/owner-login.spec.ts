@@ -15,7 +15,7 @@ import {
   UnsupportedPostgresVersionError,
   workspaceFingerprintMajor,
 } from '../../../workspace-schema/v1/expected-fingerprints';
-import { selectFingerprintsForRun } from '../locked-migration-runner';
+import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
 import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
@@ -483,5 +483,46 @@ describe('derived-authority path (deploy-prepare / child, production): the bound
     await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID }), ID)).resolves.toMatchObject({ summary: `production/${ID}` });
     await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID }), OTHER)).rejects.toThrow(/bound to production\/0b9a8c7d/);
     await expect(check(derived({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }), ID)).rejects.toThrow(/CREWFLOW_DEPLOYMENT_ID/);
+  });
+});
+
+describe('Agent 5 finding 1: a fresh NON-production install with a declared identity reaches its auto-bind; production unchanged', () => {
+  const ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
+  const declared = { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: ID };
+  const absentMarker = (async (sql: string) => (sql === MARKER_PRESENT_SQL ? [{ present: false, database: 'crewflow', disposable_test: false }] : [])) as never;
+  const guard = (env: Record<string, string | undefined>) =>
+    assertDeploymentIdentity(absentMarker, { processLabel: 'migrations command', production: false, env, connectionHost: '127.0.0.1', command: true });
+
+  it('the regression: the declaration itself is refused on an unmarked database, so the guard must not see it before the bind', async () => {
+    await expect(guard({ ...declared, DB_TARGET: 'local' })).rejects.toThrow(/no deployment identity marker/);
+    const derived = synthesiseGuardEnv(declared, 'absent', 'crewflow', 'x').guardEnv;
+    expect(derived.CREWFLOW_DEPLOYMENT_ENVIRONMENT).toBeUndefined();
+    expect(derived.CREWFLOW_DEPLOYMENT_ID).toBeUndefined();
+    await expect(guard(derived)).resolves.toMatchObject({ summary: 'absent' });
+    expect(synthesiseGuardEnv(declared, 'unbound', 'crewflow', 'x').guardEnv.CREWFLOW_DEPLOYMENT_ID).toBeUndefined();
+  });
+  it('once the marker is bound the declaration is checked again (a mismatch still refuses); production keeps its declaration', () => {
+    expect(synthesiseGuardEnv(declared, 'bound', 'crewflow', 'x').guardEnv).toMatchObject(declared);
+    const prod = synthesiseGuardEnv({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID }, 'absent', 'crewflow', 'x').guardEnv;
+    expect(prod).toMatchObject({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: ID, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' });
+  });
+});
+
+describe('Agent 5 finding 2: CREWFLOW_MIGRATION_APPROVAL_MODE=token gates EVERY non-fresh apply, whatever the target', () => {
+  const base = { mode: 'apply' as const, ownerLogin: true, fresh: false, pending: 3, hasApprover: false, production: false };
+  it('token without a token on an existing non-production database: refused (exit 65); with a token: the F5 gate', () => {
+    expect(approvalDecision({ ...base, approvalMode: 'token' })).toBe('refuse-token');
+    expect(approvalDecision({ ...base, approvalMode: 'token', production: true })).toBe('refuse-token');
+    expect(approvalDecision({ ...base, approvalMode: 'token', hasApprover: true })).toBe('f5');
+    const named = Object.assign(new Error('migrate-on-start: CREWFLOW_MIGRATION_APPROVAL_MODE=token needs CREWFLOW_MIGRATION_APPROVED for the 3 pending'), { name: 'Error' });
+    expect(outcomeOf(named)).toBe('behind');
+  });
+  it('a proven fresh install, nothing pending, approval mode none, a check run and deploy-prepare (mode unset) are unchanged', () => {
+    expect(approvalDecision({ ...base, approvalMode: 'token', fresh: true })).toBe('f5');
+    expect(approvalDecision({ ...base, approvalMode: 'token', pending: 0 })).toBe('f5');
+    expect(approvalDecision({ ...base, approvalMode: 'none' })).toBe('none-mode');
+    expect(approvalDecision({ ...base, approvalMode: 'token', mode: 'check' })).toBe('check');
+    expect(approvalDecision({ ...base, approvalMode: undefined })).toBe('f5');
+    expect(approvalDecision({ ...base, approvalMode: 'token', ownerLogin: false })).toBe('f5');
   });
 });

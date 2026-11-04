@@ -235,6 +235,29 @@ export function selectFingerprintsForRun(serverVersionNum: string, strict: boole
   return major;
 }
 
+/**
+ * The F5 decision of an apply run (pure; exported for its spec). Agent 5 finding (MEDIUM, 2026-11-04): with
+ * CREWFLOW_MIGRATION_APPROVAL_MODE=token the child used to demand the token only for a PRODUCTION target, so `token` without
+ * a token applied pending migrations to a non-fresh non-production database. Design decision (Agent 1, flagged to the
+ * owner): `token` set explicitly gates EVERY non-fresh apply with something pending, whatever the target — the operator
+ * chose per-release approval for this deployment. A proven fresh install still needs none (owner rule). deploy-prepare
+ * (approvalMode unset) keeps its F5 behaviour: an apply run always carries the token; production refuses without it.
+ */
+export function approvalDecision(f: {
+  mode: 'apply' | 'check';
+  ownerLogin: boolean;
+  approvalMode: 'none' | 'token' | undefined;
+  fresh: boolean;
+  pending: number;
+  hasApprover: boolean;
+  production: boolean;
+}): 'check' | 'none-mode' | 'refuse-token' | 'f5' {
+  if (f.mode !== 'apply') return 'check';
+  if (f.ownerLogin && f.approvalMode === 'none') return 'none-mode';
+  if (f.ownerLogin && f.approvalMode === 'token' && !f.fresh && f.pending > 0 && !f.hasApprover) return 'refuse-token';
+  return 'f5';
+}
+
 const timestampOrNull = (name: string): number | null => {
   const m = /(\d{13})$/.exec(name);
   return m ? Number(m[1]) : null;
@@ -424,7 +447,21 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       for (const warning of assertSchemaCompatible(compatibility, `migration run (${options.label})`)) log(`WARNING: ${warning}`);
     }
     // 3c. F5: the approval is checked against the set pending now, with the lock held (it cannot change before the apply).
-    if (mode === 'apply' && ownerLogin && options.approvalMode === 'none') {
+    const approval = approvalDecision({
+      mode,
+      ownerLogin,
+      approvalMode: options.approvalMode,
+      fresh: ownerState?.proof.fresh === true,
+      pending: pendingBefore.length,
+      hasApprover: Boolean(options.approvePending),
+      production: guarded.target === 'production',
+    });
+    if (approval === 'refuse-token') {
+      throw new Error(
+        `${options.label}: CREWFLOW_MIGRATION_APPROVAL_MODE=token needs CREWFLOW_MIGRATION_APPROVED for the ${pendingBefore.length} pending migration(s) of this existing database (any target). Nothing was applied. Refusing.`,
+      );
+    }
+    if (approval === 'none-mode') {
       // The migrate-on-start child with approval mode none: N1 above is the gate on an existing database (ST-3).
       log(`approval mode none: ${ownerState?.proof.fresh ? 'proven fresh install' : 'N1 production list checked'}; no per-release token`);
     } else if (mode === 'apply') {
