@@ -30,11 +30,23 @@ describeIfDb('database security posture (integration)', () => {
     try {
       const [who] = (await client.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`)).rows;
       // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
-      expect(who).toEqual({ u: 'crewflow_owner', s: false, b: false });
+      // The only other runtime accepted here is crewflow_app on the LEGACY separated database that ci-migration-security's
+      // restricted-migrator job still builds (LEGACY, REMOVE IN PR #9): there the original separated-mode assertions run
+      // unchanged, the runtime login itself must be refused (42501).
+      expect(['crewflow_owner', 'crewflow_app']).toContain(who.u);
+      expect({ s: who.s, b: who.b }).toEqual({ s: false, b: false });
+      const legacySeparated = who.u === 'crewflow_app';
       // A real call, not only a catalog check: an unknown hash resolves to no row (and no permission error).
       expect((await client.query(`SELECT * FROM core.auth_find_session_by_web_token_hash($1)`, ['0'.repeat(64)])).rows).toEqual([]);
       // P-class (owner-login architecture): the schema role crewflow_app still cannot run the provisioner-only function or
       // write the ledger, the reference tables or audit_log (42501), checked through the fixture superuser's SET LOCAL ROLE.
+      if (legacySeparated) {
+        await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`UPDATE core.permission SET key = key WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`DELETE FROM core.migrations WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        return;
+      }
       const writes = [
         `SELECT core.register_workspace_schema(gen_random_uuid())`,
         `UPDATE core.permission SET key = key WHERE false`,

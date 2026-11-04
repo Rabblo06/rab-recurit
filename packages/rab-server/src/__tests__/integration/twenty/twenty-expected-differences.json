@@ -220,7 +220,7 @@
       "id": "COLGRANT-1",
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: non-secret column-level INSERT grants no longer bind the runtime login)",
-      "change": "Column INSERT grants that kept server-owned columns out of the runtime's hands (id, created_at, updated_by, expires_at, origin) no longer bind the runtime login, and there is no INSERT parity guard. Measured on the owner-login CI (PR #74): core.ai_usage accepts a forged id / created_at; organisation_ai_model_preference accepts a forged updated_by. RLS WITH CHECK (own organisation, own user) and the INSERT policies still hold: an INSERT for another user / organisation, or a decided proposal (status / decided_by), is still refused.",
+      "change": "Column INSERT grants that kept server-owned columns out of the runtime's hands (id, created_at, expires_at, origin) no longer bind the runtime login, and there is no INSERT parity guard. Measured on the owner-login CI (PR #74): core.ai_usage accepts a forged id / created_at; core.ai_skill accepts a client-chosen id. RLS WITH CHECK (own organisation, own user) and the INSERT policies still hold: an INSERT for another user / organisation, or a decided proposal (status / decided_by), is still refused. Measured NOT affected: a forged updated_by on organisation_ai_model_preference is still refused to the runtime login by the INSERT policy WITH CHECK.",
       "test": "twenty-behaviour-catalogue (owner-login CI: ai-usage-ledger WITH CHECK, ai-model-settings forge, ai-rls T5-D1 INSERT; schema-role checks keep crewflow_app's 42501)",
       "bc": []
     },
@@ -236,7 +236,7 @@
       "id": "HL-1",
       "severity": "LOW",
       "acceptance": "OWNER-ACCEPTED (§2: SQL with owner privileges) — table privileges only; no observable effect without context",
-      "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded.",
+      "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded. Measured on PR #74: core.reserved_host_label (global reference data, no organisation_id) is readable by the runtime login through the policy for crewflow (210 rows); its DELETE is refused by the parity guard.",
       "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace, the namespace-table privilege test)",
       "bc": [
         "BC-01"

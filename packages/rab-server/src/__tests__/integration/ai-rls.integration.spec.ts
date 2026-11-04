@@ -267,7 +267,10 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     // P-class (owner-login architecture): the schema role crewflow_app has no UPDATE grant on these columns (42501). For the
     // runtime login the property is the state: each attempt is refused (the ai_action_proposal_guard trigger, 23514, or the
     // UPDATE parity guard, 42501) or is a no-op assignment, and the row is byte-identical afterwards.
-    const rowOf = async () => (await kit.owner.query(`SELECT row_to_json(p)::text AS r FROM core.ai_action_proposal p WHERE id = $1`, [proposal.id]))[0].r;
+    // updated_at is excluded: a no-op assignment still fires the row's updated_at maintenance (measured on PR #74); every
+    // identity, content, expiry and decision column is compared.
+    const rowOf = async () =>
+      (await kit.owner.query(`SELECT (row_to_json(p)::jsonb - 'updated_at')::text AS r FROM core.ai_action_proposal p WHERE id = $1`, [proposal.id]))[0].r;
     for (const set of [`arguments = '{}'::jsonb`, `tool = 'create_draft_shift'`, `expires_at = now() + interval '1 day'`, `summary = 'y'`, `user_id = '${b.ceo.userId}'`, `snapshot_hash = '${hash}'`]) {
       const sql = `UPDATE core.ai_action_proposal SET ${set} WHERE id = '${proposal.id}'`;
       expect({ set, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxOfA(), [{ sql }]) }).toEqual({ set, code: '42501' });

@@ -255,8 +255,9 @@ describeIfDb('host-label namespace, reserved labels and quarantine (C1/C2/C4/C5)
 
   // P-class (owner-login architecture). The schema role crewflow_app still has no privilege on the namespace tables (42501),
   // checked through the fixture superuser's SET LOCAL ROLE and rolled back. The runtime login crewflow_owner holds table
-  // privileges through the owner (OWNER-LOGIN DIFFERENCE HL-1, catalogue): with no tenant context bound it sees ZERO rows
-  // (FORCE RLS since M-T1; the owner-only definer policy admits only rab_secure_owner) and its DELETE removes nothing.
+  // privileges through the owner (OWNER-LOGIN DIFFERENCE HL-1, catalogue): with no tenant context bound it sees ZERO claim /
+  // quarantine rows (FORCE RLS since M-T1; the owner-only definer policy admits only rab_secure_owner) and its DELETE removes
+  // nothing; the global reserved-label list (no organisation_id) is readable and its DELETE is refused by the parity guard.
   it('the schema role crewflow_app has no privilege on the namespace tables; the runtime login sees and deletes nothing without context; quarantine rows are never deleted, even by the superuser', async () => {
     const tables = ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label'];
     const asSchemaApp = async (sql: string): Promise<string> => {
@@ -280,6 +281,14 @@ describeIfDb('host-label namespace, reserved labels and quarantine (C1/C2/C4/C5)
       expect({ t, code: await asSchemaApp(`SELECT count(*) FROM ${t}`) }).toEqual({ t, code: '42501' });
       // sql-injection-reviewed: t comes from the constant table list above
       expect({ t, code: await asSchemaApp(`DELETE FROM ${t}`) }).toEqual({ t, code: '42501' });
+      if (t === 'core.reserved_host_label') {
+        // Global reference data (no organisation_id): the runtime login reads every reserved label through the policy for
+        // its owner role crewflow (measured 210 rows on PR #74; HL-1). Writes: the reserved_host_label parity guard refuses
+        // a DELETE of the visible rows (42501).
+        expect({ t, n: (await app.query(`SELECT count(*)::int AS n FROM core.reserved_host_label`)).rows[0].n }).toEqual({ t, n: before[t] });
+        expect(await sqlstateOf(app.query(`DELETE FROM core.reserved_host_label`))).toBe('42501');
+        continue;
+      }
       // sql-injection-reviewed: t comes from the constant table list above
       expect({ t, n: (await app.query(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n }).toEqual({ t, n: 0 });
       // sql-injection-reviewed: t comes from the constant table list above

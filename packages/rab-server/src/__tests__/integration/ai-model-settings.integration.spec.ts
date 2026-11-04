@@ -193,19 +193,12 @@ describeIfDb('Settings → AI model choice (integration)', () => {
 
     it('the CEO cannot forge updated_by, move a row to another organisation/tier, or TRUNCATE (column grants + WITH CHECK)', async () => {
       const org = await aiOrganisation(kit, 'ai-set-grants');
-      // P-class (owner-login architecture): a forged updated_by is refused to the schema role crewflow_app by its column INSERT
-      // grant (42501). The runtime login is NOT refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS
-      // OWNER APPROVAL), asserted inside a rolled-back transaction so the forged row never stays.
+      // P-class (owner-login architecture): a forged updated_by is refused to the schema role crewflow_app (column grant, 42501)
+      // AND to the runtime login (the INSERT policy's WITH CHECK pins updated_by to the bound user; measured on PR #74).
       const forged = `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'fast', $2, $3, 'forged author')`;
       const forgedParams = [org.orgId, TEST_MOCK_MODEL_ID, randomUUID()];
       expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: forged, params: forgedParams }])).toBe('42501');
-      const rollback = new Error('rollback');
-      await expect(
-        tenant.runInTenantContext({ organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId, role: '' }, async (m) => {
-          await m.query(forged, forgedParams);
-          throw rollback;
-        }),
-      ).rejects.toBe(rollback);
+      expect(pgCode(await asTenant(org.ceo, forged, forgedParams).catch((e) => e))).toBe('42501');
       await asTenant(org.ceo, `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'fast', $2, $3, 'direct CEO write')`, [org.orgId, TEST_MOCK_MODEL_ID, org.ceo.userId]);
       // Real changes of non-updatable columns: refused to the schema role (column grant) AND to the runtime login (the
       // organisation_ai_model_preference UPDATE grant-parity guard, OwnerLoginGrantParityGuards1786721420000), both 42501.
