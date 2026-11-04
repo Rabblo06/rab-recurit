@@ -281,6 +281,16 @@ services:
       PG_DATABASE_URL: postgres://crewflow_app:${CREWFLOW_APP_PW:?}@pg:5432/rab
       SEED_URL: postgres://rab:${PG_SUPER_PW:?}@costaudit-pg:5432/rab
       SEED_PW: ${SEED_PW:?}
+      # Docker hardening H1-M1 (main 824f0824..2733c7fb): the image's HOME is not writable by uid 1000, and Chromium's
+      # crashpad handler then aborts the launch ("--database is required", SIGTRAP), so the backfill could not render.
+      # Same plan the Worker launcher gives its jobs child (start-worker-bundle.cjs): HOME=/nonexistent (not creatable),
+      # TMPDIR a private 0700 tmpfs, crashpad/fontconfig state in XDG_* directories inside it.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
     volumes:
       - ./:/cost:ro
     restart: 'no'

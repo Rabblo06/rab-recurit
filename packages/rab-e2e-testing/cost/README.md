@@ -217,6 +217,69 @@ Useful options:
 To compare two runs, first check their host conditions (see "Comparability on a shared host"), then diff their
 `results.json` → `metrics[]`. Every metric has the same `metric` key in both runs.
 
+### D-Q6 architecture benchmark (2026-11-04)
+
+`scripts/dq6-bench.sh` compares the Worker dispatch architectures on one stack (one image, configuration only), at one
+organisation level (default 200), idle and loaded. It extends the Phase D after-measurement drivers and the #24 A/B
+benchmark, and uses only this harness's guarded helpers.
+
+```bash
+OUT=/c/rab-ai-wt/cost-work/results/dq6
+COST_HEAVY_LABEL=dq6 bash scripts/run.sh --commit <sha> --only build,stack --keep --out "$OUT"
+OUT=$OUT COST_TAG=<sha8> bash /c/rab-ai-wt/setup/heavy-run.sh dq6 bash scripts/dq6-bench.sh setup 200
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh abab "per_scope global" 2   # each arm-repetition in its own heavy-run window
+OUT=$OUT bash scripts/dq6-bench.sh report                                        # dq6-results.md / dq6-results.json
+```
+
+| Arm | Configuration |
+|---|---|
+| `per_scope` | `WORKER_CLAIM_MODE=per_scope`, Worker as `crewflow_app` (production default) |
+| `global` | `WORKER_CLAIM_MODE=global`, Worker as `crewflow_worker` (Phase D) |
+| `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
+
+Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. A label is never reused: `arm` refuses an
+arm-repetition that already has results, and the load generator refuses a label that already has tagged rows, so rerun
+under a new repetition number (nothing is deleted). Each arm repetition runs, in order:
+
+| Window | What |
+|---|---|
+| `idle-off` | realtime + push off (production default), drained, `DQ6_IDLE_S` (300 s) idle window |
+| `idle-on` | realtime + push on, drained, idle window |
+| `loaded` | `DQ6_RATE` (10) notifications/s for 390 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The 300 s resource window starts 15 s in; the generator's own transactions are subtracted, and the report accepts the window only if the generator's own recorded run (start and end, written on success and on failure) covers all of it, its inserts inside the window never pause for more than 3 s, and they deliver at least 90 % of the offered rate |
+| `burst` | `DQ6_BURST` (2,000) notifications inserted at once: drain time, rows/s, per-organisation completion, fairness |
+| `rworker` | 5/s load; graceful Worker stop, 30 s down, start, 60 s more load: time to ready, first delivery, backlog cleared, stuck rows, duplicates |
+| `rredis` | the same with Redis stopped. Redis runs without persistence, so it comes back empty: a Redis data loss |
+
+Metrics, all MEASURED: PostgreSQL transactions/min (`pg_stat_database`, harness transactions subtracted) and statements/min
+(`pg_stat_statements`), cgroup CPU of PostgreSQL / Worker / Redis, Redis commands/min (`total_commands_processed`) and
+used memory, Worker RSS (node processes) and cgroup memory, latency (created → terminal, database clock), queue depth
+(non-terminal rows of the scenario and BullMQ wait/active lengths, every 10 s), throughput, duplicates (email: LOGGER
+send lines per row; realtime: Pub/Sub messages per event from a `PSUBSCRIBE` listener; push: not observable with the FAKE
+driver, retried rows are reported), fairness (Jain's index of per-organisation mean latency, per-organisation p95 and
+completion spread), errors (failed rows and Worker log error lines), and host contention (other containers' CPU).
+
+Memory contention (added 2026-11-04). The Docker VM is 4 GB and shared, and it swaps. At both edges of every window and
+scenario, `dq6-bench.sh` appends the VM's `MemAvailable`, `SwapFree` and cumulative `pswpin`/`pswpout` (read from `/proc`
+inside `costaudit-pg`) to `vm-memory.txt`. A window does not start when `MemAvailable` is below `DQ6_MIN_AVAIL_MIB`
+(384). The report EXCLUDES a window, from its table and from every mean, if it:
+- swapped in more than `DQ6_MAX_SWAPIN_MIB` (16 MiB);
+- had less than `DQ6_MIN_AVAIL_MIB` available at an edge; or
+- has no complete record.
+
+The swap counters are VM-wide, so another container's swapping also excludes a window.
+
+Connection-pool waits are NOT measured. They are in-process (pg `Pool.waitingCount`), and the production Worker exposes
+no metric for them. As a proxy, the 10 s depth sample records the Worker container's PostgreSQL backends (all and
+non-idle, by its address on the harness network). The Worker's pool is 12 (`PG_POOL_MAX_CONNECTIONS`), and its
+consumers' concurrencies sum to more than that (email 5 + push 10 + shift statements 2 + AI 4), so a non-idle count at
+the cap means checkouts could have been waiting.
+
+Setup seeds with `COST_SEED_NOW=2026-10-27T22:05:00Z` (`DQ6_SEED_NOW`) and marks the last shifts' post-shift stamps as
+processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. Before every
+window and scenario (after its drain) and at the end of each arm, `arm` refuses to go on once a published shift starts
+within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. A margin shorter than the longest window or scenario (computed from
+`DQ6_IDLE_S` and the fixed caps; about 22 min with the defaults) is refused, so roster PDF renders can never enter a window silently. Usable budget: about 4 h 15 min.
+
 ## Phases (`scripts/run.sh`)
 
 | Phase | What happens | Script |
@@ -305,6 +368,8 @@ A projection is never labelled MEASURED.
 - `lib/compare.js`: compares two results directories (`node lib/compare.js <baseline> <after> <out>` →
   `comparison.md`/`comparison.json`): Δ% per metric, noise bands from code-identical control metrics, and the
   roster-stage SQL per email by query fingerprint (from `shift-cycle.pgss-raw.csv`, idle-O20 background subtracted).
+- `scripts/dq6-bench.sh` (D-Q6 architecture benchmark driver), `lib/dq6-load.js` (load generator, burst drain and
+  recovery probe), `lib/dq6-report.js` (D-Q6 results tables).
 - `scripts/tree-snapshot.sh` (read-only worktree snapshot for `--tree`), `scripts/compare-images.sh` (dist file-by-file
   comparison of two image pairs), `lib/worker-env.sh` (per-phase worker configuration), `lib/analyze-boot.js` (boot /
   restart / replicas summaries), `init/empty.env` (default, empty worker env file).
