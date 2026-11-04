@@ -611,8 +611,9 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
     // the connected login so neither behaviour is silently flipped to the other.
     const [{ login }] = await runtime.query(`SELECT session_user::text AS login`);
     if (login === 'crewflow_owner') {
+      // TypeORM returns [rows, affectedCount] for DELETE … RETURNING.
       const removed = await runtime.transaction(async (m) => m.query(`DELETE FROM core.member_invitation RETURNING id`));
-      expect(removed).toEqual([]); // BC-18: accepted, but nothing outside a bound tenant is visible to delete
+      expect(removed).toEqual([[], 0]); // BC-18: accepted, but nothing outside a bound tenant is visible to delete
       expect(await runtime.query(`SELECT count(*)::int AS c FROM core.member_invitation`)).toEqual([{ c: 0 }]);
     } else {
       await expect(runtime.query(`DELETE FROM core.member_invitation`)).rejects.toThrow(/permission denied/);
