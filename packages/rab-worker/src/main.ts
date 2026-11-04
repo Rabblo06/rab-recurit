@@ -26,6 +26,8 @@ import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hw
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
 import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
+import { installSessionRoleResetOnDataSource } from '@rab/server/database/postgres/session-role-reset';
+import { securityReady, startSecurityPostureMonitoring } from '@rab/server/engine/core-modules/health/security-readiness';
 import { createPgDataSource, pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
@@ -297,6 +299,18 @@ async function bootstrap(): Promise<void> {
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');
+  // Owner-login architecture (Agent 3's pool safety): this pool comes from TypeOrmModule.forRoot, not the connection
+  // factory, so RESET ROLE on checkout is installed here explicitly (idempotent).
+  installSessionRoleResetOnDataSource(runtimeDataSource);
+  // Agent 3's external security audit sink and semantic posture monitor (boot baseline from the gates above). An invalid
+  // audit-sink configuration refuses to start; posture drift is acted on below, once the runtime exists.
+  const securityMonitoring = (() => {
+    try {
+      return startSecurityPostureMonitoring({ dataSource: runtimeDataSource, baseline: gateReport.semanticBaseline, processLabel: 'worker process' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
   // run against the worker's own runtimeDataSource — it's the one whose entity metadata and migrationsTableName matter.
   await assertHwsStartupInvariants(runtimeDataSource, appContext.get(EnvironmentService).get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
@@ -520,6 +534,15 @@ async function bootstrap(): Promise<void> {
   };
   beat();
   runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
+  // Security readiness: the Worker has no readiness endpoint, so on posture drift it shuts down (exit 1). Its restart then
+  // meets the boot-time semantic check, which refuses while the drift is there — it never keeps running jobs on a database
+  // whose security objects changed under it.
+  runtime.interval(() => {
+    if (!securityReady()) {
+      logger.error('SECURITY: the database security posture changed since boot (posture monitor) — shutting the Worker down');
+      void shutdown('SECURITY-POSTURE-DRIFT', 1);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 
   // ---- Owner-login architecture (T4): workspace provisioning IN-PROCESS, on the one owner login. ----
   // The SAME loops the superseded separate provisioner ran (workspace-provisioning.loops.ts): its own session-affine
@@ -649,7 +672,7 @@ async function bootstrap(): Promise<void> {
   const aiTurns = appContext.get(AiTurnRunnerService);
   const aiTitles = appContext.get(AiTitleService);
   let shutdownStarted = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shutdownStarted) return;
     shutdownStarted = true;
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
@@ -665,6 +688,7 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      securityMonitoring.stop();
       provisioningRuntime.beginShutdown(); // the in-process provisioner too (a waiting provisioning lock is abandoned at once)
       // Phase D: no new wake-up or claim run; the LISTEN session closes (its in-flight runs are runtime cycles → drained below).
       coordinator?.stop();
@@ -710,7 +734,7 @@ async function bootstrap(): Promise<void> {
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');
-      process.exit(0);
+      process.exit(exitCode);
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Worker shutdown failed:', error);

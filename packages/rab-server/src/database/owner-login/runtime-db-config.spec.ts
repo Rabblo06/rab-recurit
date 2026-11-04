@@ -85,7 +85,7 @@ const CASES: Array<[string, Env]> = [
   ['test seam FAIL_AT in development', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'development', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' }],
   ['test seam FAIL_AT with NODE_ENV unset', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'x' }],
   ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
-  ['DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS are not this parser's business (CLI authority; the runtime guard refuses them)', { CREWFLOW_MIGRATE_ON_START: 'false', DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }],
+  ['DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS are outside this parser (CLI authority; the runtime guard refuses them)', { CREWFLOW_MIGRATE_ON_START: 'false', DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }],
 ];
 
 describe('runtime-db-config (owner-login architecture)', () => {
