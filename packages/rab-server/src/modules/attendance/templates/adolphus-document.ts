@@ -90,6 +90,17 @@ export function documentFooterTemplate(s: DocumentShiftInfo): string {
   </div>`;
 }
 
+/**
+ * `.bottom > div` (NOTES | MANAGER SIGN-OFF on the final timesheet, NOTES | BEFORE-SHIFT DOCUMENT on the pre-shift
+ * roster): `min-width: 0` + `overflow-wrap: anywhere` keep both columns at their flex width whatever they hold. Without
+ * them a flex item's min-width is its longest unbreakable word, so a long token in the notes (a URL, an ID) widened the
+ * NOTES column and pushed the right-hand column off the page, where Chromium's print layout dropped it (sign-off and
+ * "Total worked hours" included) without any error: F-PDF-1, PDF P0 plan §15.
+ *
+ * `.notes-text` (the shift-notes paragraph only): `white-space: pre-line` keeps the line breaks the author typed (owner
+ * decision 2026-11-04) while still collapsing runs of spaces and tabs. The native renderer applies the same rule to the
+ * same field.
+ */
 export const DOCUMENT_CSS = `
   @page { size: A4 landscape; }
   * { box-sizing: border-box; }
@@ -114,7 +125,8 @@ export const DOCUMENT_CSS = `
   .avatar { width: 26px; height: 26px; border-radius: 50%; background: #E6E7E5; color: #4A4F4C; font-size: 9px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
   .note-line { color: #8A8F8C; font-size: 9.5px; margin-top: 8px; }
   .bottom { display: flex; gap: 40px; margin-top: 22px; page-break-inside: avoid; }
-  .bottom > div { flex: 1; }
+  .bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .notes-text { white-space: pre-line; }
   .bottom h3 { font-size: 10.5px; margin: 0 0 8px; letter-spacing: .3px; }
   .bottom p { margin: 0 0 6px; }
   .flag { color: #B45309; font-weight: 600; }

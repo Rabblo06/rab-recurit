@@ -5033,3 +5033,44 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
+
+Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
+grants, RLS, the renderer's isolation, or any money or worked-minutes value.
+
+- **Asset:** the final timesheet. It is the record of the manager's sign-off ("Reviewed by … Finalised at …", the typed
+  "Signed off as …") and of the shift's "Total worked hours". The pre-shift roster's BEFORE-SHIFT DOCUMENT column is
+  also affected.
+- **Actor:** anyone who can write shift notes, a free-text field. This can also be accidental: a pasted URL, reference
+  or token.
+- **Finding (Medium, integrity):**
+  - **Actor → action → consequence:** notes holding one long unbroken token → the NOTES column grows to the token's
+    width → the right-hand column is pushed off the page → Chromium omits it from the PDF.
+  - **What is lost:** MANAGER SIGN-OFF and the total disappear without any error or warning, and only 237 of a
+    1,000-character token print.
+  - **Where:** `adolphus-document.ts` `DOCUMENT_CSS`, `.bottom > div { flex: 1 }`.
+  - **Root cause:** a flex item's `min-width: auto` means its smallest width is its longest unbreakable word.
+- **Fix:** `.bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }`. Both columns keep half the width, and a
+  token too long for its column breaks at the column edge. Every character is printed.
+- **Owner decision applied in the same change:** notes keep their line breaks. The notes paragraph only (class
+  `notes-text`) gets `white-space: pre-line`. The native renderer applies the same rule to the same field (agreed
+  field list: shift notes in both final-timesheet variants and in the pre-shift roster). Every other field still
+  collapses whitespace, including names, so a line break typed into a name cannot reshape the sign-off block.
+- **Unchanged otherwise:** for ordinary notes the PDF is byte-identical to the pre-fix stylesheet (tested), and values
+  are still escaped (`escapeHtml`). `pre-line` changes whitespace handling only; it cannot turn text into markup.
+- **Regression test:** `render-pdf-notes-layout.integration.spec.ts` (real Chromium via `renderHtmlToPdf`).
+  - A 1,000-character token prints in full.
+  - The sign-off, the total and the before-shift column are each printed exactly once.
+  - Chromium's print layout places nothing past the printable width.
+  - Paragraphs stay on separate lines, with blank lines kept.
+  - Run against main's templates, the token and line-break cases fail.
+- **Test-helper fix:** the PDF text reader (`__tests__/helpers/pdf-inspect.ts`) now honours a stream's direct `/Length`.
+  Before, it stripped a final 0x0d data byte as if it were an end-of-line marker. That made a font's ToUnicode map
+  unreadable, so every glyph of that font decoded as U+FFFD, which hides text from assertions. The fuller reader on
+  `worker/pdf-inspectors` (#54) already uses the same rule.
+- **Residual:**
+  - **Already-stored PDFs:** final timesheets generated before the fix whose notes held such a token remain without
+    their sign-off and total. Regenerating them is an owner decision.
+  - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
+    reported to the native-renderer owner.
