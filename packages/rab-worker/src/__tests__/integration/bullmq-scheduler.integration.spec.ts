@@ -27,7 +27,7 @@ const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 // Every scan interval at its real default: the three minutes keys (15 / 60 / 60) and, since Phase A pa-intervals, the 17
 // WORKER_<JOB>_INTERVAL_SECONDS keys (defaults = the historical constants).
 const env = defaultIntervalEnv();
-const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 22 = 19 pre-migration scans + ai-retention + workspace-provisioning-health + ai-stale-turn-sweep (D-Q2)
+const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 23 = 19 pre-migration scans + ai-retention + workspace-provisioning-health + ai-stale-turn-sweep (D-Q2) + shift-scan-combined (D-Q4a; no enable predicate here = all)
 const intervalOf = (def: ScanJobDefinition) => resolveIntervalMs(def, env);
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 const freshPrefix = () => `crewflow:it-${randomBytes(4).toString('hex')}:bull`;

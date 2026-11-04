@@ -34,6 +34,16 @@ export class ShiftScanProcessor {
     if (result.flagged) logger.log(`late clock-in: flagged=${result.flagged}`);
   }
 
+  /**
+   * Phase D-Q4a: the combined shift scan. Scheduled only with WORKER_SHIFT_SCAN_MODE=combined, where main.ts replaces this
+   * handler with the wired CombinedShiftScan (shift-scan-combined.job.ts: withCombinedShiftScan). Reaching THIS body means
+   * it was invoked without that wiring: fail closed, never a silent no-op stamped as a successful scan.
+   */
+  @Process('shift-scan-combined')
+  async shiftScanCombined(): Promise<void> {
+    throw new Error('shift-scan-combined runs only when main.ts wires it (WORKER_SHIFT_SCAN_MODE=combined)');
+  }
+
   @Process('shift-cancellation-followup')
   async shiftCancellationFollowup(): Promise<void> {
     const { runtimeDataSource, tenantContext, notificationService, auditService, logger } = this.deps.get();

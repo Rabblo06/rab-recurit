@@ -1,6 +1,6 @@
 import { WORKER_SCAN_INTERVAL_SETTINGS } from '@rab/server/engine/core-modules/environment/worker-scan-intervals';
 import { QUEUE_SETTINGS, SCAN_QUEUES } from './queue-registry';
-import { SCAN_JOBS } from './scan-jobs';
+import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './scan-jobs';
 
 /**
  * D-Q4 test preparation (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §D-Q4). CHARACTERISATION ONLY: these tests pin today's
@@ -35,7 +35,8 @@ describe('D-Q4 characterisation: backstop scan intervals are unchanged (owner ru
     const def = SCAN_JOBS.find((j) => j.jobName === jobName);
     expect(def).toBeDefined();
     expect(def!.interval).toEqual({ kind: 'env-seconds', key: envKey });
-    // None of these is behind a registration switch: each is always scheduled, so each always backstops.
+    // None of these is behind an enable switch. D-Q4a: the four combined members are scheduled separately only in
+    // WORKER_SHIFT_SCAN_MODE=separate (default); in combined mode the combined scan runs them at this same interval.
     expect(def!.enabledBy).toBeUndefined();
     expect(def!.firstRunAfterInterval).toBeFalsy();
   });
@@ -61,8 +62,11 @@ describe('D-Q4a characterisation: the five shift-family scans are separate scans
     ]);
   });
 
-  it('no combined scan and no timer-trigger queue exists by default', () => {
-    expect(SCAN_JOBS.filter((j) => /combined|timer-trigger/i.test(j.jobName))).toEqual([]);
+  it('D-Q4a: the combined scan exists but is NOT scheduled by default (separate); no timer-trigger queue (D-Q4b) yet', () => {
+    const defaults = { get: () => undefined } as never;
+    expect(SCAN_JOBS.filter((j) => /combined|timer-trigger/i.test(j.jobName)).map((j) => j.jobName)).toEqual(['shift-scan-combined']);
+    expect(SCAN_JOBS.filter((j) => /combined/.test(j.jobName) && isScanJobEnabled(j, defaults))).toEqual([]);
+    expect(members.every((m) => isScanJobEnabled(SCAN_JOBS.find((j) => j.jobName === m)!, defaults))).toBe(true);
     expect(Object.keys(QUEUE_SETTINGS).filter((q) => /timer|trigger/i.test(q))).toEqual([]);
   });
 
@@ -82,11 +86,19 @@ describe('D-Q4a characterisation: the five shift-family scans are separate scans
     expect(pick('rab-ai')).toEqual({ c: 4, lock: 60_000, stalls: 1 });
   });
 
-  it.todo('PROPOSED D-Q4a: WORKER_SHIFT_SCAN_MODE defaults to `separate`; any value other than separate|combined refuses to boot');
-  it.todo('PROPOSED D-Q4a: in combined mode each member still runs at its own configured interval (never less often than separate mode)');
-  it.todo('PROPOSED D-Q4a: in combined mode each member keeps its own lastRunAt / failures / skipped stats keys');
-  it.todo('PROPOSED D-Q4a: a member still running from the previous tick is skipped for that member only (per-member overlap guard)');
-  it.todo('PROPOSED D-Q4a: a failing member query does not fail the other members of the same workspace walk (SAVEPOINT per member)');
+  // D-Q4a (implemented): flag default/strictness → rab-server env.validation.worker-shift-scan-mode.spec.ts; own interval,
+  // own stats keys, per-member overlap guard → queues/rab-shifts/shift-scan-combined.spec.ts; SAVEPOINT per member →
+  // core/database/workspace-discovery.members.spec.ts and (real PostgreSQL) dq4-shift-scan-equivalence.integration.spec.ts.
+  it('D-Q4a: in combined mode the members keep their own intervals and the combined tick divides every one of them', () => {
+    const seconds: Record<string, number> = { WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: 60, WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS: 120, WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS: 180, WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS: 900 };
+    const env = { get: (k: string) => seconds[k] } as never;
+    const tick = resolveIntervalMs(SCAN_JOBS.find((j) => j.jobName === 'shift-scan-combined')!, env);
+    expect(tick).toBe(60_000);
+    for (const m of ['shift-monitor', 'attendance-monitor', 'shift-report-scheduler', 'final-timesheet']) {
+      const own = resolveIntervalMs(SCAN_JOBS.find((j) => j.jobName === m)!, env);
+      expect(own % tick).toBe(0);
+    }
+  });
   it.todo('PROPOSED D-Q4b: WORKER_TIMER_TRIGGERS defaults to `off`; any value other than off|shadow|on refuses to boot');
   it.todo('PROPOSED D-Q4b: the timer-trigger queue is in the registry with an organisation scope, ids-only payload keys and explicit options');
 });

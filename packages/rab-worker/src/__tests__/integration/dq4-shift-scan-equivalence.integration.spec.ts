@@ -5,6 +5,20 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
+import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
+import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
+import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
+import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
+import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
+import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
+import Redis from 'ioredis';
+import * as advisoryLock from '../../core/locking/advisory-lock';
+import { discoverMembersInWorkspaces, WalkMember } from '../../core/database/workspace-discovery';
+import { WorkerRuntime } from '../../core/runtime/worker-runtime';
+import { combinedShiftScanMemberDefs } from '../../core/scheduler/scan-jobs';
+import type { WorkerJobDependencies } from '../../core/scheduler/worker-dependencies';
+import { bindCombinedShiftScanMembers, CombinedShiftScan } from '../../queues/rab-shifts/shift-scan-combined.job';
+import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
@@ -218,10 +232,244 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
     expect(await eventsOf(s.s5)).toEqual(['late-clock-in=completed@own-scope']);
   });
 
-  it.todo('PROPOSED D-Q4a: WORKER_SHIFT_SCAN_MODE=combined on the same fixture yields exactly the Order A keys, statuses and scopes');
-  it.todo('PROPOSED D-Q4a: combined mode, second pass — no new event and no new notification (same as separate mode)');
-  it.todo('PROPOSED D-Q4a: combined mode, two Worker replicas in parallel — each event key exactly once, every notification exactly once');
-  it.todo('PROPOSED D-Q4a: combined mode, one member query throws for one workspace — the other members of that workspace still run (SAVEPOINT)');
-  it.todo('PROPOSED D-Q4a: combined mode with the two report members — the advisory lock is still taken on the DIRECT DataSource per shift');
-  it.todo('PROPOSED D-Q4a: combined mode, no tenant context bound for a member query → zero rows (fail closed), never another workspace\'s rows');
+  // ── D-Q4a: WORKER_SHIFT_SCAN_MODE=combined (owner approval 2026-11-04, OD-1) ──────────────────────────────────────────
+  // The combined scan is driven exactly as main.ts wires it (CombinedShiftScan + the production member binding + the shared
+  // walk on the runtime DataSource + a WorkerRuntime), on a Redis stand-in (interval mode needs no Redis to find work).
+  // The shift members are compared with separate mode on every subject. The two report members are exercised separately
+  // below, narrowed to the fixture's organisation, because a global report walk would render every other suite's shifts.
+
+  /** Minimal in-memory Redis for WorkerRuntime's stats writes (or a dead client: Redis loss). */
+  function memoryRedis() {
+    const hash: Record<string, string> = {};
+    const chain: Record<string, unknown> = {};
+    chain.hset = (_k: string, a: Record<string, unknown> | string, b?: unknown) => {
+      Object.entries(typeof a === 'string' ? { [a]: b } : a).forEach(([k, v]) => (hash[k] = String(v)));
+      return chain;
+    };
+    chain.hincrby = (_k: string, f: string, by: number) => ((hash[f] = String(Number(hash[f] ?? 0) + by)), chain);
+    chain.expire = () => chain;
+    chain.exec = async () => [];
+    return { redis: { hset: async (_k: string, o: Record<string, unknown>) => (chain.hset as (k: string, o: unknown) => unknown)(_k, o), multi: () => chain } as unknown as Redis, hash };
+  }
+
+  function workerDeps(directDataSource: DataSource): WorkerJobDependencies {
+    return {
+      logger: { log: () => undefined, warn: () => undefined, error: () => undefined } as never,
+      runtimeDataSource: dataSource,
+      directDataSource,
+      tenantContext,
+      auditService,
+      notificationService,
+      environmentService: app.get(EnvironmentService),
+      attendanceQrService: app.get(AttendanceQrService),
+      qrImageService: app.get(QrImageService),
+      emailOutboxService: app.get(EmailOutboxService),
+      fileService: app.get(FileService),
+    } as unknown as WorkerJobDependencies;
+  }
+
+  const SHIFT_MEMBERS = ['shift-monitor', 'attendance-monitor'];
+
+  /** One combined scanner (one "replica"): its own runtime; `wrap` may decorate a member's discovery (fault injection). */
+  function combinedScanner(opts: { members?: string[]; redis?: Redis; direct?: DataSource; wrap?: (key: string, m: WalkMember['discover']) => WalkMember['discover']; narrowTo?: string } = {}) {
+    const mem = memoryRedis();
+    const runtime = new WorkerRuntime(opts.redis ?? mem.redis, { metricsLogMs: 0, statsWrite: 'fields' });
+    const members = combinedShiftScanMemberDefs().filter((d) => (opts.members ?? SHIFT_MEMBERS).includes(d.jobName));
+    const scan = new CombinedShiftScan({
+      members,
+      bind: () => {
+        const bound = bindCombinedShiftScanMembers(workerDeps(opts.direct ?? dataSource));
+        const out = new Map<string, { discover: WalkMember['discover']; process: (rows: unknown[]) => Promise<void> }>();
+        for (const [key, m] of bound) {
+          const discover = opts.wrap ? opts.wrap(key, m.discover) : m.discover;
+          // Report members only: narrow processing to the fixture organisation (the walk itself stays global).
+          const process = opts.narrowTo
+            ? (rows: unknown[]) => m.process(rows.filter((r) => (r as { organisation_id: string }).organisation_id === opts.narrowTo))
+            : m.process;
+          out.set(key, { discover, process });
+        }
+        return out;
+      },
+      walk: (walkMembers) => discoverMembersInWorkspaces(dataSource, tenantContext, walkMembers),
+      intervalOf: () => 300_000,
+      tickMs: 300_000,
+      runtime,
+    });
+    const tick = async () => {
+      const report = await scan.tick();
+      const outcomes = await Promise.all(report.started);
+      return { report, outcomes };
+    };
+    return { scan, runtime, stats: mem.hash, tick };
+  }
+
+  async function snapshot(s: Awaited<ReturnType<typeof seedAll>>) {
+    return Promise.all(Object.values(s).map(async (x) => ({ events: await eventsOf(x), status: await statusOf(x), notifications: await notificationCount(x) })));
+  }
+
+  it('D-Q4a equivalence, Order A: late-clock-in → COMBINED (shift monitor + attendance monitor) gives exactly the separate-mode keys, statuses, scopes and notifications', async () => {
+    const separate = await seedAll('dq4E1s');
+    await late();
+    await monitor();
+    await attendance();
+    const expected = await snapshot(separate);
+
+    const combinedFixture = await seedAll('dq4E1c');
+    await late();
+    const { outcomes, report } = await combinedScanner().tick();
+    expect(report.discovered).toEqual(SHIFT_MEMBERS);
+    expect(outcomes).toEqual(['succeeded', 'succeeded']);
+    expect(await snapshot(combinedFixture)).toEqual(expected);
+    // The pinned Order A outcome, explicitly.
+    expect(await eventsOf(combinedFixture.s3)).toEqual(['late-clock-in=completed@own-scope', 'no-show=completed@own-scope']);
+    expect(await eventsOf(combinedFixture.s4)).toEqual(['missing-clock-out=completed@own-scope']);
+    expect(await eventsOf(combinedFixture.s5)).toEqual(['late-clock-in=completed@own-scope']);
+  });
+
+  it('D-Q4a scan order (plan A1 / OD-2): late clock-in is NOT a member, so COMBINED → late-clock-in reproduces separate Order B (no-show only)', async () => {
+    const s = await seedAll('dq4E2');
+    await combinedScanner().tick();
+    await late();
+    expect(await eventsOf(s.s3)).toEqual(['no-show=completed@own-scope']);
+    expect(await eventsOf(s.s2)).toEqual(['late-clock-in=completed@own-scope']);
+    expect(await statusOf(s.s3)).toEqual({ assignment: 'no_show', attendance: null });
+  });
+
+  it('D-Q4a idempotent: a second combined pass, and a rollback to SEPARATE mode after it, create no new event and no new notification', async () => {
+    const s = await seedAll('dq4E3');
+    await late();
+    await combinedScanner().tick();
+    const before = await snapshot(s);
+    // Second combined tick (a fresh scanner: every member due again): same events, same notifications.
+    await combinedScanner().tick();
+    expect(await snapshot(s)).toEqual(before);
+    // Flag rollback (WORKER_SHIFT_SCAN_MODE=separate): the separate scans meet the same keys and do nothing new.
+    await monitor();
+    await attendance();
+    await late();
+    expect(await snapshot(s)).toEqual(before);
+  });
+
+  it('D-Q4a two replicas in parallel: each event key exactly once and every notification exactly once', async () => {
+    const reference = await seedAll('dq4E4r');
+    await late();
+    await combinedScanner().tick();
+    const expected = await snapshot(reference);
+
+    const s = await seedAll('dq4E4');
+    await late();
+    const [a, b] = [combinedScanner(), combinedScanner()];
+    await Promise.all([a.tick(), b.tick()]);
+    expect(await snapshot(s)).toEqual(expected);
+    for (const x of Object.values(s)) {
+      const keys = await withOrg(x.org, (m) =>
+        m.query<Array<{ event_key: string; n: number }>>(`SELECT event_key, count(*)::int AS n FROM core.worker_event WHERE entity_id::text = ANY($1::text[]) GROUP BY 1`, [[x.assignmentId, x.attendanceId].filter(Boolean)]),
+      );
+      for (const k of keys) expect(k.n).toBe(1);
+    }
+  });
+
+  it('D-Q4a SAVEPOINT: a member query that errors in one workspace fails only that member; the next member in the SAME transaction still runs', async () => {
+    const s = await seedAll('dq4E5');
+    const failIn = s.s1.org.manager.workspaceId;
+    const scanner = combinedScanner({
+      wrap: (key, discover) =>
+        key === 'shift-monitor'
+          ? async (m) => {
+              const [{ ws }] = await m.query<Array<{ ws: string | null }>>(`SELECT core.current_workspace()::text AS ws`);
+              if (ws === failIn) await m.query('SELECT 1/0'); // a real PostgreSQL error: aborts the transaction without the savepoint
+              return discover(m);
+            }
+          : discover,
+    });
+    const { report, outcomes } = await scanner.tick();
+    expect(report.failed).toEqual(['shift-monitor']);
+    expect(report.discovered).toEqual(['attendance-monitor']);
+    expect(outcomes).toEqual(['failed', 'succeeded']);
+    // attendance-monitor ran after the failed member, in the same workspace transaction: S4 is flagged.
+    expect(await eventsOf(s.s4)).toEqual(['missing-clock-out=completed@own-scope']);
+    expect(await statusOf(s.s4)).toEqual({ assignment: 'confirmed', attendance: 'missing_clock_out' });
+    // shift-monitor failed for the whole tick (as a failing separate scan would): nothing of it was processed anywhere.
+    expect(await eventsOf(s.s1)).toEqual([]);
+    expect(await eventsOf(s.s3)).toEqual([]);
+    expect(scanner.stats.shiftMonitorFailures).toBe('1');
+    expect(scanner.stats.lastShiftMonitorAt).toBeUndefined();
+    expect(scanner.stats.lastAttendanceMonitorAt).toBeDefined();
+    // Retried on its next due tick (here: a healthy scanner): the member recovers.
+    await combinedScanner().tick();
+    expect(await eventsOf(s.s3)).toEqual(['no-show=completed@own-scope']);
+  });
+
+  it('D-Q4a report members: per-shift advisory locks on the DIRECT DataSource; same reports as the separate scan', async () => {
+    const direct = new DataSource({ ...coreDataSourceOptions, name: `dq4-direct-${randomUUID().slice(0, 8)}`, extra: { ...(coreDataSourceOptions.extra as object), max: 2 } } as never);
+    await direct.initialize();
+    try {
+      const minutes = app.get(EnvironmentService).get('REPORT_AVAILABLE_BEFORE_MINUTES');
+      const separate = await seedAll('dq4E6s');
+      const sepOrg = separate.s1.org.manager.organisationId;
+      const sepResult = await runShiftReportSchedulerCycle(direct, tenantContext, app.get(AttendanceQrService), app.get(QrImageService), app.get(EmailOutboxService), app.get(FileService), minutes, {
+        organisationId: sepOrg,
+        audit: auditService,
+      });
+
+      const s = await seedAll('dq4E6c');
+      const org = s.s1.org.manager.organisationId;
+      const spy = jest.spyOn(advisoryLock, 'withAdvisoryLock');
+      try {
+        const { report, outcomes } = await combinedScanner({ members: ['shift-report-scheduler', 'final-timesheet'], direct, narrowTo: org }).tick();
+        expect(report.discovered).toEqual(['shift-report-scheduler', 'final-timesheet']);
+        expect(outcomes).toEqual(['succeeded', 'succeeded']);
+        const shiftReportLocks = spy.mock.calls.filter(([, name]) => String(name).startsWith('shift_report:'));
+        expect(shiftReportLocks.length).toBe(sepResult.generated + sepResult.failed + sepResult.skippedLocked);
+        for (const [ds] of spy.mock.calls) expect(ds).toBe(direct); // never the pooled runtime DataSource
+      } finally {
+        spy.mockRestore();
+      }
+      const reportsOf = async (fx: typeof s) =>
+        (await Promise.all(Object.values(fx).map((x) => withOrg(x.org, (m) => m.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [x.shiftId]))))).map((r) => r[0]?.status ?? null);
+      expect(await reportsOf(s)).toEqual(await reportsOf(separate));
+    } finally {
+      await direct.destroy();
+    }
+  });
+
+  it('D-Q4a isolation: no tenant context bound → every member discovery query returns zero rows or is refused, never rows', async () => {
+    await seedAll('dq4E7');
+    const bound = bindCombinedShiftScanMembers(workerDeps(dataSource));
+    for (const [key, member] of bound) {
+      const outcome = await dataSource
+        .transaction(async (m) => {
+          await m.query('SET TRANSACTION READ ONLY');
+          const rows = await member.discover(m);
+          // shift-monitor returns one discovery object per workspace: count the rows inside it.
+          return rows.flatMap((r) => ('assignments' in (r as object) ? [...(r as { assignments: unknown[] }).assignments, ...(r as { lifecycleCandidates: unknown[] }).lifecycleCandidates] : [r])).length;
+        })
+        .catch(() => 'refused' as const);
+      expect({ key, outcome: [0, 'refused'].includes(outcome) ? 'none' : outcome }).toEqual({ key, outcome: 'none' });
+    }
+  });
+
+  it('D-Q4a isolation: after a combined tick, organisation A cannot read organisation B\'s events, and every event carries its own scope', async () => {
+    const s = await seedAll('dq4E8');
+    await late();
+    await combinedScanner().tick();
+    const crossRead = await withOrg(s.s1.org, (m) => m.query(`SELECT count(*)::int AS n FROM core.worker_event WHERE entity_id::text = $1`, [s.s5.assignmentId]));
+    expect(crossRead[0].n).toBe(0);
+    for (const x of Object.values(s)) for (const e of await eventsOf(x)) expect(e).toMatch(/@own-scope$/);
+  });
+
+  it('D-Q4a Redis loss: with Redis unreachable the combined scan still finds and processes its work (stats writes are best-effort)', async () => {
+    const dead = new Redis('redis://127.0.0.1:1', { lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, retryStrategy: () => null });
+    dead.on('error', () => undefined);
+    try {
+      const s = await seedAll('dq4E9');
+      await late();
+      const { outcomes } = await combinedScanner({ redis: dead }).tick();
+      expect(outcomes).toEqual(['succeeded', 'succeeded']);
+      expect(await eventsOf(s.s3)).toEqual(['late-clock-in=completed@own-scope', 'no-show=completed@own-scope']);
+      expect(await eventsOf(s.s4)).toEqual(['missing-clock-out=completed@own-scope']);
+    } finally {
+      dead.disconnect();
+    }
+  });
 });

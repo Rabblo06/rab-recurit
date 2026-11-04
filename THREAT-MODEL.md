@@ -5033,3 +5033,40 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## Phase D-Q4a — combined shift scan behind `WORKER_SHIFT_SCAN_MODE` (branch phase-d/dq4a-combined-scan, not merged)
+
+No business record, rule, threshold, deadline, recipient or transition changes; no migration, role, grant, RLS policy
+or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §1, owner approval 2026-11-04 OD-1). Default `separate` is
+today's four scans, byte for byte (the refactor commit only moved each scan's discovery and processing into named
+functions; SQL template text unchanged). `combined` changes HOW the four 300-s scans (shift monitor, attendance monitor,
+shift report scheduler, final timesheet) find their work: ONE workspace walk per tick instead of four.
+
+- **Tenant isolation (unchanged primitives).** The walk (`discoverMembersInWorkspaces`) uses the same
+  `core.worker_list_workspaces` catalogue pages (ids only, READ ONLY) and, per workspace, ONE READ ONLY
+  `runInTenantContext` transaction with the same server-derived worker context (organisation + workspace bound with
+  `SET LOCAL`, `actorType: 'worker'`, no user, no role; FORCE RLS). Each member's own discovery query runs inside that
+  transaction under its own `SAVEPOINT` (a constant identifier, never data). The callbacks receive only the RLS-bound
+  manager. Every mutation is still one `runScopedForOrg` transaction per candidate inside the member's unchanged
+  processing; the report members still take their per-shift session advisory locks on the direct DataSource. Abuse
+  cases (real PostgreSQL, `dq4-shift-scan-equivalence.integration.spec.ts`): no tenant context bound → every member
+  discovery returns zero rows or is refused; organisation A cannot read organisation B's events after a combined tick;
+  every event carries its own organisation and workspace.
+- **Failure containment.** A member whose query fails in any workspace rolls back to its savepoint, its cycle fails
+  for that tick (`<loop>Failures` + 1, nothing of it processed — what a failing separate scan does) and the other
+  members in the same transaction still run. A workspace-level or catalogue failure fails every due member (fail closed;
+  no partial discovery is ever processed). A not-yet-routable workspace is skipped, as today.
+- **Timing (owner rule §12.1/5).** The tick is the greatest common divisor of the member intervals; combined mode
+  refuses to boot under 30 s (env validation and the Worker boot check). Each member runs only when its own interval
+  has passed, so none runs less often than in separate mode. Each member's processing is its own runtime cycle with
+  its own overlap guard and Health keys, so a slow member never delays another.
+- **Multi-replica.** Interval mode: each replica runs the combined scan, as each scan today; cross-replica safety is the
+  same worker_event UNIQUE keys, compare-and-sets and per-shift advisory locks (two concurrent combined scanners → each
+  key exactly once, tested). Lane A (`WORKER_SCHEDULER=bullmq`): one cluster scheduler and scan lock for the walk, plus
+  each member's own scan lock for its processing once the scheduler exists. **Residual:** the first combined job a
+  replica processes before its bullmq scheduler finishes starting runs its members without their member locks
+  (correctness still held by the keys/CAS/locks above; only duplicate work).
+- **Redis.** Interval mode needs no Redis to find or process work (tested with Redis unreachable); stats writes stay
+  best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the periodic reconcile (≤ 60 s).
+- **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
+  worker_event keys and do nothing twice (tested).

@@ -48,7 +48,8 @@ import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/d
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
-import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { assertCombinedShiftScanTick, isScanJobEnabled, resolveIntervalMs, resolveShiftScanMode, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { COMBINED_SHIFT_SCAN_JOB, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
 import { DispatchWakeListener } from './core/wake/dispatch-listener';
@@ -318,6 +319,17 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     refuseStartup(error);
   }
+  // Phase D-Q4a: WORKER_SHIFT_SCAN_MODE (default separate = the four shift-family scans exactly as before). Re-checked here,
+  // fail closed: an unknown value, or combined mode with a common tick under 30 s, refuses to start.
+  const shiftScanMode = (() => {
+    try {
+      const mode = resolveShiftScanMode({ get: (key) => environmentService.get(key) });
+      if (mode === 'combined') assertCombinedShiftScanTick(intervalOf(SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!));
+      return mode;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
 
   // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
   // any consumer exists — fail closed.
@@ -383,6 +395,24 @@ async function bootstrap(): Promise<void> {
         `batch=${dispatchConfig.claimBatch} reconcile=${dispatchConfig.reconcileSeconds}s` +
         (dispatchConfig.dispatchMode === 'event' ? ` backstop=${dispatchConfig.backstopSeconds}s` : ''),
     );
+  }
+
+  // Phase D-Q4a: combined mode only. The four members are not registered (isScanJobEnabled); `shift-scan-combined` is,
+  // and runs the shared walk + each member's own processing as its own runtime cycle. Lane A: each member's processing
+  // also takes that member's own scan lock once the bullmq scheduler exists. separate (default): nothing installed here.
+  if (shiftScanMode === 'combined') {
+    const combinedDef = SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!;
+    const combined = createCombinedShiftScan(() => appContext.get(WorkerDependencies).get(), {
+      intervalOf,
+      tickMs: intervalOf(combinedDef),
+      runtime,
+      memberLock: (schedulerId) => {
+        const lock = scheduler?.scanLock;
+        return lock ? (work) => lock.run(schedulerId, work) : undefined;
+      },
+    });
+    scanRegistry = withCombinedShiftScan(scanRegistry, combined);
+    logger.log(`shift scans: WORKER_SHIFT_SCAN_MODE=combined tick=${intervalOf(combinedDef) / 1000}s members=shift-monitor,attendance-monitor,shift-report-scheduler,final-timesheet`);
   }
 
   // Heartbeat: unchanged in both modes (the liveness signal Admin Health and invitation sends read).
