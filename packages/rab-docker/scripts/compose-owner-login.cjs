@@ -301,6 +301,9 @@ function checkModel(model, combo) {
   if (worker.user !== '1000:1000') p(`rab-worker: user is "${worker.user ?? ''}", expected 1000:1000`);
   if ((worker.command ?? []).join(' ') !== 'node packages/rab-worker/dist/main.js') p('rab-worker: command is not `node packages/rab-worker/dist/main.js` (no root launcher, no per-child credentials)');
   if (worker.working_dir !== '/app') p('rab-worker: working_dir is not /app');
+  // The Worker's watchdog SIGKILLs itself when its event loop stalls; the kernel ignores that signal for PID 1, so the
+  // Worker refuses to start as PID 1. Docker's init (tini) must be PID 1 whatever the image entrypoint is.
+  if (worker.init !== true) p('rab-worker: init: true is missing (the Worker refuses to run as PID 1; its watchdog SIGKILL needs a real init)');
   const tmpfs = (worker.tmpfs ?? []).map(String);
   for (const dir of ['/tmp/crewflow-jobs', '/run/crewflow-health/jobs']) if (!tmpfs.some((t) => t === dir || t.startsWith(`${dir}:`))) p(`rab-worker: tmpfs ${dir} is missing`);
   if (!tmpfs.every((t) => /uid=1000/.test(t) && /gid=1000/.test(t))) p('rab-worker: a tmpfs is not owned by 1000:1000');
