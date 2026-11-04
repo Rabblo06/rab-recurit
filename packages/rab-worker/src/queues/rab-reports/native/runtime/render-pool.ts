@@ -76,14 +76,15 @@ export const DEFAULT_DOCUMENTS_MODULE = join(
 );
 
 /**
- * `PDF_NATIVE_CONCURRENCY`: unset → 2; exactly one of "1".."4" → that size; anything else (empty, spaces, "0", "5",
- * "2.0", "two") throws. The Worker's EnvironmentVariables validation applies the same rule at boot.
+ * `PDF_NATIVE_CONCURRENCY`: unset or empty → 2; exactly one of "1".."4" → that size; anything else (spaces, "0", "5",
+ * "2.0", "two") throws. The same rule as the Worker's boot validation (env.validation.ts), which treats an empty value
+ * (`KEY=` in a .env file) as unset for every variable and refuses the rest through EnvironmentVariables.
  */
 export function pdfNativeConcurrency(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
   const raw = env.PDF_NATIVE_CONCURRENCY;
-  if (raw === undefined) return PDF_NATIVE_POOL_SIZE_DEFAULT;
+  if (raw === undefined || raw === '') return PDF_NATIVE_POOL_SIZE_DEFAULT;
   if (/^[1-4]$/.test(raw)) return Number(raw);
   throw new Error(
     `PDF_NATIVE_CONCURRENCY must be an integer from 1 to ${PDF_NATIVE_POOL_SIZE_MAX}`,
@@ -91,15 +92,16 @@ export function pdfNativeConcurrency(
 }
 
 /**
- * `PDF_NATIVE_PREWARM`: threads started at Worker boot. Unset → min(2, pool size); exactly "0".."4" → that number
- * ("0" = no pre-warm); more than the pool size, or anything else, throws.
+ * `PDF_NATIVE_PREWARM`: threads started at Worker boot. Unset or empty → min(2, pool size), as boot validation treats an
+ * empty value as unset; exactly "0".."4" → that number ("0" = no pre-warm); more than the pool size, or anything else
+ * (spaces, "1.0", "two"), throws.
  */
 export function pdfNativePrewarm(
   env: NodeJS.ProcessEnv = process.env,
   size = pdfNativeConcurrency(env),
 ): number {
   const raw = env.PDF_NATIVE_PREWARM;
-  if (raw === undefined) return Math.min(PDF_NATIVE_PREWARM_DEFAULT, size);
+  if (raw === undefined || raw === '') return Math.min(PDF_NATIVE_PREWARM_DEFAULT, size);
   if (/^[0-4]$/.test(raw) && Number(raw) <= size) return Number(raw);
   throw new Error(
     `PDF_NATIVE_PREWARM must be an integer from 0 to PDF_NATIVE_CONCURRENCY (${size})`,

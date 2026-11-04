@@ -259,13 +259,15 @@ async function until(cond: () => boolean, ms = 20_000): Promise<void> {
 // ─── configuration ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 describe('pool configuration (fail closed)', () => {
-  it('PDF_NATIVE_CONCURRENCY: unset → 2, "1".."4" → n, anything else refuses', () => {
+  it('PDF_NATIVE_CONCURRENCY: unset or empty → 2, "1".."4" → n, anything else refuses', () => {
     expect(pdfNativeConcurrency({})).toBe(PDF_NATIVE_POOL_SIZE_DEFAULT);
+    // Empty means unset, as in the Worker's boot validation (env.validation.ts drops '' before validating).
+    expect(pdfNativeConcurrency({ PDF_NATIVE_CONCURRENCY: '' })).toBe(PDF_NATIVE_POOL_SIZE_DEFAULT);
     for (const n of [1, 2, 3, 4])
       expect(pdfNativeConcurrency({ PDF_NATIVE_CONCURRENCY: String(n) })).toBe(
         n,
       );
-    for (const bad of ['', ' 2', '2 ', '0', '5', '2.0', 'two', '-1', '02']) {
+    for (const bad of [' ', ' 2', '2 ', '0', '5', '2.0', 'two', '-1', '02']) {
       expect(() =>
         pdfNativeConcurrency({ PDF_NATIVE_CONCURRENCY: bad }),
       ).toThrow('PDF_NATIVE_CONCURRENCY');
@@ -614,12 +616,16 @@ describe('right-to-left order (F2): what react-pdf prints, read back from the co
 // ─── pre-warm and health (F3) ─────────────────────────────────────────────────────────────────────────────────────────
 
 describe('pre-warm (F3)', () => {
-  it('PDF_NATIVE_PREWARM: unset → min(2, size); "0".."4" up to the pool size; anything else refuses', () => {
+  it('PDF_NATIVE_PREWARM: unset or empty → min(2, size); "0".."4" up to the pool size; anything else refuses', () => {
     expect(pdfNativePrewarm({})).toBe(2);
+    // Empty means unset (boot validation's rule), for this variable and for the pool size it is bounded by.
+    expect(pdfNativePrewarm({ PDF_NATIVE_PREWARM: '' })).toBe(2);
+    expect(pdfNativePrewarm({ PDF_NATIVE_PREWARM: '', PDF_NATIVE_CONCURRENCY: '1' })).toBe(1);
+    expect(pdfNativePrewarm({ PDF_NATIVE_PREWARM: '2', PDF_NATIVE_CONCURRENCY: '' })).toBe(2);
     expect(pdfNativePrewarm({ PDF_NATIVE_CONCURRENCY: '1' })).toBe(1);
     expect(pdfNativePrewarm({ PDF_NATIVE_PREWARM: '0' })).toBe(0);
     expect(pdfNativePrewarm({ PDF_NATIVE_PREWARM: '1' })).toBe(1);
-    for (const bad of ['', ' 1', '3', '-1', 'two', '1.0'])
+    for (const bad of [' ', ' 1', '3', '-1', 'two', '1.0'])
       expect(() => pdfNativePrewarm({ PDF_NATIVE_PREWARM: bad })).toThrow(
         'PDF_NATIVE_PREWARM',
       );
