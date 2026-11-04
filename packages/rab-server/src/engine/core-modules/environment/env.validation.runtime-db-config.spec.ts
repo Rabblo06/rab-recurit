@@ -1,4 +1,5 @@
 import { validate } from './env.validation';
+import { resolveRuntimeDatabase, RuntimeDbError } from '../../../database/typeorm/core/runtime-database-guard';
 
 /**
  * Owner-login architecture: env.validation runs the shared runtime-db-config parser (database/owner-login/runtime-db-config.ts)
@@ -48,5 +49,27 @@ describe('env validation: owner-login database start-up settings', () => {
     expect(() => validate({ ...base, CREWFLOW_DB_MODE: 'twenty' })).toThrow(/no database mode switch any more.*Remove CREWFLOW_DB_MODE/);
     expect(() => validate({ ...base, CREWFLOW_DB_MODE: 'separated' })).toThrow(/Remove CREWFLOW_DB_MODE/);
     expect(() => validate({ ...base, DISABLE_DB_MIGRATIONS: 'true' })).toThrow(/Twenty CRM's switch.*CREWFLOW_MIGRATE_ON_START/);
+  });
+
+  it('DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS: accepted by env validation (one-off CLI commands such as bootstrap-admin need them per invocation; database-target.ts decides) but refused by the API and Worker runtime guard', () => {
+    // CLI side: the shared environment validation never refuses command authority.
+    expect(() => validate({ ...base, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' })).not.toThrow();
+    expect(() => validate({ ...base, DB_TARGET: 'local' })).not.toThrow();
+    // Runtime side: the long-running API and Worker refuse both, by name.
+    for (const processName of ['api', 'worker'] as const) {
+      for (const [name, value] of [['DB_TARGET', 'production'], ['ALLOW_PRODUCTION_DB_COMMANDS', 'true']] as const) {
+        expect(() => resolveRuntimeDatabase({ processName, env: { NODE_ENV: 'development', PG_DATABASE_URL: base.PG_DATABASE_URL, [name]: value }, dotenvValues: {} })).toThrow(RuntimeDbError);
+        expect(() => resolveRuntimeDatabase({ processName, env: { NODE_ENV: 'development', PG_DATABASE_URL: base.PG_DATABASE_URL, [name]: value }, dotenvValues: {} })).toThrow(
+          new RegExp(`^${name} is present in the ${processName} process's environment`),
+        );
+      }
+    }
+  });
+
+  it('migration test seams: accepted under NODE_ENV=test, refused otherwise (actionable)', () => {
+    expect(() => validate({ ...base, NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' })).not.toThrow();
+    expect(() => validate({ ...base, NODE_ENV: 'development', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '1786700000000' })).toThrow(
+      /CREWFLOW_MIGRATION_TEST_STOP_BEFORE is a migration test seam: it is allowed only with NODE_ENV=test/,
+    );
   });
 });

@@ -40,6 +40,12 @@ export interface ReconnectingPgClientOptions {
   now?: () => number;
   /** Test seam: builds the underlying client (defaults to `new Client(config)`). */
   createClient?: (config: ClientConfig) => Client;
+  /**
+   * Runs on every NEW connection, before it is handed out (owner-login architecture: the in-process provisioner's session
+   * identity, see workspace-provisioning.loops.ts). A failure counts exactly like a failed connect: the client is closed,
+   * the backoff applies and the error is rethrown — a connection whose setup failed is never used.
+   */
+  onConnect?: (client: Client) => Promise<void>;
 }
 
 export class ReconnectingPgClient {
@@ -101,6 +107,7 @@ export class ReconnectingPgClient {
     });
     try {
       await client.connect();
+      if (this.options.onConnect) await this.options.onConnect(client);
     } catch (error) {
       this.failures += 1;
       const backoff = Math.min(this.maxBackoffMs, this.initialBackoffMs * 2 ** Math.min(this.failures - 1, 16));
