@@ -76,7 +76,11 @@ export function fixedColumnProblems(doc: ReportDocument, x: PdfExtraction, name:
     .map((f) => `${f.check}: ${f.detail}`);
   if (!compact(x.text).includes(compact(heading))) problems.push(`the ${heading} column is not printed`);
   const e = clippingEvidence(doc, x, name, heading);
-  if (e.tokenCharsPrinted !== 1000) problems.push(`${e.tokenCharsPrinted} of the 1,000 token characters printed in order after "Token:"`);
+  // Read in page text order AND block by block: once the notes column keeps its width (the fix), the 1,000-character
+  // token wraps over ~13 lines of the left column, and the page's reading order interleaves the right-hand column's
+  // lines (sign-off, "Reviewed by …") between them. Inside the notes paragraph's own block the token is contiguous.
+  const printed = Math.max(e.tokenCharsPrinted, tokenCharsInBlocks(doc, x));
+  if (printed !== 1000) problems.push(`${printed} of the 1,000 token characters printed in order after "Token:"`);
   const outside = x.outOfPageRuns.reduce((a, b) => a + b, 0);
   if (outside) problems.push(`${outside} text run(s) drawn outside the page`);
   return problems;
@@ -98,6 +102,21 @@ export interface ClippingEvidence {
   /** How many characters of the 1,000-character token are printed after "Token:". */
   tokenCharsPrinted: number;
   droppedHeadingPrinted: boolean;
+}
+
+/** How many token characters follow "Token:" in order inside one block (paragraph) of the render, at most. */
+function tokenCharsInBlocks(doc: ReportDocument, x: PdfExtraction): number {
+  const token = doc.data && 'notes' in doc.data ? compact(String(doc.data.notes ?? '')).replace(/^Token:/, '') : '';
+  let best = 0;
+  for (const block of x.pages.flatMap((p) => p.blocks)) {
+    const text = compact(block);
+    const at = text.indexOf('Token:');
+    if (at < 0) continue;
+    let printed = 0;
+    while (printed < token.length && text[at + 6 + printed] === token[printed]) printed++;
+    best = Math.max(best, printed);
+  }
+  return best;
 }
 
 /** What one Chromium render of an F-PDF-1 fixture actually prints, in the shape of `ClippingExpectation`. */
