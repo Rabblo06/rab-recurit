@@ -8,6 +8,8 @@ import {
   COLOR,
   DocumentHeader,
   h,
+  mayExceedUnsplitHeight,
+  PAGE_MARGIN,
   PageFooter,
   pageStyle,
   px,
@@ -51,6 +53,18 @@ function rowCells(r: FinalTimesheetRowView): ReactNode[] {
   ];
 }
 
+/** A4 landscape: each bottom column's width and the page's content height, in pt (layout constants of this file). */
+const BOTTOM_COLUMN_PT = (841.89 - PAGE_MARGIN.left - PAGE_MARGIN.right - px(40)) / 2;
+const PAGE_CONTENT_PT = 595.28 - PAGE_MARGIN.top - PAGE_MARGIN.bottom;
+
+/** May the bottom section (notes / sign-off) be taller than what can stay unsplit on one page? See BottomSection. */
+function bottomMayBreak(vm: FinalTimesheetViewModel): boolean {
+  const notes = [vm.notes.text, vm.counts];
+  const signOff = [...vm.signOff.map((l) => l.text), vm.totalWorked];
+  const max = PAGE_CONTENT_PT - px(22) - px(30); // minus the section's top margin and heading
+  return [notes, signOff].some((col) => mayExceedUnsplitHeight(col, BOTTOM_COLUMN_PT, px(11), max));
+}
+
 export function FinalTimesheetDocument(props: { vm: FinalTimesheetViewModel; creationDate: Date }): ReactElement {
   const vm = props.vm;
   if (vm.columns.length !== COLUMN_WIDTHS.length) throw new Error('native PDF renderer: final timesheet column count changed');
@@ -74,6 +88,7 @@ export function FinalTimesheetDocument(props: { vm: FinalTimesheetViewModel; cre
         h(Text, { key: 'legend', style: { color: COLOR.muted, fontSize: px(9.5), marginTop: px(8) } }, vm.scaleLegend),
         h(BottomSection, {
           key: 'bottom',
+          mayBreak: bottomMayBreak(vm),
           children: [
             h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [vm.notes, { text: vm.counts, muted: true }] }),
             h(SignOffBlock, { heading: vm.signOffHeading, paragraphs: [...vm.signOff, { text: vm.totalWorked, muted: true }] }),

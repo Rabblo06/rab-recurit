@@ -16,7 +16,7 @@ import { inspectPdf as inspectRaw } from '../../../__tests__/helpers/pdf-inspect
 
 /** pdf-inspect, reading pdfkit's indirect page /Resources too (see inlinePageResources). */
 const inspectPdf = (pdf: Buffer) => inspectRaw(inlinePageResources(pdf));
-import { DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
+import { collapseWhitespace, DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
 import { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './fonts';
 import { renderNativePdf } from './render-native';
 import { shutdownRenderPool } from './runtime/render-pool';
@@ -250,6 +250,41 @@ describe('F-PDF-1: an unbroken 1,000-character token in the notes stays inside t
     expect(all).toContain(strip(vm.signOffHeading));
     for (const line of vm.signOff) expect(all).toContain(strip(line.text));
     expect(all.split(strip(vm.totalWorked)).length - 1).toBe(1);
+  });
+});
+
+/**
+ * I-9 long-text (PDF equality harness): a note taller than a page. A react-pdf node that cannot wrap and is taller than
+ * the page is drawn unsplit and loses everything past the page (MEASURED: the note, both counts and every page footer
+ * were missing). The bottom section now starts a new page and continues across pages, as Chromium does with its
+ * page-break-inside: avoid block. Every paragraph, the counts and "Page n of N" on every page must be printed.
+ */
+describe('a note taller than a page is printed in full (I-9 long-text)', () => {
+  it('every paragraph, the corrected / missing counts, the sign-off and "Page n of N" on every page', async () => {
+    const notes = Array.from({ length: 56 }, (_, k) => `Paragraph ${k + 1}: arrive via the loading bay, sign the visitor book, collect lanyards from security, and brief the team on allergens, fire exits and the running order.`).join('\n\n');
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes };
+    const vm = buildFinalTimesheetViewModel(data);
+    const doc = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data }));
+    const all = strip(doc.pageTexts.join(''));
+    // Page-break-straddling paragraphs: drop each page's footer ("<left> <generated> · Page n of N") before joining.
+    // The NOTES column, in order: drop each page's footer and the MANAGER SIGN-OFF column (pdfkit writes one column after
+    // the other, so on the page where the section starts the sign-off text sits between two halves of a paragraph).
+    const other = [strip(vm.footer.left), strip(vm.signOffHeading), ...vm.signOff.map((l) => strip(l.text)), strip(vm.totalWorked)];
+    const body = doc.pageTexts
+      .map((t, i) => [...other, `${strip(vm.footer.generated)}·Page${i + 1}of${doc.pageCount}`].reduce((s, x) => s.split(x).join(''), strip(t)))
+      .join('');
+    for (let k = 1; k <= 56; k++) expect(body).toContain(strip(`Paragraph ${k}: arrive via the loading bay`));
+    expect(all).toContain(strip(vm.counts));
+    expect(all.split(strip(vm.totalWorked)).length - 1).toBe(1);
+    expect(doc.pageCount).toBeGreaterThan(1);
+    doc.pageTexts.forEach((t, i) => expect(strip(t)).toContain(`·Page${i + 1}of${doc.pageCount}`));
+  });
+});
+
+describe('whitespace is laid out like the Chromium templates (HTML white-space: normal)', () => {
+  it('collapses runs of ASCII whitespace, keeps NBSP', () => {
+    expect(collapseWhitespace('a\n\nb \t c\r\nd\fe')).toBe('a b c d e');
+    expect(collapseWhitespace('x\u00a0\u00a0y')).toBe('x\u00a0\u00a0y');
   });
 });
 
