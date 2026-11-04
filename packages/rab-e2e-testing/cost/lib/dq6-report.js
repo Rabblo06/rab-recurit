@@ -112,6 +112,12 @@ const METRICS = [
 // record (fail closed: a window not shown to be unstarved is not reported). Swap counters are VM-wide, so swapping by any
 // other container counts too; that is contention as well.
 const MAX_SWAPIN_MIB = Number(process.env.DQ6_MAX_SWAPIN_MIB || 16);
+// DQ6_SWAPIN_SCOPE=vm (default, the rule fixed before the first run): the VM-wide swap-in decides. =harness: a POST-HOC
+// view, added after the first windows showed VM-wide swap-in of 57-186 MiB per window while the harness's own containers
+// faulted in under 8 MiB: the same threshold applied to the harness containers' own swap-ins only (no attribution record
+// = excluded). It writes dq6-results.harness-rule.{md,json} and is labelled as needing the owner's approval.
+const SWAPIN_SCOPE = process.env.DQ6_SWAPIN_SCOPE || 'vm';
+if (!['vm', 'harness'].includes(SWAPIN_SCOPE)) throw new Error('DQ6_SWAPIN_SCOPE must be vm or harness');
 const MIN_AVAIL_MIB = Number(process.env.DQ6_MIN_AVAIL_MIB || 384);
 const PAGE_MIB = 4 / 1024;
 const vm = new Map(); // label -> { start, end }
@@ -135,7 +141,9 @@ const memVerdict = (label) => {
   // Attribution only: swap-ins by the harness's own containers (a recreated container restarts its counter: shown as n/a).
   const hr = v.start.harnessRefault != null && v.end.harnessRefault != null && v.end.harnessRefault >= v.start.harnessRefault ? +((v.end.harnessRefault - v.start.harnessRefault) * PAGE_MIB).toFixed(1) : null;
   const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1), harnessRefaultMiB: hr };
-  const why = swapInMiB > MAX_SWAPIN_MIB ? `swapped in ${swapInMiB.toFixed(1)} MiB (> ${MAX_SWAPIN_MIB})` : minAvail < MIN_AVAIL_MIB ? `MemAvailable ${minAvail} MiB at an edge (< ${MIN_AVAIL_MIB})` : null;
+  const counted = SWAPIN_SCOPE === 'vm' ? swapInMiB : hr;
+  if (counted == null) return { row, why: 'no harness swap-in attribution for this window (post-hoc rule)' };
+  const why = counted > MAX_SWAPIN_MIB ? `${SWAPIN_SCOPE === 'vm' ? '' : 'harness containers '}swapped in ${counted.toFixed(1)} MiB (> ${MAX_SWAPIN_MIB})` : minAvail < MIN_AVAIL_MIB ? `MemAvailable ${minAvail} MiB at an edge (< ${MIN_AVAIL_MIB})` : null;
   return { row, why };
 };
 for (const r of list) {
@@ -153,7 +161,8 @@ for (const r of list) {
     }
   }
 }
-if (excludedMem.length) md.push(`**Windows EXCLUDED for memory contention** (Docker VM; swap-in > ${MAX_SWAPIN_MIB} MiB, MemAvailable < ${MIN_AVAIL_MIB} MiB at an edge, or no record):`, '', ...excludedMem.map((x) => `- ${x}`), '');
+if (SWAPIN_SCOPE === 'harness') md.push('**POST-HOC MEMORY RULE (NEEDS OWNER APPROVAL).** Swap-in is counted for the harness containers only (costaudit-pg/worker/redis/api/minio, cgroup workingset_refault_anon), not VM-wide. The rule fixed before the run (VM-wide) is in dq6-results.md; use these tables only if the owner accepts this rule.', '');
+if (excludedMem.length) md.push(`**Windows EXCLUDED for memory contention** (${SWAPIN_SCOPE === 'vm' ? 'Docker VM' : 'harness containers'}; swap-in > ${MAX_SWAPIN_MIB} MiB, MemAvailable < ${MIN_AVAIL_MIB} MiB at an edge, or no record):`, '', ...excludedMem.map((x) => `- ${x}`), '');
 md.push('## Docker VM memory per window (MEASURED, VM-wide)', '');
 md.push('| Window | MemAvailable start / end MiB | SwapFree at end MiB | Swapped in / out MiB (VM) | of which faulted in by harness containers MiB | Verdict |');
 md.push('|---|---|---|---|---|---|');
@@ -252,6 +261,8 @@ if (errs.size) {
 json.vmMemory = vmRows;
 json.excludedForMemory = excludedMem;
 for (const r of list) json.runs.push({ arm: r.arm, rep: r.rep, memExcluded: r.memExcluded || null, loadedInvalid: r.loadedInvalid || null, windows: Object.fromEntries(Object.entries(r.windows).map(([k, s]) => [k, windowMetrics(s)])), scenarios: r.scen });
-fs.writeFileSync(path.join(OUT, 'dq6-results.md'), md.join('\n'));
-fs.writeFileSync(path.join(OUT, 'dq6-results.json'), JSON.stringify(json, null, 2));
+json.memoryRule = { swapInScope: SWAPIN_SCOPE, maxSwapInMiB: MAX_SWAPIN_MIB, minAvailMiB: MIN_AVAIL_MIB, postHoc: SWAPIN_SCOPE !== 'vm' };
+const base = SWAPIN_SCOPE === 'vm' ? 'dq6-results' : 'dq6-results.harness-rule';
+fs.writeFileSync(path.join(OUT, `${base}.md`), md.join('\n'));
+fs.writeFileSync(path.join(OUT, `${base}.json`), JSON.stringify(json, null, 2));
 console.log(md.join('\n'));
