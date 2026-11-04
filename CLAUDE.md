@@ -268,6 +268,8 @@ From M1 onward (the moment auth + tenancy exist), every PR touching
 authorisation, tenancy, or a state machine needs the matching **abuse-case**
 test from `rab-workforce-architecture.md` §1.2 — the denial, not just the
 happy path. Every new tenant-scoped table needs an integration test that runs
-a query with no tenant context bound and asserts zero rows back.
+a query with no tenant context bound **as the owner login `crewflow_owner`**
+and asserts zero rows back. Run as the owner login, this proves FORCE; run as
+a non-owner, it proves nothing.
 `THREAT-MODEL.md` gets a new entry, in the same PR, for any feature touching
 auth, money, or another person's data — not written after the fact.
