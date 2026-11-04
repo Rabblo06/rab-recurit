@@ -239,6 +239,28 @@ export function createCombinedShiftScan(
   });
 }
 
+/** The Lane A scan lock surface `combinedMemberLock` needs (ScanLock.run). */
+export interface MemberScanLock {
+  run<T>(schedulerId: string, work: () => Promise<T>): Promise<{ acquired: true; value: T } | { acquired: false }>;
+}
+
+/**
+ * main.ts's `memberLock` for the combined scan, by scheduler mode:
+ *  - `interval`: no member lock (undefined), exactly as each separate interval scan runs today.
+ *  - `bullmq` (Lane A): each member's processing runs under ITS OWN scheduler id's scan lock, read at tick time. If the
+ *    scan lock is not available yet (a combined job taken before `startBullmqScheduler` resolved), the member is
+ *    `skipped-locked` for that tick — fail closed, never processed unlocked — and runs on its next due tick. main.ts also
+ *    receives the lock through `onScanLock` before any scan Worker exists, so this branch is a defence, not a path.
+ */
+export function combinedMemberLock(schedulerMode: 'interval' | 'bullmq', currentLock: () => MemberScanLock | null | undefined): (schedulerId: string) => CycleLockWrapper | undefined {
+  if (schedulerMode !== 'bullmq') return () => undefined;
+  return (schedulerId) => {
+    const lock = currentLock();
+    if (!lock) return async () => ({ acquired: false });
+    return (work) => lock.run(schedulerId, work);
+  };
+}
+
 /**
  * Wraps the handler registry (as withGlobalDispatch does) so `shift-scan-combined` runs the combined scan. Every other
  * scan's handler is unchanged. Installed by main.ts only in combined mode.
