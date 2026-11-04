@@ -14,11 +14,11 @@
  * make one of the two wait.
  *
  * Waiting is bounded: `pg_try_advisory_lock` first; when another run holds it, the holder's pid and application_name are
- * logged, then a blocking `pg_advisory_lock` runs under `lock_timeout` = the wait bound (default 600 s, CREWFLOW_MIGRATION_
- * LOCK_WAIT_SECONDS 1..840, always below the migration statement_timeout of 900 s), with a progress line every 15 s. A wait
- * that runs out fails the run with nothing applied. After acquisition the session's previous lock_timeout is restored
- * exactly, so every migration runs with the lock_timeout it always had (several manage their own; 1786676100000 depends on
- * CONCURRENTLY builds never being cut short by one).
+ * logged, then the waiter RE-TRIES `pg_try_advisory_lock` every LOCK_POLL_INTERVAL_MS until the wait bound (default 600 s,
+ * CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS 1..840), with a progress line every 15 s. A wait that runs out fails the run with
+ * nothing applied. It never blocks in `pg_advisory_lock`: a blocked waiter holds an open transaction, which the holder's
+ * CREATE INDEX CONCURRENTLY (1786676100000) waits for — a deadlock (owner-login PR 3, found by the three-replica run).
+ * The session's lock_timeout is never changed, so every migration runs with the lock_timeout it always had.
  */
 import { DataSource, QueryRunner } from 'typeorm';
 
@@ -97,25 +97,31 @@ export async function acquireMigrationLock(
   }, PROGRESS_INTERVAL_MS);
   progress.unref();
 
-  const [{ previous }] = (await queryRunner.query(`SELECT pg_catalog.current_setting('lock_timeout') AS "previous"`)) as Array<{ previous: string }>;
+  // POLL, never block: a waiter blocked in pg_advisory_lock sits in an OPEN transaction, and the holder's
+  // CREATE INDEX CONCURRENTLY (1786676100000) waits for every open transaction of the database to finish — a deadlock
+  // (found by the PG16 three-replica run, 2026-11-04). Each pg_try_advisory_lock is its own instant transaction, so the
+  // holder never waits for a waiter. The session's lock_timeout is never touched.
   try {
-    await queryRunner.query(`SELECT pg_catalog.set_config('lock_timeout', $1, false)`, [`${waitSeconds * 1000}ms`]);
-    await queryRunner.query('SELECT pg_catalog.pg_advisory_lock($1::bigint)', [key.toString()]);
-  } catch (error) {
-    if ((error as { code?: string }).code === '55P03') {
-      throw new MigrationLockError(
-        `gave up waiting for the migration lock after ${waitSeconds} s (still held by ${describeHolders(await migrationLockHolders(dataSource, key).catch(() => []))}). ` +
-          'Nothing was applied. Let the other run finish, then run again.',
-      );
+    const deadline = started + waitSeconds * 1000;
+    for (;;) {
+      await sleep(Math.min(LOCK_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+      const [row] = (await queryRunner.query('SELECT pg_catalog.pg_try_advisory_lock($1::bigint) AS "ok"', [key.toString()])) as Array<{ ok: boolean }>;
+      if (row?.ok) return { waitedMs: Date.now() - started };
+      if (Date.now() >= deadline) {
+        throw new MigrationLockError(
+          `gave up waiting for the migration lock after ${waitSeconds} s (still held by ${describeHolders(await migrationLockHolders(dataSource, key).catch(() => []))}). ` +
+            'Nothing was applied. Let the other run finish, then run again.',
+        );
+      }
     }
-    throw error;
   } finally {
     clearInterval(progress);
   }
-  // Restore the session's own lock_timeout exactly: the migrations must run as they always have.
-  await queryRunner.query(`SELECT pg_catalog.set_config('lock_timeout', $1, false)`, [previous]);
-  return { waitedMs: Date.now() - started };
 }
+
+/** How often a waiting run re-tries the lock (each try is an instant, non-blocking transaction). */
+export const LOCK_POLL_INTERVAL_MS = 500;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Best effort: the lock also ends with the session, which the caller closes right after. */
 export async function releaseMigrationLock(queryRunner: QueryRunner, key: bigint = MIGRATION_LOCK_KEY): Promise<boolean> {

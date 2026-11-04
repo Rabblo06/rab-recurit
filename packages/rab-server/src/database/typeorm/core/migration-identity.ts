@@ -13,6 +13,13 @@
  * So the runner refuses up front, with an explanation, instead of failing (or silently half-succeeding) mid-chain.
  * Bootstrap identity = a superuser (local/disposable), or a non-superuser that can act as both `rab_secure_owner` and
  * `crewflow` (for example a managed-Postgres owner role granted those memberships for the migration job only).
+ *
+ * Owner-login architecture (owner decision 2026-11-04, PR 3): the migration identity is EXACTLY the owner login
+ * `crewflow_owner` (not SUPERUSER, not BYPASSRLS, nothing privileged reachable): scripts/migrate/owner-login/
+ * owner-login-identity.ts, applied by the locked runner whenever the session login is crewflow_owner. The CF-41 rule above
+ * is the LEGACY path (superuser on a disposable/local cluster, or the restricted migrator) — RETAINED FOR MIGRATION
+ * COMPATIBILITY until PR #9 (REMOVE AFTER VERIFIED REPLACEMENT), because existing CI, compose and production flows still
+ * build and migrate through it.
  */
 export const ROLE_SPLIT_MIGRATION = 'CrewflowSingleCredentialRoleArchitecture1786682000000';
 

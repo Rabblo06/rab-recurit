@@ -28,6 +28,15 @@ describe('twenty-expected-differences.json (behaviour-change catalogue)', () => 
     }
   });
 
+  it('every difference is reconciled with the BC catalogue (owner-login-behaviour-catalogue.ts): a bc list, empty only when listed in reconciliation.missingFromBc or a doc fix', () => {
+    const missing = new Set((catalogue as unknown as { reconciliation: { missingFromBc: Array<{ id: string }> } }).reconciliation.missingFromBc.map((m) => m.id));
+    for (const d of diffs as Array<Diff & { bc?: string[] }>) {
+      expect(Array.isArray(d.bc)).toBe(true);
+      if (d.bc!.length === 0) expect(missing.has(d.id) || d.acceptance.startsWith('doc fix')).toBe(true);
+      for (const id of d.bc!) expect(id).toMatch(/^BC-\d{2}$/);
+    }
+  });
+
   it('the five protections the owner did NOT list in §2 are present and marked NEEDS OWNER APPROVAL (never silently accepted)', () => {
     const needs = diffs.filter((d) => d.acceptance.startsWith('NEEDS OWNER APPROVAL')).map((d) => d.acceptance);
     for (const item of ['DBA-01', 'deployment identity', 'logical backup', 'column-level secret grants', 'worker_due_work']) {
