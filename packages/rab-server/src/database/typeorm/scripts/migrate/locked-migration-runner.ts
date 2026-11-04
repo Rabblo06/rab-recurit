@@ -69,6 +69,7 @@ import {
 import { assertProductionMigrationApproval } from '../../core/production-migration-approval';
 import { OWNER_LOGIN } from './owner-login/bootstrap';
 import {
+  assertFingerprintsComplete,
   assertSupportedPostgresMajor,
   postgresMajorOf,
   selectWorkspaceFingerprintMajor,
@@ -219,7 +220,9 @@ export interface LockedMigrationResult {
 export function selectFingerprintsForRun(serverVersionNum: string, strict: boolean, log: (line: string) => void): number {
   const major = postgresMajorOf(serverVersionNum);
   if (strict) {
-    selectWorkspaceFingerprintMajor(assertSupportedPostgresMajor(major));
+    const supported = assertSupportedPostgresMajor(major);
+    assertFingerprintsComplete(supported);
+    selectWorkspaceFingerprintMajor(supported);
     return major;
   }
   if ((SUPPORTED_FINGERPRINT_MAJORS as readonly number[]).includes(major)) selectWorkspaceFingerprintMajor(major);

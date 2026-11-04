@@ -114,6 +114,27 @@ export function assertSupportedPostgresMajor(major: number): FingerprintMajor {
   return major as FingerprintMajor;
 }
 
+/**
+ * Module versions that have a value on PostgreSQL 16 (the reference set) but none on `major`. A non-empty list means that
+ * major's fingerprints were never generated (D4: generate-workspace-fingerprints.ts) and the chain would refuse mid-way.
+ */
+export function missingFingerprintVersions(major: FingerprintMajor): number[] {
+  return Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS_PG16)
+    .map(Number)
+    .filter((v) => !TABLES[major][v]);
+}
+
+/** Strict form for the owner-login runner: a supported major whose table is incomplete is refused before any change. */
+export function assertFingerprintsComplete(major: FingerprintMajor): void {
+  const missing = missingFingerprintVersions(major);
+  if (missing.length) {
+    throw new UnsupportedPostgresVersionError(
+      `PostgreSQL ${major}: no generated workspace fingerprints for module version(s) ${missing.join(', ')} ` +
+        `(workspace-schema/v1/expected-fingerprints-pg${major}.ts; generate them with scripts/generate-workspace-fingerprints.ts). Refusing before any change.`,
+    );
+  }
+}
+
 /** Selects the table for `major` (validated by assertSupportedPostgresMajor). Idempotent; a different second major throws. */
 export function selectWorkspaceFingerprintMajor(major: number): FingerprintMajor {
   const m = assertSupportedPostgresMajor(major);

@@ -8,6 +8,7 @@ import type { QueryRunner } from 'typeorm';
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  missingFingerprintVersions,
   postgresMajorOf,
   resetWorkspaceFingerprintSelectionForTests,
   selectWorkspaceFingerprintMajor,
@@ -275,6 +276,9 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(postgresMajorOf(180006)).toBe(18);
     expect(() => postgresMajorOf('16.4')).toThrow();
     expect(() => selectFingerprintsForRun('150008', true, () => undefined)).toThrow(/refused/);
+    // PG18 is supported, but until its fingerprints are generated and committed the owner login refuses it up front.
+    if (missingFingerprintVersions(18).length) expect(() => selectFingerprintsForRun('180006', true, () => undefined)).toThrow(/no generated workspace fingerprints/);
+    expect(missingFingerprintVersions(16)).toEqual([]);
     resetWorkspaceFingerprintSelectionForTests();
     const lines: string[] = [];
     expect(selectFingerprintsForRun('170002', false, (l) => lines.push(l))).toBe(17);
