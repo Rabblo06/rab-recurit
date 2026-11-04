@@ -96,7 +96,8 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
     const realGet = environment.get.bind(environment) as (key: string) => unknown;
     jest.spyOn(environment, 'get').mockImplementation(((key: string) => (key === 'HWS_RUNTIME_ENABLED' ? hwsOn : realGet(key))) as never);
     const [{ current_user: who }] = await app.get(DataSource).query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(who).toBe('crewflow_owner');
   }, 180_000);
 
   afterEach(() => {

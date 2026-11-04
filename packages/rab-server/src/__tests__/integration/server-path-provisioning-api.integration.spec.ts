@@ -106,7 +106,8 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
     org = await factory.createOrganisation('spp-api');
     otherOrg = await factory.createOrganisation('spp-api-other');
     const [{ current_user: who }] = await replicaA.get(DataSource).query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(who).toBe('crewflow_owner');
   }, 180_000);
 
   afterAll(async () => {
@@ -246,7 +247,7 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
       let killed = false;
       for (let i = 0; i < 200 && !killed; i++) {
         const rows = await admin.query(
-          `SELECT pid FROM pg_stat_activity WHERE usename = 'crewflow_app' AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
+          `SELECT pid FROM pg_stat_activity WHERE usename = 'crewflow_owner' AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
         );
         if (rows.length) {
           await admin.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
