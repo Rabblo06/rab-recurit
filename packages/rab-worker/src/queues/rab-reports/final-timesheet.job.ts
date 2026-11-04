@@ -11,12 +11,10 @@ import { FileService } from '@rab/server/engine/core-modules/storage/file.servic
 import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
-import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
-import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderHtmlToPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { renderFinalTimesheetEmail } from './report-email-content';
@@ -102,7 +100,7 @@ export async function processFinalTimesheetCandidates(
       else if (outcome.value) sent += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 
@@ -205,14 +203,15 @@ async function deliverFinalTimesheet(
         finalisedAt: report.finalisedAt ? new Date(report.finalisedAt).toISOString() : new Date().toISOString(),
       };
 
-      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), footerTemplate: documentFooterTemplate(info), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, venueName };
+      // The data, not HTML (D1): renderReportPdf derives either renderer's output from it through the shared view-model.
+      return { template, needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, venueName };
     },
   );
 
   if (!prepared || !candidate.report_id) return false;
 
   if (prepared.needsOriginal) {
-    const originalBuffer = await renderHtmlToPdf(prepared.originalHtml, { footerTemplate: prepared.footerTemplate, landscape: true });
+    const originalBuffer = await renderReportPdf({ kind: 'final-timesheet', data: { ...prepared.template, unsigned: true } });
     const originalUpload = await files.putObject({ kind: FileKind.FINAL_TIMESHEET_PDF, organisationId: candidate.organisation_id,
       workspaceId: candidate.workspace_id ?? null, resourceType: 'shift_report', resourceId: candidate.report_id!,
       buffer: originalBuffer, filename: 'original-timesheet.pdf' });
@@ -235,7 +234,7 @@ async function deliverFinalTimesheet(
   }
   if (!prepared.needsSigned) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
+  const pdfBuffer = await renderReportPdf({ kind: 'final-timesheet', data: prepared.template });
   // Bytes go to SHARED object storage (validated, SHA-256'd, HEAD-verified) before anything claims them. Each
   // attempt writes its own immutable object: a final report is never overwritten in place.
   const uploaded = await files.putObject({
