@@ -1,12 +1,11 @@
 # Owner-login deployment configuration CI. NOT a release workflow: it builds, pushes and deploys nothing, holds no secret
 # and needs only `contents: read`.
 #
-#   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs), plus
-#                      `docker compose config` of the committed combinations. Until the in-place compose edits land (after
-#                      #61/#62), the gate runs in --static mode: env templates + the bundled-database override. The in-place
-#                      PR switches this job to the full mode (one identical PG_DATABASE_URL on rab-api / rab-worker /
-#                      rab-migrate, no second identity, no token, the H1-H6 keys, the lifecycle) and adds
-#                      compose-owner-login.full.test.cjs.
+#   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs) in FULL mode
+#                      (one identical PG_DATABASE_URL on rab-api / rab-worker / rab-migrate, no second identity, no token,
+#                      the H1-H6 keys, the controlled-release and migrate-on-start lifecycles, the bundled database), plus
+#                      `docker compose config` of every supported combination. ci-security.yaml's deployment-config job
+#                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
 # transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
 name: CI owner-login deployment
@@ -59,13 +58,14 @@ jobs:
       # The self-tests skip their rendered-model cases without docker compose; here it is required, so they cannot skip.
       - name: docker compose is available
         run: docker compose version
-      - name: docker compose config — image + local-db
+      - name: docker compose config — every supported combination
         run: |
           set -euo pipefail
           t="$RUNNER_TEMP/owner-login-config"
           mkdir -p "$t/project" "$t/secrets"
-          : > "$t/project/.env.migrate"
           : > "$t/project/.env.ops"
+          : > "$t/secrets/database.env"
+          : > "$t/secrets/runtime.env"
           z="$(printf '%064d' 0)"
           {
             echo "CREWFLOW_API_IMAGE_DIGEST=sha256:$z"
@@ -76,14 +76,22 @@ jobs:
             echo "CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt"
           } > "$t/compose.env"
           D=packages/rab-docker
-          docker compose --env-file "$t/compose.env" --project-directory "$t/project" -f "$D/docker-compose.image.yml" -f "$D/docker-compose.local-db.yml" config -q
+          I="$D/docker-compose.image.yml"; M="$D/docker-compose.migrate-on-start.yml"; L="$D/docker-compose.local-db.yml"; S="$D/staging/docker-compose.staging.yml"
+          for combo in "$I" "$I $L" "$I $M" "$I $M $L" "$I $S"; do
+            args=()
+            for f in $combo; do args+=(-f "$f"); done
+            echo "docker compose config: $combo"
+            docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
+          done
           # Fail closed: a missing required interpolation value must refuse to render.
-          grep -v '^CREWFLOW_POSTGRES_IMAGE=' "$t/compose.env" > "$t/compose-missing.env"
-          if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$D/docker-compose.image.yml" -f "$D/docker-compose.local-db.yml" config -q 2>/dev/null; then
-            echo "::error::docker-compose.local-db.yml rendered without CREWFLOW_POSTGRES_IMAGE"
-            exit 1
-          fi
-      - name: Gate self-tests
-        run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs
-      - name: Owner-login gate (static until the in-place compose edits land after #61/#62)
-        run: node packages/rab-docker/scripts/compose-owner-login.cjs --static
+          for var in CREWFLOW_API_IMAGE_DIGEST CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
+            grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
+            if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
+              echo "::error::docker-compose.image.yml rendered without $var"
+              exit 1
+            fi
+          done
+      - name: Gate self-tests (static and full)
+        run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs packages/rab-docker/scripts/compose-owner-login.full.test.cjs
+      - name: Owner-login gate (full)
+        run: node packages/rab-docker/scripts/compose-owner-login.cjs
