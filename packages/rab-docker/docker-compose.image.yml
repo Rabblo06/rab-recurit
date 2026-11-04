@@ -39,8 +39,8 @@
 # RUNTIME ISOLATION (Docker hardening H1-H6), on every service: non-root numeric user, read-only root, cap_drop ALL with
 # nothing added, no-new-privileges, PID/memory/CPU limits, health checks (long-running services), a graceful stop window,
 # bounded logs. CREWFLOW_RUNTIME_ISOLATION=enforce: the API (api-prestart.sh) refuses to start when a control is missing at
-# runtime; the Worker no longer has the root launcher that enforced it, so its own process must (Agent 2's port) — until
-# then the Worker's isolation is APPLIED here but NOT self-verified at start.
+# runtime, and so does the Worker's own process (the retired launcher's check, ported into rab-worker: uid 1000, empty
+# capability bounding set, no-new-privileges, read-only root, PID and memory limits; "[worker-isolation] ..." log line).
 #
 # WHERE IT RUNS: plain `docker compose` (v2.24+) on a VM the operator controls. Never OpenShip (it drops user / read_only /
 # tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions; the Worker would run as ROOT); the
