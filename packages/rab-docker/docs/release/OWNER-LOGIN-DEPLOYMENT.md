@@ -38,6 +38,7 @@ git-ignored, so neither is committed.
 | `env/redis-users.acl.example` | Redis ACL: `default` off, app user stored by SHA-256, PING-only health user. | now |
 | `local-db/pg_hba.conf` | Bundled database: superuser on the local socket only; `crewflow_owner` over TLS only. | now |
 | `postgres-init/owner-login/01-crewflow-owner.sql`, `transition-from-separated.sql` | **Agent 1's** tested provider-admin SQL. Referenced here, never copied. | Agent 1 |
+| `docs/release/OWNER-LOGIN-RECOVERY.md` | Recovery and rollback: the mandatory pre-upgrade backup, restore-then-previous-image (proven), and why an old image on an upgraded database fails closed. | now |
 
 Shorthand, used from `packages/rab-docker/` on the host:
 
@@ -211,6 +212,8 @@ An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the leg
    - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
    - **64–69: STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7). Nothing was applied by a check run, and the running release is untouched.
 
+   **Approval rule (owner decision 2026-11-04):** with `CREWFLOW_MIGRATION_APPROVAL_MODE=token`, **every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target**: production, staging and test alike. Without it the run exits **65**. A proven fresh install, approval mode `none` (the migrate-on-start quick start) and check runs are unchanged.
+
    With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
@@ -245,8 +248,8 @@ $P up -d --wait --wait-timeout 600
 ```
 `rab-migrate` re-checks and must exit 0. Then the API starts: it runs a read-only compatibility check and refuses to serve otherwise. The Worker follows a healthy API. Verify `$P ps`, `/healthz` through the edge, and the Worker health line. Compose returns 1 when `rab-migrate` does not exit 0; nothing new is promoted in that case.
 
-**3.6 Rollback.**
-- **(a) Expand-only release:**
+**3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
+- **(a) Expand-only release (only between owner-login releases reviewed as expand-only; never back across the transition):**
   ```bash
   docker compose --env-file /etc/crewflow/compose.env.<old-sha> $I up -d --wait
   ```
@@ -325,7 +328,7 @@ unchanged.
 
 These are what rollback compares against.
 
-**5.2 Backup or PITR marker.** As 3.3. Confirm that a restore of it has been **tested**.
+**5.2 Backup or PITR marker: MANDATORY, before 5.3.** Take it before `transition-from-separated.sql` runs. Self-hosted: as the cluster superuser, `pg_dumpall --roles-only` plus `pg_dump -Fc --create`. Managed: record the PITR timestamp or snapshot. Exact commands and the restore: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §2 and §4. The owner login cannot take this backup (BC-12). Confirm that a restore of it has been **tested**.
 
 **5.3 Provider-admin SQL.** The admin runs `postgres-init/owner-login/transition-from-separated.sql` (Agent 1). Per M0 §3.1, it:
 - creates `crewflow_owner`;
@@ -355,16 +358,18 @@ The file's own verification queries must pass before anything else happens. The 
 - the audit sink receiving events;
 - no service holds any old credential (`docker compose config` plus the gate).
 
-**5.9 Rollback to separated:**
-- **(a) Nothing was applied in 5.6, or everything applied was expand-only:**
+**5.9 Rollback to separated.** Full procedure and evidence: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
+- **(a) Nothing was applied in 5.6:**
   1. `$P down`. Never `-v`.
   2. Restart the old stack from 5.5 with its old env files and digests.
 
   The old logins still work, because 5.3 did not change them.
-- **(b) Otherwise:**
+- **(b) Anything was applied in 5.6 (the supported rollback, PROVEN):**
   1. Stop everything.
-  2. Restore 5.2.
+  2. Restore 5.2 (`OWNER-LOGIN-RECOVERY.md` §4).
   3. Then do (a).
+
+  An old image on the upgraded database is **not** supported in production and fails closed. The old api and worker refuse at their boot gate (unknown `provision_workspace` version), and the old provisioner refuses because the ledger is AHEAD (`OWNER-LOGIN-RECOVERY.md` §3). The transition's migrations are not "expand-only" for the old code.
 - **`crewflow_owner` after a rollback:** the admin may `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Do not `DROP ROLE`** without Agent 1's guidance: objects it created would need `REASSIGN OWNED`.
 
 **5.10 After the rollback window.** Retiring the old logins (NOLOGIN, rotated or dropped passwords) and deleting `.env.migrate`, the per-service files and the separated compose paths all belong to the **final PR (#9)**. That needs:
@@ -380,8 +385,8 @@ The golden security posture expects some of those roles to stay LOGIN, so retiri
 |---|---|
 | 5.3 fails | Nothing app-side changed. Follow the script's recovery notes, then restart the old stack. |
 | 5.6 exits 3 with an unexpected pending set | Stop. Review it, or roll back (5.9a). |
-| 5.6 fails part-way | 3.6c, or 5.9b. |
-| 5.7/5.8 fail | 5.9a if expand-only, else 5.9b. |
+| 5.6 fails part-way | Resume on the NEW image after review (3.6c), or restore: 5.9b. |
+| 5.7/5.8 fail | 5.9b (restore, then the previous image). The old image on the upgraded database fails closed in production. |
 
 ---
 
@@ -422,7 +427,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 | Assumption | Owner |
 |---|---|
-| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. | Agents 1 and 2 |
+| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. Approval mode `token` = every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it); a proven fresh install, mode `none` and check runs are unchanged (owner decision; Agent 1, `approvalDecision`, f77fc9e5). | Agents 1 and 2 |
 | `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
 | `deploy-prepare.js` (in place) is the release step and is **always in token mode**: no token = check run (0 current, 3 pending); `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run; failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1, confirmed.) | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
