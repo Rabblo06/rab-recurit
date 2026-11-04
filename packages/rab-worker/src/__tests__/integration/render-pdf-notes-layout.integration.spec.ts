@@ -125,8 +125,35 @@ interface Layout {
   columns: { left: number; right: number }[];
   /** Top of each rendered line of the notes paragraph that draws text, in order. */
   noteLineTops: number[];
-  lineHeight: number;
 }
+
+/**
+ * Runs inside the page (plain JS: this package has no DOM typings). Lists every element whose right edge is past the
+ * printable width or whose content overflows its box, the `.bottom` columns, and the tops of the notes paragraph's
+ * text lines (only boxes that draw text: a kept blank line also gets a zero-width box for its line break).
+ */
+const LAYOUT_PROBE = `(limit) => {
+  const overflowing = [];
+  for (const el of Array.from(document.body.querySelectorAll('*'))) {
+    const r = el.getBoundingClientRect();
+    const label = el.tagName.toLowerCase() + '.' + el.className;
+    if (r.right > limit + 0.5) overflowing.push(label + ' right=' + r.right);
+    if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0) overflowing.push(label + ' scrollWidth=' + el.scrollWidth + ' > clientWidth=' + el.clientWidth);
+  }
+  if (document.documentElement.scrollWidth > limit + 1) overflowing.push('document scrollWidth=' + document.documentElement.scrollWidth);
+  const columns = Array.from(document.querySelectorAll('.bottom > div')).map((d) => {
+    const r = d.getBoundingClientRect();
+    return { left: r.left, right: r.right };
+  });
+  const notes = document.querySelector('.notes-text');
+  const tops = [];
+  if (notes && notes.firstChild) {
+    const range = document.createRange();
+    range.selectNodeContents(notes.firstChild);
+    for (const r of Array.from(range.getClientRects())) if (r.width > 1 && !tops.some((t) => Math.abs(t - r.top) < 1)) tops.push(r.top);
+  }
+  return { overflowing, columns, noteLineTops: tops };
+}`;
 
 /**
  * Chromium's own print layout of the same HTML at the printable width (print media, same browser build as the
@@ -138,30 +165,7 @@ async function measureLayout(html: string): Promise<Layout> {
     const page = await browser.newPage({ viewport: { width: PRINTABLE_WIDTH_PX, height: 800 } });
     await page.emulateMedia({ media: 'print' });
     await page.setContent(html, { waitUntil: 'load' });
-    return await page.evaluate((limit) => {
-      const overflowing: string[] = [];
-      for (const el of Array.from(document.body.querySelectorAll('*'))) {
-        const r = el.getBoundingClientRect();
-        const label = `${el.tagName.toLowerCase()}.${el.className}`;
-        if (r.right > limit + 0.5) overflowing.push(`${label} right=${r.right}`);
-        if (el.scrollWidth > el.clientWidth + 1 && el.clientWidth > 0) overflowing.push(`${label} scrollWidth=${el.scrollWidth} > clientWidth=${el.clientWidth}`);
-      }
-      if (document.documentElement.scrollWidth > limit + 1) overflowing.push(`document scrollWidth=${document.documentElement.scrollWidth}`);
-      const columns = Array.from(document.querySelectorAll('.bottom > div')).map((d) => {
-        const r = d.getBoundingClientRect();
-        return { left: r.left, right: r.right };
-      });
-      const notes = document.querySelector('.notes-text');
-      const tops: number[] = [];
-      if (notes?.firstChild) {
-        const range = document.createRange();
-        range.selectNodeContents(notes.firstChild);
-        // Only boxes that draw text: a kept blank line also gets a zero-width box for its line break.
-        for (const r of Array.from(range.getClientRects())) if (r.width > 1 && !tops.some((t) => Math.abs(t - r.top) < 1)) tops.push(r.top);
-      }
-      const lineHeight = notes ? parseFloat(getComputedStyle(notes).lineHeight) || 0 : 0;
-      return { overflowing, columns, noteLineTops: tops, lineHeight };
-    }, PRINTABLE_WIDTH_PX);
+    return (await page.evaluate(`(${LAYOUT_PROBE})(${PRINTABLE_WIDTH_PX})`)) as Layout;
   } finally {
     await browser.close();
   }
