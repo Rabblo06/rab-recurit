@@ -133,6 +133,17 @@ export class ReconnectingPgClient {
     await this.discard();
   }
 
+  /**
+   * Marks `client` (if it is still the held connection) as unusable: the next `acquire()` closes it and opens a fresh one,
+   * running `onConnect` again. Used when a per-cycle check finds the session no longer in the state `onConnect` set up
+   * (owner-login provisioning: current_user is not crewflow any more). No backoff: this is not a connection failure.
+   */
+  invalidate(client: Client, reason: string): void {
+    if (client !== this.client || this.closed) return;
+    if (!this.broken) this.options.logger.warn(`${this.options.label} database connection dropped (${reason}); a fresh connection is opened on the next cycle`);
+    this.broken = true;
+  }
+
   private onClientError(client: Client, error: Error & { code?: string }): void {
     if (client !== this.client) return; // a client already discarded
     if (!this.broken) {

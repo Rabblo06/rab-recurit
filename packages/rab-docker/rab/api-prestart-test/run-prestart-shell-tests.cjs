@@ -116,7 +116,7 @@ const FORBIDDEN = [
   'CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF',
   // Owner-login architecture: one PG_DATABASE_URL, no role password, no mode switch, no provisioner setting on the API.
   'DATABASE_URL', 'DATABASE_DIRECT_URL', 'PG_DATABASE_REPLICA_URL', 'PG_WORKER_DATABASE_URL', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
-  'CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_DB_MODE', 'DISABLE_DB_MIGRATIONS', 'CREWFLOW_PROVISIONER_ENABLED', 'CREWFLOW_PROVISIONER_ANYTHING',
+  'CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', 'CREWFLOW_DB_MODE', 'DISABLE_DB_MIGRATIONS', 'CREWFLOW_PROVISIONER_ENABLED', 'CREWFLOW_PROVISIONER_ANYTHING',
 ];
 // Final review F5: the approval is now a token naming the exact pending set (pending-<count>-<sha256>); a well-formed token
 // is refused on the API exactly like any other value (by name), and so is the retired constant.

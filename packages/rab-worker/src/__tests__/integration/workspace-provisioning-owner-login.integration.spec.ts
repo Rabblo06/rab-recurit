@@ -12,7 +12,13 @@ import { Organisation, Role, User, UserRole } from '@rab/server/modules/identity
 import { workspaceSchemaName } from '@rab/server/database/typeorm/workspace-schema/provision-workspace-schema';
 import { ReconnectingPgClient } from '../../core/database/reconnecting-pg-client';
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
-import { actAsProvisioningRole, ProvisioningIdentityError, startWorkspaceProvisioningLoops } from '../../queues/rab-maintenance/workspace-provisioning.loops';
+import {
+  actAsProvisioningRole,
+  assertProvisioningIdentity,
+  ProvisioningIdentityError,
+  startWorkspaceProvisioningLoops,
+} from '../../queues/rab-maintenance/workspace-provisioning.loops';
+import { PROVISIONING_LOCK_WAIT_MS } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
@@ -326,5 +332,128 @@ describeIfDb('T4: in-process workspace provisioning on the owner login (integrat
         actAsCrewflow: true,
       }),
     ).rejects.toThrow(/cannot act as crewflow/);
+  });
+
+  // ---------------------------------------------------------------------------------------------------------------------
+  // Agent 5's review: in-process equivalents of the superseded provisioner-process tests (R5a, R5b, opt-in 1 and 2), so they
+  // exist before PR #9 removes the process tests. Opt-in 3a / 3b / 4 need no database (workspace-provisioning.loops.spec.ts).
+  // ---------------------------------------------------------------------------------------------------------------------
+  const LOCK_KEY = `hashtext('rab_workspace_provisioning')`;
+
+  /** The loops as the Worker runs them (owner login, SET ROLE crewflow), with a hand-driven runtime. */
+  async function loopsWith(isShuttingDown: () => boolean, extra: { production?: boolean } = {}) {
+    const applied = (await admin.query<Array<{ name: string }>>(`SELECT name FROM core.migrations ORDER BY timestamp, id`)).map((r) => r.name);
+    const runs: Array<{ name: string; run: () => Promise<unknown> }> = [];
+    const runtime = {
+      every: (def: { name: string; run: () => Promise<unknown> }) => runs.push(def),
+      get isShuttingDown() {
+        return isShuttingDown();
+      },
+    };
+    const pg = resolvePgEnvironmentCached({ NODE_ENV: 'test', PG_DATABASE_URL: ownerUrl, HWS_RUNTIME_ENABLED: 'false' }, { processRole: 'worker' });
+    const loops = await startWorkspaceProvisioningLoops({
+      pg,
+      endpoint: 'primary',
+      runtime: runtime as never,
+      logger,
+      intervalMs: 5_000,
+      expectedMigrations: applied,
+      production: extra.production ?? false,
+      actAsCrewflow: true,
+    });
+    opened.push(loops);
+    return runs.find((r) => r.name === 'workspace provisioning')!.run;
+  }
+
+  /** A foreign session holding the provisioning advisory lock (another replica, or the superseded provisioner). */
+  async function foreignLockHolder(): Promise<{ client: Client; pid: number }> {
+    const client = new Client({ connectionString: resolveIntegrationTestDatabase(process.env).adminUrl });
+    client.on('error', () => undefined);
+    await client.connect();
+    await client.query(`SELECT pg_advisory_lock(${LOCK_KEY})`);
+    const [{ pid }] = (await client.query('SELECT pg_backend_pid() AS pid')).rows;
+    return { client, pid };
+  }
+
+  /** Advisory locks currently held by any session of the owner-member login (the in-process provisioner's sessions). */
+  const ownerAdvisoryLocks = async () =>
+    (
+      await admin.query<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE l.locktype = 'advisory' AND l.granted AND a.usename = $1`,
+        [ownerRole],
+      )
+    )[0]!.n;
+
+  it('R5a. shutdown aborts the bounded lock wait at once (real lock holder): no provisioning, nothing left held', async () => {
+    const fx = await seedCreatingWorkspace('t4-r5a');
+    const holder = await foreignLockHolder();
+    try {
+      const run = await loopsWith(() => true); // shutdown has begun
+      const started = Date.now();
+      expect(await run()).toBe(false);
+      expect(Date.now() - started).toBeLessThan(2_000); // never the full bounded wait
+      expect((await registry(fx.workspaceId))?.status ?? 'CREATING').not.toBe('READY');
+      expect(await ownerAdvisoryLocks()).toBe(0);
+    } finally {
+      await holder.client.end().catch(() => undefined);
+    }
+  });
+
+  it('R5b. a foreign lock holder whose session dies releases the lock at once; the waiting in-process cycle provisions within its bound', async () => {
+    const fx = await seedCreatingWorkspace('t4-r5b');
+    const holder = await foreignLockHolder();
+    const run = await loopsWith(() => false);
+    const started = Date.now();
+    const cycle = run();
+    await new Promise((r) => setTimeout(r, 1_000));
+    await adminClient.query('SELECT pg_terminate_backend($1)', [holder.pid]); // the holder "process" dies
+    expect(await cycle).toBe(true);
+    expect(Date.now() - started).toBeLessThan(PROVISIONING_LOCK_WAIT_MS + 5_000);
+    for (let i = 0; i < 15 && (await registry(fx.workspaceId))?.status !== 'READY'; i += 1) await run();
+    expect((await registry(fx.workspaceId))?.status).toBe('READY');
+    expect(await ownerAdvisoryLocks()).toBe(0);
+  });
+
+  it('opt-in 1. another session holds the lock for the whole bound → the cycle skips within the bound; after release it provisions and releases the lock', async () => {
+    const fx = await seedCreatingWorkspace('t4-optin1');
+    const holder = await foreignLockHolder();
+    const run = await loopsWith(() => false);
+    try {
+      const started = Date.now();
+      expect(await run()).toBe(false); // lock busy for the whole bounded wait: an idle tick, never stamped
+      const elapsed = Date.now() - started;
+      expect(elapsed).toBeGreaterThanOrEqual(PROVISIONING_LOCK_WAIT_MS - 500);
+      expect(elapsed).toBeLessThan(PROVISIONING_LOCK_WAIT_MS + 5_000);
+      expect((await registry(fx.workspaceId))?.status ?? 'CREATING').not.toBe('READY');
+    } finally {
+      await holder.client.query(`SELECT pg_advisory_unlock(${LOCK_KEY})`).catch(() => undefined);
+      await holder.client.end().catch(() => undefined);
+    }
+    for (let i = 0; i < 15 && (await registry(fx.workspaceId))?.status !== 'READY'; i += 1) await run();
+    expect((await registry(fx.workspaceId))?.status).toBe('READY');
+    expect(await ownerAdvisoryLocks()).toBe(0); // released after the cycle
+  });
+
+  it('opt-in 2. the production configuration (HWS_RUNTIME_ENABLED=false, production compatibility policy) provisions to READY through the real loops', async () => {
+    const fx = await seedCreatingWorkspace('t4-optin2');
+    // The loops read no HWS switch: in-process provisioning is always on (the only path that builds createFor workspaces,
+    // and any workspace in production). The per-cycle compatibility check runs with the production policy.
+    const run = await loopsWith(() => false, { production: true });
+    for (let i = 0; i < 15 && (await registry(fx.workspaceId))?.status !== 'READY'; i += 1) await run();
+    expect((await registry(fx.workspaceId))?.status).toBe('READY');
+  });
+
+  it('identity re-check: a session whose role was reset is refused for the cycle and reopened; the new session is crewflow again', async () => {
+    const client = ownerClient('identity-recheck');
+    const first = await client.acquire();
+    await first.query('RESET ROLE'); // what a stray / injected RESET ROLE would leave behind
+    await expect(assertProvisioningIdentity(first)).rejects.toThrow(ProvisioningIdentityError);
+    client.invalidate(first, 'the session is no longer crewflow');
+    const second = await client.acquire();
+    expect(second).not.toBe(first);
+    const [{ who }] = (await second.query('SELECT current_user::text AS who')).rows;
+    expect(who).toBe('crewflow');
+    await expect(assertProvisioningIdentity(second)).resolves.toBeUndefined();
   });
 });
