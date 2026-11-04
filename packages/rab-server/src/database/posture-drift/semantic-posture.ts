@@ -125,9 +125,13 @@ export interface SemanticPosture {
 
 const sortedUnique = (lines: string[]) => [...new Set(lines)].sort();
 
-/** Reads the semantic posture over `query` inside ONE read-only transaction (the caller's session). */
-export async function readSemanticPosture(query: SemanticQuery): Promise<SemanticPosture> {
-  await query('BEGIN READ ONLY');
+/**
+ * Reads the semantic posture over `query` inside ONE read-only transaction (the caller's session). `ownTransaction: false`
+ * reads inside the caller's open transaction instead (tests that plant a change and roll it back).
+ */
+export async function readSemanticPosture(query: SemanticQuery, options: { ownTransaction?: boolean } = {}): Promise<SemanticPosture> {
+  const own = options.ownTransaction !== false;
+  if (own) await query('BEGIN READ ONLY');
   try {
     const [{ v }] = (await query(`SELECT pg_catalog.current_setting('server_version_num')::int AS v`)) as Array<{ v: number }>;
     const objects = await query(SEMANTIC_OBJECT_SQL);
@@ -149,7 +153,7 @@ export async function readSemanticPosture(query: SemanticQuery): Promise<Semanti
     hash.update(`\n#roles\n${roles.join('\n')}`);
     return { core: coreLines, workspaces, roles, sha256: hash.digest('hex'), serverMajor: Math.floor(Number(v) / 10000) };
   } finally {
-    await query('ROLLBACK').catch(() => undefined);
+    if (own) await query('ROLLBACK').catch(() => undefined);
   }
 }
 
