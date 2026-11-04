@@ -41,12 +41,12 @@ const ops = rd('redis-ops.txt').trim().split(/\r?\n/).filter(Boolean).map((l) =>
 const cgMem = fs.existsSync(path.join(dir, 'cgroup-mem.txt')) ? rd('cgroup-mem.txt').trim().split(/\r?\n/).map((l) => { const [n, cur, anon] = l.split(' '); return [n, { memoryCurrentMiB: cur ? +(Number(cur) / 1048576).toFixed(1) : null, anonMiB: anon ? +(Number(anon.split('=')[1]) / 1048576).toFixed(1) : null }]; }) : [];
 const top = (a) => a.slice(0, 15).map((r) => ({ role: r.role, toplevel: r.toplevel, callsPerMin: +(r.calls / mins).toFixed(2), query: r.query.slice(0, 160) }));
 // D-Q6: database transactions per minute (pg_stat_database xact_commit + xact_rollback; absent in older result dirs).
-// The two snapshot reads are this harness's own transactions; a load generator that logged its own psql transactions in
+// The start snapshot read is a harness transaction inside the delta (the end read commits after itself); a load generator that logged its own psql transactions in
 // <out>/dq6-<label>.gen.jsonl ({"t": epoch ms, "xact": n}) is subtracted too, for the window [t-start, t-end].
 let pgXact = null;
 if (fs.existsSync(path.join(dir, 'pg-xact-start.txt')) && fs.existsSync(path.join(dir, 'pg-xact-end.txt'))) {
   const raw = Number(rd('pg-xact-end.txt').trim()) - Number(rd('pg-xact-start.txt').trim());
-  let harness = 2;
+  let harness = 1; // only the START read commits inside the delta; the end read's own transaction commits after it
   const gen = path.join(OUT, `dq6-${label}.gen.jsonl`);
   if (fs.existsSync(gen)) {
     for (const l of fs.readFileSync(gen, 'utf8').split(String.fromCharCode(10)).filter((x) => x.trim())) {

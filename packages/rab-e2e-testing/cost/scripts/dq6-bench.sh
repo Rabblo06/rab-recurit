@@ -29,7 +29,9 @@
 # Delayed triggers (D-Q4b) are OFF in every arm (the key is never set); they are not part of this measurement.
 #
 # Clock budget: the seed's logical clock leaves no shift inside the Worker's 180-minute roster window for ~5 h after
-# seeding (DQ6_SEED_NOW). `arm` refuses to measure once a published shift starts within 3 h 15 min, so a late run cannot
+# seeding (DQ6_SEED_NOW). Before EVERY window and scenario (after its drain) and at the end of each arm, the guard refuses
+# to go on once a published shift starts within the roster window plus DQ6_CLOCK_MARGIN_MIN (45 min: longer than the
+# longest scenario, a recovery with its 900 s collection cap, about 18 min), so a late run cannot
 # silently include roster PDF renders; re-seed a fresh stack instead.
 set -euo pipefail
 . "$(dirname "$0")/../lib/common.sh"
@@ -91,10 +93,12 @@ set_arm() {
   esac
 }
 
-clock_guard() {
-  local n
-  n="$(q "select count(*) from core.shift where status not in ('cancelled','completed','draft') and starts_at > now() and starts_at <= now() + interval '3 hours 15 minutes'")"
-  [ "$n" = 0 ] || die "clock budget exhausted: $n published shift(s) start within 3 h 15 min (roster PDF renders would enter the window). Re-seed a fresh stack."
+CLOCK_MARGIN_MIN="${DQ6_CLOCK_MARGIN_MIN:-45}"
+case "$CLOCK_MARGIN_MIN" in '' | *[!0-9]*) die "DQ6_CLOCK_MARGIN_MIN must be whole minutes" ;; esac
+clock_guard() { # [where]: before every window/scenario; the roster window is 180 min
+  local n where="${1:-}"
+  n="$(q "select count(*) from core.shift where status not in ('cancelled','completed','draft') and starts_at > now() and starts_at <= now() + make_interval(mins => 180 + $CLOCK_MARGIN_MIN)")"
+  [ "$n" = 0 ] || die "clock budget exhausted${where:+ before $where}: $n published shift(s) start within 180 + $CLOCK_MARGIN_MIN min (roster PDF renders would enter the window). Re-seed a fresh stack."
   n="$(q "select count(*) from core.shift where status not in ('cancelled','completed','draft') and starts_at <= now() and ends_at > now()")"
   [ "$n" = 0 ] || die "clock: $n shift(s) in progress; the seed clock is off"
 }
@@ -106,6 +110,7 @@ ensure_flags() { # on|off: recreate API + Worker with that configuration (no-op 
 
 idle_window() { # label
   stamp "drain before $1"; bash "$M" drain "$1"
+  clock_guard "$1"
   host_snapshot "$1 start"; bash "$M" idle "$1" "$IDLE_S"; host_snapshot "$1 end"
 }
 
@@ -148,6 +153,7 @@ do_arm() {
   # loaded: generator runs IDLE_S + 30 s; the resource window is its middle IDLE_S seconds
   stamp "arm $L: loaded"
   host_snapshot "$L-loaded start"
+  clock_guard "$L-loaded"
   node_env "$LOAD" steady "$L-loaded" --seconds $((IDLE_S + 30)) --rate "$RATE" > "$OUT/dq6-$L-loaded.log" 2>&1 &
   local gen=$!
   sleep 15
@@ -157,21 +163,25 @@ do_arm() {
   stamp "arm $L: loaded $(tail -1 "$OUT/dq6-$L-loaded.log" | cut -c1-300)"
   stamp "arm $L: burst"; bash "$M" drain "$L-burst"
   host_snapshot "$L-burst start"
+  clock_guard "$L-burst"
   node_env "$LOAD" burst "$L-burst" --notifications "$BURST" > "$OUT/dq6-$L-burst.log" 2>&1 || stamp "arm $L: burst FAILED"
   host_snapshot "$L-burst end"
   stamp "arm $L: burst $(tail -1 "$OUT/dq6-$L-burst.log" | cut -c1-300)"
   stamp "arm $L: Worker restart"
   host_snapshot "$L-rworker start"
+  clock_guard "$L-rworker"
   node_env "$LOAD" recovery "$L-rworker" worker --rate "$REC_RATE" > "$OUT/dq6-$L-rworker.log" 2>&1 || stamp "arm $L: rworker FAILED"
   stamp "arm $L: rworker $(tail -1 "$OUT/dq6-$L-rworker.log" | cut -c1-400)"
   ensure_flags on; bash "$M" drain "$L-rredis"
   stamp "arm $L: Redis restart"
   host_snapshot "$L-rredis start"
+  clock_guard "$L-rredis"
   node_env "$LOAD" recovery "$L-rredis" redis --rate "$REC_RATE" > "$OUT/dq6-$L-rredis.log" 2>&1 || stamp "arm $L: rredis FAILED"
   stamp "arm $L: rredis $(tail -1 "$OUT/dq6-$L-rredis.log" | cut -c1-400)"
   # Redis lost every BullMQ key and connection; recreate the API and Worker so the next arm starts from a clean process.
   hdocker_try rm -f costaudit-worker
   ensure_flags off
+  clock_guard "the end of $L" # the last scenario ran inside the budget too
   stamp "arm $L: done"
 }
 

@@ -109,7 +109,7 @@ case "${1:?usage}" in
     q "select pg_stat_statements_reset()" >/dev/null
     cpu_snapshot > "$R/cpu-start.txt"; redis_cli INFO stats > "$R/redis-stats-start.txt"; date +%s > "$R/t-start"
     # D-Q6: committed + rolled-back transactions of the measured database (pg_stat_database; every role, this harness's own
-    # two snapshot queries included, so analyze-idle.js subtracts them; a load generator logs its own in dq6-*.gen.jsonl).
+    # start snapshot query included (the end one commits after its own read), so analyze-idle.js subtracts it; a load generator logs its own in dq6-*.gen.jsonl).
     pg_xact > "$R/pg-xact-start.txt"
     END=$(( $(date +%s) + D )); : > "$R/dstats.txt"; : > "$R/redis-ops.txt"; : > "$R/dstats-host.txt"
     while [ "$(date +%s)" -lt "$END" ]; do

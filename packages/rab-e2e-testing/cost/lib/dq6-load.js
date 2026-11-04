@@ -1,7 +1,7 @@
 /**
  * D-Q6 load generator, burst drain and recovery probe. Disposable crewflow-cost stack ONLY: every SQL statement goes
  * through lib.psql (refuses unless the database carries the crewflow-cost disposable marker) and every container
- * stop/start through lib.harnessDocker (refuses anything that is not a harness-owned costaudit-* container).
+ * stop/start through lib.harnessDockerAsync (the same guard as harnessDocker; refuses anything that is not a harness-owned costaudit-* container).
  *
  *   node lib/dq6-load.js devices
  *   node lib/dq6-load.js steady   <label> [--seconds 330] [--rate 10]
@@ -24,8 +24,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, execFileSync } = require('child_process');
-const { OUT, psql, redis, harnessDocker, cgroupUsec, dockerEnv, pct, sleep } = require('./lib');
+const { spawn, execFileSync, execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileP = promisify(execFile);
+const { OUT, psql, redis, harnessDockerAsync, cgroupUsec, dockerEnv, pct, sleep } = require('./lib');
 
 const [mode, label, ...rest] = require.main === module ? process.argv.slice(2) : ['module', process.env.DQ6_LABEL || 'offline'];
 const opt = (name, dflt) => {
@@ -126,16 +128,29 @@ const cpuNow = () => Object.fromEntries(['costaudit-pg', 'costaudit-worker', 'co
 }));
 
 /** PSUBSCRIBE listener for realtime Pub/Sub messages (duplicate detection). */
+const SUBSCRIBERS = new Set();
+function stopSubscribers() { for (const p of SUBSCRIBERS) { try { p.kill(); } catch { /* gone */ } } SUBSCRIBERS.clear(); }
+process.on('exit', stopSubscribers);
 function startSubscriber(file) {
-  const p = spawn('docker', ['exec', 'costaudit-redis', 'redis-cli', '--no-auth-warning', 'PSUBSCRIBE', 'crewflow:*:rt:*'], { env: dockerEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+  const p = spawn('docker', ['exec', 'costaudit-redis', 'timeout', '3600', 'redis-cli', '--no-auth-warning', 'PSUBSCRIBE', 'crewflow:*:rt:*'], { env: dockerEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+  SUBSCRIBERS.add(p);
   const ws = fs.createWriteStream(file, { flags: 'a' });
   p.stdout.pipe(ws);
-  return { stop: () => { try { p.kill(); } catch { /* gone */ } } };
+  return { stop: () => { SUBSCRIBERS.delete(p); try { p.kill(); } catch { /* gone */ } } };
 }
 
 function workerLogsSince(iso) {
   try {
     return execFileSync('docker', ['logs', '--since', iso, 'costaudit-worker'], { env: dockerEnv, encoding: 'utf8', maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    return `${e.stdout || ''}${e.stderr || ''}`;
+  }
+}
+
+async function workerLogsSinceAsync(iso) {
+  try {
+    const { stdout, stderr } = await execFileP('docker', ['logs', '--since', iso, 'costaudit-worker'], { env: dockerEnv, encoding: 'utf8', maxBuffer: 1 << 30 });
+    return `${stdout}${stderr}`;
   } catch (e) {
     return `${e.stdout || ''}${e.stderr || ''}`;
   }
@@ -329,7 +344,7 @@ function waitFor(fn, capMs) {
   const t0 = Date.now();
   return (async () => {
     while (Date.now() - t0 < capMs) {
-      try { if (fn()) return Date.now() - t0; } catch { /* not yet */ }
+      try { if (await fn()) return Date.now() - t0; } catch { /* not yet */ }
       await sleep(500);
     }
     return null;
@@ -349,12 +364,15 @@ async function recovery() {
   const subFile = path.join(OUT, `dq6-${label}.pubsub.txt`);
   let sub = startSubscriber(subFile);
   const container = what === 'worker' ? 'costaudit-worker' : 'costaudit-redis';
+  // Generator ticks that started more than 1 s late (would show a stalled generator).
+  let late = 0;
   const restartsBefore = execFileSync('docker', ['inspect', '-f', '{{.RestartCount}}', 'costaudit-worker'], { env: dockerEnv, encoding: 'utf8' }).trim();
   let seq = 0;
   let running = true;
   const gen = (async () => {
     const t0 = Date.now();
     for (let tick = 0; running; tick++) {
+      if (Date.now() > t0 + tick * 1000 + 1000) late++;
       try { seq = insertBatch(T, seq, rate); } catch (e) { logGen({ kind: 'insert-error', message: String(e.message).slice(0, 200) }); }
       if (tick % 10 === 0) { try { sampleDepth(); } catch { /* ignore */ } }
       const wait = t0 + (tick + 1) * 1000 - Date.now();
@@ -363,18 +381,18 @@ async function recovery() {
   })();
   await sleep(pre * 1000);
   const tStop = Date.now();
-  harnessDocker('stop', container);
+  await harnessDockerAsync('stop', container);
   const stopMs = Date.now() - tStop;
   if (what === 'redis') sub.stop();
   await sleep(down * 1000);
   const tStart = Date.now();
-  harnessDocker('start', container);
+  await harnessDockerAsync('start', container);
   const startIso = new Date(tStart - 1000).toISOString();
   let readyMs = null;
   if (what === 'worker') {
-    readyMs = await waitFor(() => /rab-worker ready/.test(workerLogsSince(startIso)), 180000);
+    readyMs = await waitFor(async () => /rab-worker ready/.test(await workerLogsSinceAsync(startIso)), 180000);
   } else {
-    readyMs = await waitFor(() => redis('PING') === 'PONG', 60000);
+    readyMs = await waitFor(async () => (await execFileP('docker', ['exec', 'costaudit-redis', 'redis-cli', 'PING'], { env: dockerEnv, encoding: 'utf8' })).stdout.trim() === 'PONG', 60000);
     sub = startSubscriber(subFile);
   }
   await sleep(post * 1000);
@@ -382,7 +400,7 @@ async function recovery() {
   await gen;
   const c = await collect(sinceIso, opt('cap', 900), subFile);
   sub.stop();
-  const { out, kinds } = analyse(c, { scenario: `recovery-${what}`, offered: { notificationsPerSecond: rate, pre, down, post, notifications: seq }, clockOffsetHostMinusDbMs: off });
+  const { out, kinds } = analyse(c, { scenario: `recovery-${what}`, offered: { notificationsPerSecond: rate, pre, down, post, notifications: seq, generatorTicksLate: late }, clockOffsetHostMinusDbMs: off });
   // Recovery: rows created before the restart instant (they waited through the outage) and when the last of them, per
   // outbox, became terminal; the first terminal row after the restart; rows still not terminal at the cap ("stuck").
   const rec = { what, stopMs, downS: down, readyMsAfterStart: readyMs };
@@ -424,7 +442,14 @@ async function devices() {
     select org, uid, 'dq6-bench', 'android', decode(${lit(hex)}, 'hex'), 'dq6' from t
     on conflict (user_id, device_id) do nothing returning 1`).split('\n').filter(Boolean).length;
   const total = psql(`select count(*) from core.push_device where device_id = 'dq6-bench' and active`);
-  console.log(JSON.stringify({ devicesCreated: n, devicesActive: Number(total) }));
+  const orgs = Number(psql(`select count(*) from core.organisation where slug like 'costaudit-%'`));
+  const ready = Number(psql(`select count(distinct o.id) from core.organisation o
+      join core."user" u on u.email = 'manager1@org' || substr(o.slug, 11) || '.example.test'
+      join core.push_device d on d.user_id = u.id and d.device_id = 'dq6-bench' and d.active
+      join lateral (select id from core.manager_workspace mw where mw.organisation_id = o.id order by created_at limit 1) w on true
+     where o.slug like 'costaudit-%'`));
+  if (orgs === 0 || ready !== orgs) throw new Error(`devices: ${ready} complete targets for ${orgs} organisations (created ${n}); every organisation needs manager1, an active dq6-bench device and a workspace`);
+  console.log(JSON.stringify({ devicesCreated: n, devicesActive: Number(total), organisations: orgs, completeTargets: ready }));
 }
 
 // Required as a module (offline check of the analysis on synthetic rows): export the pure parts, run nothing.
@@ -435,4 +460,4 @@ else (async () => {
   if (mode === 'burst') return burst();
   if (mode === 'recovery') return recovery();
   throw new Error(`unknown mode ${mode}`);
-})().then(() => process.exit(0)).catch((e) => { console.error('[dq6-load] FAILED', e.stack || e.message); process.exit(1); });
+})().then(() => { stopSubscribers(); process.exit(0); }).catch((e) => { stopSubscribers(); console.error('[dq6-load] FAILED', e.stack || e.message); process.exit(1); });

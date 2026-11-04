@@ -257,8 +257,10 @@ driver, retried rows are reported), fairness (Jain's index of per-organisation m
 completion spread), errors (failed rows and Worker log error lines), and host contention (other containers' CPU).
 
 Setup seeds with `COST_SEED_NOW=2026-10-27T22:05:00Z` (`DQ6_SEED_NOW`) and marks the last shifts' post-shift stamps as
-processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. `arm` refuses to
-measure once a published shift starts within 3 h 15 min, so roster PDF renders can never enter a window silently.
+processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. Before every
+window and scenario (after its drain) and at the end of each arm, `arm` refuses to go on once a published shift starts
+within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. The margin is longer than the longest scenario (a recovery with its
+900 s collection cap, about 18 min), so roster PDF renders can never enter a window silently. Usable budget: about 4 h 15 min.
 
 ## Phases (`scripts/run.sh`)
 
