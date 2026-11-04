@@ -2,7 +2,9 @@ import { EventEmitter } from 'node:events';
 import { Client } from 'pg';
 
 import { DatabaseReconnectDeferredError, ReconnectingPgClient } from '../../core/database/reconnecting-pg-client';
-import { actAsProvisioningRole, ProvisioningIdentityError } from './workspace-provisioning.loops';
+import { runtimeEnvRefusal } from '@rab/server/database/typeorm/core/never-in-runtime-env';
+import { ProvisionerConfigError, resolveInProcessProvisioningInterval } from '../../workspace-provisioner.config';
+import { actAsProvisioningRole, assertProvisioningIdentity, ProvisioningIdentityError } from './workspace-provisioning.loops';
 
 /**
  * Owner-login architecture (T4): the in-process provisioner's session acts as crewflow (SET ROLE) on its own dedicated
@@ -102,5 +104,76 @@ describe('ReconnectingPgClient onConnect (the provisioning session identity is r
     created[1]!.emit('error', Object.assign(new Error('terminating connection'), { code: '57P01' }));
     await holder.acquire(); // reconnect → onConnect again
     expect(seen).toHaveLength(3);
+  });
+});
+
+describe('per-cycle identity re-check (Agent 3): the session must still be crewflow, else the connection is reopened', () => {
+  it('assertProvisioningIdentity: crewflow passes; anything else (a RESET ROLE left the owner login) is refused', async () => {
+    const as = (who: string) => ({ query: async () => ({ rows: [{ who }] }) }) as unknown as Client;
+    await expect(assertProvisioningIdentity(as('crewflow'))).resolves.toBeUndefined();
+    for (const who of ['crewflow_owner', 'rab_secure_owner', 'crewflow_app']) {
+      await expect(assertProvisioningIdentity(as(who))).rejects.toThrow(ProvisioningIdentityError);
+      await expect(assertProvisioningIdentity(as(who))).rejects.toThrow(new RegExp(`the session is "${who}", not crewflow`));
+    }
+  });
+
+  it('invalidate(): the next acquire opens a fresh connection and runs onConnect again (no backoff); a stale client is ignored', async () => {
+    const created: FakeClient[] = [];
+    let connects = 0;
+    const holder = new ReconnectingPgClient(
+      { connectionString: 'postgres://unused' },
+      {
+        label: 'provisioning',
+        logger: { log: () => undefined, warn: () => undefined },
+        createClient: () => {
+          const c = new FakeClient();
+          created.push(c);
+          return c as unknown as Client;
+        },
+        onConnect: async () => void (connects += 1),
+      },
+    );
+    const first = await holder.acquire();
+    holder.invalidate(created[0] as unknown as Client, 'the session is no longer crewflow');
+    const second = await holder.acquire();
+    expect(second).not.toBe(first);
+    expect(created[0]!.ended).toBe(1);
+    expect(connects).toBe(2);
+    holder.invalidate(first, 'stale'); // no longer the held client: no effect
+    expect(await holder.acquire()).toBe(second);
+  });
+});
+
+/**
+ * Agent 5's review — in-process equivalents of the superseded provisioner process tests that need no database (the
+ * database ones are in workspace-provisioning-owner-login.integration.spec.ts):
+ *   opt-in 3a / 3b ("not enabled → exit 0 before any connection"): there is no on/off switch in-process; the replacement
+ *     guarantee is that the switch itself is REFUSED on the Worker by the runtime guard, a pure check that runs before the
+ *     Worker opens any connection (main.ts: assertRuntimeDatabaseIdentity before the identity probe);
+ *   opt-in 4 ("an invalid switch or interval refuses, names the variable only, opens no connection"): the interval parser
+ *     refuses before startWorkspaceProvisioningLoops is ever called.
+ */
+describe('in-process provisioning configuration (opt-in 3a / 3b / 4 equivalents)', () => {
+  it('3a/3b: CREWFLOW_PROVISIONER_ENABLED (true, false, anything) is refused on the Worker by name, before any connection', () => {
+    for (const value of ['true', 'false', 'yes']) {
+      expect(runtimeEnvRefusal({ NODE_ENV: 'development', CREWFLOW_PROVISIONER_ENABLED: value }, 'worker')?.name).toBe('CREWFLOW_PROVISIONER_ENABLED');
+    }
+    expect(runtimeEnvRefusal({ NODE_ENV: 'development', CREWFLOW_PROVISIONER_ENABLED: '' }, 'worker')).toBeNull();
+  });
+
+  it('4: an invalid WORKSPACE_PROVISIONER_INTERVAL_SECONDS refuses (ProvisionerConfigError), names the variable only', () => {
+    for (const value of ['4', '121', '5s', '1e1', 'S3cret']) {
+      let message = '';
+      try {
+        resolveInProcessProvisioningInterval({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: value });
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProvisionerConfigError);
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/^WORKSPACE_PROVISIONER_INTERVAL_SECONDS must be a whole number of seconds from 5 to 120/);
+      expect(message).not.toContain('S3cret');
+    }
+    expect(resolveInProcessProvisioningInterval({})).toEqual({ intervalSeconds: 60, intervalMs: 60_000 });
+    expect(resolveInProcessProvisioningInterval({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5' })).toEqual({ intervalSeconds: 5, intervalMs: 5_000 });
   });
 });
