@@ -526,3 +526,30 @@ describe('Agent 5 finding 2: CREWFLOW_MIGRATION_APPROVAL_MODE=token gates EVERY 
     expect(approvalDecision({ ...base, approvalMode: 'token', ownerLogin: false })).toBe('f5');
   });
 });
+
+describe('Agent 5 ID-2 (BC-11): deployment id mandatory after the first bind — enforced for production, lenient outside it by design', () => {
+  const HOST = 'db.example.internal';
+  const bound = (environment: string) =>
+    (async (sql: string) => {
+      if (sql === MARKER_PRESENT_SQL) return [{ present: true, database: 'crewflow', disposable_test: false }];
+      if (sql === MARKER_READ_SQL) {
+        return [{ environment, deployment_id: '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f', bound_database: 'crewflow', bound_hosts: [HOST], bound_system_identifier: null, current_system_identifier: null }];
+      }
+      return [];
+    }) as never;
+  const guard = (env: Record<string, string | undefined>, marker: string) =>
+    assertDeploymentIdentity(bound(marker), { processLabel: 'migrations command', production: env.DB_TARGET === 'production', env, connectionHost: HOST, command: true });
+
+  it('a database bound to PRODUCTION and a child with no declaration: refused (exit 67), whatever the child derives', async () => {
+    const derived = synthesiseGuardEnv({}, 'bound', 'crewflow', 'x').guardEnv;
+    expect(derived.DB_TARGET).toBe('local');
+    await expect(guard(derived, 'production')).rejects.toThrow(/bound to production .* must not use it/);
+    // Declaring production without an id is refused too (assertDeclaredIdentityForProcess).
+    await expect(guard(synthesiseGuardEnv({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }, 'bound', 'crewflow', 'x').guardEnv, 'production')).rejects.toThrow(/CREWFLOW_DEPLOYMENT_ID/);
+  });
+
+  it('a database bound to staging / test with no declaration: allowed with a warning (the existing non-production rule)', async () => {
+    const r = await guard(synthesiseGuardEnv({}, 'bound', 'crewflow', 'x').guardEnv, 'staging');
+    expect(r.warnings.join(' ')).toMatch(/declares no identity; set CREWFLOW_DEPLOYMENT_ENVIRONMENT and CREWFLOW_DEPLOYMENT_ID/);
+  });
+});
