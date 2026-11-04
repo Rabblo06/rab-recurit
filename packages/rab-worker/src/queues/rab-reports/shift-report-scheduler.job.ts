@@ -12,12 +12,11 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
-import { renderPreShiftReportHtml } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
-import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
+import { PreShiftReportData } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderHtmlToPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { renderRosterEmail } from './report-email-content';
 import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
@@ -29,9 +28,9 @@ const logger = new Logger('ShiftReportSchedulerJob');
  * `shift-monitor.job.ts` — a read-only crewflow workspace scan finds candidates, each
  * candidate is then re-loaded and processed under its own `crewflow`-scoped
  * transaction via `runScopedForOrg`... except this job's actual work
- * (Playwright render + email enqueue) needs its OWN transaction boundary
+ * (PDF render + email enqueue) needs its OWN transaction boundary
  * separate from the read that finds the assignments/venue, since a long
- * Playwright render should not hold a Postgres transaction open. The scoped
+ * render (Chromium or native, PDF_RENDERER) should not hold a Postgres transaction open. The scoped
  * read/write here is therefore split into two short `runInTenantContext`
  * calls per candidate (load data, then persist result) rather than one
  * long one wrapping the render — deliberate, not an oversight.
@@ -135,7 +134,7 @@ export async function processShiftReportCandidates(
       else if (outcome.value) generated += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 
@@ -197,7 +196,8 @@ async function generatePreShiftReport(
       const qrToken = attendanceQr.sign(shift);
       const qrPng = await qrImage.generatePng(qrToken);
 
-      const html = renderPreShiftReportHtml({
+      // The data, not HTML (D1): renderReportPdf derives either renderer's output from it through the shared view-model.
+      const data: PreShiftReportData = {
         ...info,
         staff: staffRows.map((r: { period: string; assignment_break_minutes: number | null; staff_ref: string | null; first_name: string; last_name: string }) => ({
           name: `${r.first_name} ${r.last_name}`,
@@ -208,13 +208,11 @@ async function generatePreShiftReport(
           breakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignment_break_minutes }, shift),
         })),
         qrPngBase64: qrPng.toString('base64'),
-      });
-      const footerTemplate = documentFooterTemplate(info);
+      };
 
       return {
         shift,
-        html,
-        footerTemplate,
+        data,
         venueName,
       };
     },
@@ -222,7 +220,7 @@ async function generatePreShiftReport(
 
   if (!prepared) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
+  const pdfBuffer = await renderReportPdf({ kind: 'pre-shift', data: prepared.data });
   // Every generation is a NEW immutable object in shared storage; the report row points at the latest.
   const uploaded = await files.putObject({
     kind: FileKind.SHIFT_ROSTER_PDF,

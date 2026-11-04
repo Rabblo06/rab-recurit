@@ -65,6 +65,12 @@ crewflow_runtime_db_config() {
   if [ -n "${DISABLE_DB_MIGRATIONS:-}" ]; then
     refuse "DISABLE_DB_MIGRATIONS is Twenty CRM's switch and is not read by Crewflow. Remove it and set CREWFLOW_MIGRATE_ON_START=true or false. Refusing to start."
   fi
+  if [ "${NODE_ENV:-}" != test ]; then
+    for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT; do
+      eval "seam_value=\${$seam:-}"
+      if [ -n "$seam_value" ]; then refuse "$seam is a migration test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start."; fi
+    done
+  fi
   case "${CREWFLOW_MIGRATE_ON_START:-}" in
     true | false) MIGRATE_ON_START="$CREWFLOW_MIGRATE_ON_START" ;;
     '') refuse "CREWFLOW_MIGRATE_ON_START is required on the API service: set it to true (the API applies pending migrations on start, under the migration lock) or false (a release step runs them first). Refusing to start." ;;

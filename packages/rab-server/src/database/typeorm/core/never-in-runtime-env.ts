@@ -109,8 +109,9 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
 
 /**
  * Owner-login architecture: whole NAME PREFIXES the API refuses (any variable whose name starts with one). The separate
- * workspace provisioner's settings (CREWFLOW_PROVISIONER_*) never belong on the API. The Worker's rule for them comes with
- * in-process provisioning (T4); the superseded provisioner child legitimately receives CREWFLOW_PROVISIONER_ENABLED.
+ * workspace provisioner's settings (CREWFLOW_PROVISIONER_*) never belong on the API or the Worker (which provisions
+ * in-process, always — T4). The superseded provisioner child legitimately receives CREWFLOW_PROVISIONER_ENABLED. The jobs-only
+ * health check sets CREWFLOW_PROVISIONER_ENABLED=false on its own check command, never in the Worker's environment.
  */
 export interface NeverInRuntimeEnvPrefix {
   prefix: string;
@@ -121,8 +122,8 @@ export interface NeverInRuntimeEnvPrefix {
 export const NEVER_IN_RUNTIME_ENV_PREFIXES: readonly NeverInRuntimeEnvPrefix[] = Object.freeze([
   {
     prefix: 'CREWFLOW_PROVISIONER_',
-    why: 'Workspace provisioning runs inside the Worker on the one owner login; there is no separate provisioner credential or switch on the API. Remove it.',
-    processes: ['api'] as const,
+    why: 'Workspace provisioning runs inside the Worker on the one owner login; there is no separate provisioner credential or switch. Remove it.',
+    processes: ['api', 'worker'] as const,
   },
 ]);
 

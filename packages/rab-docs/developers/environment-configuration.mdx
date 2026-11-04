@@ -56,6 +56,7 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | `CLOCK_IN_EARLY_MINUTES` | 15 | How early clock-in opens. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
+| `PDF_RENDERER` | `chromium` | How the Worker renders report PDFs that have a native layout (today the final timesheet): `chromium`, or `native` (pure JavaScript, no browser). Exactly one of the two; anything else refuses to boot. No automatic fallback between them. |
 | `GEOFENCE_MAX_ACCURACY_M` | 100 | Worst acceptable GPS accuracy at enforced venues. |
 | `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
 | `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` | 60 | When an unanswered acceptance is auto-confirmed. |

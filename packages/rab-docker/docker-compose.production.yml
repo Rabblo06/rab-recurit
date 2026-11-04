@@ -381,6 +381,10 @@ services:
     # reports, final timesheets, 2 statement consumers) = 551 tasks measured,
     # plus tini, the launcher and both children; 512 made renders fail.
     pids_limit: 1024
+    # Native PDF render threads (review M-3): PDF_NATIVE_CONCURRENCY x 384 MB heap cap must fit
+    # PDF_NATIVE_MEMORY_BUDGET_MB (default 768 = half of this 1536m; the rest is the jobs process, the
+    # threads' young generations and WASM, and the provisioner), else the Worker refuses to boot. Raising
+    # CREWFLOW_WORKER_MEM_LIMIT does not raise the budget: set both together.
     mem_limit: ${CREWFLOW_WORKER_MEM_LIMIT:-1536m}
     cpus: ${CREWFLOW_WORKER_CPUS:-2}
 

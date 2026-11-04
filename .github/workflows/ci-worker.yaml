@@ -19,6 +19,15 @@ jobs:
   test:
     needs: changed
     if: needs.changed.outputs.worker == 'true'
+    # PDF integration branch only (integration/pdf-native-pre-removal, CI only): every Worker suite, including the
+    # DB-backed specs that render report PDFs (shift-statement, attendance-lifecycle-42, report-email-*, report-storage-*,
+    # report-worker-concurrency, worker-scan-adapters, ...), runs once per renderer, each leg on its own fresh database.
+    # The chromium leg is the existing run, unchanged.
+    name: test (PDF_RENDERER=${{ matrix.pdf_renderer }})
+    strategy:
+      fail-fast: false
+      matrix:
+        pdf_renderer: [chromium, native]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     services:
@@ -29,6 +38,7 @@ jobs:
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
+      PDF_RENDERER: ${{ matrix.pdf_renderer }}
       DB_TARGET: local
       REDIS_URL: redis://localhost:6379
       EMAIL_DRIVER: LOGGER
