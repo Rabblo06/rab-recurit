@@ -227,7 +227,7 @@
     {
       "id": "REF-1",
       "severity": "MEDIUM",
-      "acceptance": "NEEDS OWNER APPROVAL (not in §2: global reference tables writable by the runtime login through normal DML)",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT with the owner, parity guard proposed: the test stays strict and red, never accepted)",
       "change": "core.permission (RBAC flag reference data) and core.migrations (TypeORM ledger) have no RLS and no organisation_id; the runtime login inherits crewflow's S,I,U,D,T on both (golden :926, :968), so one UPDATE / DELETE changes every tenant. Not in GRANT_PARITY_TARGETS. Before: crewflow_app S,I on permission and S on migrations.",
       "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture CF-09, rolled back, WHERE false)",
       "bc": []
@@ -245,7 +245,7 @@
     {
       "id": "MFA-SESS-1",
       "severity": "HIGH",
-      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT routed to Agent 3: fix proposed, the test stays strict and red until it lands)",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT with the owner, overlaps X2's accepted user_session scope: the test stays strict and red, never accepted)",
       "change": "The runtime login can UPDATE core.user_session.mfa_verified_at on its own sessions (measured ACCEPTED, PR #74 run 41910894672, w45-db5-schema:467): a session can be stamped MFA-verified without a factor check. Separated mode refused it by crewflow_app's column grant; user_session is not in GRANT_PARITY_TARGETS and no trigger covers the column after INSERT.",
       "test": "twenty-behaviour-catalogue (owner-login CI: w45-db5-schema mfa_verified_at, kept strict)",
       "bc": []
@@ -425,7 +425,7 @@
         "class": "P",
         "classification": [
           "PROV-1",
-          "catalogue:REF-1"
+          "REF-1 OPEN DEFECT (strict, red)"
         ],
         "kept": "audit_log DML still 42501 for the runtime login (crewflow holds S,I only)"
       },

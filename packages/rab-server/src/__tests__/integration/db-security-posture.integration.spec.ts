@@ -76,16 +76,22 @@ describeIfDb('database security posture (integration)', () => {
       //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, NEEDS OWNER APPROVAL) and is refused
       //    there: an unknown workspace is P0002, nothing is registered;
       //  - audit_log stays insert-only against DML: the table owner crewflow holds only SELECT/INSERT on it (42501);
-      //  - core.permission / core.migrations (global, no RLS) are writable: OWNER-LOGIN DIFFERENCE REF-1 (NEEDS OWNER
-      //    APPROVAL; Agent 5 finding, parity guard proposed). WHERE false and rolled back: nothing changes.
+      //  - core.permission / core.migrations (global, no RLS): REF-1 is an OPEN DEFECT with the owner (Agent 5 finding, parity
+      //    guard proposed; NOT accepted). The assertion stays STRICT: the runtime login must be refused (42501). It fails until
+      //    the guard lands. WHERE false and rolled back, so nothing can change either way.
       await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: 'P0002' });
       await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
-      await client.query('BEGIN');
-      try {
-        expect((await client.query(`UPDATE core.permission SET key = key WHERE false`)).rowCount).toBe(0);
-        expect((await client.query(`DELETE FROM core.migrations WHERE false`)).rowCount).toBe(0);
-      } finally {
-        await client.query('ROLLBACK').catch(() => undefined);
+      for (const sql of [`UPDATE core.permission SET key = key WHERE false`, `DELETE FROM core.migrations WHERE false`]) {
+        await client.query('BEGIN');
+        try {
+          const code = await client.query(sql).then(
+            () => 'OK',
+            (e: { code?: string }) => e.code ?? 'ERROR',
+          );
+          expect({ sql, code }).toEqual({ sql, code: '42501' });
+        } finally {
+          await client.query('ROLLBACK').catch(() => undefined);
+        }
       }
     } finally {
       await client.end();
