@@ -1,5 +1,7 @@
 # Isolated staging environment runbook (owner decision R4)
 
+> **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; they are removed in the final clean-up PR (#9). Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5).
+
 Status: **PLAN, 2026-11-03. Nothing is provisioned.** This runbook creates no host, database, bucket, DNS record or secret.
 Every numbered phase below needs its own owner approval. The temporary OpenShip/Neon deployment is not touched by any
 step (R4), and no production credential, host or bucket is used anywhere.
@@ -237,8 +239,10 @@ Production (Oracle) runs ARM64.
 
 Two ways, either acceptable for the owner (the current owner question in the release-readiness record):
 1. **CI**: the H5 security gate renders on GitHub's `ubuntu-24.04-arm` runners and refuses an emulated run. It PASSED
-   on a CI build of the H5 tree (Chromium 156.0.8078.79, a 55,008-byte report, `uname -m` `aarch64`). It re-runs on the
-   release build, so the release digest gets its own native render. Record the job URL and the arm64 manifest digest.
+   on a CI build of the H5 tree (then still Chromium 156.0.8078.79, a 55,008-byte report, `uname -m` `aarch64`). Since P5
+   (PDF renderer migration) the render is the Worker's native, browser-free renderer and the evidence records the Node
+   version instead of a Chromium version. It re-runs on the release build, so the release digest gets its own native
+   render. Record the job URL and the arm64 manifest digest.
 2. **An isolated ARM64 host**: a throwaway ARM VM (for example Hetzner CAX, AWS Graviton, or an Oracle A1 instance in a
    separate tenancy, **never the production Oracle host**), using the native ARM64 procedure:
 
@@ -246,9 +250,9 @@ Two ways, either acceptable for the owner (the current owner question in the rel
    uname -m && docker info --format '{{.Architecture}}'        # aarch64 / aarch64
    docker pull --platform linux/arm64 adhin007/adolphus@sha256:<worker-index-digest>
    docker run --rm --network none --user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-     --entrypoint sh adhin007/adolphus@sha256:<worker-index-digest> -c 'uname -m; /usr/bin/chromium --version'
+     --entrypoint sh adhin007/adolphus@sha256:<worker-index-digest> -c 'uname -m; node --version; test ! -e /usr/bin/chromium'
    # then the render smoke and the bundle integration harness from the procedure; record the digest, host arch,
-   # Chromium version and the PDF's validity (size, page count, markers).
+   # Node version and the PDF's validity (size, page count, markers). P5: no Chromium exists in the image.
    ```
 
 If the owner wants staging itself to match production's architecture, provision the staging VM on an ARM64 provider

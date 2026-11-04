@@ -1,8 +1,3 @@
-import { chromium } from 'playwright';
-
-import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
-import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
-
 import { FINAL_TIMESHEET_CASES } from '../../__tests__/helpers/final-timesheet-fixtures';
 import { inlinePageResources } from '../../__tests__/helpers/pdf-images';
 import { inspectPdf } from '../../__tests__/helpers/pdf-inspect';
@@ -14,9 +9,7 @@ import { PdfNativeRenderError, PdfNativeThreadCrashError } from './native/runtim
 import {
   describePdfRendering,
   errorCodeSuffix,
-  htmlFor,
   NATIVE_KINDS,
-  optionsFor,
   PDF_RENDER_STEP_TIMEOUT_MS,
   PdfRenderTimeoutError,
   pdfRendererMode,
@@ -25,38 +18,32 @@ import {
 } from './render-pdf.util';
 
 /**
- * PDF renderer P1 — the PDF_RENDERER switch at the data-in seam `renderReportPdf(doc)` (owner decisions D1, T3).
- * Strict: unset or empty → chromium (the default); exactly "chromium" or "native" otherwise; anything else is refused
- * before either renderer runs. No browser is started: `chromium.launch` is intercepted, so "Chromium was / was not
- * used" is observed directly; the native renderer is observed through a spy that still renders for real.
+ * PDF renderer P5 — native only, at the data-in seam `renderReportPdf(doc)` (owner decisions D1, T3, D10).
+ * PDF_RENDERER: unset / empty / "native" → native; "chromium" is refused (retired: no browser in the Worker); anything
+ * else is refused before the renderer runs. No browser package is ever loaded.
  */
 jest.setTimeout(60_000);
 
 const data = FINAL_TIMESHEET_CASES['one-page']!;
 const doc: ReportDocument = { kind: 'final-timesheet', data };
 
-class LaunchIntercepted extends Error {}
-
-describe('pdfRendererMode (strict PDF_RENDERER parsing)', () => {
-  it.each([[{}], [{ PDF_RENDERER: '' }]])('defaults to chromium when unset or empty (%p)', (env) => {
-    expect(pdfRendererMode(env)).toBe('chromium');
+describe('pdfRendererMode (native only, strict)', () => {
+  it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'native' }]])('native for %p', (env) => {
+    expect(pdfRendererMode(env)).toBe('native');
   });
 
-  it.each(['chromium', 'native'] as const)('accepts exactly %p', (value) => {
-    expect(pdfRendererMode({ PDF_RENDERER: value })).toBe(value);
+  it('refuses chromium and names the rollback', () => {
+    expect(() => pdfRendererMode({ PDF_RENDERER: 'chromium' })).toThrow(/retired .*redeploying the previous Worker image/);
   });
 
-  it.each([' ', 'Native', 'NATIVE', 'Chromium', ' native', 'native ', 'chrome', 'pdfkit', 'react-pdf', 'true', '1', 'chromium,native'])('refuses %p', (value) => {
-    expect(() => pdfRendererMode({ PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly "chromium" \(the default\) or "native"/);
+  it.each([' ', 'Native', 'NATIVE', ' native', 'native ', 'chrome', 'pdfkit', 'true', '1', 'chromium,native'])('refuses %p', (value) => {
+    expect(() => pdfRendererMode({ PDF_RENDERER: value })).toThrow(/PDF_RENDERER must be exactly "native"/);
   });
 
-  it('the boot line names the native kinds, and refuses a bad value the same way', () => {
-    expect([...NATIVE_KINDS]).toEqual(['final-timesheet', 'pre-shift', 'approved-shift-statement']);
-    expect(describePdfRendering({ PDF_RENDERER: 'native' })).toBe(
-      'PDF_RENDERER=native: native final-timesheet, pre-shift, approved-shift-statement; Chromium for every other report kind',
-    );
-    expect(describePdfRendering({})).toBe('PDF_RENDERER=chromium: native none; Chromium for every other report kind');
-    expect(() => describePdfRendering({ PDF_RENDERER: 'Native' })).toThrow(/PDF_RENDERER must be exactly/);
+  it('every report kind is native, and the boot line says so', () => {
+    expect([...NATIVE_KINDS].sort()).toEqual(['approved-shift-statement', 'final-timesheet', 'pre-shift']);
+    expect(describePdfRendering({})).toBe('PDF rendering: native for pre-shift, final-timesheet, approved-shift-statement; no browser');
+    expect(() => describePdfRendering({ PDF_RENDERER: 'chromium' })).toThrow(/retired/);
   });
 });
 
@@ -65,13 +52,6 @@ describe('one deadline error class for both renderers', () => {
     expect(PdfRenderTimeoutError).toBe(renderTimeout.PdfRenderTimeoutError);
     expect(PDF_RENDER_STEP_TIMEOUT_MS).toBe(renderTimeout.PDF_RENDER_STEP_TIMEOUT_MS);
     expect(new renderTimeout.PdfRenderTimeoutError('native-render', 1)).toBeInstanceOf(PdfRenderTimeoutError);
-  });
-});
-
-describe('Chromium input is exactly what the job passed before the seam changed', () => {
-  it('final timesheet: the template output and the landscape footer options, unchanged', () => {
-    expect(htmlFor(doc)).toBe(renderFinalTimesheetHtml(data));
-    expect(optionsFor(doc)).toEqual({ footerTemplate: documentFooterTemplate(data), landscape: true });
   });
 });
 
@@ -101,97 +81,65 @@ describe('native renders go through the render pool (I-1)', () => {
   });
 });
 
-describe('renderReportPdf dispatch', () => {
-  let launch: jest.SpyInstance;
+describe('renderReportPdf', () => {
   let native: jest.SpyInstance;
 
   beforeEach(() => {
-    launch = jest.spyOn(chromium, 'launch').mockRejectedValue(new LaunchIntercepted('chromium.launch intercepted'));
     native = jest.spyOn(nativeModule, 'renderNativePdf');
   });
   afterEach(() => jest.restoreAllMocks());
   afterAll(() => shutdownRenderPool());
 
-  it.each([[{}], [{ PDF_RENDERER: '' }], [{ PDF_RENDERER: 'chromium' }]])('%p: the Chromium path, never the native one', async (env) => {
-    await expect(renderReportPdf(doc, env)).rejects.toBeInstanceOf(LaunchIntercepted);
-    expect(launch).toHaveBeenCalledTimes(1);
-    expect(native).not.toHaveBeenCalled();
-  });
-
-  it('native: renders a PDF from the data without ever launching Chromium', async () => {
-    const pdf = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
-    expect(launch).not.toHaveBeenCalled();
+  it('renders a PDF from the data, and no browser package is ever loaded', async () => {
+    const pdf = await renderReportPdf(doc, {});
     expect(native).toHaveBeenCalledWith(doc);
     expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+    const loaded = Object.keys(require.cache).filter((k) => /[\\/]node_modules[\\/](playwright|playwright-core|chromium-bidi)[\\/]/.test(k));
+    expect(loaded).toEqual([]);
   });
 
-  // Integration of #59 (roster) with #57 (payroll): the statement now has a native layout too, so no kind is left without
-  // one. Both directions are pinned for it instead: native renders it natively, chromium still sends it to Chromium.
-  const statement = {
-    kind: 'approved-shift-statement',
-    data: {
-      statementReference: 'ASS-20261020-1A2B3C4D', employerName: 'Adolphus Group Ltd', workspaceName: 'Adolphus Events', staffName: 'Alex Example',
-      staffRef: 'ST-1001', venueName: 'The Grand Hall', roleName: 'Bar Staff', scheduledStart: '2026-10-20T17:00:00.000Z', scheduledEnd: '2026-10-21T01:00:00.000Z',
-      clockInAt: '2026-10-20T16:58:00.000Z', clockOutAt: '2026-10-21T01:03:00.000Z', breakMinutes: 30, breakPaid: false, payableMinutes: 455, payRatePence: 1250,
-      amountPence: 9479, approvedAt: '2026-10-22T10:00:00.000Z', approvedByName: 'Pat Payroll', payrollPeriodLabel: '13 Oct – 26 Oct 2026', paydayLabel: 'Fri 30 Oct 2026',
-      timezone: 'Europe/London', generatedAt: '2026-10-22T10:05:00.000Z',
-    },
-  } as ReportDocument;
-
-  it('native: the shift statement renders natively, without ever launching Chromium', async () => {
-    const pdf = await renderReportPdf(statement, { PDF_RENDERER: 'native' });
-    expect(launch).not.toHaveBeenCalled();
-    expect(native).toHaveBeenCalledWith(statement);
-    expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-');
-  });
-
-  it('chromium: the shift statement still goes to Chromium, never the native renderer', async () => {
-    await expect(renderReportPdf(statement, { PDF_RENDERER: 'chromium' })).rejects.toBeInstanceOf(LaunchIntercepted);
-    expect(launch).toHaveBeenCalledTimes(1);
+  it('an unknown kind is refused before the renderer runs (fail closed)', async () => {
+    await expect(renderReportPdf({ kind: 'no-such-document', data: {} } as unknown as ReportDocument, {})).rejects.toThrow(/no native layout/);
     expect(native).not.toHaveBeenCalled();
   });
 
-  it.each([' ', 'Native', 'pdfkit'])('refused value %p: rejects before either renderer runs', async (value) => {
-    await expect(renderReportPdf(doc, { PDF_RENDERER: value })).rejects.toThrow(/PDF_RENDERER must be exactly/);
-    expect(launch).not.toHaveBeenCalled();
+  it.each(['chromium', ' ', 'Native'])('PDF_RENDERER=%p: rejects before the renderer runs', async (value) => {
+    await expect(renderReportPdf(doc, { PDF_RENDERER: value })).rejects.toThrow(/PDF_RENDERER/);
     expect(native).not.toHaveBeenCalled();
   });
 
-  it('native: the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
+  it('the render pool deadline error (PdfRenderTimeoutError, step "native-render") reaches the job unchanged', async () => {
     // The 30 s deadline itself is enforced by the render pool terminating the thread (runtime/render-pool.spec.ts).
     native.mockRejectedValue(new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS));
-    await expect(renderReportPdf(doc, { PDF_RENDERER: 'native' })).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
-    expect(launch).not.toHaveBeenCalled();
+    await expect(renderReportPdf(doc, {})).rejects.toMatchObject({ name: 'PdfRenderTimeoutError', step: 'native-render', timeoutMs: PDF_RENDER_STEP_TIMEOUT_MS });
   });
 
-  it('native: a renderer failure propagates unchanged — no runtime fallback to Chromium (T3)', async () => {
+  it('a renderer failure propagates unchanged (T3: no fallback)', async () => {
     native.mockRejectedValue(new Error('native boom'));
-    await expect(renderReportPdf(doc, { PDF_RENDERER: 'native' })).rejects.toThrow('native boom');
-    expect(launch).not.toHaveBeenCalled();
+    await expect(renderReportPdf(doc, {})).rejects.toThrow('native boom');
   });
 
-  // Visible and auditable, never a silent Chromium fallback: a failure inside the render pool reaches the job as the
-  // pool's own error, with its stable code, and Chromium is never started instead.
+  // Visible and auditable: a failure inside the render pool reaches the job as the pool's own error, with its stable
+  // code (there is no other renderer to fall back to).
   it.each([
     ['a render error', () => new PdfNativeRenderError('native PDF render thread failed to start'), 'error_PDF_NATIVE_RENDER'],
     ['a thread crash', () => new PdfNativeThreadCrashError('native PDF render thread exited', 'ERR_UNKNOWN'), 'error_PDF_NATIVE_THREAD_CRASH'],
     ['the deadline', () => new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS), 'error_PDF_RENDER_TIMEOUT'],
-  ])('native: %s inside the render pool rejects with its code; Chromium is never launched', async (_label, make, code) => {
+  ])('%s inside the render pool rejects with its code', async (_label, make, code) => {
     native.mockRestore();
     const pooled = jest.spyOn(renderPool, 'renderInPool').mockRejectedValue(make());
-    const err = await renderReportPdf(doc, { PDF_RENDERER: 'native' }).then(
+    const err = await renderReportPdf(doc, {}).then(
       () => { throw new Error('expected a rejection'); },
       (e: unknown) => e,
     );
     expect(pooled).toHaveBeenCalledTimes(1);
     expect(err).toMatchObject({ code });
     expect(errorCodeSuffix(err)).toBe(` [${code}]`);
-    expect(launch).not.toHaveBeenCalled();
   });
 
-  it('native: deterministic output (D7) — the same data renders to the same bytes', async () => {
-    const a = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
-    const b = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
+  it('deterministic output (D7) — the same data renders to the same bytes', async () => {
+    const a = await renderReportPdf(doc, {});
+    const b = await renderReportPdf(doc, {});
     expect(a.equals(b)).toBe(true);
     // The creation date is the document's generatedAt (2026-10-20T15:00:00Z), built inside the render thread.
     expect(a.toString('latin1')).toContain('D:20261020150000');

@@ -162,7 +162,7 @@ jobs:
       - name: API start shell tests (api-prestart.sh, start.sh)
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
       - name: Worker bundle launcher and committed deployment definitions
-        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs packages/rab-docker/rab/test/runtime-deps.test.cjs
       # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
       # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
       # skip itself), fails; any check failure fails the job.

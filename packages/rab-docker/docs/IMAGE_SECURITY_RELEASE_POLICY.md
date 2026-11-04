@@ -10,9 +10,10 @@ release, how the version floors are raised, and how a finding that cannot be fix
 | `.github/workflows/ci-security.yaml` (`image-gate`, `ci-security-gate`) | Runs the gate on every PR and every push to `main`, in PR mode |
 | `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated API and Worker indexes to `docker.io/adhin007/adolphus` |
 | `packages/rab-docker/scripts/image-security/publish-gated.sh` | The only push path: one gated index, one immutable tag, existing tags refused, served digests verified |
-| `packages/rab-docker/rab/security-floors.env` | Minimum Node, Chromium and libexpat versions, the Alpine branch, npm floors |
+| `packages/rab-docker/rab/security-floors.env` | Minimum Node and libexpat versions, the Alpine branch, npm floors (no Chromium floor since P5: no image installs Chromium) |
 | `packages/rab-docker/rab/security-floors.sh`, `module-paths-gate.cjs` | H1 build-time gates, re-run by the gate against the finished image |
-| `packages/rab-docker/scripts/image-security/policy.json` | Expected users, entrypoints, writable dirs, code paths, package lists, scanner pins |
+| `packages/rab-docker/scripts/image-security/policy.json` | Expected users, entrypoints, writable dirs, code paths, package lists (including the P5 forbidden browser stack per role), scanner pins |
+| `tools/check-no-browser-in-worker.cjs` | P5 source guard: `@rab/worker` / `@rab/server` may not declare or import a browser package (run by `ci-worker` and the gate's `static` job) |
 | `packages/rab-docker/scripts/image-security/vulnerability-decisions.json` | Owner risk decisions (empty until the owner decides) |
 | `packages/rab-docker/scripts/image-security/scanner-blind-advisories.json` | Known High advisories that the scanners miss |
 | `packages/rab-docker/scripts/image-security/image_gate.py` | The checks; `tests/` holds their self-tests |
@@ -40,16 +41,16 @@ succeeded. The default mode of `image_gate.py` is `release`, so forgetting the f
 
 | Check (`image_gate.py` command) | FAIL (every mode) | HOLD (blocks a release) |
 |---|---|---|
-| `static` | Unpinned `FROM` / `COPY --from` / remote `ADD`; floors file malformed; decision register invalid or expired; scanner image not pinned by digest | Unpinned `# syntax=` frontend line |
+| `static` | Unpinned `FROM` / `COPY --from` / remote `ADD`; floors file malformed, or a `MIN_CHROMIUM_VERSION` line (retired in P5); a role without `forbidden_apk` / `forbidden_npm` / `sbom_must_not_include` or without `apk-absent:chromium`; decision register invalid or expired; scanner image not pinned by digest | Unpinned `# syntax=` frontend line |
 | `config` | Wrong platform, runtime user, entrypoint, cmd, exposed ports or healthcheck; `org.opencontainers.image.revision` ≠ the source commit; a secret-like env name or a URL with credentials in the image config | – |
-| `container` | `security-floors.sh` fails inside the image (Node, Chromium, libexpat below the floor; Alpine branch or repositories wrong; Chromium present in the API); Chromium binary version below the floor; `module-paths-gate.cjs` finds a writable module path or a plantable `$HOME/.node_modules` for any runtime identity | – |
-| `fs` (exported filesystem) | setuid/setgid file; file capability; world-writable file or a non-sticky world-writable directory; code under `/app`, `/opt/crewflow-bundle`, `/usr/local`, `/usr/lib/chromium` not `0:0` or group/other-writable; HOME writable; extra uid 0 account; unapproved apk repository, drop-in, apk config or tag pin; test files, `.env*` files or `.git` in application code; esbuild/vite; an npm package below an `NPM_FLOOR` | Development-only packages (the H3 list in `policy.json`) |
+| `container` | `security-floors.sh` fails inside the image (Node or libexpat below the floor; Alpine branch or repositories wrong; Chromium present in either image); `module-paths-gate.cjs` finds a writable module path or a plantable `$HOME/.node_modules` for any runtime identity | – |
+| `fs` (exported filesystem) | setuid/setgid file; file capability; world-writable file or a non-sticky world-writable directory; code under `/app`, `/opt/crewflow-bundle`, `/usr/local` not `0:0` or group/other-writable; **P5: any installed apk matching the role's `forbidden_apk` (Chromium and the 149 OS packages only it pulled in: ffmpeg and every codec, the X11/Wayland/Mesa/GTK stack, fonts, audio, `libxml2`, `glib`, `cups-libs`, `cjson`, ...), any npm package matching `forbidden_npm` (`playwright`, `playwright-core`, `chromium-bidi`, `@playwright/*`, `puppeteer*`), or a `/usr/lib/chromium` / `/usr/bin/chromium*` path**; HOME writable; extra uid 0 account; unapproved apk repository, drop-in, apk config or tag pin; test files, `.env*` files or `.git` in application code; esbuild/vite; an npm package below an `NPM_FLOOR` | Development-only packages (the H3 list in `policy.json`) |
 | `worker-base` | The Worker's lower layers are not exactly the gated API image's layers | – |
 | `scan` | A scanner failed; the scanner version is not the pinned one; DB older than 72 h; the scanned image ID or layer chain is not the gated image | – |
 | `vulns` | **Fixable** High/Critical (either scanner knows a fixed version) without a valid owner decision | **Unfixed** High/Critical without a valid owner decision; a watch-list package whose version changed (re-verify) |
-| `pdf` (Worker) | No PDF: the launcher's jobs-child plan is not `HOME=/nonexistent` + its own TMPDIR/XDG dirs; the render through the production renderer fails; the output lacks a `%PDF-` header, `%%EOF`, a page, the known text markers (including the synthetic markup, which must come out as literal text) or an embedded image; the image ran on a host of another architecture (emulated) | – |
+| `pdf` (Worker) | No PDF: the launcher's jobs-child plan is not `HOME=/nonexistent` + its own TMPDIR/XDG dirs, or forwards a `CHROMIUM_*` / `PLAYWRIGHT_*` key; the render through the production native renderer (`pdf-render-smoke.cjs`; it refuses to run while the Chromium renderer is still exported) fails; the output lacks a `%PDF-` header, `%%EOF`, a page, the known text markers (including the synthetic markup, which must come out as literal text) or an embedded image; the image ran on a host of another architecture (emulated) | – |
 | `secrets` | Any Trivy secret finding in any layer (including files deleted in later layers) or in the image config | – |
-| `attest` | Build output is not the gated image; no SBOM; SBOM too small or missing key packages; no or more than one provenance; provenance records a build argument not in the allowlist, a build secret, SSH, a credential-like string, or a source revision ≠ the commit | – |
+| `attest` | Build output is not the gated image; no SBOM; SBOM too small or missing key packages, or naming a package in `sbom_must_not_include` (P5: `chromium`, `playwright`, `playwright-core`); no or more than one provenance; provenance records a build argument not in the allowlist, a build secret, SSH, a credential-like string, or a source revision ≠ the commit | – |
 | `manifest` | Platforms ≠ the expected set; config OS/architecture ≠ descriptor; an image without its attestation manifest; revision label mismatch; Worker not layered on the API for every platform | – |
 
 Medium and Low findings never block. They are counted and listed in the evidence artifacts and the job summary.
@@ -60,14 +61,15 @@ so it needs an explicit owner decision before a release (section 5). It is never
 
 ## 3. Floors (`security-floors.env`)
 
-- `MIN_NODE_VERSION`, `MIN_CHROMIUM_VERSION`, `MIN_LIBEXPAT_VERSION` and `ALPINE_BRANCH` are read by
-  `security-floors.sh` at build time and again by the gate inside the finished image. A build argument with the same
-  name can only **raise** a floor. All comparisons are real version comparisons (`apk version -t` for Alpine packages;
-  numeric comparison for Node and for the Chromium binary's own `--version`), never string comparisons.
+- `MIN_NODE_VERSION`, `MIN_LIBEXPAT_VERSION` and `ALPINE_BRANCH` are read by `security-floors.sh` at build time and
+  again by the gate inside the finished image. A build argument with the same name can only **raise** a floor. All
+  comparisons are real version comparisons (`apk version -t` for Alpine packages; numeric comparison for Node), never
+  string comparisons. `MIN_CHROMIUM_VERSION` was retired in P5 (PDF renderer migration): no image installs Chromium,
+  both images run `apk-absent:chromium`, and `static` refuses the key if it comes back.
 - `NPM_FLOOR=<package>@<major.minor.patch>` (repeatable) sets a minimum for **every installed copy** of an npm package in
   the image, using semantic-version precedence. Use it for patched-dependency requirements (for example
   `NPM_FLOOR=prismjs@1.30.0` once H4a merges).
-- **Raising a floor** after a security release (Chrome stable, Node, Alpine):
+- **Raising a floor** after a security release (Node, Alpine):
   1. Confirm that the fixed package is in Alpine `v3.24/main|community` (`apk policy`, APKINDEX) or that the Node base
      digest has it.
   2. Raise the value in `security-floors.env` (and bump the `node:24-alpine@sha256` digest in **both** `FROM` lines for
@@ -88,8 +90,9 @@ To update a scanner:
 1. Resolve the new tag's multi-arch digest with `docker buildx imagetools inspect`.
 2. Update `image`, `version` and the comment in the PR, and compare the findings before and after in the PR description.
 
-Neither scanner can see Chromium's own CVEs (Alpine's secdb stops at 144) or the tarball-installed Node runtime. The
-floors are the only control for those, so they are never dropped because a scanner reports zero. Docker Scout is not
+Neither scanner can see the tarball-installed Node runtime's own CVEs. The Node floor is the only control for it, so
+it is never dropped because a scanner reports zero. (Until P5 the same was true of Chromium, whose Alpine secdb entries
+stop at 144; P5 removed Chromium from every image instead.) Docker Scout is not
 used: it needs a Docker Hub credential, which has not been approved (section 9).
 
 ## 5. Owner risk decisions (`vulnerability-decisions.json`)
@@ -127,9 +130,10 @@ Rules, all enforced by `image_gate.py static` / `vulns`:
 - Entries are added in a PR that links the owner's written decision. An agent or a CI job never adds one on its own
   initiative.
 
-**Current state (2026-11-03): the register is empty.** The Worker's unfixed High/Critical findings (the seven
-Chromium-dependency CVEs from the 2026-11-02 report, plus those Grype reports through NVD CPE matching) appear as HOLD on
-every PR and block a release until the owner decides on each one.
+**Current state (2026-11-03): the register is empty.** Until P5, the Worker's unfixed High/Critical findings (the
+seven Chromium-dependency CVEs from the 2026-11-02 report, plus those Grype reports through NVD CPE matching) appeared as
+HOLD on every PR. P5 removes Chromium and every package those findings were in (MEASURED in the P5 PR: absent from the
+built Worker image); any finding that remains is listed in the P5 PR body and keeps its HOLD until decided.
 
 ## 6. Scanner-blind watch list (`scanner-blind-advisories.json`)
 

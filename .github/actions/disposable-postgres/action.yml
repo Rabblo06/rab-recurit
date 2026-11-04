@@ -3,9 +3,11 @@ description: >-
   Starts a throwaway PostgreSQL 16 container on 127.0.0.1:5432 AFTER checkout (no volume mount from the workspace, which
   broke checkout with EACCES when it was a service volume), marked crewflow.disposable_cluster=on for the M2 harness.
   Writes MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD,
-  CREWFLOW_OWNER_BOOTSTRAP_PASSWORD and APP_SECRET to $GITHUB_ENV, every value random per run and masked before first use.
-  Nothing is printed. CREWFLOW_OWNER_BOOTSTRAP_PASSWORD is the crewflow_owner password the owner-login test database build
-  (twenty-mode-check.ts ci-db, through 01-crewflow-owner.sql) gives the one runtime login.
+  CREWFLOW_WORKER_BOOTSTRAP_PASSWORD, CREWFLOW_OWNER_BOOTSTRAP_PASSWORD and APP_SECRET to $GITHUB_ENV, every value random
+  per run and masked before first use. Nothing is printed. CREWFLOW_OWNER_BOOTSTRAP_PASSWORD is the crewflow_owner password
+  the owner-login test database build (twenty-mode-check.ts ci-db, through 01-crewflow-owner.sql) gives the one runtime
+  login. CREWFLOW_WORKER_BOOTSTRAP_PASSWORD (E5) is the password the legacy M2 harness gives crewflow_worker when it creates
+  that role; only the legacy restricted-migrator build still uses it (until PR #9).
 
 runs:
   using: composite
@@ -17,11 +19,13 @@ runs:
         su_pass="$(openssl rand -hex 24)"
         cf_pass="$(openssl rand -hex 24)"
         app_pass="$(openssl rand -hex 24)"
+        worker_pass="$(openssl rand -hex 24)"
         owner_pass="$(openssl rand -hex 32)"
         app_secret="$(openssl rand -hex 32)"
         echo "::add-mask::${su_pass}"
         echo "::add-mask::${cf_pass}"
         echo "::add-mask::${app_pass}"
+        echo "::add-mask::${worker_pass}"
         echo "::add-mask::${owner_pass}"
         echo "::add-mask::${app_secret}"
         # Password through a file, not -e: an environment value shows in the process list and in `docker inspect`.
@@ -47,6 +51,7 @@ runs:
           echo "MIGRATION_SECURITY_ADMIN_URL=${admin_url}"
           echo "CREWFLOW_BOOTSTRAP_PASSWORD=${cf_pass}"
           echo "CREWFLOW_APP_BOOTSTRAP_PASSWORD=${app_pass}"
+          echo "CREWFLOW_WORKER_BOOTSTRAP_PASSWORD=${worker_pass}"
           echo "CREWFLOW_OWNER_BOOTSTRAP_PASSWORD=${owner_pass}"
           echo "APP_SECRET=${app_secret}"
         } >> "$GITHUB_ENV"

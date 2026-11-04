@@ -102,6 +102,17 @@ structural changes.
   the role on checkout and `TenantContextService` asserts `current_user =
   session_user` (`database/postgres/session-role-reset.ts`). Never use
   `DISCARD ALL` inside a transaction.
+  - **One reviewed exception (2026-11-04):** the Worker's workspace
+    provisioning and drift connections
+    (`rab-worker/.../workspace-provisioning.loops.ts`,
+    `actAsProvisioningRole`) run a session-level `SET ROLE crewflow`. This
+    is allowed only because each one is a dedicated `pg.Client`, never a
+    pool. It is private to that module, runs only that module's fixed
+    statements (no request input), verifies `current_user` after the SET,
+    and repeats the SET on every reconnect. It is not a privilege
+    boundary: the owner login can act as `crewflow` anyway. Any other
+    session-level SET ROLE needs its own SECURITY TRADE-OFF review and an
+    entry here.
 - **New database objects are owned by a schema role, never by the login.**
   - Tables, functions and schemas belong to `crewflow` (through
     `withCrewflowCoreCreate`) or `rab_secure_owner`.
