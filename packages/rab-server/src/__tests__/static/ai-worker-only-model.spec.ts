@@ -8,6 +8,7 @@ import { MODULE_METADATA } from '@nestjs/common/constants';
 import { AiModule } from '../../modules/ai/ai.module';
 import { AiWorkerCoreModule } from '../../modules/ai/ai-worker-core.module';
 import { AI_LANGUAGE_MODEL_FACTORY, ModelGatewayService } from '../../modules/ai/gateway/model-gateway.service';
+import { AiStaleTurnSweepService } from '../../modules/ai/services/ai-stale-turn-sweep.service';
 import { AiTitleService } from '../../modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '../../modules/ai/services/ai-turn-runner.service';
 
@@ -17,8 +18,12 @@ import { AiTurnRunnerService } from '../../modules/ai/services/ai-turn-runner.se
  *   1. The API's AI module graph (`AiModule` and everything it imports, recursively) provides none of the model side:
  *      ModelGatewayService, AI_LANGUAGE_MODEL_FACTORY, AiTurnRunnerService, AiTitleService.
  *   2. `AiWorkerCoreModule` provides them, and the Worker's module imports it; `app.module.ts` never does.
- *   3. No production source outside the Worker module, the gateway and the two Worker services imports the model side
+ *   3. No production source outside the Worker module, the gateway and the Worker services imports the model side
  *      (so a future API service cannot reach a model in-request, bypassing the queue, the slot and the lease).
+ *      Phase D-Q2 adds ONE Worker service to that list: `AiStaleTurnSweepService` imports `AiTurnRunnerService` only for
+ *      its `finaliseStaleQueued` compare-and-set (it never calls a model). It is admitted on the same terms as the
+ *      other Worker services, pinned by 1 and 2: the API `AiModule` graph must NOT provide it and `AiWorkerCoreModule`
+ *      must, so it can only ever exist in the Worker process.
  * (The provider-SDK boundary and "only the gateway calls streamText" stay in ai-provider-boundary.spec.ts.)
  */
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -58,11 +63,14 @@ describe('AI model side is Worker-only (static)', () => {
     const tokens = providerTokens(AiModule);
     expect(tokens.size).toBeGreaterThan(10); // a meaningful graph was walked
     for (const t of [...MODEL_SIDE, AI_LANGUAGE_MODEL_FACTORY]) expect(tokens.has(t)).toBe(false);
+    // D-Q2: the stale-turn sweep imports the turn runner, so it must be Worker-only too.
+    expect(tokens.has(AiStaleTurnSweepService)).toBe(false);
   });
 
   it('AiWorkerCoreModule provides all of them', () => {
     const tokens = providerTokens(AiWorkerCoreModule);
     for (const t of [...MODEL_SIDE, AI_LANGUAGE_MODEL_FACTORY]) expect(tokens.has(t)).toBe(true);
+    expect(tokens.has(AiStaleTurnSweepService)).toBe(true);
   });
 
   it('the Worker imports AiWorkerCoreModule; app.module.ts never references it', () => {
@@ -78,6 +86,8 @@ describe('AI model side is Worker-only (static)', () => {
       'modules/ai/ai-worker-core.module.ts',
       'modules/ai/services/ai-turn-runner.service.ts',
       'modules/ai/services/ai-title.service.ts',
+      // Phase D-Q2: Worker-only (asserted above: not in the API AiModule graph, provided by AiWorkerCoreModule).
+      'modules/ai/services/ai-stale-turn-sweep.service.ts',
     ]);
     const modelSide = /from\s+['"][^'"]*(ai-worker-core\.module|services\/ai-turn-runner\.service|services\/ai-title\.service|\/ai-turn-runner\.service|\/ai-title\.service|gateway\/model-gateway\.service)['"]/;
     const offenders: string[] = [];

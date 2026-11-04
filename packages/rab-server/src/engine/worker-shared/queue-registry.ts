@@ -205,7 +205,9 @@ export const QUEUE_SETTINGS = Object.freeze({
   [SCAN_QUEUES.shifts]: scanQueue(4, ['shift-monitor', 'attendance-monitor', 'late-clock-in', 'shift-cancellation-followup']),
   [SCAN_QUEUES.offers]: scanQueue(3, ['offer-expiry', 'manager-confirmation-timeout', 'replacement-staff']),
   [SCAN_QUEUES.reports]: scanQueue(4, ['shift-report-scheduler', 'final-timesheet', 'shift-statement-dispatch', 'payroll-period-attention']),
-  [SCAN_QUEUES.maintenance]: scanQueue(7, [
+  // Phase D-Q2 adds `ai-stale-turn-sweep` (one more slot: 7 → 8). Registered only when AI_STALE_TURN_SWEEP=true; the
+  // slot exists either way so the registry equals SCAN_JOBS (assertScanQueueSettings counts every defined scan).
+  [SCAN_QUEUES.maintenance]: scanQueue(8, [
     'account-invite-cleanup',
     'token-cleanup',
     'login-handoff-cleanup',
@@ -213,6 +215,7 @@ export const QUEUE_SETTINGS = Object.freeze({
     'outbox-retention',
     'ai-retention',
     'workspace-provisioning-health',
+    'ai-stale-turn-sweep',
   ]),
   [SCAN_QUEUES.realtime]: scanQueue(1, ['realtime-outbox-publish']),
 } satisfies { readonly [N in QueueName]: QueueSettings });

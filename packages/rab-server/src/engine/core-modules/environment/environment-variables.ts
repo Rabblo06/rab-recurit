@@ -1059,6 +1059,38 @@ export class EnvironmentVariables {
   AI_RETENTION_INTERVAL_MINUTES: number = 60;
 
   /**
+   * Phase D-Q2: the Worker scan that ends AI turns stuck `queued` because their BullMQ job was lost (Redis loss). OFF by
+   * default (not even scheduled). When on, a turn `queued` for longer than AI_STALE_TURN_THRESHOLD_MINUTES is finalised
+   * `failed` / AI_WORKER_INTERRUPTED (the user asks again) — never re-run or requeued (owner rule 2026-11-02).
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value)) // 'true' / 'false' only; TRUE, 1, yes, ' true' refuse to boot (review F46-1)
+  @IsBoolean()
+  AI_STALE_TURN_SWEEP: boolean = false;
+
+  /**
+   * How long a turn may stay `queued` before the sweep treats its job as lost. Default 15 min; floor 11 min because the
+   * longest LEGITIMATE queued wait is bounded by the org-slot TTL = AI_TURN_TIMEOUT_SECONDS (max 300 s) + 5 min = 10 min
+   * (a deferred successor gives up even earlier, at timeout + 60 s). The service re-checks against the live timeout and
+   * refuses to run with a threshold that is not above it (fail closed).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(11)
+  @Max(1440)
+  AI_STALE_TURN_THRESHOLD_MINUTES: number = 15;
+
+  /** Cadence of the stale-turn sweep (minutes, 1–60, default 5). Read by rab-worker only. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  AI_STALE_TURN_SWEEP_INTERVAL_MINUTES: number = 5;
+
+  /**
    * AI Phase 2 (PHASE2_TWENTY_PLAN §2.5, P2-D8): a conversation's first question also enqueues one thread-title call on
    * the fast model, in the Worker, through the gateway with every EX-1 / payload / budget control. `false` ⇒ no title job
    * is enqueued and a queued one does nothing (the first-question fallback title stays). Not a boot refusal either way.
