@@ -147,21 +147,28 @@ export async function runAccountInviteCleanupCycle(
    */
   options: InviteCleanupOptions = { autoDeleteEnabled: false },
 ): Promise<AccountInviteCleanupResult> {
+  // D-1 (Twenty Mode M0, HIGH) — OFF means OFF. Retention gate OFF (the default; anything but the boolean `true`): return
+  // before a transaction is opened, so not one statement reaches the database. The pre-fix OFF path ran the legacy
+  // expire UPDATE / DELETE FROM core."user" below and relied on the login being crewflow_app (RLS, no tenant context ⇒ a
+  // silent no-op, D0 F-1). On any login that owns, or is a member of the owner of, the NOT-FORCE core."user" /
+  // core.account_invite — rab_secure_owner members, the superuser, Twenty Mode's schema-owning crewflow_owner — that same
+  // OFF cycle expired invites and deleted accounts in every organisation. Nothing externally visible is lost by skipping
+  // it: expired / revoked / consumed links are still rejected at redemption (AccountInviteService checks the live row),
+  // and the 'invited' → 'invite_expired' flip is display bookkeeping only (see the doc comment above).
+  if (options.autoDeleteEnabled !== true) return { expired: 0, deleted: 0, retained: 0 };
+
   return dataSource.transaction(async (manager) => {
     await manager.query(`SELECT pg_advisory_xact_lock(hashtext('rab_account_invite_cleanup'))`);
 
-    // Phase D F-1 (D8): when automatic deletion is ENABLED (owner approval required; never in production in this release)
-    // AND this login can EXECUTE all three narrow definers (migration 1786721340000, crewflow_worker only), the cycle
-    // reaches core."user" / core.account_invite through them — as the runtime role it otherwise sees no row of either (RLS,
-    // no tenant context) and has been a silent no-op.
-    // Retention gate OFF (the default): neither definer is ever called and no probe runs — everything below is the
-    // pre-Phase-D code path exactly as on main. On the runtime login that path is today's silent no-op under RLS (D0 F-1),
-    // so OFF changes nothing externally visible: no account is deleted, no invite status flips, no new audit row appears;
-    // expired / revoked / consumed links are still rejected at redemption (AccountInviteService checks the live row).
-    if (options.autoDeleteEnabled === true) {
-      const [probe] = await manager.query<Array<{ usable: boolean | null }>>(DEFINER_PROBE_SQL);
-      if (probe?.usable === true) return runDefinerCleanup(manager);
-    }
+    // Phase D F-1 (D8): automatic deletion is ENABLED here (owner approval required; refused in production by
+    // resolveInviteAutoDeleteEnabled). When this login can EXECUTE all three narrow definers (migration 1786721340000),
+    // the cycle reaches core."user" / core.account_invite through them, which re-check every secure-table condition
+    // (never signed in, no token or session ever, no owned workspace, not a platform admin) under the row lock.
+    const [probe] = await manager.query<Array<{ usable: boolean | null }>>(DEFINER_PROBE_SQL);
+    if (probe?.usable === true) return runDefinerCleanup(manager);
+
+    // ON, but the definers are not executable (crewflow_app, or a database without 1786721340000): the pre-Phase-D path.
+    // On crewflow_app it sees no row of either table (RLS, no tenant context) and is a no-op, exactly as before.
 
     // `account_invite` is ENABLE-but-not-FORCE (AccountInviteSchema1786670100000)
     // specifically so an owner-privileged connection like this one already
