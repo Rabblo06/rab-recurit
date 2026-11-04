@@ -355,8 +355,34 @@ async function freshScenario(): Promise<Record<string, string[]>> {
   check(shimmed.length === 3, 'fresh: the three ROW_COPY migrations are recorded (through the shim)');
   await postInstallChecks(db, 'fresh');
   await rlsGateAsApp(db, 'fresh');
+  // Test C (owner gate): repeated deploy — start, stop, start, start. No duplicate role, schema or ledger row; nothing re-run.
+  const facts = async () =>
+    (
+      await rows(
+        db,
+        `SELECT (SELECT count(*)::int FROM pg_roles WHERE rolname IN ('rab_owner','rab_app','rab_secure_owner','crewflow','crewflow_app','crewflow_worker','crewflow_owner','crewflow_rolemaker')) AS roles,
+                (SELECT count(*)::int FROM pg_namespace WHERE nspname = 'core') AS core,
+                (SELECT count(*)::int FROM pg_namespace WHERE nspname ~ '^workspace_') AS workspaces,
+                (SELECT count(*)::int FROM core.migrations) AS ledger, (SELECT count(DISTINCT name)::int FROM core.migrations) AS names,
+                (SELECT max(id)::int FROM core.migrations) AS maxid`,
+      )
+    )[0];
+  const before = await facts();
   const again = await inProcess(db);
   check(again.outcome === 'ok' && again.state === 'CURRENT' && again.applied.length === 0, 'second boot: CURRENT, nothing applied, exit 0');
+  const third = await inProcess(db);
+  const after = await facts();
+  check(
+    third.outcome === 'ok' &&
+      third.state === 'CURRENT' &&
+      JSON.stringify(after) === JSON.stringify(before) &&
+      before.roles === 7 &&
+      before.core === 1 &&
+      before.ledger === before.names &&
+      before.ledger === MIGRATIONS.length,
+    'Test C repeated deploy (start, start, start): 7 roles, one core schema, no duplicate or re-run ledger row, nothing changed',
+    [JSON.stringify({ before, after })],
+  );
 
   // Golden equivalence: the same lifecycle with the ROW_COPY migrations run by the superuser instead of the shim.
   const ref = `owl_ref_${RUN}`;
@@ -535,6 +561,56 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
       for (const s of off.split(';')) await rows('postgres', s);
     }
   }
+  await rows('postgres', 'ALTER ROLE crewflow_owner SUPERUSER');
+  try {
+    const sup = await inProcess(f);
+    check(sup.outcome === 'identity', 'wrong role (crewflow_owner made SUPERUSER): refused, exit 67');
+  } finally {
+    await rows('postgres', 'ALTER ROLE crewflow_owner NOSUPERUSER');
+  }
+
+  // Test D: a superuser (or any other) login handed to the migrate-on-start child: refused, no legacy fallback.
+  const asSuper = await runMigrateOnStart(
+    { migrationApprovalMode: 'none', upgradeFailurePolicy: 'refuse' },
+    { env: { ...childEnv(f), PG_DATABASE_URL: dbUrl(f, 'admin') }, log: () => undefined },
+  );
+  check(asSuper.outcome === 'identity', 'wrong identity (a superuser login): the child refuses, exit 67 (no legacy fallback)', [asSuper.reason]);
+
+  // Test D: a partially initialised database (bootstrap committed, chain never started) completes and equals the fresh one.
+  const bp = `owl_bpartial_${RUN}`;
+  await providerAdminStep(bp);
+  await rows(bp, 'CREATE SCHEMA core AUTHORIZATION rab_owner');
+  const bpr = await inProcess(bp);
+  check(bpr.outcome === 'ok' && bpr.state === 'BOOTSTRAP-PARTIAL' && bpr.applied.length === MIGRATIONS.length, 'BOOTSTRAP-PARTIAL: bootstrap re-run (idempotent) and the whole chain applied');
+  const bpDiff = diffSnapshots(freshSnapshot, await snapshot(bp));
+  check(bpDiff.length === 0, 'BOOTSTRAP-PARTIAL: the completed database equals the fresh install', bpDiff);
+
+  // Test D: insufficient privileges, refused before anything is created.
+  const noRole = `owl_nocreaterole_${RUN}`;
+  await providerAdminStep(noRole);
+  await rows('postgres', 'ALTER ROLE crewflow_owner NOCREATEROLE');
+  try {
+    const r = await inProcess(noRole);
+    const [u] = await rows(noRole, `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'core') AS ok`);
+    check(r.outcome === 'identity' && u.ok === true, 'insufficient privileges (NOCREATEROLE on a fresh install): refused, exit 67, nothing created', [r.reason]);
+  } finally {
+    await rows('postgres', 'ALTER ROLE crewflow_owner CREATEROLE');
+  }
+  const noGrantOption = `owl_nograntopt_${RUN}`;
+  await createEmptyDatabase(noGrantOption);
+  await rows(noGrantOption, `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${noGrantOption}" TO crewflow_owner`);
+  const ng = await inProcess(noGrantOption);
+  const [ngu] = await rows(noGrantOption, `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'core') AS ok`);
+  check(ng.outcome === 'identity' && ngu.ok === true, 'insufficient privileges (database grant without GRANT OPTION): refused, exit 67, nothing created', [ng.reason]);
+
+  // Test D: an extension installed where the chain cannot use it (outside schema public): refused, nothing created.
+  const ext = `owl_ext_${RUN}`;
+  await providerAdminStep(ext);
+  await rows(ext, 'CREATE SCHEMA extensions');
+  await rows(ext, 'CREATE EXTENSION citext WITH SCHEMA extensions');
+  const er = await inProcess(ext);
+  const [eu] = await rows(ext, `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'core') AS ok`);
+  check(er.outcome === 'identity' && eu.ok === true, 'extension outside schema public: refused (exit 67), nothing created', [er.state, er.reason]);
 }
 
 async function transitionScenario(): Promise<void> {
