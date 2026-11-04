@@ -163,10 +163,10 @@ export type CycleLockWrapper = <T>(work: () => Promise<T>) => Promise<{ acquired
  * half-rendered PDF, a mid-flight email claim) instead of `process.exit`-ing
  * underneath it.
  *
- * Why non-overlap matters: several jobs are heavy (a Playwright render is
+ * Why non-overlap matters: several jobs are heavy (a PDF render is
  * seconds). If a cycle outlasted its interval a second cycle would start on
  * top of it — harmless for correctness (per-resource advisory locks + CAS),
- * but it multiplies Chromium/DB-connection load exactly when the system is
+ * but it multiplies render CPU / DB-connection load exactly when the system is
  * already slow.
  *
  * Two drivers share ONE execution path (`execute`): `every()` (interval mode — a process-local timer per loop, exactly as

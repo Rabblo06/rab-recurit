@@ -35,7 +35,9 @@ jobs:
     env:
       NODE_ENV: test
       PDF_EQUALITY_OUT: ${{ github.workspace }}/pdf-equality-out
-      PDF_EQUALITY_MODE: compare
+      # Native only (P5: no Chromium in this tree): the harness checks the native render against the input, the
+      # document's own text and the owner-reviewed golden rasters; it never calls Chromium (mode.ts).
+      PDF_EQUALITY_MODE: native-only
       # All three documents are converted on this tree (final timesheet, pre-shift roster, Approved Shift Statement):
       # an unavailable native renderer or a NOT CONVERTED document is a failure, never a skip.
       PDF_EQUALITY_REQUIRE_NATIVE: '1'

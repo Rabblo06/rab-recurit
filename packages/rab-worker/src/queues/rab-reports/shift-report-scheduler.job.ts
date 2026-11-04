@@ -30,7 +30,7 @@ const logger = new Logger('ShiftReportSchedulerJob');
  * transaction via `runScopedForOrg`... except this job's actual work
  * (PDF render + email enqueue) needs its OWN transaction boundary
  * separate from the read that finds the assignments/venue, since a long
- * render (Chromium or native, PDF_RENDERER) should not hold a Postgres transaction open. The scoped
+ * PDF render should not hold a Postgres transaction open. The scoped
  * read/write here is therefore split into two short `runInTenantContext`
  * calls per candidate (load data, then persist result) rather than one
  * long one wrapping the render — deliberate, not an oversight.
