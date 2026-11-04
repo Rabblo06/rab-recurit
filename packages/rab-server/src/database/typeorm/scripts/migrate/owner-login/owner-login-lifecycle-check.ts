@@ -332,20 +332,17 @@ async function postInstallChecks(db: string, label: string): Promise<void> {
   check(Number(n) === MIGRATIONS.length, `${label}: all ${MIGRATIONS.length} migrations in the ledger (${n})`);
 }
 
-async function rlsGateAsApp(db: string, label: string): Promise<void> {
-  const pw = randomBytes(18).toString('hex');
-  await rows('postgres', `ALTER ROLE crewflow_app PASSWORD '${pw}'`);
-  try {
-    // The child gets the crewflow_app URL it needs and none of the cluster's admin or test secrets.
-    const env: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: dbUrl(db, { user: 'crewflow_app', password: pw }) };
-    for (const k of ['OWNER_LOGIN_CHECK_ADMIN_URL', 'FINGERPRINT_ADMIN_URL', 'MIGRATION_SECURITY_ADMIN_URL', 'PG_DATABASE_URL', 'DATABASE_URL_UNPOOLED',
-      'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'TEST_DATABASE_WORKER_URL', 'APP_SECRET',
-      'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete env[k];
-    const r = spawnSync('yarn', ['check-rls'], { cwd: ROOT, env, encoding: 'utf8', shell: process.platform === 'win32' });
-    check(r.status === 0, `${label}: RLS coverage gate passes as crewflow_app`, sanitise(`${r.stdout ?? ''}${r.stderr ?? ''}`).trim().split('\n').slice(-8));
-  } finally {
-    await rows('postgres', `ALTER ROLE crewflow_app PASSWORD NULL`);
-  }
+/**
+ * The RLS coverage gate (tools/check-rls-coverage.ts) as the ONE runtime login, crewflow_owner: Agent 3's in-place gate
+ * refuses any other login by design (owner-login architecture). PG_DATABASE_URL only; no admin or test secret in the child.
+ */
+async function rlsGateAsOwner(db: string, label: string): Promise<void> {
+  const env: NodeJS.ProcessEnv = { ...process.env, PG_DATABASE_URL: dbUrl(db, 'owner') };
+  for (const k of ['OWNER_LOGIN_CHECK_ADMIN_URL', 'FINGERPRINT_ADMIN_URL', 'MIGRATION_SECURITY_ADMIN_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED',
+    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'TEST_DATABASE_WORKER_URL', 'APP_SECRET', 'RAB_APP_ROLE',
+    'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete env[k];
+  const r = spawnSync('yarn', ['check-rls'], { cwd: ROOT, env, encoding: 'utf8', shell: process.platform === 'win32' });
+  check(r.status === 0, `${label}: RLS coverage gate passes as crewflow_owner`, sanitise(`${r.stdout ?? ''}${r.stderr ?? ''}`).trim().split('\n').slice(-8));
 }
 
 // ── Scenarios ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -357,7 +354,7 @@ async function freshScenario(): Promise<Record<string, string[]>> {
   const shimmed = await rows(db, `SELECT name FROM core.migrations WHERE name = ANY ($1::text[])`, [[...SHIMMED_MIGRATIONS]]);
   check(shimmed.length === 3, 'fresh: the three ROW_COPY migrations are recorded (through the shim)');
   await postInstallChecks(db, 'fresh');
-  await rlsGateAsApp(db, 'fresh');
+  await rlsGateAsOwner(db, 'fresh');
   // Test C (owner gate): repeated deploy — start, stop, start, start. No duplicate role, schema or ledger row; nothing re-run.
   const facts = async () =>
     (
