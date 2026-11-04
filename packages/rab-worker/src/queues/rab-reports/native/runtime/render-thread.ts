@@ -7,11 +7,12 @@ import {
   setRenderClock,
 } from './thread-guard';
 
-import type { CoveragePredicate, GlyphFont } from './glyph-coverage';
+import type { GlyphCoverage, GlyphFont } from './glyph-coverage';
 import type {
   NativeDocumentMeta,
   RenderJobMessage,
   RenderThreadData,
+  ThreadInitBreakdown,
   ToThreadMessage,
   FromThreadMessage,
 } from './render-protocol';
@@ -25,6 +26,11 @@ import type {
  * Order matters: `worker_threads` (for `parentPort`) and the guard are the ONLY top-level imports. The guard is
  * installed before react-pdf, the fonts or any layout module is loaded, so nothing loaded after it can open a socket,
  * spawn a process or a thread, or read the wall clock.
+ *
+ * Start-up (F3): every font file is read and sha256-verified ONCE per thread; the primary family is parsed at start;
+ * the fallback family is parsed lazily, the first time a string or a layout needs it. A tiny warm-up render (primary
+ * font only) runs before `ready`, so a pre-warmed thread has already paid for yoga's WebAssembly start and the first
+ * JIT pass. `ready` carries the time of each step.
  */
 
 const port = parentPort;
@@ -43,7 +49,7 @@ export type NativeDocumentRegistry = Readonly<
 interface ThreadState {
   renderToBuffer: (element: never) => Promise<Buffer>;
   registry: NativeDocumentRegistry;
-  covers: CoveragePredicate;
+  coverage: GlyphCoverage;
   coverageFamilies: string[];
   registeredFamilies: () => string[];
 }
@@ -51,21 +57,38 @@ interface ThreadState {
 let state: ThreadState | undefined;
 let rendersServed = 0;
 
-async function init(): Promise<ThreadState> {
+interface MarkerGlyphFont extends GlyphFont {
+  glyphForCodePoint(cp: number): {
+    advanceWidth: number;
+    path: { commands: unknown[] };
+  };
+}
+
+async function init(breakdown: ThreadInitBreakdown): Promise<ThreadState> {
+  let t = performance.now();
+  const step = (name: keyof ThreadInitBreakdown): void => {
+    const now = performance.now();
+    breakdown[name] = Math.round((now - t) * 10) / 10;
+    t = now;
+  };
   const fonts = require('./native-fonts') as typeof import('./native-fonts');
   const protocol =
     require('./render-protocol') as typeof import('./render-protocol');
-  const coverage =
+  const coverageModule =
     require('./glyph-coverage') as typeof import('./glyph-coverage');
   // ESM-only package, loaded by Node's require(esm) (Node >= 22.12; the Worker image runs Node 24).
   const reactPdf =
     require('@react-pdf/renderer') as typeof import('@react-pdf/renderer');
+  const { createElement: h } = require('react') as typeof import('react');
+  step('modulesMs');
 
-  const loaded = fonts.loadVendoredFonts();
+  const loaded = fonts.loadVendoredFonts(); // read + sha256, once per thread
+  step('fontFilesVerifyMs');
   fonts.registerVendoredFonts(
     reactPdf.Font as unknown as import('./native-fonts').ReactPdfFontStore,
     loaded,
   );
+  step('fontRegisterMs');
 
   const docs = require(data.documentsModule) as {
     NATIVE_DOCUMENT_REGISTRY?: NativeDocumentRegistry;
@@ -76,17 +99,17 @@ async function init(): Promise<ThreadState> {
       'native PDF renderer: the documents module exports no NATIVE_DOCUMENT_REGISTRY',
     );
   }
+  step('registryLoadMs');
 
-  // Coverage is computed over FONT_FAMILY_STACK, the families react-pdf actually falls back through.
-  const families: GlyphFont[][] = [];
-  for (const family of fonts.FONT_FAMILY_STACK) {
-    const weights: GlyphFont[] = [];
+  /** Parses (react-pdf `Font.load`) every weight of one family and returns react-pdf's own fontkit objects. */
+  const parseFamily = async (family: string): Promise<MarkerGlyphFont[]> => {
+    const out: MarkerGlyphFont[] = [];
     for (const f of loaded.filter((x) => x.family === family)) {
       await reactPdf.Font.load({ fontFamily: family, fontWeight: f.weight });
       const source = reactPdf.Font.getFont({
         fontFamily: family,
         fontWeight: f.weight,
-      }) as unknown as { data?: GlyphFont } | undefined;
+      }) as unknown as { data?: MarkerGlyphFont } | undefined;
       if (
         !source?.data ||
         typeof source.data.hasGlyphForCodePoint !== 'function'
@@ -95,16 +118,54 @@ async function init(): Promise<ThreadState> {
           `native PDF renderer: font ${f.file} did not load`,
         );
       }
-      weights.push(source.data);
+      out.push(source.data);
     }
-    families.push(weights);
+    return out;
+  };
+
+  const primary = await parseFamily(fonts.PRIMARY_FONT_FAMILY);
+  // F1: the replacement marker must really print, in every weight of the primary font (no fallback involved).
+  const markerCp = coverageModule.REPLACEMENT_MARKER.codePointAt(0)!;
+  for (const font of primary) {
+    const glyph = font.hasGlyphForCodePoint(markerCp)
+      ? font.glyphForCodePoint(markerCp)
+      : undefined;
+    if (!glyph || glyph.advanceWidth <= 0 || glyph.path.commands.length === 0) {
+      throw new fonts.PdfFontIntegrityError(
+        'native PDF renderer: the replacement marker has no visible glyph in the primary font',
+      );
+    }
   }
+  step('primaryFontParseMs');
+
+  // Warm-up: yoga's WebAssembly start and the first JIT pass happen here, not in the first real render.
+  const warm = reactPdf.renderToBuffer as unknown as (
+    el: unknown,
+  ) => Promise<Buffer>;
+  await warm(
+    h(
+      reactPdf.Document,
+      null,
+      h(
+        reactPdf.Page,
+        { size: 'A4' },
+        h(
+          reactPdf.Text,
+          { style: { fontFamily: fonts.PRIMARY_FONT_FAMILY } },
+          'warm-up',
+        ),
+      ),
+    ),
+  );
+  step('warmupRenderMs');
 
   return {
     renderToBuffer:
       reactPdf.renderToBuffer as unknown as ThreadState['renderToBuffer'],
     registry,
-    covers: coverage.coveragePredicate(families),
+    coverage: new coverageModule.GlyphCoverage(primary, () =>
+      parseFamily(fonts.FALLBACK_FONT_FAMILY),
+    ),
     coverageFamilies: [...fonts.FONT_FAMILY_STACK],
     registeredFamilies: () => reactPdf.Font.getRegisteredFontFamilies(),
   };
@@ -126,8 +187,6 @@ function reviveBuffers(value: unknown): unknown {
 async function render(s: ThreadState, msg: RenderJobMessage): Promise<void> {
   const protocol =
     require('./render-protocol') as typeof import('./render-protocol');
-  const coverage =
-    require('./glyph-coverage') as typeof import('./glyph-coverage');
   try {
     const build = Object.prototype.hasOwnProperty.call(s.registry, msg.kind)
       ? s.registry[msg.kind]
@@ -138,7 +197,8 @@ async function render(s: ThreadState, msg: RenderJobMessage): Promise<void> {
       );
 
     const t0 = performance.now();
-    coverage.assertGlyphCoverage(msg.viewModel, s.covers);
+    // F1: unprintable characters become the visible marker; only per-field counts leave the thread.
+    const { value, substitutions } = await s.coverage.substitute(msg.viewModel);
     const t1 = performance.now();
 
     setRenderClock(msg.generatedAtMs);
@@ -146,7 +206,7 @@ async function render(s: ThreadState, msg: RenderJobMessage): Promise<void> {
       creationDate: new Date(msg.generatedAtMs),
       modificationDate: new Date(msg.generatedAtMs),
     };
-    const element = build(reviveBuffers(msg.viewModel), meta);
+    const element = build(reviveBuffers(value), meta);
     const pdf = await s.renderToBuffer(element as never);
     const t2 = performance.now();
 
@@ -169,6 +229,7 @@ async function render(s: ThreadState, msg: RenderJobMessage): Promise<void> {
         ok: true,
         pdf: out,
         timings: { coverageMs: t1 - t0, renderMs: t2 - t1 },
+        substitutions,
       },
       [out],
     );
@@ -199,15 +260,18 @@ function probe(id: number): void {
       heapUsedBytes: process.memoryUsage().heapUsed,
       rendersServed,
       clockNowMs: Date.now(),
+      fallbackFontLoads: state ? state.coverage.fallbackLoadCount : 0,
     },
   });
 }
 
 async function main(): Promise<void> {
   const t0 = performance.now();
+  const breakdown: ThreadInitBreakdown = {};
   try {
     installThreadGuard();
-    state = await init();
+    breakdown.guardMs = Math.round((performance.now() - t0) * 10) / 10;
+    state = await init(breakdown);
   } catch (err) {
     const protocol =
       require('./render-protocol') as typeof import('./render-protocol');
@@ -221,7 +285,7 @@ async function main(): Promise<void> {
     else if (msg.type === 'render')
       chain = chain.then(() => render(state!, msg));
   });
-  send({ type: 'ready', initMs: performance.now() - t0 });
+  send({ type: 'ready', initMs: performance.now() - t0, breakdown });
 }
 
 void main();
