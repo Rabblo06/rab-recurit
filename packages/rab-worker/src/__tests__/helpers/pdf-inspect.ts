@@ -373,8 +373,25 @@ function parseToUnicode(cmap: string): { map: Map<number, string>; bytes: number
   return { map, bytes: cs ? cs[1]!.length / 2 : null };
 }
 
-const WIN_ANSI = new TextDecoder('windows-1252');
-const MAC_ROMAN = (() => {
+/** A single-byte decoder: what the simple-font path needs from TextDecoder. */
+interface ByteDecoder {
+  decode(input: Uint8Array): string;
+}
+/**
+ * WinAnsiEncoding (windows-1252), decoded by table rather than TextDecoder('windows-1252'): Node 24.5.0 (CI's .nvmrc)
+ * decodes 0x80-0x9F as ISO-8859-1 C1 controls, so curly quotes, dashes and the euro sign came out as invisible
+ * characters on CI while later Node versions decoded them correctly. 0x81/0x8D/0x8F/0x90/0x9D are unassigned and map
+ * to the C1 code point, as the WHATWG decoder does.
+ */
+const CP1252_HIGH = [
+  0x20ac, 0x81, 0x201a, 0x192, 0x201e, 0x2026, 0x2020, 0x2021, 0x2c6, 0x2030, 0x160, 0x2039, 0x152, 0x8d, 0x17d, 0x8f,
+  0x90, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x2dc, 0x2122, 0x161, 0x203a, 0x153, 0x9d, 0x17e, 0x178,
+];
+const WIN_ANSI: ByteDecoder = {
+  decode: (input) =>
+    String.fromCharCode(...Array.from(input, (b) => (b >= 0x80 && b <= 0x9f ? CP1252_HIGH[b - 0x80]! : b))),
+};
+const MAC_ROMAN: ByteDecoder = (() => {
   try {
     return new TextDecoder('macintosh');
   } catch {
@@ -426,7 +443,7 @@ function buildFont(doc: Doc, fontRef: PdfValue | undefined): FontInfo {
     };
   }
   // Simple font (Type1 / TrueType / MMType1 / Type3): one byte per code.
-  let base: InstanceType<typeof TextDecoder> = WIN_ANSI;
+  let base: ByteDecoder = WIN_ANSI;
   const differences = new Map<number, string>();
   const enc = doc.resolve(font.get('Encoding'));
   const pick = (n: string | undefined) => (n === 'MacRomanEncoding' ? MAC_ROMAN : WIN_ANSI);
