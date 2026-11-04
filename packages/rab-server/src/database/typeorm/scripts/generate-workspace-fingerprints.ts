@@ -181,6 +181,7 @@ async function generate(major: number): Promise<void> {
     }
     log(`cross-check: the TypeScript provisioner at module ${LATEST_WORKSPACE_MODULE_VERSION} equals the v14 workspace migrated forward`);
   });
+  console.log(`FINGERPRINTS_JSON ${JSON.stringify({ major, generatedOn: db, values: out })}`); // eslint-disable-line no-console
   log(`PostgreSQL ${major} expected fingerprints (generated on ${db}):`);
   for (const [v, f] of Object.entries(out)) log(`  ${v}: '${f}',`);
   for (const [v, f] of Object.entries(out)) log(`  v${v} ${f === EXPECTED_WORKSPACE_FINGERPRINTS_PG16[Number(v)] ? 'EQUALS' : 'differs from'} PostgreSQL 16`);
