@@ -5003,6 +5003,39 @@ so the fixture failed everywhere (Worker-bundle integration harness case 10 and 
   `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
 - **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
 
+## PDF renderer P1 — native final timesheet behind `PDF_RENDERER` (branch worker/pdf-without-chromium, not merged)
+
+Owner decisions D1–D11, T1–T3 (`docs/PDF_RENDERER_P0_PLAN_2026-11-03.md` §14). The final timesheet (original and
+finalised) can be rendered in pure JavaScript (`@react-pdf/renderer` 4.9.0, pinned exactly) instead of
+Chromium. `PDF_RENDERER=chromium` (default) keeps today's path byte-for-byte. No endpoint, table, queue, storage key, file
+kind, policy or email changes: only the bytes' producer differs, and they still go through `FileService` (validated,
+SHA-256'd) to the same `stored_file` row and `ReportFilePolicy`.
+
+- **Markup / script injection through staff, venue or note text.** Threat: a name like `<script>…`, `<img src=http…>`
+  or `javascript:` is interpreted. Control: the native layout passes every value as a string child of `Text`; react-pdf
+  has no HTML/CSS/script engine, so it prints literally. The Chromium path keeps `escapeHtml` and its hardening. Both
+  render from ONE rab-server view-model (`buildFinalTimesheetViewModel`), so neither renderer re-implements a label,
+  date, minute or total. Tests: `native-pdf.spec.ts` (hostile text in every field: tags, entities, URLs, RTL/bidi
+  overrides, zero-width, emoji, a 315-character token; the PDF has no `/URI`, `/JavaScript`, `/OpenAction`, `/Launch`,
+  `/Annots`, `/AA`), `final-timesheet-renderer-parity.integration.spec.ts`.
+- **Renderer fetching remote or local resources (SSRF / file read).** Control: images enter only as in-memory bytes
+  (`ImageBytes`; `imageBytesFromDataUri` refuses URLs, paths, SVG and HTML); fonts are vendored files checked against
+  `fonts.sha256` (fail closed); no emoji source is registered (react-pdf would fetch emoji images). Tests: socket,
+  http(s) and DNS spies stay untouched while rendering, with a positive control proving the detector sees a real fetch.
+- **Silent fallback hiding native defects (T3).** A native failure fails the job and is retried like any render
+  failure; there is no retry in Chromium. Rollback is the explicit `PDF_RENDERER=chromium`.
+- **Misconfiguration.** `PDF_RENDERER` accepts exactly `chromium` / `native` (empty = default); anything else refuses to
+  boot (env validation) and is re-checked at render time. The worker-bundle launcher forwards it to the jobs child only.
+- **Dependency surface.** No native addon, no install script, no Chromium, no network (VERIFIED dependency walk; the
+  image gate's worker-delta refuses install scripts and `binding.gyp`). The H3 forbid list keeps every SWC compiler
+  package banned by name and allows only the runtime helper `@swc/helpers` (D5/T2).
+- **Residual (T1, accepted):** P1 renders in the jobs process (in-process until the worker_threads pool with an empty
+  env lands, plan §4.2). A parser bug in fontkit / png-js / jay-peg would run with the jobs child's privileges; the
+  inputs are server-produced bytes (vendored font, our logo JPEG, our QR PNG) and text strings. Same residual class as
+  today's same-uid, no-sandbox Chromium, with a far smaller parser surface.
+- **Visible delta (owner to confirm):** a token longer than 24 characters with no space may now break across lines, and
+  react-pdf draws a "-" at each such break (Chromium instead shrinks the whole page). No character is lost.
+
 ## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
 
 Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,

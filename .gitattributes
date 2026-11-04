@@ -8,3 +8,4 @@
 *.p8 binary
 *.p12 binary
 /.yarn/releases/** binary
+*.ttf binary

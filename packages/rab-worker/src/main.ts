@@ -46,6 +46,7 @@ import { WorkerRuntime } from './core/runtime/worker-runtime';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
 import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
+import { describePdfRendering } from './queues/rab-reports/render-pdf.util';
 import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
@@ -308,6 +309,12 @@ async function bootstrap(): Promise<void> {
       ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
       : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
   );
+  // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
+  try {
+    logger.log(describePdfRendering());
+  } catch (error) {
+    refuseStartup(error);
+  }
   // event mode: the four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS (the backstop); every other interval as before.
   const intervalOf = (def: (typeof SCAN_JOBS)[number]) => dispatchIntervalOf(def, resolveIntervalMs(def, environmentService), dispatchConfig);
   // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.

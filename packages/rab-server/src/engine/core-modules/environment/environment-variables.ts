@@ -618,6 +618,20 @@ export class EnvironmentVariables {
   @Max(3600)
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
+  /**
+   * PDF renderer P1 (owner decisions D1/D2) — how the Worker renders the report kinds that have a native layout
+   * (today: the final timesheet).
+   *  - `chromium` (DEFAULT; also when unset or empty): the HTML template through the Chromium renderer, as before;
+   *  - `native`: @react-pdf/renderer inside the Worker (pure JavaScript, no browser).
+   * Anything else (a different case, surrounding spaces, another word) refuses to boot. Read by rab-worker only
+   * (queues/rab-reports/render-pdf.util.ts `pdfRendererMode`, which applies the same rule at render time); report kinds
+   * without a native layout yet (pre-shift roster, shift statement) are rendered by Chromium in either mode.
+   */
+  @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
+  @IsIn(['chromium', 'native'], { message: 'PDF_RENDERER must be exactly chromium or native' })
+  PDF_RENDERER?: 'chromium' | 'native' = 'chromium';
+
   // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
   // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
   // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot
