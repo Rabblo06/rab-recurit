@@ -1,4 +1,4 @@
-import { assertTransition, NotificationType, PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus, PermissionFlag } from '@rab/shared';
+import { assertSafePence, assertTransition, NotificationType, PAYROLL_RECORD_TRANSITIONS, PayrollRecordStatus, PermissionFlag } from '@rab/shared';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { EntityManager } from 'typeorm';
@@ -143,7 +143,7 @@ export class PayrollRunService {
       return {
         periods: [...periods, ...extra.values()].sort((a, b) => a.start.localeCompare(b.start)).map((period) => {
           const r = byPeriod.get(period.id);
-          return { period, run: r ? { id: r.id, status: r.status, records: r.records, grossPence: Number(r.gross) } : null };
+          return { period, run: r ? { id: r.id, status: r.status, records: r.records, grossPence: assertSafePence(Number(r.gross), 'payroll run gross') } : null };
         }),
       };
     });
@@ -185,7 +185,7 @@ export class PayrollRunService {
           `INSERT INTO payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, original_period_id, late_approval, worked_minutes, pay_rate_pence, amount_pence)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [ctx.organisationId, ctx.workspaceId, run.id, c.id, c.staff_profile_id, a.workDate, isLate ? a.originalPeriod!.id : null, isLate,
-            Number(c.worked_minutes), Number(c.pay_rate_pence), Number(c.amount_pence)]);
+            Number(c.worked_minutes), assertSafePence(Number(c.pay_rate_pence), 'payroll_record.pay_rate_pence'), assertSafePence(Number(c.amount_pence), 'payroll_record.amount_pence')]);
         added += 1;
         if (isLate) {
           late += 1;
@@ -362,8 +362,8 @@ export class PayrollRunService {
         const document = s?.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
         entries.push({
           payslipId: (s?.id as string) ?? null, runId: r.run_id, period: { id: p.id, start: p.start, end: p.end }, payday: p.payday,
-          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence: Number(r.gross),
-          netPence: s?.net_pence == null ? null : Number(s.net_pence), netSource: (s?.net_source as 'provider_document') ?? null, document, paidAt: iso(s?.paid_at),
+          status: s?.paid_at ? 'paid' : document ? 'available' : 'processing', shiftCount: r.shifts, grossPence: assertSafePence(Number(r.gross), 'payslip gross'),
+          netPence: s?.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s?.net_source as 'provider_document') ?? null, document, paidAt: iso(s?.paid_at),
         });
       }
       const upcoming = new Map<string, StaffPayslipEntry>();
@@ -371,16 +371,16 @@ export class PayrollRunService {
       let unallocatedGross = 0;
       for (const p of pending) {
         const a = alloc.get(p.id)!;
-        if (!a.period) { unallocatedShifts += 1; unallocatedGross += Number(p.amount_pence); continue; }
+        if (!a.period) { unallocatedShifts += 1; unallocatedGross = assertSafePence(unallocatedGross + assertSafePence(Number(p.amount_pence), 'payroll_record.amount_pence'), 'unallocated gross'); continue; }
         const e = upcoming.get(a.period.id) ?? { payslipId: null, runId: a.runId, period: { id: a.period.id, start: a.period.start, end: a.period.end }, payday: a.period.payday,
           status: 'upcoming' as PayslipStatus, shiftCount: 0, grossPence: 0, netPence: null, netSource: null, document: null, paidAt: null };
         e.shiftCount += 1;
-        e.grossPence += Number(p.amount_pence);
+        e.grossPence = assertSafePence(e.grossPence + assertSafePence(Number(p.amount_pence), 'payroll_record.amount_pence'), 'upcoming gross');
         upcoming.set(a.period.id, e);
       }
       for (const e of upcoming.values()) {
         const merged = entries.find((x) => x.period.id === e.period.id);
-        if (merged) { merged.shiftCount += e.shiftCount; merged.grossPence += e.grossPence; } else entries.push(e);
+        if (merged) { merged.shiftCount += e.shiftCount; merged.grossPence = assertSafePence(merged.grossPence + e.grossPence, 'payslip gross'); } else entries.push(e);
       }
       entries.sort((a, b) => b.payday.localeCompare(a.payday));
       return { data: entries, unallocated: { shiftCount: unallocatedShifts, grossPence: unallocatedGross } };
@@ -427,10 +427,10 @@ export class PayrollRunService {
       const document = s.file_id ? { fileId: s.file_id as string, filename: (s.filename as string) ?? null, version: Number(s.version), uploadedAt: iso(s.uploaded_at)! } : null;
       return {
         staffProfileId: s.staff_profile_id as string, staffName: `${s.first_name} ${s.last_name}`, staffRef: (s.staff_ref as string) ?? null,
-        records: Number(s.records), minutes: Number(s.minutes), grossPence: Number(s.gross), lateCount: Number(s.late),
+        records: Number(s.records), minutes: Number(s.minutes), grossPence: assertSafePence(Number(s.gross), 'run staff gross'), lateCount: Number(s.late),
         payslip: s.payslip_id ? {
           id: s.payslip_id as string, status: s.paid_at ? 'paid' : document ? 'available' : 'processing', version: Number(s.version), document,
-          netPence: s.net_pence == null ? null : Number(s.net_pence), netSource: (s.net_source as 'provider_document') ?? null,
+          netPence: s.net_pence == null ? null : assertSafePence(Number(s.net_pence), 'payslip.net_pence'), netSource: (s.net_source as 'provider_document') ?? null,
           paidAt: iso(s.paid_at), paymentReference: (s.payment_reference as string) ?? null,
         } : null,
       };
@@ -440,7 +440,7 @@ export class PayrollRunService {
       finalisedAt: iso(run.finalised_at), finalisedByName: run.finalised_by_name ?? null,
       totals: {
         records: rows.reduce((n, r) => n + r.records, 0), staff: rows.length, minutes: rows.reduce((n, r) => n + r.minutes, 0),
-        grossPence: rows.reduce((n, r) => n + r.grossPence, 0), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
+        grossPence: assertSafePence(rows.reduce((n, r) => n + r.grossPence, 0), 'run gross total'), lateCount: rows.reduce((n, r) => n + r.lateCount, 0),
       },
       staff: rows,
     };
