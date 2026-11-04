@@ -273,7 +273,7 @@ packages/rab-server/src/
 │   │   ├── secret-encryption/        # SecretEncryptionService (APP_SECRET, decryptAndMask)
 │   │   ├── audit/                    # append-only audit writer + interceptor
 │   │   ├── file-storage/             # S3 driver, presigned URLs, MIME allowlist
-│   │   ├── pdf/                      # Playwright renderer (payslips)
+│   │   ├── pdf/                      # native renderer, @react-pdf/renderer (payslips)
 │   │   ├── email/                    # transactional sender
 │   │   ├── push/                     # Expo push driver + token pruning
 │   │   ├── message-queue/            # BullMQ abstraction + outbox dispatcher
@@ -366,10 +366,11 @@ Render `type: worker` service** (`packages/rab-docker/rab/start-worker.sh` →
 image (`packages/rab-docker/rab/Dockerfile`) as `rab-server`. An equivalent
 split exists for the OpenShip/Docker-Compose production target
 (`packages/rab-docker/docker-compose.production.yml`). Payslip rendering
-must never compete with API request handling for CPU. Since Docker hardening
-H2 the shared image has **no Chromium**: only the Worker bundle image
+must never compete with API request handling for CPU. No image contains a
+browser: since Docker hardening H2 the shared image has no Chromium, and since
+P5 (PDF renderer migration) neither has the Worker bundle image
 (`packages/rab-docker/rab/Dockerfile.worker-bundle`, built on the shared
-image) can render PDFs; `start-worker.sh` in the shared image is retired
+image), which renders PDFs natively; `start-worker.sh` in the shared image is retired
 and refuses to start (exit 1), pointing to the Worker bundle image.
 
 ---
@@ -388,7 +389,7 @@ and refuses to start (exit 1), pointing to the Worker bundle image.
 | Web           | React 18, Vite, TypeScript, TanStack Query + Table, React Hook Form + Zod, Tailwind + Radix         |
 | Mobile        | React Native via Expo (expo-router, expo-secure-store, expo-location, expo-notifications)           |
 | Files         | S3-compatible private buckets, presigned 60s downloads                                              |
-| PDF           | Playwright Chromium in the worker                                                                   |
+| PDF           | `@react-pdf/renderer` (native, no browser) in the worker                                            |
 | Email         | react-email templates in `rab-emails` — transactional provider                                      |
 | Observability | Sentry + OpenTelemetry, structured logs with `requestId`, `actorId`, `organisationId`               |
 

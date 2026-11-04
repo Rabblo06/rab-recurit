@@ -237,8 +237,10 @@ Production (Oracle) runs ARM64.
 
 Two ways, either acceptable for the owner (the current owner question in the release-readiness record):
 1. **CI**: the H5 security gate renders on GitHub's `ubuntu-24.04-arm` runners and refuses an emulated run. It PASSED
-   on a CI build of the H5 tree (Chromium 156.0.8078.79, a 55,008-byte report, `uname -m` `aarch64`). It re-runs on the
-   release build, so the release digest gets its own native render. Record the job URL and the arm64 manifest digest.
+   on a CI build of the H5 tree (then still Chromium 156.0.8078.79, a 55,008-byte report, `uname -m` `aarch64`). Since P5
+   (PDF renderer migration) the render is the Worker's native, browser-free renderer and the evidence records the Node
+   version instead of a Chromium version. It re-runs on the release build, so the release digest gets its own native
+   render. Record the job URL and the arm64 manifest digest.
 2. **An isolated ARM64 host**: a throwaway ARM VM (for example Hetzner CAX, AWS Graviton, or an Oracle A1 instance in a
    separate tenancy, **never the production Oracle host**), using the native ARM64 procedure:
 
@@ -246,9 +248,9 @@ Two ways, either acceptable for the owner (the current owner question in the rel
    uname -m && docker info --format '{{.Architecture}}'        # aarch64 / aarch64
    docker pull --platform linux/arm64 adhin007/adolphus@sha256:<worker-index-digest>
    docker run --rm --network none --user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-     --entrypoint sh adhin007/adolphus@sha256:<worker-index-digest> -c 'uname -m; /usr/bin/chromium --version'
+     --entrypoint sh adhin007/adolphus@sha256:<worker-index-digest> -c 'uname -m; node --version; test ! -e /usr/bin/chromium'
    # then the render smoke and the bundle integration harness from the procedure; record the digest, host arch,
-   # Chromium version and the PDF's validity (size, page count, markers).
+   # Node version and the PDF's validity (size, page count, markers). P5: no Chromium exists in the image.
    ```
 
 If the owner wants staging itself to match production's architecture, provision the staging VM on an ARM64 provider

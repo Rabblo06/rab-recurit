@@ -535,7 +535,9 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
   const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
   for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
-    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET']) delete childEnv[k];
+    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
+    // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
+    'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'TEST_DATABASE_WORKER_URL']) delete childEnv[k];
   // Permanent owner login (owner decision, PERMANENT-OWNER-LOGIN-ADDENDUM): the RLS coverage gate connects ONLY as
   // crewflow_owner, and these legacy scenarios have no owner login. What this harness pins here is that the gate fails
   // closed on the legacy runtime logins: it must refuse them by name, not pass and not fail for another reason. The gate
