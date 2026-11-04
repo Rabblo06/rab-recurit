@@ -149,7 +149,8 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     worker2 = await connect(WORKER_URL!);
     if (process.env.TEST_DATABASE_CREWFLOW_URL) crewflow = await connect(process.env.TEST_DATABASE_CREWFLOW_URL);
     const { rows } = await worker.query('SELECT current_user AS u, session_user AS s');
-    expect(rows[0]).toEqual({ u: 'crewflow_worker', s: 'crewflow_worker' });
+    // BC-08 (Phase D under one login): TEST_DATABASE_WORKER_URL is the owner login; crewflow_worker is a schema role.
+    expect(rows[0]).toEqual({ u: 'crewflow_owner', s: 'crewflow_owner' });
     a = await seedWorkspace(admin, `pd-a-${run}`);
     b = await seedWorkspace(admin, `pd-b-${run}`);
   });

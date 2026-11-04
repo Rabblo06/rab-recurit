@@ -29,7 +29,8 @@ describeIfWorkerLogin('Phase D: storage cleanup on the crewflow_worker login, gl
     moduleRef = await Test.createTestingModule({ imports: [WorkerModule] }).compile();
     await moduleRef.init();
     const [{ current_user: role }] = await moduleRef.get(DataSource).query('SELECT current_user');
-    expect(role).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(role).toBe('crewflow_owner');
     expect(process.env.WORKER_CLAIM_MODE).toBe('global');
     command = moduleRef.get(StorageReconcileCommand, { strict: false });
     moduleRef.get(WorkerDependencies).provide({

@@ -57,9 +57,9 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
     expect(CONSUMER_QUEUES.ai).toMatchObject({ name: 'rab-ai', prefix: 'bull', concurrency: 4, lockDurationMs: 60_000 });
   });
 
-  it('the step loop runs on the restricted runtime role (crewflow_app, no BYPASSRLS)', async () => {
+  it('the step loop runs on the runtime login (crewflow_owner, no BYPASSRLS; BC-02)', async () => {
     const [row] = await moduleRef.get(DataSource).query(`SELECT current_user AS u, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass`);
-    expect(row).toEqual({ u: 'crewflow_app', bypass: false });
+    expect(row).toEqual({ u: 'crewflow_owner', bypass: false });
     expect(moduleRef.get(AiTurnConsumer)).toBeInstanceOf(AiTurnConsumer);
     expect(moduleRef.get(AiTurnRunnerService, { strict: false })).toBeInstanceOf(AiTurnRunnerService);
     // Phase 2 (P2-C11): the Worker graph — and only it — has the model side.

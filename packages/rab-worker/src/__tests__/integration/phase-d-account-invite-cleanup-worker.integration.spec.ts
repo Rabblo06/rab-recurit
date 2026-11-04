@@ -55,7 +55,8 @@ describeIfApproved('Phase D F-1 account-invite cleanup on the runtime data sourc
     worker = new DataSource({ type: 'postgres', url: WORKER_URL, entities: [], synchronize: false, extra: { max: 2, application_name: 'crewflow-worker-it' } });
     await worker.initialize();
     const [{ current_user: who }] = await worker.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
     owner = await factory.createInternalManager(await factory.createOrganisation('f1'), { label: 'f1-owner' });
   });
 

@@ -77,7 +77,8 @@ describe('worker runtime cutover (integration)', () => {
         `SELECT current_user, r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname = current_user`,
       );
       // P1C.2: single application credential — see docs/P1-MASTER-EXECUTION-STATUS.md's P1C.2 entry.
-      expect(row.current_user).toBe('crewflow_app');
+      // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+      expect(row.current_user).toBe('crewflow_owner');
       expect(row.rolsuper).toBe(false);
       expect(row.rolbypassrls).toBe(false);
     });

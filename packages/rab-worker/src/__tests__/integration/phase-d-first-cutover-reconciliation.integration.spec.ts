@@ -97,7 +97,8 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
     worker = new DataSource({ type: 'postgres', url: WORKER_URL, entities: [], synchronize: false, extra: { max: 4, application_name: 'crewflow-worker-it' } });
     await worker.initialize();
     const [{ current_user: who }] = await worker.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
 
     // ── fixtures: two organisations, each with email / push / realtime pending work ──────────────────────────────────
     const seededA = await factory.createOrganisationWithManagers(1, { workspace: true, permissions: 'production', label: 'cut-a' });

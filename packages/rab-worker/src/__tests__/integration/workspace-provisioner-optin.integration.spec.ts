@@ -31,7 +31,15 @@ import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
  *  4. An invalid switch or interval refuses to start (exit 1) without opening a connection.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
-const describeIfDb = RUN ? describe : describe.skip;
+/**
+ * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
+ * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs
+ * in-process on the owner login (T4: workspace-provisioning-owner-login.integration.spec.ts). SKIPPED BY NAME until the
+ * separated code is deleted: REMOVE IN PR #9.
+ * Coverage: opt-in 1 (lock held elsewhere: skip within the bound), 3a/3b (disabled: no provisioning connection), 4 (invalid switch/interval refuses) are T4 GAPS routed to Agent 2; 2 (production config provisions) is partly covered.
+ */
+const LEGACY_PROVISIONER_REMOVE_IN_PR9 = true;
+const describeIfDb = RUN && !LEGACY_PROVISIONER_REMOVE_IN_PR9 ? describe : describe.skip;
 jest.setTimeout(150_000);
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -70,7 +78,7 @@ class ProcessWatch {
   }
 }
 
-describeIfDb('Phase A — opt-in workspace provisioner (integration)', () => {
+describeIfDb('LEGACY, REMOVE IN PR #9 (skipped: separate provisioner, no crewflow login under the owner login) — Phase A — opt-in workspace provisioner (integration)', () => {
   let admin: DataSource;
   let passwordHashing: PasswordHashingService;
   let CREWFLOW_URL: string;

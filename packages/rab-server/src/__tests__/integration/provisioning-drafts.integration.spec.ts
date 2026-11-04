@@ -129,7 +129,8 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // Invitation e-mail is queued only while a Worker heartbeat is fresh (same as initial-manager-invitation.integration.spec.ts).
     await app.get(ThrottlerRedisClientProvider).client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 300);
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app is a schema role.
+    expect(who).toBe('crewflow_owner');
   }, 180_000);
 
   afterAll(async () => {

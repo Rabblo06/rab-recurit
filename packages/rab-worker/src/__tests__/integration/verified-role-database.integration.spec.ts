@@ -16,7 +16,8 @@ describeIfDb('verified test-database role helper (fail closed)', () => {
     delete process.env[PROBE];
   });
 
-  it('accepts the verified restricted runtime role on the test database', async () => {
+  // BC-02 (owner-login architecture): the runtime login is crewflow_owner; still never SUPERUSER / BYPASSRLS (helper checks).
+  it('accepts the verified runtime login (crewflow_owner, not SUPERUSER, not BYPASSRLS) on the test database', async () => {
     await expect(verifiedRestrictedRuntimeUrl()).resolves.toBe(
       process.env.TEST_DATABASE_URL,
     );
@@ -40,7 +41,7 @@ describeIfDb('verified test-database role helper (fail closed)', () => {
     url.pathname = '/postgres';
     process.env[PROBE] = url.toString();
     await expect(
-      resolveVerifiedRoleDatabaseUrl(PROBE, 'crewflow_app'),
+      resolveVerifiedRoleDatabaseUrl(PROBE, 'crewflow_owner'),
     ).rejects.toThrow(/not the test database/);
   });
 

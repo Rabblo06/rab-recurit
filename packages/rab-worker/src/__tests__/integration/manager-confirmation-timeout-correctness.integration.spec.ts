@@ -857,7 +857,8 @@ describeIfDb('manager confirmation timeout correctness (integration)', () => {
       const fx = await seedNormalFixture('scopedTimeoutPlan');
       const plan = await withContext(ctxOf(fx.managerA), async (manager) => {
         const [role] = await manager.query('SELECT current_user AS name');
-        expect(role.name).toBe('crewflow_app');
+        // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+        expect(role.name).toBe('crewflow_owner');
         const indexes = await manager.query("SELECT indexname FROM pg_indexes WHERE schemaname='core' AND tablename='job_offer'");
         expect(indexes.map((r: { indexname: string }) => r.indexname)).toContain('job_offer_staff_accepted_timeout_idx');
         const explain = await manager.query(`EXPLAIN (FORMAT JSON)
