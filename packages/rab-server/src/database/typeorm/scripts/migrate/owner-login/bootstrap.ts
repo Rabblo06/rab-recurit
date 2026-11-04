@@ -174,6 +174,14 @@ export async function runOwnerLoginBootstrap(
       return { ...result, attempts: attempt };
     } catch (error) {
       await query('ROLLBACK').catch(() => undefined);
+      const code = (error as { code?: string; driverError?: { code?: string } })?.code ?? (error as { driverError?: { code?: string } })?.driverError?.code;
+      if (code === '42501') {
+        // Insufficient privilege (e.g. no GRANT OPTION on the database, no CREATE on it, an extension that needs more than
+        // CREATE): the M0 §5.1 admin step is incomplete. The whole bootstrap rolled back; nothing was created.
+        throw new BootstrapRefusal(
+          `insufficient privilege during the bootstrap (SQLSTATE 42501): run the provider-admin step postgres-init/owner-login/01-crewflow-owner.sql exactly (CREATEROLE, and CONNECT, CREATE, TEMPORARY ON DATABASE WITH GRANT OPTION). Nothing was created.`,
+        );
+      }
       if (isRoleRace(error) && attempt < maxAttempts) {
         log(`bootstrap attempt ${attempt}: another installation created a Crewflow role at the same moment (roles are cluster-wide); rolled back, re-verifying`);
         continue;

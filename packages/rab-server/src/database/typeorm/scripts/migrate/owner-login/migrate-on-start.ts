@@ -277,6 +277,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       log,
       mode: 'apply',
       approvalMode: config.migrationApprovalMode,
+      requireOwnerLogin: true,
       connectionCheckIntervalSeconds: 1,
       onSession: deps.onSession,
       testFailAt: seams.failAt,

@@ -321,8 +321,10 @@ async function postInstallChecks(db: string, label: string): Promise<void> {
         WHERE refobjid = 'crewflow_owner'::regrole AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) ORDER BY 1`,
     )
   ).map((r) => String(r.obj));
-  const extOnly = deps.filter((d) => !/^extension (btree_gist|citext|pg_trgm|pgcrypto|unaccent)$/.test(d) && !/^database .* \[a\]$/.test(d));
-  check(extOnly.length === 0, `${label}: nothing but the five extensions (and its database grant) depends on crewflow_owner`, deps);
+  // The five bootstrap extensions, plus uuid-ossp, which TypeORM's postgres driver creates at DataSource.initialize as the
+  // connecting login (entities with uuid generation). All are owner-login-owned by design (the H3 class, M0); nothing else.
+  const extOnly = deps.filter((d) => !/^extension (btree_gist|citext|pg_trgm|pgcrypto|unaccent|uuid-ossp)$/.test(d) && !/^database .* \[a\]$/.test(d));
+  check(extOnly.length === 0, `${label}: nothing but the extensions (and its database grant) depends on crewflow_owner`, deps);
   const [{ n }] = await rows(db, `SELECT count(*)::int AS n FROM core.migrations`);
   check(Number(n) === MIGRATIONS.length, `${label}: all ${MIGRATIONS.length} migrations in the ledger (${n})`);
 }
@@ -368,7 +370,17 @@ async function freshScenario(): Promise<Record<string, string[]>> {
     approvalMode: 'none',
     rowCopyOverride: async (name) => {
       const m = MIGRATIONS.find((x) => x.name === name)!;
-      const ds = new DataSource({ ...(coreMigrationDataSourceOptions as object), url: dbUrl(ref, 'admin'), name: `ref-${name}`, migrations: MIGRATIONS.filter((x) => x.ts <= m.ts).map((x) => x.path), logging: false } as DataSourceOptions);
+      // Plain options (M0 Agent A replay B): the superuser applies exactly this one migration and records it.
+      const ds = new DataSource({
+        type: 'postgres',
+        url: dbUrl(ref, 'admin'),
+        name: `ref-${name}`,
+        synchronize: false,
+        logging: false,
+        migrations: MIGRATIONS.filter((x) => x.ts <= m.ts).map((x) => x.path),
+        migrationsTableName: 'core.migrations',
+        migrationsTransactionMode: 'each',
+      } as DataSourceOptions);
       await ds.initialize();
       try {
         const ran = await ds.runMigrations({ transaction: 'each' });

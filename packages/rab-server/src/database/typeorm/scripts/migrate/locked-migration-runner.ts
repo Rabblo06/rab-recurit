@@ -78,7 +78,7 @@ import {
 import { BootstrapResult, runOwnerLoginBootstrap } from './owner-login/bootstrap';
 import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './owner-login/fresh-install';
 import { LAST_ROLE_MIGRATION_TIMESTAMP, runOwnerLoginChain } from './owner-login/owner-login-chain';
-import { assertOwnerLoginMigrationIdentity, readOwnerLoginIdentityFacts } from './owner-login/owner-login-identity';
+import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityError, readOwnerLoginIdentityFacts } from './owner-login/owner-login-identity';
 import { acquireMigrationLock, MIGRATION_APPLICATION_NAME, migrationLockWaitSeconds, releaseMigrationLock } from './migration-lock';
 import { ResolvedMigrationConnection, resolveMigrationConnection, targetGuardEnv } from './migration-database-url';
 
@@ -173,6 +173,11 @@ export interface LockedMigrationOptions {
    * still applies to every database that is not a proven fresh install. Honoured for the owner login only.
    */
   approvalMode?: 'none' | 'token';
+  /**
+   * The migrate-on-start child: refuse any login other than crewflow_owner (the legacy CF-41 path exists only for the
+   * retained deploy-prepare / setup-db flows until PR #9; a runtime child must never fall back to it).
+   */
+  requireOwnerLogin?: boolean;
   /** Server-side check for a vanished client, in seconds (the child sets 1; M0-C: a killed holder otherwise keeps the lock). */
   connectionCheckIntervalSeconds?: number;
   /** Owner login: called with the classification and the fresh-install proof as soon as they are known. */
@@ -349,6 +354,9 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     }
     const [who] = (await query(`SELECT session_user::text AS "login", current_setting('server_version_num') AS "num"`)) as Array<{ login: string; num: string }>;
     const ownerLogin = who?.login === OWNER_LOGIN;
+    if (!ownerLogin && options.requireOwnerLogin) {
+      throw new OwnerLoginIdentityError(`the migrate-on-start child runs only as ${OWNER_LOGIN}; this login is not it (no legacy fallback). Refusing.`);
+    }
     if (!ownerLogin) {
       log(
         '*** LEGACY migration identity (not crewflow_owner): the separated-layout CF-41 path is RETAINED ONLY UNTIL PR #9. ' +
