@@ -51,10 +51,11 @@ describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQ
       ['expected-fingerprints-pg18.ts', 'EXPECTED_WORKSPACE_FINGERPRINTS_PG18'],
     ] as const) {
       const before = readFileSync(join(__dirname, file), 'utf8');
-      const after = appendToTableSource(before, name, { 20: h('7') }, 'PAY-1 module 20');
+      const next = Math.max(...[...before.matchAll(/^\s*(\d+):\s*'[0-9a-f]{64}',/gm)].map((m) => Number(m[1]))) + 1;
+      const after = appendToTableSource(before, name, { [next]: h('7') }, `module ${next}`);
       const removed = before.split('\n').filter((l) => !after.split('\n').includes(l));
       expect(removed).toEqual([]);
-      expect(after).toContain(`  20: '${h('7')}',\n};`);
+      expect(after).toContain(`  ${next}: '${h('7')}',\n};`);
       expect(after.split('\n').length).toBe(before.split('\n').length + 2);
     }
   });
