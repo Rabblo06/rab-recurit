@@ -118,10 +118,10 @@ const vm = new Map(); // label -> { start, end }
 const vmFile = path.join(OUT, 'vm-memory.txt');
 if (fs.existsSync(vmFile)) {
   for (const l of fs.readFileSync(vmFile, 'utf8').split(/\r?\n/)) {
-    const m = /^(\S+) (start|end) t=(\d+) availMiB=(\d+) swapFreeMiB=(\d+) pswpin=(\d+) pswpout=(\d+)/.exec(l.trim());
+    const m = /^(\S+) (start|end) t=(\d+) availMiB=(\d+) swapFreeMiB=(\d+) pswpin=(\d+) pswpout=(\d+)(?: harnessRefaultPages=(\d+))?/.exec(l.trim());
     if (!m) continue;
     if (!vm.has(m[1])) vm.set(m[1], {});
-    vm.get(m[1])[m[2]] = { t: Number(m[3]), availMiB: Number(m[4]), swapFreeMiB: Number(m[5]), pswpin: Number(m[6]), pswpout: Number(m[7]) };
+    vm.get(m[1])[m[2]] = { t: Number(m[3]), availMiB: Number(m[4]), swapFreeMiB: Number(m[5]), pswpin: Number(m[6]), pswpout: Number(m[7]), harnessRefault: m[8] == null ? null : Number(m[8]) };
   }
 }
 const vmRows = [];
@@ -132,7 +132,9 @@ const memVerdict = (label) => {
   const swapInMiB = (v.end.pswpin - v.start.pswpin) * PAGE_MIB;
   const swapOutMiB = (v.end.pswpout - v.start.pswpout) * PAGE_MIB;
   const minAvail = Math.min(v.start.availMiB, v.end.availMiB);
-  const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1) };
+  // Attribution only: swap-ins by the harness's own containers (a recreated container restarts its counter: shown as n/a).
+  const hr = v.start.harnessRefault != null && v.end.harnessRefault != null && v.end.harnessRefault >= v.start.harnessRefault ? +((v.end.harnessRefault - v.start.harnessRefault) * PAGE_MIB).toFixed(1) : null;
+  const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1), harnessRefaultMiB: hr };
   const why = swapInMiB > MAX_SWAPIN_MIB ? `swapped in ${swapInMiB.toFixed(1)} MiB (> ${MAX_SWAPIN_MIB})` : minAvail < MIN_AVAIL_MIB ? `MemAvailable ${minAvail} MiB at an edge (< ${MIN_AVAIL_MIB})` : null;
   return { row, why };
 };
@@ -153,9 +155,9 @@ for (const r of list) {
 }
 if (excludedMem.length) md.push(`**Windows EXCLUDED for memory contention** (Docker VM; swap-in > ${MAX_SWAPIN_MIB} MiB, MemAvailable < ${MIN_AVAIL_MIB} MiB at an edge, or no record):`, '', ...excludedMem.map((x) => `- ${x}`), '');
 md.push('## Docker VM memory per window (MEASURED, VM-wide)', '');
-md.push('| Window | MemAvailable start / end MiB | SwapFree at end MiB | Swapped in / out MiB | Verdict |');
-md.push('|---|---|---|---|---|');
-for (const v of vmRows) md.push(`| ${v.label} | ${v.availStartMiB} / ${v.availEndMiB} | ${v.swapFreeEndMiB} | ${v.swapInMiB} / ${v.swapOutMiB} | ${v.verdict} |`);
+md.push('| Window | MemAvailable start / end MiB | SwapFree at end MiB | Swapped in / out MiB (VM) | of which faulted in by harness containers MiB | Verdict |');
+md.push('|---|---|---|---|---|---|');
+for (const v of vmRows) md.push(`| ${v.label} | ${v.availStartMiB} / ${v.availEndMiB} | ${v.swapFreeEndMiB} | ${v.swapInMiB} / ${v.swapOutMiB} | ${v.harnessRefaultMiB == null ? 'n/a' : v.harnessRefaultMiB} | ${v.verdict} |`);
 md.push('');
 
 // A loaded resource window is valid only if the generator's own recorded [start, end] covers the window's [t-start, t-end]

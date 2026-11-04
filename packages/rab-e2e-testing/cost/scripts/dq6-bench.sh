@@ -75,8 +75,16 @@ vm_counters() {
   docker exec costaudit-pg sh -c 'awk '"'"'/^MemAvailable:/{a=int($2/1024)} /^SwapFree:/{s=int($2/1024)} END{printf "availMiB=%d swapFreeMiB=%d", a, s}'"'"' /proc/meminfo; awk '"'"'/^pswpin /{i=$2} /^pswpout /{o=$2} END{printf " pswpin=%s pswpout=%s\n", i, o}'"'"' /proc/vmstat' 2>/dev/null
 }
 vm_snapshot() { # "<label> <start|end>"
-  local v; v="$(vm_counters)" || v=""
-  [ -n "$v" ] && echo "$1 t=$(date +%s) $v" >> "$OUT/vm-memory.txt" || true
+  local v h c r; v="$(vm_counters)" || v=""
+  # Attribution only (no verdict uses it): anon pages the harness's own containers faulted back in from swap so far
+  # (cgroup v2 workingset_refault_anon, cumulative per container; a recreated container restarts at 0).
+  h=0
+  for c in costaudit-pg costaudit-worker costaudit-redis costaudit-api costaudit-minio; do
+    r="$(docker exec "$c" sh -c 'awk "/^workingset_refault_anon /{print \$2}" /sys/fs/cgroup/memory.stat' 2>/dev/null)" || r=0
+    case "$r" in '' | *[!0-9]*) r=0 ;; esac
+    h=$(( h + ${r:-0} ))
+  done
+  [ -n "$v" ] && echo "$1 t=$(date +%s) $v harnessRefaultPages=$h" >> "$OUT/vm-memory.txt" || true
 }
 MIN_AVAIL_MIB="${DQ6_MIN_AVAIL_MIB:-384}"
 case "$MIN_AVAIL_MIB" in '' | *[!0-9]*) die "DQ6_MIN_AVAIL_MIB must be whole MiB" ;; esac
