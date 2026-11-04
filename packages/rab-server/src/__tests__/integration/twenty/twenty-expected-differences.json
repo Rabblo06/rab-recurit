@@ -485,6 +485,37 @@
         "classification": [
           "routed to Agent 2: its §12.2-§12.6 DDL attempts ran for real as crewflow_owner and replaced core.provision_workspace on the shared CI database (G-02 measured); ~20 suites failed in consequence"
         ]
+      },
+      {
+        "suite": "phase-d-two-worker-concurrency (both Worker runtimes)",
+        "class": "I",
+        "classification": [
+          "BC-08"
+        ]
+      },
+      {
+        "suite": "phase-d-dispatch-pointer (no direct access; claims; API-login claims)",
+        "class": "P",
+        "classification": [
+          "BC-08",
+          "BC-10"
+        ],
+        "kept": "the three schema roles keep 42501; the runtime login still sees zero pointers, cannot insert one and changes none (definer policy + RESTRICTIVE deny); claims by the runtime login only in rolled-back transactions"
+      },
+      {
+        "suite": "phase-d-account-invite-cleanup-definer (API login and the three definers)",
+        "class": "P",
+        "classification": [
+          "BC-08"
+        ],
+        "kept": "schema role crewflow_app 42501; runtime calls rolled back"
+      },
+      {
+        "suite": "workspace-provisioning-health (stuck-workspace alert) and the other deferral users (provisioning-drafts, server-path-provisioning-api)",
+        "class": "HARNESS GAP",
+        "classification": [
+          "routed to Agent 2: the deferral seam REVOKE EXECUTE ON core.provision_workspace FROM crewflow_app is a no-op under the one login (it inherits the owner), so the workspace provisions at once and is never CREATING"
+        ]
       }
     ]
   },
