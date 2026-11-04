@@ -73,7 +73,20 @@ jobs:
           unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
-          npx nx run-many -t test -p rab-server,rab-shared --runInBand --testTimeout=180000
+          # JSON results (one file per project) and a per-file summary: the classification of the owner-login differences
+          # (behaviour-change catalogue / schema-role test / removed in PR #9) is made from these, not from truncated output.
+          status=0
+          mkdir -p "${RUNNER_TEMP}/jest-results"
+          npx nx run-many -t test -p rab-shared --runInBand --output-style=stream \n            --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-shared.json" || status=$?
+          npx nx run-many -t test -p rab-server --runInBand --testTimeout=180000 --output-style=stream \n            --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server.json" || status=$?
+          node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
+          exit $status
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: jest-results-server
+          path: ${{ runner.temp }}/jest-results/
+          if-no-files-found: ignore
       - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
         if: always()

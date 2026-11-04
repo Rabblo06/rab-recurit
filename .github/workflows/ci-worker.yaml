@@ -94,8 +94,12 @@ jobs:
           # would start running the __tests__/load suites).
           # Both runs always execute (the first failing must not hide the second's results); the step fails if either did.
           status=0
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=worker-scan-adapters\.integration' || status=$?
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=^(?!.*worker-scan-adapters\.integration)' || status=$?
+          mkdir -p "${RUNNER_TEMP}/jest-results"
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 --output-style=stream '--testFile=worker-scan-adapters\.integration' \
+            --json "--outputFile=${RUNNER_TEMP}/jest-results/worker-scan-adapters.json" || status=$?
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 --output-style=stream '--testFile=^(?!.*worker-scan-adapters\.integration)' \
+            --json "--outputFile=${RUNNER_TEMP}/jest-results/worker-rest.json" || status=$?
+          node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache

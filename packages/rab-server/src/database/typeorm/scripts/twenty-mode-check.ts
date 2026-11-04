@@ -759,10 +759,13 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await partial(tpl, STOP_BEFORE, r);
   });
 
-  await step('BEHIND-1', 'pending in token mode: 65 without/with a wrong token; deploy-prepare check prints the token (exit 3); the right token applies to head', async (r) => {
+  await step('BEHIND-1', 'pending on a NON-fresh database in token mode: 65 without/with a wrong token; deploy-prepare check prints the token (exit 3); the right token applies to head', async (r) => {
     const db = dbName('behind');
     r.database = db;
-    await partial(db, STOP_BEFORE, r);
+    // Past the ROW_COPY trio, then tenant data: NOT a proven fresh install (a proven fresh install may apply the whole chain
+    // without a token by design, owner rule; locked-migration-runner.ts step 3c), so the per-release token is the gate.
+    await partial(db, FAIL_AT.slice(-13), r);
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 behind tenant', $2)`, [randomUUID(), `twa-t5-behind-${RUN_ID}`]));
     const before = await readState(ctx, db);
     const none = await child(db, { CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' });
     expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), `token mode WITHOUT a token applied nothing (${none.events.filter((e) => e.event === 'recorded').length} recorded)`);
