@@ -5072,3 +5072,88 @@ shift report scheduler, final timesheet) find their work: ONE workspace walk per
   is taken after the shared walk, so a second replica may repeat a member's read-only discovery and then skip it.
 - **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
   worker_event keys and do nothing twice (tested).
+
+## formatPence exact; bigint pence enter a number only through assertSafePence (branch fix/format-pence-exact, not merged)
+
+Formatting and range guards only. No payroll, rate-resolution, rounding, pay-period or pay-date rule changes. There is
+no migration and no change to roles, grants or RLS.
+
+- **Asset:** money printed or returned to people: payroll views, payslip and run totals, offers, attendance pay, the
+  approved shift statement, and the assistant's payroll answers.
+- **Finding 1 (Low, integrity):**
+  - **What:** `@rab/shared` `formatPence` divided pence by 100 as a float, so `formatPence(2^53 - 1)` printed
+    `£90,071,992,547,409.90` instead of `.91`.
+  - **Scope:** the first wrong value found in a 32,000-value sweep was about 7.0 × 10^15 pence (£70 trillion), so no
+    real amount is affected today. The function is still the single money formatter, and it must be exact by
+    construction.
+  - **Fix:** split pounds and pence with integer arithmetic (number: `% 100` and an exact division; bigint: `/ 100n` and
+    `% 100n`). Format the same way as before: `-£1,234.56`, `£0.00`, `£0.01`, and `-£0.00` for `-0` as before.
+  - **New behaviour:** accepts a `bigint` of any size. A `number` must now be a safe integer (`assertSafePence`) rather
+    than any integer, because past 2^53 a number no longer holds the exact pence. That case is refused rather than
+    printed wrong. An unsupported currency code is refused.
+- **Finding 2 (Low, integrity, control at one layer only):**
+  - **What:** entity columns convert bigint pence through `bigintAsNumber`, which calls `assertSafePence`. Raw
+    `manager.query` rows did not: 22 sites ran `Number(r.x_pence)` directly, so a stored value past 2^53 - 1 would
+    have been silently rounded into a different, plausible amount.
+  - **Where:** attendance, shift-report, offer and offer-confirmation services; payroll and payroll-run services.
+  - **Write paths affected:** two of the sites write the rounded value back. `preparePayrollRecords` inserts
+    `pay_rate_pence`, and run preparation inserts `payroll_run_line`.
+  - **Fix:** each site now calls `assertSafePence(Number(...), '<column>')`, and JS-side gross sums are guarded the same
+    way. A corrupt or out-of-range value now fails that request or job closed (RangeError → 500 / job failure). It
+    never produces a wrong amount.
+- **Regression tests:**
+  - `money.spec.ts`: `formatPence` matches an exact BigInt reference for all boundaries (±(2^53 − 1), 0, ±1, ±99, ±100,
+    …) and 20,000 random safe integers. It matches the previous implementation wherever that one was exact. The bigint
+    form equals the number form. Unsafe or non-integer numbers are refused.
+  - `pence-number-boundary.spec.ts`: an AST scan of server and Worker source. Any new `Number(...)` on a pence or gross
+    value outside `assertSafePence` fails. On main's code it lists all 21 money sites it can see.
+- **Residual (reported, not changed here):**
+  - **Statement:** the approved shift statement's loader (`shift-statement.job.ts`, 2 sites) is guarded on the PDF
+    integration branches (#57) and is baselined here.
+  - **Assistant totals:** `payroll-assistant.service.ts` guards with `Number.isSafeInteger`.
+  - **Scan pattern:** the scan matches identifiers containing `pence` or `gross` only. A pence value under another name
+    (e.g. `row.rate`, guarded by hand here) is not caught automatically.
+  - **Precision before the guard:** `payForMinutes` computes `rate × minutes` as a float, which is exact only while the
+    product is ≤ 2^53. Rate DTOs have `@Min(0)` but no `@Max`, so an absurd rate is refused only later, at the column
+    transformer (500, not 400).
+
+## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
+
+Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
+grants, RLS, the renderer's isolation, or any money or worked-minutes value.
+
+- **Asset:** the final timesheet. It is the record of the manager's sign-off ("Reviewed by … Finalised at …", the typed
+  "Signed off as …") and of the shift's "Total worked hours". The pre-shift roster's BEFORE-SHIFT DOCUMENT column is
+  also affected.
+- **Actor:** anyone who can write shift notes, a free-text field. This can also be accidental: a pasted URL, reference
+  or token.
+- **Finding (Medium, integrity):**
+  - **Actor → action → consequence:** notes holding one long unbroken token → the NOTES column grows to the token's
+    width → the right-hand column is pushed off the page → Chromium omits it from the PDF.
+  - **What is lost:** MANAGER SIGN-OFF and the total disappear without any error or warning, and only 237 of a
+    1,000-character token print.
+  - **Where:** `adolphus-document.ts` `DOCUMENT_CSS`, `.bottom > div { flex: 1 }`.
+  - **Root cause:** a flex item's `min-width: auto` means its smallest width is its longest unbreakable word.
+- **Fix:** `.bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }`. Both columns keep half the width, and a
+  token too long for its column breaks at the column edge. Every character is printed.
+- **Owner decision applied in the same change:** notes keep their line breaks. The notes paragraph only (class
+  `notes-text`) gets `white-space: pre-line`. The native renderer applies the same rule to the same field (agreed
+  field list: shift notes in both final-timesheet variants and in the pre-shift roster). Every other field still
+  collapses whitespace, including names, so a line break typed into a name cannot reshape the sign-off block.
+- **Unchanged otherwise:** for ordinary notes the PDF is byte-identical to the pre-fix stylesheet (tested), and values
+  are still escaped (`escapeHtml`). `pre-line` changes whitespace handling only; it cannot turn text into markup.
+- **Regression test:** `render-pdf-notes-layout.integration.spec.ts` (real Chromium via `renderHtmlToPdf`).
+  - A 1,000-character token prints in full.
+  - The sign-off, the total and the before-shift column are each printed exactly once.
+  - Chromium's print layout places nothing past the printable width.
+  - Paragraphs stay on separate lines, with blank lines kept.
+  - Run against main's templates, the token and line-break cases fail.
+- **Test-helper fix:** the PDF text reader (`__tests__/helpers/pdf-inspect.ts`) now honours a stream's direct `/Length`.
+  Before, it stripped a final 0x0d data byte as if it were an end-of-line marker. That made a font's ToUnicode map
+  unreadable, so every glyph of that font decoded as U+FFFD, which hides text from assertions. The fuller reader on
+  `worker/pdf-inspectors` (#54) already uses the same rule.
+- **Residual:**
+  - **Already-stored PDFs:** final timesheets generated before the fix whose notes held such a token remain without
+    their sign-off and total. Regenerating them is an owner decision.
+  - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
+    reported to the native-renderer owner.
