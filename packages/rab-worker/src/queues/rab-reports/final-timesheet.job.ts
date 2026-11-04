@@ -14,7 +14,7 @@ import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-repor
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderReportPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { renderFinalTimesheetEmail } from './report-email-content';
@@ -78,7 +78,7 @@ export async function runFinalTimesheetCycle(
       else if (outcome.value) sent += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 

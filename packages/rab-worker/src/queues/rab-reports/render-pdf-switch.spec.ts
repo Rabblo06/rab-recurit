@@ -10,8 +10,10 @@ import * as nativeModule from './native/render-native';
 import * as renderPool from './native/runtime/render-pool';
 import { shutdownRenderPool } from './native/runtime/render-pool';
 import * as renderTimeout from './native/runtime/render-timeout';
+import { PdfNativeRenderError, PdfNativeThreadCrashError } from './native/runtime/render-protocol';
 import {
   describePdfRendering,
+  errorCodeSuffix,
   htmlFor,
   NATIVE_KINDS,
   optionsFor,
@@ -146,11 +148,39 @@ describe('renderReportPdf dispatch', () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
+  // Visible and auditable, never a silent Chromium fallback: a failure inside the render pool reaches the job as the
+  // pool's own error, with its stable code, and Chromium is never started instead.
+  it.each([
+    ['a render error', () => new PdfNativeRenderError('native PDF render thread failed to start'), 'error_PDF_NATIVE_RENDER'],
+    ['a thread crash', () => new PdfNativeThreadCrashError('native PDF render thread exited', 'ERR_UNKNOWN'), 'error_PDF_NATIVE_THREAD_CRASH'],
+    ['the deadline', () => new PdfRenderTimeoutError('native-render', PDF_RENDER_STEP_TIMEOUT_MS), 'error_PDF_RENDER_TIMEOUT'],
+  ])('native: %s inside the render pool rejects with its code; Chromium is never launched', async (_label, make, code) => {
+    native.mockRestore();
+    const pooled = jest.spyOn(renderPool, 'renderInPool').mockRejectedValue(make());
+    const err = await renderReportPdf(doc, { PDF_RENDERER: 'native' }).then(
+      () => { throw new Error('expected a rejection'); },
+      (e: unknown) => e,
+    );
+    expect(pooled).toHaveBeenCalledTimes(1);
+    expect(err).toMatchObject({ code });
+    expect(errorCodeSuffix(err)).toBe(` [${code}]`);
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it('native: deterministic output (D7) — the same data renders to the same bytes', async () => {
     const a = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     const b = await renderReportPdf(doc, { PDF_RENDERER: 'native' });
     expect(a.equals(b)).toBe(true);
     // The creation date is the document's generatedAt (2026-10-20T15:00:00Z), built inside the render thread.
     expect(a.toString('latin1')).toContain('D:20261020150000');
+  });
+});
+
+describe('errorCodeSuffix (report-job failure log lines)', () => {
+  it("prints only a code of the renderers' fixed shape, never free text", () => {
+    expect(errorCodeSuffix(new PdfNativeRenderError('x'))).toBe(' [error_PDF_NATIVE_RENDER]');
+    expect(errorCodeSuffix(new PdfRenderTimeoutError('pdf', 1))).toBe(' [error_PDF_RENDER_TIMEOUT]');
+    for (const e of [new Error('boom'), Object.assign(new Error('x'), { code: 'error_<script>' }), Object.assign(new Error('x'), { code: 'Jane Doe' }), null, undefined, 'error_PDF_NATIVE_RENDER'])
+      expect(errorCodeSuffix(e)).toBe('');
   });
 });
