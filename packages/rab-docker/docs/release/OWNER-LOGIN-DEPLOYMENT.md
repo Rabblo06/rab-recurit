@@ -425,7 +425,13 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 **Tested here:**
 - the gate: 18 self-tests, plus `--static` on the committed files;
 - `docker compose config` of image + local-db;
-- earlier, a disposable PG16 run of the bundled database shape: TLS verify-full, the hba refusals, the read-only root, no capabilities, the internal network, no password in the logs, the half-initialised volume staying unhealthy (21 checks). That run used a reference init script, **not** Agent 1's file, so it must be re-run once that file lands.
+- a disposable PG16.15 run of `docker-compose.local-db.yml` with **Agent 1's `01-crewflow-owner.sql` (`twa/db-lifecycle` b5a03348)** as its one init file, 21/21 checks:
+  - the exact `crewflow_owner` attributes and the database grant `WITH GRANT OPTION`; no other role or membership created;
+  - SCRAM storage; TLS on; verify-full accepted;
+  - refused: a non-TLS login, the superuser over the network, another database, a wrong host name, a wrong password;
+  - no route out of the internal network; no password in the server log;
+  - read-only root, `CapBnd` 0, `NoNewPrivs` 1;
+  - a second start does not re-run the init; a short password refuses the init and the container never becomes healthy.
 
 **NOT TESTED:**
 - any real owner-login image;
