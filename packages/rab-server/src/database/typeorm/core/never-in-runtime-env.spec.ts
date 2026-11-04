@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { forbiddenRuntimeEnvNames, forbiddenWorkerServiceEnvNames, NEVER_IN_RUNTIME_ENV, runtimeEnvRefusal } from './never-in-runtime-env';
+import { forbiddenRuntimeEnvNames, forbiddenRuntimeEnvPrefixes, forbiddenWorkerServiceEnvNames, NEVER_IN_RUNTIME_ENV, runtimeEnvRefusal } from './never-in-runtime-env';
 import { resolveRuntimeDatabase, RuntimeDbError } from './runtime-database-guard';
 
 /**
@@ -19,6 +19,12 @@ function prestartNames(): string[] {
   const names: string[] = [];
   for (const match of script.matchAll(/^\s*for name in ([^;]+); do/gm)) names.push(...match[1]!.trim().split(/\s+/));
   return names;
+}
+
+/** Every prefix in the `for prefix in ...; do` loop of api-prestart.sh. */
+function prestartPrefixes(): string[] {
+  const script = fs.readFileSync(PRESTART, 'utf8');
+  return [...script.matchAll(/^\s*for prefix in ([^;]+); do/gm)].flatMap((m) => m[1]!.trim().split(/\s+/));
 }
 
 const sorted = (xs: readonly string[]) => [...xs].sort();
@@ -96,6 +102,39 @@ describe('never-in-runtime-env (security review L-4): one list, three enforcers'
       expect(runtimeEnvRefusal({ NODE_ENV: 'development', ALLOW_PRODUCTION_DB_COMMANDS: 'false' }, processName)?.name).toBe('ALLOW_PRODUCTION_DB_COMMANDS');
       expect(runtimeEnvRefusal({ NODE_ENV: 'development', DB_TARGET: ' ' }, processName)).toBeNull();
     }
+  });
+
+  it('owner-login architecture: one PG_DATABASE_URL — legacy / second URLs, role passwords and the removed mode switch are refused in the API and Worker', () => {
+    const OWNER_LOGIN_NAMES = [
+      'DATABASE_URL',
+      'DATABASE_DIRECT_URL',
+      'PG_DATABASE_REPLICA_URL',
+      'PG_WORKER_DATABASE_URL',
+      'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
+      'CREWFLOW_OWNER_PASSWORD',
+    ];
+    for (const processName of ['api', 'worker'] as const) {
+      for (const name of [...OWNER_LOGIN_NAMES, 'DATABASE_URL_UNPOOLED', 'CREWFLOW_PROVISIONER_DATABASE_URL', 'CREWFLOW_MIGRATION_DATABASE_URL', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_MIGRATOR_PASSWORD', 'ALLOW_PRODUCTION_DB_COMMANDS']) {
+        expect(forbiddenRuntimeEnvNames(processName)).toContain(name);
+        expect(runtimeEnvRefusal({ NODE_ENV: 'development', [name]: 'x' }, processName)?.name).toBe(name);
+      }
+    }
+    // The superseded separate provisioner process (unused; removed in the final clean-up PR) is left exactly as it was.
+    for (const name of OWNER_LOGIN_NAMES) expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain(name);
+    // The superseded Worker bundle launcher keeps its literal list until it is removed (it is a #61/#62 file).
+    for (const name of OWNER_LOGIN_NAMES) expect(forbiddenWorkerServiceEnvNames()).not.toContain(name);
+    // Actionable messages: the legacy name says what to rename it to.
+    expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);
+  });
+
+  it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {
+    expect(forbiddenRuntimeEnvPrefixes('api')).toEqual(['CREWFLOW_PROVISIONER_']);
+    expect(sorted(prestartPrefixes())).toEqual(sorted(forbiddenRuntimeEnvPrefixes('api')));
+    expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'false', CREWFLOW_PROVISIONER_A: 'x' }, 'api')?.name).toBe('CREWFLOW_PROVISIONER_A');
+    expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'true' }, 'api')?.name).toBe('CREWFLOW_PROVISIONER_ENABLED');
+    expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: ' ' }, 'api')).toBeNull();
+    // The Worker's rule comes with in-process provisioning (T4); the provisioner child legitimately receives its switch.
+    expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'true' }, 'provisioner')).toBeNull();
   });
 
   it('L-4 follow-up: the image enforcers stay strict BY NAME (DB_TARGET included); they never see a developer .env', () => {

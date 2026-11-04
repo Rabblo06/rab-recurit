@@ -147,9 +147,9 @@ describe('B3 identity in the command and runtime guards (integration, marker abs
 
   it('the runtime guard reads the marker on its probe connection: unmarked non-production passes, a declared identity is refused', async () => {
     silence();
-    await expect(assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ classification: 'LOCAL' });
+    await expect(assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', PG_DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ classification: 'LOCAL' });
     await expect(
-      assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
+      assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
     ).rejects.toBeInstanceOf(RuntimeDbError);
   });
 });
