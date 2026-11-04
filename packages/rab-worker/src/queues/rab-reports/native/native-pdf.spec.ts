@@ -3,6 +3,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 
+import { Logger } from '@nestjs/common';
 import { Document, Page, renderToBuffer } from '@react-pdf/renderer';
 import jsQR from 'jsqr';
 
@@ -18,15 +19,14 @@ const inspectPdf = (pdf: Buffer) => inspectRaw(inlinePageResources(pdf));
 import { DataTable, h, imageBytesFromDataUri, pngBytes, QrCode } from './document-components';
 import { breakOnlyOverlongTokens, OVERLONG_TOKEN_CHARS } from './fonts';
 import { renderNativePdf } from './render-native';
-import { PdfGlyphCoverageError } from './runtime/render-protocol';
 import { shutdownRenderPool } from './runtime/render-pool';
 
 /**
  * Native renderer (PDF renderer migration P1) — security properties, without a browser or a database:
  *   - user-supplied text is printed literally, never interpreted as markup (react-pdf lays out text; there is no HTML,
  *     CSS or script engine), including entities, URLs, Hebrew, Latin diacritics and very long names; characters that
- *     cannot be printed faithfully (bidi controls, zero-width, C0 controls, emoji, unsupported scripts) are REFUSED by
- *     the render pool's glyph guard (fail closed), with the field named and the value never echoed;
+ *     cannot be printed visibly (bidi controls, zero-width, C0 controls, emoji, unsupported scripts) are replaced by a
+ *     visible marker by the render pool (owner decision F1), with counts only in the log, never the value;
  *   - nothing leaves the process: a counting TCP listener that every hostile URL points at receives no connection and
  *     no http(s) request is made while rendering (positive control: a real fetch IS counted);
  *   - only the expected image (the 166x70 logo) is embedded, whatever URLs the text contains;
@@ -80,22 +80,24 @@ function hostile(): Readonly<Record<PrintableKey, string>> {
 }
 
 /**
- * Characters the render pool REFUSES (fail closed, runtime/glyph-coverage.ts, plan D3): react-pdf would draw nothing
- * for them or consume them before the text layer, so printing would silently change the data. Invisible characters are
- * written as escapes on purpose.
+ * Characters the render pool cannot print visibly (owner decision F1, runtime/glyph-coverage.ts): each is REPLACED by the
+ * visible marker U+25A1, the render still succeeds, and only counts are logged. Without this react-pdf would draw nothing
+ * (or reorder text, for bidi controls). TAB is normalised to a space (not counted). Invisible characters are written as
+ * escapes on purpose. [label, value, markers expected]
  */
-const REFUSED: ReadonlyArray<readonly [string, string]> = [
-  ['bidi override (U+202E)', 'abc\u202edcba\u202c xyz'],
-  ['bidi isolate (U+2066)', 'a\u2066isolated\u2069b'],
-  ['zero-width space (U+200B)', 'Zero\u200bWidth'],
-  ['zero-width joiner (U+200D)', 'Join\u200dHere'],
-  ['byte-order mark (U+FEFF)', 'BOM\ufeffHere'],
-  ['tab (C0 control)', 'Tab\there'],
-  ['carriage return', 'Line\rBreak'],
-  ['NUL', 'Nul\u0000Here'],
-  ['emoji (no font draws it)', 'Party \u{1F389}'],
-  ['Arabic (outside the agreed fallback scripts)', '\u0645\u0631\u062d\u0628\u0627'],
+const UNPRINTABLE: ReadonlyArray<readonly [string, string, number]> = [
+  ['bidi override (U+202E, U+202C)', 'abc\u202edcba\u202c xyz', 2],
+  ['bidi isolate (U+2066, U+2069)', 'a\u2066isolated\u2069b', 2],
+  ['zero-width space (U+200B)', 'Zero\u200bWidth', 1],
+  ['zero-width joiner (U+200D)', 'Join\u200dHere', 1],
+  ['byte-order mark (U+FEFF)', 'BOM\ufeffHere', 1],
+  ['carriage return alone', 'Line\rBreak', 1],
+  ['NUL', 'Nul\u0000Here', 1],
+  ['emoji (no font draws it)', 'Party \u{1F389}', 1],
+  ['Arabic (no glyphs in the font stack)', '\u0645\u0631\u062d\u0628\u0627', 5],
 ];
+
+const MARKER = '\u25a1';
 
 /** Every printed field of the final timesheet carries printable hostile text. */
 function hostileTimesheet(): FinalTimesheetData {
@@ -193,19 +195,30 @@ describe('hostile text is printed, never interpreted (through the render pool)',
   });
 });
 
-describe('characters that cannot be printed faithfully are refused (fail closed), never blanked', () => {
-  it.each(REFUSED)('%s → PdfGlyphCoverageError naming the field, never the value', async (_label, value) => {
+describe('characters that cannot be printed visibly become a visible marker, never a blank (F1)', () => {
+  it.each(UNPRINTABLE)('%s → the render succeeds with the marker in place; the log carries counts only', async (_label, value, markers) => {
     const watch = watchNetwork();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes: `Before ${value} after` };
-    const error = await renderNativePdf({ kind: 'final-timesheet', data }).then(
-      () => null,
-      (e: unknown) => e as Error & { code?: string },
-    );
-    expect(error).toBeInstanceOf(PdfGlyphCoverageError);
-    expect(error!.code).toBe('error_PDF_GLYPH_UNSUPPORTED');
-    expect(error!.message).toContain('notes');
-    expect(error!.message).not.toContain(value);
+    const pdf = await renderNativePdf({ kind: 'final-timesheet', data });
+    const text = strip(inspectPdf(pdf).pageTexts.join(''));
+    const at = text.indexOf('Before');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const printed = text.slice(at, text.indexOf('after', at) + 'after'.length);
+    expect([...printed].filter((c) => c === MARKER)).toHaveLength(markers);
+    // Nothing invisible (controls, format characters) reached the text layer.
+    expect(printed).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/u);
+    const lines = warn.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes(`${markers} unprintable character(s) replaced by the visible marker`))).toBe(true);
+    for (const l of lines) expect(l).not.toContain(value);
     expectNoNetwork(watch);
+  });
+
+  it('TAB is laid out as a space (normalised, not a marker)', async () => {
+    const data: FinalTimesheetData = { ...FINAL_TIMESHEET_CASES['one-page']!, notes: 'Tab\tthere' };
+    const text = inspectPdf(await renderNativePdf({ kind: 'final-timesheet', data })).text; // whitespace collapsed
+    expect(text).toContain('Tab there');
+    expect(text).not.toContain(MARKER);
   });
 });
 
