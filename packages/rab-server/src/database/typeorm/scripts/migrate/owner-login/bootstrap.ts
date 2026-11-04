@@ -200,6 +200,18 @@ async function bootstrapOnce(query: Query, owner: string, log: (line: string) =>
   if (!me || me.session !== owner || me.current !== owner) throw new BootstrapRefusal(`the bootstrap runs only as ${owner} itself (no SET ROLE).`);
   if (me.super || me.bypassrls) throw new BootstrapRefusal(`${owner} must be NOSUPERUSER NOBYPASSRLS.`);
   if (!me.createrole) throw new BootstrapRefusal(`${owner} needs CREATEROLE for the first install (M0 §5.1 admin step). Refusing.`);
+  // A GRANT without the grant option is only a WARNING in PostgreSQL ("no privileges were granted"), so the admin step is
+  // verified up front instead of failing deep in the chain (Phase 0b's preflight needs the re-grant).
+  const [grants] = (await query(
+    `SELECT pg_catalog.has_database_privilege(current_database(), 'CREATE WITH GRANT OPTION') AS "create",
+            pg_catalog.has_database_privilege(current_database(), 'CONNECT WITH GRANT OPTION') AS "connect",
+            pg_catalog.has_database_privilege(current_database(), 'TEMPORARY WITH GRANT OPTION') AS "temp"`,
+  )) as Array<{ create: boolean; connect: boolean; temp: boolean }>;
+  if (!grants?.create || !grants.connect || !grants.temp) {
+    throw new BootstrapRefusal(
+      `${owner} needs CONNECT, CREATE, TEMPORARY ON DATABASE ${me.db} WITH GRANT OPTION (postgres-init/owner-login/01-crewflow-owner.sql). Nothing was created. Refusing.`,
+    );
+  }
 
   const names = [...BOOTSTRAP_ROLES.map((r) => r.name), ROLEMAKER];
   const existing = await readRoleFacts(query, names);
