@@ -27,16 +27,21 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const { OUT, psql, redis, harnessDocker, cgroupUsec, dockerEnv, pct, sleep } = require('./lib');
 
-const [mode, label, ...rest] = process.argv.slice(2);
+const [mode, label, ...rest] = require.main === module ? process.argv.slice(2) : ['module', process.env.DQ6_LABEL || 'offline'];
 const opt = (name, dflt) => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? Number(rest[i + 1]) : dflt;
 };
-if (mode !== 'devices' && !/^[A-Za-z0-9-]{1,60}$/.test(label || '')) throw new Error('label must be [A-Za-z0-9-]{1,60}');
+if (mode !== 'devices' && mode !== 'module' && !/^[a-z0-9_-]{1,60}$/.test(label || '')) throw new Error('label must be [a-z0-9_-]{1,60}');
 
 const GEN = label ? path.join(OUT, `dq6-${label}.gen.jsonl`) : null;
 const logGen = (e) => GEN && fs.appendFileSync(GEN, `${JSON.stringify({ t: Date.now(), ...e })}\n`);
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
+// Exact prefix matches (not LIKE: '_' in an arm name would be a wildcard there).
+const EMAIL_PREFIX = `dq6-${label}-`;
+const RT_PREFIX = `dq6:${label}:`;
+const EMAIL_MATCH = `left(recipient_email::text, ${EMAIL_PREFIX.length}) = ${lit(EMAIL_PREFIX)}`;
+const RT_MATCH = `left(event_key, ${RT_PREFIX.length}) = ${lit(RT_PREFIX)}`;
 const TERMINAL = { email: ['SENT', 'FAILED', 'CANCELLED'], push: ['ACCEPTED', 'FAILED', 'CANCELLED'], realtime: ['completed', 'failed', 'cancelled'] };
 const inList = (a) => a.map(lit).join(',');
 
@@ -88,10 +93,10 @@ function insertBatch(T, seq, n) {
 }
 
 const depthSql = () => `select
-  (select count(*) from core.email_outbox where recipient_email like ${lit(`dq6-${label}-%`)} and status not in (${inList(TERMINAL.email)})),
+  (select count(*) from core.email_outbox where ${EMAIL_MATCH} and status not in (${inList(TERMINAL.email)})),
   (select count(*) from core.push_delivery pd join core.notification n on n.id = pd.notification_id
      where n.type = 'dq6' and n.title = ${lit(label)} and pd.status not in (${inList(TERMINAL.push)})),
-  (select count(*) from core.realtime_event where event_key like ${lit(`dq6:${label}:%`)} and status not in (${inList(TERMINAL.realtime)}))`;
+  (select count(*) from core.realtime_event where ${RT_MATCH} and status not in (${inList(TERMINAL.realtime)}))`;
 const BULL_DEPTH = "local w,a=0,0 for _,k in ipairs(redis.call('KEYS','*:wait')) do w=w+redis.call('LLEN',k) end for _,k in ipairs(redis.call('KEYS','*:active')) do a=a+redis.call('LLEN',k) end return {w,a}";
 
 function sampleDepth() {
@@ -143,12 +148,12 @@ async function collect(sinceIso, capS, subFile) {
   }
   const rows = (sql) => psql(sql).split('\n').filter(Boolean).map((l) => l.split('|'));
   const email = rows(`select organisation_id, (extract(epoch from created_at)*1000)::bigint, (extract(epoch from coalesce(sent_at, failed_at, cancelled_at))*1000)::bigint, status, infrastructure_attempt_count, substr(recipient_email::text, ${label.length + 6}, 36)
-      from core.email_outbox where recipient_email like ${lit(`dq6-${label}-%`)}`);
+      from core.email_outbox where ${EMAIL_MATCH}`);
   const push = rows(`select pd.organisation_id, (extract(epoch from pd.created_at)*1000)::bigint, (extract(epoch from coalesce(pd.accepted_at, pd.failed_at, pd.cancelled_at))*1000)::bigint, pd.status, pd.attempt_count, pd.notification_id
       from core.push_delivery pd join core.notification n on n.id = pd.notification_id where n.type = 'dq6' and n.title = ${lit(label)}`);
   const realtime = rows(`select organisation_id, (extract(epoch from created_at)*1000)::bigint,
         (extract(epoch from case when status in (${inList(TERMINAL.realtime)}) then coalesce(processed_at, updated_at) end)*1000)::bigint, status, attempt_count, entity_id
-      from core.realtime_event where event_key like ${lit(`dq6:${label}:%`)}`);
+      from core.realtime_event where ${RT_MATCH}`);
   logGen({ kind: 'collect', xact: 3 });
   const logs = workerLogsSince(sinceIso);
   return { last, email, push, realtime, logs, subText: subFile && fs.existsSync(subFile) ? fs.readFileSync(subFile, 'utf8') : null };
@@ -419,7 +424,9 @@ async function devices() {
   console.log(JSON.stringify({ devicesCreated: n, devicesActive: Number(total) }));
 }
 
-(async () => {
+// Required as a module (offline check of the analysis on synthetic rows): export the pure parts, run nothing.
+if (require.main !== module) module.exports = { analyse, fairness, stats };
+else (async () => {
   if (mode === 'devices') return devices();
   if (mode === 'steady') return steady();
   if (mode === 'burst') return burst();
