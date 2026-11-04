@@ -242,3 +242,128 @@ describe('pre-shift attendance sheet, native PDF bytes', () => {
     expect(viaSwitch.equals(await renderNativePdf({ kind: 'pre-shift', data }))).toBe(true);
   });
 });
+
+
+interface PlacedLine {
+  /** Page x (PDF points from the left edge) where the BT…ET text object starts. */
+  x: number;
+  text: string;
+}
+
+/**
+ * The text lines of a pdfkit (react-pdf) PDF with their page x, per page, in content-stream order. Self-contained on
+ * purpose: it decodes each font's ToUnicode CMap (both `bfchar` and both `bfrange` forms — pdfkit writes the array form)
+ * and tracks the current transformation matrix through `q` / `cm` / `Q` and `Tm`, which is how pdfkit positions text.
+ */
+function placedLines(pdf: Buffer): PlacedLine[][] {
+  const latin = pdf.toString('latin1');
+  const object = (n: string): { dict: string; stream?: Buffer } => {
+    const at = latin.indexOf(`\n${n} 0 obj`);
+    const end = latin.indexOf('endobj', at);
+    const body = latin.slice(at, end);
+    const head = /<<([^]*?)>>\s*stream\r?\n/.exec(body);
+    if (!head) return { dict: body };
+    const start = at + head.index + head[0].length;
+    const raw = pdf.subarray(start, start + Number(/\/Length\s+(\d+)/.exec(head[1]!)![1]));
+    return { dict: head[1]!, stream: /\/FlateDecode/.test(head[1]!) ? inflateSync(raw) : raw };
+  };
+  const toUnicode = (cmap: string): Map<number, string> => {
+    const map = new Map<number, string>();
+    const hex = (h: string) => parseInt(h, 16);
+    const str = (h: string) => String.fromCodePoint(...(h.match(/.{4}/g) ?? []).map(hex));
+    for (const b of cmap.matchAll(/beginbfchar([^]*?)endbfchar/g)) for (const m of b[1]!.matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) map.set(hex(m[1]!), str(m[2]!));
+    for (const b of cmap.matchAll(/beginbfrange([^]*?)endbfrange/g)) {
+      for (const m of b[1]!.matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*(\[[^\]]*\]|<[0-9a-fA-F]+>)/g)) {
+        const lo = hex(m[1]!);
+        const hi = hex(m[2]!);
+        if (m[3]!.startsWith('[')) [...m[3]!.matchAll(/<([0-9a-fA-F]+)>/g)].forEach((u, i) => map.set(lo + i, str(u[1]!)));
+        else for (let c = lo; c <= hi; c++) map.set(c, String.fromCodePoint(hex(m[3]!.slice(1, -1)) + (c - lo)));
+      }
+    }
+    return map;
+  };
+  type M = [number, number, number, number, number, number];
+  const mul = (a: M, b: M): M => [a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3], a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3], a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]];
+
+  const pages: PlacedLine[][] = [];
+  for (const page of latin.matchAll(/\/Type\s*\/Page\b([^]*?)>>/g)) {
+    const resources = object(/\/Resources\s+(\d+)\s+0\s+R/.exec(page[1]!)![1]!).dict;
+    const fonts = new Map<string, Map<number, string>>();
+    const fontBlock = /\/Font\s*<<([^]*?)>>/.exec(resources)?.[1] ?? '';
+    for (const f of fontBlock.matchAll(/\/(\w+)\s+(\d+)\s+0\s+R/g)) {
+      const tu = /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(object(f[2]!).dict)?.[1];
+      fonts.set(f[1]!, tu ? toUnicode(object(tu).stream!.toString('latin1')) : new Map());
+    }
+    const ops = object(/\/Contents\s+(\d+)\s+0\s+R/.exec(page[1]!)![1]!).stream!.toString('latin1');
+    const lines: PlacedLine[] = [];
+    let ctm: M = [1, 0, 0, 1, 0, 0];
+    const stack: M[] = [];
+    let font = new Map<number, string>();
+    let line: PlacedLine | null = null;
+    let operands: string[] = [];
+    for (const tok of ops.match(/\[[^\]]*\]|<[0-9a-fA-F]*>|\/[^\s/[\]<>()]+|-?[\d.]+|[A-Za-z*'"]+/g) ?? []) {
+      if (/^[[<\/\-\d.]/.test(tok)) {
+        operands.push(tok);
+        continue;
+      }
+      const nums = () => operands.slice(-6).map(Number) as M;
+      if (tok === 'q') stack.push(ctm);
+      else if (tok === 'Q') ctm = stack.pop()!;
+      else if (tok === 'cm') ctm = mul(nums(), ctm);
+      else if (tok === 'BT') line = { x: NaN, text: '' };
+      else if (tok === 'Tf') font = fonts.get(operands[0]!.slice(1)) ?? new Map();
+      else if (tok === 'Tm' && line) line.x = mul(nums(), ctm)[4];
+      else if ((tok === 'TJ' || tok === 'Tj') && line) {
+        for (const h of operands.join(' ').matchAll(/<([0-9a-fA-F]*)>/g)) for (const c of h[1]!.match(/.{4}/g) ?? []) line.text += font.get(parseInt(c, 16)) ?? '�';
+      } else if (tok === 'ET' && line) {
+        lines.push(line);
+        line = null;
+      }
+      operands = [];
+    }
+    pages.push(lines);
+  }
+  return pages;
+}
+
+describe('F-PDF-1: a long unbroken token in the shift notes keeps every column (native layout)', () => {
+  // The harness fixture: "Token: " + 1,000 characters with no break opportunity.
+  const TOKEN = Array.from({ length: 1000 }, (_, i) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[i % 36]).join('');
+  const PAGE_WIDTH = 841.89; // A4 landscape, points
+  const MARGIN = (12 * 72) / 25.4;
+
+  it('the helper reads this document correctly (positive control on a normal roster)', async () => {
+    const pages = placedLines(await renderNativePdf({ kind: 'pre-shift', data: PRE_SHIFT_FIXTURES['four-staff']! }));
+    const all = pages.flat().map((l) => l.text.trim());
+    expect(all).toEqual(expect.arrayContaining(['NOTES', 'BEFORE-SHIFT DOCUMENT', 'Black tie. Report to the side door.', 'Staff Member 01']));
+    expect(all.join('')).not.toContain('�');
+  });
+
+  it.each([['four-staff'], ['sixty-staff']])('%s: "Token: " + 1,000 characters wraps inside NOTES; BEFORE-SHIFT DOCUMENT stays on the page', async (name) => {
+    const pdf = await renderNativePdf({ kind: 'pre-shift', data: { ...PRE_SHIFT_FIXTURES[name]!, notes: `Token: ${TOKEN}` } });
+    const pages = placedLines(pdf);
+    const last = pages[pages.length - 1]!.map((l) => ({ ...l, text: l.text.trim() }));
+    const find = (text: string) => last.find((l) => l.text === text);
+
+    // Both bottom columns are printed, on the same (last) page; the right one starts inside the page.
+    for (const text of ['NOTES', 'BEFORE-SHIFT DOCUMENT', 'Use the QR above to clock in and clock out.', 'Ratings, confirmation and signatures are not included yet.']) {
+      expect([text, find(text) !== undefined]).toEqual([text, true]);
+    }
+    const notesX = find('NOTES')!.x;
+    const rightX = find('BEFORE-SHIFT DOCUMENT')!.x;
+    expect(notesX).toBeCloseTo(MARGIN, 0);
+    expect(rightX).toBeGreaterThan(PAGE_WIDTH / 2 - 10);
+    expect(rightX).toBeLessThan(PAGE_WIDTH - MARGIN - 100);
+    expect(find('Use the QR above to clock in and clock out.')!.x).toBeCloseTo(rightX, 0);
+
+    // The token is broken INSIDE the NOTES column: many lines, each starting at the column's x, none long enough to reach
+    // the right column (an 8.25 pt Liberation Sans capital or digit is at least 4.5 pt wide, so a line of the ~370 pt
+    // column holds at most ~82 of them).
+    const tokenLines = last.filter((l) => /^(Token: ?)?[A-Z0-9]{3,}-?$/.test(l.text));
+    expect(tokenLines.length).toBeGreaterThanOrEqual(12);
+    for (const l of tokenLines) expect([l.text.length <= 90, Math.abs(l.x - notesX) < 1]).toEqual([true, true]);
+
+    // Nothing is lost: all 1,000 characters print, in order, once react-pdf's inserted break hyphens are ignored.
+    expect(last.map((l) => l.text).join('').replace(/[\s-]/g, '')).toContain(`Token:${TOKEN}`);
+  });
+});
