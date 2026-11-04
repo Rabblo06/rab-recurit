@@ -72,7 +72,7 @@ jobs:
           MIGRATION_SECURITY_SCENARIOS: fresh
           MIGRATION_SECURITY_KEEP_DATABASES: 'true'
           MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
-      - name: Owner fixture (PRE-T2 STAND-IN: crewflow_owner with the M0 §3.1 memberships)
+      - name: 'Owner fixture (PRE-T2 STAND-IN - crewflow_owner with the M0 §3.1 memberships)'
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
