@@ -14,6 +14,7 @@ const ORG = '00000000-0000-4000-8000-00000000000a';
 const WS = '00000000-0000-4000-8000-0000000000a1';
 const REC = '0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0';
 const JOB = { payrollRecordId: REC, organisationId: ORG, workspaceId: WS, generation: 3 };
+type StatementDocument = Extract<ReportDocument, { kind: 'approved-shift-statement' }>;
 
 function recordRow(over: Record<string, unknown> = {}) {
   return {
@@ -35,8 +36,13 @@ function harness(row: Record<string, unknown>) {
     if (sql.startsWith("UPDATE payroll_record SET statement_status = 'failed'")) return [[], 1];
     return [];
   });
-  const docs: ReportDocument[] = [];
-  const render = jest.fn(async (doc: ReportDocument) => { docs.push(doc); return Buffer.from('%PDF-1.3 test'); });
+  // Narrowed on entry: the statement job hands the renderer only this kind, and any other kind fails the test.
+  const docs: StatementDocument[] = [];
+  const render = jest.fn(async (doc: ReportDocument) => {
+    if (doc.kind !== 'approved-shift-statement') throw new Error(`unexpected document kind ${doc.kind}`);
+    docs.push(doc);
+    return Buffer.from('%PDF-1.3 test');
+  });
   // Stop right after the render: the upload / registration path is covered by shift-statement.integration.spec.ts.
   const files = { putObject: jest.fn(async () => { throw new Error('stop after render'); }), discardUnregistered: jest.fn(async () => undefined) };
   const deps = { tenantContext: tenant, files, notifications: {}, render } as never;
