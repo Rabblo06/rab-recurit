@@ -55,13 +55,17 @@ function depthMax(label) {
   if (!fs.existsSync(f)) return null;
   let rows = 0;
   let bull = 0;
+  let wAll = null;
+  let wBusy = null;
   for (const l of fs.readFileSync(f, 'utf8').split('\n').filter((x) => x.trim())) {
     const e = JSON.parse(l);
     if (e.kind !== 'depth') continue;
     rows = Math.max(rows, (e.email || 0) + (e.push || 0) + (e.realtime || 0));
     bull = Math.max(bull, (e.bullWait || 0) + (e.bullActive || 0));
+    if (e.workerBackends != null) wAll = Math.max(wAll || 0, e.workerBackends);
+    if (e.workerBackendsNonIdle != null) wBusy = Math.max(wBusy || 0, e.workerBackendsNonIdle);
   }
-  return { outboxRowsNonTerminalMax: rows, bullmqWaitActiveMax: bull };
+  return { outboxRowsNonTerminalMax: rows, bullmqWaitActiveMax: bull, workerBackendsMax: wAll, workerBackendsNonIdleMax: wBusy };
 }
 const stat = (vals) => {
   const v = vals.filter((x) => x != null && !Number.isNaN(x));
@@ -102,6 +106,58 @@ const METRICS = [
   ['workerCgroupMiB', 'Worker cgroup memory MiB'],
   ['hostOtherCpuPct', 'Host: other containers CPU % (contention)'],
 ];
+// Memory contention (Docker VM, 4 GB, shared): scripts/dq6-bench.sh writes VM MemAvailable / SwapFree / pswpin / pswpout
+// at both edges of every window and scenario (vm-memory.txt). A window is EXCLUDED, from its table and from every mean, if
+// it swapped in more than MAX_SWAPIN_MIB, if either edge had less than MIN_AVAIL_MIB available, or if it has no complete
+// record (fail closed: a window not shown to be unstarved is not reported). Swap counters are VM-wide, so swapping by any
+// other container counts too; that is contention as well.
+const MAX_SWAPIN_MIB = Number(process.env.DQ6_MAX_SWAPIN_MIB || 16);
+const MIN_AVAIL_MIB = Number(process.env.DQ6_MIN_AVAIL_MIB || 384);
+const PAGE_MIB = 4 / 1024;
+const vm = new Map(); // label -> { start, end }
+const vmFile = path.join(OUT, 'vm-memory.txt');
+if (fs.existsSync(vmFile)) {
+  for (const l of fs.readFileSync(vmFile, 'utf8').split(/\r?\n/)) {
+    const m = /^(\S+) (start|end) t=(\d+) availMiB=(\d+) swapFreeMiB=(\d+) pswpin=(\d+) pswpout=(\d+)/.exec(l.trim());
+    if (!m) continue;
+    if (!vm.has(m[1])) vm.set(m[1], {});
+    vm.get(m[1])[m[2]] = { t: Number(m[3]), availMiB: Number(m[4]), swapFreeMiB: Number(m[5]), pswpin: Number(m[6]), pswpout: Number(m[7]) };
+  }
+}
+const vmRows = [];
+const excludedMem = [];
+const memVerdict = (label) => {
+  const v = vm.get(label);
+  if (!v || !v.start || !v.end) return { why: 'no VM memory record at both edges' };
+  const swapInMiB = (v.end.pswpin - v.start.pswpin) * PAGE_MIB;
+  const swapOutMiB = (v.end.pswpout - v.start.pswpout) * PAGE_MIB;
+  const minAvail = Math.min(v.start.availMiB, v.end.availMiB);
+  const row = { label, availStartMiB: v.start.availMiB, availEndMiB: v.end.availMiB, swapFreeEndMiB: v.end.swapFreeMiB, swapInMiB: +swapInMiB.toFixed(1), swapOutMiB: +swapOutMiB.toFixed(1) };
+  const why = swapInMiB > MAX_SWAPIN_MIB ? `swapped in ${swapInMiB.toFixed(1)} MiB (> ${MAX_SWAPIN_MIB})` : minAvail < MIN_AVAIL_MIB ? `MemAvailable ${minAvail} MiB at an edge (< ${MIN_AVAIL_MIB})` : null;
+  return { row, why };
+};
+for (const r of list) {
+  for (const w of ['idle-off', 'idle-on', 'loaded', 'burst', 'rworker', 'rredis']) {
+    const has = w in r.windows || w in r.scen;
+    if (!has) continue;
+    const label = `${r.arm}-r${r.rep}-${w}`;
+    const { row, why } = memVerdict(label);
+    if (row) vmRows.push({ ...row, verdict: why ? 'EXCLUDED' : 'ok' });
+    if (why) {
+      excludedMem.push(`${label}: ${why}`);
+      (r.memExcluded = r.memExcluded || {})[w] = why;
+      delete r.windows[w];
+      delete r.scen[w];
+    }
+  }
+}
+if (excludedMem.length) md.push(`**Windows EXCLUDED for memory contention** (Docker VM; swap-in > ${MAX_SWAPIN_MIB} MiB, MemAvailable < ${MIN_AVAIL_MIB} MiB at an edge, or no record):`, '', ...excludedMem.map((x) => `- ${x}`), '');
+md.push('## Docker VM memory per window (MEASURED, VM-wide)', '');
+md.push('| Window | MemAvailable start / end MiB | SwapFree at end MiB | Swapped in / out MiB | Verdict |');
+md.push('|---|---|---|---|---|');
+for (const v of vmRows) md.push(`| ${v.label} | ${v.availStartMiB} / ${v.availEndMiB} | ${v.swapFreeEndMiB} | ${v.swapInMiB} / ${v.swapOutMiB} | ${v.verdict} |`);
+md.push('');
+
 // A loaded resource window is valid only if the generator's own recorded [start, end] covers the window's [t-start, t-end]
 // (dq6-<label>.gen-window.json, written by dq6-load.js on success and on failure). Missing record or gap -> INVALID, excluded.
 const MAX_INSERT_GAP_MS = 3000; // one tick is 1 s
@@ -147,27 +203,28 @@ for (const w of ['idle-off', 'idle-on', 'loaded']) {
 }
 
 md.push('## Loaded: delivery (steady load)', '');
-md.push('| Run | Offered | Email latency ms p50/p95/p99/max | Push | Realtime | Max non-terminal rows | Max BullMQ wait+active | Drain after load stop (email/push/rt) | Duplicates email / realtime (detector coverage) | Non-terminal at end | Failed rows | Worker error lines | Jain (email, per-org mean latency) | Per-org p95 email min/median/max |');
-md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+md.push('| Run | Offered | Email latency ms p50/p95/p99/max | Push | Realtime | Max non-terminal rows | Max BullMQ wait+active | Max Worker DB backends all / non-idle (pool proxy) | Drain after load stop (email/push/rt) | Duplicates email / realtime (detector coverage) | Non-terminal at end | Failed rows | Worker error lines | Jain (email, per-org mean latency) | Per-org p95 email min/median/max |');
+md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 for (const r of list) {
   const s = r.scen.loaded;
   if (!s) continue;
   const d = depthMax(`${r.arm}-r${r.rep}-loaded`) || {};
   const failed = ['email', 'push', 'realtime'].map((k) => (s[k].status.FAILED || 0) + (s[k].status.failed || 0) + (s[k].status.CANCELLED || 0) + (s[k].status.cancelled || 0)).join('/');
-  md.push(`| ${r.arm} r${r.rep} | ${s.offered.notificationsPerSecond}/s × ${s.offered.seconds} s = ${s.offered.notifications} | ${lat(s.email.latencyMs)} | ${lat(s.push.latencyMs)} | ${lat(s.realtime.latencyMs)} | ${fmt(d.outboxRowsNonTerminalMax)} | ${fmt(d.bullmqWaitActiveMax)} | ${['email', 'push', 'realtime'].map((k) => ms(s.drainAfterLoadStopMs && s.drainAfterLoadStopMs[k])).join(' / ')} | ${dupCell(s)} | ${s.email.nonTerminal}/${s.push.nonTerminal}/${s.realtime.nonTerminal} | ${failed} | ${s.workerLogErrorLines} | ${s.email.fairness ? s.email.fairness.jainIndexOfMeanLatency : '—'} | ${s.email.fairness ? `${s.email.fairness.perOrgP95Ms.min} / ${s.email.fairness.perOrgP95Ms.median} / ${s.email.fairness.perOrgP95Ms.max}` : '—'} |`);
+  md.push(`| ${r.arm} r${r.rep} | ${s.offered.notificationsPerSecond}/s × ${s.offered.seconds} s = ${s.offered.notifications} | ${lat(s.email.latencyMs)} | ${lat(s.push.latencyMs)} | ${lat(s.realtime.latencyMs)} | ${fmt(d.outboxRowsNonTerminalMax)} | ${fmt(d.bullmqWaitActiveMax)} | ${fmt(d.workerBackendsMax)} / ${fmt(d.workerBackendsNonIdleMax)} | ${['email', 'push', 'realtime'].map((k) => ms(s.drainAfterLoadStopMs && s.drainAfterLoadStopMs[k])).join(' / ')} | ${dupCell(s)} | ${s.email.nonTerminal}/${s.push.nonTerminal}/${s.realtime.nonTerminal} | ${failed} | ${s.workerLogErrorLines} | ${s.email.fairness ? s.email.fairness.jainIndexOfMeanLatency : '—'} | ${s.email.fairness ? `${s.email.fairness.perOrgP95Ms.min} / ${s.email.fairness.perOrgP95Ms.median} / ${s.email.fairness.perOrgP95Ms.max}` : '—'} |`);
 }
 md.push('');
 
 md.push('## Burst (all notifications inserted at once; throughput and fairness)', '');
-md.push('| Run | Notifications × organisations | Email drained after insert | Email rows/s | Push drained | Realtime drained | Per-org email completion min/median/max | Jain (email) | Duplicates email / realtime (detector coverage) | Non-terminal | Worker error lines | CPU-s pg / worker / redis | PG transactions (incl. harness) |');
-md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+md.push('| Run | Notifications × organisations | Email drained after insert | Email rows/s | Max Worker DB backends all / non-idle | Push drained | Realtime drained | Per-org email completion min/median/max | Jain (email) | Duplicates email / realtime (detector coverage) | Non-terminal | Worker error lines | CPU-s pg / worker / redis | PG transactions (incl. harness) |');
+md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 for (const r of list) {
   const s = r.scen.burst;
+  const bd = depthMax(`${r.arm}-r${r.rep}-burst`) || {};
   if (!s) continue;
   const t = s.throughput || {};
   const pc = t.email && t.email.perOrgCompletionMs;
   const cpu = s.resources ? s.resources.cpuSeconds : {};
-  md.push(`| ${r.arm} r${r.rep} | ${s.offered.notifications} × ${s.offered.organisations} | ${ms(t.email && t.email.drainedMsAfterInsert)} | ${fmt(t.email && t.email.rowsPerSecond)} | ${ms(t.push && t.push.drainedMsAfterInsert)} | ${ms(t.realtime && t.realtime.drainedMsAfterInsert)} | ${pc ? `${ms(pc.min)} / ${ms(pc.median)} / ${ms(pc.max)}` : '—'} | ${s.email.fairness ? s.email.fairness.jainIndexOfMeanLatency : '—'} | ${dupCell(s)} | ${s.email.nonTerminal}/${s.push.nonTerminal}/${s.realtime.nonTerminal} | ${s.workerLogErrorLines} | ${fmt(cpu['costaudit-pg'])} / ${fmt(cpu['costaudit-worker'])} / ${fmt(cpu['costaudit-redis'])} | ${fmt(s.resources && s.resources.pgTransactionsInclHarness)} |`);
+  md.push(`| ${r.arm} r${r.rep} | ${s.offered.notifications} × ${s.offered.organisations} | ${ms(t.email && t.email.drainedMsAfterInsert)} | ${fmt(t.email && t.email.rowsPerSecond)} | ${fmt(bd.workerBackendsMax)} / ${fmt(bd.workerBackendsNonIdleMax)} | ${ms(t.push && t.push.drainedMsAfterInsert)} | ${ms(t.realtime && t.realtime.drainedMsAfterInsert)} | ${pc ? `${ms(pc.min)} / ${ms(pc.median)} / ${ms(pc.max)}` : '—'} | ${s.email.fairness ? s.email.fairness.jainIndexOfMeanLatency : '—'} | ${dupCell(s)} | ${s.email.nonTerminal}/${s.push.nonTerminal}/${s.realtime.nonTerminal} | ${s.workerLogErrorLines} | ${fmt(cpu['costaudit-pg'])} / ${fmt(cpu['costaudit-worker'])} / ${fmt(cpu['costaudit-redis'])} | ${fmt(s.resources && s.resources.pgTransactionsInclHarness)} |`);
 }
 md.push('');
 
@@ -190,7 +247,9 @@ if (errs.size) {
   for (const e of [...errs].slice(0, 30)) md.push(`- \`${e.replace(/`/g, "'")}\``);
   md.push('');
 }
-for (const r of list) json.runs.push({ arm: r.arm, rep: r.rep, windows: Object.fromEntries(Object.entries(r.windows).map(([k, s]) => [k, windowMetrics(s)])), scenarios: r.scen });
+json.vmMemory = vmRows;
+json.excludedForMemory = excludedMem;
+for (const r of list) json.runs.push({ arm: r.arm, rep: r.rep, memExcluded: r.memExcluded || null, loadedInvalid: r.loadedInvalid || null, windows: Object.fromEntries(Object.entries(r.windows).map(([k, s]) => [k, windowMetrics(s)])), scenarios: r.scen });
 fs.writeFileSync(path.join(OUT, 'dq6-results.md'), md.join('\n'));
 fs.writeFileSync(path.join(OUT, 'dq6-results.json'), JSON.stringify(json, null, 2));
 console.log(md.join('\n'));

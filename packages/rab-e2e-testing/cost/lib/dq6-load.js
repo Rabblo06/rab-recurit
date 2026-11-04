@@ -113,8 +113,28 @@ const depthSql = () => `select
   (select count(*) from core.realtime_event where ${RT_MATCH} and status not in (${inList(TERMINAL.realtime)}))`;
 const BULL_DEPTH = "local w,a=0,0 for _,k in ipairs(redis.call('KEYS','*:wait')) do w=w+redis.call('LLEN',k) end for _,k in ipairs(redis.call('KEYS','*:active')) do a=a+redis.call('LLEN',k) end return {w,a}";
 
+// Pool-saturation PROXY (not pool waits): the Worker's database backends, by the Worker container's address on the
+// harness network. The Worker's jobs child has a 12-connection pool (PG_POOL_MAX_CONNECTIONS) shared by consumers whose
+// concurrencies add up to more than 12 (rab-email 5 + rab-push 10 + rab-shift-statements 2 + rab-ai 4 on main), so a
+// non-idle count at the cap means checkouts COULD be waiting. The waits themselves (pg Pool waitingCount) are in-process
+// and the production Worker exposes no metric for them; they are not measured here. The address is re-read every sample
+// because the recovery scenarios recreate the container. Same statement as the depth query: no extra transaction.
+function workerAddr() {
+  try {
+    const ip = execFileSync('docker', ['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', 'costaudit-worker'], { env: dockerEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
+  } catch {
+    return null; // stopped (recovery scenario)
+  }
+}
+const backendsSql = (ip) => (ip
+  ? `, (select count(*) from pg_stat_activity where datname = 'rab' and backend_type = 'client backend' and client_addr = ${lit(ip)}::inet),
+     (select count(*) from pg_stat_activity where datname = 'rab' and backend_type = 'client backend' and client_addr = ${lit(ip)}::inet and state <> 'idle')`
+  : ', null, null');
+
 function sampleDepth() {
-  const [email, push, realtime] = psql(depthSql()).split('|').map(Number);
+  const ip = workerAddr();
+  const [email, push, realtime, wAll, wBusy] = psql(depthSql().replace(/\)$/, `)${backendsSql(ip)}`)).split('|').map((x) => (x === '' ? null : Number(x)));
   let bullWait = null;
   let bullActive = null;
   try {
@@ -122,7 +142,7 @@ function sampleDepth() {
   } catch {
     /* Redis down (recovery scenario) */
   }
-  const s = { email, push, realtime, bullWait, bullActive };
+  const s = { email, push, realtime, bullWait, bullActive, workerBackends: wAll, workerBackendsNonIdle: wBusy };
   logGen({ kind: 'depth', xact: 1, redisCmds: bullWait == null ? 0 : 1, ...s });
   return s;
 }

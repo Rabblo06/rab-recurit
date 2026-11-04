@@ -63,6 +63,29 @@ host_snapshot() { # label: the non-harness containers' CPU (host contention), re
   others="$(docker ps --format '{{.Names}}' | grep -vE '^(costaudit-|crewflow-cost-)' || true)"
   # shellcheck disable=SC2086
   { echo "# $(date -u +%FT%TZ) $1"; [ -z "$others" ] || docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $others 2>/dev/null; } >> "$OUT/host-contention.txt" || true
+  vm_snapshot "$1"
+}
+
+# Docker VM memory (4 GB, shared with the dev and parity stacks): MemAvailable, SwapFree and the cumulative swap-in/out
+# page counters, read from /proc inside the disposable Postgres container (the VM's own counters, not the cgroup's).
+# One line per window edge in vm-memory.txt: "<label> <start|end> t=<epoch> availMiB= swapFreeMiB= pswpin= pswpout=".
+# lib/dq6-report.js excludes a window that swapped in more than DQ6_MAX_SWAPIN_MIB or whose edges fell below
+# DQ6_MIN_AVAIL_MIB, and one with no record at all (fail closed: a window not shown to be unstarved is not reported).
+vm_counters() {
+  docker exec costaudit-pg sh -c 'awk '"'"'/^MemAvailable:/{a=int($2/1024)} /^SwapFree:/{s=int($2/1024)} END{printf "availMiB=%d swapFreeMiB=%d", a, s}'"'"' /proc/meminfo; awk '"'"'/^pswpin /{i=$2} /^pswpout /{o=$2} END{printf " pswpin=%s pswpout=%s\n", i, o}'"'"' /proc/vmstat' 2>/dev/null
+}
+vm_snapshot() { # "<label> <start|end>"
+  local v; v="$(vm_counters)" || v=""
+  [ -n "$v" ] && echo "$1 t=$(date +%s) $v" >> "$OUT/vm-memory.txt" || true
+}
+MIN_AVAIL_MIB="${DQ6_MIN_AVAIL_MIB:-384}"
+case "$MIN_AVAIL_MIB" in '' | *[!0-9]*) die "DQ6_MIN_AVAIL_MIB must be whole MiB" ;; esac
+mem_guard() { # [where]: refuse to start a window on a VM already short of memory (numbers from a starved host are void)
+  local v a
+  v="$(vm_counters)" || die "memory guard: cannot read the VM's /proc/meminfo"
+  a="$(echo "$v" | sed -n 's/.*availMiB=\([0-9]*\).*/\1/p')"
+  [ -n "$a" ] || die "memory guard: no MemAvailable in '$v'"
+  [ "$a" -ge "$MIN_AVAIL_MIB" ] || die "memory guard${1:+ before $1}: Docker VM MemAvailable ${a} MiB < DQ6_MIN_AVAIL_MIB=${MIN_AVAIL_MIB} ($v). Not starting a window on a starved host."
 }
 
 record_mode() { # what the containers actually run with (env keys from docker inspect, login roles from pg_stat_activity)
@@ -119,7 +142,7 @@ ensure_flags() { # on|off: recreate API + Worker with that configuration (no-op 
 
 idle_window() { # label
   stamp "drain before $1"; bash "$M" drain "$1"
-  clock_guard "$1"
+  clock_guard "$1"; mem_guard "$1"
   host_snapshot "$1 start"; bash "$M" idle "$1" "$IDLE_S"; host_snapshot "$1 end"
 }
 
@@ -167,7 +190,7 @@ do_arm() {
   # loaded: generator runs IDLE_S + 90 s; the resource window (IDLE_S) starts 15 s in, leaving 75 s for overrun
   stamp "arm $L: loaded"
   host_snapshot "$L-loaded start"
-  clock_guard "$L-loaded"
+  clock_guard "$L-loaded"; mem_guard "$L-loaded"
   rm -f "$OUT/dq6-$L-loaded.gen-window.json" # a rerun must not reuse a stale coverage record
   node_env "$LOAD" steady "$L-loaded" --seconds $((IDLE_S + LOADED_EXTRA_S)) --rate "$RATE" > "$OUT/dq6-$L-loaded.log" 2>&1 &
   local gen=$!
@@ -178,20 +201,22 @@ do_arm() {
   stamp "arm $L: loaded $(tail -1 "$OUT/dq6-$L-loaded.log" | cut -c1-300)"
   stamp "arm $L: burst"; bash "$M" drain "$L-burst"
   host_snapshot "$L-burst start"
-  clock_guard "$L-burst"
+  clock_guard "$L-burst"; mem_guard "$L-burst"
   node_env "$LOAD" burst "$L-burst" --notifications "$BURST" > "$OUT/dq6-$L-burst.log" 2>&1 || stamp "arm $L: burst FAILED"
   host_snapshot "$L-burst end"
   stamp "arm $L: burst $(tail -1 "$OUT/dq6-$L-burst.log" | cut -c1-300)"
   stamp "arm $L: Worker restart"
   host_snapshot "$L-rworker start"
-  clock_guard "$L-rworker"
+  clock_guard "$L-rworker"; mem_guard "$L-rworker"
   node_env "$LOAD" recovery "$L-rworker" worker --rate "$REC_RATE" > "$OUT/dq6-$L-rworker.log" 2>&1 || stamp "arm $L: rworker FAILED"
+  host_snapshot "$L-rworker end"
   stamp "arm $L: rworker $(tail -1 "$OUT/dq6-$L-rworker.log" | cut -c1-400)"
   ensure_flags on; bash "$M" drain "$L-rredis"
   stamp "arm $L: Redis restart"
   host_snapshot "$L-rredis start"
-  clock_guard "$L-rredis"
+  clock_guard "$L-rredis"; mem_guard "$L-rredis"
   node_env "$LOAD" recovery "$L-rredis" redis --rate "$REC_RATE" > "$OUT/dq6-$L-rredis.log" 2>&1 || stamp "arm $L: rredis FAILED"
+  host_snapshot "$L-rredis end"
   stamp "arm $L: rredis $(tail -1 "$OUT/dq6-$L-rredis.log" | cut -c1-400)"
   # Redis lost every BullMQ key and connection; recreate the API and Worker so the next arm starts from a clean process.
   hdocker_try rm -f costaudit-worker
