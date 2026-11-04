@@ -38,6 +38,7 @@ git-ignored, so neither is committed.
 | `env/redis-users.acl.example` | Redis ACL: `default` off, app user stored by SHA-256, PING-only health user. | now |
 | `local-db/pg_hba.conf` | Bundled database: superuser on the local socket only; `crewflow_owner` over TLS only. | now |
 | `postgres-init/owner-login/01-crewflow-owner.sql`, `transition-from-separated.sql` | **Agent 1's** tested provider-admin SQL. Referenced here, never copied. | Agent 1 |
+| `docs/release/OWNER-LOGIN-RECOVERY.md` | Recovery and rollback: the mandatory pre-upgrade backup, restore-then-previous-image (proven), and why an old image on an upgraded database fails closed. | now |
 
 Shorthand, used from `packages/rab-docker/` on the host:
 
@@ -247,8 +248,8 @@ $P up -d --wait --wait-timeout 600
 ```
 `rab-migrate` re-checks and must exit 0. Then the API starts: it runs a read-only compatibility check and refuses to serve otherwise. The Worker follows a healthy API. Verify `$P ps`, `/healthz` through the edge, and the Worker health line. Compose returns 1 when `rab-migrate` does not exit 0; nothing new is promoted in that case.
 
-**3.6 Rollback.**
-- **(a) Expand-only release:**
+**3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
+- **(a) Expand-only release (only between owner-login releases reviewed as expand-only; never back across the transition):**
   ```bash
   docker compose --env-file /etc/crewflow/compose.env.<old-sha> $I up -d --wait
   ```
@@ -327,7 +328,7 @@ unchanged.
 
 These are what rollback compares against.
 
-**5.2 Backup or PITR marker.** As 3.3. Confirm that a restore of it has been **tested**.
+**5.2 Backup or PITR marker: MANDATORY, before 5.3.** Take it before `transition-from-separated.sql` runs. Self-hosted: as the cluster superuser, `pg_dumpall --roles-only` plus `pg_dump -Fc --create`. Managed: record the PITR timestamp or snapshot. Exact commands and the restore: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §2 and §4. The owner login cannot take this backup (BC-12). Confirm that a restore of it has been **tested**.
 
 **5.3 Provider-admin SQL.** The admin runs `postgres-init/owner-login/transition-from-separated.sql` (Agent 1). Per M0 §3.1, it:
 - creates `crewflow_owner`;
@@ -357,16 +358,18 @@ The file's own verification queries must pass before anything else happens. The 
 - the audit sink receiving events;
 - no service holds any old credential (`docker compose config` plus the gate).
 
-**5.9 Rollback to separated:**
-- **(a) Nothing was applied in 5.6, or everything applied was expand-only:**
+**5.9 Rollback to separated.** Full procedure and evidence: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
+- **(a) Nothing was applied in 5.6:**
   1. `$P down`. Never `-v`.
   2. Restart the old stack from 5.5 with its old env files and digests.
 
   The old logins still work, because 5.3 did not change them.
-- **(b) Otherwise:**
+- **(b) Anything was applied in 5.6 (the supported rollback, PROVEN):**
   1. Stop everything.
-  2. Restore 5.2.
+  2. Restore 5.2 (`OWNER-LOGIN-RECOVERY.md` §4).
   3. Then do (a).
+
+  An old image on the upgraded database is **not** supported in production and fails closed. The old api and worker refuse at their boot gate (unknown `provision_workspace` version), and the old provisioner refuses because the ledger is AHEAD (`OWNER-LOGIN-RECOVERY.md` §3). The transition's migrations are not "expand-only" for the old code.
 - **`crewflow_owner` after a rollback:** the admin may `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Do not `DROP ROLE`** without Agent 1's guidance: objects it created would need `REASSIGN OWNED`.
 
 **5.10 After the rollback window.** Retiring the old logins (NOLOGIN, rotated or dropped passwords) and deleting `.env.migrate`, the per-service files and the separated compose paths all belong to the **final PR (#9)**. That needs:
@@ -382,8 +385,8 @@ The golden security posture expects some of those roles to stay LOGIN, so retiri
 |---|---|
 | 5.3 fails | Nothing app-side changed. Follow the script's recovery notes, then restart the old stack. |
 | 5.6 exits 3 with an unexpected pending set | Stop. Review it, or roll back (5.9a). |
-| 5.6 fails part-way | 3.6c, or 5.9b. |
-| 5.7/5.8 fail | 5.9a if expand-only, else 5.9b. |
+| 5.6 fails part-way | Resume on the NEW image after review (3.6c), or restore: 5.9b. |
+| 5.7/5.8 fail | 5.9b (restore, then the previous image). The old image on the upgraded database fails closed in production. |
 
 ---
 
