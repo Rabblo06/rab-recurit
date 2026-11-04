@@ -133,6 +133,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   // Lane A (BullMQ worker migration): scheduler mode, scan-queue prefix and reconcile period (validated by the shared
   // EnvironmentVariables class: an invalid mode/prefix refuses to boot; interval is the default).
   'WORKER_SCHEDULER', 'BULLMQ_PREFIX', 'WORKER_SCHEDULER_RECONCILE_SECONDS',
+  // Phase D-Q4a: separate (default) | combined shift scan (validated by the shared EnvironmentVariables class: anything
+  // else, or combined with a common member tick under 30 s, refuses to boot).
+  'WORKER_SHIFT_SCAN_MODE',
   // Phase A pa-intervals: per-scan polling intervals in seconds (environment/worker-scan-intervals.ts; defaults = the
   // historical cadences, bounded, out-of-range refuses to boot).
   'WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS', 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS',
@@ -147,6 +150,9 @@ const JOBS_ENV_KEYS = Object.freeze([
   'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE', 'WORKER_DISPATCH_BACKSTOP_SECONDS', 'WORKER_DISPATCH_RECONCILE_SECONDS', 'WORKER_DISPATCH_CLAIM_BATCH',
   // Phase D-Q3: after-commit fast publish of notify() email/push rows written by Worker jobs (default false).
   'WORKER_FAST_PUBLISH_NOTIFY',
+  // Phase D-Q4b: delayed timer triggers (default off = no trigger consumer, no arming). Validated by the shared
+  // EnvironmentVariables class in the jobs child (strict off|shadow|on and a known-kinds list); forwarded verbatim.
+  'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS',
   // Phase D wave 2: may the account-invite cleanup delete expired-invite user accounts — default false; true in production
   // refuses to boot until the owner approves a retention policy (env.validation.ts). Forwarded verbatim, never invented.
   'WORKER_INVITE_AUTO_DELETE_ENABLED',

@@ -69,7 +69,7 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
     );
     const outerKeys = new Set(rows.map((r) => r.k));
     expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 22 distinct keys: no two scans share a lock
-    expect(outerKeys.size).toBe(22);
+    expect(outerKeys.size).toBe(23); // D-Q4a: + shift-scan-combined
     for (const r of innerRows) expect(outerKeys.has(r.k)).toBe(false);
   });
 

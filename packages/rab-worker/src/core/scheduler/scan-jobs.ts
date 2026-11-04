@@ -1,4 +1,6 @@
 import {
+  COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS,
+  combinedShiftScanTickSeconds,
   WORKER_SCAN_INTERVAL_SETTINGS,
   WorkerScanIntervalKey,
 } from '@rab/server/engine/core-modules/environment/worker-scan-intervals';
@@ -26,7 +28,10 @@ import { SCAN_QUEUES, ScanQueueName } from './queue-registry';
 export type IntervalSource =
   | { kind: 'constant'; ms: number }
   | { kind: 'env-seconds'; key: WorkerScanIntervalKey }
-  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' | 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' };
+  | { kind: 'env-minutes'; key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' | 'OUTBOX_RETENTION_INTERVAL_MINUTES' | 'AI_RETENTION_INTERVAL_MINUTES' | 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' }
+  // Phase D-Q4a: the combined shift scan's tick, the greatest common divisor of its members' own intervals (each member
+  // keeps its own interval and runs only on the ticks where it is due).
+  | { kind: 'combined-shift-scan' };
 
 /**
  * Env switches a scan's registration may depend on. Phase A: REALTIME_ENABLED / PUSH_ENABLED. Phase D (D3, owner
@@ -61,7 +66,14 @@ export interface ScanJobDefinition {
    * (e.g. a 24 h sweep on every deploy). Phase D (D3, owner decision): on for the three daily housekeeping scans.
    */
   firstRunAfterInterval?: boolean;
+  /**
+   * Phase D-Q4a: registered only in this WORKER_SHIFT_SCAN_MODE (absent: both modes). The four combined members say
+   * `separate`, the combined scan says `combined`, so exactly one of the two shapes is ever scheduled.
+   */
+  shiftScanMode?: ShiftScanMode;
 }
+
+export type ShiftScanMode = 'separate' | 'combined';
 
 const MINUTE = 60 * 1000;
 
@@ -73,7 +85,7 @@ const job = (
   lastRunAt: string,
   failures: string,
   mayReturnFalse = false,
-  extra: Pick<ScanJobDefinition, 'enabledBy' | 'firstRunAfterInterval'> = {},
+  extra: Pick<ScanJobDefinition, 'enabledBy' | 'firstRunAfterInterval' | 'shiftScanMode'> = {},
 ): ScanJobDefinition => ({
   queue,
   jobName,
@@ -91,8 +103,9 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
   job(SCAN_QUEUES.maintenance, 'account-invite-cleanup', 'account-invite cleanup', envSeconds('WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS'), 'lastAccountInviteCleanupAt', 'accountInviteCleanupFailures'),
   job(SCAN_QUEUES.email, 'email-dispatch', 'email dispatch', envSeconds('WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS'), 'lastEmailDispatchAt', 'emailDispatchFailures', true),
   job(SCAN_QUEUES.push, 'push-dispatch', 'push dispatch', envSeconds('WORKER_PUSH_DISPATCH_INTERVAL_SECONDS'), 'lastPushDispatchAt', 'pushDispatchFailures', true, { enabledBy: 'PUSH_ENABLED' }),
-  job(SCAN_QUEUES.shifts, 'shift-monitor', 'shift monitor', envSeconds('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS'), 'lastShiftMonitorAt', 'shiftMonitorFailures'),
-  job(SCAN_QUEUES.shifts, 'attendance-monitor', 'attendance monitor', envSeconds('WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS'), 'lastAttendanceMonitorAt', 'attendanceMonitorFailures'),
+  // Phase D-Q4a: the four members of the combined shift scan are registered only in WORKER_SHIFT_SCAN_MODE=separate.
+  job(SCAN_QUEUES.shifts, 'shift-monitor', 'shift monitor', envSeconds('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS'), 'lastShiftMonitorAt', 'shiftMonitorFailures', false, { shiftScanMode: 'separate' }),
+  job(SCAN_QUEUES.shifts, 'attendance-monitor', 'attendance monitor', envSeconds('WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS'), 'lastAttendanceMonitorAt', 'attendanceMonitorFailures', false, { shiftScanMode: 'separate' }),
   job(SCAN_QUEUES.shifts, 'late-clock-in', 'late clock-in', envSeconds('WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS'), 'lastLateClockInAt', 'lateClockInFailures'),
   job(SCAN_QUEUES.shifts, 'shift-cancellation-followup', 'shift cancellation follow-up', envSeconds('WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS'), 'lastShiftCancellationFollowupAt', 'shiftCancellationFollowupFailures'),
   job(SCAN_QUEUES.offers, 'offer-expiry', 'offer expiry', envSeconds('WORKER_OFFER_EXPIRY_INTERVAL_SECONDS'), 'lastOfferExpiryAt', 'offerExpiryFailures'),
@@ -113,8 +126,8 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
   ),
   // Phase A pa-storage: returns false when it skips (recent run cluster-wide, or another replica holds the reconcile lock).
   job(SCAN_QUEUES.maintenance, 'storage-cleanup', 'storage cleanup', envSeconds('WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS'), 'lastStorageCleanupAt', 'storageCleanupFailures', true, { firstRunAfterInterval: true }),
-  job(SCAN_QUEUES.reports, 'shift-report-scheduler', 'shift report scheduler', envSeconds('WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS'), 'lastShiftReportSchedulerAt', 'shiftReportSchedulerFailures'),
-  job(SCAN_QUEUES.reports, 'final-timesheet', 'final timesheet', envSeconds('WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS'), 'lastFinalTimesheetAt', 'finalTimesheetFailures'),
+  job(SCAN_QUEUES.reports, 'shift-report-scheduler', 'shift report scheduler', envSeconds('WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS'), 'lastShiftReportSchedulerAt', 'shiftReportSchedulerFailures', false, { shiftScanMode: 'separate' }),
+  job(SCAN_QUEUES.reports, 'final-timesheet', 'final timesheet', envSeconds('WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS'), 'lastFinalTimesheetAt', 'finalTimesheetFailures', false, { shiftScanMode: 'separate' }),
   job(SCAN_QUEUES.reports, 'shift-statement-dispatch', 'shift statement dispatch', envSeconds('WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'), 'lastShiftStatementDispatchAt', 'shiftStatementDispatchFailures', true),
   job(SCAN_QUEUES.reports, 'payroll-period-attention', 'payroll period attention', envSeconds('WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS'), 'lastPayrollPeriodAttentionAt', 'payrollPeriodAttentionFailures'),
   job(SCAN_QUEUES.realtime, 'realtime-outbox-publish', 'realtime outbox publish', envSeconds('WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS'), 'lastRealtimeOutboxPublishAt', 'realtimeOutboxPublishFailures', true, { enabledBy: 'REALTIME_ENABLED' }),
@@ -165,7 +178,30 @@ export const SCAN_JOBS: readonly ScanJobDefinition[] = Object.freeze([
     true,
     { enabledBy: 'AI_STALE_TURN_SWEEP' },
   ),
+  // Phase D-Q4a (owner approval 2026-11-04, OD-1): the combined shift scan (queues/rab-shifts/shift-scan-combined.job.ts).
+  // Registered only with WORKER_SHIFT_SCAN_MODE=combined, instead of its four members (COMBINED_SHIFT_SCAN_MEMBERS). One
+  // workspace walk per tick; each due member keeps its own discovery SQL, interval, processing and Health keys. Returns
+  // false (idle, not stamped) on a tick where no member was due or every due member was still running.
+  job(SCAN_QUEUES.shifts, 'shift-scan-combined', 'shift scan (combined)', { kind: 'combined-shift-scan' }, 'lastShiftScanCombinedAt', 'shiftScanCombinedFailures', true, {
+    shiftScanMode: 'combined',
+  }),
 ]);
+
+/**
+ * Phase D-Q4a: the combined scan's members, in registration order (OD-1: the four 300-s scans only; late clock-in stays
+ * its own 120-s scan). Their interval keys are COMBINED_SHIFT_SCAN_MEMBER_KEYS (worker-scan-intervals.ts).
+ */
+export const COMBINED_SHIFT_SCAN_MEMBERS = Object.freeze(['shift-monitor', 'attendance-monitor', 'shift-report-scheduler', 'final-timesheet'] as const);
+export type CombinedShiftScanMember = (typeof COMBINED_SHIFT_SCAN_MEMBERS)[number];
+
+/** The member definitions, from SCAN_JOBS (a missing one is a programming error: fail closed). */
+export function combinedShiftScanMemberDefs(jobs: readonly ScanJobDefinition[] = SCAN_JOBS): ScanJobDefinition[] {
+  return COMBINED_SHIFT_SCAN_MEMBERS.map((jobName) => {
+    const def = jobs.find((d) => d.jobName === jobName);
+    if (!def) throw new Error(`combined shift scan member ${jobName} is not in SCAN_JOBS`);
+    return def;
+  });
+}
 
 /** Scheduler id: `crewflow:<queue>:<jobName>` (owner brief). The `crewflow:<queue>:` prefix marks it as Crewflow-owned. */
 export const schedulerIdOf = (def: Pick<ScanJobDefinition, 'queue' | 'jobName'>): string => `crewflow:${def.queue}:${def.jobName}`;
@@ -181,6 +217,11 @@ export function resolveIntervalMs(def: ScanJobDefinition, env: { get(key: Interv
   let ms: number;
   if (source.kind === 'constant') {
     ms = source.ms;
+  } else if (source.kind === 'combined-shift-scan') {
+    // The greatest common divisor of the members' own (validated) intervals. The 30-s floor is enforced where the mode is
+    // known (env.validation.ts; main.ts via assertCombinedShiftScanTick): in separate mode this scan is never registered,
+    // so a degenerate common tick there must not refuse a boot that is valid today.
+    ms = combinedShiftScanTickSeconds(combinedShiftScanMemberDefs().map((member) => resolveIntervalMs(member, env) / 1000)) * 1000;
   } else if (source.kind === 'env-seconds') {
     const seconds = env.get(source.key);
     const bounds = WORKER_SCAN_INTERVAL_SETTINGS[source.key];
@@ -194,18 +235,54 @@ export function resolveIntervalMs(def: ScanJobDefinition, env: { get(key: Interv
   if (!Number.isInteger(ms) || ms <= 0) throw new Error(`${def.name}: invalid interval`);
   return ms;
 }
-export type IntervalSourceEnvKey = Exclude<IntervalSource, { kind: 'constant' }>['key'];
+export type IntervalSourceEnvKey = Extract<IntervalSource, { key: string }>['key'];
 
 /**
  * Registration predicate: true unless the scan names a switch that is off. Boolean switches must be exactly `true`;
  * AI_RETENTION_MODE must be exactly `report` or `purge`. Anything else — false, missing, malformed — means NOT
  * registered (fail closed).
  */
-export function isScanJobEnabled(def: Pick<ScanJobDefinition, 'enabledBy'>, env: { get(key: ScanEnableKey): unknown }): boolean {
+export function isScanJobEnabled(
+  def: Pick<ScanJobDefinition, 'enabledBy' | 'shiftScanMode'>,
+  env: { get(key: ScanEnableKey | 'WORKER_SHIFT_SCAN_MODE'): unknown },
+): boolean {
+  // Phase D-Q4a: exactly one shape of the shift-family scans is registered. Only the exact value `combined` selects the
+  // combined scan; anything else keeps today's four separate scans (main.ts refuses to boot on a value that is neither).
+  if (def.shiftScanMode !== undefined && shiftScanModeOf(env.get('WORKER_SHIFT_SCAN_MODE')) !== def.shiftScanMode) return false;
   if (def.enabledBy === undefined) return true;
   const value = env.get(def.enabledBy);
   if (def.enabledBy === 'AI_RETENTION_MODE') return value === 'report' || value === 'purge';
   return value === true;
+}
+
+/** Registration reading of WORKER_SHIFT_SCAN_MODE: `combined` only for the exact value, otherwise today's `separate`. */
+const shiftScanModeOf = (value: unknown): ShiftScanMode => (value === 'combined' ? 'combined' : 'separate');
+
+export class ShiftScanModeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShiftScanModeError';
+  }
+}
+
+/**
+ * Phase D-Q4a boot check (main.ts, fail closed, defence in depth behind env.validation.ts): WORKER_SHIFT_SCAN_MODE must be
+ * exactly `separate` or `combined` (unset or empty means `separate`, like every optional env key).
+ */
+export function resolveShiftScanMode(env: { get(key: 'WORKER_SHIFT_SCAN_MODE'): unknown }): ShiftScanMode {
+  const raw = env.get('WORKER_SHIFT_SCAN_MODE');
+  if (raw === undefined || raw === null || raw === '') return 'separate';
+  if (raw === 'separate' || raw === 'combined') return raw;
+  throw new ShiftScanModeError('WORKER_SHIFT_SCAN_MODE must be exactly separate or combined');
+}
+
+/** Combined mode only: the combined tick must be a whole number of ms and at least 30 s (fail closed). */
+export function assertCombinedShiftScanTick(tickMs: number): void {
+  if (!Number.isInteger(tickMs) || tickMs < COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS * 1000) {
+    throw new ShiftScanModeError(
+      `WORKER_SHIFT_SCAN_MODE=combined needs a common tick of at least ${COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS} s across the member intervals (got ${tickMs / 1000} s)`,
+    );
+  }
 }
 
 /**

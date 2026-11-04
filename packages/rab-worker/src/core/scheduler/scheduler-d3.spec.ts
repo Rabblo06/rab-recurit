@@ -33,7 +33,7 @@ describe('D3.2 disabled scans are not scheduled', () => {
 
   it('defaults: push, realtime, outbox retention (OFF by default) and AI retention (off) are not scheduled; login handoff cleanup (ON by default) is', () => {
     const env = envOf();
-    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, env)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep']);
+    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, env)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep', 'shift-scan-combined']);
     const off = envOf({ LOGIN_HANDOFF_CLEANUP_ENABLED: 'false' });
     expect(isScanJobEnabled(byJob('login-handoff-cleanup'), off)).toBe(false);
   });
