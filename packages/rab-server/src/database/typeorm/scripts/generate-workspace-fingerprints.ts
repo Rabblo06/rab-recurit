@@ -238,9 +238,17 @@ async function main(): Promise<void> {
   const major = Math.floor(Number(num) / 10000);
   selectWorkspaceFingerprintMajor(major);
   log(`PostgreSQL ${major} (${num}); latest module ${LATEST_WORKSPACE_MODULE_VERSION}; selected table has ${Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS).filter((k) => EXPECTED_WORKSPACE_FINGERPRINTS[Number(k)]).length} value(s)`);
-  if (process.env.FINGERPRINT_MODE === 'generate') await generate(major);
-  else if (process.env.FINGERPRINT_MODE === 'verify') await verify(major);
-  else throw new Error('FINGERPRINT_MODE must be generate or verify');
+  const mode = process.env.FINGERPRINT_MODE;
+  if (mode === 'generate') await generate(major);
+  else if (mode === 'verify') await verify(major);
+  else if (mode === 'ci') {
+    // CI: verify committed values; when the major has none yet, generate them, print them, and FAIL (never a silent pass).
+    if (Object.keys(table(major)).length) await verify(major);
+    else {
+      await generate(major);
+      throw new Error(`PostgreSQL ${major} fingerprints are not committed yet: review the FINGERPRINTS_JSON line above and commit expected-fingerprints-pg${major}.ts`);
+    }
+  } else throw new Error('FINGERPRINT_MODE must be generate, verify or ci');
 }
 
 main().catch((e: Error) => {

@@ -123,6 +123,8 @@ jobs:
           - { pg: 18, scenarios: 'transition' }
           - { pg: 15, scenarios: 'unsupported' }
           - { pg: 17, scenarios: 'unsupported' }
+          - { pg: 16, scenarios: 'fingerprints' }
+          - { pg: 18, scenarios: 'fingerprints' }
     env:
       NODE_ENV: test
       NX_DAEMON: 'false'
@@ -154,7 +156,19 @@ jobs:
           echo "::add-mask::${admin_url}"
           echo "OWNER_LOGIN_CHECK_ADMIN_URL=${admin_url}" >> "$GITHUB_ENV"
 
+      # D4: the committed workspace fingerprints of this major are reproduced by every provisioning path (TypeScript
+      # provisioner, the server path, a pre-ledger v14 workspace migrated forward). A major with none committed yet is
+      # generated here and the job FAILS with the values printed for review.
+      - name: Workspace fingerprints (D4) on PostgreSQL ${{ matrix.pg }}
+        if: matrix.scenarios == 'fingerprints'
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts
+        env:
+          FINGERPRINT_MODE: ci
+          FINGERPRINT_ADMIN_URL: ${{ env.OWNER_LOGIN_CHECK_ADMIN_URL }}
+
       - name: Owner-login lifecycle (${{ matrix.scenarios }}) on PostgreSQL ${{ matrix.pg }}
+        if: matrix.scenarios != 'fingerprints'
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts
         env:
