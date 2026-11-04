@@ -32,7 +32,10 @@ const opt = (name, dflt) => {
   const i = rest.indexOf(`--${name}`);
   return i >= 0 ? Number(rest[i + 1]) : dflt;
 };
-if (mode !== 'devices' && mode !== 'module' && !/^[a-z0-9_-]{1,60}$/.test(label || '')) throw new Error('label must be [a-z0-9_-]{1,60}');
+// The label reaches SQL literals and a RegExp, so it is validated in every mode that has one (module mode reads it from
+// DQ6_LABEL) and is also regex-escaped where a pattern is built from it.
+if (mode !== 'devices' && !/^[a-z0-9_-]{1,60}$/.test(label || '')) throw new Error('label must be [a-z0-9_-]{1,60}');
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const GEN = label ? path.join(OUT, `dq6-${label}.gen.jsonl`) : null;
 const logGen = (e) => GEN && fs.appendFileSync(GEN, `${JSON.stringify({ t: Date.now(), ...e })}\n`);
@@ -185,7 +188,7 @@ function analyse(c, extra) {
   // Duplicates. Email: the LOGGER driver prints one "Email not sent (EMAIL_DRIVER=LOGGER) ... to: <recipient>" line per
   // provider call; more than one line for the same row is a duplicate send.
   const sendCount = new Map();
-  const re = new RegExp(`to: dq6-${label}-([0-9a-f-]{36})@cost\\.invalid`, 'g');
+  const re = new RegExp(`to: dq6-${escapeRegExp(label)}-([0-9a-f-]{36})@cost\\.invalid`, 'g');
   for (const m of c.logs.matchAll(re)) sendCount.set(m[1], (sendCount.get(m[1]) || 0) + 1);
   const emailDup = [...sendCount.values()].filter((n) => n > 1).length;
   // Realtime: Pub/Sub messages carrying one of this label's entity ids.
