@@ -5033,3 +5033,47 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## formatPence exact; bigint pence enter a number only through assertSafePence (branch fix/format-pence-exact, not merged)
+
+Formatting and range guards only. No payroll, rate-resolution, rounding, pay-period or pay-date rule changes. There is
+no migration and no change to roles, grants or RLS.
+
+- **Asset:** money printed or returned to people: payroll views, payslip and run totals, offers, attendance pay, the
+  approved shift statement, and the assistant's payroll answers.
+- **Finding 1 (Low, integrity):**
+  - **What:** `@rab/shared` `formatPence` divided pence by 100 as a float, so `formatPence(2^53 - 1)` printed
+    `£90,071,992,547,409.90` instead of `.91`.
+  - **Scope:** the first wrong value found in a 32,000-value sweep was about 7.0 × 10^15 pence (£70 trillion), so no
+    real amount is affected today. The function is still the single money formatter, and it must be exact by
+    construction.
+  - **Fix:** split pounds and pence with integer arithmetic (number: `% 100` and an exact division; bigint: `/ 100n` and
+    `% 100n`). Format the same way as before: `-£1,234.56`, `£0.00`, `£0.01`, and `-£0.00` for `-0` as before.
+  - **New behaviour:** accepts a `bigint` of any size. A `number` must now be a safe integer (`assertSafePence`) rather
+    than any integer, because past 2^53 a number no longer holds the exact pence. That case is refused rather than
+    printed wrong. An unsupported currency code is refused.
+- **Finding 2 (Low, integrity, control at one layer only):**
+  - **What:** entity columns convert bigint pence through `bigintAsNumber`, which calls `assertSafePence`. Raw
+    `manager.query` rows did not: 22 sites ran `Number(r.x_pence)` directly, so a stored value past 2^53 - 1 would
+    have been silently rounded into a different, plausible amount.
+  - **Where:** attendance, shift-report, offer and offer-confirmation services; payroll and payroll-run services.
+  - **Write paths affected:** two of the sites write the rounded value back. `preparePayrollRecords` inserts
+    `pay_rate_pence`, and run preparation inserts `payroll_run_line`.
+  - **Fix:** each site now calls `assertSafePence(Number(...), '<column>')`, and JS-side gross sums are guarded the same
+    way. A corrupt or out-of-range value now fails that request or job closed (RangeError → 500 / job failure). It
+    never produces a wrong amount.
+- **Regression tests:**
+  - `money.spec.ts`: `formatPence` matches an exact BigInt reference for all boundaries (±(2^53 − 1), 0, ±1, ±99, ±100,
+    …) and 20,000 random safe integers. It matches the previous implementation wherever that one was exact. The bigint
+    form equals the number form. Unsafe or non-integer numbers are refused.
+  - `pence-number-boundary.spec.ts`: an AST scan of server and Worker source. Any new `Number(...)` on a pence or gross
+    value outside `assertSafePence` fails. On main's code it lists all 21 money sites it can see.
+- **Residual (reported, not changed here):**
+  - **Statement:** the approved shift statement's loader (`shift-statement.job.ts`, 2 sites) is guarded on the PDF
+    integration branches (#57) and is baselined here.
+  - **Assistant totals:** `payroll-assistant.service.ts` guards with `Number.isSafeInteger`.
+  - **Scan pattern:** the scan matches identifiers containing `pence` or `gross` only. A pence value under another name
+    (e.g. `row.rate`, guarded by hand here) is not caught automatically.
+  - **Precision before the guard:** `payForMinutes` computes `rate × minutes` as a float, which is exact only while the
+    product is ≤ 2^53. Rate DTOs have `@Min(0)` but no `@Max`, so an absurd rate is refused only later, at the column
+    transformer (500, not 400).

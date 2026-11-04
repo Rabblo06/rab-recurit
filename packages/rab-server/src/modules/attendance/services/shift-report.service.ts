@@ -6,7 +6,7 @@ import { DeliveryCounts, REPORT_IN_HISTORY_SQL, REPORT_NEEDS_ATTENTION_SQL, Repo
 import { ListShiftReportsDto } from '../dto/list-shift-reports.dto';
 import { FinaliseReportDto } from '../dto/staff-review.dto';
 import { paginationSkipTake } from '../../../engine/dto/pagination.dto';
-import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, PermissionFlag, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus } from '@rab/shared';
+import { assertSafePence, assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, PermissionFlag, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager, In } from 'typeorm';
 
@@ -266,7 +266,7 @@ export class ShiftReportService {
     const seatFields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
     const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
       clockInAt: r.clockInAt ? new Date(r.clockInAt).toISOString() : null, clockOutAt: r.clockOutAt ? new Date(r.clockOutAt).toISOString() : null,
-      earnedPence: r.earnedPence == null ? null : Number(r.earnedPence), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
+      earnedPence: r.earnedPence == null ? null : assertSafePence(Number(r.earnedPence), 'attendance.earned_pence'), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
       attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null,
       manuallyEntered: !!r.manuallyEntered, attendanceVersion: r.attendanceVersion ?? null,
       noShowConfirmed: r.assignmentStatus === 'no_show' && !!r.attendanceReviewedAt,
