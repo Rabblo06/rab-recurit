@@ -95,7 +95,9 @@ export interface EmailDispatchResult {
  * already exhausted its budget while stuck is moved straight to FAILED here
  * instead of being re-published (a fresh BullMQ `Job` would start
  * `attemptsMade` back at 0, which would otherwise let a systematically-stuck
- * row retry forever) — unchanged from before Phase 9.
+ * row retry forever) — unchanged from before Phase 9. Since D-Q5b the count
+ * itself is cumulative (the processor's claim increments it), so this gate
+ * really does see every attempt across generations.
  */
 export async function runEmailDispatchCycle(
   dataSource: DataSource,
@@ -215,9 +217,26 @@ export async function dispatchEmailScope(
         // Exhausted rows (already at/over their attempt budget while stuck)
         // go straight to FAILED — never re-published, never handed a fresh
         // attempt count via a recreated BullMQ job.
+        //
+        // D-Q5b (OC-1 + OD-5): the processor's claim now counts the in-flight
+        // attempt (cumulative across generations), so a PROCESSING row at the
+        // cap means the LAST allowed attempt died. If it had already reached
+        // the provider (`provider_call_started_at` set — including a confirmed
+        // send whose SENT write failed) the email may have gone out: it is
+        // marked DELIVERY_UNCERTAIN (manual review; a replay needs the explicit
+        // allow-uncertain flag), for every driver — never re-sent, and never
+        // labelled a plain exhausted failure that a replay would resend.
+        const lastAttemptAmbiguous = (row: ClaimedRow) =>
+          row.status === 'PROCESSING' && Boolean(row.provider_call_started_at);
+        const exhaustedUncertain = claimed.filter(
+          (row) =>
+            row.infrastructure_attempt_count >= row.max_infrastructure_attempts &&
+            lastAttemptAmbiguous(row),
+        );
         const exhausted = claimed.filter(
           (row) =>
-            row.infrastructure_attempt_count >= row.max_infrastructure_attempts,
+            row.infrastructure_attempt_count >= row.max_infrastructure_attempts &&
+            !lastAttemptAmbiguous(row),
         );
         const notExhausted = claimed.filter(
           (row) =>
@@ -263,10 +282,13 @@ export async function dispatchEmailScope(
           (row) =>
             !row.provider_call_started_at || ambiguousDeliverySafeToRetry,
         );
-        const uncertain = hadPriorAttempt.filter(
-          (row) =>
-            row.provider_call_started_at && !ambiguousDeliverySafeToRetry,
-        );
+        const uncertain = [
+          ...exhaustedUncertain,
+          ...hadPriorAttempt.filter(
+            (row) =>
+              row.provider_call_started_at && !ambiguousDeliverySafeToRetry,
+          ),
+        ];
         uncertainCount = uncertain.length;
 
         if (uncertain.length > 0) {

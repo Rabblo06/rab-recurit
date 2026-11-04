@@ -5033,3 +5033,51 @@ grant, RLS or posture change.
   the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
   workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
   turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## Phase D-Q5b — cumulative email/push attempt cap, no resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
+
+Owner approval 2026-11-04 (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §10: OC-1 confirmed, OD-5 Option B, OD-6 no change;
+audit §13 #3 and #4). No migration, column, role, grant, RLS policy or posture change; no payroll / attendance /
+staffing / permission rule. **Asset:** another person's email or push notification (its delivery count, and whether it
+is delivered twice). **Actor:** the Worker, without a request; a replica racing another; a forged job payload.
+
+- **Cumulative cap (OC-1, §13 #4).** The claim CAS that moves an `email_outbox` / `push_delivery` row to PROCESSING now
+  adds one to the row's existing `infrastructure_attempt_count` / `attempt_count` and returns it (`RETURNING`); SENT /
+  ACCEPTED / RETRY / FAILED record that value and the attempt is final at the row's own max (5). The claim refuses a row
+  already at its max (`… AND count < max`), and a claim that reports no count fails closed (the claim rolls back, nothing
+  is sent). Before, every write used the BullMQ job's `attemptsMade + 1`, which restarted at 1 for each republished
+  generation, so the cap applied per generation and a row republished after lease/RETRY recovery could be retried for
+  ever. Actor → action → consequence after the fix: a delivery that keeps failing stops at 5 attempts in total (FAILED,
+  audited) instead of looping; a row recovered after a Redis loss has fewer attempts left (accepted under OC-1). A
+  provider-throttled email attempt (Resend 429 Retry-After, D5) still gives its count back, as before; an operator replay
+  (`core.replay_failed_email`) still resets the count to 0 (unchanged).
+- **No resend after a confirmed send (OD-5 Option B, §13 #3).** When the provider accepted an email and every local try
+  to persist SENT fails, the processor no longer routes the error to the RETRY/FAILED path (RETRY made BullMQ call the
+  provider again: a duplicate email, reproduced). It writes nothing more, throws `UnrecoverableError` (BullMQ does not
+  retry the job; tested with a real BullMQ job: one provider call, `attemptsMade` 1) and leaves the row PROCESSING under its
+  token with `provider_call_started_at` set. After the 10-minute lease the existing dispatcher recovery resolves it:
+  SMTP → FAILED `DELIVERY_UNCERTAIN` (manual review; replay needs the explicit allow-uncertain flag); Resend → one
+  re-presentation under the SAME idempotency key `email-outbox:<id>` (Resend returns the original message instead of
+  sending again; its key window is 24 h, the lease 10 min) → SENT. The log line now states that behaviour (it used to say
+  the row "remains PROCESSING" while the code wrote RETRY); it carries ids, provider and provider message id only.
+  Push already left the row PROCESSING after a failed ACCEPTED write (no RETRY write); unchanged.
+- **Exhausted ambiguous lease.** Because the count now includes the in-flight attempt, a PROCESSING row whose lease
+  expired at the cap means the last allowed attempt died. With the provider-call marker set (the message may have gone
+  out — including the OD-5 case on the 5th attempt) both dispatchers now mark it `DELIVERY_UNCERTAIN` (email: for every
+  driver) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
+  it is never re-presented past the cap. Without the marker nothing was sent: `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, unchanged.
+  For push this keeps the pre-change outcome (with the job-relative count that row sat one below the cap → uncertain).
+- **Unchanged (OD-6):** SMTP definite-rejection handling (the marker is still not cleared on RETRY), push uncertain
+  delivery (at-most-once), the payroll statement lease cap; the dispatcher claim SQL (sha256-pinned), jobIds, leases and
+  backoff.
+- **Tenant isolation:** every changed statement runs under the same organisation-bound `SET LOCAL` and FORCE RLS as
+  before; the count is never taken from the job payload. Abuse cases on real PostgreSQL
+  (`dq5b-email-cumulative-attempts.integration.spec.ts`, `dq5b-push-cumulative-attempts.integration.spec.ts`): a job naming
+  another organisation sees, claims and counts nothing (no send); another organisation's dispatcher does not reclassify the
+  row; a query with no tenant context returns zero rows. **Replicas:** two consumers (old and republished generation) race
+  one row → one claim, one provider call, count +1 once; five dispatchers race one exhausted ambiguous row → one
+  `DELIVERY_UNCERTAIN` transition and one audit row.
+- **Residual:** an SMTP email whose SENT write failed after a confirmed send now needs manual review instead of going out
+  twice (owner-accepted trade-off of Option B). A job whose own BullMQ attempts run out before the cumulative cap (attempts
+  spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
+  republishes it until the cumulative cap.
