@@ -18,7 +18,14 @@ import {
   TO_BE_CONFIRMED,
 } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
 
-import type { RenderPdfOptions } from '../../queues/rab-reports/render-pdf.util';
+/**
+ * The Chromium `page.pdf()` options the job passed before P5 (render-pdf.util.ts no longer exports them: native only).
+ * Kept here so the harness still describes the Chromium reference it was built against.
+ */
+export interface RenderPdfOptions {
+  footerTemplate?: string;
+  landscape?: boolean;
+}
 
 /**
  * THE DOCUMENTS IN SCOPE — verified in code (2026-11-04, db053b92). `renderHtmlToPdf` has exactly three production

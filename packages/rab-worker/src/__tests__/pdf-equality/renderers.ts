@@ -1,4 +1,5 @@
 import * as renderPdfUtil from '../../queues/rab-reports/render-pdf.util';
+import { reportHtmlFor } from '../helpers/report-html';
 import { ReportDocument } from './documents';
 
 /**
@@ -17,6 +18,11 @@ import { ReportDocument } from './documents';
  *
  * (Integration of #51 with #55: the harness was written against a provisional `renderPdf(doc: { kind; viewModel })` /
  * `chromiumRenderInput` contract and therefore skipped the native suite against the seam that actually landed.)
+ *
+ * NATIVE ONLY (P5, #61 + its follow-up patch): the Worker has no Chromium and render-pdf.util.ts no longer exports
+ * `htmlFor` / `renderHtmlToPdf`. The Chromium reference renderer therefore FAILS LOUDLY (ChromiumRemovedError) instead
+ * of rendering; the Chromium-vs-native comparison exists only on the pre-removal tree. What replaces the Chromium
+ * reference after removal (D6 owner-signed goldens) is for the harness's owner to define.
  */
 export type RendererName = 'chromium' | 'native';
 
@@ -52,12 +58,21 @@ export function seamDocument(doc: ReportDocument): renderPdfUtil.ReportDocument 
  * template output (the view-model refactor must keep the HTML byte-identical, P0 §5.1).
  */
 export function switchChromiumHtml(doc: ReportDocument): string | null {
-  return renderPdfUtil.htmlFor(seamDocument(doc));
+  return reportHtmlFor(seamDocument(doc));
+}
+
+export class ChromiumRemovedError extends Error {
+  constructor() {
+    super('Chromium renderer removed in P5 (native only): the Chromium reference exists only on the pre-removal tree');
+    this.name = 'ChromiumRemovedError';
+  }
 }
 
 export const chromiumRenderer: Renderer = {
   name: 'chromium',
-  render: async (doc) => renderPdfUtil.renderReportPdf(seamDocument(doc), { ...process.env, PDF_RENDERER: 'chromium' }),
+  render: async () => {
+    throw new ChromiumRemovedError();
+  },
 };
 
 export function loadNativeRenderer(): Renderer | { unavailable: string } {
