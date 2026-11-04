@@ -1,0 +1,169 @@
+/**
+ * Owner-login architecture (PR 3): what the migrate-on-start child decides after a FAILED upgrade, under
+ * CREWFLOW_UPGRADE_FAILURE_POLICY (parsed by Agent 2's runtime-db-config.ts readUpgradeFailurePolicy; default `refuse`).
+ *
+ *   fresh install (the run started EMPTY / BOOTSTRAP-PARTIAL, or a proven fresh CHAIN-PARTIAL)  never serves: the child keeps
+ *                                                                                                its failure exit code;
+ *   refuse                                                                                       never serves;
+ *   continue-if-compatible                                                                       serves (exit 70, logged as a
+ *     FAILURE, never as success) only when EVERY check below passes; otherwise it does not serve and keeps the failure code.
+ *
+ * Checks (all read-only, on a fresh session of the same login; each is reported, pass or fail):
+ *   ledger-compatible     schema-compatibility.ts for process 'api' (the API's own boot gate): nothing pending, no
+ *                         interleaved name, provision function not behind. In practice this means a failure that left the
+ *                         schema current (a post-check, the auto-bind, a lock timeout after another run finished it).
+ *   no-partial-migration  the failed migration (if any) is not one of the seven `transaction = false` migrations, which can
+ *                         leave partial DDL without a ledger row.
+ *   post-checks           deploy-post-checks.ts deployPostCheckProblems(): secure-owner invariants, RLS enabled on every
+ *                         tenant table, the login owns nothing, schema compatibility (function + READY workspaces).
+ *   required-functions    the functions the API and the Worker call exist and the login may EXECUTE them.
+ *   deployment-identity   the caller's hook: the deployment identity check the API boot performs (marker, id, host).
+ *   posture               the caller's hook: Agent 3's posture / drift monitor. NOT wired yet: absent = FAIL (fail closed),
+ *                         so continue-if-compatible cannot serve until that monitor exists.
+ * Columns: with nothing pending and the ledger equal to the code (ledger-compatible), every column the code's migrations
+ * create exists; no separate column scan is made.
+ *
+ * Importing this module has no side effects (no environment read, no connection).
+ */
+import { assessSchemaCompatibility, readLedgerNames } from '../../../../boot-checks/schema-compatibility';
+import { readProvisionFunctionState } from '../../../workspace-schema/provision-function-versions';
+import { deployPostCheckProblems } from '../deploy-post-checks';
+import type { Query } from '../locked-migration-runner';
+
+export type UpgradeFailurePolicy = 'refuse' | 'continue-if-compatible';
+
+/** The seven `transaction = false` migrations (M0: the runner comment said six). */
+export const NON_TRANSACTIONAL_MIGRATIONS: readonly number[] = [
+  1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
+];
+
+/** Called by the API and the Worker; the owner login reaches each through its role memberships. */
+export const REQUIRED_FUNCTIONS: readonly string[] = [
+  'core.current_org()',
+  'core.current_uid()',
+  'core.current_workspace()',
+  'core.provision_workspace(uuid)',
+  'core.deployment_identity_check()',
+  'core.worker_claim_due_work(text,integer,integer)',
+  'core.worker_complete_due_work(uuid,uuid)',
+  'core.worker_reschedule_due_work(uuid,uuid,timestamp with time zone)',
+  'core.worker_claim_email_dispatch(integer)',
+  'core.worker_release_dispatch_claim(text,uuid,uuid,integer)',
+];
+
+export interface UpgradeCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface UpgradeVerdict {
+  serve: boolean;
+  policy: UpgradeFailurePolicy;
+  reason: string;
+  checks: UpgradeCheck[];
+}
+
+export interface AssessUpgradeFailureInput {
+  policy: UpgradeFailurePolicy;
+  /** The run started on a fresh install: a failure never serves. */
+  freshInstall: boolean;
+  /** The migration that failed, when one did (null: the failure was elsewhere). */
+  failedMigration: string | null;
+  /** The code's loaded migration names. */
+  expectedMigrations: readonly string[];
+  /** A fresh session of the same login. */
+  query: Query;
+  production: boolean;
+  /** Returns null when the deployment identity is OK, else the problem. Required: absent = FAIL. */
+  deploymentIdentityCheck?: (query: Query) => Promise<string | null>;
+  /** Agent 3's posture / drift monitor: the problems found (empty = OK). Absent = FAIL until it exists. */
+  postureCheck?: (query: Query) => Promise<string[]>;
+}
+
+const timestampOf = (name: string) => Number(/(\d{13})$/.exec(name)?.[1] ?? Number.NaN);
+
+async function guarded(name: string, fn: () => Promise<UpgradeCheck>): Promise<UpgradeCheck> {
+  try {
+    return await fn();
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    return { name, ok: false, detail: `the check itself failed (${error instanceof Error ? error.name : 'error'}${code ? `, SQLSTATE ${code}` : ''}): fail closed` };
+  }
+}
+
+/** Runs every check (even after one fails, so the operator sees the whole picture), then decides. */
+export async function assessUpgradeFailure(input: AssessUpgradeFailureInput): Promise<UpgradeVerdict> {
+  const { policy } = input;
+  if (input.freshInstall) {
+    return { serve: false, policy, reason: 'a first-install failure never serves (the API must not become healthy on a half-installed database)', checks: [] };
+  }
+  if (policy === 'refuse') {
+    return { serve: false, policy, reason: 'CREWFLOW_UPGRADE_FAILURE_POLICY=refuse (the default): the API stays unready', checks: [] };
+  }
+  const q = input.query;
+  const checks: UpgradeCheck[] = [];
+  checks.push(
+    await guarded('ledger-compatible', async () => {
+      const applied = await readLedgerNames(q, 'upgrade-failure assessment');
+      const assessment = assessSchemaCompatibility(
+        'api',
+        { expected: input.expectedMigrations, applied, provisionFunction: await readProvisionFunctionState(q) },
+        { production: input.production },
+      );
+      return {
+        name: 'ledger-compatible',
+        ok: assessment.refusals.length === 0,
+        detail: assessment.refusals.length ? assessment.refusals.map((r) => r.finding).join(', ') : `api compatibility passes (${assessment.warnings.length} warning(s))`,
+      };
+    }),
+  );
+  checks.push({
+    name: 'no-partial-migration',
+    ok: input.failedMigration === null || !NON_TRANSACTIONAL_MIGRATIONS.includes(timestampOf(input.failedMigration)),
+    detail:
+      input.failedMigration === null
+        ? 'no migration failed'
+        : NON_TRANSACTIONAL_MIGRATIONS.includes(timestampOf(input.failedMigration))
+          ? `${input.failedMigration} runs with transaction = false and may have left partial DDL`
+          : `${input.failedMigration} is transactional (rolled back with its ledger row)`,
+  });
+  checks.push(
+    await guarded('post-checks', async () => {
+      const problems = await deployPostCheckProblems(q);
+      return { name: 'post-checks', ok: problems.length === 0, detail: problems.length ? problems.slice(0, 10).join('; ') : 'none' };
+    }),
+  );
+  checks.push(
+    await guarded('required-functions', async () => {
+      const rows = (await q(
+        `SELECT s.sig, pg_catalog.to_regprocedure(s.sig) IS NOT NULL AS "exists",
+                CASE WHEN pg_catalog.to_regprocedure(s.sig) IS NULL THEN false ELSE pg_catalog.has_function_privilege(pg_catalog.to_regprocedure(s.sig), 'EXECUTE') END AS "exec"
+           FROM pg_catalog.unnest($1::text[]) AS s(sig)`,
+        [[...REQUIRED_FUNCTIONS]],
+      )) as Array<{ sig: string; exists: boolean; exec: boolean }>;
+      const bad = rows.filter((r) => !r.exists || !r.exec).map((r) => `${r.sig}${r.exists ? ' (no EXECUTE)' : ' (missing)'}`);
+      return { name: 'required-functions', ok: bad.length === 0, detail: bad.length ? bad.join(', ') : `${rows.length} present and executable` };
+    }),
+  );
+  checks.push(
+    input.deploymentIdentityCheck
+      ? await guarded('deployment-identity', async () => {
+          const problem = await input.deploymentIdentityCheck!(q);
+          return { name: 'deployment-identity', ok: problem === null, detail: problem ?? 'OK' };
+        })
+      : { name: 'deployment-identity', ok: false, detail: 'no deployment identity check supplied: fail closed' },
+  );
+  checks.push(
+    input.postureCheck
+      ? await guarded('posture', async () => {
+          const problems = await input.postureCheck!(q);
+          return { name: 'posture', ok: problems.length === 0, detail: problems.length ? problems.slice(0, 10).join('; ') : 'OK' };
+        })
+      : { name: 'posture', ok: false, detail: 'the posture / drift monitor is not wired yet (Agent 3): fail closed' },
+  );
+  const failed = checks.filter((c) => !c.ok);
+  return failed.length
+    ? { serve: false, policy, reason: `continue-if-compatible: ${failed.length} check(s) failed (${failed.map((c) => c.name).join(', ')}); the API stays unready`, checks }
+    : { serve: true, policy, reason: 'continue-if-compatible: every check passed; serving DEGRADED after a FAILED upgrade (exit 70)', checks };
+}

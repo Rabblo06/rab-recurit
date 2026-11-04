@@ -286,6 +286,69 @@ const sanitise = (text: string) => text.replace(/postgres(ql)?:\/\/\S+/g, '<url>
 const describeMarker = (m: DeploymentMarker) =>
   m.state === 'bound' ? `${m.environment}/${m.deploymentId}@${m.boundHosts?.join(',') ?? '?'}/${m.boundDatabase ?? '?'}` : m.state;
 
+export interface BindInTransactionInput {
+  args: BindArgs;
+  target: Pick<ResolvedDbTarget, 'target' | 'declared' | 'bootstrapRequested'>;
+  /** The host the caller's session connects to (the factory's canonical parse). */
+  host: string;
+  log: (line: string) => void;
+  /** Print the "set CREWFLOW_DEPLOYMENT_* on every process" hint (the operator command). */
+  nextStepHint?: boolean;
+}
+
+/**
+ * The bind itself, as a library (owner-login PR 3: the migrate-on-start child auto-binds a FRESH install with it). On the
+ * caller's session, which must already be authorised as the migration identity (a member of rab_secure_owner; the definer
+ * re-checks the session login): one transaction — read the marker, planBind (every refusal decided before the write),
+ * core.deployment_identity_bind(...), read again, verify, commit. Any failure rolls back and rethrows. Never prints a URL,
+ * user name or password.
+ */
+export async function bindDeploymentIdentityInTransaction(
+  query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>>,
+  input: BindInTransactionInput,
+): Promise<{ before: DeploymentMarker; after: DeploymentMarker; database: string }> {
+  const { args, target, host, log } = input;
+  await query('BEGIN');
+  try {
+    const before = await readDeploymentMarker(query);
+    const plan = planBind({ args, target, marker: before.marker, database: before.database, host });
+    log(`[${BIND_COMMAND}] database=${before.database} host=${host} target=${target.target} before=${describeMarker(before.marker)}`);
+    log(`[${BIND_COMMAND}] ${plan}`);
+    await query(`SELECT core.deployment_identity_bind($1, $2::uuid, $3, $4, $5::uuid, $6::text[])`, [
+      args.environment,
+      args.deploymentId,
+      args.reason,
+      args.actor,
+      args.confirmCurrentDeploymentId,
+      args.confirmHosts,
+    ]);
+    const after = await readDeploymentMarker(query);
+    if (
+      after.marker.state !== 'bound' ||
+      after.marker.environment !== args.environment ||
+      after.marker.deploymentId.toLowerCase() !== args.deploymentId ||
+      after.marker.boundDatabase !== before.database ||
+      JSON.stringify(after.marker.boundHosts ?? []) !== JSON.stringify(args.confirmHosts) ||
+      !args.confirmHosts.includes(canonicalConfirmHost(host))
+    ) {
+      throw new BindIdentityError(`the marker reads ${describeMarker(after.marker)} after the bind, not the requested value. Rolled back.`);
+    }
+    await query('COMMIT');
+    log(`[${BIND_COMMAND}] committed. after=${describeMarker(after.marker)} database=${after.database} host=${host} (history row written with session_login and bound_by)`);
+    if (input.nextStepHint) {
+      log(
+        `[${BIND_COMMAND}] next: set CREWFLOW_DEPLOYMENT_ENVIRONMENT=${args.environment} and CREWFLOW_DEPLOYMENT_ID=${args.deploymentId} on every process that uses this database` +
+          (target.bootstrapRequested ? ', and REMOVE CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP' : '') +
+          '. Processes still declaring the old value will refuse to start.',
+      );
+    }
+    return { before: before.marker, after: after.marker, database: after.database };
+  } catch (error) {
+    await query('ROLLBACK').catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function runBind(argv: readonly string[], env: Record<string, string | undefined>, log: (line: string) => void): Promise<void> {
   const args = parseBindArgs(argv);
   // The factory's rule (selectMigrationEndpoint): PG_DATABASE_URL; outside production the deprecated DATABASE_URL_UNPOOLED
@@ -303,42 +366,7 @@ export async function runBind(argv: readonly string[], env: Record<string, strin
     assertBindLogin({ currentUser: facts.currentUser, sessionUser: login.login, isSuperuser: facts.isSuperuser, canActAsOwnerRoles: facts.canActAsOwnerRoles });
 
     const query = async (sql: string, params?: unknown[]) => (await client.query(sql, params as unknown[])).rows;
-    await client.query('BEGIN');
-    try {
-      const before = await readDeploymentMarker(query);
-      const plan = planBind({ args, target, marker: before.marker, database: before.database, host });
-      log(`[${BIND_COMMAND}] database=${before.database} host=${host} target=${target.target} before=${describeMarker(before.marker)}`);
-      log(`[${BIND_COMMAND}] ${plan}`);
-      await client.query(`SELECT core.deployment_identity_bind($1, $2::uuid, $3, $4, $5::uuid, $6::text[])`, [
-        args.environment,
-        args.deploymentId,
-        args.reason,
-        args.actor,
-        args.confirmCurrentDeploymentId,
-        args.confirmHosts,
-      ]);
-      const after = await readDeploymentMarker(query);
-      if (
-        after.marker.state !== 'bound' ||
-        after.marker.environment !== args.environment ||
-        after.marker.deploymentId.toLowerCase() !== args.deploymentId ||
-        after.marker.boundDatabase !== before.database ||
-        JSON.stringify(after.marker.boundHosts ?? []) !== JSON.stringify(args.confirmHosts) ||
-        !args.confirmHosts.includes(canonicalConfirmHost(host))
-      ) {
-        throw new BindIdentityError(`the marker reads ${describeMarker(after.marker)} after the bind, not the requested value. Rolled back.`);
-      }
-      await client.query('COMMIT');
-      log(`[${BIND_COMMAND}] committed. after=${describeMarker(after.marker)} database=${after.database} host=${host} (history row written with session_login and bound_by)`);
-      log(
-        `[${BIND_COMMAND}] next: set CREWFLOW_DEPLOYMENT_ENVIRONMENT=${args.environment} and CREWFLOW_DEPLOYMENT_ID=${args.deploymentId} on every process that uses this database` +
-          (target.bootstrapRequested ? ', and REMOVE CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP' : '') +
-          '. Processes still declaring the old value will refuse to start.',
-      );
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    }
+    await bindDeploymentIdentityInTransaction(query, { args, target, host, log, nextStepHint: true });
   } finally {
     await client.end().catch(() => undefined);
   }

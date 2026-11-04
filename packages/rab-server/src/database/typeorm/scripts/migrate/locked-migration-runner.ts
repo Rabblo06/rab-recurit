@@ -27,7 +27,24 @@
  *   6. Unlock, release, destroy. A holder that dies at any point (signal, crash, pg_terminate_backend) loses its session:
  *      PostgreSQL rolls back the open migration transaction and frees the lock together; earlier migrations of that run
  *      stay committed with their ledger rows, so a re-run continues from exactly there. (A `transaction = false` migration
- *      that dies mid-way can leave partial DDL without a ledger row; each of the six is written to be re-run safely.)
+ *      that dies mid-way can leave partial DDL without a ledger row; each of the seven is written to be re-run safely:
+ *      1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000.)
+ *
+ * Owner-login architecture (owner decision 2026-11-04, PR 3): the path is chosen by the SESSION LOGIN, never by an
+ * environment switch.
+ *   - `crewflow_owner` (OWNER_LOGIN): the owner-login lifecycle. After the lock the database is classified
+ *     (owner-login/fresh-install.ts; FOREIGN refuses), the exact owner-login identity rule replaces CF-41
+ *     (owner-login/owner-login-identity.ts), PostgreSQL below 16 or without reviewed workspace fingerprints is refused (D4),
+ *     the N1 production list is waived ONLY on a proven fresh install, an EMPTY / BOOTSTRAP-PARTIAL database is bootstrapped
+ *     (owner-login/bootstrap.ts) and the chain is applied by owner-login/owner-login-chain.ts (phase A as rab_owner, the
+ *     pre-0b CREATE window, phase B as crewflow_owner, the fresh-only ROW_COPY shim). With nothing pending, a ledger AHEAD of
+ *     the code is a warning, never a refusal (C-1), so an image rollback stays healthy.
+ *   - any other login (the CF-41 superuser of a disposable/local cluster, or a restricted migrator): the LEGACY path,
+ *     unchanged, logged loudly. RETAINED ONLY UNTIL PR #9 (REMOVE AFTER VERIFIED REPLACEMENT): today's production and
+ *     every existing CI / compose flow still build and migrate through it.
+ * The approval gate is the same for both: N1 (unless fresh, owner login only), then F5 as before — approvePending when the
+ * caller supplies it, required for a production apply run unless `approvalMode: 'none'` (the migrate-on-start child with
+ * CREWFLOW_MIGRATION_APPROVAL_MODE=none; never deploy-prepare).
  *
  * CF-41, M2 (read-only pending computation: the ledger is never created before the identity check), N1 and DB_TARGET are
  * enforced by the same functions as before; nothing here widens them. Workspace schemas are migrated, as before, by the core
@@ -50,6 +67,17 @@ import {
   ROLE_SPLIT_MIGRATION,
 } from '../../core/migration-identity';
 import { assertProductionMigrationApproval } from '../../core/production-migration-approval';
+import { OWNER_LOGIN } from './owner-login/bootstrap';
+import {
+  assertSupportedPostgresMajor,
+  postgresMajorOf,
+  selectWorkspaceFingerprintMajor,
+  SUPPORTED_FINGERPRINT_MAJORS,
+} from '../../workspace-schema/v1/expected-fingerprints';
+import { BootstrapResult, runOwnerLoginBootstrap } from './owner-login/bootstrap';
+import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './owner-login/fresh-install';
+import { LAST_ROLE_MIGRATION_TIMESTAMP, runOwnerLoginChain } from './owner-login/owner-login-chain';
+import { assertOwnerLoginMigrationIdentity, readOwnerLoginIdentityFacts } from './owner-login/owner-login-identity';
 import { acquireMigrationLock, MIGRATION_APPLICATION_NAME, migrationLockWaitSeconds, releaseMigrationLock } from './migration-lock';
 import { ResolvedMigrationConnection, resolveMigrationConnection, targetGuardEnv } from './migration-database-url';
 
@@ -124,8 +152,37 @@ export interface LockedMigrationOptions {
    * runs. A throw refuses the run with nothing applied. Required in 'apply' mode when the target is production.
    */
   approvePending?: (pendingNames: readonly string[]) => void;
-  /** Runs while the lock is still held, after the run (post-checks, cache flush). A throw fails the run. */
-  afterMigrations?: (ctx: { queryRunner: QueryRunner; dataSource: DataSource; applied: string[] }) => Promise<void>;
+  /**
+   * Runs while the lock is still held, after the run (post-checks, cache flush), in both modes. `pendingBefore` is the set
+   * read on the locked session before step 4 (in 'check' mode it is still pending). A throw fails the run.
+   */
+  afterMigrations?: (ctx: {
+    queryRunner: QueryRunner;
+    dataSource: DataSource;
+    applied: string[];
+    pendingBefore: readonly string[];
+    /** The guarded target of this run (target, database, host). */
+    guarded?: GuardedTarget;
+  }) => Promise<void>;
+  /** Called with the migration session's backend pid before the lock is taken (the child's SIGTERM self-cancel). */
+  onSession?: (pid: number) => void;
+  /**
+   * F5 approval policy of an apply run. 'token' (default; deploy-prepare, setup-db): approvePending when supplied, required
+   * for a production apply. 'none': the migrate-on-start child with CREWFLOW_MIGRATION_APPROVAL_MODE=none — no token; N1
+   * still applies to every database that is not a proven fresh install. Honoured for the owner login only.
+   */
+  approvalMode?: 'none' | 'token';
+  /** Server-side check for a vanished client, in seconds (the child sets 1; M0-C: a killed holder otherwise keeps the lock). */
+  connectionCheckIntervalSeconds?: number;
+  /** Owner login: called with the classification and the fresh-install proof as soon as they are known. */
+  onClassified?: (classification: Classification, proof: FreshInstallProof) => void;
+  /** Test seam for the golden-equivalence reference build (owner-login-chain.ts rowCopyOverride). Never set in production. */
+  rowCopyOverride?: (name: string) => Promise<void>;
+  /**
+   * The child: re-derives the target-guard environment AFTER the lock (the deployment-identity bootstrap flag depends on
+   * the marker state, which another run may have changed while this one waited). Default: the same environment as before.
+   */
+  refreshGuardEnv?: () => Promise<Record<string, string | undefined>>;
   /** Test seam: the target guard (default: database-target.ts assertDbTarget). Used to exercise the production approval gate. */
   assertTarget?: (
     purpose: string,
@@ -145,7 +202,33 @@ export interface LockedMigrationResult {
   applied: string[];
   waitedMs: number;
   currentUser: string;
+  /** PostgreSQL major of the server (read after the lock). */
+  serverMajor?: number;
+  /** Which path ran: the owner-login lifecycle, or the legacy CF-41 path (until PR #9). */
+  path?: 'owner-login' | 'legacy';
+  ownerLogin?: { classification: Classification; proof: FreshInstallProof; bootstrap: BootstrapResult | null };
 }
+
+/**
+ * D4: the workspace fingerprints of the server's major. The owner login refuses below 16 and any major without reviewed
+ * fingerprints. The legacy path (until PR #9) selects 16 or 18 when it is one of them and otherwise keeps today's
+ * behaviour (the PG16 table, so a mismatch fails closed at the fingerprint comparison), with a warning.
+ */
+export function selectFingerprintsForRun(serverVersionNum: string, strict: boolean, log: (line: string) => void): number {
+  const major = postgresMajorOf(serverVersionNum);
+  if (strict) {
+    selectWorkspaceFingerprintMajor(assertSupportedPostgresMajor(major));
+    return major;
+  }
+  if ((SUPPORTED_FINGERPRINT_MAJORS as readonly number[]).includes(major)) selectWorkspaceFingerprintMajor(major);
+  else log(`WARNING: PostgreSQL ${major} has no reviewed workspace fingerprints (${SUPPORTED_FINGERPRINT_MAJORS.join(', ')} only); workspace fingerprint checks will refuse`);
+  return major;
+}
+
+const timestampOrNull = (name: string): number | null => {
+  const m = /(\d{13})$/.exec(name);
+  return m ? Number(m[1]) : null;
+};
 
 /** Loaded migrations not yet in core.migrations (all of them when the ledger does not exist). Read-only, like GuardedMigrationDataSource. */
 export async function pendingMigrationNames(query: Query, dataSource: DataSource): Promise<string[]> {
@@ -251,21 +334,58 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     await query(`SELECT pg_catalog.set_config('application_name', $1, false)`, [MIGRATION_APPLICATION_NAME]);
     const [{ pid }] = (await query('SELECT pg_catalog.pg_backend_pid() AS "pid"')) as Array<{ pid: number }>;
     log(`migration session pid ${pid}; taking the migration lock`);
+    options.onSession?.(Number(pid));
     const { waitedMs } = await acquireMigrationLock(session, dataSource, waitSeconds, log);
     locked = true;
     log(`migration lock acquired${waitedMs ? ` after waiting ${waitedMs} ms` : ''}`);
 
+    if (options.connectionCheckIntervalSeconds) {
+      await query(`SELECT pg_catalog.set_config('client_connection_check_interval', $1, false)`, [`${options.connectionCheckIntervalSeconds}s`]);
+    }
+    const [who] = (await query(`SELECT session_user::text AS "login", current_setting('server_version_num') AS "num"`)) as Array<{ login: string; num: string }>;
+    const ownerLogin = who?.login === OWNER_LOGIN;
+    if (!ownerLogin) {
+      log(
+        '*** LEGACY migration identity (not crewflow_owner): the separated-layout CF-41 path is RETAINED ONLY UNTIL PR #9. ' +
+          'Move this deployment to the owner login (packages/rab-docker/postgres-init/owner-login/). ***',
+      );
+    }
+    const serverMajor = selectFingerprintsForRun(who!.num, ownerLogin, log);
+
     // 3. Every gate again, now that no other run can change the ledger under us.
-    const guarded = await assertTarget('migrations', guardEnv, dotenvValues, DEFER_UNREADABLE_MARKER);
+    const lockedGuardEnv = options.refreshGuardEnv ? targetGuardEnv(await options.refreshGuardEnv(), connection.url) : guardEnv;
+    const guarded = await assertTarget('migrations', lockedGuardEnv, dotenvValues, DEFER_UNREADABLE_MARKER);
     const [{ db }] = (await query('SELECT current_database() AS "db"')) as Array<{ db: string }>;
     if (db !== guarded.app.database) {
       throw new Error(`the migration session is connected to database "${db}", not the guarded "${guarded.app.database}". Refusing.`);
     }
     const pendingBefore = await pendingMigrationNames(query, dataSource);
-    assertProductionMigrationApproval({ target: guarded.target, pendingMigrationNames: pendingBefore });
+    let ownerState: { classification: Classification; proof: FreshInstallProof } | null = null;
+    if (ownerLogin) {
+      // Classify first (FOREIGN refuses before any other decision), then the exact identity rule, then N1 unless this is a
+      // proven fresh install (owner rule: on EMPTY the full chain is allowed under the shim; never on an existing database).
+      const expected = dataSource.migrations.map((m) => m.name || m.constructor.name);
+      const classification = await classifyDatabaseState(query, expected);
+      const proof = await readFreshInstallProof(query, classification.state);
+      options.onClassified?.(classification, proof);
+      log(`database state ${classification.state} (${classification.reason}); fresh install ${proof.fresh ? 'PROVEN' : `not proven: ${proof.reasons.join('; ')}`}`);
+      if (classification.state === 'FOREIGN') throw new DatabaseStateError(classification);
+      const identity = await readOwnerLoginIdentityFacts(query);
+      const roleWork =
+        classification.state === 'EMPTY' ||
+        classification.state === 'BOOTSTRAP-PARTIAL' ||
+        pendingBefore.some((n) => (timestampOrNull(n) ?? 0) <= LAST_ROLE_MIGRATION_TIMESTAMP);
+      assertOwnerLoginMigrationIdentity(identity, { needCreateRole: roleWork && mode === 'apply' });
+      if (!proof.fresh) assertProductionMigrationApproval({ target: guarded.target, pendingMigrationNames: pendingBefore });
+      ownerState = { classification, proof };
+    } else {
+      assertProductionMigrationApproval({ target: guarded.target, pendingMigrationNames: pendingBefore });
+    }
     const facts = await readMigrationIdentityFacts(query, dataSource);
-    assertMigrationIdentity(facts);
-    if (options.requireMigrationIdentity) assertIdentityCanMigrate(facts);
+    if (!ownerLogin) {
+      assertMigrationIdentity(facts);
+      if (options.requireMigrationIdentity) assertIdentityCanMigrate(facts);
+    }
     options.extraIdentityCheck?.(facts);
     if (guarded.identityDeferred) {
       // CF-41 accepted a login that cannot read the marker: the full marker check on this session decides (refuses).
@@ -275,22 +395,28 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         app: guarded.app,
         admin: guarded.admin,
         migrationEndpoint: guarded.migrationEndpoint,
-      }, guardEnv);
+      }, lockedGuardEnv);
     }
     // 3b. Ledger compatibility: an interleaved foreign chain always refuses; a newer ledger refuses an apply run.
     const [{ hasLedger }] = (await query(`SELECT to_regclass('core.migrations') IS NOT NULL AS "hasLedger"`)) as Array<{ hasLedger: boolean }>;
     if (hasLedger) {
       const appliedNames = ((await query(`SELECT name FROM core.migrations`)) as Array<{ name: string }>).map((r) => r.name);
+      // C-1 (owner login): with nothing pending, an older image looks at a newer ledger exactly like a check run (warn).
+      const lenient = mode === 'check' || (ownerLogin && pendingBefore.length === 0);
       const compatibility = assessSchemaCompatibility(
-        mode === 'apply' ? 'migrate-apply' : 'migrate-check',
+        lenient ? 'migrate-check' : 'migrate-apply',
         { expected: dataSource.migrations.map((m) => m.name || m.constructor.name), applied: appliedNames },
         { production: guarded.target === 'production' },
       );
       for (const warning of assertSchemaCompatible(compatibility, `migration run (${options.label})`)) log(`WARNING: ${warning}`);
     }
     // 3c. F5: the approval is checked against the set pending now, with the lock held (it cannot change before the apply).
-    if (mode === 'apply') {
+    if (mode === 'apply' && ownerLogin && options.approvalMode === 'none') {
+      // The migrate-on-start child with approval mode none: N1 above is the gate on an existing database (ST-3).
+      log(`approval mode none: ${ownerState?.proof.fresh ? 'proven fresh install' : 'N1 production list checked'}; no per-release token`);
+    } else if (mode === 'apply') {
       if (options.approvePending) options.approvePending(pendingBefore);
+      else if (ownerLogin && ownerState?.proof.fresh) log('proven fresh install: the full chain is allowed without a per-release token (owner rule)');
       else if (guarded.target === 'production') {
         throw new Error(`${options.label}: a production apply run needs the per-release approval gate (CREWFLOW_MIGRATION_APPROVED). Nothing was applied. Refusing.`);
       }
@@ -299,7 +425,15 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
 
     // 4. Apply on the locked session.
     let applied: string[] = [];
-    if (mode === 'apply' && pendingBefore.length > 0) {
+    let bootstrap: BootstrapResult | null = null;
+    if (ownerLogin && ownerState) {
+      const state = ownerState.classification.state;
+      if (mode === 'apply' && (state === 'EMPTY' || state === 'BOOTSTRAP-PARTIAL')) bootstrap = await runOwnerLoginBootstrap(query, { log });
+      if (mode === 'apply' && pendingBefore.length > 0) {
+        applied = (await runOwnerLoginChain({ dataSource, session, log, freshInstall: ownerState.proof.fresh, rowCopyOverride: options.rowCopyOverride }))
+          .applied;
+      }
+    } else if (mode === 'apply' && pendingBefore.length > 0) {
       const executor = new MigrationExecutor(dataSource, session);
       executor.transaction = dataSource.options.migrationsTransactionMode ?? 'all';
       applied = (await executor.executePendingMigrations()).map((m) => m.name);
@@ -310,14 +444,31 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       const still = await pendingMigrationNames(query, dataSource);
       if (still.length) throw new Error(`${still.length} migration(s) are still pending after the run: ${still.join(', ')}`);
     }
-    if (options.afterMigrations) await options.afterMigrations({ queryRunner: session, dataSource, applied });
-    return { target: guarded.target, pendingBefore, applied, waitedMs, currentUser: facts.currentUser };
+    if (options.afterMigrations) await options.afterMigrations({ queryRunner: session, dataSource, applied, pendingBefore, guarded });
+    return {
+      target: guarded.target,
+      pendingBefore,
+      applied,
+      waitedMs,
+      currentUser: facts.currentUser,
+      serverMajor,
+      path: ownerLogin ? 'owner-login' : 'legacy',
+      ...(ownerState ? { ownerLogin: { ...ownerState, bootstrap } } : {}),
+    };
   } finally {
     if (queryRunner) {
       if (locked && !(await releaseMigrationLock(queryRunner))) log('migration lock not released explicitly (session gone); it ends with the session');
       await queryRunner.release().catch(() => undefined);
     }
     await dataSource.destroy().catch(() => undefined);
+  }
+}
+
+/** Owner login: the database is not this application's (or not in a state this code may touch). Nothing was changed. */
+export class DatabaseStateError extends Error {
+  constructor(readonly classification: Classification) {
+    super(`refusing a ${classification.state} database: ${classification.reason}. Nothing was changed.`);
+    this.name = 'DatabaseStateError';
   }
 }
 
