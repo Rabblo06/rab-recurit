@@ -481,7 +481,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return 'no write outside the per-child tmpfs (EROFS)';
   });
 
-  await step('M06', 'Tmp dirs: per-child tmpfs ownership/mode/noexec; children cannot reach each other\'s; Chromium temp cleaned', async () => {
+  await step('M06', 'Tmp dirs: per-child tmpfs ownership/mode/noexec; children cannot reach each other\'s', async () => {
     const w = containerId('rab-worker');
     const tm = mounts(w).filter((m) => m.type === 'tmpfs' && /crewflow/.test(m.target));
     write(tm.map((m) => `${m.target} ${m.options}`).join('\n'));
@@ -588,7 +588,7 @@ BEGIN; ${ctx(orgA, wsA)} SELECT count(*) FROM core.venue; COMMIT;`).out.trim().s
     return `mail delivered; outbox ${outbox}`;
   });
 
-  await step('M09', 'Chromium PDF + M10 report upload: real pre-shift report rendered by the jobs child, bytes in object storage', async () => {
+  await step('M09', 'Native PDF (no browser) + M10 report upload: real pre-shift report rendered by the jobs child, bytes in object storage', async () => {
     const { shiftId, orgId } = await startShiftReport(20);
     fx.shift = { shiftId, orgId };
     const mailsBefore = mailCount();
@@ -618,14 +618,15 @@ BEGIN; ${ctx(orgA, wsA)} SELECT count(*) FROM core.venue; COMMIT;`).out.trim().s
     fx.reportFile.objectSha = (/^([0-9a-f]{64})/m.exec(obj.out) || [])[1];
     assert(status === 'AVAILABLE' && fx.reportFile.size > 1000, `stored_file ${status} ${size}`);
     const logs = logsOf('rab-worker', since);
-    write(logs.split('\n').filter((l) => /shift report scheduler|render|chromium|storage/i.test(l)).slice(-10).join('\n'));
+    write(logs.split('\n').filter((l) => /shift report scheduler|render|native|storage/i.test(l)).slice(-10).join('\n'));
     assert(/shift report scheduler: generated=1/.test(logs), 'scheduler did not log the generated report');
     await waitFor('report email', () => mailCount() > mailsBefore, 120_000, 3000);
-    // Chromium temp/profile cleaned after the render (only Chromium's XDG config/cache dirs may stay).
-    const left = execAs('rab-worker', '1000:1000', 'ls -A /tmp/crewflow-jobs; echo; ls /tmp/crewflow-jobs | grep -c playwright_chromiumdev_profile || true');
-    const chrome = procTable(containerId('rab-worker')).filter((p) => /chrom/i.test(p.cmd)).length;
-    write(`jobs tmp after render: ${left.out.trim()}\nchromium processes left: ${chrome}`);
-    assert(/^0$/m.test(left.out.trim().split('\n').pop()) && chrome === 0, 'Chromium left a profile directory or a process');
+    // P5: the render ran in the jobs process itself. No browser binary exists, no browser process or profile directory
+    // appeared, and the jobs tmpfs holds nothing but (at most) the XDG config/cache directories the launcher points at.
+    const left = execAs('rab-worker', '1000:1000', 'ls -A /tmp/crewflow-jobs | grep -v -x -e .config -e .cache | wc -l; for p in /usr/bin/chromium /usr/bin/chromium-browser /usr/lib/chromium; do test -e "$p" && echo "present $p"; done; true');
+    const browser = procTable(containerId('rab-worker')).filter((p) => /chrom|playwright/i.test(p.cmd)).length;
+    write(`jobs tmp entries after render (besides .config/.cache): ${left.out.trim()}\nbrowser processes: ${browser}`);
+    assert(/^0$/m.test(left.out.trim().split('\n')[0]) && !/present/.test(left.out) && browser === 0, 'the render left temp files, or a browser exists');
     return `PDF ${size} bytes in MinIO (key in PostgreSQL); Worker peak ${measured.workerPeakDuringPdf.memoryPeakMiB} MiB / ${measured.workerPeakDuringPdf.pidsPeak} tasks`;
   });
 
@@ -696,9 +697,15 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
   await step('M21', 'Isolation after failed jobs: a refused render and a storage outage leave no process/temp residue; next job succeeds', async () => {
     const w = containerId('rab-worker');
     const restarts0 = restartsOf('rab-worker');
-    const bad = execIn(w, '1000:1000', 'cd /app && HOME=/nonexistent TMPDIR=/tmp/crewflow-jobs XDG_CONFIG_HOME=/tmp/crewflow-jobs/.config XDG_CACHE_HOME=/tmp/crewflow-jobs/.cache CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium CHROMIUM_NO_SANDBOX=true node -e "require(\\"/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js\\").renderHtmlToPdf(\\"<meta http-equiv=refresh content=0;url=http://169.254.169.254/><p>x</p>\\").then(()=>console.log(\\"UNEXPECTED render ok\\"),e=>console.log(\\"refused: \\"+e.name))"');
-    write(`navigation render: ${bad.out.trim()}`);
-    assert(/refused: PdfRenderNavigationError/.test(bad.out), 'navigation not refused');
+    // P5: the native renderer loads no document and cannot navigate (the Chromium navigation case is gone). Its
+    // fail-closed path: an unknown document kind must be refused, never rendered as something else.
+    const prog = [
+      "const u=require('/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js')",
+      "Promise.resolve().then(()=>u.renderReportPdf({kind:'no-such-document',data:{}},Object.assign({},process.env,{PDF_RENDERER:'native'}))).then(()=>console.log('UNEXPECTED render ok'),e=>console.log('refused: '+e.message))",
+    ].join(';');
+    const bad = execIn(w, '1000:1000', `cd /app && HOME=/nonexistent TMPDIR=/tmp/crewflow-jobs XDG_CONFIG_HOME=/tmp/crewflow-jobs/.config XDG_CACHE_HOME=/tmp/crewflow-jobs/.cache node -e "${prog}"`);
+    write(`unknown-document render: ${bad.out.trim()}`);
+    assert(/refused: /.test(bad.out) && !/UNEXPECTED/.test(bad.out), 'an unknown document was not refused');
     // Real job failure: object storage down while a report is due.
     // Outage without data loss: MinIO keeps running (its tmpfs /data survives) but leaves the project network.
     const minioId = containerId('minio');
@@ -709,11 +716,11 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     compose(['restart', '-t', '60', 'rab-worker']);
     await waitFor('a failed report cycle', () => /shift report scheduler: generated=0 failed=[1-9]/.test(logsOf('rab-worker', since)), 240_000, 5000);
     const state = reportState(shiftId);
-    const chrome = procTable(containerId('rab-worker')).filter((p) => /chrom/i.test(p.cmd)).length;
-    const tmp = execAs('rab-worker', '1000:1000', 'ls /tmp/crewflow-jobs | grep -c playwright_chromiumdev_profile || true').out.trim();
+    const browser = procTable(containerId('rab-worker')).filter((p) => /chrom|playwright/i.test(p.cmd)).length;
+    const tmp = execAs('rab-worker', '1000:1000', 'ls -A /tmp/crewflow-jobs | grep -v -x -e .config -e .cache | wc -l').out.trim();
     const failLogs = logsOf('rab-worker', since).split('\n').filter((l) => /shift report|storage|S3|ECONNREFUSED|ENOTFOUND|failed/i.test(l)).slice(0, 12);
-    write(`report state during outage: ${state || '(no ready report)'}; chromium processes ${chrome}; profile dirs ${tmp}\n${failLogs.join('\n')}`);
-    assert(!/^ready\|true$/.test(state) && chrome === 0 && tmp === '0', 'failure left residue or reported ready');
+    write(`report state during outage: ${state || '(no ready report)'}; browser processes ${browser}; jobs tmp entries ${tmp}\n${failLogs.join('\n')}`);
+    assert(!/^ready\|true$/.test(state) && browser === 0 && tmp === '0', 'failure left residue or reported ready');
     const restartsDuring = restartsOf('rab-worker') - restarts0;
     assert(docker(['network', 'connect', '--alias', 'minio', net, minioId]).code === 0, 'could not reconnect minio');
     await waitFor('minio healthy', () => healthOf('minio') === 'healthy', 60_000);

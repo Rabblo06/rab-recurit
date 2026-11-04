@@ -634,23 +634,19 @@ export class EnvironmentVariables {
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
   /**
-   * PDF renderer P1 (owner decisions D1/D2) — how the Worker renders the report kinds that have a native layout
-   * (today: the final timesheet and the pre-shift roster).
-   *  - `chromium` (DEFAULT; also when unset or empty): the HTML template through the Chromium renderer, as before;
-   *  - `native`: @react-pdf/renderer inside the Worker (pure JavaScript, no browser).
-   * Anything else (a different case, surrounding spaces, another word) refuses to boot. Read by rab-worker only
-   * (queues/rab-reports/render-pdf.util.ts `pdfRendererMode`, which applies the same rule at render time); report kinds
-   * without a native layout yet (shift statement) are rendered by Chromium in either mode.
+   * PDF renderer P5 (owner decision D10): every report renders natively (@react-pdf/renderer, no browser). The key is
+   * kept for ONE release and accepts only `native` (unset or empty = native); `chromium` refuses to boot, because this
+   * Worker has no browser (roll back by redeploying the previous image). Delete the key in the release after.
    */
   @IsOptional()
   @Transform(({ value }) => (value === '' ? undefined : value))
-  @IsIn(['chromium', 'native'], { message: 'PDF_RENDERER must be exactly chromium or native' })
-  PDF_RENDERER?: 'chromium' | 'native' = 'chromium';
+  @IsIn(['native'], { message: 'PDF_RENDERER must be exactly native (chromium was retired in P5: the Worker has no browser)' })
+  PDF_RENDERER?: 'native' = 'native';
 
   /**
    * PDF renderer P1 — size of the native renderer's worker_threads pool (rab-worker queues/rab-reports/native/runtime,
    * `pdfNativeConcurrency`, which applies the same rule at render time). Unset (or empty, as for every variable) → 2;
-   * exactly "1".."4"; anything else (spaces, "0", "5", "2.0") refuses to boot. Only read when PDF_RENDERER=native.
+   * exactly "1".."4"; anything else (spaces, "0", "5", "2.0") refuses to boot.
    */
   @IsOptional()
   @IsIn(['1', '2', '3', '4'], { message: 'PDF_NATIVE_CONCURRENCY must be an integer from 1 to 4' })

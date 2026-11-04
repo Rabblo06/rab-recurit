@@ -439,7 +439,7 @@ test(
       assert.ok(o.includes(`uid=${uid}`) && o.includes(`gid=${uid}`) && o.includes(`mode=${mode}`), `${p}: ${tmpfs[p]}`);
       assert.ok(!o.includes('exec'), `${p} must stay noexec (Docker's tmpfs default)`);
     }
-    assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit >= 768 && svc.pids_limit <= 4096, `pids_limit ${svc.pids_limit} (4 concurrent Chromium renders measured 551 tasks)`);
+    assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit >= 768 && svc.pids_limit <= 4096, `pids_limit ${svc.pids_limit} (sized for 4 concurrent Chromium renders = 551 tasks; kept until re-measured for the native renderer)`);
     const mem = sizeMiB(interpolate(svc.mem_limit, {}));
     assert.ok(mem >= 1024 && mem <= 8192, `mem_limit ${mem} MiB`);
     assert.ok(Number(interpolate(svc.cpus, {})) > 0, `cpus ${svc.cpus}`);

@@ -16,7 +16,8 @@ import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { SHIFT_EARNINGS_APPROVED_LINE, STATEMENT_DISCLAIMER, TO_BE_CONFIRMED } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
 import { SHIFT_STATEMENT_MAX_ATTEMPTS, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { processShiftStatementJob, runShiftStatementDispatchCycle } from '../../queues/rab-reports/shift-statement.job';
-import { htmlFor, renderReportPdf, ReportDocument } from '../../queues/rab-reports/render-pdf.util';
+import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render-pdf.util';
+import { reportHtmlFor } from '../helpers/report-html';
 import { runPayrollPeriodAttentionCycle } from '../../queues/rab-reports/payroll-period-attention.job';
 import { OFFICIAL_CALENDAR_2026 } from '@rab/server/modules/payroll/constants/official-calendar-2026';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -160,7 +161,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
   // The seam receives the data-in document (D1). `lastHtml` is the Chromium template for that document, printed from the
   // SAME view-model builder the native layout uses, so the content assertions below hold in both PDF_RENDERER modes.
   const deps = (render?: (doc: ReportDocument) => Promise<Buffer>) => ({ tenantContext, files, notifications, audit,
-    render: render ?? (async (doc: ReportDocument) => { lastHtml = htmlFor(doc); return renderReportPdf(doc); }) });
+    render: render ?? (async (doc: ReportDocument) => { lastHtml = reportHtmlFor(doc); return renderReportPdf(doc); }) });
   const expireLease = (id: string) => adminDataSource.query(
     `UPDATE core.payroll_record SET statement_queued_at = now() - interval '11 minutes', statement_processing_at = NULL WHERE id = $1`, [id]);
 
