@@ -17,7 +17,8 @@ import {
 import { selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
-import { blockingPostCheckProblems, outcomeOf, synthesiseGuardEnv } from './migrate-on-start';
+import { blockingPostCheckProblems, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
+import { deployPrepareFailureExitCode } from '../../deploy-prepare';
 import { LAST_ROLE_MIGRATION_TIMESTAMP, ROLE_SPLIT_TIMESTAMP } from './owner-login-chain';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityFacts } from './owner-login-identity';
 import {
@@ -338,5 +339,38 @@ describe('upgrade-failure policy', () => {
     const byName = Object.fromEntries(v.checks.map((c) => [c.name, c.ok]));
     expect(byName).toMatchObject({ 'no-partial-migration': false, posture: false, 'deployment-identity': false });
     expect(v.checks.map((c) => c.name)).toEqual(['ledger-compatible', 'no-partial-migration', 'post-checks', 'required-functions', 'deployment-identity', 'posture']);
+  });
+});
+
+describe('test seams (Agent 5): honoured only on a disposable test database outside production', () => {
+  const ok = { production: false, disposableTestDatabase: true };
+  it('unset = no seam; set = parsed', () => {
+    expect(readTestSeams({}, { production: true, disposableTestDatabase: false })).toEqual({ failAt: null, stopBefore: null });
+    expect(
+      readTestSeams({ NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'StatementDispatchPointer1786721320000', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '1786721350000' }, ok),
+    ).toEqual({ failAt: 'StatementDispatchPointer1786721320000', stopBefore: 1786721350000 });
+  });
+  it('refused (exit 64) outside NODE_ENV=test, in production, on a non-disposable database, or malformed', () => {
+    const seam = { CREWFLOW_MIGRATION_TEST_FAIL_AT: 'StatementDispatchPointer1786721320000' };
+    expect(() => readTestSeams({ ...seam, NODE_ENV: 'development' }, ok)).toThrow(/test seams/);
+    expect(() => readTestSeams({ ...seam, NODE_ENV: 'test' }, { production: true, disposableTestDatabase: true })).toThrow(/never production/);
+    expect(() => readTestSeams({ ...seam, NODE_ENV: 'test' }, { production: false, disposableTestDatabase: false })).toThrow(/disposable/);
+    expect(() => readTestSeams({ NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'DROP TABLE x' }, ok)).toThrow(/class name/);
+    expect(() => readTestSeams({ NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '17867' }, ok)).toThrow(/13-digit/);
+    const named = (name: string) => Object.assign(new Error('x'), { name });
+    expect(outcomeOf(named('TestSeamRefusal'))).toBe('config');
+    expect(outcomeOf(named('InjectedMigrationFailure'))).toBe('migrationFailed');
+  });
+});
+
+describe('deploy-prepare failure exit codes are the startup exit codes', () => {
+  const named = (name: string, message = 'x') => Object.assign(new Error(message), { name });
+  it('maps each kind; post-check failures are 68', () => {
+    expect(deployPrepareFailureExitCode(new Error('post-migration checks failed (1): rls-disabled core.x'))).toBe(68);
+    expect(deployPrepareFailureExitCode(named('MigrationLockError'))).toBe(69);
+    expect(deployPrepareFailureExitCode(named('MigrationIdentityError'))).toBe(67);
+    expect(deployPrepareFailureExitCode(named('MigrationApprovalError'))).toBe(65);
+    expect(deployPrepareFailureExitCode(named('PgConfigError'))).toBe(64);
+    expect(deployPrepareFailureExitCode(named('QueryFailedError'))).toBe(66);
   });
 });

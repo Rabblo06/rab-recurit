@@ -29,8 +29,14 @@ import { assessSchemaCompatibility, readLedgerNames } from '../../../../boot-che
 import { readProvisionFunctionState } from '../../../workspace-schema/provision-function-versions';
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import type { Query } from '../locked-migration-runner';
+import { readUpgradeFailurePolicy, UpgradeFailurePolicy } from '../../../../owner-login/runtime-db-config';
 
-export type UpgradeFailurePolicy = 'refuse' | 'continue-if-compatible';
+export type { UpgradeFailurePolicy };
+
+/** CREWFLOW_UPGRADE_FAILURE_POLICY, parsed by the ONE runtime config module (default refuse; invalid = exit 64). */
+export function parseUpgradeFailurePolicy(env: Record<string, string | undefined>): UpgradeFailurePolicy {
+  return readUpgradeFailurePolicy(env);
+}
 
 /** The seven `transaction = false` migrations (M0: the runner comment said six). */
 export const NON_TRANSACTIONAL_MIGRATIONS: readonly number[] = [

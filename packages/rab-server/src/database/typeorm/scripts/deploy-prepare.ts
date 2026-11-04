@@ -45,6 +45,7 @@ import {
 } from './migrate/migration-approval';
 import { MigrationIdentityError, MigrationIdentityFacts } from '../core/migration-identity';
 import { outcomeOf } from './migrate/owner-login/migrate-on-start';
+import { STARTUP_EXIT_CODES } from '../../owner-login/runtime-db-config';
 import { runCacheFlush } from './cache-flush';
 
 export const EXIT_PENDING_NOT_APPROVED = 3;
@@ -163,9 +164,9 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
  * but not approved" (check run). Pure.
  */
 export function deployPrepareFailureExitCode(error: unknown): number {
-  if (error instanceof Error && /post-migration checks failed/.test(error.message)) return 68;
-  const codes: Record<string, number> = { config: 64, behind: 65, migrationFailed: 66, identity: 67, postCheck: 68, lockTimeout: 69 };
-  return codes[outcomeOf(error)] ?? 66;
+  if (error instanceof Error && /post-migration checks failed/.test(error.message)) return STARTUP_EXIT_CODES.postCheck;
+  const outcome = outcomeOf(error);
+  return outcome === 'ok' || outcome === 'degradedContinue' ? STARTUP_EXIT_CODES.migrationFailed : STARTUP_EXIT_CODES[outcome];
 }
 
 if (require.main === module) {

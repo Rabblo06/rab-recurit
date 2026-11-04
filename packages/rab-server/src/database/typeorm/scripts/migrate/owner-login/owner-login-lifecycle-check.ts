@@ -35,6 +35,7 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 import { DataSource, DataSourceOptions } from 'typeorm';
 
+import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../../../core/core.datasource';
 import { compareWithGolden } from '../../../core/security-posture';
 import { secureOwnerInvariantViolations } from '../../../core/secure-owner-invariants';
@@ -44,17 +45,8 @@ import { MIGRATION_LOCK_KEY } from '../migration-lock';
 import { installSigtermSelfCancel, MigrateOnStartResult, RESULT_LINE_PREFIX, runMigrateOnStart, StartupOutcome } from './migrate-on-start';
 import { PRIVILEGED_COPY_MIGRATION, SHIMMED_MIGRATIONS } from './row-copy-shim';
 
-/** Mirror of Agent 2's STARTUP_EXIT_CODES (runtime-db-config.ts); the real entry uses theirs. */
-export const EXIT: Readonly<Record<StartupOutcome, number>> = {
-  ok: 0,
-  config: 64,
-  behind: 65,
-  migrationFailed: 66,
-  identity: 67,
-  postCheck: 68,
-  lockTimeout: 69,
-  degradedContinue: 70,
-};
+/** The startup exit codes of the ONE runtime config module (Agent 2). */
+export const EXIT: Readonly<Record<StartupOutcome, number>> = STARTUP_EXIT_CODES;
 
 const ROOT = join(__dirname, '..', '..', '..', '..', '..', '..', '..', '..');
 const MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
