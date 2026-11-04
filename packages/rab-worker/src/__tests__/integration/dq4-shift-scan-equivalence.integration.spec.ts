@@ -176,6 +176,9 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = createTestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: app.get(PasswordHashingService) });
+    // D-Q4a (review): the combined path reads CLOCK_IN_EARLY_MINUTES from EnvironmentService, the separate baseline uses the
+    // constant; the equivalence comparison is only meaningful when they are the same window.
+    expect(app.get(EnvironmentService).get('CLOCK_IN_EARLY_MINUTES')).toBe(CLOCK_IN_EARLY_MINUTES);
   }, 60_000);
 
   afterAll(async () => {
@@ -444,7 +447,12 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
           // shift-monitor returns one discovery object per workspace: count the rows inside it.
           return rows.flatMap((r) => ('assignments' in (r as object) ? [...(r as { assignments: unknown[] }).assignments, ...(r as { lifecycleCandidates: unknown[] }).lifecycleCandidates] : [r])).length;
         })
-        .catch(() => 'refused' as const);
+        // Only a refusal to resolve the workspace tables (no workspace schema routed: undefined_table) or a privilege
+        // refusal counts as fail-closed; any other error (broken query, lost connection) fails the test (review).
+        .catch((error: { code?: string }) => {
+          if (error?.code === '42P01' || error?.code === '42501') return 'refused' as const;
+          throw error;
+        });
       expect({ key, outcome: [0, 'refused'].includes(outcome) ? 'none' : outcome }).toEqual({ key, outcome: 'none' });
     }
   });

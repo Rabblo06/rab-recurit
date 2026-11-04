@@ -5067,6 +5067,8 @@ shift report scheduler, final timesheet) find their work: ONE workspace walk per
   replica processes before its bullmq scheduler finishes starting runs its members without their member locks
   (correctness still held by the keys/CAS/locks above; only duplicate work).
 - **Redis.** Interval mode needs no Redis to find or process work (tested with Redis unreachable); stats writes stay
-  best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the periodic reconcile (≤ 60 s).
+  best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the next periodic reconcile, within
+  one `WORKER_SCHEDULER_RECONCILE_SECONDS` (default 60 s, configurable up to 3 600 s). In Lane A a member's scan lock
+  is taken after the shared walk, so a second replica may repeat a member's read-only discovery and then skip it.
 - **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
   worker_event keys and do nothing twice (tested).

@@ -36,6 +36,9 @@ import { discoverShiftMonitorInWorkspace, processShiftMonitorDiscoveries, ShiftM
  * is skipped for that tick only (`skipped-running`, counted in its own `<loop>Skipped`), exactly like the separate scan's
  * own overlap guard. Every interleaving this produces is one separate mode can already produce (independent timers), so
  * no outcome is new. Late clock-in stays its own scan, so the late-clock-in vs no-show order (OD-2) is not affected.
+ * Lane A note: a member's scan lock is taken AFTER the shared walk (a probe before the walk could not reserve it: check-
+ * then-act). While one replica still processes a member, another replica can therefore run that member's read-only
+ * discovery and then get `skipped-locked`; this bounded read-only cost is accepted to keep member processing independent.
  *
  * Multi-replica: unchanged primitives. Interval mode runs the combined scan once per replica (as each scan today);
  * cross-replica correctness is the worker_event UNIQUE keys, the compare-and-sets and the per-shift advisory locks. Lane A
