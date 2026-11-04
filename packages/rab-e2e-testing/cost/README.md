@@ -217,6 +217,49 @@ Useful options:
 To compare two runs, first check their host conditions (see "Comparability on a shared host"), then diff their
 `results.json` → `metrics[]`. Every metric has the same `metric` key in both runs.
 
+### D-Q6 architecture benchmark (2026-11-04)
+
+`scripts/dq6-bench.sh` compares the Worker dispatch architectures on one stack (one image, configuration only), at one
+organisation level (default 200), idle and loaded. It extends the Phase D after-measurement drivers and the #24 A/B
+benchmark, and uses only this harness's guarded helpers.
+
+```bash
+OUT=/c/rab-ai-wt/cost-work/results/dq6
+COST_HEAVY_LABEL=dq6 bash scripts/run.sh --commit <sha> --only build,stack --keep --out "$OUT"
+OUT=$OUT COST_TAG=<sha8> bash /c/rab-ai-wt/setup/heavy-run.sh dq6 bash scripts/dq6-bench.sh setup 200
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh abab "per_scope global" 2   # each arm-repetition in its own heavy-run window
+OUT=$OUT bash scripts/dq6-bench.sh report                                        # dq6-results.md / dq6-results.json
+```
+
+| Arm | Configuration |
+|---|---|
+| `per_scope` | `WORKER_CLAIM_MODE=per_scope`, Worker as `crewflow_app` (production default) |
+| `global` | `WORKER_CLAIM_MODE=global`, Worker as `crewflow_worker` (Phase D) |
+| `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
+
+Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. Each arm repetition runs, in order:
+
+| Window | What |
+|---|---|
+| `idle-off` | realtime + push off (production default), drained, `DQ6_IDLE_S` (300 s) idle window |
+| `idle-on` | realtime + push on, drained, idle window |
+| `loaded` | `DQ6_RATE` (10) notifications/s for 330 s, round-robin over every organisation. One notification = a `notification` row plus one `realtime_event`, `push_delivery` (FAKE provider) and `email_outbox` (LOGGER driver) row, as `notify()` writes them. The resource window is the middle 300 s; the generator's own transactions are subtracted |
+| `burst` | `DQ6_BURST` (2,000) notifications inserted at once: drain time, rows/s, per-organisation completion, fairness |
+| `rworker` | 5/s load; graceful Worker stop, 30 s down, start, 60 s more load: time to ready, first delivery, backlog cleared, stuck rows, duplicates |
+| `rredis` | the same with Redis stopped. Redis runs without persistence, so it comes back empty: a Redis data loss |
+
+Metrics, all MEASURED: PostgreSQL transactions/min (`pg_stat_database`, harness transactions subtracted) and statements/min
+(`pg_stat_statements`), cgroup CPU of PostgreSQL / Worker / Redis, Redis commands/min (`total_commands_processed`) and
+used memory, Worker RSS (node processes) and cgroup memory, latency (created → terminal, database clock), queue depth
+(non-terminal rows of the scenario and BullMQ wait/active lengths, every 10 s), throughput, duplicates (email: LOGGER
+send lines per row; realtime: Pub/Sub messages per event from a `PSUBSCRIBE` listener; push: not observable with the FAKE
+driver, retried rows are reported), fairness (Jain's index of per-organisation mean latency, per-organisation p95 and
+completion spread), errors (failed rows and Worker log error lines), and host contention (other containers' CPU).
+
+Setup seeds with `COST_SEED_NOW=2026-10-27T22:05:00Z` (`DQ6_SEED_NOW`) and marks the last shifts' post-shift stamps as
+processed, which leaves about 5 h before the first next-day shift enters the 180-minute roster window. `arm` refuses to
+measure once a published shift starts within 3 h 15 min, so roster PDF renders can never enter a window silently.
+
 ## Phases (`scripts/run.sh`)
 
 | Phase | What happens | Script |
@@ -305,6 +348,8 @@ A projection is never labelled MEASURED.
 - `lib/compare.js`: compares two results directories (`node lib/compare.js <baseline> <after> <out>` →
   `comparison.md`/`comparison.json`): Δ% per metric, noise bands from code-identical control metrics, and the
   roster-stage SQL per email by query fingerprint (from `shift-cycle.pgss-raw.csv`, idle-O20 background subtracted).
+- `scripts/dq6-bench.sh` (D-Q6 architecture benchmark driver), `lib/dq6-load.js` (load generator, burst drain and
+  recovery probe), `lib/dq6-report.js` (D-Q6 results tables).
 - `scripts/tree-snapshot.sh` (read-only worktree snapshot for `--tree`), `scripts/compare-images.sh` (dist file-by-file
   comparison of two image pairs), `lib/worker-env.sh` (per-phase worker configuration), `lib/analyze-boot.js` (boot /
   restart / replicas summaries), `init/empty.env` (default, empty worker env file).
