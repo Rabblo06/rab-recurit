@@ -208,7 +208,8 @@ describe('pre-shift attendance sheet, native PDF bytes', () => {
   });
 
   it('the printed QR is the QR service\'s image: decoded from the PDF it is the signed token, byte for byte', async () => {
-    const token = 'eyJhbGciOiJIUzI1NiJ9.eyJzaGlmdElkIjoiZml4dHVyZSIsInZlbnVlSWQiOiJ2IiwidmVyIjoxfQ.c2lnbmF0dXJlLWZpeHR1cmU';
+    // Any string the QR service encodes; the payload is opaque here (the comparison harness uses real signed tokens).
+    const token = 'rab-qr-v1.fixture-shift-0001.fixture-signature-not-a-credential';
     const png = await new QrImageService().generatePng(token);
     const pdf = await renderNativePdf({ kind: 'pre-shift', data: { ...PRE_SHIFT_FIXTURES['four-staff']!, qrPngBase64: png.toString('base64') } });
     const qrImages = imageXObjects(pdf).filter((x) => dictNumber(x.dict, 'Width') === 600 && dictNumber(x.dict, 'Height') === 600);
