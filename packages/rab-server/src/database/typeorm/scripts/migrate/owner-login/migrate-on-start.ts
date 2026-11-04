@@ -140,7 +140,7 @@ export function outcomeOf(error: unknown): StartupOutcome {
     return 'identity';
   }
   if (['UnapprovedProductionMigrationError', 'MigrationApprovalError'].includes(name)) return 'behind';
-  if (error instanceof Error && /needs the per-release approval|not a proven fresh install/.test(error.message)) return 'behind';
+  if (error instanceof Error && /needs the per-release approval|not a proven fresh install|APPROVAL_MODE=token needs/.test(error.message)) return 'behind';
   if (name === 'PostCheckFailure') return 'postCheck';
   return 'migrationFailed';
 }
@@ -169,7 +169,19 @@ export function synthesiseGuardEnv(
   const guardEnv: Record<string, string | undefined> = { ...env, DB_TARGET: production ? 'production' : 'local' };
   delete guardEnv.ALLOW_PRODUCTION_DB_COMMANDS;
   delete guardEnv[IDENTITY_BOOTSTRAP_VAR];
-  if (!production) return { guardEnv, generatedDeploymentId: null };
+  if (!production) {
+    // Agent 5 finding (MEDIUM): outside production a declared identity on a database WITHOUT a bound marker was refused by
+    // the target guard ("declares test/<id>, but the database has no deployment identity marker") before anything ran, so a
+    // fresh non-production install could never reach its own auto-bind (D6). The guard sees the declaration only once the
+    // marker is bound; until then it judges the database as undeclared (exactly as a run without the variables; a remote
+    // unmarked host stays refused by H-1), and the auto-bind binds the ORIGINAL declaration, fresh install only. Production
+    // is unchanged: it keeps its declaration and the one-time bootstrap rules below.
+    if (marker !== 'bound') {
+      delete guardEnv[DEPLOYMENT_ENVIRONMENT_VAR];
+      delete guardEnv[DEPLOYMENT_ID_VAR];
+    }
+    return { guardEnv, generatedDeploymentId: null };
+  }
   guardEnv.ALLOW_PRODUCTION_DB_COMMANDS = 'true';
   let generatedDeploymentId: string | null = null;
   if (marker !== 'bound') {
@@ -420,13 +432,15 @@ async function autoBindFreshInstall(input: {
     log('deployment identity marker is unbound on an existing database: NOT auto-bound (fresh install only); bind it with db:bind-identity');
     return;
   }
-  const environment = guardEnv[DEPLOYMENT_ENVIRONMENT_VAR]?.trim();
+  // The guard environment may hide a non-production declaration while the marker is unbound (synthesiseGuardEnv): the
+  // bind uses the process's own declaration, or production's generated id.
+  const environment = (guardEnv[DEPLOYMENT_ENVIRONMENT_VAR] ?? input.env[DEPLOYMENT_ENVIRONMENT_VAR])?.trim();
   if (!environment) {
     log('fresh install without CREWFLOW_DEPLOYMENT_ENVIRONMENT: the marker stays unbound (non-production)');
     return;
   }
   if (!isDeploymentEnvironment(environment)) throw new Error(`${DEPLOYMENT_ENVIRONMENT_VAR} is not a deployment environment. Refusing.`);
-  const deploymentId = guardEnv[DEPLOYMENT_ID_VAR]?.trim().toLowerCase();
+  const deploymentId = (guardEnv[DEPLOYMENT_ID_VAR] ?? input.env[DEPLOYMENT_ID_VAR])?.trim().toLowerCase();
   if (!deploymentId) {
     log('fresh install without CREWFLOW_DEPLOYMENT_ID: the marker stays unbound (non-production)');
     return;

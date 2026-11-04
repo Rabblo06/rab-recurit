@@ -31,7 +31,7 @@ export class MaintenanceScanProcessor {
 
   // Phase D wave 2 retention gate: WORKER_INVITE_AUTO_DELETE_ENABLED (default false — validated by the server environment
   // config and re-checked by resolveInviteAutoDeleteEnabled, the same accessor path as WORKER_CLAIM_MODE). OFF ⇒ the
-  // pre-Phase-D cycle exactly as on main; never a definer call, never an automatic account deletion.
+  // cycle returns before touching the database (D-1): no invite expired, no account deleted, on any login.
   @Process('account-invite-cleanup')
   async accountInviteCleanup(): Promise<void> {
     const { runtimeDataSource, environmentService, logger } = this.deps.get();

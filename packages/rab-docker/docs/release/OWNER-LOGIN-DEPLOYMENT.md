@@ -211,6 +211,8 @@ An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the leg
    - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
    - **64–69: STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7). Nothing was applied by a check run, and the running release is untouched.
 
+   **Approval rule (owner decision 2026-11-04):** with `CREWFLOW_MIGRATION_APPROVAL_MODE=token`, **every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target**: production, staging and test alike. Without it the run exits **65**. A proven fresh install, approval mode `none` (the migrate-on-start quick start) and check runs are unchanged.
+
    With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
@@ -412,7 +414,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 - **Logs:** `json-file`, 10 MB × 5 per container. Ship them off the host, because forensics depend on them.
 - **Redis:** AOF `everysec`, `noeviction`, an ACL; never published.
 - **Owner password rotation:** done by the admin at the provider. Then update `database.env` and restart rab-api and rab-worker. After a suspected compromise, rotation is **not** remediation: inventory roles, memberships, ADMIN rows, definers, policies and triggers first (M0 §6.4 item 9).
-- **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce must be ported into `rab-worker` (Agent 2). Until then compose **applies** the Worker's isolation but nothing **self-verifies** it at start. `CREWFLOW_RUNTIME_ISOLATION=enforce` is already set, so the port takes effect without a compose change.
+- **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce is ported into `rab-worker` itself (Agent 2). At start it logs `[worker-isolation] runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=… memory.max=… mode=enforce`, and with `CREWFLOW_RUNTIME_ISOLATION=enforce` (committed in `docker-compose.image.yml`) it **refuses to start** when any of these is missing: uid 1000, an empty capability bounding set, no-new-privileges, a read-only root, a PID limit, a memory limit.
 - **Resources:**
   - API: 1 GB (raised from 768 MB for the migration child under migrate-on-start; NOT MEASURED).
   - Worker: 1.5 GB, with the native PDF budget rule from #61 (`PDF_NATIVE_MEMORY_BUDGET_MB`).
@@ -422,7 +424,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 | Assumption | Owner |
 |---|---|
-| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. | Agents 1 and 2 |
+| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. Approval mode `token` = every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it); a proven fresh install, mode `none` and check runs are unchanged (owner decision; Agent 1, `approvalDecision`, f77fc9e5). | Agents 1 and 2 |
 | `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
 | `deploy-prepare.js` (in place) is the release step and is **always in token mode**: no token = check run (0 current, 3 pending); `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run; failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1, confirmed.) | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |

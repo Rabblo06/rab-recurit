@@ -155,12 +155,12 @@ test('3 children have different non-root identities and separate homes/health fi
   assert.notEqual(w.healthFile, p.healthFile);
 });
 
-test('3b security review H1-M1: no child has a writable HOME (a Node module search root); Chromium dirs live in TMPDIR', () => {
+test('3b security review H1-M1: no child has a writable HOME (a Node module search root); XDG dirs live in TMPDIR', () => {
   for (const c of makePlan(env())) {
     // HOME is a path neither child can create: $HOME/.node_modules and $HOME/.node_libraries are on require's globalPaths.
     assert.equal(c.env.HOME, '/nonexistent', c.name);
     assert.ok(!c.env.TMPDIR.startsWith(c.env.HOME), c.name);
-    // Chromium's crashpad database and fontconfig cache go to the child's own 0700 temp directory, not HOME.
+    // Any per-user config/cache a library wants goes to the child's own 0700 temp directory, not HOME.
     assert.equal(c.env.XDG_CONFIG_HOME, path.join(c.env.TMPDIR, '.config'), c.name);
     assert.equal(c.env.XDG_CACHE_HOME, path.join(c.env.TMPDIR, '.cache'), c.name);
     // Neither the TMPDIR nor the XDG directories are module search paths, and no NODE_PATH is ever forwarded.
@@ -169,6 +169,18 @@ test('3b security review H1-M1: no child has a writable HOME (a Node module sear
     for (const dir of [c.env.TMPDIR, c.env.XDG_CONFIG_HOME, c.env.XDG_CACHE_HOME]) {
       assert.ok(!searchRoots.some((r) => r.startsWith(dir)), `${c.name}: ${dir} must not be a module search root`);
     }
+  }
+});
+
+test('3c P5: no browser setting reaches either child, even when the container environment sets it', () => {
+  const browser = {
+    CHROMIUM_EXECUTABLE_PATH: '/usr/bin/chromium',
+    CHROMIUM_NO_SANDBOX: 'true',
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+    PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright',
+  };
+  for (const c of makePlan({ ...env(), ...browser })) {
+    for (const k of Object.keys(c.env)) assert.ok(!/^(CHROMIUM_|PLAYWRIGHT_)/.test(k), `${c.name}: ${k} forwarded`);
   }
 });
 
@@ -438,7 +450,7 @@ test('17 a child that ignores SIGTERM is SIGKILLed at the bounded deadline and t
   }
 });
 
-test('18 descendants that escaped the child process group (setsid, like Playwright Chromium) are killed on stop', { skip: !linuxRoot && 'needs root on Linux' }, async () => {
+test('18 descendants that escaped the child process group (setsid) are killed on stop', { skip: !linuxRoot && 'needs root on Linux' }, async () => {
   const fx = fixtures({
     'parent.cjs':
       "const {spawn}=require('node:child_process'); const g=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'}); g.unref(); console.log('grandchild '+g.pid); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);",
@@ -797,6 +809,23 @@ test('33 the jobs allowlist forwards AI_TITLE_GENERATION (AI Phase 2 titles) and
   const [jobs, provisioner] = makePlan({ ...env(), AI_TITLE_GENERATION: 'false' });
   assert.equal(jobs.env.AI_TITLE_GENERATION, 'false');
   assert.equal(provisioner.env.AI_TITLE_GENERATION, undefined);
+});
+
+test('34 the jobs allowlist forwards PDF_RENDERER and PDF_NATIVE_CONCURRENCY (PDF renderer P1; otherwise they would silently never reach the child) and never to the provisioner', () => {
+  // PDF_NATIVE_MEMORY_BUDGET_MB (review M-3): an operator who raised the budget with the container's mem_limit must reach
+  // the jobs child, or its boot check would refuse a pool the operator sized deliberately.
+  for (const key of ['PDF_RENDERER', 'PDF_NATIVE_CONCURRENCY', 'PDF_NATIVE_PREWARM', 'PDF_NATIVE_MEMORY_BUDGET_MB']) {
+    assert.ok(JOBS_ENV_KEYS.includes(key), key);
+    assert.ok(!PROVISIONER_ENV_KEYS.includes(key), key);
+  }
+  const [jobs, provisioner] = makePlan({ ...env(), PDF_RENDERER: 'native', PDF_NATIVE_CONCURRENCY: '2', PDF_NATIVE_PREWARM: '1', PDF_NATIVE_MEMORY_BUDGET_MB: '1024' });
+  assert.equal(jobs.env.PDF_RENDERER, 'native');
+  assert.equal(jobs.env.PDF_NATIVE_PREWARM, '1');
+  assert.equal(jobs.env.PDF_NATIVE_CONCURRENCY, '2');
+  assert.equal(jobs.env.PDF_NATIVE_MEMORY_BUDGET_MB, '1024');
+  assert.equal(provisioner.env.PDF_RENDERER, undefined);
+  assert.equal(provisioner.env.PDF_NATIVE_CONCURRENCY, undefined);
+  assert.equal(provisioner.env.PDF_NATIVE_MEMORY_BUDGET_MB, undefined);
 });
 
 test('35 the jobs allowlist forwards the 7b budget and rate names (T7-W1) and never to the provisioner', () => {

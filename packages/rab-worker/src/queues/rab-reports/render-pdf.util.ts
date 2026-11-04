@@ -1,67 +1,26 @@
 import { Logger } from '@nestjs/common';
-import { chromium, errors, Route } from 'playwright';
+
+import { PreShiftReportData } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
+import type { FinalTimesheetData } from '@rab/server/modules/attendance/templates/final-timesheet.view-model';
+import { ApprovedShiftStatementData } from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
+
+import type { NativeReportDocument } from './native/render-native';
+import { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 /**
- * Per-call `chromium.launch()`/`close()` — not a persistent browser instance
- * held across the whole worker process. Acceptable overhead at these jobs'
- * ~5min polling cadence and low per-tick candidate count; a persistent
- * instance would need its own lifecycle/crash-recovery handling for marginal
- * benefit here. The `finally` blocks guarantee the page, context and browser
- * process are closed even when rendering throws, so a failed render never leaks a Chromium.
- *
- * Container support (the production image is `node:alpine`, where Playwright's
- * bundled Chromium does not run): when `CHROMIUM_EXECUTABLE_PATH` is set the
- * renderer launches that system Chromium instead. Unset in local development,
- * where Playwright's own downloaded browser is used.
- *
- * OS sandbox (Docker hardening H6, measured): Chromium runs WITHOUT its OS sandbox in every environment. Playwright adds
- * `--no-sandbox` itself unless `chromiumSandbox: true` is passed, so `CHROMIUM_NO_SANDBOX` (whose `true` only repeats
- * the flag) has never switched the sandbox on — unset and `false` were verified to launch with `--no-sandbox` too.
- * `chromiumSandbox: false` below states that explicitly. In the production Worker container the sandbox cannot start
- * anyway: Docker's default seccomp profile refuses the user namespace it needs and the setuid helper has no setuid bit
- * (H1-L2), so `chromiumSandbox: true` aborts the launch. Enabling it is an owner decision (a reviewed seccomp delta for
- * the Worker container; see THREAT-MODEL.md "Docker hardening H6"). The in-page controls below are what contain a
- * hostile document today.
- *
- * Hardening (Phase 0). Every template is self-contained, server-generated HTML whose values are escaped and whose
- * images (logo, shift QR) are `data:` URIs, so the renderer needs neither script nor any fetch. It therefore renders in
- * an isolated context that:
- *   - runs no page JavaScript (`javaScriptEnabled: false` — <script>, inline handlers and `javascript:` URLs are inert);
- *   - is offline, blocks service workers and refuses downloads;
- *   - aborts every request that is not `data:` / `about:blank` (http, https, ws, file, …) via `page.route`, counting the
- *     blocked requests and logging the count only — never a URL, which could carry document data;
- *   - fails closed if the document tries to navigate away from its own content (e.g. `<meta http-equiv="refresh">`),
- *     instead of printing whatever page it landed on;
- *   - bounds `setContent` and `pdf` by `PDF_RENDER_STEP_TIMEOUT_MS` each, with a clear error.
- * `file://` subresources are additionally refused by Chromium itself for an `about:blank` document (they never reach
- * request interception); `render-pdf-hardening.integration.spec.ts` pins all of the above, and that the real templates
- * render byte-identically to the pre-hardening renderer.
+ * PDF renderer migration P5: every report PDF is rendered NATIVELY (@react-pdf/renderer, pure JavaScript, vendored
+ * fonts) inside the jobs process. There is no browser: Chromium and Playwright were removed from the Worker (the image
+ * gate fails if either returns), so the Chromium-era controls (JavaScript off, offline context, request interception,
+ * navigation refusal, the launch-environment allowlist) have nothing left to contain. Their native equivalents are
+ * structural: the renderer interprets no markup, executes no document-supplied code and opens no URL or file path
+ * (P3 security tests). The one shared contract that remains is the time bound below.
  */
-export interface RenderPdfOptions {
-  /** Playwright footer template (page x of y); see `documentFooterTemplate`. */
-  footerTemplate?: string;
-  landscape?: boolean;
-}
 
-/** Upper bound for each render step (`setContent`, `pdf`). Real templates render in well under a second. */
-export const PDF_RENDER_STEP_TIMEOUT_MS = 30_000;
-
-export class PdfRenderTimeoutError extends Error {
-  constructor(
-    readonly step: string,
-    readonly timeoutMs: number,
-  ) {
-    super(`PDF render step "${step}" did not finish within ${timeoutMs} ms`);
-    this.name = 'PdfRenderTimeoutError';
-  }
-}
-
-export class PdfRenderNavigationError extends Error {
-  constructor() {
-    super('PDF render refused: the document tried to navigate away from its own content');
-    this.name = 'PdfRenderNavigationError';
-  }
-}
+/**
+ * The render deadline and its error class live in the dependency-free native/runtime/render-timeout.ts (shared with the
+ * native render runtime). Re-exported here: ONE class, so `instanceof PdfRenderTimeoutError` holds everywhere.
+ */
+export { PDF_RENDER_STEP_TIMEOUT_MS, PdfRenderTimeoutError } from './native/runtime/render-timeout';
 
 /** Rejects with `PdfRenderTimeoutError` if `work` has not settled within `ms`. The loser's later rejection is swallowed. */
 export async function withRenderStepTimeout<T>(step: string, ms: number, work: Promise<T>): Promise<T> {
@@ -69,7 +28,7 @@ export async function withRenderStepTimeout<T>(step: string, ms: number, work: P
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new PdfRenderTimeoutError(step, ms)), ms);
   });
-  work.catch(() => undefined); // e.g. a pdf() still pending when the browser is closed in `finally`
+  work.catch(() => undefined);
   try {
     return await Promise.race([work, timeout]);
   } finally {
@@ -77,110 +36,76 @@ export async function withRenderStepTimeout<T>(step: string, ms: number, work: P
   }
 }
 
-const logger = new Logger('RenderHtmlToPdf');
+const logger = new Logger('RenderReportPdf');
 
-function isAllowedUrl(url: string): boolean {
-  return url.startsWith('data:') || url === 'about:blank';
+// ─── Renderer selection (P5 / owner decision D10) ─────────────────────────────────────────────────────────────────────
+
+/**
+ * `PDF_RENDERER` is kept for ONE release after P5 (D10) and accepts only `native` (or unset / empty, which mean
+ * native). `chromium` is refused with a message naming the rollback: there is no Chromium in this image, so the only way
+ * back is redeploying the previous (P4) image, never a switch. Anything else is refused as before. The Worker's env
+ * validation (`EnvironmentVariables.PDF_RENDERER`) applies the same rule at boot. After that release the key is deleted.
+ */
+export const PDF_RENDERER_MODES = Object.freeze(['native'] as const);
+export type PdfRendererMode = (typeof PDF_RENDERER_MODES)[number];
+
+export function pdfRendererMode(env: NodeJS.ProcessEnv = process.env): PdfRendererMode {
+  const raw = env.PDF_RENDERER;
+  if (raw === undefined || raw === '' || raw === 'native') return 'native';
+  if (raw === 'chromium') {
+    throw new Error('PDF_RENDERER=chromium is retired (P5: this Worker has no browser); roll back by redeploying the previous Worker image');
+  }
+  throw new Error('PDF_RENDERER must be exactly "native" (or unset)');
 }
 
 /**
- * Docker hardening H6: the ONLY environment variables the browser process receives. Playwright's default is the whole
- * `process.env` — in the Worker that is the jobs child's PG_DATABASE_URL, REDIS_URL, APP_SECRET, S3 / SMTP / push
- * credentials — and Chromium runs without its OS sandbox as the same uid, so a renderer bug would land next to them.
- * This is an ALLOWLIST (never a denylist): process location, temp/profile/cache directories, locale, time zone and
- * fontconfig. Nothing here is a credential. Windows names are for local development only (Chromium needs them there).
- * Residual (THREAT-MODEL.md, Docker hardening H6): a same-uid renderer can still read the jobs process's own
- * /proc/<pid>/environ while the OS sandbox is off.
+ * The data-in seam (D1): every report PDF is requested as its kind plus the data the job holds. The native renderer
+ * derives its output through the document's rab-server view-model builder, so no business rule is re-implemented here.
  */
-export const CHROMIUM_ENV_KEYS: readonly string[] = Object.freeze([
-  'PATH', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR',
-  'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ', 'FONTCONFIG_PATH', 'FONTCONFIG_FILE',
-]);
-const CHROMIUM_WINDOWS_ENV_KEYS: readonly string[] = Object.freeze([
-  'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'PROGRAMFILES',
-  'PROGRAMFILES(X86)', 'COMMONPROGRAMFILES', 'SYSTEMDRIVE', 'PATHEXT', 'COMSPEC', 'NUMBER_OF_PROCESSORS',
+export type ReportDocument =
+  | { kind: 'pre-shift'; data: PreShiftReportData }
+  | { kind: 'final-timesheet'; data: FinalTimesheetData }
+  | { kind: 'approved-shift-statement'; data: ApprovedShiftStatementData };
+
+/** Every report kind renders natively. */
+export const NATIVE_KINDS: ReadonlySet<ReportDocument['kind']> = new Set<ReportDocument['kind']>([
+  'pre-shift',
+  'final-timesheet',
+  'approved-shift-statement',
 ]);
 
-/** The browser's environment: `source` filtered through the allowlist (exact names; case-insensitive on Windows). */
-export function chromiumLaunchEnv(source: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  const env: Record<string, string> = {};
-  const windows = platform === 'win32';
-  for (const [key, value] of Object.entries(source)) {
-    if (typeof value !== 'string') continue;
-    const allowed = CHROMIUM_ENV_KEYS.includes(key) || (windows && [...CHROMIUM_ENV_KEYS, ...CHROMIUM_WINDOWS_ENV_KEYS].includes(key.toUpperCase()));
-    if (allowed) env[key] = value;
-  }
-  return env;
+/** One log line at Worker boot; also re-validates PDF_RENDERER (throws on a bad or retired value). */
+export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): string {
+  pdfRendererMode(env);
+  return `PDF rendering: native for ${[...NATIVE_KINDS].join(', ')}; no browser`;
 }
 
-export async function renderHtmlToPdf(html: string, options: RenderPdfOptions = {}): Promise<Buffer> {
-  const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
-  const args = ['--disable-dev-shm-usage'];
-  if (process.env.CHROMIUM_NO_SANDBOX === 'true') args.push('--no-sandbox', '--disable-setuid-sandbox');
-  // chromiumSandbox: Playwright's own default, stated (see "OS sandbox" above): never read as a sandbox being on.
-  // env: the allowlisted environment only (chromiumLaunchEnv) — never the Worker's credentials.
-  const browser = await chromium.launch({ executablePath, args, chromiumSandbox: false, env: chromiumLaunchEnv() });
-  let blockedRequests = 0;
-  let navigationAttempted = false;
-  try {
-    const context = await browser.newContext({
-      javaScriptEnabled: false,
-      offline: true,
-      serviceWorkers: 'block',
-      acceptDownloads: false,
-    });
-    try {
-      const page = await context.newPage();
-      try {
-        await page.route('**/*', async (route: Route) => {
-          const request = route.request();
-          if (isAllowedUrl(request.url())) return route.continue().catch(() => undefined);
-          blockedRequests += 1;
-          try {
-            if (request.isNavigationRequest() && request.frame() === page.mainFrame()) navigationAttempted = true;
-          } catch {
-            navigationAttempted = true; // no owning frame (e.g. a worker request): treat as unsafe
-          }
-          return route.abort('blockedbyclient').catch(() => undefined);
-        });
-        const assertStillOwnDocument = () => {
-          if (navigationAttempted || page.url() !== 'about:blank') throw new PdfRenderNavigationError();
-        };
-
-        try {
-          await page.setContent(html, { waitUntil: 'load', timeout: PDF_RENDER_STEP_TIMEOUT_MS });
-        } catch (err) {
-          if (err instanceof errors.TimeoutError) throw new PdfRenderTimeoutError('setContent', PDF_RENDER_STEP_TIMEOUT_MS);
-          throw err;
-        }
-        assertStillOwnDocument();
-        const pdf = await withRenderStepTimeout(
-          'pdf',
-          PDF_RENDER_STEP_TIMEOUT_MS,
-          page.pdf({
-            format: 'A4',
-            landscape: options.landscape ?? false,
-            printBackground: true,
-            ...(options.footerTemplate
-              ? {
-                  displayHeaderFooter: true,
-                  headerTemplate: '<span></span>',
-                  footerTemplate: options.footerTemplate,
-                  margin: { top: '12mm', bottom: '16mm', left: '12mm', right: '12mm' },
-                }
-              : {}),
-          }),
-        );
-        assertStillOwnDocument();
-        return pdf;
-      } finally {
-        await page.close().catch(() => undefined);
-      }
-    } finally {
-      await context.close().catch(() => undefined);
-    }
-  } finally {
-    if (blockedRequests > 0) logger.warn(`PDF render blocked ${blockedRequests} external resource request(s)`);
-    await browser.close();
+/**
+ * Renders a report PDF natively. Resolves to the PDF bytes; a render that does not finish within
+ * `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError` (step `native-render`, enforced by the render pool,
+ * which terminates the render thread; a timer here could not stop a thread). Native failures carry a stable `code`
+ * (native/runtime/render-protocol.ts, e.g. error_PDF_NATIVE_RENDER; a timeout carries error_PDF_RENDER_TIMEOUT). An
+ * unknown kind is refused (fail closed); a native failure is thrown as is (T3: no fallback) — the job's normal failure /
+ * retry path handles it (warning log with the code; for the statement, `statement_error` and the SHIFT_STATEMENT_FAILED
+ * audit row carry it).
+ */
+export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
+  pdfRendererMode(env);
+  if (!NATIVE_KINDS.has(doc.kind)) {
+    logger.error(`refused to render an unknown report kind`);
+    throw new Error(`no native layout for report kind ${String((doc as { kind?: unknown }).kind)}`);
   }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
+  return renderNativePdf(doc as NativeReportDocument);
+}
+
+/**
+ * " [<code>]" for a report-job failure log line when the error carries a stable code of the renderers' shape
+ * (`error_PDF_NATIVE_RENDER`, `error_PDF_RENDER_TIMEOUT`, …), else "": a failed native render is attributable in the
+ * Worker log, never silent. Only a code of that fixed shape is printed, never free text.
+ */
+export function errorCodeSuffix(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^error_[A-Z0-9_]{1,40}$/.test(code) ? ` [${code}]` : '';
 }

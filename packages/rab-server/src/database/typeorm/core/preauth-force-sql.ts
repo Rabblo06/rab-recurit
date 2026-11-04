@@ -78,6 +78,89 @@ export const PREAUTH_FORCE_DOWN_SQL: readonly string[] = PREAUTH_FORCE_TABLES.fl
   `DROP POLICY IF EXISTS ${preauthDefinerPolicyName(t)} ON ${qualified(t)}`,
 ]);
 
+/**
+ * PLATFORM-ADMIN RECURSION GUARD (fixed in place 2026-11-04, owner decision; found on PR #72 as "stack depth limit
+ * exceeded" in core.is_active_platform_admin()). core.platform_admin's three policies apply TO PUBLIC and call
+ * core.is_active_platform_admin(), a SECURITY DEFINER function owned by rab_secure_owner that reads core.platform_admin.
+ * Before FORCE the owner bypassed RLS, so that read never evaluated the policies. Under FORCE it does: policy -> function
+ * -> read -> policy -> ... until the stack limit, as soon as the table holds a row that is not the caller's own.
+ *
+ * Fix: for rab_secure_owner the three policies are false, behind CASE so the function is never called there (CASE fixes
+ * the evaluation order; the function is STABLE, never constant-folded). rab_secure_owner keeps every row through
+ * platform_admin_secure_owner_definer. For every other role the predicate is exactly the previous one. A static scan of
+ * the other 15 tables found no policy calling a definer that reads its own table, and no cycle across tables.
+ * Applied BEFORE FORCE, so the recursive form never coexists with FORCE, not even inside the migration's transaction.
+ */
+export const PLATFORM_ADMIN_GUARDED_POLICIES: readonly string[] = Object.freeze(['platform_admin_select', 'platform_admin_update', 'platform_admin_write']);
+
+const ownerGuard = (predicate: string) => `CASE WHEN CURRENT_USER = 'rab_secure_owner'::name THEN false ELSE (${predicate}) END`;
+
+export const PLATFORM_ADMIN_GUARD_UP_SQL: readonly string[] = Object.freeze([
+  `ALTER POLICY platform_admin_select ON core.platform_admin
+     USING (${ownerGuard('user_id = core.current_uid() OR core.is_active_platform_admin()')})`,
+  `ALTER POLICY platform_admin_write ON core.platform_admin
+     WITH CHECK (${ownerGuard('core.is_active_platform_admin()')})`,
+  `ALTER POLICY platform_admin_update ON core.platform_admin
+     USING (${ownerGuard('core.is_active_platform_admin()')})
+     WITH CHECK (${ownerGuard('core.is_active_platform_admin()')})`,
+]);
+
+/** down(): exactly the expressions of PlatformAdminGlobalRedesign1786669400000 (never altered since). */
+export const PLATFORM_ADMIN_GUARD_DOWN_SQL: readonly string[] = Object.freeze([
+  `ALTER POLICY platform_admin_select ON core.platform_admin USING (user_id = core.current_uid() OR core.is_active_platform_admin())`,
+  `ALTER POLICY platform_admin_write ON core.platform_admin WITH CHECK (core.is_active_platform_admin())`,
+  `ALTER POLICY platform_admin_update ON core.platform_admin USING (core.is_active_platform_admin()) WITH CHECK (core.is_active_platform_admin())`,
+]);
+
+/** The three policies as PostgreSQL prints them. */
+export const PLATFORM_ADMIN_POLICY_SQL = `
+SELECT p.polname::text AS name, p.polroles = '{0}'::oid[] AS to_public,
+       coalesce(pg_catalog.pg_get_expr(p.polqual, p.polrelid), '') AS qual,
+       coalesce(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), '') AS chk
+  FROM pg_catalog.pg_policy p
+ WHERE p.polrelid = 'core.platform_admin'::regclass AND p.polname = ANY ($1::name[])
+ ORDER BY 1`;
+
+export interface PlatformAdminPolicyRow {
+  name: string;
+  to_public: boolean;
+  qual: string;
+  chk: string;
+}
+
+const GUARD_PREFIX = `CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE `;
+
+/**
+ * pg_get_expr lays a CASE out over several lines even in non-pretty mode (PostgreSQL 16:
+ * "\nCASE\n    WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false\n    ELSE (…)\nEND"). Compare with every run of
+ * whitespace collapsed to one space and the ends trimmed; nothing else is rewritten.
+ */
+export const collapseWhitespace = (expr: string): string => expr.replace(/\s+/g, ' ').trim();
+
+/**
+ * 'start': the three policies exist TO PUBLIC, call is_active_platform_admin and carry no guard yet.
+ * 'end': every expression they have (USING and / or WITH CHECK) starts with the guard, whitespace collapsed.
+ */
+export function platformAdminPolicyProblems(rows: PlatformAdminPolicyRow[], phase: 'start' | 'end'): string[] {
+  const p: string[] = [];
+  for (const name of PLATFORM_ADMIN_GUARDED_POLICIES) {
+    const r = rows.find((x) => x.name === name);
+    if (!r) {
+      p.push(`core.platform_admin policy ${name} is missing`);
+      continue;
+    }
+    if (!r.to_public) p.push(`core.platform_admin policy ${name} no longer applies TO PUBLIC (unexpected)`);
+    const exprs = [r.qual, r.chk].filter(Boolean);
+    if (phase === 'start') {
+      if (!exprs.some((e) => e.includes('is_active_platform_admin'))) p.push(`${name} does not call is_active_platform_admin (unexpected starting state)`);
+      if (exprs.some((e) => e.includes('rab_secure_owner'))) p.push(`${name} already carries the rab_secure_owner guard`);
+    } else if (!exprs.length || !exprs.every((e) => collapseWhitespace(e).startsWith(GUARD_PREFIX))) {
+      p.push(`${name} is not guarded for rab_secure_owner: using=${collapseWhitespace(r.qual) || '-'} check=${collapseWhitespace(r.chk) || '-'}`);
+    }
+  }
+  return p;
+}
+
 /** Preflight facts: who runs it and whether every table is in the expected starting state. */
 export const PREAUTH_FORCE_PREFLIGHT_SQL = `
 SELECT current_user::text AS who,

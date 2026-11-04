@@ -10,13 +10,14 @@
  *
  * Status:
  *   accepted-s2           — listed among the consequences the owner accepted in the final prompt §2;
+ *   accepted-owner        — accepted by a later, explicit owner decision (date in the entry), with app-level protection;
  *   needs-owner-approval  — NOT listed in §2: STOPPED for explicit owner approval (addendum "Protections that cannot be
  *                           kept with one login"); the code records it (boot warning, gate message) but nothing claims it is fine;
  *   mitigated             — a new control narrows it on NORMAL code paths (never against injection; residual stated);
  *   behaviour-change      — a functional change with no security loss (documented so reviewers see it).
  * Mirrored in THREAT-MODEL.md (PT-01 and its table). Changing an entry is a reviewed change.
  */
-export type CatalogueStatus = 'accepted-s2' | 'needs-owner-approval' | 'mitigated' | 'behaviour-change';
+export type CatalogueStatus = 'accepted-s2' | 'accepted-owner' | 'needs-owner-approval' | 'mitigated' | 'behaviour-change';
 export type CatalogueSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
 
 export interface CatalogueEntry {
@@ -202,6 +203,19 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     before: 'crewflow / crewflow_app / crewflow_worker were the restricted runtime logins with passwords in the deployment config.',
     after: 'They remain LOGIN (golden posture) though nothing connects as them; an old credential still logs in. The boot check cannot see passwords (pg_authid is superuser-only).',
     controls: 'Recommended: ALTER ROLE … NOLOGIN (or PASSWORD NULL) for all three after cut-over — changes the posture golden and workerRoleProblems. NEEDS OWNER APPROVAL.',
+  },
+  {
+    id: 'BC-18',
+    title: 'The app can delete or change member invitations, login sessions and email-change requests within one tenant (7 tables)',
+    severity: 'MEDIUM',
+    status: 'accepted-owner',
+    refs: ['X2', 'INV-1', 'owner decision 2026-11-04'],
+    before:
+      'crewflow_app held no DELETE (and on login_handoff, organisation_invitation, released_host_label, user_auth_identity, user_session no or only column-level INSERT / UPDATE) on these rab_secure_owner tables: a direct write was refused with 42501; definers were the write path.',
+    after:
+      'The owner login inherits rab_secure_owner, so a direct INSERT / UPDATE / DELETE on login_handoff, organisation_invitation, released_host_label, user_auth_identity, user_session, member_invitation and email_change_request succeeds within the bound tenant (RLS still limits it to that tenant; no context = 0 rows). Owner decision 2026-11-04: "Accepted, like Twenty." No database guard.',
+    controls:
+      'App-level only, like Twenty: every write to the 7 tables must stay in the reviewed owning code (tools/check-protected-table-writes.cjs, CI job protected-table-writes); M-T1 FORCE keeps it to one tenant on normal paths.',
   },
 ]);
 

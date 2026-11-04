@@ -131,6 +131,22 @@ jobs:
       - name: Dynamic SQL sites carry a reviewed allow-comment
         run: node tools/check-sql-injection.cjs
 
+  # Owner decision 2026-11-04 (BC-18, accepted like Twenty): the database no longer refuses the owner login's direct writes
+  # to seven pre-auth tables, so the protection is app-level - every write must stay inside the reviewed owning code.
+  # Fails on any INSERT / UPDATE / DELETE / TRUNCATE / MERGE / COPY or TypeORM write to those tables outside the allow-list
+  # in tools/check-protected-table-writes.cjs. Node built-ins only.
+  protected-table-writes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: The check's own tests
+        run: node --test tools/check-protected-table-writes.test.cjs
+      - name: Writes to the seven owner-accepted pre-auth tables stay in their owning code
+        run: node tools/check-protected-table-writes.cjs
+
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
   # never migrate, refuse migration credentials), the Worker bundle launcher (PG_* forwarding, legacy names refused in
   # production, the provisioner child's own PG_DATABASE_URL), every committed compose definition fed to the real launcher,
@@ -146,7 +162,7 @@ jobs:
       - name: API start shell tests (api-prestart.sh, start.sh)
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
       - name: Worker bundle launcher and committed deployment definitions
-        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs packages/rab-docker/rab/test/runtime-deps.test.cjs
       # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
       # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
       # skip itself), fails; any check failure fails the job.
@@ -197,7 +213,7 @@ jobs:
   ci-security-gate:
     name: ci-security gate
     # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
-    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, deployment-config, changes, image-gate]
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, protected-table-writes, deployment-config, changes, image-gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

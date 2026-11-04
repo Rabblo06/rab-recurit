@@ -1,6 +1,12 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 import {
+  PLATFORM_ADMIN_GUARD_DOWN_SQL,
+  PLATFORM_ADMIN_GUARD_UP_SQL,
+  PLATFORM_ADMIN_GUARDED_POLICIES,
+  PLATFORM_ADMIN_POLICY_SQL,
+  PlatformAdminPolicyRow,
+  platformAdminPolicyProblems,
   PREAUTH_FORCE_COUNTS_SQL,
   PREAUTH_FORCE_DOWN_SQL,
   PREAUTH_FORCE_PREFLIGHT_SQL,
@@ -29,9 +35,15 @@ import { secureOwnerInvariantViolations } from '../secure-owner-invariants';
  *  2. end state: every table ENABLE + FORCE with its definer policy;
  *  3. functional: when the session may SET ROLE rab_secure_owner, the rows rab_secure_owner sees in each table are
  *     counted before and after — they must be equal (a definer keeps seeing every row);
- *  4. the secure-owner invariants still hold (the policy expression calls no function).
+ *  4. the secure-owner invariants still hold (the policy expression calls no function);
+ *  5. platform_admin recursion guard (fixed in place 2026-11-04, owner decision): core.platform_admin's three TO PUBLIC
+ *     policies call core.is_active_platform_admin(), a rab_secure_owner definer that reads core.platform_admin; under
+ *     FORCE that recursed until "stack depth limit exceeded". They are made false for rab_secure_owner (behind CASE)
+ *     BEFORE FORCE, with start and end state checked; self-check 3 then reads every platform_admin row as
+ *     rab_secure_owner, which is exactly the path that recursed. Full reasoning in ../preauth-force-sql.ts.
  *
- * down(): NO FORCE and drop the 16 definer policies (exactly the previous state).
+ * down(): NO FORCE, drop the 16 definer policies, and the three platform_admin policies back to their previous
+ * expressions (exactly the previous state).
  */
 export class PreAuthTablesForceOwnerOnly1786721400000 implements MigrationInterface {
   name = 'PreAuthTablesForceOwnerOnly1786721400000';
@@ -43,12 +55,21 @@ export class PreAuthTablesForceOwnerOnly1786721400000 implements MigrationInterf
     const startProblems = preauthForceStartProblems(start);
     if (startProblems.length) throw new Error(`${this.name}: unexpected starting state (nothing changed):\n  ${startProblems.join('\n  ')}`);
 
+    const policiesAtStart = (await queryRunner.query(PLATFORM_ADMIN_POLICY_SQL, [[...PLATFORM_ADMIN_GUARDED_POLICIES]])) as PlatformAdminPolicyRow[];
+    const policyStartProblems = platformAdminPolicyProblems(policiesAtStart, 'start');
+    if (policyStartProblems.length) throw new Error(`${this.name}: unexpected platform_admin policies (nothing changed):\n  ${policyStartProblems.join('\n  ')}`);
+
     const before = canSetOwner ? await countsAsSecureOwner(queryRunner) : null;
+    // The recursion guard first: the recursive policy form must never coexist with FORCE.
+    for (const sql of PLATFORM_ADMIN_GUARD_UP_SQL) await queryRunner.query(sql);
     for (const sql of PREAUTH_FORCE_UP_SQL) await queryRunner.query(sql);
 
     const end = (await queryRunner.query(PREAUTH_FORCE_STATE_SQL, [[...PREAUTH_FORCE_TABLES]])) as PreauthForceState[];
     const endProblems = preauthForceEndProblems(end);
     if (endProblems.length) throw new Error(`${this.name}: self-check failed (rolled back):\n  ${endProblems.join('\n  ')}`);
+    const policiesAtEnd = (await queryRunner.query(PLATFORM_ADMIN_POLICY_SQL, [[...PLATFORM_ADMIN_GUARDED_POLICIES]])) as PlatformAdminPolicyRow[];
+    const policyEndProblems = platformAdminPolicyProblems(policiesAtEnd, 'end');
+    if (policyEndProblems.length) throw new Error(`${this.name}: platform_admin recursion guard missing (rolled back):\n  ${policyEndProblems.join('\n  ')}`);
 
     if (before) {
       const after = await countsAsSecureOwner(queryRunner);
@@ -64,6 +85,7 @@ export class PreAuthTablesForceOwnerOnly1786721400000 implements MigrationInterf
     await pinSearchPath(queryRunner);
     await this.preflight(queryRunner);
     for (const sql of PREAUTH_FORCE_DOWN_SQL) await queryRunner.query(sql);
+    for (const sql of PLATFORM_ADMIN_GUARD_DOWN_SQL) await queryRunner.query(sql);
   }
 
   /** Refuses unless the session can act as rab_secure_owner. Returns whether it may also SET ROLE to it (self-check 3). */

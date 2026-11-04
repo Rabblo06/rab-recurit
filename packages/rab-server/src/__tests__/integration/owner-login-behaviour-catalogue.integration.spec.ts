@@ -251,4 +251,32 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     ]);
     await expect(owner.query(`SELECT rolpassword FROM pg_authid LIMIT 1`)).rejects.toThrow(/permission denied/);
   });
+
+  it('BC-18: ACCEPTED (owner, 2026-11-04) — direct writes to the 7 pre-auth tables crewflow_app could not write are not refused', async () => {
+    // Expected difference, documented — not a passing security control: the database no longer refuses these writes for
+    // the owner login; RLS still confines them to the bound tenant, and the app-level check
+    // (tools/check-protected-table-writes.cjs) keeps every write in its owning service.
+    const lost: Array<[string, string]> = [
+      ['login_handoff', 'DELETE'],
+      ['organisation_invitation', 'DELETE'],
+      ['released_host_label', 'DELETE'],
+      ['user_auth_identity', 'DELETE'],
+      ['user_session', 'DELETE'],
+      ['member_invitation', 'DELETE'],
+      ['email_change_request', 'DELETE'],
+      ['login_handoff', 'INSERT'],
+      ['organisation_invitation', 'UPDATE'],
+      ['released_host_label', 'UPDATE'],
+    ];
+    for (const [table, op] of lost) {
+      const [r] = await q(owner)(
+        `SELECT has_table_privilege('crewflow_app', $1::regclass, $2) AS app, has_table_privilege($1::regclass, $2) AS me`,
+        [`core."${table}"`, op],
+      );
+      expect({ table, op, ...r }).toEqual({ table, op, app: false, me: true });
+    }
+    // The X2 statement: refused (42501) for crewflow_app, accepted for the owner login; without tenant context RLS leaves 0 rows.
+    const result = await rolledBack(owner, () => owner.query(`DELETE FROM core.member_invitation`));
+    expect(result.rowCount).toBe(0);
+  });
 });

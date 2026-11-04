@@ -402,13 +402,24 @@ INSERT INTO ${other.schema}.job_role(organisation_id, workspace_id, name) VALUES
     assert(/\[jobs\].*email/i.test(logsOf('worker-a')), 'jobs process did not log the email work');
   });
 
-  await step('20', 'PDF rendering (system Chromium) as the jobs identity under the read-only root', async () => {
-    const r = execAs('worker-a', '1000:1000', 'cd /app && HOME=/tmp/crewflow-jobs TMPDIR=/tmp/crewflow-jobs CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium CHROMIUM_NO_SANDBOX=true node -e "require(\\"/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js\\").renderHtmlToPdf(\\"<h1>bundle test</h1>\\").then(b=>console.log(\\"pdf bytes=\\"+b.length+\\" magic=\\"+b.subarray(0,5).toString()),e=>{console.error(\\"render failed: \\"+e.message);process.exit(1)})"');
-    assert(/pdf bytes=\d+ magic=%PDF-/.test(r.out), 'render failed');
-    const leftovers = procTable('worker-a').filter((p) => /chrom/i.test(p.cmd));
-    write(`chromium processes left after render: ${leftovers.length}`);
-    assert(leftovers.length === 0, 'chromium left running');
-    return { status: 'PASS', note: 'renderer smoke only — a scheduled report-PDF job needs shift/attendance fixtures (see report)' };
+  await step('20', 'PDF rendering (native, no browser) as the jobs identity under the read-only root', async () => {
+    // P5: the Worker image has no browser. Render a small final timesheet through the production data-in seam with the
+    // native renderer, as the jobs identity, and prove that no browser binary exists and no extra process was started.
+    const prog = [
+      "const u=require('/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js')",
+      "if(typeof u.renderHtmlToPdf==='function')throw new Error('the Chromium renderer is still exported')",
+      "if(typeof u.renderReportPdf!=='function')throw new Error('no renderReportPdf: the native renderer has not landed')",
+      "const data={venueName:'bundle test',roleName:'Bar Staff',startsAt:'2026-11-03T17:00:00.000Z',endsAt:'2026-11-03T23:00:00.000Z',shiftReference:'BUNDLE-20',timezone:'Europe/London',generatedAt:'2026-11-03T12:00:00.000Z',finalisedByName:'QA',finalisedAt:'2026-11-03T23:30:00.000Z',staff:[]}",
+      "u.renderReportPdf({kind:'final-timesheet',data},Object.assign({},process.env,{PDF_RENDERER:'native'})).then(b=>console.log('pdf bytes='+b.length+' magic='+Buffer.from(b).subarray(0,5).toString()),e=>{console.error('render failed: '+e.message);process.exit(1)})",
+    ].join(';');
+    const r = execAs('worker-a', '1000:1000', `cd /app && HOME=/nonexistent TMPDIR=/tmp/crewflow-jobs node -e "${prog}"`);
+    assert(/pdf bytes=\d+ magic=%PDF-/.test(r.out), 'native render failed');
+    const browser = execAs('worker-a', '1000:1000', 'for p in /usr/bin/chromium /usr/bin/chromium-browser /usr/lib/chromium; do test -e "$p" && echo "present $p"; done; true');
+    const leftovers = procTable('worker-a').filter((p) => /chrom|playwright/i.test(p.cmd));
+    write(`browser paths: ${browser.out.trim() || 'none'}; browser processes: ${leftovers.length}`);
+    assert(!/present/.test(browser.out), 'a browser binary is in the Worker image');
+    assert(leftovers.length === 0, 'a browser process is running');
+    return { status: 'PASS', note: 'renderer smoke only; 20b covers the real scheduled report job' };
   });
 
   await step('20b', 'Real scheduled pre-shift report job: PDF rendered, stored and emailed by the bundled jobs process', async () => {

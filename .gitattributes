@@ -4,7 +4,9 @@
 *.jpeg binary
 *.gif binary
 *.ico binary
+*.pdf binary
 *.jks binary
 *.p8 binary
 *.p12 binary
 /.yarn/releases/** binary
+*.ttf binary

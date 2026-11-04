@@ -14,6 +14,9 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json', isolatedModules: true }],
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
+  // @react-pdf/renderer is ESM-only; Jest 29's module runtime cannot load it. The mapping hands specs the same package
+  // loaded through Node's own require(esm), exactly as the compiled Worker loads it (see the helper's header).
+  moduleNameMapper: { '^@react-pdf/renderer$': '<rootDir>/src/__tests__/helpers/react-pdf-node-loader.ts' },
   // Fails the run before any fixture is written unless the TEST_* pair is valid and agrees (live identity proof included).
   globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],
@@ -24,6 +27,7 @@ export default {
   // + dist/*.d.ts is what this package's imports actually resolve to).
   transformIgnorePatterns: ['/node_modules/', '/dist-cjs/', '/dist-esm/', '/rab-server/dist/'],
   // Opt-in load tests (RAB_LOAD_TEST=1, see src/__tests__/load) never run in the default suite — same convention as rab-server's own jest.config.ts.
-  testPathIgnorePatterns: ['/node_modules/', '/__tests__/load/'],
+  // The PDF renderer-migration harness (src/__tests__/pdf-equality) has its own database-free config: `test-pdf-equality`.
+  testPathIgnorePatterns: ['/node_modules/', '/__tests__/load/', '/__tests__/pdf-equality/'],
   coverageDirectory: '../../coverage/packages/rab-worker',
 };

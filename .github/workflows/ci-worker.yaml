@@ -40,6 +40,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # P5 (PDF renderer migration): the Worker renders PDFs natively. Fails if @rab/worker or @rab/server declares or
+      # imports a browser package again (tests included). Scoped to those two packages only: the web e2e suite's own
+      # @playwright/test (ci-e2e) is not affected. Dependency-free, so it runs before the install.
+      - name: No browser dependency in the Worker or the server code it runs
+        run: node tools/check-no-browser-in-worker.cjs
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
       # The lint target is `tsc --noEmit`, which resolves @rab/shared and @rab/emails through their built dist: build them
@@ -48,23 +53,28 @@ jobs:
         run: npx nx run-many -t build -p rab-shared,rab-emails
       - run: npx nx run-many -t lint -p rab-worker,rab-server,rab-shared
       - uses: ./.github/actions/disposable-postgres
-      - name: Build the test database with the restricted migrator (fresh install, with its security checks)
+      # Owner-login architecture (owner decision 2026-11-04): the suites run on a database built the way every install is
+      # now built: the provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) and Agent 1's migrate child as
+      # crewflow_owner, followed by the head-state checks (ledger = chain, 1786721330000 absent, B3, reachability, golden
+      # posture). The legacy restricted-migrator build (CF-41) keeps its own job in ci-migration-security.yaml until PR #9.
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
         run: |
-          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
         env:
-          MIGRATION_SECURITY_SCENARIOS: fresh
-          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
-          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/test-database.env
-      # The worker renders report PDFs with Playwright's Chromium (queues/rab-reports/render-pdf.util.ts); ci-e2e installs it
-      # the same way. Without it reports stay pending and the report-email suites fail.
-      - name: Install Playwright Chromium for the PDF renderer
-        run: npx playwright install --with-deps chromium
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      # P5: no browser install. The Worker renders report PDFs natively (queues/rab-reports/render-pdf.util.ts); a test
+      # that needed Chromium here would fail, which is the point (check-no-browser-in-worker.cjs above also refuses one).
       - name: Worker tests
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
-          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
+          # TEST_DATABASE_URL = crewflow_owner (the one runtime login); TEST_DATABASE_URL_UNPOOLED = the cluster superuser
+          # (fixtures only). The Twenty catalogue suites run in ci-twenty-tests.yaml, not here.
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"  # a helper refusal fails the step here, not later
           eval "$test_env"
+          # The owner password is inside TEST_DATABASE_URL now; the raw value never reaches a test process or the live API.
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
           # In band: the integration suites share ONE database, and the email/offer dispatchers of one suite claim rows
           # another suite created (first real GitHub run, PR #19). One suite at a time, as the local regression runs them.
           # worker-scan-adapters runs FIRST, alone, on the still-empty database: it drives every real scan cycle UNSCOPED
@@ -75,9 +85,109 @@ jobs:
           # makes the first pattern match nothing fails the step ("No tests found"), never silently skips the suite. The second
           # run excludes it with a path regex, NOT --testPathIgnorePatterns (that CLI flag replaces jest.config's list and
           # would start running the __tests__/load suites).
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=worker-scan-adapters\.integration'
-          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 '--testFile=^(?!.*worker-scan-adapters\.integration)'
+          # Both runs always execute (the first failing must not hide the second's results); the step fails if either did.
+          status=0
+          mkdir -p "${RUNNER_TEMP}/jest-results"
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 --output-style=stream '--testFile=worker-scan-adapters\.integration' \
+            --json "--outputFile=${RUNNER_TEMP}/jest-results/worker-scan-adapters.json" || status=$?
+          npx nx run-many -t test -p rab-worker --runInBand --testTimeout=180000 --output-style=stream '--testFile=^(?!.*worker-scan-adapters\.integration)' \
+            --json "--outputFile=${RUNNER_TEMP}/jest-results/worker-rest.json" || status=$?
+          node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
+          exit $status
       - run: npx nx run-many -t build -p rab-worker,rab-server,rab-shared,rab-ui
+      - uses: ./.github/actions/save-cache
+        if: always()
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # E5 (Twenty Mode M0-H, 2026-11-04): the gated Phase D suites, in SEPARATED mode, on a database the restricted migrator
+  # built. Before E5 every one of them reported "skipped" in CI: PHASE_D_SQL_APPROVED and TEST_DATABASE_WORKER_URL were
+  # never set, and the harness gave crewflow_worker a random password nobody else knew. Now disposable-postgres exports
+  # CREWFLOW_WORKER_BOOTSTRAP_PASSWORD, the harness creates crewflow_worker with it (the reviewed operator bootstrap step),
+  # and migration-security-test-env.cjs --with-worker-login emits TEST_DATABASE_WORKER_URL for this job only.
+  # PHASE_D_D5=before ONLY: 1786721330000 (gated-migrations/, never in the chain) stays excluded; the job asserts that the
+  # ledger does not contain it and phase-d-ci-suite-check.cjs refuses any other PHASE_D_D5 value. That checker also proves
+  # the required suites actually ran (passed > 0) rather than skipped, from jest's JSON result.
+  phase-d:
+    needs: changed
+    if: needs.changed.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DB_TARGET: local
+      REDIS_URL: redis://localhost:6379
+      EMAIL_DRIVER: LOGGER
+      PHASE_D_SQL_APPROVED: 'true'
+      PHASE_D_D5: before
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries (the database build imports them)
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - uses: ./.github/actions/disposable-postgres
+      # Owner-login architecture: E5's gated Phase D suites now run "Phase D under one login" (M0-H F2). The in-place gates
+      # accept only crewflow_owner, so the separated crewflow_worker login is refused at Worker boot (deploy 852c8991:
+      # "connects as crewflow_worker, a schema role ... Every process connects as crewflow_owner"). The database is the
+      # owner-login install (ci-db) and TEST_DATABASE_WORKER_URL is the owner URL (twenty-test-env.cjs
+      # --worker-login-is-owner). Suites that assert the separated crewflow_worker identity or its exclusive privileges are
+      # I/P-class differences: they are migrated through the behaviour-change catalogue (BC-08/BC-10), never flipped.
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: The gated migration 1786721330000 is NOT in the ledger (PHASE_D_D5=before is the real state)
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          applied="$(docker exec disposable-postgres psql -U ci_bootstrap -d "$OWNER_DB" -tAc \
+            "SELECT count(*) FROM core.migrations WHERE timestamp = 1786721330000 OR name LIKE '%1786721330000%'")"
+          phase_d="$(docker exec disposable-postgres psql -U ci_bootstrap -d "$OWNER_DB" -tAc \
+            "SELECT count(*) FROM core.migrations WHERE timestamp IN (1786721300000, 1786721310000, 1786721320000, 1786721340000, 1786721350000)")"
+          worker="$(docker exec disposable-postgres psql -U ci_bootstrap -d "$OWNER_DB" -tAc \
+            "SELECT count(*) FROM pg_roles r WHERE r.rolname = 'crewflow_worker' AND NOT r.rolsuper AND NOT r.rolbypassrls AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid = r.oid)")"
+          echo "1786721330000 applied: ${applied}; approved Phase D migrations applied: ${phase_d}/5; crewflow_worker schema role with 0 members: ${worker}"
+          [ "$applied" = 0 ] || { echo "1786721330000 is in the ledger: refusing" >&2; exit 1; }
+          [ "$phase_d" = 5 ] || { echo "the approved Phase D migrations are not all applied" >&2; exit 1; }
+          [ "$worker" = 1 ] || { echo "crewflow_worker is missing, privileged or has members (B3)" >&2; exit 1; }
+      # P5: no browser install; the Worker renders report PDFs natively.
+      - name: Phase D server suites (one owner login)
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap --worker-login-is-owner)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
+          # --skip-nx-cache: the opt-in lives in the environment, which is not part of nx's task hash; a replayed result
+          # from a run without it would be a "skipped" run reported as green, the exact failure E5 exists to remove.
+          status=0
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=(phase-d-|worker-identity-boot-gates\.integration)' --json "--outputFile=${RUNNER_TEMP}/phase-d-server.json" || status=$?
+          node packages/rab-server/src/database/typeorm/scripts/phase-d-ci-suite-check.cjs server "${RUNNER_TEMP}/phase-d-server.json" || status=1
+          exit $status
+      - name: Phase D worker suites (one owner login, WORKER_CLAIM_MODE=global)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap --worker-login-is-owner)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD
+          status=0
+          npx nx run-many -t test -p rab-worker --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=(phase-d-|dq4b-timer-triggers\.integration|push-dispatch-global-publish-failure\.integration)' --json "--outputFile=${RUNNER_TEMP}/phase-d-worker.json" || status=$?
+          node packages/rab-server/src/database/typeorm/scripts/phase-d-ci-suite-check.cjs worker "${RUNNER_TEMP}/phase-d-worker.json" || status=1
+          exit $status
       - uses: ./.github/actions/save-cache
         if: always()
       - name: Stop PostgreSQL

@@ -30,7 +30,7 @@
       "dependsOn": ["^build"],
       "outputs": ["{workspaceRoot}/packages/rab-worker/dist"],
       "options": {
-        "command": "tsc -p packages/rab-worker/tsconfig.app.json",
+        "command": "tsc -p packages/rab-worker/tsconfig.app.json && node -e \"require('fs').cpSync('packages/rab-worker/src/queues/rab-reports/native/assets', 'packages/rab-worker/dist/queues/rab-reports/native/assets', { recursive: true })\"",
         "cwd": "."
       }
     },
@@ -39,6 +39,14 @@
       "dependsOn": ["^build"],
       "options": {
         "command": "tsc --noEmit -p packages/rab-worker/tsconfig.app.json"
+      }
+    },
+    "test-pdf-equality": {
+      "executor": "@nx/jest:jest",
+      "dependsOn": ["^build"],
+      "options": {
+        "jestConfig": "packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts",
+        "runInBand": true
       }
     },
     "test": {

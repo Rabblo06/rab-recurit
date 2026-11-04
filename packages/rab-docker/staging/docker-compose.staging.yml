@@ -1,39 +1,28 @@
-# ISOLATED STAGING override for docker-compose.image.yml (owner decision R4). Plain `docker compose` on the staging VM:
+# ISOLATED STAGING override for docker-compose.image.yml (owner decision R4), on the OWNER LOGIN. Plain `docker compose`
+# on the staging VM:
 #
 #   docker compose --env-file /etc/crewflow-staging/compose.env \
 #     -f docker-compose.image.yml -f staging/docker-compose.staging.yml config --quiet        # render check
-#   ... up -d                                                                                  # see the runbook
+#   ... then the controlled release (docs/release/OWNER-LOGIN-DEPLOYMENT.md section 3)
 #
-# Runbook: packages/rab-docker/docs/release/STAGING-ENVIRONMENT-RUNBOOK.md. Templates (placeholders only): staging/env/.
+# Runbooks: docs/release/OWNER-LOGIN-DEPLOYMENT.md and STAGING-ENVIRONMENT-RUNBOOK.md. Templates: env/*.example (the same
+# templates as production, filled with STAGING-ONLY values: no value is shared with production or with the temporary
+# deployment; staging has its own crewflow_owner login, database, deployment id, APP_SECRET, Redis, S3 and email).
 #
-# What it changes, and nothing else (no runtime security key, no image, no dependency condition):
+# What it changes, and nothing else (no runtime security key, no image, no dependency condition, no env file):
 #   - the Compose project name, so a staging stack can never be mistaken for (or collide with) a production one;
-#   - each runtime service reads ITS OWN environment file from the host secret directory (root-owned 0700, files 0600).
-#     Staging-only credentials: no value is shared with production or with the temporary deployment;
-#   - the staging PostgreSQL CA certificate (not a secret) is mounted READ-ONLY as one file into rab-api, rab-worker and
-#     rab-migrate, for sslmode=verify-full (PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in each env file). This is the
-#     only bind mount on the runtime services;
 #   - STORAGE_KEY_PREFIX=staging, so an object key copied into the wrong bucket is recognisable.
-# rab-migrate keeps the variant's .env.migrate next to the compose file (present only for the release window, 0600).
+# The env files (${CREWFLOW_SECRETS_DIR}/database.env shared by rab-api, rab-worker and rab-migrate; runtime.env for
+# rab-api and rab-worker) and the PostgreSQL CA mount now come from docker-compose.image.yml itself. The separated-mode
+# per-service files (api.env / worker.env / .env.migrate) are no longer read; their templates in staging/env/ are
+# superseded and removed in the final clean-up PR (#9).
 name: crewflow-staging
 
 services:
   rab-api:
-    env_file:
-      - ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/api.env
-    volumes:
-      - ${CREWFLOW_PG_CA_FILE:?CREWFLOW_PG_CA_FILE must name the staging PostgreSQL CA certificate}:/run/crewflow/pg-ca.crt:ro
     environment:
       STORAGE_KEY_PREFIX: staging
 
   rab-worker:
-    env_file:
-      - ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/worker.env
-    volumes:
-      - ${CREWFLOW_PG_CA_FILE:?CREWFLOW_PG_CA_FILE must name the staging PostgreSQL CA certificate}:/run/crewflow/pg-ca.crt:ro
     environment:
       STORAGE_KEY_PREFIX: staging
-
-  rab-migrate:
-    volumes:
-      - ${CREWFLOW_PG_CA_FILE:?CREWFLOW_PG_CA_FILE must name the staging PostgreSQL CA certificate}:/run/crewflow/pg-ca.crt:ro

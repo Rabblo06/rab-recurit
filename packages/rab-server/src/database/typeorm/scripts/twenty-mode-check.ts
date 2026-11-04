@@ -48,6 +48,9 @@ export const MIGRATION_LOCK_KEY_SQL = `x'637265776d696772'::bigint`;
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..');
 const DIST = join(REPO_ROOT, 'packages', 'rab-server', 'dist', 'database', 'typeorm', 'scripts');
 const DEFAULT_ENTRYPOINT = join(DIST, 'migrate', 'twenty', 'twenty-migrate.js');
+/** The same child from source (ts-node), for CI jobs that build the test database before `nx build rab-server`. */
+const SOURCE_ENTRYPOINT = join(__dirname, 'migrate', 'twenty', 'twenty-migrate.ts');
+const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
 const DEPLOY_PREPARE = join(DIST, 'deploy-prepare.js');
 const OWNER_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql');
 const TRANSITION_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql');
@@ -138,8 +141,9 @@ function context(): Ctx {
   const ownerPassword = process.env.CREWFLOW_OWNER_BOOTSTRAP_PASSWORD?.trim();
   if (!ownerPassword || !/^[A-Za-z0-9_-]{24,128}$/.test(ownerPassword)) throw new Refusal('CREWFLOW_OWNER_BOOTSTRAP_PASSWORD (24-128 [A-Za-z0-9_-]) is required');
   const container = process.env.TWENTY_PG_CONTAINER?.trim() || null;
-  if (container && !/^twa-t5-pg1[6-9][a-z-]*$|^twenty-pg$/.test(container)) throw new Refusal('TWENTY_PG_CONTAINER is not a harness container name');
-  return { admin, ownerPassword, entrypoint: process.env.TWENTY_MIGRATE_ENTRYPOINT || DEFAULT_ENTRYPOINT, container };
+  // twa-t5-*: Agent 5's local clusters; twenty-pg / disposable-postgres: the CI containers (ci-twenty-tests, disposable-postgres action).
+  if (container && !/^twa-t5-pg1[6-9][a-z-]*$|^twenty-pg$|^disposable-postgres$/.test(container)) throw new Refusal('TWENTY_PG_CONTAINER is not a harness container name');
+  return { admin, ownerPassword, entrypoint: process.env.TWENTY_MIGRATE_ENTRYPOINT || (existsSync(DEFAULT_ENTRYPOINT) ? DEFAULT_ENTRYPOINT : SOURCE_ENTRYPOINT), container };
 }
 
 async function assertDisposableCluster(ctx: Ctx): Promise<{ major: number }> {
@@ -370,7 +374,10 @@ export function runChild(
 ): Promise<ChildResult> {
   const started = Date.now();
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // A .ts entrypoint (the source child, before the dist build) runs through ts-node --transpile-only, as the repo's
+    // migration entrypoints do (never tsx: decorator metadata, CLAUDE.md "Resolved gotchas").
+    const argv = script.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, script] : [script];
+    const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     const lines: string[] = [];
     const events: ChildResult['events'] = [];
     let result: ChildResult['result'] = null;
@@ -444,7 +451,8 @@ function summary(c: ChildResult): string {
   const res = c.result;
   return (
     `exit=${c.exitCode}${c.killed ? ' (killed)' : ''} outcome=${res?.outcome ?? '-'} state=${res?.state ?? '-'} applied=${res?.applied?.length ?? '-'} ` +
-    `pending=${res?.pending?.length ?? '-'} serve=${res?.serve ?? '-'} failed=${res?.failedMigration ?? '-'} events=${c.events.length} ${c.ms}ms`
+    `pending=${res?.pending?.length ?? '-'} serve=${res?.serve ?? '-'} failed=${res?.failedMigration ?? '-'} events=${c.events.length} ${c.ms}ms` +
+    (c.exitCode !== 0 && res?.reason ? ` reason=${redact(String(res.reason)).slice(0, 220)}` : '')
   );
 }
 
@@ -523,15 +531,45 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   const child = (db: string, extra: Record<string, string | undefined> = {}, opts: Parameters<typeof runChild>[2] = {}) =>
     runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, db), extra), opts);
   const deploymentId = randomUUID();
+  const declared = dbName('i1d');
   const head = dbName('i1');
   const tpl = dbName('tpl');
   const idEnv = { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: deploymentId };
+  let bound = false;
+  /**
+   * A CHAIN-PARTIAL database built FROM SCRATCH: empty database, provider grant, the child with STOP_BEFORE. Never a
+   * CREATE DATABASE ... TEMPLATE clone: a clone does not copy the database ACL (pg_database.datacl), so the bootstrap's
+   * GRANT CREATE ON DATABASE ... TO rab_owner would be missing and Phase 0b fails for a reason no real install has
+   * (harness artefact found in CI, PR #73 first run).
+   */
+  const partial = async (db: string, stopBefore: string, r: ScenarioReport) => {
+    await createEmptyDatabase(ctx, db);
+    await providerStep(ctx, db, r);
+    const c = await child(db, { CREWFLOW_MIGRATION_TEST_STOP_BEFORE: stopBefore });
+    const expected = chainMigrationNames().filter((n) => Number(n.slice(-13)) < Number(stopBefore));
+    const s = await readState(ctx, db);
+    // A seam-stopped install is a half-installed database: the post-checks fail (68) and it never serves. Exit 0 or 68.
+    expect(r, c.exitCode === EXIT.ok || (c.exitCode === EXIT.postCheck && c.result?.serve === false), `partial install before ${stopBefore}: exit 0 or 68, never serving a half install (${summary(c)})`);
+    expect(r, JSON.stringify(s.ledger) === JSON.stringify(expected), `ledger = exactly the ${expected.length} migrations before ${stopBefore} (got ${s.ledger.length})`);
+  };
 
-  await step('TW-I1', 'fresh install on an EMPTY database through the real provider SQL, owner URL only', async (r) => {
+  await step('TW-I1d', 'fresh NON-production install that DECLARES its deployment (test/<id>): installs and auto-binds the marker (D6)', async (r) => {
+    r.database = declared;
+    await createEmptyDatabase(ctx, declared);
+    await providerStep(ctx, declared, r);
+    const c = await child(declared, idEnv);
+    r.evidence.push(`child: ${summary(c)}`);
+    expect(r, c.exitCode === EXIT.ok && c.result?.serve === true, 'exit 0, serve=true');
+    const s = await readState(ctx, declared);
+    bound = s.marker?.bound === true && s.marker.deploymentId === deploymentId;
+    expect(r, bound, `marker auto-bound to the declared id (${s.marker?.deploymentId ? 'bound' : 'not bound'})`);
+  });
+
+  await step('TW-I1', 'fresh install on an EMPTY database through the real provider SQL, owner URL only (no deployment declaration)', async (r) => {
     r.database = head;
     await createEmptyDatabase(ctx, head);
     await providerStep(ctx, head, r);
-    const c = await child(head, idEnv);
+    const c = await child(head, {});
     r.evidence.push(`child: ${summary(c)}`);
     expect(r, c.exitCode === EXIT.ok && c.result?.exitCode === 0 && c.result?.serve === true, 'exit 0, result exitCode 0, serve=true');
     expect(r, c.result?.state === 'EMPTY', `classified EMPTY (got ${c.result?.state})`);
@@ -540,13 +578,13 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, c.events.some((e) => e.phase === 'A') && c.events.some((e) => e.phase === 'B'), 'phase A and phase B both ran');
     neverLoadedGated(r, c);
     const s = await assertHeadState(ctx, head, r);
-    expect(r, s.marker?.bound === true && s.marker.deploymentId === deploymentId, `deployment marker auto-bound to the declared id on the fresh install (${s.marker?.deploymentId === deploymentId ? 'match' : 'mismatch'})`);
+    expect(r, s.marker !== null && !s.marker.bound, 'no declaration: the deployment marker exists and stays unbound (non-production)');
   });
 
   await step('S1', 'second boot: CURRENT, nothing applied, ledger byte-identical, post-checks ran', async (r) => {
     r.database = head;
     const before = await readState(ctx, head);
-    const c = await child(head, idEnv);
+    const c = await child(head, {});
     r.evidence.push(`child: ${summary(c)}`);
     expect(r, c.exitCode === EXIT.ok && c.result?.state === 'CURRENT' && (c.result?.applied ?? ['?']).length === 0, 'exit 0, CURRENT, applied nothing');
     expect(r, c.lines.some((l) => /post-checks passed/.test(l)), 'post-checks ran on a start with nothing pending (C-2)');
@@ -555,7 +593,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   });
 
   await step('ID-2', 'deployment identity: a bound marker refuses a different id, a missing id and no declaration (67)', async (r) => {
-    r.database = head;
+    r.database = declared;
+    if (!bound) {
+      r.failures.push('FAIL: no bound marker to test (TW-I1d did not bind; see its failure)');
+      return;
+    }
+    const head = declared;
     const wrong = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: randomUUID() });
     expect(r, wrong.exitCode === EXIT.identity && wrong.result?.serve === false, `different CREWFLOW_DEPLOYMENT_ID: exit 67, serve=false (${summary(wrong)})`);
     const missing = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test' });
@@ -564,6 +607,8 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, none.exitCode === EXIT.identity, `no deployment declaration at all on a bound database: exit 67 (${summary(none)})`);
     const s = await readState(ctx, head);
     expect(r, s.marker?.deploymentId === deploymentId, 'marker still bound to the original id');
+    const same = await child(head, idEnv);
+    expect(r, same.exitCode === EXIT.ok, `the declared id itself still starts (${summary(same)})`);
   });
 
   await step('RB-1', 'old-image rollback: a NEWER ledger (unknown migration) is AHEAD: exit 0, nothing applied, never rewound', async (r) => {
@@ -572,7 +617,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       const before = await readState(ctx, head);
       for (const policy of ['refuse', 'continue-if-compatible']) {
-        const c = await child(head, { ...idEnv, CREWFLOW_UPGRADE_FAILURE_POLICY: policy });
+        const c = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: policy });
         expect(r, c.exitCode === EXIT.ok && c.result?.state === 'AHEAD' && (c.result?.applied ?? ['?']).length === 0, `policy ${policy}: exit 0, AHEAD, applied nothing (${summary(c)})`);
         expect(r, c.lines.some((l) => /AHEAD/.test(l) && /WARNING/.test(l)), 'a WARNING names the AHEAD ledger');
       }
@@ -587,14 +632,14 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     r.database = head;
     await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log DISABLE ROW LEVEL SECURITY`));
     try {
-      const refuse = await child(head, { ...idEnv, CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
+      const refuse = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
       expect(r, refuse.exitCode === EXIT.postCheck && refuse.result?.serve === false, `refuse: exit 68, serve=false (${summary(refuse)})`);
-      const cont = await child(head, { ...idEnv, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
+      const cont = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
       expect(r, cont.exitCode !== EXIT.ok && cont.exitCode !== EXIT.degraded && cont.result?.serve === false, `continue-if-compatible: not 0/70, serve=false (${summary(cont)}; checks ${checksSummary(cont)})`);
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log ENABLE ROW LEVEL SECURITY`));
     }
-    const ok = await child(head, idEnv);
+    const ok = await child(head, {});
     expect(r, ok.exitCode === EXIT.ok, `after repair: exit 0 (${summary(ok)})`);
   });
 
@@ -606,7 +651,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       // sql-injection-reviewed: MIGRATION_LOCK_KEY_SQL is a code constant (the crewmigr bigint literal), no input
       await holder.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY_SQL})`);
-      const c = await child(head, { ...idEnv, CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5' }, { timeoutMs: 120_000 });
+      const c = await child(head, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5' }, { timeoutMs: 120_000 });
       expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `exit 69, serve=false (${summary(c)})`);
       expect(r, c.ms < 60_000, `gave up within the bounded wait (${c.ms} ms)`);
     } finally {
@@ -709,24 +754,21 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     }
   });
 
-  await step('TPL', `CHAIN-PARTIAL template: fresh install stopped before ${STOP_BEFORE} (test seam)`, async (r) => {
+  await step('TPL', `CHAIN-PARTIAL: fresh install stopped before ${STOP_BEFORE} (test seam), built from scratch`, async (r) => {
     r.database = tpl;
-    await createEmptyDatabase(ctx, tpl);
-    await providerStep(ctx, tpl, r);
-    const c = await child(tpl, { CREWFLOW_MIGRATION_TEST_STOP_BEFORE: STOP_BEFORE });
-    r.evidence.push(`child: ${summary(c)}`);
-    expect(r, c.exitCode === EXIT.ok, 'exit 0');
-    const s = await readState(ctx, tpl);
-    const expected = chainMigrationNames().filter((n) => Number(n.slice(-13)) < Number(STOP_BEFORE));
-    expect(r, JSON.stringify(s.ledger) === JSON.stringify(expected), `ledger = exactly the ${expected.length} migrations before ${STOP_BEFORE} (got ${s.ledger.length})`);
+    await partial(tpl, STOP_BEFORE, r);
   });
 
-  await step('BEHIND-1', 'pending in token mode: 65 without/with a wrong token; deploy-prepare check prints the token (exit 3); the right token applies to head', async (r) => {
+  await step('BEHIND-1', 'pending on a NON-fresh database in token mode: 65 without/with a wrong token; deploy-prepare check prints the token (exit 3); the right token applies to head', async (r) => {
     const db = dbName('behind');
     r.database = db;
-    await cloneDatabase(ctx, tpl, db);
+    // Past the ROW_COPY trio, then tenant data: NOT a proven fresh install (a proven fresh install may apply the whole chain
+    // without a token by design, owner rule; locked-migration-runner.ts step 3c), so the per-release token is the gate.
+    await partial(db, FAIL_AT.slice(-13), r);
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 behind tenant', $2)`, [randomUUID(), `twa-t5-behind-${RUN_ID}`]));
     const before = await readState(ctx, db);
     const none = await child(db, { CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' });
+    expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), `token mode WITHOUT a token applied nothing (${none.events.filter((e) => e.event === 'recorded').length} recorded)`);
     expect(r, none.exitCode === EXIT.behind && none.result?.serve === false && (none.result?.pending?.length ?? 0) > 0, `token mode, no approval: exit 65, serve=false, pending listed (${summary(none)})`);
     const wrong = await child(db, { CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_MIGRATION_APPROVED: `sha256:${'0'.repeat(64)}` });
     expect(r, wrong.exitCode === EXIT.behind, `token mode, wrong token: exit 65 (${summary(wrong)})`);
@@ -752,7 +794,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   await step('SHIM-1', 'the D3(b) ROW_COPY shim refuses a database that ever held tenant data; nothing applied, the data intact', async (r) => {
     const db = dbName('shim');
     r.database = db;
-    await cloneDatabase(ctx, tpl, db);
+    await partial(db, STOP_BEFORE, r);
     const org = randomUUID();
     await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 tenant', $2)`, [org, `twa-t5-${RUN_ID}`]));
     const before = await readState(ctx, db);
@@ -770,7 +812,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   await step('UPF-0', `an interrupted FIRST install (CHAIN-PARTIAL, still provably fresh) that fails (FAIL_AT=${FAIL_AT}) never serves, even under continue-if-compatible`, async (r) => {
     const db = dbName('upf0');
     r.database = db;
-    await cloneDatabase(ctx, tpl, db);
+    await partial(db, STOP_BEFORE, r);
     const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
     expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `exit 66, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(-120)})`);
   });
@@ -778,10 +820,11 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   await step('UPF-1', `failed UPGRADE of a database holding tenant data (FAIL_AT=${FAIL_AT}): refuse → 66; continue-if-compatible → 70 only if every check passes; then recovery`, async (r) => {
     const db = dbName('upf');
     r.database = db;
-    await cloneDatabase(ctx, tpl, db);
+    await partial(db, STOP_BEFORE, r);
     // Bring it past the ROW_COPY trio while it is still provably fresh, then make it a real tenant database.
     const pre = await child(db, { CREWFLOW_MIGRATION_TEST_STOP_BEFORE: FAIL_AT.slice(-13) });
-    expect(r, pre.exitCode === EXIT.ok, `advanced to just before ${FAIL_AT} (${summary(pre)})`);
+    const preLedger = (await readState(ctx, db)).ledger;
+    expect(r, (pre.exitCode === EXIT.ok || pre.exitCode === EXIT.postCheck) && preLedger.length === chainMigrationNames().filter((n) => Number(n.slice(-13)) < Number(FAIL_AT.slice(-13))).length, `advanced to just before ${FAIL_AT} (${summary(pre)})`);
     await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 upf tenant', $2)`, [randomUUID(), `twa-t5-upf-${RUN_ID}`]));
     const refuse = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
     expect(r, refuse.exitCode === EXIT.failed && refuse.result?.serve === false, `refuse: exit 66, serve=false (${summary(refuse)})`);
@@ -817,7 +860,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     step(id, title, async (r) => {
       const db = dbName(id);
       r.database = db;
-      await cloneDatabase(ctx, tpl, db);
+      await partial(db, STOP_BEFORE, r);
       const k = await child(db, {}, { killOn });
       expect(r, k.killed && k.exitCode !== 0, `child killed at ${killOn.event} ${killOn.name}${killOn.delayMs ? ` +${killOn.delayMs}ms` : ''} (${summary(k)})`);
       const freedIn = await waitLockFree(ctx, db, 15_000);
@@ -838,7 +881,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
   await step('S4', 'three replicas start together on a CHAIN-PARTIAL database: one applies, the others wait; all exit 0, no duplicate', async (r) => {
     const db = dbName('s4');
     r.database = db;
-    await cloneDatabase(ctx, tpl, db);
+    await partial(db, STOP_BEFORE, r);
     const runs = await Promise.all([1, 2, 3].map(() => child(db, {})));
     runs.forEach((c, i) => r.evidence.push(`replica ${i + 1}: ${summary(c)}`));
     expect(r, runs.every((c) => c.exitCode === EXIT.ok), 'every replica exits 0');
@@ -929,10 +972,43 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// ci-db: the CI test database, built the owner-login way (replaces the separated restricted-migrator build for the suites)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * One EMPTY disposable database → the real provider SQL (01-crewflow-owner.sql, psql as the cluster superuser) → Agent 1's
+ * migrate child with PG_DATABASE_URL = crewflow_owner only → the head-state assertions (ledger = chain, 1786721330000 absent,
+ * B3, reachability, golden posture) → `OWNER_DB=<name>` written to TWENTY_CI_DB_FILE for the test step, which then runs
+ * `eval "$(node twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"` (TEST_DATABASE_URL = crewflow_owner). Any failed
+ * assertion fails the step: the suites never run on a database the owner-login install did not build correctly.
+ */
+async function ciDatabase(ctx: Ctx, major: number): Promise<number> {
+  const out = process.env.TWENTY_CI_DB_FILE?.trim();
+  if (!out) throw new Refusal('TWENTY_CI_DB_FILE is required');
+  const entry = ctx.entrypoint;
+  const r: ScenarioReport = { id: 'CI-DB', title: 'owner-login test database for the CI suites', status: 'NOT TESTED', pgMajor: major, evidence: [], failures: [] };
+  const db = dbName('ci');
+  r.database = db;
+  await createEmptyDatabase(ctx, db);
+  await providerStep(ctx, db, r);
+  const c = await runChild(entry, childEnvironment(ownerUrl(ctx, db)));
+  r.evidence.push(`child (${entry === SOURCE_ENTRYPOINT ? 'source via ts-node' : 'dist'}): ${summary(c)}`);
+  expect(r, c.exitCode === EXIT.ok && c.result?.state === 'EMPTY' && c.result?.serve === true, 'fresh install: exit 0, EMPTY, serve=true');
+  neverLoadedGated(r, c);
+  if (c.exitCode === EXIT.ok) await assertHeadState(ctx, db, r);
+  else r.failures.push(...c.lines.slice(-8).map((l) => `child: ${l.slice(0, 240)}`));
+  r.status = r.failures.length ? 'FAIL' : 'PASS';
+  log(`${r.id} ${r.status} (${db})`);
+  for (const line of [...r.evidence, ...r.failures]) log(`  ${line}`);
+  if (r.status === 'PASS') writeFileSync(out, `OWNER_DB=${db}\n`);
+  return r.status === 'PASS' ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------------------------------------------------
 
-const SCENARIO_IDS = ['TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
+const SCENARIO_IDS = ['TW-I1d', 'TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
 
 async function main(argv: string[]): Promise<number> {
   const reportIdx = argv.indexOf('--report');
@@ -955,7 +1031,8 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === 'lifecycle' || command === 'scenario') return write(await lifecycle(ctx, major));
   if (command === 'transition') return write(await transition(ctx, major, rest[0] ?? ''));
-  process.stderr.write('usage: twenty-mode-check.ts list | owner-fixture <db> | lifecycle | transition <separated-db> [--report <file>]\n');
+  if (command === 'ci-db') return ciDatabase(ctx, major);
+  process.stderr.write('usage: twenty-mode-check.ts list | owner-fixture <db> | lifecycle | transition <separated-db> | ci-db [--report <file>]\n');
   return 2;
 }
 

@@ -14,19 +14,19 @@
 # Compose passes the shared image as a named build context (`additional_contexts: crewflow-app: service:<api service>`).
 #
 # What this layer changes (and nothing else):
-#   - H2: Chromium lives ONLY here, in the Worker runtime layer. The shared image (the API image) carries no browser,
-#     fonts or CHROMIUM_* settings; this file installs Alpine's chromium + nss/freetype/harfbuzz + fonts from the stable
-#     v3.24 repositories, runs the Chromium/libexpat/Node security floors (packages/rab-docker/rab/security-floors.env,
-#     fail closed) and sets CHROMIUM_EXECUTABLE_PATH / CHROMIUM_NO_SANDBOX / PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD for the
-#     renderer (packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts, the only browser launcher). Every
-#     application layer below is the API image's own (shared, not duplicated);
-#   - H3: the Worker-only production dependencies (today: playwright and playwright-core, the browser driver) are added
-#     to the API image's node_modules, which no longer contains them. The `worker-modules` stage resolves @rab/worker's
-#     production closure from the same lockfile and copies ONLY the packages it adds; it refuses to build unless every
-#     package of the API tree is in the Worker tree at the same path and version (so the API layers are reused unchanged)
-#     and every added package needs no install script or native build (that stage runs none). The final stage proves the
-#     Worker's closure: every import in the Worker, server, shared and emails dist resolves, and no build or test tool is
-#     present (runtime-deps.cjs);
+#   - P5 (PDF renderer migration): NO browser. The Worker renders PDFs natively (@react-pdf/renderer, pure JavaScript,
+#     vendored fonts) inside its own process, so this layer installs no Chromium, no system fonts and no CHROMIUM_* /
+#     PLAYWRIGHT_* settings. Like the API image, it re-runs the security floors with Chromium ABSENT (fail closed if a
+#     future change pulls it back) and libexpat at or above its floor only if something installs it; a second guard
+#     refuses every OS package of the former browser stack by name;
+#   - H3: the Worker-only production dependencies (the native PDF renderer's closure) are added to the API image's
+#     node_modules. The `worker-modules` stage resolves @rab/worker's production closure from the same lockfile and copies
+#     ONLY the packages it adds; it refuses to build unless every package of the API tree is in the Worker tree at the same
+#     path and version (so the API layers are reused unchanged) and every added package needs no install script or native
+#     build (that stage runs none). The final stage proves the Worker's closure: every import in the Worker, server, shared
+#     and emails dist resolves, and no build or test tool, browser driver (playwright, playwright-core) or SWC compiler is
+#     present (runtime-deps.cjs). The whole `@swc/*` scope is banned with one exact exception, `@swc/helpers` (a runtime
+#     helper library fontkit requires; owner decision D5/T2, review L-4);
 #   - nothing about /app ownership any more: since H1 the shared image already ships application code and dependencies
 #     root-owned and not group/other-writable, so neither child identity can rewrite code the other imports. This build
 #     re-verifies that and REFUSES a base image that does not meet it (e.g. one built from an older Dockerfile, which
@@ -35,11 +35,11 @@
 #     migrates since Phase B; migrations run only in rab-migrate) and never belong in this service;
 #   - a dedicated provisioner identity (10001:10001), separate 0700 temp/home directories, and per-child health
 #     directories (writable only by their own child) are created;
-#   - tini becomes PID 1 (reaps orphaned Chromium processes, forwards signals) and the dependency-free launcher runs as
+#   - tini becomes PID 1 (reaps orphaned processes, forwards signals) and the dependency-free launcher runs as
 #     root ONLY to start each child under its own non-root UID/GID.
 # No dotenv file is copied (the repo's .dockerignore excludes them; the build re-checks). No secret is baked in.
 #
-# Cost: the Chromium layer plus a few small layers on top of the shared image. Before H1 a recursive
+# Cost: a few small layers on top of the shared image (since P5 there is no browser layer). Before H1 a recursive
 # `chown -R root:root /app; chmod -R go-w /app` here rewrote node_modules as one extra layer of about 1.08 GB unpacked /
 # 144 MB compressed.
 ARG CREWFLOW_BASE_IMAGE
@@ -76,26 +76,29 @@ RUN --mount=type=bind,from=app,source=/app/node_modules,target=/api/node_modules
 FROM app
 USER root
 ARG MIN_NODE_VERSION
-ARG MIN_CHROMIUM_VERSION
 ARG MIN_LIBEXPAT_VERSION
 
-# System Chromium for the Worker's PDF jobs (pre-shift roster, final timesheet, pay statements). Playwright's own
-# downloaded Chromium is glibc-only and does not run on Alpine/musl, so the renderer is pointed at Alpine's Chromium via
-# the env below. Fonts: without them Chromium renders blank text. Resolved fresh from the base image's stable v3.24
-# repositories (upgrade first, so shared libraries Chromium links against are current too); no edge repository. tini
-# (PID 1, below) comes from the same apk transaction. The renderer always runs Chromium with --no-sandbox
-# (CHROMIUM_NO_SANDBOX=true below), so the setuid-root sandbox helper is never used: its setuid bit is dropped (security
-# review H1-L2; the gate further down refuses any setuid/setgid file).
+# tini (PID 1, below) is the only OS package this layer adds. P5: no browser, no system fonts (the native renderer embeds
+# its own vendored font files), no CHROMIUM_*/PLAYWRIGHT_* environment. Resolved fresh from the base image's stable v3.24
+# repositories (upgrade first); no edge repository.
 RUN apk upgrade --no-cache \
-  && apk add --no-cache chromium nss freetype harfbuzz ttf-liberation font-noto tini \
-  && chmod u-s /usr/lib/chromium/chrome-sandbox \
+  && apk add --no-cache tini \
   && test -z "$(apk info -e python3 make g++ gcc)"
-# Security floors after the last browser apk transaction: fail the build if Chromium, libexpat or Node is below its floor
-# or any repository other than the stable v3.24 main/community is configured.
+# Security floors after the last apk transaction: Node, the Alpine branch/repositories, Chromium ABSENT, libexpat at or
+# above its floor only if something installs it. The same checks as the API image (policy.json floors_checks).
 RUN --mount=type=bind,source=packages/rab-docker/rab/security-floors.sh,target=/tmp/security-floors.sh \
     --mount=type=bind,source=packages/rab-docker/rab/security-floors.env,target=/tmp/security-floors.env \
-    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine apk-required:chromium apk-required:libexpat
-ENV CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium CHROMIUM_NO_SANDBOX=true PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+    sh /tmp/security-floors.sh /tmp/security-floors.env node alpine apk-absent:chromium apk-if-installed:libexpat
+# P5 guard: no OS package of the former browser stack may come back into the Worker image by any route (Chromium and the
+# libraries only it pulled in: ffmpeg, libsndfile, alsa-lib, glib, libxml2, cups-libs, cjson, ...). The image gate's `fs`
+# check enforces the same names from policy.json (roles.worker.forbidden_apk) on the exported filesystem.
+RUN set -eu; \
+    test "$(apk info -e tini)" = tini; \
+    back="$(apk info -e chromium chromium-swiftshader chromium-lang nss nspr ffmpeg-libavcodec ffmpeg-libavformat \
+      ffmpeg-libavutil ffmpeg-libswresample ffmpeg-libswscale libsndfile alsa-lib libpulse glib libxml2 cups-libs cjson \
+      librist mesa-gbm libdrm at-spi2-core libx11 libxcb dbus-libs harfbuzz fontconfig ttf-liberation font-noto || true)"; \
+    if [ -n "$back" ]; then echo "FATAL: browser-stack packages in the Worker image:"; echo "$back"; exit 1; fi; \
+    for p in /usr/lib/chromium /usr/bin/chromium /usr/bin/chromium-browser; do test ! -e "$p"; done
 
 RUN set -eux; \
     test -x /sbin/tini; \
@@ -118,22 +121,31 @@ RUN set -eux; \
     test -f /app/packages/rab-worker/dist/workspace-provisioner.main.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
     test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-emails/dist; \
-    test -x "$CHROMIUM_EXECUTABLE_PATH"; \
     for f in /app/.env /app/packages/rab-worker/.env /app/packages/rab-worker/.env.provisioner /app/packages/rab-server/.env; do test ! -e "$f"; done; \
     test -z "$(find /app -path /app/node_modules -prune -o -name '.env*' -print)"
 
 # H3: the Worker-only packages, root-owned (COPY's default) and not group/other-writable (cleared in worker-modules); the
 # ownership gate above already covers everything under /app, and is repeated for these by the setuid/ownership check below.
 COPY --from=worker-modules /worker-delta/node_modules/ /app/node_modules/
-# H3 runtime-dependency gate for the Worker: every bare import in the code the two children run resolves, the browser
-# driver is present, and no build or test tool is anywhere in node_modules.
+# H3 runtime-dependency gate for the Worker: every bare import in the code the two children run resolves, and no build
+# or test tool, browser driver or SWC compiler is anywhere in node_modules. P5: playwright, playwright-core and
+# chromium-bidi are forbidden here exactly as in the API image. D5/T2 + review L-4: the whole '@swc/*' scope stays banned
+# (every SWC compiler, platform binary and future SWC package) with ONE exact exception, the runtime helper library
+# @swc/helpers (Apache-2.0, required by fontkit, a dependency of the native renderer @react-pdf/renderer), named by
+# runtime-deps.cjs --allow (directory and package.json name must both be exactly that).
+# The native renderer and its vendored fonts must
+# be present (the fonts are copied next to the compiled native module by the rab-worker build).
 RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
     set -eu; \
     node /tmp/runtime-deps.cjs check /app/node_modules \
       --scan /app/packages/rab-worker/dist /app/packages/rab-server/dist /app/packages/rab-shared/dist-cjs /app/packages/rab-emails/dist \
-      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint '@swc/*' \
-        webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on; \
-    test -f /app/node_modules/playwright-core/package.json; \
+      --forbid typescript nx '@nx/*' jest '@jest/*' ts-jest ts-node ts-node-dev tsx vite esbuild '@esbuild/*' eslint \
+        '@swc/*' '@swc-node/*' \
+        webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
+        playwright playwright-core chromium-bidi \
+      --allow @swc/helpers; \
+    test -f /app/node_modules/@react-pdf/renderer/package.json; \
+    for f in LiberationSans-Regular.ttf LiberationSans-Bold.ttf OFL.txt fonts.sha256; do test -f "/app/packages/rab-worker/dist/queues/rab-reports/native/assets/fonts/$f"; done; \
     bad="$(find /app/node_modules ! -type l \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print | head -n 20)"; \
     if [ -n "$bad" ]; then echo "FATAL: Worker dependencies not root-owned or group/other-writable:"; echo "$bad"; exit 1; fi
 

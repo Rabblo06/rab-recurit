@@ -10,12 +10,12 @@ exact generated name.
 
   static                                   Dockerfile base-image pins, floors file, decision register, watch list
   config     <role> <image> --revision SHA --platform os/arch   runtime user, entrypoint, labels, env, architecture
-  container  <role> <image>                security-floors.sh (Node/Chromium/libexpat floors, Alpine repositories) and
-                                           module-paths-gate.cjs as every runtime identity, run inside the image; Chromium
-                                           binary version
+  container  <role> <image>                security-floors.sh (Node/libexpat floors, Chromium absent, Alpine repositories)
+                                           and module-paths-gate.cjs as every runtime identity, run inside the image
   fs         <role> <image>                exported filesystem: setuid/setgid, file capabilities, world-writable entries,
                                            code ownership, HOME, accounts, apk sources, test/env/.git files, dev packages,
-                                           npm floors; writes the apk package list and size measurements
+                                           forbidden browser-stack apk/npm packages (P5), npm floors; writes the apk
+                                           package list and size measurements
   worker-base <api-image> <worker-image>   the Worker's lower layers are exactly the API image's layers
   scan       <role> <image> --image-id ID  Trivy (vuln, secret, CycloneDX, SARIF) + Grype, both pinned by digest; proves
                                            the scanned image ID and DB freshness
@@ -195,7 +195,8 @@ def parse_npm_floor(spec: str) -> tuple[str, str]:
 
 
 def name_matches(name: str, patterns: list[str]) -> bool:
-    return any(name == p or (p.endswith('/*') and name.startswith(p[:-1])) for p in patterns)
+    """Exact name, or a prefix pattern ending in '*' ('@nx/*' = a whole scope, 'ffmpeg-*' = every ffmpeg library)."""
+    return any(name == p or (p.endswith('*') and name.startswith(p[:-1])) for p in patterns)
 
 
 def today(mode: str = 'release') -> dt.date:
@@ -355,21 +356,28 @@ def cmd_static(a, c: Check) -> None:
     for role, rp in policy()['roles'].items():
         if rp['dockerfile'] not in files:
             c.fail(f'policy role {role}: {rp["dockerfile"]} is not a tracked Dockerfile')
+        for key in ('forbidden_apk', 'forbidden_npm', 'sbom_must_not_include'):
+            if not isinstance(rp.get(key), list) or not rp[key]:
+                c.fail(f'policy role {role}: {key} must be a non-empty list (P5: Chromium must never return)')
+        if 'apk-absent:chromium' not in rp.get('floors_checks', []):
+            c.fail(f'policy role {role}: floors_checks must include apk-absent:chromium (P5)')
+        if 'chromium_binary' in rp:
+            c.fail(f'policy role {role}: chromium_binary is retired (P5: no image ships Chromium)')
     values, npm, problems = read_floors()
     for p in problems:
         c.fail(p)
-    for key in ('MIN_NODE_VERSION', 'MIN_CHROMIUM_VERSION', 'MIN_LIBEXPAT_VERSION', 'ALPINE_BRANCH'):
+    for key in ('MIN_NODE_VERSION', 'MIN_LIBEXPAT_VERSION', 'ALPINE_BRANCH'):
         if not values.get(key):
             c.fail(f'security-floors.env: {key} missing or empty')
+    # P5: no image installs Chromium any more (both roles run apk-absent:chromium), so a Chromium floor would be dead
+    # configuration that suggests a browser is expected. Refuse it rather than silently carry it.
+    if 'MIN_CHROMIUM_VERSION' in values:
+        c.fail('security-floors.env: MIN_CHROMIUM_VERSION is retired (P5: no image installs Chromium); delete it')
     try:
         if len(numeric_version(values.get('MIN_NODE_VERSION', ''))) != 3:
             raise ValueError
     except ValueError:
         c.fail(f'security-floors.env: MIN_NODE_VERSION {values.get("MIN_NODE_VERSION")!r} is not X.Y.Z')
-    try:
-        numeric_version(values.get('MIN_CHROMIUM_VERSION', ''))
-    except ValueError:
-        c.fail(f'security-floors.env: MIN_CHROMIUM_VERSION {values.get("MIN_CHROMIUM_VERSION")!r} is not a version')
     if not re.fullmatch(r'v\d+\.\d+', values.get('ALPINE_BRANCH', '')):
         c.fail('security-floors.env: ALPINE_BRANCH must be vMAJOR.MINOR')
     for spec in npm:
@@ -379,7 +387,7 @@ def cmd_static(a, c: Check) -> None:
             c.fail(f'security-floors.env: {e}')
     c.data['floors'] = values
     c.data['npm_floors'] = npm
-    c.info(f'floors: node>={values.get("MIN_NODE_VERSION")} chromium>={values.get("MIN_CHROMIUM_VERSION")} '
+    c.info(f'floors: node>={values.get("MIN_NODE_VERSION")} '
            f'libexpat>={values.get("MIN_LIBEXPAT_VERSION")} alpine={values.get("ALPINE_BRANCH")} npm={npm or "none"}')
     validate_decisions(c)
     wl = validate_watchlist(c)
@@ -468,26 +476,7 @@ def cmd_container(a, c: Check) -> None:
     else:
         for line in out.splitlines():
             c.info(line)
-    # 2. Chromium: the binary itself must report a version at or above the floor (independent of apk metadata).
-    if rp['chromium_binary']:
-        floors, _, _ = read_floors()
-        p = docker(*base, '--read-only', '--tmpfs', '/tmp', '--user', '1000:1000', '-e', 'HOME=/tmp',
-                   '--entrypoint', rp['chromium_binary'], a.image, '--version', check=False, timeout=120)
-        m = re.search(r'Chromium\s+(\d+(?:\.\d+){3})', p.stdout)
-        if p.returncode != 0 or not m:
-            c.fail(f'{rp["chromium_binary"]} --version failed or unparsable (exit {p.returncode}): '
-                   f'{(p.stdout + p.stderr).strip()[-300:]}')
-        else:
-            have, floor = m[1], floors['MIN_CHROMIUM_VERSION']
-            try:
-                if numeric_version(have) < numeric_version(floor):
-                    c.fail(f'Chromium binary reports {have}, below the floor {floor} (MIN_CHROMIUM_VERSION)')
-                else:
-                    c.info(f'Chromium binary {have} >= {floor}')
-                c.data['chromium_binary_version'] = have
-            except ValueError as e:
-                c.fail(f'cannot compare Chromium {have!r} with floor {floor!r}: {e}')
-    # 3. The H1-M1 module-path gate as every runtime identity (not read-only: it must see real writability).
+    # 2. The H1-M1 module-path gate as every runtime identity (not read-only: it must see real writability).
     for ident in rp['module_path_identities']:
         env = ['-e', f'HOME={ident["home"]}'] if ident['home'] else []
         p = docker(*base, '--user', ident['user'], *env, '--entrypoint', 'node',
@@ -681,6 +670,13 @@ def cmd_fs(a, c: Check) -> None:
     if dev_found:
         c.hold(f'{len(dev_found)} development-only packages are in the runtime image (H3 production-only node_modules '
                f'must remove them): {", ".join(dev_found)}')
+    # P5: the browser driver must never return (fails in every mode, not a HOLD).
+    bad_npm = sorted(f'{n} ({", ".join(sorted(p for _, p in packages[n]))[:200]})' for n in packages
+                     if name_matches(n, rp['forbidden_npm']))
+    if bad_npm:
+        c.fail(f'forbidden browser package(s) in the runtime image (P5: native PDF rendering only): {"; ".join(bad_npm)}')
+    else:
+        c.info(f'no forbidden browser npm package ({", ".join(rp["forbidden_npm"])})')
     c.data['dev_packages'] = dev_found
 
     apk = {}
@@ -694,6 +690,16 @@ def cmd_fs(a, c: Check) -> None:
             cur.setdefault(line[0], line[2:])
     if not apk:
         c.fail('/lib/apk/db/installed is missing or empty: cannot list OS packages')
+    # P5: Chromium and every OS package that only Chromium pulled in (ffmpeg, libsndfile, alsa-lib, glib, libxml2, ...)
+    # must never return to a runtime image: FAIL in every mode, never a HOLD.
+    bad_apk = sorted(f'{n} {v}' for n, v in apk.items() if name_matches(n, rp['forbidden_apk']))
+    if bad_apk:
+        c.fail(f'forbidden browser-stack OS package(s) in the runtime image (P5): {", ".join(bad_apk)}')
+    elif apk:
+        c.info(f'no forbidden browser-stack OS package ({len(rp["forbidden_apk"])} names/prefixes checked)')
+    for path in ('/usr/lib/chromium', '/usr/bin/chromium', '/usr/bin/chromium-browser'):
+        if path in seen_paths:
+            c.fail(f'{path} exists in the runtime image (P5: no browser)')
     c.data.update(apk=apk, npm_package_dirs=sum(len(v) for v in packages.values()),
                   npm_package_names=len(packages), stats=stats)
     c.info(f'{stats["files"]} files, {stats["bytes"] / 1e6:.1f} MB uncompressed, node_modules '
@@ -968,13 +974,237 @@ def cmd_secrets(a, c: Check) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------- PDF
-def _pdf_objects(pdf: bytes) -> dict:
-    """Python port of packages/rab-worker/src/__tests__/helpers/pdf-inspect.ts parseObjects (Skia/PDF output only)."""
+# Python port of packages/rab-worker/src/__tests__/helpers/pdf-inspect.ts (keep the two in step). It reads both
+# renderers' output: Chromium (Skia/PDF: inline page /Resources, Type0/Identity-H fonts with ToUnicode, one BT..ET per
+# run) and @react-pdf/renderer (PDFKit: INDIRECT page `/Resources n 0 R`, each glyph run in its own BT..ET positioned
+# by `cm`, simple WinAnsi standard-14 fonts without ToUnicode, images as Flate pixels + /SMask). Also compressed object
+# streams, PNG predictors, inherited resources, Form XObjects and literal strings. Not a general PDF parser: no
+# encryption (refused), no Type3 glyph programs, no non-Identity CID CMaps, no LZW/ASCII85/RunLength filters.
+class _PdfName(str):
+    """A PDF name (str subclass so it compares to plain strings)."""
+
+
+class _PdfRef(int):
+    """An indirect reference `n g R` (the object number)."""
+
+
+class _PdfStr(bytes):
+    """A PDF string's bytes."""
+
+
+class _PdfOp(str):
+    """A content-stream operator or unknown keyword."""
+
+
+_PDF_WS = frozenset(b'\x00\t\n\x0c\r ')
+_PDF_DELIM = frozenset(b'()<>[]{}/%')
+_ARR_END, _DICT_END, _EOF = object(), object(), object()
+_PDF_NUM = re.compile(r'^[+-]?(\d+\.?\d*|\.\d+)$')
+_PDF_EI = re.compile(r'\sEI(?=[\s/\[<(%]|$)')
+
+
+class _PdfLexer:
+    def __init__(self, s: str):
+        self.s, self.pos = s, 0
+
+    def _skip(self):
+        s, n = self.s, len(self.s)
+        while self.pos < n:
+            c = ord(s[self.pos])
+            if c in _PDF_WS:
+                self.pos += 1
+            elif c == 0x25:  # %
+                while self.pos < n and s[self.pos] not in '\r\n':
+                    self.pos += 1
+            else:
+                break
+
+    def _literal(self) -> _PdfStr:
+        s, out, depth = self.s, bytearray(), 1
+        self.pos += 1
+        esc = {'n': 10, 'r': 13, 't': 9, 'b': 8, 'f': 12, '(': 40, ')': 41, '\\': 92}
+        while self.pos < len(s):
+            ch = s[self.pos]
+            self.pos += 1
+            if ch == '\\':
+                e = s[self.pos] if self.pos < len(s) else ''
+                self.pos += 1
+                if e in esc:
+                    out.append(esc[e])
+                elif e and e in '01234567':
+                    octal = e
+                    while len(octal) < 3 and self.pos < len(s) and s[self.pos] in '01234567':
+                        octal += s[self.pos]
+                        self.pos += 1
+                    out.append(int(octal, 8) & 0xff)
+                elif e == '\r':
+                    if self.pos < len(s) and s[self.pos] == '\n':
+                        self.pos += 1
+                elif e and e != '\n':
+                    out.append(ord(e) & 0xff)
+                continue
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            out.append(ord(ch) & 0xff)
+        return _PdfStr(bytes(out))
+
+    def _raw(self):
+        self._skip()
+        s = self.s
+        if self.pos >= len(s):
+            return _EOF
+        c = s[self.pos]
+        if c == '(':
+            return self._literal()
+        if c == '<':
+            if s[self.pos + 1:self.pos + 2] == '<':
+                self.pos += 2
+                d: dict = {}
+                while True:
+                    k = self.value()
+                    if k is _DICT_END or k is _EOF:
+                        return d
+                    if not isinstance(k, _PdfName):
+                        continue
+                    v = self.value()
+                    if v is _DICT_END or v is _EOF:
+                        return d
+                    if v is not _ARR_END:
+                        d[str(k)] = v
+            end = s.find('>', self.pos)
+            end = len(s) if end < 0 else end
+            hx = re.sub(r'[^0-9A-Fa-f]', '', s[self.pos + 1:end])
+            self.pos = min(len(s), end + 1)
+            return _PdfStr(bytes.fromhex(hx + ('0' if len(hx) % 2 else '')))
+        if c == '>' and s[self.pos + 1:self.pos + 2] == '>':
+            self.pos += 2
+            return _DICT_END
+        if c == '[':
+            self.pos += 1
+            arr: list = []
+            while True:
+                v = self.value()
+                if v is _ARR_END or v is _EOF:
+                    return arr
+                if v is not _DICT_END:
+                    arr.append(v)
+        if c == ']':
+            self.pos += 1
+            return _ARR_END
+        end = self.pos + 1 if c == '/' else self.pos
+        while end < len(s) and ord(s[end]) not in _PDF_WS and ord(s[end]) not in _PDF_DELIM:
+            end += 1
+        if c == '/':
+            name = re.sub(r'#([0-9A-Fa-f]{2})', lambda m: chr(int(m[1], 16)), s[self.pos + 1:end])
+            self.pos = end
+            return _PdfName(name)
+        if end == self.pos:
+            end += 1  # a stray delimiter such as `{`, `}` or a lone `>`
+        word = s[self.pos:end]
+        self.pos = end
+        if _PDF_NUM.match(word):
+            return float(word) if '.' in word else int(word)
+        return {'true': True, 'false': False, 'null': None}.get(word, _PdfOp(word))
+
+    def value(self):
+        """Next value, folding `n g R` into a reference (look-ahead with backtracking)."""
+        v = self._raw()
+        if type(v) is not int:
+            return v
+        save = self.pos
+        g = self._raw()
+        if type(g) is int:
+            r = self._raw()
+            if isinstance(r, _PdfOp) and r == 'R':
+                return _PdfRef(v)
+        self.pos = save
+        return v
+
+    def skip_inline_image(self):
+        m = _PDF_EI.search(self.s, self.pos)
+        self.pos = m.end() if m else len(self.s)
+
+
+def _pdf_value(text: str):
+    v = _PdfLexer(text).value()
+    return None if v is _ARR_END or v is _DICT_END or v is _EOF else v
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _arr(v) -> list:
+    return [] if v is None else v if isinstance(v, list) else [v]
+
+
+def _png_unpredict(data: bytes, parms) -> bytes:
+    parms = parms if isinstance(parms, dict) else {}
+    if (_num(parms.get('Predictor')) or 1) < 10:
+        return data
+    colors = int(_num(parms.get('Colors')) or 1)
+    bpc = int(_num(parms.get('BitsPerComponent')) or 8)
+    cols = int(_num(parms.get('Columns')) or 1)
+    bpp = max(1, (colors * bpc + 7) // 8)
+    row_len = (colors * bpc * cols + 7) // 8
+    out = bytearray()
+    prev = bytearray(row_len)
+    for r in range(len(data) // (row_len + 1)):
+        t = data[r * (row_len + 1)]
+        src = data[r * (row_len + 1) + 1:(r + 1) * (row_len + 1)]
+        row = bytearray(row_len)
+        for i in range(row_len):
+            a = row[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            x = src[i]
+            if t == 1:
+                x += a
+            elif t == 2:
+                x += b
+            elif t == 3:
+                x += (a + b) >> 1
+            elif t == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                x += a if pa <= pb and pa <= pc else b if pb <= pc else c
+            row[i] = x & 0xff
+        out += row
+        prev = row
+    return bytes(out)
+
+
+def _pdf_decode_stream(dict_text: str, raw: bytes) -> bytes:
     import zlib
+    d = _pdf_value(dict_text)
+    if not isinstance(d, dict):
+        return raw
+    filters = [str(f) for f in _arr(d.get('Filter')) if isinstance(f, _PdfName)]
+    parms = _arr(d.get('DecodeParms'))
+    data = raw
+    for i, f in enumerate(filters):
+        if f not in ('FlateDecode', 'Fl'):
+            return data  # e.g. DCTDecode: keep the encoded bytes
+        try:
+            data = zlib.decompress(data)
+        except zlib.error:
+            return data
+        data = _png_unpredict(data, parms[i] if i < len(parms) else None)
+    return data
+
+
+def _pdf_objects(pdf: bytes) -> dict:
+    """Object number -> (source text before `stream`, decoded stream bytes or None), object streams expanded."""
     text = pdf.decode('latin1')
+    if re.search(r'/Encrypt\s+\d+\s+\d+\s+R', text):
+        raise ValueError('encrypted PDF: not supported')
     objs: dict = {}
+    rx = re.compile(r'(\d+)\s+\d+\s+obj\b\s*')
     pos = 0
-    rx = re.compile(r'(\d+) 0 obj\s*')
     while True:
         m = rx.search(text, pos)
         if not m:
@@ -991,122 +1221,371 @@ def _pdf_objects(pdf: bytes) -> dict:
             continue
         hdr = re.search(r'stream\r?\n', body[sm.start():])
         data_start = start + sm.start() + hdr.end()
-        data_end = text.find('endstream', data_start)
-        if data_end < 0:
-            break
-        raw = pdf[data_start:data_end]
-        if raw.endswith(b'\n'):
-            raw = raw[:-1]
-        if raw.endswith(b'\r'):
-            raw = raw[:-1]
         d = body[:sm.start() + 2]
-        stream = raw
-        if '/FlateDecode' in d:
-            try:
-                stream = zlib.decompress(raw)
-            except zlib.error:
-                stream = raw
-        objs[int(m[1])] = (d, stream)
-        pos = data_end
+        # A direct /Length is authoritative when `endstream` really follows it (binary data may contain "endstream").
+        ln = re.search(r'/Length\s+(\d+)(?!\s+\d+\s+R)', d)
+        if ln and re.match(r'\s*endstream', text[data_start + int(ln[1]):data_start + int(ln[1]) + 12]):
+            data_end = data_start + int(ln[1])
+        else:
+            data_end = text.find('endstream', data_start)
+            if data_end < 0:
+                break
+            if pdf[data_end - 1:data_end] == b'\n':
+                data_end -= 1
+            if pdf[data_end - 1:data_end] == b'\r':
+                data_end -= 1
+        objs[int(m[1])] = (d, _pdf_decode_stream(d, pdf[data_start:data_end]))
+        pos = text.find('endobj', data_end)
+        if pos < 0:
+            break
+    # Compressed object streams (PDF 1.5+): their members are objects too. A directly written object wins.
+    for d, stream in list(objs.values()):
+        if stream is None or not re.search(r'/Type\s*/ObjStm\b', d):
+            continue
+        sd = _pdf_value(d)
+        if not isinstance(sd, dict):
+            continue
+        n, first = int(_num(sd.get('N')) or 0), int(_num(sd.get('First')) or 0)
+        data = stream.decode('latin1')
+        head = [int(x) for x in data[:first].split()]
+        for i in range(n):
+            oid, s0 = head[2 * i], first + head[2 * i + 1]
+            s1 = first + head[2 * i + 3] if i + 1 < n else len(data)
+            objs.setdefault(oid, (data[s0:s1], None))
     return objs
 
 
+class _PdfDoc:
+    def __init__(self, objs: dict):
+        self.objs, self._cache = objs, {}
+
+    def value(self, oid: int):
+        if oid not in self._cache:
+            o = self.objs.get(oid)
+            self._cache[oid] = _pdf_value(o[0]) if o else None
+        return self._cache[oid]
+
+    def resolve(self, v):
+        for _ in range(32):
+            if not isinstance(v, _PdfRef):
+                return v
+            v = self.value(int(v))
+        return None
+
+    def dict(self, v):
+        r = self.resolve(v)
+        return r if isinstance(r, dict) else None
+
+    def stream(self, v):
+        return self.objs.get(int(v), ('', None))[1] if isinstance(v, _PdfRef) else None
+
+
+def _to_unicode(cmap: str):
+    m: dict = {}
+
+    def h2s(h: str) -> str:
+        if len(h) % 4:
+            h = h.zfill(-(-len(h) // 4) * 4)
+        return bytes.fromhex(h).decode('utf-16-be', errors='replace') if h else ''
+
+    cs = re.search(r'begincodespacerange\s*<([0-9A-Fa-f]+)>', cmap)
+    for blk in re.findall(r'beginbfchar(.*?)endbfchar', cmap, re.S):
+        for a, b in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>', blk):
+            m[int(a, 16)] = h2s(b)
+    for blk in re.findall(r'beginbfrange(.*?)endbfrange', cmap, re.S):
+        for lo, hi, dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])', blk):
+            a, b = int(lo, 16), int(hi, 16)
+            if b - a > 0xffff:
+                continue
+            if dst.startswith('['):
+                items = [h2s(x) for x in re.findall(r'<([0-9A-Fa-f]*)>', dst)]
+                for c in range(a, b + 1):
+                    m[c] = items[c - a] if c - a < len(items) else ''
+            else:
+                # The destination's LAST UTF-16 unit is incremented across the range.
+                base = h2s(dst[1:-1])
+                for c in range(a, b + 1):
+                    m[c] = base[:-1] + chr(ord(base[-1]) + c - a) if base else ''
+    return m, (len(cs[1]) // 2 if cs else None)
+
+
+def _glyph_name(name: str) -> str:
+    m = re.match(r'^uni([0-9A-Fa-f]{4})$', name) or re.match(r'^u([0-9A-Fa-f]{4,6})$', name)
+    if m:
+        return chr(int(m[1], 16))
+    return name if len(name) == 1 else '�'
+
+
+_UNKNOWN_FONT = (2, lambda c: '�', lambda c: None)
+
+
+def _pdf_font(doc: _PdfDoc, ref):
+    """(bytes per code, decode(code) -> str, width(code) -> glyph-space width or None)."""
+    font = doc.dict(ref)
+    if font is None:
+        return _UNKNOWN_FONT
+    tus = doc.stream(font.get('ToUnicode'))
+    tu, tu_bytes = _to_unicode(tus.decode('latin1')) if tus else ({}, None)
+    if font.get('Subtype') == 'Type0':
+        cid = doc.dict((_arr(doc.resolve(font.get('DescendantFonts'))) or [None])[0]) or {}
+        widths: dict = {}
+        w = [doc.resolve(x) for x in _arr(doc.resolve(cid.get('W')))]
+        i = 0
+        while i < len(w) and _num(w[i]) is not None:
+            first = int(w[i])
+            nxt = w[i + 1] if i + 1 < len(w) else None
+            if isinstance(nxt, list):
+                for k, x in enumerate(nxt):
+                    x = doc.resolve(x)
+                    if _num(x) is not None:
+                        widths[first + k] = x
+                i += 2
+            else:
+                v = w[i + 2] if i + 2 < len(w) else None
+                if _num(nxt) is None or _num(v) is None:
+                    break
+                for c in range(first, min(int(nxt), first + 0xffff) + 1):
+                    widths[c] = v
+                i += 3
+        dw = _num(doc.resolve(cid.get('DW')))
+        dw = 1000 if dw is None else dw
+        # Identity-H/V: CID = code, read at the ToUnicode codespace width (2 bytes for both renderers).
+        return (tu_bytes or 2, lambda c: tu.get(c, '�'), lambda c: widths.get(c, dw))
+    # Simple font (Type1 / TrueType): one byte per code; ToUnicode, else /Differences, else the base encoding.
+    codec = 'cp1252'
+    diffs: dict = {}
+    enc = doc.resolve(font.get('Encoding'))
+    if isinstance(enc, _PdfName):
+        codec = 'mac_roman' if enc == 'MacRomanEncoding' else 'cp1252'
+    elif isinstance(enc, dict):
+        codec = 'mac_roman' if enc.get('BaseEncoding') == 'MacRomanEncoding' else 'cp1252'
+        code = 0
+        for x in _arr(doc.resolve(enc.get('Differences'))):
+            if _num(x) is not None:
+                code = int(x)
+            elif isinstance(x, _PdfName):
+                diffs[code] = _glyph_name(str(x))
+                code += 1
+    first_char = int(_num(doc.resolve(font.get('FirstChar'))) or 0)
+    wl = [doc.resolve(x) for x in _arr(doc.resolve(font.get('Widths')))]
+    has_widths = 'Widths' in font
+
+    def width(c):
+        if not has_widths:
+            return None  # standard 14 font: the PDF does not carry the widths
+        v = wl[c - first_char] if 0 <= c - first_char < len(wl) else None
+        return v if _num(v) is not None else 0
+
+    def decode(c):
+        if c in tu:
+            return tu[c]
+        if c in diffs:
+            return diffs[c]
+        return bytes([c]).decode(codec, errors='replace')
+
+    return (1, decode, width)
+
+
+def _mul(m, n):
+    return (m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3], m[2] * n[0] + m[3] * n[2],
+            m[2] * n[1] + m[3] * n[3], m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5])
+
+
+_IDENTITY = (1, 0, 0, 1, 0, 0)
+
+
+def _pdf_scan(doc: _PdfDoc, content: str, resources, base_ctm, runs: list, counter: list, depth: int, seen: set):
+    """Appends one dict per shown text run: text, text object index, device-space origin, end point and font size."""
+    fonts_d = doc.dict((resources or {}).get('Font')) or {}
+    xobjs = doc.dict((resources or {}).get('XObject')) or {}
+    cache: dict = {}
+    # q/Q save and restore the CTM and the text state (font, size, spacing, scaling, leading); not the text matrix.
+    gs = dict(ctm=base_ctm, font=_UNKNOWN_FONT, size=0, tc=0, tw=0, th=1, tl=0)
+    stack: list = []
+    tm = tlm = _IDENTITY
+    in_text, tobj = False, -1
+
+    def show(parts):
+        nonlocal tm
+        if not in_text:
+            return
+        nbytes, decode, width = gs['font']
+        start = _mul(tm, gs['ctm'])
+        text, measurable = '', True
+        for p in parts:
+            if _num(p) is not None:
+                tm = _mul((1, 0, 0, 1, -p / 1000 * gs['size'] * gs['th'], 0), tm)
+                continue
+            if not isinstance(p, _PdfStr):
+                continue
+            for i in range(0, len(p) - nbytes + 1, nbytes):
+                code = int.from_bytes(p[i:i + nbytes], 'big')
+                text += decode(code)
+                w = width(code)
+                if w is None:
+                    measurable = False
+                tx = ((w or 0) / 1000 * gs['size'] + gs['tc'] + (gs['tw'] if nbytes == 1 and code == 32 else 0)) * gs['th']
+                tm = _mul((1, 0, 0, 1, tx, 0), tm)
+        if text:
+            e = _mul(tm, gs['ctm'])
+            runs.append(dict(text=text, tobj=tobj, x=start[4], y=start[5], end=(e[4], e[5]) if measurable else None,
+                             size=abs(gs['size']) * (start[2] ** 2 + start[3] ** 2) ** 0.5))
+
+    lx = _PdfLexer(content)
+    ops: list = []
+
+    def n(i):
+        return (_num(ops[-i]) or 0) if len(ops) >= i else 0
+
+    while True:
+        v = lx.value()
+        if v is _EOF:
+            break
+        if v is _ARR_END or v is _DICT_END:
+            continue
+        if not isinstance(v, _PdfOp):
+            ops.append(v)
+            continue
+        op = str(v)
+        if op == 'q':
+            stack.append(dict(gs))
+        elif op == 'Q':
+            gs = stack.pop() if stack else dict(gs, ctm=base_ctm)
+        elif op == 'cm':
+            gs['ctm'] = _mul((n(6), n(5), n(4), n(3), n(2), n(1)), gs['ctm'])
+        elif op == 'BT':
+            in_text, tm, tlm = True, _IDENTITY, _IDENTITY
+            tobj = counter[0]
+            counter[0] += 1
+        elif op == 'ET':
+            in_text = False
+        elif op == 'Tf':
+            name = ops[-2] if len(ops) >= 2 else None
+            if isinstance(name, _PdfName):
+                if name not in cache:
+                    cache[name] = _pdf_font(doc, fonts_d[name]) if name in fonts_d else _UNKNOWN_FONT
+                gs['font'] = cache[name]
+            else:
+                gs['font'] = _UNKNOWN_FONT
+            gs['size'] = n(1)
+        elif op in ('Tc', 'Tw', 'TL'):
+            gs[op.lower()] = n(1)
+        elif op == 'Tz':
+            gs['th'] = n(1) / 100
+        elif op in ('Td', 'TD'):
+            if op == 'TD':
+                gs['tl'] = -n(1)
+            tlm = _mul((1, 0, 0, 1, n(2), n(1)), tlm)
+            tm = tlm
+        elif op == 'Tm':
+            tlm = tm = (n(6), n(5), n(4), n(3), n(2), n(1))
+        elif op in ('T*', "'", '"'):
+            if op == '"':
+                gs['tw'], gs['tc'] = n(3), n(2)
+            tlm = _mul((1, 0, 0, 1, 0, -gs['tl']), tlm)
+            tm = tlm
+            if op != 'T*':
+                show([ops[-1] if ops else None])
+        elif op == 'Tj':
+            show([ops[-1] if ops else None])
+        elif op == 'TJ':
+            if ops and isinstance(ops[-1], list):
+                show(ops[-1])
+        elif op == 'Do':
+            ref = xobjs.get(ops[-1]) if ops and isinstance(ops[-1], _PdfName) else None
+            xo = doc.dict(ref) if isinstance(ref, _PdfRef) else None
+            if xo and xo.get('Subtype') == 'Form' and depth < 12 and int(ref) not in seen:
+                fm = [_num(doc.resolve(x)) or 0 for x in _arr(doc.resolve(xo.get('Matrix')))]
+                body = (doc.stream(ref) or b'').decode('latin1')
+                seen.add(int(ref))
+                _pdf_scan(doc, body, doc.dict(xo.get('Resources')) or resources,
+                          _mul(tuple(fm) if len(fm) == 6 else _IDENTITY, gs['ctm']), runs, counter, depth + 1, seen)
+                seen.discard(int(ref))
+        elif op == 'ID':
+            lx.skip_inline_image()
+        ops = []
+
+
+def _pdf_lines(runs: list) -> list:
+    """One line per text object (Chromium), joining a run that continues the previous one on the same baseline with no
+    gap (react-pdf: "5" + "h 28m"); a new baseline inside one text object also starts a new line."""
+    lines, line, prev = [], '', None
+    for r in runs:
+        cont = False
+        if prev:
+            tol = max(r['size'], prev['size']) * 0.1
+            if r['tobj'] == prev['tobj']:
+                base = prev['end'][1] if prev['end'] else prev['y']
+                cont = abs(r['y'] - base) <= max(tol, 0.01)
+            elif prev['end']:
+                cont = abs(r['y'] - prev['end'][1]) <= tol and abs(r['x'] - prev['end'][0]) <= tol
+        if not cont and line:
+            lines.append(line)
+            line = ''
+        line += r['text']
+        prev = r
+    if line:
+        lines.append(line)
+    return lines
+
+
 def inspect_pdf(pdf: bytes) -> dict:
-    """Page count and text (decoded through each font's ToUnicode CMap), like the repo's pdf-inspect test helper."""
+    """Page count, text (decoded through each font's ToUnicode CMap or a simple font's encoding; whitespace collapsed),
+    text per page and the number of embedded raster images (soft masks excluded), like the repo's pdf-inspect helper."""
     if pdf[:5] != b'%PDF-':
         raise ValueError('not a PDF (no %PDF- header)')
     if b'%%EOF' not in pdf[-1024:]:
         raise ValueError('PDF has no %%EOF trailer (truncated)')
-    objs = _pdf_objects(pdf)
-
-    def ref(d: str, key: str):
-        m = re.search(r'/' + key + r'\s+(\d+)\s+0\s+R', d)
-        return int(m[1]) if m else None
-
-    def h2s(h: str) -> str:
-        return ''.join(chr(int(h[i:i + 4], 16)) for i in range(0, len(h) - 3, 4))
-
-    def cmap_of(stream: bytes) -> dict:
-        out: dict = {}
-        s = stream.decode('latin1')
-        for blk in re.findall(r'beginbfchar(.*?)endbfchar', s, re.S):
-            for a, b in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>', blk):
-                out[a.upper()] = h2s(b)
-        for blk in re.findall(r'beginbfrange(.*?)endbfrange', s, re.S):
-            for lo, hi, dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])', blk):
-                a, b, w = int(lo, 16), int(hi, 16), len(lo)
-                if dst.startswith('['):
-                    items = [h2s(x) for x in re.findall(r'<([0-9A-Fa-f]+)>', dst)]
-                    for c in range(a, b + 1):
-                        out[format(c, 'X').zfill(w)] = items[c - a] if c - a < len(items) else ''
-                else:
-                    base = int(dst[1:-1], 16)
-                    for c in range(a, b + 1):
-                        out[format(c, 'X').zfill(w)] = chr(base + c - a)
-        return out
-
-    catalog = next((d for d, _ in objs.values() if re.search(r'/Type\s*/Catalog', d)), None)
+    doc = _PdfDoc(_pdf_objects(pdf))
     pages: list = []
+    seen: set = set()
 
-    def walk(i, depth=0):
-        node = objs.get(i)
-        if node is None or depth > 50:
+    def walk(ref, inherited, depth=0):
+        if not isinstance(ref, _PdfRef) or int(ref) in seen or depth > 64:
             return
-        d = node[0]
-        if re.search(r'/Type\s*/Pages', d):
-            kids = re.search(r'/Kids\s*\[([^\]]*)\]', d)
-            for k in re.findall(r'(\d+)\s+0\s+R', kids[1] if kids else ''):
-                walk(int(k), depth + 1)
-        elif re.search(r'/Type\s*/Page\b', d):
-            pages.append(d)
+        seen.add(int(ref))
+        node = doc.dict(ref)
+        if node is None:
+            return
+        res = doc.dict(node.get('Resources')) if 'Resources' in node else inherited
+        if node.get('Type') == 'Pages':
+            for k in _arr(doc.resolve(node.get('Kids'))):
+                walk(k, res, depth + 1)
+        elif node.get('Type') == 'Page':
+            pages.append((node, res))
 
-    root = ref(catalog, 'Pages') if catalog else None
-    if root is not None:
-        walk(root)
+    catalog = next((i for i, (d, _) in doc.objs.items() if re.search(r'/Type\s*/Catalog\b', d)), None)
+    if catalog is not None:
+        walk((doc.dict(_PdfRef(catalog)) or {}).get('Pages'), None)
     texts = []
-    for d in pages:
-        fonts = {}
-        fd = re.search(r'/Font\s*<<(.*?)>>', d, re.S)
-        for name, fid in re.findall(r'/(\w+)\s+(\d+)\s+0\s+R', fd[1] if fd else ''):
-            f = objs.get(int(fid))
-            tu = ref(f[0], 'ToUnicode') if f else None
-            fonts[name] = cmap_of(objs[tu][1] or b'') if tu in objs else {}
-        single = ref(d, 'Contents')
-        if single is not None:
-            ids = [single]
-        else:
-            arr = re.search(r'/Contents\s*\[([^\]]*)\]', d)
-            ids = [int(x) for x in re.findall(r'(\d+)\s+0\s+R', arr[1] if arr else '')]
-        content = '\n'.join((objs.get(i, ('', b''))[1] or b'').decode('latin1') for i in ids)
-        lines = []
-        for bt in re.findall(r'BT(.*?)ET', content, re.S):
-            cur, line = None, ''
-            for t in re.finditer(r'/(\w+)\s+[-\d.]+\s+Tf|<([0-9A-Fa-f\s]*)>\s*Tj|\[([^\]]*)\]\s*TJ', bt):
-                if t[1]:
-                    cur = fonts.get(t[1])
-                    continue
-                hexes = [t[2]] if t[2] is not None else re.findall(r'<([0-9A-Fa-f\s]*)>', t[3])
-                for h in hexes:
-                    h = re.sub(r'\s+', '', h).upper()
-                    line += ''.join((cur or {}).get(h[i:i + 4], '�') for i in range(0, len(h) - 3, 4))
-            if line:
-                lines.append(line)
-        texts.append('\n'.join(lines))
-    images = sum(1 for d, _ in objs.values() if re.search(r'/Subtype\s*/Image', d))
-    return {'pages': len(pages), 'text': re.sub(r'\s+', ' ', '\n'.join(texts)).strip(), 'images': images}
+    for node, res in pages:
+        contents: list = []
+        for c in _arr(node.get('Contents')):
+            r = doc.resolve(c) if isinstance(c, _PdfRef) else None
+            contents += r if isinstance(r, list) else [c]
+        content = '\n'.join((doc.stream(c) or b'').decode('latin1') for c in contents)
+        runs: list = []
+        _pdf_scan(doc, content, res, _IDENTITY, runs, [0], 0, set())
+        texts.append('\n'.join(_pdf_lines(runs)))
+    # A soft mask is itself an /Image referenced via /SMask from its colour image: count only the colour image.
+    masks = {int(x) for d, _ in doc.objs.values() for x in re.findall(r'/SMask\s+(\d+)\s+\d+\s+R', d)}
+    images = sum(1 for i, (d, _) in doc.objs.items() if re.search(r'/Subtype\s*/Image\b', d) and i not in masks)
+    return {'pages': len(pages), 'text': re.sub(r'\s+', ' ', '\n'.join(texts)).strip(), 'images': images,
+            'page_texts': texts}
 
 
 def cmd_pdf(a, c: Check) -> None:
-    """Native PDF render of a real report template inside the exact gated Worker image, as the launcher's jobs child."""
+    """PDF render of a real report through the production (native, Chromium-free) renderer inside the exact gated Worker
+    image, as the launcher's jobs child, on a host of the image's own architecture."""
     import base64
     rp = role_policy(a.role)
-    if not rp['chromium_binary']:
-        c.fail(f'role {a.role} has no Chromium; the PDF render gate applies to the Worker image')
+    if not rp.get('pdf_render'):
+        c.fail(f'role {a.role} does not render PDFs; the PDF render gate applies to the Worker image')
         return
     smoke = os.path.join(HERE, 'pdf-render-smoke.cjs')
     hard = ['run', '--rm', '--pull', 'never', '--network', 'none', '--cap-drop', 'ALL', '--security-opt',
             'no-new-privileges', '--read-only', *_mount(smoke, '/gate/pdf-render-smoke.cjs')]
-    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH, CHROMIUM_*).
+    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH).
     p = docker(*hard, '--user', '1000:1000', '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'plan',
                check=False, timeout=120)
     try:
@@ -1119,14 +1598,16 @@ def cmd_pdf(a, c: Check) -> None:
         c.fail(f'unexpected jobs-child environment from the launcher: HOME={env.get("HOME")} TMPDIR={env.get("TMPDIR")}')
     c.info(f'jobs child per launcher plan: uid {plan["uid"]} gid {plan["gid"]} HOME={env.get("HOME")} '
            f'TMPDIR={env.get("TMPDIR")} XDG_CONFIG_HOME={env.get("XDG_CONFIG_HOME")} '
-           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")} CHROMIUM_NO_SANDBOX={env.get("CHROMIUM_NO_SANDBOX")}')
+           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")}')
+    leaked = sorted(k for k in env if k.startswith(('CHROMIUM_', 'PLAYWRIGHT_')))
+    if leaked:
+        c.fail(f'the launcher still forwards browser settings to the jobs child: {leaked} (P5: no browser)')
     uid, gid = plan['uid'], plan['gid']
-    # 2. Runtime facts: the kernel architecture the image ran on and the Chromium that rendered.
+    # 2. Runtime facts: the kernel architecture the image ran on and the Node that rendered (the renderer is JavaScript).
     u = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--entrypoint', 'uname', a.image, '-m',
                check=False).stdout.strip()
-    cv = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--tmpfs', '/tmp',
-                '--user', f'{uid}:{gid}', '-e', 'HOME=/tmp', '--entrypoint', rp['chromium_binary'], a.image,
-                '--version', check=False).stdout.strip()
+    nv = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--user', f'{uid}:{gid}',
+                '--entrypoint', 'node', a.image, '--version', check=False).stdout.strip()
     img = inspect_image(a.image)
     # Native, not emulated: inside a QEMU-emulated container `uname -m` also says aarch64, so compare the image's
     # architecture with the Docker host's own.
@@ -1134,7 +1615,7 @@ def cmd_pdf(a, c: Check) -> None:
     native = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(host) == img.get('Architecture')
     facts = dict(image=a.image, image_id=img['Id'], repo_digests=img.get('RepoDigests'),
                  platform=f'{img.get("Os")}/{img.get("Architecture")}', uname_m=u, docker_host_arch=host,
-                 native=native, chromium=cv)
+                 native=native, node=nv)
     c.data.update(facts)
     if not native:
         c.fail(f'the {img.get("Architecture")} image ran on a {host!r} Docker host (emulated): not a native render')
@@ -1180,7 +1661,7 @@ def cmd_pdf(a, c: Check) -> None:
             c.fail(f'expected text not found in the PDF: {needle!r}')
     if info['images'] < 1:
         c.fail('no embedded image (logo / QR) in the PDF')
-    c.info(f'{u}: {cv}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
+    c.info(f'{u}: node {nv}, renderer {run.get("renderer")}; rendered {run["bytes"]} bytes, {info["pages"]} page(s), {info["images"]} image object(s) in '
            f'{run["render_ms"]} ms as uid {run["uid"]} (HOME={run["home"]}, TMPDIR={run["tmpdir"]}); markup in the '
            'synthetic names came out as literal text')
 
@@ -1289,6 +1770,9 @@ def cmd_attest(a, c: Check) -> None:
                 if p.get('name'):
                     names.add(p['name'])
         missing = [n for n in rp['sbom_must_include'] if n not in names]
+        present = sorted(n for n in names if name_matches(n, rp['sbom_must_not_include']))
+        if present:
+            c.fail(f'SBOM lists {present}, which must never be in this image (P5: native PDF rendering only)')
         if len(names) < rp['min_sbom_packages']:
             c.fail(f'SBOM lists only {len(names)} package names (expected >= {rp["min_sbom_packages"]})')
         if missing:
@@ -1493,7 +1977,7 @@ def cmd_release_manifest(a) -> int:
             if role == 'worker' and os.path.exists(pdf):
                 r = load_json(pdf)
                 entry['native_pdf_render'] = {k: r.get(k) for k in (
-                    'native', 'uname_m', 'docker_host_arch', 'chromium', 'render_ms', 'pdf_pages', 'pdf_sha256')}
+                    'native', 'uname_m', 'docker_host_arch', 'node', 'renderer', 'render_ms', 'pdf_pages', 'pdf_sha256')}
             platforms[p] = entry
         out['images'][role] = {'tag': f'{role}-{a.commit}', 'index_digest': d['index_digest'],
                                'reference': f'{a.repo}@{d["index_digest"]}', 'platforms': platforms}
@@ -1566,7 +2050,7 @@ def cmd_summary(a) -> int:
         if r and name.endswith('-pdf') and r['data'].get('uname_m'):
             d = r['data']
             lines += ['', f'#### {name}: native={d.get("native")} uname -m={d.get("uname_m")} '
-                          f'(Docker host {d.get("docker_host_arch")}), {d.get("chromium")}, render '
+                          f'(Docker host {d.get("docker_host_arch")}), node {d.get("node")}, {d.get("renderer")}, render '
                           f'{d.get("render_ms", "n/a")} ms, {d.get("pdf_pages", 0)} page(s), image {d.get("image_id")}']
         if r and r.get('holds') and not name.endswith('-vulns'):
             lines += ['', f'#### {name}: held items', ''] + [f'- {h}' for h in r['holds'][:40]]

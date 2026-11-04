@@ -45,13 +45,30 @@ function licenceAllowed(expr) {
   return ALLOW.includes(e.trim());
 }
 
-function licenceOf(pkg) {
+/**
+ * Packages whose package.json has NO licence field but whose shipped LICENSE file states an allowed licence. Pinned by
+ * exact name@version AND verified against the file's first line at check time, so a new version (or a changed file)
+ * fails the gate again until someone re-reads it. Each entry is owner-vetoable.
+ *   png-js@2.0.0 (via pdfkit, native PDF renderer): LICENSE = "MIT License, Copyright (c) 2017 Devon Govett".
+ */
+const LICENCE_FILE_EVIDENCE = new Map([['png-js@2.0.0', { licence: 'MIT', firstLine: 'MIT License' }]]);
+
+function licenceFromFile(dir, pkg) {
+  const evidence = LICENCE_FILE_EVIDENCE.get(`${pkg.name}@${pkg.version}`);
+  if (!evidence) return null;
+  const file = join(dir, 'LICENSE');
+  if (!existsSync(file)) return null;
+  const firstLine = readFileSync(file, 'utf8').split(/\r?\n/)[0].trim();
+  return firstLine === evidence.firstLine ? evidence.licence : null;
+}
+
+function licenceOf(pkg, dir) {
   if (typeof pkg.license === 'string') return pkg.license;
   if (pkg.license && typeof pkg.license.type === 'string') return pkg.license.type;
   if (Array.isArray(pkg.licenses) && pkg.licenses.length) {
     return pkg.licenses.map((l) => (typeof l === 'string' ? l : l.type)).filter(Boolean).join(' OR ');
   }
-  return null;
+  return licenceFromFile(dir, pkg);
 }
 
 const seen = new Map(); // realpath -> { name, version, licence, firstParty, via }
@@ -61,7 +78,7 @@ function visit(dir, via) {
   const key = dir;
   if (seen.has(key)) return;
   const firstParty = pkg.private === true && (pkg.name?.startsWith('@rab/') || dir.startsWith(join(ROOT, 'packages')));
-  seen.set(key, { name: pkg.name, version: pkg.version, licence: licenceOf(pkg), firstParty, via });
+  seen.set(key, { name: pkg.name, version: pkg.version, licence: licenceOf(pkg, dir), firstParty, via });
   const deps = { ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}), ...(pkg.peerDependencies ?? {}) };
   for (const name of Object.keys(deps)) {
     const child = findPackageDir(dir, name);

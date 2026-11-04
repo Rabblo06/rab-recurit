@@ -11,22 +11,27 @@
  *   TEST_DATABASE_URL_UNPOOLED         the disposable cluster's superuser (fixtures only; never given to a child process)
  *   TEST_DATABASE_SEPARATED_APP_URL    crewflow_app, ONLY for --source fixture (a separated-built chain) — the negative controls
  *   TWENTY_MODE_TESTS=true, TWENTY_DB_SOURCE=<source>
+ *   TEST_DATABASE_WORKER_URL           ONLY with --worker-login-is-owner: the same crewflow_owner URL. Phase D under one login
+ *                                      (M0-H F2): the gated Phase D suites run the Worker on the owner login, as every process
+ *                                      now does; crewflow_worker is a schema role with no usable password.
  *
  * Reads MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_OWNER_BOOTSTRAP_PASSWORD and (fixture only) CREWFLOW_APP_BOOTSTRAP_PASSWORD from
  * the environment only. Refuses a non-loopback host, a database name no harness creates, and a missing owner password.
  */
 const args = process.argv.slice(2);
 let source = 'fixture';
+let workerIsOwner = false;
 const positional = [];
 for (let i = 0; i < args.length; i += 1) {
   if (args[i] === '--source') source = args[++i] ?? '';
+  else if (args[i] === '--worker-login-is-owner') workerIsOwner = true;
   else if (args[i].startsWith('--')) {
-    process.stderr.write('refusing: usage: twenty-test-env.cjs <database> [--source fixture|bootstrap]\n');
+    process.stderr.write('refusing: usage: twenty-test-env.cjs <database> [--source fixture|bootstrap] [--worker-login-is-owner]\n');
     process.exit(2);
   } else positional.push(args[i]);
 }
 if (!['fixture', 'bootstrap'].includes(source) || positional.length !== 1) {
-  process.stderr.write('refusing: usage: twenty-test-env.cjs <database> [--source fixture|bootstrap]\n');
+  process.stderr.write('refusing: usage: twenty-test-env.cjs <database> [--source fixture|bootstrap] [--worker-login-is-owner]\n');
   process.exit(2);
 }
 const db = positional[0];
@@ -66,5 +71,6 @@ process.stderr.write(`::add-mask::${admin}\n::add-mask::${owner}\n${app ? `::add
 process.stdout.write(
   `export TEST_DATABASE_URL_UNPOOLED=${q(admin)}\nexport TEST_DATABASE_URL=${q(owner)}\nexport TEST_DATABASE_TWENTY_OWNER_URL=${q(owner)}\n` +
     (app ? `export TEST_DATABASE_SEPARATED_APP_URL=${q(app)}\n` : '') +
-    `export TWENTY_MODE_TESTS=true\nexport TWENTY_DB_SOURCE=${source}\n`,
+    `export TWENTY_MODE_TESTS=true\nexport TWENTY_DB_SOURCE=${source}\n` +
+    (workerIsOwner ? `export TEST_DATABASE_WORKER_URL=${q(owner)}\n` : ''),
 );

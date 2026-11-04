@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -56,6 +57,71 @@ class Versions(unittest.TestCase):
         self.assertFalse(g.name_matches('@jestx/core', ['@jest/*']))
         self.assertTrue(g.name_matches('jest', ['jest']))
         self.assertFalse(g.name_matches('jest-worker', ['jest']))
+        # P5: a trailing * is a plain prefix too (OS package families, per-platform binaries)
+        self.assertTrue(g.name_matches('ffmpeg-libavcodec', ['ffmpeg-*']))
+        self.assertTrue(g.name_matches('chromium-swiftshader', ['chromium', 'chromium-*']))
+        self.assertTrue(g.name_matches('chromium', ['chromium', 'chromium-*']))
+        self.assertFalse(g.name_matches('chromium-bidix', ['chromium-bidi']))
+        self.assertFalse(g.name_matches('libxml2-utils', ['libxml2']))
+
+
+class P5NoBrowser(unittest.TestCase):
+    """P5: Chromium, Playwright and the OS packages only Chromium pulled in must never return to a runtime image."""
+
+    BROWSER_APK = ['chromium', 'chromium-swiftshader', 'nss', 'ffmpeg-libavcodec', 'ffmpeg-libavformat',
+                   'ffmpeg-libavutil', 'ffmpeg-libswresample', 'libsndfile', 'alsa-lib', 'libpulse', 'glib', 'libxml2',
+                   'cups-libs', 'cjson', 'librist', 'harfbuzz', 'fontconfig', 'font-noto', 'ttf-liberation']
+    BROWSER_NPM = ['playwright', 'playwright-core', 'chromium-bidi', '@playwright/test']
+    # Present in the node:24-alpine base / API image today: must stay allowed, or every build would fail.
+    BASE_APK = ['musl', 'busybox', 'alpine-baselayout', 'apk-tools', 'libgcc', 'libstdc++', 'tini', 'zlib',
+                'libcrypto3', 'libssl3', 'ca-certificates-bundle']
+
+    def test_every_role_forbids_the_browser_stack(self):
+        for role, rp in g.policy()['roles'].items():
+            for n in self.BROWSER_APK:
+                self.assertTrue(g.name_matches(n, rp['forbidden_apk']), f'{role}: apk {n} not forbidden')
+            for n in self.BASE_APK:
+                self.assertFalse(g.name_matches(n, rp['forbidden_apk']), f'{role}: base apk {n} must stay allowed')
+            for n in self.BROWSER_NPM:
+                self.assertTrue(g.name_matches(n, rp['forbidden_npm']), f'{role}: npm {n} not forbidden')
+            # D5/T2: the runtime helper library fontkit needs stays allowed
+            self.assertFalse(g.name_matches('@swc/helpers', rp['forbidden_npm']), role)
+            for n in ('chromium', 'playwright', 'playwright-core'):
+                self.assertIn(n, rp['sbom_must_not_include'], role)
+            self.assertIn('apk-absent:chromium', rp['floors_checks'], role)
+            self.assertNotIn('apk-required:chromium', rp['floors_checks'], role)
+            self.assertNotIn('chromium_binary', rp, role)
+        self.assertTrue(g.policy()['roles']['worker']['pdf_render'])
+        self.assertNotIn('/usr/lib/chromium', g.policy()['filesystem']['code_paths'])
+        self.assertNotIn('MIN_CHROMIUM_VERSION', g.policy()['provenance']['allowed_build_args'])
+
+    def test_static_refuses_a_chromium_floor_or_a_missing_forbidden_list(self):
+        values, _, _ = g.read_floors()
+        self.assertNotIn('MIN_CHROMIUM_VERSION', values)
+        d = tempfile.mkdtemp()
+        floors = os.path.join(d, 'security-floors.env')
+        with open(g.FLOORS_ENV, encoding='utf-8') as f, open(floors, 'w', encoding='utf-8') as o:
+            o.write(f.read() + 'MIN_CHROMIUM_VERSION=156.0.8078.79-r0\n')
+        with mock.patch.object(g, 'FLOORS_ENV', floors):
+            rc, _ = run(['--mode', 'pr', '--results', d, 'static'])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('MIN_CHROMIUM_VERSION is retired' in f for f in result(d, 'static')['fails']))
+        pol = g.policy()
+        del pol['roles']['worker']['forbidden_apk']
+        pol['roles']['api']['floors_checks'] = ['node', 'alpine']
+        d = tempfile.mkdtemp()
+        with mock.patch.object(g, 'policy', lambda: pol):
+            rc, _ = run(['--mode', 'pr', '--results', d, 'static'])
+        fails = result(d, 'static')['fails']
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('worker: forbidden_apk must be a non-empty list' in f for f in fails), fails)
+        self.assertTrue(any('api: floors_checks must include apk-absent:chromium' in f for f in fails), fails)
+
+    def test_pdf_gate_refuses_a_role_without_pdf_render(self):
+        d = tempfile.mkdtemp()
+        rc, _ = run(['--mode', 'pr', '--results', d, 'pdf', 'api', 'crewflow-gate/api:none'])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('does not render PDFs' in f for f in result(d, 'api-pdf')['fails']))
 
 
 class Decisions(unittest.TestCase):
@@ -333,7 +399,42 @@ def minimal_pdf(text: str, truncate: bool = False) -> bytes:
 
 
 
+def pdfkit_shaped_pdf(text: str) -> bytes:
+    """A tiny pdfkit-shaped PDF (the native renderer's writer): /Resources and /Font are INDIRECT objects, text is a TJ
+    array of lower-case hex glyph ids with kerning, decoded through a ToUnicode bfrange with an array destination."""
+    import zlib
+    n = len(text)
+    dst = ' '.join('<%04x>' % ord(ch) for ch in text)
+    cmap = (f'begincmap\n1 begincodespacerange\n<0000><ffff>\nendcodespacerange\n1 beginbfrange\n'
+            f'<0001> <{n:04x}> [{dst}]\nendbfrange\nendcmap')
+    tj = ' -26.666667 '.join('<%04x>' % (i + 1) for i in range(n))
+    content = zlib.compress(f'BT 1 0 0 1 0 595 Tm /F2 11.25 Tf [{tj}] TJ ET'.encode())
+    tu = zlib.compress(cmap.encode())
+
+    def stream(data: bytes) -> bytes:
+        return b'<< /Filter /FlateDecode /Length ' + str(len(data)).encode() + b' >>\nstream\n' + data + b'\nendstream'
+
+    objs = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        b'<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Resources 5 0 R /UserUnit 1 >>',
+        stream(content),
+        b'<< /ProcSet [/PDF /Text /ImageB /ImageC /ImageI] /Font 6 0 R >>',
+        b'<< /F2 7 0 R >>',
+        b'<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode 8 0 R >>',
+        stream(tu),
+    ]
+    out = b'%PDF-1.3\n' + b''.join(str(i + 1).encode() + b' 0 obj\n' + o + b'\nendobj\n' for i, o in enumerate(objs))
+    return out + b'trailer << /Root 1 0 R >>\n%%EOF\n'
+
+
 class Pdf(unittest.TestCase):
+    def test_native_renderer_shape(self):
+        # P5: the gate's oracle must read the native renderer's output (indirect /Resources and /Font, TJ arrays).
+        info = g.inspect_pdf(pdfkit_shaped_pdf('<img src="http://example.invalid/x.png">'))
+        self.assertEqual(info['pages'], 1)
+        self.assertEqual(info['text'], '<img src="http://example.invalid/x.png">')
+
     def test_text_and_pages(self):
         info = g.inspect_pdf(minimal_pdf('H5 <script>'))
         self.assertEqual(info['pages'], 1)
@@ -344,6 +445,87 @@ class Pdf(unittest.TestCase):
             g.inspect_pdf(b'<html>not a pdf</html>')
         with self.assertRaises(ValueError):
             g.inspect_pdf(minimal_pdf('x', truncate=True))
+
+    def test_encrypted_pdf_is_refused(self):
+        with self.assertRaises(ValueError):
+            g.inspect_pdf(b'%PDF-1.4\n1 0 obj\n<< >>\nendobj\ntrailer << /Encrypt 2 0 R >>\n%%EOF\n')
+
+
+# The same synthetic two-page document from both renderers, shared with rab-worker's PDF oracle tests (provenance in
+# packages/rab-worker/src/__tests__/helpers/pdf-inspect.spec.ts). Chromium: inline page /Resources. @react-pdf/renderer
+# 4.9.0: INDIRECT /Resources, one BT..ET per glyph run, a WinAnsi standard-14 font, the QR as RGB pixels + /SMask.
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '..', 'rab-worker', 'src', '__tests__',
+                        'fixtures', 'pdf')
+FIXTURE_NEEDLES = ['SYNTHETIC FIXTURE REPORT', 'The <Hostile> & "Quoted" Venue', 'Reference FIXTURE-0001', 'Alex Example',
+                   '5h 28m', '£1,234.56', '<script>alert(1)</script>', '<img src="http://example.invalid/x.png">',
+                   'Zoë Ł. O’Brien-Ñúñez', 'Fixture Workspace · FIXTURE-0001', 'Page 1 of 2',
+                   'Second page: totals 13h 33m · £1,335.55 – end', 'Page 2 of 2']
+
+
+def fixture(name: str) -> bytes:
+    with open(os.path.join(FIXTURES, name), 'rb') as f:
+        return f.read()
+
+
+class PdfRenderers(unittest.TestCase):
+    def check(self, pdf: bytes):
+        info = g.inspect_pdf(pdf)
+        self.assertEqual(info['pages'], 2)
+        self.assertEqual(len(info['page_texts']), 2)
+        for n in FIXTURE_NEEDLES:
+            self.assertIn(n, info['text'])
+        self.assertNotIn('�', info['text'])
+        self.assertIn('Alex Example', info['page_texts'][0])
+        self.assertNotIn('Alex Example', info['page_texts'][1])
+        self.assertIn('5h 28m', info['page_texts'][0].split('\n'))  # one line, not "5" + "h 28m"
+        self.assertNotIn('Alex ExampleS-001', info['text'])  # separate cells are never glued together
+        self.assertEqual(info['images'], 2)  # the JPEG and the QR; a soft mask is not an image of its own
+        return info
+
+    def test_chromium_skia(self):
+        pdf = fixture('chromium-skia.pdf')
+        self.assertTrue(re.search(r'/Type\s*/Page\s*/Resources\s*<<', pdf.decode('latin1')))  # inline resources
+        self.check(pdf)
+
+    def test_react_pdf(self):
+        pdf = fixture('react-pdf-4.9.0.pdf')
+        raw = pdf.decode('latin1')
+        self.assertTrue(re.search(r'/Resources\s+\d+\s+0\s+R', raw))  # indirect resources
+        self.assertTrue(re.search(r'/SMask\s+\d+\s+0\s+R', raw))
+        info = self.check(pdf)
+        self.assertIn('Standard font: Café £5 – naïve “quotes”', info['page_texts'][1].split('\n'))
+
+    def test_both_renderers_print_the_same_needles_and_the_gate_needles_shape(self):
+        c, r = g.inspect_pdf(fixture('chromium-skia.pdf')), g.inspect_pdf(fixture('react-pdf-4.9.0.pdf'))
+        self.assertEqual([n in c['text'] for n in FIXTURE_NEEDLES], [n in r['text'] for n in FIXTURE_NEEDLES])
+        self.assertEqual((c['pages'], c['images']), (r['pages'], r['images']))
+
+    def test_object_stream_inherited_resources_literal_strings_and_forms(self):
+        import zlib
+
+        def stream(d: str, data: bytes) -> bytes:
+            z = zlib.compress(data)
+            return f'<< {d} /Filter /FlateDecode /Length {len(z)} >>\nstream\n'.encode() + z + b'\nendstream'
+
+        members = [(1, '<< /Type /Catalog /Pages 2 0 R >>'),
+                   (2, '<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 4 0 R >>'),
+                   (3, '<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>'),
+                   (5, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')]
+        head, body = '', ''
+        for i, t in members:
+            head += f'{i} {len(body)} '
+            body += t + '\n'
+        content = b"BT /F1 12 Tf 72 700 Td (Hello \\(world\\) caf\\351) Tj 14 TL (Next line) ' ET /X1 Do"
+        objs = [(4, b'<< /Font << /F1 5 0 R >> /XObject << /X1 7 0 R >> >>'),
+                (6, stream('', content)),
+                (7, stream('/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 72 600]',
+                           b'BT /F1 10 Tf (Inside a form) Tj ET')),
+                (8, stream(f'/Type /ObjStm /N {len(members)} /First {len(head)}', (head + body).encode()))]
+        pdf = b'%PDF-1.5\n' + b''.join(f'{i} 0 obj\n'.encode() + o + b'\nendobj\n' for i, o in objs) + \
+            b'trailer << /Root 1 0 R >>\n%%EOF\n'
+        info = g.inspect_pdf(pdf)
+        self.assertEqual(info['pages'], 1)
+        self.assertEqual(info['page_texts'], ['Hello (world) café\nNext line\nInside a form'])
 
 
 if __name__ == '__main__':

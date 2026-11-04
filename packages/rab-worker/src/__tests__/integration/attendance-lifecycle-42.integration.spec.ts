@@ -26,6 +26,7 @@ import { runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet.job';
 import * as renderPdf from '../../queues/rab-reports/render-pdf.util';
+import { reportHtmlFor } from '../helpers/report-html';
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { SmtpSink } from './helpers/smtp-sink';
@@ -80,7 +81,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   let sink: SmtpSink;
   let emailWorker: Worker;
   let workerRedis: Redis;
-  let renderSpy: jest.SpyInstance;
+  let renderDocSpy: jest.SpyInstance;
   const renderedHtml: string[] = [];
 
   // ---- actors ---------------------------------------------------------
@@ -226,11 +227,12 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     emailWorker.on('failed', (job, err) => console.error('[lifecycle] email job failed', job?.id, err.message));
     emailWorker.on('error', (err) => console.error('[lifecycle] email worker error', err.message));
 
-    // Pass-through spy: records the HTML the renderer is asked to print, still renders a real PDF.
-    const original = renderPdf.renderHtmlToPdf;
-    renderSpy = jest.spyOn(renderPdf, 'renderHtmlToPdf').mockImplementation(async (html: string) => {
-      renderedHtml.push(html);
-      return original(html);
+    // Every report goes through renderReportPdf (data-in seam; native only since P5, no browser): record the HTML its
+    // data renders to through the shared view-model and the rab-server template, then render the real (native) PDF.
+    const originalRenderReportPdf = renderPdf.renderReportPdf;
+    renderDocSpy = jest.spyOn(renderPdf, 'renderReportPdf').mockImplementation(async (doc, env) => {
+      renderedHtml.push(reportHtmlFor(doc));
+      return originalRenderReportPdf(doc, env);
     });
 
     // ---- setup (not numbered): identities ---------------------------------
@@ -254,7 +256,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   }, 120_000);
 
   afterAll(async () => {
-    renderSpy?.mockRestore();
+    renderDocSpy?.mockRestore();
     await emailWorker?.close();
     await workerRedis?.quit();
     await app.close();

@@ -50,18 +50,52 @@ export function initials(name: string): string {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('');
 }
 
+/**
+ * The shift-details block as plain display strings: the ONE place its wording and its formatting (the organisation
+ * timezone via `fmtDate` / `fmtTime`) are decided. Both PDF renderers print from this: the HTML helper below (escaping
+ * every value) and the native renderer in rab-worker (which draws text, never markup). Optional lines are `null` when
+ * the data is absent, never a literal placeholder.
+ */
+export interface ShiftDetailsView {
+  venueName: string;
+  address: string | null;
+  /** "Department / role: D · R" or "Role: R". */
+  role: string;
+  date: string;
+  /** "HH:MM–HH:MM". */
+  scheduled: string;
+  /** "name · phone" (either part optional), or null when neither exists. */
+  contact: string | null;
+  shiftReference: string;
+}
+
+export function shiftDetailsView(s: DocumentShiftInfo): ShiftDetailsView {
+  const contact = [s.contactName, s.contactPhone].filter((v): v is string => !!v && v.trim().length > 0).join(' · ');
+  return {
+    venueName: s.venueName,
+    address: s.venueAddress ? s.venueAddress : null,
+    role: s.department ? `Department / role: ${s.department} · ${s.roleName}` : `Role: ${s.roleName}`,
+    date: fmtDate(s.startsAt, s.timezone),
+    scheduled: `${fmtTime(s.startsAt, s.timezone)}–${fmtTime(s.endsAt, s.timezone)}`,
+    contact: contact ? contact : null,
+    shiftReference: s.shiftReference,
+  };
+}
+
 /** "Department / role", "Date · Scheduled", "Contact", "Shift reference" — optional lines only when the data exists. */
 export function shiftDetailsHtml(s: DocumentShiftInfo): string {
-  const role = s.department ? `Department / role: ${escapeHtml(s.department)} · ${escapeHtml(s.roleName)}` : `Role: ${escapeHtml(s.roleName)}`;
-  const contact = [s.contactName, s.contactPhone].filter((v): v is string => !!v && v.trim().length > 0).map(escapeHtml).join(' · ');
+  return shiftDetailsHtmlFromView(shiftDetailsView(s));
+}
+
+export function shiftDetailsHtmlFromView(v: ShiftDetailsView): string {
   return `
-    <h1 class="venue">${escapeHtml(s.venueName)}</h1>
+    <h1 class="venue">${escapeHtml(v.venueName)}</h1>
     <div class="details">
-      ${s.venueAddress ? `<div>${escapeHtml(s.venueAddress)}</div>` : ''}
-      <div>${role}</div>
-      <div>Date: ${escapeHtml(fmtDate(s.startsAt, s.timezone))} &nbsp;&nbsp; Scheduled: ${escapeHtml(fmtTime(s.startsAt, s.timezone))}–${escapeHtml(fmtTime(s.endsAt, s.timezone))}</div>
-      ${contact ? `<div>Contact: ${contact}</div>` : ''}
-      <div>Shift reference: ${escapeHtml(s.shiftReference)}</div>
+      ${v.address ? `<div>${escapeHtml(v.address)}</div>` : ''}
+      <div>${escapeHtml(v.role)}</div>
+      <div>Date: ${escapeHtml(v.date)} &nbsp;&nbsp; Scheduled: ${escapeHtml(v.scheduled)}</div>
+      ${v.contact ? `<div>Contact: ${escapeHtml(v.contact)}</div>` : ''}
+      <div>Shift reference: ${escapeHtml(v.shiftReference)}</div>
     </div>`;
 }
 
@@ -75,7 +109,11 @@ export function documentHeaderHtml(title: string): string {
 }
 
 export function staffCellHtml(name: string, sub: string): string {
-  return `<div class="staff"><span class="avatar">${escapeHtml(initials(name))}</span><span><b>${escapeHtml(name)}</b><br><small>${escapeHtml(sub)}</small></span></div>`;
+  return staffCellHtmlFromView(initials(name), name, sub);
+}
+
+export function staffCellHtmlFromView(avatarInitials: string, name: string, sub: string): string {
+  return `<div class="staff"><span class="avatar">${escapeHtml(avatarInitials)}</span><span><b>${escapeHtml(name)}</b><br><small>${escapeHtml(sub)}</small></span></div>`;
 }
 
 /**
@@ -83,10 +121,29 @@ export function staffCellHtml(name: string, sub: string): string {
  * generated time and page x of y on the right. Footer templates do not inherit page CSS, so styles are inline.
  */
 export function documentFooterTemplate(s: DocumentShiftInfo): string {
-  const left = [s.workspaceName, s.shiftReference].filter(Boolean).map((v) => escapeHtml(v!)).join(' · ');
+  return documentFooterTemplateFromView(documentFooterView(s));
+}
+
+/**
+ * The per-page footer's text, shared by both renderers: `left` (workspace · shift reference) and `generated`
+ * ("Generated <date, time>"). Each renderer appends its own " · Page x of y", since page numbers exist only at render time.
+ */
+export interface DocumentFooterView {
+  left: string;
+  generated: string;
+}
+
+export function documentFooterView(s: DocumentShiftInfo): DocumentFooterView {
+  return {
+    left: [s.workspaceName, s.shiftReference].filter((v): v is string => !!v).join(' · '),
+    generated: `Generated ${fmtDateTime(s.generatedAt, s.timezone)}`,
+  };
+}
+
+export function documentFooterTemplateFromView(v: DocumentFooterView): string {
   return `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 7.5px; color: #8A8F8C; width: 100%; padding: 0 12mm; display: flex; justify-content: space-between;">
-    <span>${left}</span>
-    <span>Generated ${escapeHtml(fmtDateTime(s.generatedAt, s.timezone))} · Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+    <span>${escapeHtml(v.left)}</span>
+    <span>${escapeHtml(v.generated)} · Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
   </div>`;
 }
 
