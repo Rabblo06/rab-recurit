@@ -90,7 +90,8 @@ export function FinalTimesheetDocument(props: { vm: FinalTimesheetViewModel; cre
           key: 'bottom',
           mayBreak: bottomMayBreak(vm),
           children: [
-            h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [vm.notes, { text: vm.counts, muted: true }] }),
+            // The shift notes keep the line breaks their author typed (pre-line, owner decision 2026-11-04).
+            h(SignOffBlock, { heading: vm.notesHeading, paragraphs: [{ ...vm.notes, whiteSpace: 'pre-line' }, { text: vm.counts, muted: true }] }),
             h(SignOffBlock, { heading: vm.signOffHeading, paragraphs: [...vm.signOff, { text: vm.totalWorked, muted: true }] }),
           ],
         }),

@@ -13,6 +13,9 @@
 export const PDF_RENDER_STEP_TIMEOUT_MS = 30_000;
 
 export class PdfRenderTimeoutError extends Error {
+  /** Stable, non-personal code for logs, `statement_error` and audit metadata (as the native runtime's errors carry). */
+  readonly code = 'error_PDF_RENDER_TIMEOUT';
+
   constructor(
     readonly step: string,
     readonly timeoutMs: number,

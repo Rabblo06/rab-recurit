@@ -262,9 +262,10 @@ export function describePdfRendering(env: NodeJS.ProcessEnv = process.env): stri
  * Renders a report PDF with the renderer PDF_RENDERER selects for its kind. Same contract either way: resolves to the
  * PDF bytes; a render that does not finish within `PDF_RENDER_STEP_TIMEOUT_MS` rejects with `PdfRenderTimeoutError`
  * (native: step `native-render`, enforced by the render pool; Chromium bounds `setContent` and `pdf` itself). Native
- * failures carry a stable `code` (runtime/render-protocol.ts, e.g. error_PDF_GLYPH_UNSUPPORTED). A native failure is thrown as is: there is NO
- * runtime fallback to Chromium (T3) — the job's normal failure / retry path handles it, and rollback is the explicit
- * `PDF_RENDERER=chromium`.
+ * failures carry a stable `code` (native/runtime/render-protocol.ts, e.g. error_PDF_NATIVE_RENDER; a timeout carries
+ * error_PDF_RENDER_TIMEOUT). A native failure is thrown as is: there is NO runtime fallback to Chromium (T3) — the
+ * job's normal failure / retry path handles it (warning log with the code; for the statement, `statement_error` and
+ * the SHIFT_STATEMENT_FAILED audit row carry it), and rollback is the explicit `PDF_RENDERER=chromium`.
  */
 export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEnv = process.env): Promise<Buffer> {
   if (pdfRendererMode(env) === 'chromium' || !isNative(doc)) return renderHtmlToPdf(htmlFor(doc), optionsFor(doc));
@@ -273,4 +274,14 @@ export async function renderReportPdf(doc: ReportDocument, env: NodeJS.ProcessEn
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { renderNativePdf } = require('./native/render-native') as typeof import('./native/render-native');
   return renderNativePdf(doc);
+}
+
+/**
+ * " [<code>]" for a report-job failure log line when the error carries a stable code of the renderers' shape
+ * (`error_PDF_NATIVE_RENDER`, `error_PDF_RENDER_TIMEOUT`, …), else "": a failed native render is attributable in the
+ * Worker log, never silent. Only a code of that fixed shape is printed, never free text.
+ */
+export function errorCodeSuffix(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^error_[A-Z0-9_]{1,40}$/.test(code) ? ` [${code}]` : '';
 }

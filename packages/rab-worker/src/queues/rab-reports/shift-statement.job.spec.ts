@@ -1,6 +1,8 @@
 import { fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { ReportScanProcessor } from './report.processors';
-import { dispatchStatementScope, runShiftStatementDispatchCycle, shiftStatementJobOptions } from './shift-statement.job';
+import { PdfNativeInputError, PdfNativeRenderError, PdfNativeThreadCrashError } from './native/runtime/render-protocol';
+import { PdfRenderTimeoutError } from './native/runtime/render-timeout';
+import { dispatchStatementScope, runShiftStatementDispatchCycle, shiftStatementJobOptions, statementFailureCode } from './shift-statement.job';
 
 /** Phase D (D1): statement dispatcher — per_scope byte-for-byte; global = same scan + per-row CAS restricted to the claimed ids. */
 const ORG = '00000000-0000-4000-8000-00000000000a';
@@ -81,5 +83,36 @@ describe('shift statement dispatch', () => {
     });
     await expect(dispatchStatementScope(tenant as never, ORG, WS, [P1, P2], publish)).resolves.toMatchObject({ claimed: 2, published: 0, publishFailed: 2 });
     expect(publish).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * A failed statement records a fixed, non-personal code in `statement_error` and the SHIFT_STATEMENT_FAILED audit row.
+ * Native renderer failures keep their own code (visible and attributable; there is no fallback to Chromium), a driver
+ * code is prefixed, and anything else is `generation_failed`. Never a message or other free text.
+ */
+describe('statementFailureCode', () => {
+  it.each([
+    [new PdfNativeRenderError('thread failed to start'), 'error_PDF_NATIVE_RENDER'],
+    [new PdfNativeInputError('bad request'), 'error_PDF_NATIVE_INPUT'],
+    [new PdfNativeThreadCrashError('exited', 'ERR_WORKER_OUT_OF_MEMORY'), 'error_PDF_NATIVE_OUT_OF_MEMORY'],
+    [new PdfNativeThreadCrashError('exited', 'ERR_UNKNOWN'), 'error_PDF_NATIVE_THREAD_CRASH'],
+    [new PdfRenderTimeoutError('native-render', 30_000), 'error_PDF_RENDER_TIMEOUT'],
+    [Object.assign(new Error('duplicate key'), { code: '23505' }), 'error_23505'],
+  ])('%p → %p', (error, code) => {
+    expect(statementFailureCode(error)).toBe(code);
+    expect(code.length).toBeLessThanOrEqual(64); // payroll_record.statement_error CHECK
+  });
+
+  it.each([
+    new Error('no code'),
+    Object.assign(new Error('x'), { code: 'Jane Doe' }),
+    Object.assign(new Error('x'), { code: 'error_lowercase' }),
+    Object.assign(new Error('x'), { code: `error_${'A'.repeat(41)}` }),
+    Object.assign(new Error('x'), { code: 42 }),
+    null,
+    'error_PDF_NATIVE_RENDER',
+  ])('%p → generation_failed', (error) => {
+    expect(statementFailureCode(error)).toBe('generation_failed');
   });
 });
