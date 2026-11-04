@@ -229,12 +229,35 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     expect((await migrator().migrateAll({ workspaceIds: [busy.id] }))[0]!.status).toBe('MIGRATED');
   });
 
-  it('the runtime role cannot migrate, write or rewrite the ledger, run the recorder, or forge drift columns', async () => {
+  // P-class (owner-login architecture). The migrator's own refusal is keyed on the SCHEMA ROLE crewflow_app: a connection
+  // acting as it (fixture superuser + SET ROLE, a dedicated client that is closed afterwards) is still refused, and that role
+  // still cannot run the recorder or the fingerprint (42501). The one runtime login inherits the definers' owner and can run
+  // both, and the migrator does not refuse it: OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL), asserted from the
+  // catalog, never executed here (migrateAll would migrate every workspace). Ledger writes, the registry drift columns and
+  // the zero-rows-without-context check below still bind the runtime login (parity guard / append-only trigger / M-T2).
+  it('the runtime login cannot write or rewrite the ledger or forge drift columns; the schema role crewflow_app cannot migrate or run the recorder (PROV-1 for the runtime login)', async () => {
     const ws = created[0]!;
+    const asApp = new Client({ connectionString: adminUrl });
+    await asApp.connect();
+    try {
+      await asApp.query('SET ROLE crewflow_app');
+      await expect(new WorkspaceSchemaMigrator(pgClientRunner(asApp)).migrateAll()).rejects.toThrow('refuses to run as "crewflow_app"');
+      for (const sql of ['SELECT * FROM core.record_workspace_schema_drift($1)', 'SELECT core.workspace_schema_fingerprint($1)']) {
+        await asApp.query('BEGIN');
+        expect({ sql, code: await sqlstateOf(asApp.query(sql, [ws.id])) }).toEqual({ sql, code: '42501' });
+        await asApp.query('ROLLBACK');
+      }
+    } finally {
+      await asApp.end();
+    }
+    const { rows: prov } = await admin.query(
+      `SELECT has_function_privilege('crewflow_owner', 'core.record_workspace_schema_drift(uuid)', 'EXECUTE') AS rec,
+              has_function_privilege('crewflow_owner', 'core.workspace_schema_fingerprint(uuid)', 'EXECUTE') AS fp`,
+    );
+    expect(prov[0]).toEqual({ rec: true, fp: true });
     const app = new Client({ connectionString: appUrl });
     await app.connect();
     try {
-      await expect(new WorkspaceSchemaMigrator(pgClientRunner(app)).migrateAll()).rejects.toThrow('refuses to run as "crewflow_app"');
       await app.query('BEGIN');
       await app.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [ws.org, ws.owner]);
       // Reads its own organisation's history only.
@@ -255,10 +278,6 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
       expect(await sqlstateOf(app.query(`UPDATE core.workspace_schema_migration SET status = 'APPLIED' WHERE workspace_id = $1`, [ws.id]))).toBe('42501');
       await app.query('ROLLBACK TO SAVEPOINT s');
       expect(await sqlstateOf(app.query(`DELETE FROM core.workspace_schema_migration WHERE workspace_id = $1`, [ws.id]))).toBe('42501');
-      await app.query('ROLLBACK TO SAVEPOINT s');
-      expect(await sqlstateOf(app.query('SELECT * FROM core.record_workspace_schema_drift($1)', [ws.id]))).toBe('42501');
-      await app.query('ROLLBACK TO SAVEPOINT s');
-      expect(await sqlstateOf(app.query('SELECT core.workspace_schema_fingerprint($1)', [ws.id]))).toBe('42501');
       await app.query('ROLLBACK TO SAVEPOINT s');
       // Table-level UPDATE on the registry is pre-existing; the guard still refuses the versioning/drift columns.
       expect(await sqlstateOf(app.query(`UPDATE core.workspace_schema_registry SET drift_status = 'OK', module_version = 99 WHERE workspace_id = $1`, [ws.id]))).toBe('42501');

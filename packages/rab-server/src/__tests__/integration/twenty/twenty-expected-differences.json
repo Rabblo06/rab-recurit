@@ -516,6 +516,31 @@
         "classification": [
           "routed to Agent 2: the deferral seam REVOKE EXECUTE ON core.provision_workspace FROM crewflow_app is a no-op under the one login (it inherits the owner), so the workspace provisions at once and is never CREATING"
         ]
+      },
+      {
+        "suite": "workspace-schema-migrator (runtime cannot migrate / recorder / ledger / drift columns)",
+        "class": "P",
+        "classification": [
+          "catalogue:PROV-1"
+        ],
+        "kept": "the migrator still refuses a connection acting as crewflow_app; ledger INSERT / UPDATE / DELETE and registry drift columns still 42501 for the runtime login; zero ledger rows without context"
+      },
+      {
+        "suite": "deployment-identity (the real runtime login block)",
+        "class": "P / I",
+        "classification": [
+          "BC-11 / G-06 (HIGH, NEEDS OWNER APPROVAL)"
+        ],
+        "kept": "the SET LOCAL ROLE crewflow_app / crewflow block unchanged; for the runtime login every direct write but a no-row singleton UPDATE is refused (privilege or owner-only policy); bind() reachable, rolled back"
+      },
+      {
+        "suite": "crewflow-app-copied-write-grants (whole suite)",
+        "class": "P",
+        "classification": [
+          "schema role crewflow_app via SET ROLE for every grant assertion",
+          "parity guards"
+        ],
+        "kept": "a new runtime-login test: the same registry / membership / checkpoint / file writes on visible rows are 42501; zero rows without context on the one-connection pool (runtime login)"
       }
     ]
   },

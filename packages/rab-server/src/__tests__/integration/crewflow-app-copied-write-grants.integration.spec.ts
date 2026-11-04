@@ -30,7 +30,8 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
   const { adminUrl, appUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
   const sfx = Math.random().toString(36).slice(2, 8);
   let admin: Client;
-  let app: Client;
+  let app: Client; // the SCHEMA ROLE crewflow_app (fixture superuser + SET ROLE), see beforeAll
+  let runtime: Client; // the one runtime login (crewflow_owner)
   let a: SeededWorkspace; // READY via the server path (crewflow_app)
   let b: SeededWorkspace; // READY via the TS provisioner (crewflow), another organisation
   let c: SeededWorkspace; // PROVISIONING registry row, then superseded through the DEFINER function
@@ -65,9 +66,17 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
       throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
     }
-    app = new Client({ connectionString: appUrl });
+    // P-class (owner-login architecture): crewflow_app is a SCHEMA ROLE now (no process connects as it). `app` acts as it
+    // through a dedicated fixture-superuser connection with a session SET ROLE, so every grant assertion of this suite still
+    // tests exactly the reviewed boundary. The one runtime login (`runtime`, crewflow_owner) is asserted separately: the
+    // grant-parity guards (OwnerLoginGrantParityGuards1786721420000) must refuse it the same writes on rows it can see.
+    app = new Client({ connectionString: adminUrl });
     await app.connect();
+    await app.query('SET ROLE crewflow_app');
     expect((await app.query('SELECT current_user AS u')).rows[0].u).toBe('crewflow_app');
+    runtime = new Client({ connectionString: appUrl });
+    await runtime.connect();
+    expect((await runtime.query('SELECT current_user AS u')).rows[0].u).toBe('crewflow_owner');
 
     a = await seedWorkspace(admin, `lcg-a-${sfx}`);
     b = await seedWorkspace(admin, `lcg-b-${sfx}`);
@@ -112,6 +121,7 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
   afterAll(async () => {
     for (const ws of created) await dropWorkspaceSchema(admin, ws.schema).catch(() => undefined);
     await app?.end();
+    await runtime?.end();
     await admin?.end();
   });
 
@@ -179,6 +189,57 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
       expect(await refused('DELETE FROM core.stored_file WHERE id = $1', [fileId])).toBe('42501');
     });
     expect((await admin.query('SELECT count(*)::int AS n FROM core.stored_file WHERE id = $1', [fileId])).rows[0].n).toBe(1);
+  });
+
+  it('the runtime login: the grant-parity guards refuse the same registry, membership, checkpoint and file writes on rows it can see (42501); nothing changes', async () => {
+    const before = await registryOf(admin, a.id);
+    const counts = async () =>
+      (
+        await admin.query(
+          `SELECT (SELECT count(*)::int FROM core.workspace_membership WHERE user_id = $1) AS m, (SELECT count(*)::int FROM core.hws_backfill_checkpoint WHERE workspace_id = $2) AS h,
+                  (SELECT count(*)::int FROM core.stored_file WHERE id = $3) AS f`,
+          [a.owner, a.id, fileId],
+        )
+      ).rows[0];
+    const countsBefore = await counts();
+    await runtime.query('BEGIN');
+    try {
+      await runtime.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [
+        a.org,
+        a.id,
+        a.owner,
+      ]);
+      const code = async (sql: string, params: unknown[] = []) => {
+        await runtime.query('SAVEPOINT r');
+        const out = await sqlstateOf(runtime.query(sql, params));
+        await runtime.query('ROLLBACK TO SAVEPOINT r');
+        return out;
+      };
+      // Positive controls: every row is visible, so a refusal is the guard, not RLS hiding the row.
+      expect((await runtime.query('SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1', [a.id])).rows).toEqual([{ status: 'READY' }]);
+      expect((await runtime.query('SELECT count(*)::int AS n FROM core.workspace_membership WHERE user_id = $1', [a.owner])).rows[0].n).toBe(1);
+      expect((await runtime.query('SELECT count(*)::int AS n FROM core.hws_backfill_checkpoint WHERE workspace_id = $1', [a.id])).rows[0].n).toBe(1);
+      expect((await runtime.query('SELECT count(*)::int AS n FROM core.stored_file WHERE id = $1', [fileId])).rows[0].n).toBe(1);
+      const attempts: Array<[string, unknown[]]> = [
+        [`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [a.id]],
+        [`UPDATE core.workspace_schema_registry SET schema_version = 99 WHERE workspace_id = $1`, [a.id]],
+        [`UPDATE core.workspace_schema_registry SET migration_error = 'x' WHERE workspace_id = $1`, [a.id]],
+        [`DELETE FROM core.workspace_schema_registry WHERE workspace_id = $1`, [a.id]],
+        [`INSERT INTO core.workspace_schema_registry (workspace_id, organisation_id, schema_name, status) VALUES ($1, $2, $3, 'PROVISIONING')`, [c.id, a.org, c.schema]],
+        ['DELETE FROM core.workspace_membership WHERE user_id = $1', [a.owner]],
+        ['DELETE FROM core.hws_backfill_checkpoint WHERE workspace_id = $1', [a.id]],
+        ['DELETE FROM core.stored_file WHERE id = $1', [fileId]],
+      ];
+      for (const [sql, params] of attempts) expect({ sql, code: await code(sql, params) }).toEqual({ sql, code: '42501' });
+      // A spoofed scope finds no row of another tenant (RLS), so nothing of b's changes.
+      expect((await runtime.query('SELECT count(*)::int AS n FROM core.workspace_schema_registry WHERE workspace_id = $1', [b.id])).rows[0].n).toBe(0);
+      expect((await runtime.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [b.id])).rowCount).toBe(0);
+    } finally {
+      await runtime.query('ROLLBACK').catch(() => undefined);
+    }
+    expect(await registryOf(admin, a.id)).toEqual(before);
+    expect((await registryOf(admin, b.id)).status).toBe('READY');
+    expect(await counts()).toEqual(countsBefore);
   });
 
   it('no tenant context bound: zero rows (fail closed), and a pool of one connection carries no stale context', async () => {
