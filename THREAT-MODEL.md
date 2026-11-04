@@ -5504,6 +5504,14 @@ acceptable.
     - **Tests:** the member-invitation X2 test documents the difference per connected login. `crewflow_app` is still
       refused (42501), the owner login is not, and RLS still leaves 0 rows without context. Catalogue test BC-18
       reproduces it.
+12. **Owner-accepted, 2026-11-04 (REF-1):**
+
+    > "Under the owner login, a bug or injected SQL can change the global permission-flag table and the migration ledger
+    > (no tenant boundary; affects every tenant). Accepted, like Twenty."
+
+    The tables are `core.permission` and `core.migrations`. They stay outside the grant-parity guards on purpose: the
+    seed commands write the permission catalogue, and the migration runner writes the ledger, both as the owner login.
+    No database guard is added. Agent 5 updates the catalogue entry and the CF-09 test to record the accepted difference.
 
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 
@@ -5548,8 +5556,27 @@ Each control below is tested. None of them prevents injection.
   - BEFORE INSERT, UPDATE, DELETE and TRUNCATE triggers give the owner login exactly crewflow_app's write privileges on
     36 crewflow-owned core tables.
   - Those tables cover payroll immutability, definer-only AI, registry and ledger writes, and outbox retention.
-  - **Open:** the workspace-schema copies of the payroll tables (HWS runtime) still need a workspace module and new
-    fingerprints.
+  - The workspace-schema copies of the payroll tables (HWS runtime) get the same guards through workspace module v20
+    (`WorkspaceGrantParityGuards1786721430000`).
+  - Fixed in place on 2026-11-04 (owner-approved; both migrations had run only on disposable databases):
+    - **PAY-1b (MEDIUM, found by Agent 5 on `deploy/twenty-mode-a`):** the DELETE guards, and the UPDATE guards of
+      tables with no updatable column, were row-level. These tables have no DELETE (or UPDATE) policy, so as the owner
+      login such a statement matched 0 rows, no row trigger fired, and it "succeeded" without an error. No data
+      changed, but nothing refused or recorded the attempt (`payroll-runs.integration.spec.ts:410`,
+      `payroll-approval.integration.spec.ts:440`). Every operation `crewflow_app` lacked entirely is now refused per
+      statement (INSERT, DELETE, and UPDATE with no updatable column), like a missing privilege. The column allow-list
+      UPDATE guards stay per row.
+    - **Trigger order (functional regression, Agent 5 `ai-agents.integration.spec.ts:163`):** the allow-list guard ran
+      after `ai_agent_config_version`, saw the server-maintained `config_version` change and refused a legitimate
+      prompt edit. Every guard name now starts with `_`, so it fires before any other BEFORE UPDATE row trigger, and
+      the migration refuses a table where another one would fire first.
+    - **MFA-SESS-1 (fixed, not accepted; owner decision 2026-11-04):** `core.user_session.mfa_verified_at` is set at
+      INSERT only. No app path updates it: refresh-token, backfill and handoff INSERTs never set it, and no UPDATE
+      names it. A statement-level `BEFORE UPDATE OF mfa_verified_at` trigger now refuses any UPDATE that names the
+      column, for every role, the superuser included. The INSERT-time check (an enabled factor, not in the future) is
+      unchanged.
+    - Tests: `owner-login-guards.integration.spec.ts` (PAY-1b, trigger order and MFA-SESS-1 cases). The payroll and
+      ai-agents suites pass unchanged, and `w45-db5-schema` stays strict.
 - **Boot, runtime and CI guards** (updated in place): they accept the owner login only, run the MEMBER-semantics
   reachability walk, enforce the exact role inventory, check FORCE and ownership, and refuse PostgreSQL below 16.
 - **Pool safety:** RESET ROLE on every pool checkout and at the start of every tenant transaction. A transaction fails

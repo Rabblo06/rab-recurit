@@ -42,6 +42,10 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     hits: 1,
     why: 'operator script reads its own POSTURE_DATABASE_URL; connects through the factory (security-posture.ts createPgClientForUrl)',
   },
+  'packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts': {
+    hits: 1,
+    why: 'operator script reads its own POSTURE_DATABASE_URL (as check-db-security-posture.ts); connects through the factory (createPgClientForUrl)',
+  },
   'packages/rab-server/src/database/typeorm/scripts/check-workspace-schema-drift.ts': {
     hits: 1,
     why: 'operator script reads its own DRIFT_DATABASE_URL; connects through the factory (createPgClientForUrl)',

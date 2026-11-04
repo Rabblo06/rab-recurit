@@ -3,7 +3,7 @@ import { Client, Pool } from 'pg';
 import { ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from '../../database/boot-checks/owner-login-posture';
 import { installSessionRoleResetOnAcquire } from '../../database/postgres/session-role-reset';
 import { readSemanticPosture, semanticDriftFromSnapshot } from '../../database/posture-drift/semantic-posture';
-import { GRANT_PARITY_TARGETS } from '../../database/typeorm/core/grant-parity-guard-sql';
+import { GRANT_PARITY_ORDER_SQL, GRANT_PARITY_TARGETS } from '../../database/typeorm/core/grant-parity-guard-sql';
 import { PREAUTH_FORCE_TABLES } from '../../database/typeorm/core/preauth-force-sql';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 
@@ -197,7 +197,7 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       if (!row) {
         // No payroll fixtures on a migrations-only database: prove the trigger wiring instead (UPDATE / DELETE on every row).
         const [t] = await q(owner)(
-          `SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'core.payroll_run_line'::regclass AND tgname IN ('payroll_run_line_grant_parity_update', 'payroll_run_line_grant_parity_delete')`,
+          `SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'core.payroll_run_line'::regclass AND tgname IN ('_payroll_run_line_grant_parity_update', '_payroll_run_line_grant_parity_delete')`,
         );
         expect(t!.n).toBe(2);
         return;
@@ -209,9 +209,55 @@ suite('owner-login guards (real PostgreSQL, as crewflow_owner)', () => {
       expect(result).toBe('42501');
     });
 
-    it('every reviewed parity trigger exists and is enabled', async () => {
-      const rows = await q(owner)(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname LIKE '%\\_grant\\_parity\\_%' AND tgenabled = 'O'`);
+    it('every reviewed parity trigger exists and is enabled (core; workspace copies are counted by module 20)', async () => {
+      // Core only: every workspace schema adds its own module-20 copies (16 each), so a database-wide count depends on how
+      // many workspaces exist (67 core + 16 per workspace).
+      const rows = await q(owner)(
+        `SELECT count(*)::int AS n FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+          WHERE c.relnamespace = 'core'::regnamespace AND t.tgname LIKE '\\_%\\_grant\\_parity\\_%' AND t.tgenabled = 'O'`,
+      );
       expect(rows[0]!.n).toBe(Object.values(GRANT_PARITY_TARGETS).reduce((n, ops) => n + ops.length, 0));
+    });
+
+    it('PAY-1b: an operation crewflow_app lacked entirely is refused per statement, even when RLS leaves no row', async () => {
+      const zeroRow = [
+        `DELETE FROM core.payroll_run_line WHERE false`,
+        `UPDATE core.payroll_run_line SET amount_pence = 1 WHERE false`,
+        `UPDATE core.payslip_document SET version = 9 WHERE false`,
+        `DELETE FROM core.payroll_calendar_period WHERE false`,
+        `DELETE FROM core.payroll_record WHERE false`,
+        `DELETE FROM core.payslip WHERE false`,
+      ];
+      for (const sql of zeroRow) expect({ sql, code: await tx(owner, () => code(owner.query(sql))) }).toEqual({ sql, code: '42501' });
+      // The allow-list UPDATE guard stays per row: an allowed column on no row is not an error (crewflow_app parity).
+      expect(await tx(owner, () => code(owner.query(`UPDATE core.payroll_record SET status = status WHERE false`)))).toBe('ok');
+      // The migrator / provisioner path (SET LOCAL ROLE crewflow) and FK actions (run as the owner crewflow) pass.
+      expect(await tx(owner, async () => {
+        await owner.query('SET LOCAL ROLE crewflow');
+        return code(owner.query(`DELETE FROM core.payroll_run_line WHERE false`));
+      })).toBe('ok');
+    });
+
+    it('the row-level allow-list guard fires before every other BEFORE UPDATE row trigger (ai_agent_config_version regression)', async () => {
+      expect(await q(owner)(GRANT_PARITY_ORDER_SQL)).toEqual([]);
+      const [first] = await q(owner)(
+        `SELECT tgname::text AS name FROM pg_trigger WHERE tgrelid = 'core.ai_agent'::regclass AND NOT tgisinternal AND (tgtype::int & 19) = 19
+          ORDER BY tgname::text COLLATE "C" LIMIT 1`,
+      );
+      expect(first!.name).toBe('_ai_agent_grant_parity_update');
+    });
+
+    it('MFA-SESS-1: user_session.mfa_verified_at is INSERT-only for every role; other columns are unaffected', async () => {
+      const stamp = `UPDATE core.user_session SET mfa_verified_at = now() WHERE false`;
+      expect(await tx(owner, () => code(owner.query(stamp)))).toBe('42501');
+      for (const role of ['rab_secure_owner', 'crewflow']) {
+        expect({ role, code: await tx(owner, async () => {
+          await owner.query(`SET LOCAL ROLE ${role}`);
+          return code(owner.query(stamp));
+        }) }).toEqual({ role, code: '42501' });
+      }
+      expect(await tx(admin, () => code(admin.query(stamp)))).toBe('42501'); // the superuser too (only a disabled trigger escapes)
+      expect(await tx(owner, () => code(owner.query(`UPDATE core.user_session SET revoked_reason = revoked_reason WHERE false`)))).toBe('ok');
     });
 
     it('the registry guard body is the M-T2 allow-list', async () => {
