@@ -1,0 +1,116 @@
+# Owner-login deployment configuration CI. NOT a release workflow: it builds, pushes and deploys nothing, holds no secret
+# and needs only `contents: read`.
+#
+#   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs), plus
+#                      `docker compose config` of the committed combinations. Until the in-place compose edits land (after
+#                      #61/#62), the gate runs in --static mode: env templates + the bundled-database override. The in-place
+#                      PR switches this job to the full mode (one identical PG_DATABASE_URL on rab-api / rab-worker /
+#                      rab-migrate, no second identity, no token, the H1-H6 keys, the lifecycle) and adds
+#                      compose-owner-login.full.test.cjs.
+#   owner-login-suites HOOK for Agent 5 (independent review and integration tests). It reports "not on this branch yet"
+#                      until the harness lands, then FAILS until its command is wired below, so a landed suite is never
+#                      silently skipped.
+name: CI owner-login deployment
+
+on:
+  pull_request:
+    paths:
+      - packages/rab-docker/docker-compose*.yml
+      - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/env/**
+      - packages/rab-docker/local-db/**
+      - packages/rab-docker/postgres-init/owner-login/**
+      - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - .github/workflows/ci-deployment-owner-login.yaml
+      - .nvmrc
+  push:
+    branches: [main, deploy/twenty-mode-a]
+    paths:
+      - packages/rab-docker/docker-compose*.yml
+      - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/env/**
+      - packages/rab-docker/local-db/**
+      - packages/rab-docker/postgres-init/owner-login/**
+      - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - .github/workflows/ci-deployment-owner-login.yaml
+      - .nvmrc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-deployment-owner-login-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-config:
+    name: Owner-login compose and env gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      # The self-tests skip their rendered-model cases without docker compose; here it is required, so they cannot skip.
+      - name: docker compose is available
+        run: docker compose version
+      - name: docker compose config — image + local-db
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP/owner-login-config"
+          mkdir -p "$t/project" "$t/secrets"
+          : > "$t/project/.env.migrate"
+          : > "$t/project/.env.ops"
+          z="$(printf '%064d' 0)"
+          {
+            echo "CREWFLOW_API_IMAGE_DIGEST=sha256:$z"
+            echo "CREWFLOW_WORKER_IMAGE_DIGEST=sha256:$z"
+            echo "CREWFLOW_REDIS_IMAGE=redis@sha256:$z"
+            echo "CREWFLOW_POSTGRES_IMAGE=postgres@sha256:$z"
+            echo "CREWFLOW_SECRETS_DIR=$t/secrets"
+            echo "CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt"
+          } > "$t/compose.env"
+          D=packages/rab-docker
+          docker compose --env-file "$t/compose.env" --project-directory "$t/project" -f "$D/docker-compose.image.yml" -f "$D/docker-compose.local-db.yml" config -q
+          # Fail closed: a missing required interpolation value must refuse to render.
+          grep -v '^CREWFLOW_POSTGRES_IMAGE=' "$t/compose.env" > "$t/compose-missing.env"
+          if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$D/docker-compose.image.yml" -f "$D/docker-compose.local-db.yml" config -q 2>/dev/null; then
+            echo "::error::docker-compose.local-db.yml rendered without CREWFLOW_POSTGRES_IMAGE"
+            exit 1
+          fi
+      - name: Gate self-tests
+        run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs
+      - name: Owner-login gate (static until the in-place compose edits land after #61/#62)
+        run: node packages/rab-docker/scripts/compose-owner-login.cjs --static
+
+  # ---------------------------------------------------------------------------------------------------------------------
+  # Agent 5 hook (independent review and integration tests). Agent 5 owns the command, its paths, the disposable-postgres
+  # action and the PG16 + PG18 matrix. AGENT 5: point HARNESS at the suite's entry file and replace the marked lines.
+  # ---------------------------------------------------------------------------------------------------------------------
+  owner-login-suites:
+    name: Owner-login integration suites (Agent 5 hook)
+    needs: deployment-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Owner-login integration suites
+        env:
+          HARNESS: packages/rab-server/scripts/owner-login-check.ts
+        run: |
+          set -euo pipefail
+          if [ ! -f "$HARNESS" ]; then
+            echo "::notice::owner-login test harness not on this branch yet (Agent 5); nothing to run"
+            exit 0
+          fi
+          # AGENT 5: replace the two lines below with the suite command.
+          echo "::error::$HARNESS is present but its CI command is not wired (ci-deployment-owner-login.yaml)"
+          exit 1
