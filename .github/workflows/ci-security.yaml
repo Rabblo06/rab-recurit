@@ -62,38 +62,74 @@ jobs:
     env:
       NODE_ENV: test
       REDIS_URL: redis://localhost:6379
-    # PostgreSQL (M2 CI reliability, 2026-10-28): no longer a service with postgres-init mounted from the workspace (it
-    # starts before checkout, so Docker created that directory as root and checkout failed with EACCES), and no longer
-    # migrated as the rab_owner login (the role split refuses it under CF-41; rab_app is NOLOGIN since). The database is
-    # started after checkout and built by the M2 harness's restricted-migrator fresh install; the gate then runs as
-    # crewflow_app, the restricted NOBYPASSRLS runtime login, exactly as before in intent (check-rls-coverage.ts asserts
-    # current_user = crewflow_app and rolbypassrls = false).
+    # Owner-login architecture (owner's final decision 2026-11-04): the database is built the way production builds it - the
+    # provider-admin step (postgres-init/owner-login/01-crewflow-owner.sql) and then the migrate-on-start child
+    # (twenty-migrate.ts) as the ONE owner login crewflow_owner on an EMPTY database (bootstrap, chain, ROW_COPY shim). The
+    # RLS gate then runs AS crewflow_owner (check-rls-coverage.ts requires it and proves its role / object posture), the
+    # posture and semantic goldens are compared exactly, and the owner-login guard and behaviour-catalogue suites run as
+    # crewflow_owner (they skip - never pass - on any other login). Every credential is random and masked.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/disposable-postgres
-      - name: Build the workspace libraries the migration harness imports
+      - name: Build the workspace libraries the migration child imports
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - name: Build the database with the restricted migrator (fresh install, with its security checks)
-        run: |
-          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
-        env:
-          MIGRATION_SECURITY_SCENARIOS: fresh
-          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
-          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/rls-database.env
-      - name: FORCE RLS coverage as crewflow_app
+      - name: Provider-admin step (crewflow_owner and the database grant; the committed SQL file)
         run: |
           set -euo pipefail
-          set -a; source "${RUNNER_TEMP}/rls-database.env"; set +a
-          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
-          eval "$test_env"
-          # Phase B: the connection factory's one variable (the deprecated DATABASE_URL is no longer passed).
-          PG_DATABASE_URL="$TEST_DATABASE_URL" yarn check-rls
+          owner_pass="$(openssl rand -hex 32)"
+          echo "::add-mask::${owner_pass}"
+          db=crewflow_rls_gate
+          docker exec disposable-postgres psql -X -q -v ON_ERROR_STOP=1 -U ci_bootstrap -d postgres \
+            -c "CREATE DATABASE ${db}" -c "ALTER DATABASE ${db} SET crewflow.disposable_test_database = 'true'"
+          printf '%s' "${owner_pass}" | docker exec -i disposable-postgres sh -c 'umask 077; cat > /tmp/owner-pw'
+          docker exec -i disposable-postgres psql -X -q -U ci_bootstrap -d "${db}" -v owner_password_file=/tmp/owner-pw -v DBNAME="${db}" -f - \
+            < packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
+          docker exec disposable-postgres rm -f /tmp/owner-pw
+          admin="${MIGRATION_SECURITY_ADMIN_URL%/*}/${db}"
+          owner="postgres://crewflow_owner:${owner_pass}@127.0.0.1:5432/${db}"
+          echo "::add-mask::${admin}"
+          echo "::add-mask::${owner}"
+          { echo "RLS_OWNER_URL=${owner}"; echo "RLS_ADMIN_URL=${admin}"; } >> "$GITHUB_ENV"
+      - name: Fresh install by the migrate-on-start child as crewflow_owner
+        run: |
+          env -i PATH="$PATH" HOME="$HOME" NODE_ENV=development PG_DATABASE_URL="$RLS_OWNER_URL" CREWFLOW_MIGRATE_ON_START=true \
+            npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/migrate/twenty/twenty-migrate.ts
+      - name: FORCE RLS coverage and the owner-login posture as crewflow_owner
+        run: PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
+      - name: Security posture golden (exact)
+        run: |
+          POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/check-db-security-posture.ts
+      - name: Semantic posture golden for this PostgreSQL major (policies, function bodies, triggers, RLS, audit ACL)
+        run: |
+          POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts
+      - name: Owner-login guards and behaviour-change catalogue (real PostgreSQL, as crewflow_owner)
+        run: |
+          TEST_DATABASE_URL="$RLS_OWNER_URL" TEST_DATABASE_URL_UNPOOLED="$RLS_ADMIN_URL" DB_TARGET=local \
+            npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=120000 \
+            packages/rab-server/src/__tests__/integration/owner-login-guards.integration.spec.ts \
+            packages/rab-server/src/__tests__/integration/owner-login-behaviour-catalogue.integration.spec.ts
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # Owner-login architecture: one injected statement runs with the schema owner's privileges (PT-01), so every dynamically
+  # built SQL site needs a reviewed allow-comment (tools/check-sql-injection.cjs). A text scan, not a complete defence: the
+  # adversarial tests and code review remain required. No dependencies needed (Node built-ins only).
+  sql-injection-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Dynamic SQL sites carry a reviewed allow-comment
+        run: node tools/check-sql-injection.cjs
 
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
   # never migrate, refuse migration credentials), the Worker bundle launcher (PG_* forwarding, legacy names refused in
@@ -161,7 +197,7 @@ jobs:
   ci-security-gate:
     name: ci-security gate
     # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
-    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, deployment-config, changes, image-gate]
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, deployment-config, changes, image-gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
