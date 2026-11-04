@@ -25,7 +25,7 @@ under `packages/rab-server/src/database`.
 | Later releases | `crewflow_migrator` (restricted: NOSUPERUSER NOBYPASSRLS NOCREATEROLE, member of `rab_secure_owner` + `crewflow`) | M2 harness, `scripts/migration-security-check.ts` |
 | `DB_TARGET=staging` | **refused**: there is no staging command path | `core/database-target.ts` |
 | Runtime classification | a `NODE_ENV=production` process must declare `CREWFLOW_DEPLOYMENT_ENVIRONMENT=production`, and the database marker must agree | `deployment-identity/deployment-identity.ts` |
-| Release step | `deploy-prepare.js` (rab-migrate). Exit **0** = nothing pending, or applied with the token and post-checks passed. Exit **3** = pending and not approved (prints the list and the token). Exit **1** = refused or failed, including a stale, foreign or malformed token and the retired constant `apply-pending-migrations` | `scripts/deploy-prepare.ts` |
+| Release step | `deploy-prepare.js` (rab-migrate). Exit **0** = nothing pending, or applied with the token and post-checks passed. Exit **3** = pending and not approved (prints the list and the token). Exits **64–69** = refused or failed, by kind (64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout), including a stale, foreign or malformed token and the retired constant `apply-pending-migrations`. Always in token mode: without a token it is a check run that applies nothing | `scripts/deploy-prepare.ts` |
 | Approval token (F5) | `pending-<count>-<sha256 over "crewflow-migration-approval-v1" + the pending names in run order>`, recomputed after the migration lock | `scripts/migrate/migration-approval.ts` |
 | Migration lock | Session advisory lock `0x637265776d696772`, waited for up to `CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS` (default 600 s, range 1–840). After it is acquired, the session's own `lock_timeout` is restored | `scripts/migrate/migration-lock.ts` |
 | Statement timeout | migration sessions 900 s | `core/core.datasource.ts` |
@@ -290,7 +290,8 @@ cd /opt/crewflow-staging/release/packages/rab-docker
 C="docker compose --env-file /etc/crewflow-staging/compose.env -f docker-compose.image.yml -f staging/docker-compose.staging.yml"
 $C run --rm rab-migrate                     # CHECK run: exit 3, prints every pending name + the token; nothing applied
 #   exit 0  = nothing pending -> go to the service start
-#   exit 1  = refused (target, identity, N1, lock, connection): fix, re-run the check
+#   exit 64-69 = refused or failed, by kind (64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check,
+#                69 lock timeout): fix, re-run the check
 # The owner compares the printed list with the approved list (§2/§3) and approves exactly that token:
 $C run --rm -e CREWFLOW_MIGRATION_APPROVED=pending-<n>-<sha256> rab-migrate   # APPLY: exit 0 after post-checks
 $C run --rm rab-migrate                     # CHECK again: exit 0 ("schema is current")
@@ -298,7 +299,7 @@ $C run --rm rab-migrate                     # CHECK again: exit 0 ("schema is cu
 
 The token approves one pending set only:
 - left in a file, it approves nothing later;
-- a token for another set, a malformed value or `apply-pending-migrations` gives exit 1, with nothing applied.
+- a token for another set, a malformed value or `apply-pending-migrations` is refused (an exit in 64–69), with nothing applied.
 
 Pass it on the command line only, never in `.env.migrate`.
 
@@ -370,7 +371,7 @@ Use the least invasive rollback that fixes the problem. The order of preference 
 
 | # | Situation | Action | Notes |
 |---|---|---|---|
-| R-0 | `deploy-prepare` exit 3 or 1 | Nothing was applied, and the old release keeps running (compose never starts the API and Worker: `service_completed_successfully`) | Fix the cause and re-run the check |
+| R-0 | `deploy-prepare` exit 3, or a failure exit (64–69) | Nothing was applied, and the old release keeps running (compose never starts the API and Worker: `service_completed_successfully`) | Fix the cause and re-run the check |
 | R-1 | Phase D global mode misbehaves | `WORKER_CLAIM_MODE=per_scope` on every Worker, then a rolling restart (§8.1). Event mode: first set `WORKER_DISPATCH_MODE=poll` on the API **and** the Worker | No data change; fast |
 | R-2 | Worker credential | Point the Worker's `PG_DATABASE_URL` back at `crewflow_app` (§8.2), per_scope only | 1786721330000 must not be applied |
 | R-3 | Application bug, schema unchanged by the release | Redeploy the previous **digests** (`CREWFLOW_*_IMAGE_DIGEST` back to the recorded values) with the previous env files | A staging first install has no previous release: roll forward or rebuild staging |

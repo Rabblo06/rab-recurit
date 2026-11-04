@@ -6,9 +6,8 @@
 #                      the H1-H6 keys, the controlled-release and migrate-on-start lifecycles, the bundled database), plus
 #                      `docker compose config` of every supported combination. ci-security.yaml's deployment-config job
 #                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
-#   owner-login-suites HOOK for Agent 5 (independent review and integration tests). It reports "not on this branch yet"
-#                      until the harness lands, then FAILS until its command is wired below, so a landed suite is never
-#                      silently skipped.
+# The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
+# transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
 name: CI owner-login deployment
 
 on:
@@ -96,29 +95,3 @@ jobs:
         run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs packages/rab-docker/scripts/compose-owner-login.full.test.cjs
       - name: Owner-login gate (full)
         run: node packages/rab-docker/scripts/compose-owner-login.cjs
-
-  # ---------------------------------------------------------------------------------------------------------------------
-  # Agent 5 hook (independent review and integration tests). Agent 5 owns the command, its paths, the disposable-postgres
-  # action and the PG16 + PG18 matrix. AGENT 5: point HARNESS at the suite's entry file and replace the marked lines.
-  # ---------------------------------------------------------------------------------------------------------------------
-  owner-login-suites:
-    name: Owner-login integration suites (Agent 5 hook)
-    needs: deployment-config
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Owner-login integration suites
-        env:
-          HARNESS: packages/rab-server/scripts/owner-login-check.ts
-        run: |
-          set -euo pipefail
-          if [ ! -f "$HARNESS" ]; then
-            echo "::notice::owner-login test harness not on this branch yet (Agent 5); nothing to run"
-            exit 0
-          fi
-          # AGENT 5: replace the two lines below with the suite command.
-          echo "::error::$HARNESS is present but its CI command is not wired (ci-deployment-owner-login.yaml)"
-          exit 1
