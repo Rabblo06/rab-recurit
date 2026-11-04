@@ -31,7 +31,7 @@
  * the exit code alone. Output: database names, migration names, counts. Never a URL or password.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -76,6 +76,29 @@ export function parseAdminUrl(raw: string | undefined): URL {
   }
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) throw new Refusal('the admin URL is not a loopback disposable cluster. Refusing.');
   return u;
+}
+
+/**
+ * The ONE way an identifier reaches SQL text in this file (sql-injection lint, Agent 3): a strict lower-case allow-list,
+ * then double quotes. Database names additionally pass assertHarnessDatabaseName; role names are built here from RUN_ID.
+ */
+export function qi(name: string): string {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(name)) throw new Refusal('refusing: not a plain lower-case identifier');
+  return `"${name}"`;
+}
+
+/**
+ * A SCRAM-SHA-256 verifier computed HERE, so no plaintext password is ever part of a statement (a failed statement can be
+ * written to the server log with its text). PostgreSQL stores a pre-hashed verifier as-is (CREATE ROLE … PASSWORD '<verifier>').
+ */
+export function scramVerifier(password: string): string {
+  const salt = randomBytes(16);
+  const iterations = 4096;
+  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256');
+  const hmac = (key: Buffer, text: string) => createHmac('sha256', key).update(text).digest();
+  const storedKey = createHash('sha256').update(hmac(salted, 'Client Key')).digest();
+  const serverKey = hmac(salted, 'Server Key');
+  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
 }
 
 export function assertHarnessDatabaseName(db: string): void {
@@ -165,8 +188,10 @@ async function ownerExists(ctx: Ctx): Promise<boolean> {
 async function createEmptyDatabase(ctx: Ctx, db: string, disposable = true): Promise<void> {
   assertHarnessDatabaseName(db);
   await withClient(withDb(ctx.admin, 'postgres'), async (c) => {
-    await c.query(`CREATE DATABASE "${db}"`);
-    if (disposable) await c.query(`ALTER DATABASE "${db}" SET crewflow.disposable_test_database = 'true'`);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName above and qi() (allow-listed identifier), nothing else interpolated
+    await c.query(`CREATE DATABASE ${qi(db)}`);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName above and qi() (allow-listed identifier), nothing else interpolated
+    if (disposable) await c.query(`ALTER DATABASE ${qi(db)} SET crewflow.disposable_test_database = 'true'`);
   });
 }
 
@@ -184,17 +209,23 @@ async function providerStep(ctx: Ctx, db: string, r: ScenarioReport): Promise<vo
       `crewflow_owner has the M0 §5.1 shape (${JSON.stringify(attrs)})`,
     );
   } else {
-    await withClient(withDb(ctx.admin, db), (c) => c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${db}" TO crewflow_owner WITH GRANT OPTION`));
+    assertHarnessDatabaseName(db);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName and qi() (allow-listed identifier), nothing else interpolated
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${qi(db)} TO crewflow_owner WITH GRANT OPTION`));
   }
 }
 
 async function cloneDatabase(ctx: Ctx, template: string, db: string): Promise<void> {
   assertHarnessDatabaseName(db);
+  assertHarnessDatabaseName(template);
   await withClient(withDb(ctx.admin, 'postgres'), async (c) => {
     await c.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`, [template]);
-    await c.query(`CREATE DATABASE "${db}" TEMPLATE "${template}"`);
-    await c.query(`ALTER DATABASE "${db}" SET crewflow.disposable_test_database = 'true'`);
-    await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${db}" TO crewflow_owner WITH GRANT OPTION`);
+    // sql-injection-reviewed: db and template passed assertHarnessDatabaseName and qi() (allow-listed identifiers)
+    await c.query(`CREATE DATABASE ${qi(db)} TEMPLATE ${qi(template)}`);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName and qi() (allow-listed identifier), nothing else interpolated
+    await c.query(`ALTER DATABASE ${qi(db)} SET crewflow.disposable_test_database = 'true'`);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName and qi() (allow-listed identifier), nothing else interpolated
+    await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${qi(db)} TO crewflow_owner WITH GRANT OPTION`);
   });
 }
 
@@ -212,11 +243,13 @@ export async function ownerFixture(ctx: Ctx, db: string): Promise<void> {
   assertHarnessDatabaseName(db);
   await withClient(withDb(ctx.admin, 'postgres'), async (c) => {
     if ((await c.query(`SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner'`)).rows.length === 0) {
-      await c.query(`CREATE ROLE crewflow_owner LOGIN PASSWORD '${ctx.ownerPassword}' NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+      // sql-injection-reviewed: the only interpolation is a SCRAM verifier computed here (base64 + '$:' only), never the plaintext password
+      await c.query(`CREATE ROLE crewflow_owner LOGIN PASSWORD '${scramVerifier(ctx.ownerPassword)}' NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
     }
   });
   await withClient(withDb(ctx.admin, db), async (c) => {
-    await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${db}" TO crewflow_owner WITH GRANT OPTION`);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName and qi() (allow-listed identifier), nothing else interpolated
+    await c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${qi(db)} TO crewflow_owner WITH GRANT OPTION`);
     for (const [role, opts] of [
       ['rab_secure_owner', 'ADMIN TRUE, INHERIT TRUE, SET TRUE'],
       ['crewflow', 'ADMIN TRUE, INHERIT TRUE, SET TRUE'],
@@ -224,7 +257,8 @@ export async function ownerFixture(ctx: Ctx, db: string): Promise<void> {
       ['rab_app', 'ADMIN TRUE, INHERIT TRUE, SET FALSE'],
       ['crewflow_app', 'ADMIN TRUE, INHERIT FALSE, SET FALSE'],
     ] as const) {
-      if ((await c.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [role])).rows.length) await c.query(`GRANT "${role}" TO crewflow_owner WITH ${opts}`);
+      // sql-injection-reviewed: role and opts come from the constant table above; role also passes qi()
+      if ((await c.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [role])).rows.length) await c.query(`GRANT ${qi(role)} TO crewflow_owner WITH ${opts}`);
     }
   });
   log(`owner-fixture applied to ${db} (PRE-T2 STAND-IN; limits: ${FIXTURE_LIMITS.length})`);
@@ -252,6 +286,7 @@ export async function readState(ctx: Ctx, db: string): Promise<DbState> {
     const ledger = hasLedger ? (await c.query('SELECT name FROM core.migrations ORDER BY timestamp, id')).rows.map((r) => String(r.name)) : [];
     const worker = (await c.query(`SELECT (SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid)::int AS n FROM pg_roles r WHERE r.rolname = 'crewflow_worker'`)).rows[0];
     const lock = (
+      // sql-injection-reviewed: MIGRATION_LOCK_KEY_SQL is a code constant (the crewmigr bigint literal), no input
       await c.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND ((classid::bigint << 32) | objid::bigint) = ${MIGRATION_LOCK_KEY_SQL}`)
     ).rows[0];
     const tables = (await c.query(`SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'core' AND c.relkind = 'r'`)).rows[0];
@@ -569,6 +604,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const holder = new Client({ connectionString: withDb(ctx.admin, head), application_name: 'twa-t5-lock-holder' });
     await holder.connect();
     try {
+      // sql-injection-reviewed: MIGRATION_LOCK_KEY_SQL is a code constant (the crewmigr bigint literal), no input
       await holder.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY_SQL})`);
       const c = await child(head, { ...idEnv, CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5' }, { timeoutMs: 120_000 });
       expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `exit 69, serve=false (${summary(c)})`);
@@ -589,9 +625,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const bypass = `twa_tw_bypass_${RUN_ID}`;
     const plain = `twa_tw_plain_${RUN_ID}`;
     await withClient(withDb(ctx.admin, 'postgres'), async (c) => {
-      await c.query(`CREATE ROLE "${bypass}" LOGIN BYPASSRLS CREATEROLE PASSWORD '${pw}'`);
-      await c.query(`CREATE ROLE "${plain}" LOGIN PASSWORD '${pw}'`);
-      await c.query(`GRANT CONNECT, CREATE ON DATABASE "${empty}" TO "${bypass}", "${plain}"`);
+      // sql-injection-reviewed: bypass is built from RUN_ID and passes qi(); the password is a SCRAM verifier computed here
+      await c.query(`CREATE ROLE ${qi(bypass)} LOGIN BYPASSRLS CREATEROLE PASSWORD '${scramVerifier(pw)}'`);
+      // sql-injection-reviewed: plain is built from RUN_ID and passes qi(); the password is a SCRAM verifier computed here
+      await c.query(`CREATE ROLE ${qi(plain)} LOGIN PASSWORD '${scramVerifier(pw)}'`);
+      // sql-injection-reviewed: empty passed assertHarnessDatabaseName; every identifier passes qi()
+      await c.query(`GRANT CONNECT, CREATE ON DATABASE ${qi(empty)} TO ${qi(bypass)}, ${qi(plain)}`);
     });
     try {
       for (const [label, url] of [
@@ -606,9 +645,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       expect(r, s.ledger.length === 0 && s.coreTables === 0, `nothing created (ledger ${s.ledger.length}, core tables ${s.coreTables})`);
     } finally {
       await withClient(withDb(ctx.admin, 'postgres'), async (c) => {
-        await c.query(`REVOKE ALL ON DATABASE "${empty}" FROM "${bypass}", "${plain}"`);
-        await c.query(`DROP ROLE "${bypass}"`);
-        await c.query(`DROP ROLE "${plain}"`);
+        // sql-injection-reviewed: every identifier passes qi() (harness-built names)
+        await c.query(`REVOKE ALL ON DATABASE ${qi(empty)} FROM ${qi(bypass)}, ${qi(plain)}`);
+        // sql-injection-reviewed: bypass is built from RUN_ID and passes qi()
+        await c.query(`DROP ROLE ${qi(bypass)}`);
+        // sql-injection-reviewed: plain is built from RUN_ID and passes qi()
+        await c.query(`DROP ROLE ${qi(plain)}`);
       });
     }
   });
@@ -848,7 +890,42 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
   }
   log(`${r.id} ${r.status} (${separatedDb})`);
   for (const line of [...r.evidence, ...r.failures]) log(`  ${line}`);
-  return [r];
+
+  // MIX-1: a FRESH owner-login install of a second database on a cluster whose roles are separated-layout roles. The roles
+  // are cluster-wide: a fresh install re-runs the role migrations (random passwords for crewflow / crewflow_app), which
+  // would break a separated deployment still using crewflow_app on this cluster. Expected: refused, nothing created, and
+  // crewflow_app still authenticates with the password it had.
+  const m: ScenarioReport = { id: 'MIX-1', title: 'fresh install on a cluster that still hosts separated-layout roles: refused, crewflow_app password untouched', status: 'NOT TESTED', pgMajor: major, evidence: [], failures: [] };
+  try {
+    const appPw = process.env.CREWFLOW_APP_BOOTSTRAP_PASSWORD ?? '';
+    const appLogin = async () => {
+      try {
+        await withClient(withDb(ctx.admin, separatedDb, 'crewflow_app', appPw), (c) => c.query('SELECT 1'));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(m, await appLogin(), 'before: crewflow_app authenticates with its current password');
+    const db = dbName('mix');
+    m.database = db;
+    await createEmptyDatabase(ctx, db);
+    // sql-injection-reviewed: db passed assertHarnessDatabaseName (createEmptyDatabase) and qi()
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${qi(db)} TO crewflow_owner WITH GRANT OPTION`));
+    const c = await runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, db)));
+    m.evidence.push(`child: ${summary(c)}; reason ${(c.result?.reason ?? '').slice(0, 200)}`);
+    expect(m, c.exitCode !== EXIT.ok && c.result?.serve === false, 'the fresh install is refused');
+    const s = await readState(ctx, db);
+    expect(m, s.ledger.length === 0 && s.coreTables === 0, `nothing created (ledger ${s.ledger.length}, core tables ${s.coreTables})`);
+    expect(m, await appLogin(), 'after: crewflow_app still authenticates with the same password (no cluster-wide role was altered)');
+    m.status = m.failures.length ? 'FAIL' : 'PASS';
+  } catch (e) {
+    m.status = 'FAIL';
+    m.failures.push(`threw: ${e instanceof Error ? redact(e.message) : 'unknown'}`);
+  }
+  log(`${m.id} ${m.status}`);
+  for (const line of [...m.evidence, ...m.failures]) log(`  ${line}`);
+  return [r, m];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

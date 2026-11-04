@@ -62,11 +62,29 @@ describeTwenty('Twenty Option A behaviour catalogue C1–C8 (crewflow_owner, rea
     await admin?.end();
   });
 
-  it('C0: the pre-auth NOT FORCE set is exactly the 16 tables (CLAUDE.md lists 15: organisation_invitation is missing)', async () => {
+  it('C0: before M-T1 exactly the 16 pre-auth tables are NOT FORCE; after M-T1 (1786721400000) all 16 FORCE with the exact owner-only definer policy', async () => {
     const notForce = (await admin.query(NOT_FORCE_SQL)).rows.map((r) => String(r.relname));
     if (m_t1) {
-      controlHolds('C0/M-T1', 'all 16 pre-auth tables FORCE row level security (M-T1 applied)', 'NOT FORCE set is empty');
       expect(notForce).toEqual([]);
+      // M-T1's contract (Agent 3, PreAuthTablesForceOwnerOnly1786721400000): per table ENABLE + FORCE and one policy
+      // <table>_secure_owner_definer, PERMISSIVE, FOR ALL, TO rab_secure_owner, USING and WITH CHECK (CURRENT_USER = 'rab_secure_owner').
+      const rows = (
+        await admin.query(
+          `SELECT c.relname, c.relrowsecurity AS enabled, c.relforcerowsecurity AS forced,
+                  (SELECT count(*)::int FROM pg_policy p
+                    WHERE p.polrelid = c.oid AND p.polname = c.relname || '_secure_owner_definer' AND p.polpermissive AND p.polcmd = '*'
+                      AND p.polroles = ARRAY['rab_secure_owner'::regrole::oid]
+                      AND pg_get_expr(p.polqual, p.polrelid) = '(CURRENT_USER = ''rab_secure_owner''::name)'
+                      AND pg_get_expr(p.polwithcheck, p.polrelid) = '(CURRENT_USER = ''rab_secure_owner''::name)') AS definer_policies
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'core' AND c.relname = ANY($1::text[]) ORDER BY 1`,
+          [[...PRE_AUTH_TABLES]],
+        )
+      ).rows;
+      expect(rows.map((r) => r.relname)).toEqual([...PRE_AUTH_TABLES]);
+      const bad = rows.filter((r) => !r.enabled || !r.forced || r.definer_policies !== 1).map((r) => r.relname);
+      expect(bad).toEqual([]);
+      controlHolds('C0/M-T1', 'all 16 pre-auth tables ENABLE + FORCE with the exact owner-only definer policy (normal code paths only)', `16/16; bad: ${bad.join(',') || 'none'}`);
     } else {
       expect(notForce).toHaveLength(16);
       expect(notForce).toContain('organisation_invitation');
