@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -344,6 +345,87 @@ class Pdf(unittest.TestCase):
             g.inspect_pdf(b'<html>not a pdf</html>')
         with self.assertRaises(ValueError):
             g.inspect_pdf(minimal_pdf('x', truncate=True))
+
+    def test_encrypted_pdf_is_refused(self):
+        with self.assertRaises(ValueError):
+            g.inspect_pdf(b'%PDF-1.4\n1 0 obj\n<< >>\nendobj\ntrailer << /Encrypt 2 0 R >>\n%%EOF\n')
+
+
+# The same synthetic two-page document from both renderers, shared with rab-worker's PDF oracle tests (provenance in
+# packages/rab-worker/src/__tests__/helpers/pdf-inspect.spec.ts). Chromium: inline page /Resources. @react-pdf/renderer
+# 4.9.0: INDIRECT /Resources, one BT..ET per glyph run, a WinAnsi standard-14 font, the QR as RGB pixels + /SMask.
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '..', 'rab-worker', 'src', '__tests__',
+                        'fixtures', 'pdf')
+FIXTURE_NEEDLES = ['SYNTHETIC FIXTURE REPORT', 'The <Hostile> & "Quoted" Venue', 'Reference FIXTURE-0001', 'Alex Example',
+                   '5h 28m', '£1,234.56', '<script>alert(1)</script>', '<img src="http://example.invalid/x.png">',
+                   'Zoë Ł. O’Brien-Ñúñez', 'Fixture Workspace · FIXTURE-0001', 'Page 1 of 2',
+                   'Second page: totals 13h 33m · £1,335.55 – end', 'Page 2 of 2']
+
+
+def fixture(name: str) -> bytes:
+    with open(os.path.join(FIXTURES, name), 'rb') as f:
+        return f.read()
+
+
+class PdfRenderers(unittest.TestCase):
+    def check(self, pdf: bytes):
+        info = g.inspect_pdf(pdf)
+        self.assertEqual(info['pages'], 2)
+        self.assertEqual(len(info['page_texts']), 2)
+        for n in FIXTURE_NEEDLES:
+            self.assertIn(n, info['text'])
+        self.assertNotIn('�', info['text'])
+        self.assertIn('Alex Example', info['page_texts'][0])
+        self.assertNotIn('Alex Example', info['page_texts'][1])
+        self.assertIn('5h 28m', info['page_texts'][0].split('\n'))  # one line, not "5" + "h 28m"
+        self.assertNotIn('Alex ExampleS-001', info['text'])  # separate cells are never glued together
+        self.assertEqual(info['images'], 2)  # the JPEG and the QR; a soft mask is not an image of its own
+        return info
+
+    def test_chromium_skia(self):
+        pdf = fixture('chromium-skia.pdf')
+        self.assertTrue(re.search(r'/Type\s*/Page\s*/Resources\s*<<', pdf.decode('latin1')))  # inline resources
+        self.check(pdf)
+
+    def test_react_pdf(self):
+        pdf = fixture('react-pdf-4.9.0.pdf')
+        raw = pdf.decode('latin1')
+        self.assertTrue(re.search(r'/Resources\s+\d+\s+0\s+R', raw))  # indirect resources
+        self.assertTrue(re.search(r'/SMask\s+\d+\s+0\s+R', raw))
+        info = self.check(pdf)
+        self.assertIn('Standard font: Café £5 – naïve “quotes”', info['page_texts'][1].split('\n'))
+
+    def test_both_renderers_print_the_same_needles_and_the_gate_needles_shape(self):
+        c, r = g.inspect_pdf(fixture('chromium-skia.pdf')), g.inspect_pdf(fixture('react-pdf-4.9.0.pdf'))
+        self.assertEqual([n in c['text'] for n in FIXTURE_NEEDLES], [n in r['text'] for n in FIXTURE_NEEDLES])
+        self.assertEqual((c['pages'], c['images']), (r['pages'], r['images']))
+
+    def test_object_stream_inherited_resources_literal_strings_and_forms(self):
+        import zlib
+
+        def stream(d: str, data: bytes) -> bytes:
+            z = zlib.compress(data)
+            return f'<< {d} /Filter /FlateDecode /Length {len(z)} >>\nstream\n'.encode() + z + b'\nendstream'
+
+        members = [(1, '<< /Type /Catalog /Pages 2 0 R >>'),
+                   (2, '<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 4 0 R >>'),
+                   (3, '<< /Type /Page /Parent 2 0 R /Contents 6 0 R >>'),
+                   (5, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>')]
+        head, body = '', ''
+        for i, t in members:
+            head += f'{i} {len(body)} '
+            body += t + '\n'
+        content = b"BT /F1 12 Tf 72 700 Td (Hello \\(world\\) caf\\351) Tj 14 TL (Next line) ' ET /X1 Do"
+        objs = [(4, b'<< /Font << /F1 5 0 R >> /XObject << /X1 7 0 R >> >>'),
+                (6, stream('', content)),
+                (7, stream('/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Matrix [1 0 0 1 72 600]',
+                           b'BT /F1 10 Tf (Inside a form) Tj ET')),
+                (8, stream(f'/Type /ObjStm /N {len(members)} /First {len(head)}', (head + body).encode()))]
+        pdf = b'%PDF-1.5\n' + b''.join(f'{i} 0 obj\n'.encode() + o + b'\nendobj\n' for i, o in objs) + \
+            b'trailer << /Root 1 0 R >>\n%%EOF\n'
+        info = g.inspect_pdf(pdf)
+        self.assertEqual(info['pages'], 1)
+        self.assertEqual(info['page_texts'], ['Hello (world) café\nNext line\nInside a form'])
 
 
 if __name__ == '__main__':
