@@ -11,6 +11,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * Foundation fix P1 (2026-10-22) — an audit entry may only name users of ITS OWN organisation, except when the actor is an
@@ -176,7 +177,15 @@ describeIfDb('audit_log cross-organisation identity references (integration, P1)
       const client = dataSource.createQueryRunner();
       await client.connect();
       try {
-        await expect(client.query(`SELECT * FROM core.audit_identity_violations_in($1, $2, NULL)`, [orgB.id, managerB.userId])).rejects.toMatchObject({ code: '42501' });
+        // P-class (owner-login architecture): the schema role crewflow_app has no EXECUTE on the organisation-parameterised
+        // rule (42501). The runtime login inherits the function owner and CAN ask it about another organisation: OWNER-LOGIN
+        // DIFFERENCE BC-01 (owner-accepted §2: SQL with owner privileges; no application path passes a foreign organisation).
+        expect(
+          await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', { organisationId: orgB.id }, [
+            { sql: `SELECT * FROM core.audit_identity_violations_in($1, $2, NULL)`, params: [orgB.id, managerB.userId] },
+          ]),
+        ).toBe('42501');
+        await expect(client.query(`SELECT * FROM core.audit_identity_violations_in($1, $2, NULL)`, [orgB.id, managerB.userId])).resolves.toEqual([]);
         // No organisation bound → every supplied id is reported (never "valid").
         const rows = await client.query(`SELECT user_id, reason FROM core.audit_identity_violations($1, NULL)`, [managerB.userId]);
         expect(rows).toEqual([{ user_id: managerB.userId, reason: 'no_organisation' }]);

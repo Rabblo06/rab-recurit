@@ -13,6 +13,7 @@ import { AiUsageLedgerRowError, AiUsageLedgerService } from '../../modules/ai/se
 import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * Phase 7a `core.ai_usage` ledger and M7-1 columns on the REAL database as crewflow_app (FORCE RLS) — mock models only.
@@ -168,10 +169,23 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       expect(await sqlAs({ organisationId: a.orgId, workspaceId: b.ceo.workspaceId, userId: b.ceo.userId }, `SELECT 1 FROM core.ai_usage`)).toEqual([]);
     });
 
-    it('insert-only: UPDATE / DELETE / TRUNCATE as crewflow_app → 42501, even by the CEO on own rows', async () => {
+    // P-class (owner-login architecture): the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501). The
+    // runtime login changes NO row: ai_usage has no UPDATE policy and its DELETE policy admits only the retention definer
+    // (current_user = 'crewflow'), so RLS filters every row (and the UPDATE / DELETE parity guards would refuse a visible
+    // one). TRUNCATE ignores RLS: the runtime login holds it through the owner (catalogue AI-1, NEEDS OWNER APPROVAL),
+    // asserted from the catalog, never executed.
+    it('insert-only: the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501); the runtime login changes no row', async () => {
       for (const sql of [`UPDATE core.ai_usage SET cost_usd_micros = 0`, `DELETE FROM core.ai_usage`, `TRUNCATE core.ai_usage`]) {
-        expect({ sql, code: pgCode(await sqlAs(a.ceo, sql).catch((e) => e)) }).toEqual({ sql, code: '42501' });
+        expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', a.ceo, [{ sql }]) }).toEqual({ sql, code: '42501' });
       }
+      const snapshot = () => kit.owner.query(`SELECT id, cost_usd_micros::text AS c FROM core.ai_usage WHERE organisation_id = $1 ORDER BY id`, [a.orgId]);
+      const before = await snapshot();
+      expect(before.length).toBeGreaterThan(0);
+      expect(await sqlAs(a.ceo, `UPDATE core.ai_usage SET cost_usd_micros = 0`)).toEqual([[], 0]);
+      expect(await sqlAs(a.ceo, `DELETE FROM core.ai_usage`)).toEqual([[], 0]);
+      expect(await snapshot()).toEqual(before);
+      const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_usage', 'TRUNCATE') AS t`);
+      expect(t).toBe(true); // AI-1 (NEEDS OWNER APPROVAL)
     });
 
     it('WITH CHECK: no row for another user (not even by the CEO) or another organisation; id / created_at are not insertable', async () => {
@@ -179,8 +193,23 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       const vals = (org: string, user: string) => [org, user, randomUUID(), day, 'chat', TEST_MOCK_MODEL_ID, 'completed'];
       expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (${cols}) VALUES ($1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, im.id.userId)).catch((e) => e))).toBe('42501');
       expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (${cols}) VALUES ($1, $2, $3, $4::date, $5, $6, $7)`, vals(b.orgId, a.ceo.userId)).catch((e) => e))).toBe('42501');
-      expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (id, ${cols}) VALUES (gen_random_uuid(), $1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, a.ceo.userId)).catch((e) => e))).toBe('42501');
-      expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (created_at, ${cols}) VALUES (now() - interval '900 days', $1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, a.ceo.userId)).catch((e) => e))).toBe('42501');
+      // P-class (owner-login architecture): id / created_at are refused to the schema role crewflow_app by its column INSERT
+      // grant (42501). The runtime login is NOT refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS
+      // OWNER APPROVAL), asserted inside a rolled-back transaction so no forged row stays. The two RLS checks above and
+      // the service check below are unchanged and still refuse the runtime login.
+      for (const [sql, params] of [
+        [`INSERT INTO core.ai_usage (id, ${cols}) VALUES (gen_random_uuid(), $1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, a.ceo.userId)],
+        [`INSERT INTO core.ai_usage (created_at, ${cols}) VALUES (now() - interval '900 days', $1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, a.ceo.userId)],
+      ] as Array<[string, unknown[]]>) {
+        expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', a.ceo, [{ sql, params }]) }).toEqual({ sql, code: '42501' });
+        const rollback = new Error('rollback');
+        await expect(
+          asTenant(a.ceo, async (m) => {
+            await m.query(sql, params);
+            throw rollback;
+          }),
+        ).rejects.toBe(rollback);
+      }
       // The ledger service itself refuses to write for someone else than the bound user (RLS, not the service, decides).
       expect(pgCode(await write(a.ceo, row(im.id)).catch((e) => e))).toBe('42501');
     });
@@ -221,12 +250,18 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
     expect(await sqlAs(org.ceo, `SELECT core.ai_usage_purge_expired(interval '400 days') AS n`)).toEqual([{ n: 2 }]);
     expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [org.orgId])).toEqual([{ n: 1 }]);
     expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [other.orgId])).toEqual([{ n: 1 }]);
-    // The retention flag is no back door for the runtime role: it is not `crewflow` and holds no DELETE.
-    const backDoor = asTenant(org.ceo, async (m) => {
+    // The retention flag is no back door. The schema role crewflow_app holds no DELETE (42501). The runtime login is not
+    // `crewflow` either (the DELETE policy needs current_user = 'crewflow', the definer owner), so RLS filters every row and
+    // nothing is deleted (owner-login architecture; the DELETE parity guard would refuse a visible row).
+    expect(
+      await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: `SELECT set_config('rab.ai_usage_retention', 'on', true)` }, { sql: `DELETE FROM core.ai_usage` }]),
+    ).toBe('42501');
+    const backDoor = await asTenant(org.ceo, async (m) => {
       await m.query(`SELECT set_config('rab.ai_usage_retention', 'on', true)`);
       return m.query(`DELETE FROM core.ai_usage`);
     });
-    expect(pgCode(await backDoor.catch((e) => e))).toBe('42501');
+    expect(backDoor).toEqual([[], 0]);
+    expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [org.orgId])).toEqual([{ n: 1 }]);
   });
 
   // ── M7-1 ──────────────────────────────────────────────────────────────────────────────────────────────────────────

@@ -29,13 +29,52 @@ describeIfDb('database security posture (integration)', () => {
     await client.connect();
     try {
       const [who] = (await client.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`)).rows;
-      expect(who).toEqual({ u: 'crewflow_app', s: false, b: false });
+      // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+      expect(who).toEqual({ u: 'crewflow_owner', s: false, b: false });
       // A real call, not only a catalog check: an unknown hash resolves to no row (and no permission error).
       expect((await client.query(`SELECT * FROM core.auth_find_session_by_web_token_hash($1)`, ['0'.repeat(64)])).rows).toEqual([]);
-      await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: '42501' });
-      await expect(client.query(`UPDATE core.permission SET key = key WHERE false`)).rejects.toMatchObject({ code: '42501' });
-      await expect(client.query(`DELETE FROM core.migrations WHERE false`)).rejects.toMatchObject({ code: '42501' });
+      // P-class (owner-login architecture): the schema role crewflow_app still cannot run the provisioner-only function or
+      // write the ledger, the reference tables or audit_log (42501), checked through the fixture superuser's SET LOCAL ROLE.
+      const writes = [
+        `SELECT core.register_workspace_schema(gen_random_uuid())`,
+        `UPDATE core.permission SET key = key WHERE false`,
+        `DELETE FROM core.migrations WHERE false`,
+        `DELETE FROM core.audit_log WHERE false`,
+      ];
+      const admin = new Client({ connectionString: adminUrl });
+      await admin.connect();
+      try {
+        for (const sql of writes) {
+          await admin.query('BEGIN');
+          try {
+            await admin.query(`SELECT set_config('role', 'crewflow_app', true)`);
+            const code = await admin.query(sql).then(
+              () => 'OK',
+              (e: { code?: string }) => e.code ?? 'ERROR',
+            );
+            expect({ sql, code }).toEqual({ sql, code: '42501' });
+          } finally {
+            await admin.query('ROLLBACK').catch(() => undefined);
+          }
+        }
+      } finally {
+        await admin.end();
+      }
+      // The runtime login crewflow_owner:
+      //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, NEEDS OWNER APPROVAL) and is refused
+      //    there: an unknown workspace is P0002, nothing is registered;
+      //  - audit_log stays insert-only against DML: the table owner crewflow holds only SELECT/INSERT on it (42501);
+      //  - core.permission / core.migrations (global, no RLS) are writable: OWNER-LOGIN DIFFERENCE REF-1 (NEEDS OWNER
+      //    APPROVAL; Agent 5 finding, parity guard proposed). WHERE false and rolled back: nothing changes.
+      await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: 'P0002' });
       await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
+      await client.query('BEGIN');
+      try {
+        expect((await client.query(`UPDATE core.permission SET key = key WHERE false`)).rowCount).toBe(0);
+        expect((await client.query(`DELETE FROM core.migrations WHERE false`)).rowCount).toBe(0);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+      }
     } finally {
       await client.end();
     }

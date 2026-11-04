@@ -184,7 +184,7 @@
       "id": "AI-1",
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: AI execution/skill governance enforced by grants)",
-      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard).",
+      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard). Owner-login CI (PR #74) also measured: the runtime login holds TRUNCATE on ai_usage, ai_conversation, ai_action_proposal and organisation_ai_model_preference through the owner (asserted from the catalog, never executed). UPDATE / DELETE stay row-guarded: ai_action_proposal content is immutable for every role (ai_action_proposal_guard, 23514) and the tenant-column UPDATEs are refused by the parity guards (42501).",
       "test": "twenty-behaviour-catalogue (TW-D: ai-agents.integration.spec.ts, ai-skill T4-R5)",
       "keptControl": "the EX-3 CHECK constraint still refuses enabled=true without approval for every login (23514)",
       "bc": []
@@ -215,6 +215,32 @@
         "BC-04",
         "BC-13"
       ]
+    },
+    {
+      "id": "COLGRANT-1",
+      "severity": "MEDIUM",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2: non-secret column-level INSERT grants no longer bind the runtime login)",
+      "change": "Column INSERT grants that kept server-owned columns out of the runtime's hands (id, created_at, updated_by, expires_at, origin) no longer bind the runtime login, and there is no INSERT parity guard. Measured on the owner-login CI (PR #74): core.ai_usage accepts a forged id / created_at; organisation_ai_model_preference accepts a forged updated_by. RLS WITH CHECK (own organisation, own user) and the INSERT policies still hold: an INSERT for another user / organisation, or a decided proposal (status / decided_by), is still refused.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: ai-usage-ledger WITH CHECK, ai-model-settings forge, ai-rls T5-D1 INSERT; schema-role checks keep crewflow_app's 42501)",
+      "bc": []
+    },
+    {
+      "id": "REF-1",
+      "severity": "MEDIUM",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2: global reference tables writable by the runtime login through normal DML)",
+      "change": "core.permission (RBAC flag reference data) and core.migrations (TypeORM ledger) have no RLS and no organisation_id; the runtime login inherits crewflow's S,I,U,D,T on both (golden :926, :968), so one UPDATE / DELETE changes every tenant. Not in GRANT_PARITY_TARGETS. Before: crewflow_app S,I on permission and S on migrations.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture CF-09, rolled back, WHERE false)",
+      "bc": []
+    },
+    {
+      "id": "HL-1",
+      "severity": "LOW",
+      "acceptance": "OWNER-ACCEPTED (§2: SQL with owner privileges) — table privileges only; no observable effect without context",
+      "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace, the namespace-table privilege test)",
+      "bc": [
+        "BC-01"
+      ]
     }
   ],
   "hardFloors": {
@@ -227,7 +253,7 @@
   },
   "migratedTests": {
     "$comment": "Existing suites that assert restricted-runtime-login behaviour. Each must end as: 'catalogue:<id>' (migrated, the difference is above), 'schema-role' (kept: it tests a schema role that still exists, e.g. a definer running as rab_secure_owner), or 'unchanged' (passes as the owner login without asserting a weaker property). Filled from the TW-D differential (run the suite with TEST_DATABASE_URL = crewflow_owner).",
-    "status": "First pass from the owner-login CI (deploy e6c768f3; worker complete, server 62/300 suites). Classes: I = identity expectation -> crewflow_owner (BC-02/BC-08); P = schema-role test (superuser SET LOCAL ROLE crewflow_app/crewflow_worker -> 42501) PLUS an owner-side assertion labelled with its catalogue id; M = M-T1 posture effect (reviewed update); L = legacy separate provisioner, skipped by name 'remove in PR #9'. Agent 3 reviews every changed security assertion.",
+    "status": "First pass from the owner-login CI (deploy e6c768f3; worker complete, server complete: PR #74 run 41905033684, 422 suites). Classes: I = identity expectation -> crewflow_owner (BC-02/BC-08); P = schema-role test (superuser SET LOCAL ROLE crewflow_app/crewflow_worker -> 42501) PLUS an owner-side assertion labelled with its catalogue id; M = M-T1 posture effect (reviewed update); L = legacy separate provisioner, skipped by name 'remove in PR #9'. Agent 3 reviews every changed security assertion.",
     "entries": [
       {
         "suite": "rab-worker helpers/verified-role-database.ts + verified-role-database",
@@ -364,6 +390,101 @@
         "classification": [
           "suspected grant-parity UPDATE allow-list vs a server-maintained column; routed to Agent 3"
         ]
+      },
+      {
+        "suite": "realtime-push-gating, admin-panel-sql-functions, db-pool-runtime, payroll-import-calendar-command, seed-qa-restricted-runtime, workspace-provisioning-owner-flow, server-path-provisioning-api (incl. the pg_stat_activity usename), ai-rls, db-security-posture CF-09",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "runtime-db-role (superuser SET ROLE still refused; message now names crewflow_owner)",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "admin-panel-sql-functions (user / user_session FORCE), seed-qa-restricted-runtime (organisation FORCE)",
+        "class": "M",
+        "classification": [
+          "M-T1"
+        ]
+      },
+      {
+        "suite": "db-security-posture CF-09",
+        "class": "P",
+        "classification": [
+          "PROV-1",
+          "catalogue:REF-1"
+        ],
+        "kept": "audit_log DML still 42501 for the runtime login (crewflow holds S,I only)"
+      },
+      {
+        "suite": "ai-usage-ledger (insert-only, WITH CHECK, retention back door)",
+        "class": "P",
+        "classification": [
+          "catalogue:AI-1",
+          "catalogue:COLGRANT-1"
+        ],
+        "kept": "RLS WITH CHECK for another user / organisation; no row changes"
+      },
+      {
+        "suite": "ai-model-settings (forged updated_by, TRUNCATE)",
+        "class": "P",
+        "classification": [
+          "catalogue:COLGRANT-1",
+          "catalogue:AI-1"
+        ],
+        "kept": "real UPDATEs of organisation_id / tier / created_at refused to the runtime login by the parity guard (42501)"
+      },
+      {
+        "suite": "ai-turn-indexes (tenant / owner columns, DELETE)",
+        "class": "P",
+        "classification": [
+          "parity guards"
+        ],
+        "kept": "real changes refused to the runtime login (42501); the turn survives a DELETE"
+      },
+      {
+        "suite": "ai-rls (least privilege, T5-D1 INSERT / UPDATE / DELETE)",
+        "class": "P",
+        "classification": [
+          "catalogue:AI-1",
+          "catalogue:COLGRANT-1"
+        ],
+        "kept": "status / decided_by INSERT still refused; proposal row byte-identical after every UPDATE attempt; proposal survives DELETE"
+      },
+      {
+        "suite": "workspace-lifecycle-grant-tightening (four lifecycle mutators)",
+        "class": "P",
+        "classification": [
+          "catalogue:PROV-1"
+        ],
+        "kept": "the runtime login is refused in the body (P0002)"
+      },
+      {
+        "suite": "audit-log-cross-organisation-identity (organisation-parameterised rule)",
+        "class": "P",
+        "classification": [
+          "BC-01"
+        ]
+      },
+      {
+        "suite": "host-label-namespace (namespace tables, items 8/9)",
+        "class": "P",
+        "classification": [
+          "catalogue:HL-1"
+        ],
+        "kept": "zero rows without context; DELETE removes nothing; superuser still refused on released_host_label"
+      },
+      {
+        "suite": "server-path-provisioning-db",
+        "class": "DEFECT (test isolation)",
+        "classification": [
+          "routed to Agent 2: its §12.2-§12.6 DDL attempts ran for real as crewflow_owner and replaced core.provision_workspace on the shared CI database (G-02 measured); ~20 suites failed in consequence"
+        ]
       }
     ]
   },
@@ -409,6 +530,16 @@
         "id": "OUTBOX-1",
         "severity": "MEDIUM",
         "ask": "add or fold into BC-08: the runtime can DELETE outbox rows directly."
+      },
+      {
+        "id": "COLGRANT-1",
+        "severity": "MEDIUM",
+        "ask": "add (needs-owner-approval) or extend BC-13 beyond secret columns: non-secret column INSERT grants (id, created_at, updated_by) no longer bind the runtime; consider BEFORE INSERT parity guards."
+      },
+      {
+        "id": "REF-1",
+        "severity": "MEDIUM",
+        "ask": "add permission (UPDATE, DELETE, TRUNCATE) and migrations (INSERT, UPDATE, DELETE, TRUNCATE) to GRANT_PARITY_TARGETS (exempting the migrate child), then mark mitigated."
       }
     ]
   }

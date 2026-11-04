@@ -9,6 +9,7 @@ import { AiModelSettingsService } from '../../modules/ai/services/ai-model-setti
 import { TEST_MOCK_MODEL_ID, TEST_SMART_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * T-S1 / T-S2 (docs/ai/PHASE1_TWENTY_PLAN.md §7, D6/D7): Settings → AI "AI models" on the real AppModule, PostgreSQL
@@ -192,16 +193,35 @@ describeIfDb('Settings → AI model choice (integration)', () => {
 
     it('the CEO cannot forge updated_by, move a row to another organisation/tier, or TRUNCATE (column grants + WITH CHECK)', async () => {
       const org = await aiOrganisation(kit, 'ai-set-grants');
-      expect(pgCode(await asTenant(org.ceo, `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'fast', $2, $3, 'forged author')`, [org.orgId, TEST_MOCK_MODEL_ID, randomUUID()]).catch((e) => e))).toBe('42501');
+      // P-class (owner-login architecture): a forged updated_by is refused to the schema role crewflow_app by its column INSERT
+      // grant (42501). The runtime login is NOT refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS
+      // OWNER APPROVAL), asserted inside a rolled-back transaction so the forged row never stays.
+      const forged = `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'fast', $2, $3, 'forged author')`;
+      const forgedParams = [org.orgId, TEST_MOCK_MODEL_ID, randomUUID()];
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: forged, params: forgedParams }])).toBe('42501');
+      const rollback = new Error('rollback');
+      await expect(
+        tenant.runInTenantContext({ organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId, role: '' }, async (m) => {
+          await m.query(forged, forgedParams);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
       await asTenant(org.ceo, `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'fast', $2, $3, 'direct CEO write')`, [org.orgId, TEST_MOCK_MODEL_ID, org.ceo.userId]);
+      // Real changes of non-updatable columns: refused to the schema role (column grant) AND to the runtime login (the
+      // organisation_ai_model_preference UPDATE grant-parity guard, OwnerLoginGrantParityGuards1786721420000), both 42501.
       for (const sql of [
         `UPDATE core.organisation_ai_model_preference SET organisation_id = gen_random_uuid() WHERE organisation_id = $1`,
         `UPDATE core.organisation_ai_model_preference SET tier = 'smart' WHERE organisation_id = $1`,
         `UPDATE core.organisation_ai_model_preference SET created_at = now() WHERE organisation_id = $1`,
       ]) {
-        expect(pgCode(await asTenant(org.ceo, sql, [org.orgId]).catch((e) => e))).toBe('42501');
+        expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql, params: [org.orgId] }]) }).toEqual({ sql, code: '42501' });
+        expect({ sql, code: pgCode(await asTenant(org.ceo, sql, [org.orgId]).catch((e) => e)) }).toEqual({ sql, code: '42501' });
       }
-      expect(pgCode(await asTenant(org.ceo, `TRUNCATE core.organisation_ai_model_preference`).catch((e) => e))).toBe('42501');
+      // TRUNCATE: schema role refused (42501); the runtime login holds TRUNCATE through the owner (catalogue AI-1, NEEDS
+      // OWNER APPROVAL): asserted from the catalog, never executed (it ignores RLS).
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: `TRUNCATE core.organisation_ai_model_preference` }])).toBe('42501');
+      const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.organisation_ai_model_preference', 'TRUNCATE') AS t`);
+      expect(t).toBe(true);
       expect(pgCode(await asTenant(org.ceo, `INSERT INTO core.organisation_ai_model_preference (organisation_id, tier, model_id, updated_by, reason) VALUES ($1, 'smart', 'Not An Id', $2, 'bad id')`, [org.orgId, org.ceo.userId]).catch((e) => e))).toBe('23514');
     });
 
