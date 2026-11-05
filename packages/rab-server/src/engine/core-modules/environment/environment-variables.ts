@@ -2033,7 +2033,7 @@ export class EnvironmentVariables {
   /**
    * O3 C3: set ONLY by api-prestart.sh, on main.js, after a verified exit 70 (an upgrade migration failed and
    * CREWFLOW_UPGRADE_FAILURE=continue): the failing migration's name, or `unknown`. api-prestart.sh REFUSES (exit 64) an
-   * inherited value, so an operator cannot pre-set it. Read by /healthz (`upgradeFailed`, informational) and by the API's
+   * inherited value, so an operator cannot pre-set it. Read by /healthz (`upgradeFailed: true`, informational; never the name) and by the API's
    * boot gate (Agent 3). A migration name only: letters, digits, `_`, `-`, `.`, at most 200 characters.
    */
   @IsOptional()
