@@ -98,6 +98,19 @@ for (const r of report.testResults ?? []) {
   const runFailed = r.status === 'failed' || Boolean(r.testExecError) || (failed === 0 && r.failureMessage);
   seen.set(name, { passed, failed, pending, runFailed });
   process.stdout.write(`${kind}: ${name}: passed=${passed} failed=${failed} pending=${pending}${runFailed ? ' RUN-FAILED' : ''}\n`);
+  // The failure text itself (nx interleaving hides jest's own report in the job log): title + the first message lines,
+  // ANSI colours and stack frames stripped. Test output only; no secret is ever part of an assertion message here.
+  const clean = (m) =>
+    String(m)
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .split('\n')
+      .filter((l) => l.trim() && !/^\s+at /.test(l))
+      .slice(0, 12)
+      .join('\n      ');
+  for (const t of tests.filter((x) => x.status === 'failed')) {
+    process.stdout.write(`  FAILED-TEST ${name} :: ${t.fullName ?? t.title}\n      ${clean((t.failureMessages ?? []).join('\n'))}\n`);
+  }
+  if (failed === 0 && r.failureMessage) process.stdout.write(`  FILE-FAILURE ${name}\n      ${clean(r.failureMessage)}\n`);
 }
 
 for (const [name, s] of seen) {
