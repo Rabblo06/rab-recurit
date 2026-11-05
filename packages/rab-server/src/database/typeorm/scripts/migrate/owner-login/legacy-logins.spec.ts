@@ -17,8 +17,17 @@ describe('BC-17: legacy logins on an owner-login database', () => {
     expect(plan.info.join(' ')).toMatch(/crewflow_worker keeps its LOGIN attribute .* no password/);
   });
 
-  it('idempotent: already NOLOGIN does nothing; LOGIN without ADMIN is a warning naming the provider-admin statement, never silent', () => {
-    expect(legacyLoginPlan([{ name: 'crewflow', login: false, admin: true }, { name: 'crewflow_app', login: false, admin: false }])).toEqual({ statements: [], warnings: [], info: [] });
+  it('Agent 5 (LOW): ALREADY NOLOGIN is still cleared when crewflow_owner may (a later install re-ran the role migrations, which set a password)', () => {
+    // A second fresh install on the cluster: both roles NOLOGIN (the first install), each with a new random password the
+    // owner login cannot see. The statement is idempotent and runs anyway.
+    expect(legacyLoginPlan([{ name: 'crewflow', login: false, admin: true }, { name: 'crewflow_app', login: false, admin: true }, { name: 'crewflow_worker', login: true, admin: false }]).statements).toEqual([
+      'ALTER ROLE crewflow NOLOGIN PASSWORD NULL',
+      'ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL',
+    ]);
+  });
+
+  it('without ADMIN: NOLOGIN is left alone (nothing it may do); LOGIN is a warning naming the provider-admin statement, never silent', () => {
+    expect(legacyLoginPlan([{ name: 'crewflow', login: false, admin: false }, { name: 'crewflow_app', login: false, admin: false }])).toEqual({ statements: [], warnings: [], info: [] });
     const plan = legacyLoginPlan([{ name: 'crewflow_app', login: true, admin: false }]);
     expect(plan.statements).toEqual([]);
     expect(plan.warnings).toEqual([expect.stringMatching(/crewflow_app is still LOGIN .* "ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL" as the provider admin/)]);
@@ -27,6 +36,8 @@ describe('BC-17: legacy logins on an owner-login database', () => {
   it('ADMIN is read for the session login (crewflow_owner), never assumed', () => {
     expect(LEGACY_LOGIN_FACTS_SQL).toMatch(/a\.member = \(SELECT s\.oid FROM pg_catalog\.pg_roles s WHERE s\.rolname = session_user\)/);
     expect(LEGACY_LOGIN_FACTS_SQL).toMatch(/AND a\.admin_option/);
+    // ALTER ROLE needs CREATEROLE as well as ADMIN (PostgreSQL 16+): a transitioned database's NOCREATEROLE owner never tries.
+    expect(LEGACY_LOGIN_FACTS_SQL).toMatch(/AND \(SELECT s\.rolcreaterole FROM pg_catalog\.pg_roles s WHERE s\.rolname = session_user\) AS "admin"/);
   });
 
   it('the committed golden is the owner-login posture; a separated-layout database is compared with exactly two lines swapped', () => {
