@@ -22,6 +22,25 @@ R2 proved this (section 5). Do not start an old image on an upgraded database an
 
 **The legacy logins are disabled after the transition (BC-17, Agent 1).** Once `transition-from-separated.sql` has run, `crewflow` and `crewflow_app` become **NOLOGIN with PASSWORD NULL**; `crewflow_worker` stays LOGIN (two existing migrations assert it) but gets **PASSWORD NULL**, so it has no password to authenticate with; `crewflow_migrator` (if your deployment has it) becomes NOLOGIN with PASSWORD NULL at the transition (Agent 1, f91f1038): it keeps its role memberships but cannot log in, and a fresh owner-login install never creates it. A fresh owner-login install ends in the same state. The old image cannot connect even before any owner-login migration applies.
 
+> **MANDATORY PRECONDITION (MIX-1): one separated Crewflow deployment per cluster.** Run the transition only on a cluster that hosts no other separated Crewflow deployment. The legacy logins are cluster-wide roles, and disabling them breaks every database on that cluster that still uses them (staging, QA or another stack on the same server).
+>
+> **Check first**, as the provider admin, read-only. `<db>` is the database you are about to transition:
+> ```sql
+> -- 1. Every database on the cluster.
+> SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1;
+> -- 2. Live sessions of the legacy logins on ANY other database (must return no rows).
+> SELECT datname, usename, count(*) FROM pg_stat_activity
+>  WHERE usename IN ('crewflow','crewflow_app','crewflow_worker','crewflow_migrator') AND datname <> '<db>'
+>  GROUP BY 1, 2;
+> ```
+> Then, for **every other** database from query 1, confirm that it is not a Crewflow database (each check must print `f`):
+> ```bash
+> for d in <other databases from query 1>; do
+>   printf '%s: ' "$d"; psql "<admin URL of database $d>" -X -At -c "SELECT to_regclass('core.migrations') IS NOT NULL"
+> done
+> ```
+> **If any other database is a Crewflow database, or any legacy-login session appears: STOP.** Move that deployment to its own cluster, or transition it too, before you run the transition here. Query 2 only sees processes connected at this moment, which is why the per-database check is required as well.
+
 **What brings them back.** Role attributes and password verifiers are **cluster-wide**: they live in `pg_dumpall --roles-only`, not in `pg_dump`.
 - **Self-hosted:** only a restore into a **FRESH** cluster of the `roles.sql` file taken before the transition, **plus** the database dump, brings back LOGIN and the old password verifiers. That is the proven R2 path (§4.1).
 - **A database-only `pg_restore` into the same cluster does NOT restore role attributes.** The roles keep their post-transition state (NOLOGIN, PASSWORD NULL), and the old image still cannot connect.

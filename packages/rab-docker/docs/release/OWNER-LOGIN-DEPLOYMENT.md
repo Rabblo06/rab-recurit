@@ -348,6 +348,25 @@ These are what rollback compares against.
 
 **5.2 Backup or PITR marker: MANDATORY, before 5.3.** Take it before `transition-from-separated.sql` runs. Self-hosted: as the cluster superuser, `pg_dumpall --roles-only` plus `pg_dump -Fc --create`. Managed: record the PITR timestamp or snapshot. Exact commands and the restore: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §2 and §4. The owner login cannot take this backup (BC-12). Confirm that a restore of it has been **tested**.
 
+> **MANDATORY PRECONDITION (MIX-1): one separated Crewflow deployment per cluster.** Run the transition only on a cluster that hosts no other separated Crewflow deployment. The legacy logins are cluster-wide roles, and disabling them breaks every database on that cluster that still uses them (staging, QA or another stack on the same server).
+>
+> **Check first**, as the provider admin, read-only. `<db>` is the database you are about to transition:
+> ```sql
+> -- 1. Every database on the cluster.
+> SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1;
+> -- 2. Live sessions of the legacy logins on ANY other database (must return no rows).
+> SELECT datname, usename, count(*) FROM pg_stat_activity
+>  WHERE usename IN ('crewflow','crewflow_app','crewflow_worker','crewflow_migrator') AND datname <> '<db>'
+>  GROUP BY 1, 2;
+> ```
+> Then, for **every other** database from query 1, confirm that it is not a Crewflow database (each check must print `f`):
+> ```bash
+> for d in <other databases from query 1>; do
+>   printf '%s: ' "$d"; psql "<admin URL of database $d>" -X -At -c "SELECT to_regclass('core.migrations') IS NOT NULL"
+> done
+> ```
+> **If any other database is a Crewflow database, or any legacy-login session appears: STOP.** Move that deployment to its own cluster, or transition it too, before you run the transition here. Query 2 only sees processes connected at this moment, which is why the per-database check is required as well.
+
 **5.3 Provider-admin SQL.** The admin runs `postgres-init/owner-login/transition-from-separated.sql` (Agent 1). Per M0 §3.1, it:
 - creates `crewflow_owner`;
 - grants its memberships of the existing **schema** roles;
