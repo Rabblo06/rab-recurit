@@ -14,6 +14,7 @@ import { Permission, Role, RolePermission } from '../entities';
 import { MEMBER_OBJECT_KEYS, MEMBER_OBJECTS, MemberObjectKey, publicObjectMetadata } from '../member-access/member-object-registry';
 import { RecordFilterError, validateRecordFilter } from '../member-access/record-filter';
 import { MemberRolePolicyService } from './member-role-policy.service';
+import { slugify } from '../../../engine/utils/slug.util';
 
 export interface RoleSummary {
   id: string;
@@ -187,7 +188,8 @@ export class RoleService {
       // The key is internal and never renamed. Always `custom_…`: never equal to a privileged system key, and the
       // only marker authentication uses to recognise a workspace-member role. Keys are unique per organisation;
       // another workspace's role is invisible here, so a clash is retried with the next suffix.
-      const slug = dto.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'role';
+      // Linear-time slug (engine/utils/slug.util.ts; byte-identical to the previous regex trim, CodeQL js/polynomial-redos).
+      const slug = slugify(dto.name, '_', 'role');
       const baseKey = `${CUSTOM_ROLE_KEY_PREFIX}${slug}`.slice(0, 60);
       for (let suffix = 1; suffix <= 50; suffix++) {
         const key = suffix === 1 ? baseKey : `${baseKey}_${suffix}`;

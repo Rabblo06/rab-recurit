@@ -25,6 +25,7 @@ import { ManagerProfile } from '../entities/manager-profile.entity';
 import { InviteInitialManagerDto } from '../dto/invite-initial-manager.dto';
 import { ReplaceInitialManagerDto } from '../dto/replace-initial-manager.dto';
 import { ManagerService, ManagerSummary } from './manager.service';
+import { slugify } from '../../../engine/utils/slug.util';
 
 /** Mirrors `AccountInviteService`'s own `MAX_SEND_ATTEMPTS` (not exported there) — replacement is only ever offered once resend is no longer possible at all. */
 const INITIAL_MANAGER_MAX_SEND_ATTEMPTS = 3;
@@ -815,7 +816,8 @@ export class OrganisationOnboardingService {
   }
 
   private async resolveUniqueSlug(name: string): Promise<string> {
-    const base = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'organisation';
+    // Linear-time slug (engine/utils/slug.util.ts; byte-identical to the previous regex trim, CodeQL js/polynomial-redos).
+    const base = slugify(name, '-', 'organisation');
     let candidate = base;
     let suffix = 1;
     // `p_exclude_org_id` can never be a real organisation's id here — NIL_UUID makes the
