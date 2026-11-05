@@ -19,4 +19,6 @@ export const EXPECTED_WORKSPACE_FINGERPRINTS_PG18: Readonly<Record<number, strin
   17: '3c5cf741074298397189b0a0076e21e4c897a3fbc627a8779e64f544a857cb0f',
   18: '4abe001915802d3bf6fded617f39bee387672cdbfc765f40ec6d922b02a9b681',
   19: 'af115ec7490665c7df38fbc78128e95e680e59764bb626e4c21d0c061fe699e6',
+  // v20 (PAY-1b re-freeze, module checksum 3d22f965...): regenerated 2026-11-05 on a disposable PG18.6 by the append mode.
+  20: '265dbf51cffb43e50aba9d1a7d30d575a8303d4f7a4afd3e77e119ca7d6e8573',
 };
