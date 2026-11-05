@@ -536,7 +536,6 @@ export const SEMANTIC_GOLDEN_PG16: readonly string[] = Object.freeze([
   "rls|workspace_membership|enable=true|force=true",
   "rls|workspace_schema_migration|enable=true|force=true",
   "rls|workspace_schema_registry|enable=true|force=true",
-  "setting|*|this|crewflow.disposable_test_database=true",
   "trigger|ai_action_proposal|_ai_action_proposal_grant_parity_delete|enabled=O|core.owner_login_grant_parity_guard()",
   "trigger|ai_action_proposal|_ai_action_proposal_grant_parity_update|enabled=O|core.owner_login_grant_parity_guard()",
   "trigger|ai_action_proposal|ai_action_proposal_guard|enabled=O|core.ai_action_proposal_guard()",
