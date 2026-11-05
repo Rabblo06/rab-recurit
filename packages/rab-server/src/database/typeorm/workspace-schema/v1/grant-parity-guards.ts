@@ -18,6 +18,11 @@
  *
  * Nothing else changes: no table, column, index, policy, grant, RLS flag or CHECK; triggers only (the per-version
  * fingerprint covers them). Injection is not covered (BC-01).
+ *
+ * Re-frozen in place 2026-11-04 (owner-approved PAY-1b; v20 had run only on disposable databases): DELETE, and UPDATE of
+ * a table with an empty allow-list, are refused per STATEMENT (a statement RLS leaves with no row is refused too, like
+ * the missing privilege); the allow-list UPDATE guards stay per ROW. Every name starts with `_` so the row guard fires
+ * before any other BEFORE UPDATE row trigger (core/grant-parity-guard-sql.ts triggerName).
  */
 export const WORKSPACE_PARITY_UPDATABLE: Readonly<Record<string, readonly string[]>> = Object.freeze({
   payroll_record: [
@@ -57,19 +62,21 @@ export function workspaceGrantParitySql(schema: string): string {
     const t = `${q}.${table}`;
     const args = updatable.map((c) => `'${c}'`).join(', ');
     out.push(
-      `DROP TRIGGER IF EXISTS ${table}_grant_parity_update ON ${t}`,
-      `CREATE TRIGGER ${table}_grant_parity_update BEFORE UPDATE ON ${t} FOR EACH ROW EXECUTE FUNCTION ${FN}(${args})`,
-      `DROP TRIGGER IF EXISTS ${table}_grant_parity_delete ON ${t}`,
-      `CREATE TRIGGER ${table}_grant_parity_delete BEFORE DELETE ON ${t} FOR EACH ROW EXECUTE FUNCTION ${FN}()`,
-      `DROP TRIGGER IF EXISTS ${table}_grant_parity_truncate ON ${t}`,
-      `CREATE TRIGGER ${table}_grant_parity_truncate BEFORE TRUNCATE ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${FN}()`,
+      `DROP TRIGGER IF EXISTS _${table}_grant_parity_update ON ${t}`,
+      updatable.length === 0
+        ? `CREATE TRIGGER _${table}_grant_parity_update BEFORE UPDATE ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${FN}()`
+        : `CREATE TRIGGER _${table}_grant_parity_update BEFORE UPDATE ON ${t} FOR EACH ROW EXECUTE FUNCTION ${FN}(${args})`,
+      `DROP TRIGGER IF EXISTS _${table}_grant_parity_delete ON ${t}`,
+      `CREATE TRIGGER _${table}_grant_parity_delete BEFORE DELETE ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${FN}()`,
+      `DROP TRIGGER IF EXISTS _${table}_grant_parity_truncate ON ${t}`,
+      `CREATE TRIGGER _${table}_grant_parity_truncate BEFORE TRUNCATE ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${FN}()`,
     );
   }
   for (const table of WORKSPACE_PARITY_DELETE_ONLY) {
     const t = `${q}.${table}`;
     out.push(
-      `DROP TRIGGER IF EXISTS ${table}_grant_parity_delete ON ${t}`,
-      `CREATE TRIGGER ${table}_grant_parity_delete BEFORE DELETE ON ${t} FOR EACH ROW EXECUTE FUNCTION ${FN}()`,
+      `DROP TRIGGER IF EXISTS _${table}_grant_parity_delete ON ${t}`,
+      `CREATE TRIGGER _${table}_grant_parity_delete BEFORE DELETE ON ${t} FOR EACH STATEMENT EXECUTE FUNCTION ${FN}()`,
     );
   }
   return `\n${out.join(';\n')};\n`;

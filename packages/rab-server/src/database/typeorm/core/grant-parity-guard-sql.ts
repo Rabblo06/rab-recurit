@@ -112,7 +112,81 @@ BEGIN
 END;
 $guard$`;
 
-export const triggerName = (table: string, op: ParityOp) => `${table}_grant_parity_${op.toLowerCase()}`;
+/**
+ * Leading underscore (fixed in place 2026-11-04, owner-approved): PostgreSQL fires a table's triggers of one kind in name
+ * order (byte order), and `_` sorts before every lower-case letter. So the row-level UPDATE allow-list guard runs BEFORE any
+ * other BEFORE UPDATE row trigger and compares only what the STATEMENT changed. Named `<table>_grant_parity_update` it ran
+ * after e.g. `ai_agent_config_version`, saw the server-maintained `config_version` change and refused a legitimate prompt
+ * edit (Agent 5, ai-agents.integration.spec.ts:163). GRANT_PARITY_ORDER_SQL keeps it first.
+ */
+export const triggerName = (table: string, op: ParityOp) => `_${table}_grant_parity_${op.toLowerCase()}`;
+
+/**
+ * Other non-internal BEFORE UPDATE ROW triggers that would fire BEFORE a row-level grant-parity UPDATE guard (byte order).
+ * tgtype bits: 1 = ROW, 2 = BEFORE, 16 = UPDATE. Must return no rows.
+ */
+export const GRANT_PARITY_ORDER_SQL = `
+SELECT c.relname::text AS tbl, g.tgname::text AS guard, t.tgname::text AS earlier
+  FROM pg_catalog.pg_trigger g
+  JOIN pg_catalog.pg_class c ON c.oid = g.tgrelid
+  JOIN pg_catalog.pg_trigger t ON t.tgrelid = g.tgrelid AND t.oid <> g.oid AND NOT t.tgisinternal
+       AND (t.tgtype::int & 19) = 19 AND t.tgname::text COLLATE "C" < g.tgname::text COLLATE "C"
+ WHERE c.relnamespace = 'core'::regnamespace AND NOT g.tgisinternal AND (g.tgtype::int & 19) = 19
+   AND g.tgname LIKE '\\_%\\_grant\\_parity\\_update'
+ ORDER BY 1, 3`;
+
+/**
+ * MFA-SESS-1 (owner decision 2026-11-04: PROTECT, folded into this migration in place). core.user_session.mfa_verified_at is
+ * written at INSERT only (refresh-token / handoff paths never UPDATE it; the INSERT-time guard of MfaHandoffFollowups
+ * checks an enabled factor and "not in the future"). Under the owner login the table owner's UPDATE privilege made
+ * "stamp an existing session MFA-verified" possible on a normal code path. A statement-level BEFORE UPDATE OF
+ * mfa_verified_at trigger refuses any UPDATE that names the column, for every role, whatever the row count (the same
+ * shape as a missing column privilege). Function owned by rab_secure_owner (the table owner; secure-owner invariants).
+ * Its body must not name a crewflow-owned core table, not even inside a message: R4 (secure-owner-invariants.ts) matches
+ * table names as whole words in any rab_secure_owner function body, so 'permission denied: …' read as core.permission and
+ * failed every chain build at 1786721420000. The SQLSTATE (42501) carries the "insufficient privilege" meaning instead.
+ */
+export const MFA_VERIFIED_IMMUTABLE_UP_SQL: readonly string[] = Object.freeze([
+  `CREATE FUNCTION core.user_session_mfa_verified_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $mfa$
+BEGIN
+  RAISE EXCEPTION 'refused: user_session.mfa_verified_at is set at INSERT only and never changed'
+    USING ERRCODE = '42501';
+END;
+$mfa$`,
+  `ALTER FUNCTION core.user_session_mfa_verified_immutable() OWNER TO rab_secure_owner`,
+  `REVOKE ALL ON FUNCTION core.user_session_mfa_verified_immutable() FROM PUBLIC`,
+  `CREATE TRIGGER user_session_mfa_verified_immutable BEFORE UPDATE OF mfa_verified_at ON core.user_session
+     FOR EACH STATEMENT EXECUTE FUNCTION core.user_session_mfa_verified_immutable()`,
+]);
+
+export const MFA_VERIFIED_IMMUTABLE_DOWN_SQL: readonly string[] = Object.freeze([
+  `DROP TRIGGER IF EXISTS user_session_mfa_verified_immutable ON core.user_session`,
+  `DROP FUNCTION IF EXISTS core.user_session_mfa_verified_immutable()`,
+]);
+
+/** End state: the trigger exists on core.user_session, enabled, statement-level BEFORE UPDATE OF mfa_verified_at only. */
+export const MFA_VERIFIED_IMMUTABLE_CHECK_SQL = `
+SELECT t.tgenabled::text AS enabled, t.tgtype::int AS tgtype, pg_catalog.pg_get_userbyid(p.proowner)::text AS fn_owner,
+       (SELECT pg_catalog.array_agg(a.attname::text ORDER BY a.attnum) FROM pg_catalog.pg_attribute a
+         WHERE a.attrelid = t.tgrelid AND a.attnum = ANY (t.tgattr::int2[])) AS cols
+  FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+ WHERE t.tgrelid = 'core.user_session'::regclass AND t.tgname = 'user_session_mfa_verified_immutable'`;
+
+export function mfaVerifiedImmutableProblems(rows: Array<{ enabled: string; tgtype: number; fn_owner: string; cols: string[] | null }>): string[] {
+  const r = rows[0];
+  if (!r) return ['core.user_session: trigger user_session_mfa_verified_immutable missing'];
+  const p: string[] = [];
+  // tgtype 18 = BEFORE (2) + UPDATE (16), statement level (ROW bit 1 clear).
+  if (r.enabled !== 'O' || r.tgtype !== 18) p.push(`user_session_mfa_verified_immutable enabled=${r.enabled} tgtype=${r.tgtype} (expected O / 18)`);
+  if (JSON.stringify(r.cols) !== JSON.stringify(['mfa_verified_at'])) p.push(`user_session_mfa_verified_immutable columns=${JSON.stringify(r.cols)}`);
+  if (r.fn_owner !== 'rab_secure_owner') p.push(`core.user_session_mfa_verified_immutable() is owned by ${r.fn_owner}`);
+  return p;
+}
 
 /** crewflow_app's privileges on the target tables, read at migration time (the source of the UPDATE column lists). */
 export const GRANT_PARITY_FACTS_SQL = `
@@ -158,16 +232,22 @@ export function grantParityTriggerSql(table: string, ops: readonly ParityOp[], f
   for (const op of ops) {
     if (op === 'INSERT') {
       if (f.app_any_insert) throw new Error(`core.${table}: crewflow_app holds INSERT on some column; review the parity list`);
-      out.push(`CREATE TRIGGER ${name(op)} BEFORE INSERT ${on} FOR EACH ROW EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);
+      out.push(`CREATE TRIGGER ${name(op)} BEFORE INSERT ${on} FOR EACH STATEMENT EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);
     } else if (op === 'UPDATE') {
       if (f.app_update) throw new Error(`core.${table}: crewflow_app holds table UPDATE; review the parity list`);
       if (f.updatable_columns.length === f.column_count) throw new Error(`core.${table}: crewflow_app can update every column; review the parity list`);
       // Allow-list: the columns crewflow_app could update; none = every update refused.
+      // No column at all: refused per STATEMENT, like the missing privilege (even when RLS leaves no row to update).
+      // Some columns: the allow-list needs OLD/NEW, so per ROW.
       const args = f.updatable_columns.map(quoteLiteral).join(', ');
-      out.push(`CREATE TRIGGER ${name(op)} BEFORE UPDATE ${on} FOR EACH ROW EXECUTE FUNCTION core.owner_login_grant_parity_guard(${args})`);
+      out.push(
+        f.updatable_columns.length === 0
+          ? `CREATE TRIGGER ${name(op)} BEFORE UPDATE ${on} FOR EACH STATEMENT EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`
+          : `CREATE TRIGGER ${name(op)} BEFORE UPDATE ${on} FOR EACH ROW EXECUTE FUNCTION core.owner_login_grant_parity_guard(${args})`,
+      );
     } else if (op === 'DELETE') {
       if (f.app_delete) throw new Error(`core.${table}: crewflow_app holds DELETE; review the parity list`);
-      out.push(`CREATE TRIGGER ${name(op)} BEFORE DELETE ${on} FOR EACH ROW EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);
+      out.push(`CREATE TRIGGER ${name(op)} BEFORE DELETE ${on} FOR EACH STATEMENT EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);
     } else {
       if (f.app_truncate) throw new Error(`core.${table}: crewflow_app holds TRUNCATE; review the parity list`);
       out.push(`CREATE TRIGGER ${name(op)} BEFORE TRUNCATE ${on} FOR EACH STATEMENT EXECUTE FUNCTION ${GRANT_PARITY_FUNCTION}`);

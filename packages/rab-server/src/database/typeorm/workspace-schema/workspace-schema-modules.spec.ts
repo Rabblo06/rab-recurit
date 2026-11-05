@@ -64,7 +64,9 @@ const FROZEN_CHECKSUMS: ReadonlyArray<readonly [string, string]> = [
   // Phase D: frozen at the text the owner approved (SQL gate + v19 fingerprint sign-off, 2026-11-01).
   ['v1.019-statement-dispatch-pointer', '34da4890d853152677fc3e9fea3b8dee0b5ac59f4a6c79d68b845b36ab218c2a'],
   // Owner-login PAY-1 (2026-11-04): grant-parity guards on the workspace payroll copies (WorkspaceGrantParityGuards1786721430000).
-  ['v1.020-grant-parity-guards', '9b932320ec5048a224060f939d1e91e93a8d58e398cf208168d3eb48fdb24a9f'],
+  // Re-frozen in place 2026-11-04 (owner-approved PAY-1b: statement-level guards, `_` names; v20 had run only on disposable
+  // databases, its fingerprints are regenerated with it).
+  ['v1.020-grant-parity-guards', '3d22f9652ac99c699dbca8a13d01ff13a5439aea5214295c7fc9a3d26fe05ebe'],
 ];
 
 describe('workspace schema modules (B3 single source of truth)', () => {
@@ -126,7 +128,13 @@ describe('workspace schema modules (B3 single source of truth)', () => {
     expect(created).toHaveLength(16);
     expect(sql.match(/EXECUTE FUNCTION ([\w.]+)\(/g)).toEqual(Array(16).fill('EXECUTE FUNCTION core.owner_login_grant_parity_guard('));
     expect(sql).not.toMatch(/(ALTER TABLE|POLICY|GRANT|REVOKE|CREATE TABLE|CREATE INDEX|DROP TABLE|CREATE FUNCTION|SECURITY|BYPASSRLS)/);
-    expect(sql).toContain(`payroll_run_line_grant_parity_update BEFORE UPDATE ON "${SERVER_PATH_SENTINEL_SCHEMA}".payroll_run_line FOR EACH ROW EXECUTE FUNCTION core.owner_login_grant_parity_guard()`);
+    // PAY-1b (in place 2026-11-04): an operation crewflow_app lacked entirely is refused per STATEMENT (even on 0 rows);
+    // only the column allow-list UPDATE guards are per ROW, named with a leading `_` so they fire first.
+    expect(sql).toContain(`_payroll_run_line_grant_parity_update BEFORE UPDATE ON "${SERVER_PATH_SENTINEL_SCHEMA}".payroll_run_line FOR EACH STATEMENT EXECUTE FUNCTION core.owner_login_grant_parity_guard()`);
+    expect(sql).toContain(`_payroll_run_line_grant_parity_delete BEFORE DELETE ON "${SERVER_PATH_SENTINEL_SCHEMA}".payroll_run_line FOR EACH STATEMENT`);
+    expect(sql).toContain(`_payroll_record_grant_parity_update BEFORE UPDATE ON "${SERVER_PATH_SENTINEL_SCHEMA}".payroll_record FOR EACH ROW`);
+    expect(sql.match(/FOR EACH ROW/g)).toHaveLength(3); // payroll_record, payroll_run, payslip allow-lists
+    expect(sql).not.toMatch(/CREATE TRIGGER [a-z]\w*_grant_parity_/); // every guard name starts with `_`
     expect(() => workspaceGrantParitySql('core')).toThrow('Invalid workspace schema');
   });
 

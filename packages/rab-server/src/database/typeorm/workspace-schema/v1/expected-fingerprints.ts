@@ -28,10 +28,10 @@ export const EXPECTED_WORKSPACE_FINGERPRINTS_PG16: Readonly<Record<number, strin
   // normal migration, by both provisioning paths and by a v14 workspace migrated forward
   // (workspace-schema-migrator.integration.spec.ts). Owner sign-off required before the normal migration runs anywhere.
   19: 'b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3',
-  // WorkspaceGrantParityGuards1786721430000 (PAY-1, module v1.020-grant-parity-guards): generated 2026-11-04 by
-  // generate-workspace-fingerprints.ts FINGERPRINT_MODE=append on a disposable PostgreSQL 16.15 (fp_gen_mw2edci03d18); modules 14..19 regenerated
-  // identically in the same run; cross-checked by the TypeScript provisioner at module 20.
-  20: '3baf78d9886c1bd791d97d87b67e9dc8925cedae64a701da35f6c3df580d17fe',
+  // v20 (grant-parity guards, re-frozen in place for PAY-1b, module checksum 3d22f965...): regenerated 2026-11-05 on a
+  // disposable PG16.15 by the append mode; the six committed values regenerated identically and the TypeScript provisioner
+  // equals a v14 workspace migrated forward.
+  20: '7c73207392eecdf865056f2ec033bb6881fc3fd75a705476d7afe7ea2630cb26',
 };
 
 /**

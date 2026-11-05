@@ -103,7 +103,7 @@ describeIfDb('M-T1 platform_admin under FORCE: no policy recursion, admin flows 
     async () => {
       const email = `pa-bootstrap-${randomUUID()}@example.test`;
       const slug = `pa-bootstrap-${randomUUID().slice(0, 8)}`;
-      const call = `SELECT outcome, user_id::text AS user_id FROM core.bootstrap_first_platform_admin($1::citext, 'First', 'Admin', $2::citext, 'Bootstrap Org')`;
+      const call = `SELECT outcome, user_id::text AS user_id FROM core.bootstrap_first_platform_admin($1::public.citext, 'First', 'Admin', $2::public.citext, 'Bootstrap Org')`;
       const existing = await rows();
       if (existing.length === 0) {
         // A database that never had a platform admin: the real, committed first bootstrap.
