@@ -478,10 +478,11 @@ async function legacyLoginProblems(ctx: Ctx): Promise<string[]> {
     ).rows;
     const out: string[] = [];
     for (const r of rows) {
+      // Booleans only (the CI log masker hid part of the earlier wording): {login, pw} where pw = a stored verifier exists.
       if (r.name === 'crewflow_worker') {
-        if (r.has_password) out.push('crewflow_worker still has a password');
+        if (r.has_password) out.push(`crewflow_worker{login:${r.login},pw:true}`);
       } else if (r.login || r.has_password) {
-        out.push(`${r.name} login=${r.login} password=${r.has_password ? 'set' : 'none'}`);
+        out.push(`${r.name}{login:${r.login},pw:${r.has_password}}`);
       }
     }
     if (!rows.some((r) => r.name === 'crewflow_app') || !rows.some((r) => r.name === 'crewflow')) out.push('crewflow / crewflow_app missing');
@@ -759,12 +760,16 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       ['CREWFLOW_UPGRADE_FAILURE_POLICY=ignore', { CREWFLOW_UPGRADE_FAILURE_POLICY: 'ignore' }],
       ['CREWFLOW_MIGRATION_APPROVAL_MODE=sometimes', { CREWFLOW_MIGRATION_APPROVAL_MODE: 'sometimes' }],
       ['CREWFLOW_MIGRATE_ON_START=maybe', { CREWFLOW_MIGRATE_ON_START: 'maybe' }],
-      ['production without an explicit approval mode', { NODE_ENV: 'production' }],
     ];
     for (const [label, extra] of cases) {
       const c = await child(empty, extra);
       expect(r, c.exitCode === EXIT.config && c.result?.serve === false, `${label}: exit 64 (${summary(c)})`);
     }
+    // BC-11 (owner decision 2026-11-05, Agent 2 d27a371a): production without an explicit approval mode is no longer a
+    // configuration refusal; the mode defaults to `none`. This disposable database has no TLS, so a production child stops
+    // later (N1/TLS, not config): asserted as "not refused at config (exit != 64)". The invalid-mode pin above stays.
+    const prodNoMode = await child(empty, { NODE_ENV: 'production' });
+    expect(r, prodNoMode.exitCode !== EXIT.config, `production without an explicit approval mode: NOT a config refusal (exit != 64) (${summary(prodNoMode)})`);
     const missing = await runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, empty), { PG_DATABASE_URL: undefined }));
     expect(r, missing.exitCode === EXIT.config, `PG_DATABASE_URL missing: exit 64 (${summary(missing)})`);
     const s = await readState(ctx, empty);
