@@ -261,10 +261,11 @@ instead. Nothing else in this runbook changes. **Status: BLOCKED until a release
 ## 9. Dependency on the enforce mode
 
 `docker-compose.image.yml` sets `CREWFLOW_RUNTIME_ISOLATION=enforce` on rab-api and rab-worker. The mode is the H6 follow-up (commit
-09286aef) in `rab/api-prestart.sh` and `rab/worker-bundle/start-worker-bundle.cjs`:
+09286aef) in `rab/api-prestart.sh` and, for the Worker, `packages/rab-worker/src/core/runtime/runtime-isolation.ts` (O1: the
+Worker bundle launcher that first carried it is retired):
 - strict values `warn` | `enforce`;
 - anything else refuses;
-- in `enforce`, any missing control refuses to start, with exit 64 (API) or a `BundleConfigError` (Worker).
+- in `enforce`, any missing control refuses to start, with exit 64 (API) or the Worker's start-up refusal (exit 1).
 
 Release images built before that change ignore the variable and only warn. **Do not deploy this variant with such an
 image.** The start line must contain `mode=enforce` (§5 step 7).

@@ -4,9 +4,7 @@
  *
  * WHETHER IT PROVISIONS
  *   CREWFLOW_PROVISIONER_ENABLED  strict: "true" | "false" | unset/empty. Any other value refuses to start.
- *     "true"   provision. This is what the Worker bundle launcher sets on its provisioner child; the launcher starts that
- *              child unless the service itself sets CREWFLOW_PROVISIONER_ENABLED=false (unset = the pre-Phase-A
- *              behaviour, provisioner on; start-worker-bundle.cjs).
+ *     "true"   provision. (The retired Worker bundle launcher set this on its provisioner child; O1 removed it.)
  *     "false"  never provision (an explicit opt-out wins over HWS_RUNTIME_ENABLED).
  *     unset    legacy standalone behaviour, unchanged: provision only when HWS_RUNTIME_ENABLED=true (the original gate; the
  *              nx `provision` target and the standalone integration specs rely on it).
@@ -25,8 +23,7 @@
  *   WORKSPACE_PROVISIONER_INTERVAL_SECONDS  whole seconds, PROVISIONER_INTERVAL_MIN_SECONDS..PROVISIONER_INTERVAL_MAX_SECONDS,
  *   default PROVISIONER_INTERVAL_DEFAULT_SECONDS (PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS = the old fixed 5 s when
  *   enabled by the legacy HWS gate). Out of range or not a whole number refuses to start. Was a fixed 5 s.
- *   The launcher validates the same bounds (start-worker-bundle.cjs PROVISIONER_INTERVAL; launcher.test.cjs A7 reconciles
- *   the two). The maximum keeps a settled cycle inside the bundle health check's 5-minute provisioner window.
+ *   The maximum keeps a settled cycle inside the health check's 5-minute provisioner window.
  */
 
 export const PROVISIONER_INTERVAL_DEFAULT_SECONDS = 60;

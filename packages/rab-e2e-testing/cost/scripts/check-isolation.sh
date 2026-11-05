@@ -213,7 +213,7 @@ wenv_tests() {
   make_worker_env t7
   wdc config --format json worker | node -e '
     let r = ""; process.stdin.on("data", (d) => (r += d)).on("end", () => { const v = JSON.parse(r).services.worker.environment.CREWFLOW_PROVISIONER_DATABASE_URL;
-      const ok = typeof v === "string" && /^postgres:\/\/crewflow:[^@]+@pg:5432\/rab$/.test(v); console.log("default: provisioner URL rendered as postgres://crewflow:***@pg:5432/rab = " + ok); process.exit(ok ? 0 : 1); });'
+      const ok = v == null; console.log("default (O1): no provisioner URL in the rendered worker env = " + ok); process.exit(ok ? 0 : 1); });'
   : > "$OUT/worker-env/base.env"
   make_worker_env t4 REALTIME_ENABLED=true PUSH_ENABLED=true PHASEA_TEST_SWITCH=true
   COST_WORKER_ENV_FILE="$(hostpath "$WENV")" COST_REALTIME_ENABLED=true COST_PUSH_ENABLED=true check_compose_isolation | tail -1

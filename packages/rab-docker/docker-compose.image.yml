@@ -14,7 +14,9 @@
 #   rab-worker                     ${CREWFLOW_WORKER_IMAGE_REPOSITORY}@${CREWFLOW_WORKER_IMAGE_DIGEST}
 #   rab-redis                      ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
 # The digests are the multi-platform INDEX digests (amd64 + arm64) of the approved release, never a tag; compose refuses to
-# render without them. Two hardened images stay; a shared image is a later, separate PR (docs/release/SHARED-IMAGE-PLAN.md).
+# render without them. O1: the API and the Worker are now ONE image (rab/Dockerfile), published under both existing tag
+# names with the same digest, so CREWFLOW_API_IMAGE_DIGEST and CREWFLOW_WORKER_IMAGE_DIGEST carry the SAME digest; O2
+# collapses them into one variable and one tag (docs/release/SHARED-IMAGE-PLAN.md).
 #
 # ONE DATABASE CREDENTIAL. rab-api, rab-worker and rab-migrate read PG_DATABASE_URL (crewflow_owner at the DIRECT host,
 # sslmode=verify-full) from ONE file, ${CREWFLOW_SECRETS_DIR}/database.env (template env/database.env.example), so it is
@@ -175,9 +177,9 @@ services:
 
   # ---------------------------------------------------------------------------
   # rab-worker — background jobs, ONE process as uid/gid 1000 on the same crewflow_owner login (DBA-01, the API/Worker
-  # separation, is lost: runbook section 1, NEEDS OWNER APPROVAL). The image's ENTRYPOINT (tini) stays PID 1 and forwards
-  # SIGTERM; the command replaces the retired root launcher, so there is no root process, no capability and no
-  # provisioner identity (workspace provisioning runs in-process). It never migrates and starts only after a healthy API.
+  # separation, is lost: runbook section 1, NEEDS OWNER APPROVAL). O1: the SAME image as rab-api, a different command. The
+  # image's ENTRYPOINT (tini -s) runs under compose's init and forwards SIGTERM; there is no root process, no capability and
+  # no provisioner identity (workspace provisioning runs in-process). It never migrates and starts only after a healthy API.
   # ---------------------------------------------------------------------------
   rab-worker:
     image: ${CREWFLOW_WORKER_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_WORKER_IMAGE_DIGEST:?CREWFLOW_WORKER_IMAGE_DIGEST must be the Worker index digest (sha256:<64 hex>)}

@@ -45,10 +45,11 @@ for (const c of containers) {
     storageReconcileLines: storageLines.slice(0, 40),
     errorLines: lines.filter((x) => /\b(ERROR|error|failed)\b/.test(x)).length,
     processes: {
-      // tini (PID 1) carries the launcher's command line as its arguments; counted separately.
-      tini: procs.filter((l) => /\btini\b/.test(l)).length,
-      launcher: procs.filter((l) => /start-worker-bundle\.cjs/.test(l) && !/\btini\b/.test(l)).length,
-      jobs: procs.filter((l) => /rab-worker\/dist\/main\.js/.test(l)).length,
+      // O1: compose's init (docker-init, PID 1) and the image's tini carry the Worker's command line as their arguments;
+      // counted separately. The launcher is retired (0 expected).
+      tini: procs.filter((l) => /\b(tini|docker-init)\b/.test(l)).length,
+      launcher: procs.filter((l) => /start-worker-bundle\.cjs/.test(l) && !/\b(tini|docker-init)\b/.test(l)).length,
+      jobs: procs.filter((l) => /rab-worker\/dist\/main\.js/.test(l) && !/\b(tini|docker-init)\b/.test(l)).length,
       provisioner: procs.filter((l) => /workspace-provisioner\.main\.js/.test(l)).length,
       list: procs.map((l) => l.slice(0, 160)),
     },

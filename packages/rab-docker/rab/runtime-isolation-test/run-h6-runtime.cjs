@@ -5,7 +5,7 @@
  * disposable Compose project, and records each row of the H6.7 runtime regression matrix plus the container-security
  * matrix as PASS / FAIL / BLOCKED, with raw output in <evidence-dir>/NN-*.log and a summary in <evidence-dir>/SUMMARY.md.
  *
- *   H6_APP_IMAGE=<api image> H6_WORKER_IMAGE=<worker bundle image> \
+ *   H6_APP_IMAGE=<crewflow image> H6_WORKER_IMAGE=<crewflow image (O1: the same image)> \
  *     node packages/rab-docker/rab/runtime-isolation-test/run-h6-runtime.cjs <evidence-dir> [--compose <production file>]
  *     [--matrix-only] [--keep]
  *
@@ -18,6 +18,12 @@
  * per run, passed as an H6_* variable and redacted from every evidence file); no Docker volume is created (every data
  * directory is a tmpfs); cleanup stops and removes this project's own containers BY EXACT NAME (never `down -v`, never a
  * prune). The project network is left in place (see the H6 report).
+ *
+ * O1 (one image): the Worker is ONE process (`node packages/rab-worker/dist/main.js`, uid 1000) under compose's init and
+ * the image's tini, with no capability (CapBnd 0) and two jobs tmpfs mounts; the retired root launcher and its provisioner
+ * child (uid 10001) are gone, and provisioning runs in-process. KNOWN GAP (pre-existing since #72, not changed by O1): the
+ * database cases (M01 guard role, M12 escalation, M13) still expect the separated `crewflow_app` login; the runtime now
+ * requires the owner login (crewflow_owner), so those rows need the owner-login rework before this harness passes again.
  */
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -156,14 +162,16 @@ function procTable(id) {
     return { pid: Number(pid), uid: Number(uid), cmd: cmd.join('|').trim() };
   });
 }
-function bundlePids(id) {
+/** O1: the Worker container's processes: compose's init (PID 1), the image's tini, and the ONE Worker node process. */
+const INIT_RE = /\b(docker-init|tini)\b/;
+function workerPids(id) {
   const t = procTable(id);
-  const find = (uid, re) => t.find((p) => p.uid === uid && re.test(p.cmd))?.pid;
+  const find = (uid, re) => t.find((p) => p.uid === uid && re.test(p.cmd) && !INIT_RE.test(p.cmd))?.pid;
   return {
     table: t,
-    launcher: find(0, /^\S*node \/opt\/crewflow-bundle\/start-worker-bundle\.cjs/),
-    jobs: find(1000, /rab-worker\/dist\/main\.js/),
-    provisioner: find(10001, /workspace-provisioner\.main\.js/),
+    tini: t.find((p) => /\btini\b/.test(p.cmd))?.pid,
+    jobs: find(1000, /^\S*node packages\/rab-worker\/dist\/main\.js/),
+    workers: t.filter((p) => /rab-worker\/dist\/main\.js/.test(p.cmd) && !INIT_RE.test(p.cmd)).length,
   };
 }
 const STATUS_KEYS = ['Uid', 'Gid', 'Groups', 'CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb', 'NoNewPrivs', 'Seccomp', 'Seccomp_filters'];
@@ -265,12 +273,11 @@ function securityMatrix(label) {
   rows.push({ container: 'rab-api', process: 'pid 1 (node main.js)', ...apiStatus['pid 1'] });
   const workers = containerIds('rab-worker');
   const w = workers[0];
-  const p = bundlePids(w);
-  const wStatus = procStatus(w, [1, p.launcher, p.jobs, p.provisioner].filter(Boolean));
-  rows.push({ container: 'rab-worker', process: 'pid 1 (tini)', ...wStatus['pid 1'] });
-  rows.push({ container: 'rab-worker', process: 'launcher', ...wStatus[`pid ${p.launcher}`] });
-  rows.push({ container: 'rab-worker', process: 'jobs', ...wStatus[`pid ${p.jobs}`] });
-  rows.push({ container: 'rab-worker', process: 'provisioner', ...wStatus[`pid ${p.provisioner}`] });
+  const p = workerPids(w);
+  const wStatus = procStatus(w, [1, p.tini, p.jobs].filter(Boolean));
+  rows.push({ container: 'rab-worker', process: 'pid 1 (init)', ...wStatus['pid 1'] });
+  if (p.tini && p.tini !== 1) rows.push({ container: 'rab-worker', process: 'tini', ...wStatus[`pid ${p.tini}`] });
+  rows.push({ container: 'rab-worker', process: 'jobs (node main.js)', ...wStatus[`pid ${p.jobs}`] });
   const wHc = hostConfig(w);
   const hc = (h) => ({
     ReadonlyRootfs: h.ReadonlyRootfs, Privileged: h.Privileged, CapDrop: h.CapDrop, CapAdd: h.CapAdd, SecurityOpt: h.SecurityOpt,
@@ -281,7 +288,6 @@ function securityMatrix(label) {
     'rab-api uid 1000': writableMounts(api, '1000:1000'),
     'rab-worker root (exec, container caps)': writableMounts(w, '0:0'),
     'rab-worker uid 1000 (jobs)': writableMounts(w, '1000:1000'),
-    'rab-worker uid 10001 (provisioner)': writableMounts(w, '10001:10001'),
   };
   const matrix = { label, processes: rows, hostConfig: { 'rab-api': hc(apiHc), 'rab-worker': hc(wHc) }, writable, users: { 'rab-api': inspectId(api, '{{.Config.User}}'), 'rab-worker': inspectId(w, '{{.Config.User}}') } };
   fs.writeFileSync(path.join(OUT, `security-matrix-${label}.json`), JSON.stringify(matrix, null, 2));
@@ -392,20 +398,21 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return `healthy in ${measured.apiStartToHealthyMs} ms (includes rab-migrate check run)`;
   });
 
-  await step('M02', 'Worker start under the production runtime keys (both children, identities agree)', async () => {
+  await step('M02', 'Worker start under the production runtime keys (one process, in-process provisioning)', async () => {
     const t0 = Date.now();
     assert(compose(['up', '-d', '--wait', '--wait-timeout', '300', '--no-build', 'rab-worker']).code === 0, 'rab-worker not healthy');
     measured.workerStartToHealthyMs = Date.now() - t0;
     const logs = logsOf('rab-worker');
-    write(logs.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|rab-worker ready|workspace-provisioner\] started|EROFS|EACCES/.test(l)).join('\n'));
-    assert(/\[worker-bundle\] live identity probes agree: database=rab cluster=\d+ \(jobs=crewflow_app, provisioner=crewflow\)/.test(logs), 'no agreeing live identity line');
-    assert(/\[jobs\] rab-worker ready/.test(logs), 'jobs not ready');
-    const iso = (/\[worker-bundle\] (runtime isolation as declared|WARNING runtime isolation weaker)[^\n]*/.exec(logs) || [''])[0];
+    write(logs.split('\n').filter((l) => /worker-isolation\]|runtime-db-guard|rab-worker ready|workspace provisioning: in-process|EROFS|EACCES/.test(l)).join('\n'));
+    assert(/workspace provisioning: in-process on the owner login/.test(logs), 'no in-process provisioning line');
+    assert(/^rab-worker ready/m.test(logs), 'Worker not ready');
+    assert(!/\[worker-bundle\]|start-worker-bundle/.test(logs), 'launcher output (the launcher is retired)');
+    const iso = (/\[worker-isolation\] (runtime isolation as declared|WARNING runtime isolation weaker)[^\n]*/.exec(logs) || [''])[0];
     measured.workerIsolationLine = iso;
-    if (!MATRIX_ONLY) assert(/runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4\/4 pids\.max=\d+ memory\.max=\d+/.test(iso), `Worker isolation line: ${iso || '(none)'}`);
-    fx.workerPids = bundlePids(containerId('rab-worker'));
+    if (!MATRIX_ONLY) assert(/runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids\.max=\d+ memory\.max=\d+/.test(iso), `Worker isolation line: ${iso || '(none)'}`);
+    fx.workerPids = workerPids(containerId('rab-worker'));
     write(fx.workerPids.table.map((x) => `${x.pid} uid=${x.uid} ${x.cmd}`).join('\n'));
-    assert(fx.workerPids.launcher && fx.workerPids.jobs && fx.workerPids.provisioner, 'missing a process');
+    assert(fx.workerPids.jobs && fx.workerPids.workers === 1, 'expected exactly one Worker process');
     return `healthy in ${measured.workerStartToHealthyMs} ms`;
   });
 
@@ -415,7 +422,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     if (MATRIX_ONLY) return 'recorded (matrix-only run)';
     const byProc = Object.fromEntries(m.processes.map((r) => [`${r.container}/${r.process.split(' ')[0]}`, r]));
     const zero = '0000000000000000';
-    for (const k of ['rab-api/pid', 'rab-worker/jobs', 'rab-worker/provisioner']) {
+    for (const k of ['rab-api/pid', 'rab-worker/pid', 'rab-worker/jobs']) {
       const r = byProc[k];
       for (const c of ['CapInh', 'CapPrm', 'CapEff', 'CapAmb']) assert(r[c] === zero, `${k} ${c}=${r[c]}`);
       assert(r.NoNewPrivs === '1', `${k} NoNewPrivs=${r.NoNewPrivs}`);
@@ -426,11 +433,11 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     }
     assert(byProc['rab-api/pid'].CapBnd === zero, `rab-api CapBnd=${byProc['rab-api/pid'].CapBnd} (cap_drop ALL)`);
     assert(byProc['rab-api/pid'].Uid.split(' ').every((x) => x === '1000'), 'rab-api not uid 1000');
-    for (const k of ['rab-worker/pid', 'rab-worker/launcher']) {
-      assert(byProc[k].CapEff === '00000000000000e0' && byProc[k].CapBnd === '00000000000000e0', `${k} caps ${byProc[k].CapEff}/${byProc[k].CapBnd} (expected SETUID|SETGID|KILL only)`);
-      assert(byProc[k].NoNewPrivs === '1', `${k} NoNewPrivs`);
+    // O1: no root process and no capability anywhere in the Worker container (no identity switch any more).
+    for (const k of ['rab-worker/pid', 'rab-worker/jobs']) {
+      assert(byProc[k].CapBnd === zero, `${k} CapBnd=${byProc[k].CapBnd} (cap_drop ALL, no cap_add)`);
+      assert(byProc[k].Uid.split(' ').every((x) => x === '1000'), `${k} not uid 1000`);
     }
-    assert(byProc['rab-worker/jobs'].Uid.split(' ').every((x) => x === '1000') && byProc['rab-worker/provisioner'].Uid.split(' ').every((x) => x === '10001'), 'child UIDs');
     for (const [name, h] of Object.entries(m.hostConfig)) {
       assert(h.ReadonlyRootfs === true && h.Privileged === false, `${name} read-only/privileged`);
       assert(JSON.stringify(h.CapDrop) === '["ALL"]', `${name} CapDrop`);
@@ -441,12 +448,12 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       assert(!/^host$/.test(h.NetworkMode) && !/^host$/.test(h.PidMode), `${name} host namespace`);
     }
     assert(!m.hostConfig['rab-api'].CapAdd, 'rab-api CapAdd');
-    assert(JSON.stringify([...m.hostConfig['rab-worker'].CapAdd].sort()) === '["CAP_KILL","CAP_SETGID","CAP_SETUID"]' || JSON.stringify([...m.hostConfig['rab-worker'].CapAdd].sort()) === '["KILL","SETGID","SETUID"]', `rab-worker CapAdd ${JSON.stringify(m.hostConfig['rab-worker'].CapAdd)}`);
-    // Writable paths: the API only the kernel's /dev/shm (+ /dev/mqueue is skipped as pseudo); each Worker child only its own dirs.
+    assert(!m.hostConfig['rab-worker'].CapAdd || m.hostConfig['rab-worker'].CapAdd.length === 0, `rab-worker CapAdd ${JSON.stringify(m.hostConfig['rab-worker'].CapAdd)}`);
+    assert(m.hostConfig['rab-worker'].Init === true, 'rab-worker without init (the watchdog SIGKILL is ignored for PID 1)');
+    // Writable paths: the API only the kernel's /dev/shm (+ /dev/mqueue is skipped as pseudo); the Worker only its jobs dirs.
     assert(JSON.stringify(m.writable['rab-api uid 1000']) === '["/dev/shm"]', `rab-api writable: ${m.writable['rab-api uid 1000']}`);
     assert(JSON.stringify(m.writable['rab-worker uid 1000 (jobs)']) === '["/dev/shm","/run/crewflow-health/jobs","/tmp/crewflow-jobs"]', `jobs writable: ${m.writable['rab-worker uid 1000 (jobs)']}`);
-    assert(JSON.stringify(m.writable['rab-worker uid 10001 (provisioner)']) === '["/dev/shm","/run/crewflow-health/provisioner","/tmp/crewflow-provisioner"]', `provisioner writable: ${m.writable['rab-worker uid 10001 (provisioner)']}`);
-    return 'API: uid 1000, no capability (CapBnd 0), NNP; launcher: SETUID|SETGID|KILL only; children: no capability';
+    return 'API and Worker: uid 1000, no capability (CapBnd 0), NNP; Worker under init, one process';
   });
 
   if (MATRIX_ONLY) {
@@ -455,7 +462,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return;
   }
 
-  await step('M04', 'Provisioner (uid 10001, privileged crewflow login) brings a CREATING workspace to READY', async () => {
+  await step('M04', 'In-process provisioning (the Worker, uid 1000) brings a CREATING workspace to READY', async () => {
     await waitFor('h6-first READY', () => wsStatus(fx.probe.id) === 'READY|READY', 120_000);
     const owner = sql1(`SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'workspace_' || replace('${fx.probe.id}', '-', '')`);
     write(`schema owner: ${owner}`);
@@ -469,7 +476,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       return `if ( : > "${f}" ) 2>/dev/null; then echo "${p} WRITABLE"; rm -f "${f}"; else echo "${p} refused"; fi`;
     }).join('\n'));
     const out = [];
-    for (const [svc, user] of [['rab-api', '1000:1000'], ['rab-worker', '0:0'], ['rab-worker', '1000:1000'], ['rab-worker', '10001:10001']]) {
+    for (const [svc, user] of [['rab-api', '1000:1000'], ['rab-worker', '0:0'], ['rab-worker', '1000:1000']]) {
       const r = probe(svc, user);
       out.push(`${svc} ${user}: ${r.out.trim().split('\n').join('; ')}`);
       assert(!/WRITABLE/.test(r.out), `${svc} ${user} could write: ${r.out}`);
@@ -478,27 +485,26 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const e = execAs('rab-api', '1000:1000', 'touch /app/storage/x 2>&1; touch /tmp/x 2>&1; mkdir /home/node/.node_modules 2>&1; true');
     write(out.join('\n'));
     assert(/Read-only file system/.test(e.out), 'expected EROFS');
-    return 'no write outside the per-child tmpfs (EROFS)';
+    return 'no write outside the jobs tmpfs (EROFS)';
   });
 
-  await step('M06', 'Tmp dirs: per-child tmpfs ownership/mode/noexec; children cannot reach each other\'s', async () => {
+  await step('M06', 'Tmp dirs: jobs tmpfs ownership/mode/noexec (two mounts); the API has none', async () => {
     const w = containerId('rab-worker');
     const tm = mounts(w).filter((m) => m.type === 'tmpfs' && /crewflow/.test(m.target));
     write(tm.map((m) => `${m.target} ${m.options}`).join('\n'));
     for (const m of tm) assert(/\bnoexec\b/.test(m.options) && /\bnosuid\b/.test(m.options) && /\bnodev\b/.test(m.options), `${m.target}: ${m.options}`);
-    assert(tm.length === 4, `expected 4 crewflow tmpfs mounts, got ${tm.length}`);
-    const own = execAs('rab-worker', '1000:1000', 'echo ok > /tmp/crewflow-jobs/h6 && cat /tmp/crewflow-jobs/h6 && rm /tmp/crewflow-jobs/h6; ls /tmp/crewflow-provisioner 2>&1; ( : > /run/crewflow-health/provisioner/x ) 2>&1; cp /bin/busybox /tmp/crewflow-jobs/bb && /tmp/crewflow-jobs/bb true 2>&1; echo "exec-from-tmp=$?"; rm -f /tmp/crewflow-jobs/bb');
+    assert(tm.length === 2, `expected 2 crewflow tmpfs mounts (O1: jobs only), got ${tm.length}`);
+    const own = execAs('rab-worker', '1000:1000', 'echo ok > /tmp/crewflow-jobs/h6 && cat /tmp/crewflow-jobs/h6 && rm /tmp/crewflow-jobs/h6; cp /bin/busybox /tmp/crewflow-jobs/bb && /tmp/crewflow-jobs/bb true 2>&1; echo "exec-from-tmp=$?"; rm -f /tmp/crewflow-jobs/bb');
     write(own.out);
     assert(/^ok$/m.test(own.out), 'jobs cannot use its own tmp');
-    assert(/Permission denied/.test(own.out.split('\n').slice(1).join('\n')), 'jobs reached the provisioner dirs');
     assert(/exec-from-tmp=126/.test(own.out), 'a binary in the jobs tmpfs executed (noexec missing)');
     const apiTmpfs = mounts(containerId('rab-api')).filter((m) => m.type === 'tmpfs' && !m.target.startsWith('/dev') && !m.target.startsWith('/proc') && !m.target.startsWith('/sys'));
     write(`rab-api tmpfs mounts (excluding /dev,/proc,/sys): ${apiTmpfs.map((m) => m.target).join(' ') || '(none)'}`);
     assert(apiTmpfs.length === 0, 'the API has a tmpfs');
-    return 'noexec,nosuid,nodev per-child tmpfs; cross-child access denied; API has none';
+    return 'noexec,nosuid,nodev jobs tmpfs; API has none';
   });
 
-  await step('M07', 'Code permissions: /app and /opt/crewflow-bundle root-owned, not group/other-writable (both images)', async () => {
+  await step('M07', 'Code permissions: /app and /opt/crewflow-bundle root-owned, not group/other-writable (both services)', async () => {
     const find = "find /app /opt/crewflow-bundle -path /app/storage -prune -o ! -type l \\( ! -user 0 -o ! -group 0 -o -perm /022 \\) -print 2>/dev/null | head -n 20; echo count=$(find /app /opt/crewflow-bundle -path /app/storage -prune -o ! -type l \\( ! -user 0 -o ! -group 0 -o -perm /022 \\) -print 2>/dev/null | wc -l)";
     const a = execAs('rab-api', '0:0', find);
     const w = execAs('rab-worker', '0:0', find);
@@ -512,14 +518,12 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   await step('M08', 'Node home restrictions: no writable or creatable module search path for any runtime identity', async () => {
     const api = execAs('rab-api', '1000:1000', 'stat -c "%U:%G %a %n" /home/node; HOME=/home/node node -e "const m=require(\'module\');const fs=require(\'fs\');for(const p of m.globalPaths){let w=false;try{fs.accessSync(p,fs.constants.W_OK);w=true}catch{};console.log(p, w?\'WRITABLE\':\'not-writable\')}"; mkdir -p /home/node/.node_modules/pg-native 2>&1; echo mkdir=$?');
     const w = containerId('rab-worker');
-    const p = bundlePids(w);
+    const p = workerPids(w);
     const jobsHome = execIn(w, '1000:1000', `tr '\\0' '\\n' < /proc/${p.jobs}/environ | grep -E '^(HOME|TMPDIR|XDG_CONFIG_HOME|XDG_CACHE_HOME)='; mkdir /nonexistent 2>&1; echo mkdir=$?`);
-    const provHome = execIn(w, '10001:10001', `tr '\\0' '\\n' < /proc/${p.provisioner}/environ | grep -E '^(HOME|TMPDIR)='; mkdir /nonexistent 2>&1; echo mkdir=$?`);
-    write(`api:\n${api.out}\njobs:\n${jobsHome.out}\nprovisioner:\n${provHome.out}`);
+    write(`api:\n${api.out}\njobs:\n${jobsHome.out}`);
     assert(/root:root 555 \/home\/node/.test(api.out) && !/WRITABLE/.test(api.out) && /mkdir=1/.test(api.out), 'API home writable');
     assert(/^HOME=\/nonexistent$/m.test(jobsHome.out) && /mkdir=1/.test(jobsHome.out), 'jobs HOME');
-    assert(/^HOME=\/nonexistent$/m.test(provHome.out) && /mkdir=1/.test(provHome.out), 'provisioner HOME');
-    return 'API HOME root:root 0555; children HOME=/nonexistent (not creatable)';
+    return 'API HOME root:root 0555; Worker HOME=/nonexistent (not creatable)';
   });
 
   await step('M11', 'Redis: both services use it; Redis and PostgreSQL publish no port', async () => {
@@ -547,9 +551,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const values = [...JSON.parse(envNames('rab-api')), ...JSON.parse(envNames('rab-worker'))].join('\n');
     assert(!values.includes(`rab:${SECRETS.H6_SUPERUSER_PASSWORD}@`) && !values.includes('crewflow_migrator'), 'migration credential value in a runtime container');
     const w = containerId('rab-worker');
-    const p = bundlePids(w);
+    const p = workerPids(w);
     const jobsEnv = execIn(w, '1000:1000', `tr '\\0' '\\n' < /proc/${p.jobs}/environ | cut -d= -f1 | sort | tr '\\n' ' '`, { quiet: true }).out;
-    assert(!/CREWFLOW_PROVISIONER_DATABASE_URL|DATABASE_URL_UNPOOLED/.test(jobsEnv), 'jobs child holds the provisioning credential');
+    assert(!/CREWFLOW_PROVISIONER_|DATABASE_URL_UNPOOLED/.test(jobsEnv), 'the Worker holds a provisioner variable');
     const esc = appSql(`SELECT rolsuper, rolbypassrls, rolcreaterole, rolcreatedb FROM pg_roles WHERE rolname = current_user;
 SELECT pg_has_role(current_user, 'crewflow', 'MEMBER'), pg_has_role(current_user, 'rab_secure_owner', 'MEMBER');`);
     const setRole = appSql('SET ROLE crewflow;');
@@ -622,7 +626,7 @@ BEGIN; ${ctx(orgA, wsA)} SELECT count(*) FROM core.venue; COMMIT;`).out.trim().s
     assert(/shift report scheduler: generated=1/.test(logs), 'scheduler did not log the generated report');
     await waitFor('report email', () => mailCount() > mailsBefore, 120_000, 3000);
     // P5: the render ran in the jobs process itself. No browser binary exists, no browser process or profile directory
-    // appeared, and the jobs tmpfs holds nothing but (at most) the XDG config/cache directories the launcher points at.
+    // appeared, and the jobs tmpfs holds nothing but (at most) the XDG config/cache directories the compose points at.
     const left = execAs('rab-worker', '1000:1000', 'ls -A /tmp/crewflow-jobs | grep -v -x -e .config -e .cache | wc -l; for p in /usr/bin/chromium /usr/bin/chromium-browser /usr/lib/chromium; do test -e "$p" && echo "present $p"; done; true');
     const browser = procTable(containerId('rab-worker')).filter((p) => /chrom|playwright/i.test(p.cmd)).length;
     write(`jobs tmp entries after render (besides .config/.cache): ${left.out.trim()}\nbrowser processes: ${browser}`);
@@ -734,9 +738,9 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     return `refused render clean; storage outage → failed cycle, no residue, ${restartsDuring} container restart(s); recovered → ready`;
   });
 
-  await step('M15', 'Worker health: both roles healthy per instance (health script exit 0)', async () => {
+  await step('M15', 'Worker health: the jobs-only per-instance check passes (health script exit 0)', async () => {
     await waitFor('rab-worker healthy', () => healthOf('rab-worker') === 'healthy', 240_000, 3000);
-    const h = execAs('rab-worker', '0:0', 'node /opt/crewflow-bundle/worker-bundle-health.cjs; echo exit=$?');
+    const h = execAs('rab-worker', '1000:1000', 'env CREWFLOW_PROVISIONER_ENABLED=false node /opt/crewflow-bundle/worker-bundle-health.cjs; echo exit=$?');
     write(h.out);
     assert(/exit=0/.test(h.out), 'health script failed');
     return 'healthy';
@@ -792,28 +796,28 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     return `2 replicas healthy; 4/4 provisioned once; peaks ${measured.replicas.map((r) => `${r.memoryPeakMiB} MiB/${r.pidsPeak} tasks`).join(', ')}`;
   });
 
-  await step('M18', 'Restart recovery: a killed jobs child fails the service, the restart policy brings it back healthy', async () => {
+  await step('M18', 'Restart recovery: a killed Worker process ends the container, the restart policy brings it back healthy', async () => {
     await waitFor('rab-worker healthy', () => healthOf('rab-worker') === 'healthy', 240_000, 3000);
     const before = restartsOf('rab-worker');
     const startedBefore = inspect('rab-worker', '{{.State.StartedAt}}');
-    const p = bundlePids(containerId('rab-worker'));
+    const p = workerPids(containerId('rab-worker'));
     const since = new Date(Date.now() - 5_000).toISOString();
-    execAs('rab-worker', '0:0', `kill -9 ${p.jobs}`);
+    execAs('rab-worker', '1000:1000', `kill -9 ${p.jobs}`);
     await waitFor('container restarted', () => restartsOf('rab-worker') > before, 180_000, 3000);
     await waitFor('healthy again', () => healthOf('rab-worker') === 'healthy', 300_000, 5000);
-    const logs = logsOf('rab-worker', since).split('\n').filter((l) => /\[worker-bundle\]/.test(l)).slice(0, 12);
+    const logs = logsOf('rab-worker', since).split('\n').filter((l) => /rab-worker ready|workspace provisioning: in-process/.test(l)).slice(0, 12);
     write(logs.join('\n'));
-    const p2 = bundlePids(containerId('rab-worker'));
-    // A restarted container gets a fresh PID namespace, so the children may get the SAME pid numbers again: compare the
-    // container start time and require the failure + a new start in the launcher's own log instead.
+    const p2 = workerPids(containerId('rab-worker'));
+    // A restarted container gets a fresh PID namespace, so the Worker may get the SAME pid number again: compare the
+    // container start time and require a new start in the Worker's own log instead.
     const startedAfter = inspect('rab-worker', '{{.State.StartedAt}}');
-    write(`StartedAt ${startedBefore} → ${startedAfter}; children now jobs=${p2.jobs} provisioner=${p2.provisioner}`);
-    assert(p2.jobs && p2.provisioner && startedAfter !== startedBefore, 'children not restarted');
-    assert(logs.some((l) => /jobs exited unexpectedly \(SIGKILL\)/.test(l)) && logs.some((l) => /live identity probes agree/.test(l)), 'expected the failure and a new start in the launcher log');
+    write(`StartedAt ${startedBefore} → ${startedAfter}; Worker now pid ${p2.jobs}`);
+    assert(p2.jobs && p2.workers === 1 && startedAfter !== startedBefore, 'Worker not restarted');
+    assert(logs.some((l) => /rab-worker ready/.test(l)), 'expected a new start in the Worker log');
     return `restart count ${before} → ${restartsOf('rab-worker')}; healthy`;
   });
 
-  await step('M16', 'SIGTERM: API drains and exits within its grace; Worker forwards SIGTERM, both children drain, exit 0', async () => {
+  await step('M16', 'SIGTERM: API drains and exits within its grace; the Worker drains (jobs + in-process provisioning), exit 0', async () => {
     const t0 = Date.now();
     const since = new Date(Date.now() - 10_000).toISOString();
     compose(['stop', '-t', '35', 'rab-api']);
@@ -825,15 +829,15 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     await waitFor('rab-worker healthy', () => healthOf('rab-worker') === 'healthy', 240_000, 3000);
     const since2 = new Date(Date.now() - 10_000).toISOString();
     const t1 = Date.now();
-    compose(['stop', '-t', '55', 'rab-worker']);
+    compose(['stop', '-t', '45', 'rab-worker']);
     measured.workerStopMs = Date.now() - t1;
     const exit = inspect('rab-worker', '{{.State.ExitCode}}');
     const stopLog = logsOf('rab-worker', since2);
-    write(`rab-worker stop ${measured.workerStopMs} ms, exit ${exit}\n${stopLog.split('\n').filter((l) => /\[worker-bundle\]|SIGTERM|shut down cleanly/.test(l)).join('\n')}`);
+    write(`rab-worker stop ${measured.workerStopMs} ms, exit ${exit}\n${stopLog.split('\n').filter((l) => /Worker received|SIGTERM|shut down cleanly/.test(l)).join('\n')}`);
     assert(apiExit === '0' && measured.apiStopMs < 35_000, `API exit ${apiExit} after ${measured.apiStopMs} ms`);
-    for (const re of [/\[worker-bundle\] stopping: received SIGTERM/, /\[jobs\] Worker shut down cleanly/, /\[workspace-provisioner\] shut down cleanly/, /\[worker-bundle\] exiting with code 0/]) assert(re.test(stopLog), `missing ${re}`);
-    assert(exit === '0' && measured.workerStopMs < 55_000, `Worker exit ${exit} after ${measured.workerStopMs} ms`);
-    return `API exit 0 in ${measured.apiStopMs} ms; Worker exit 0 in ${measured.workerStopMs} ms (tini → launcher → both drains)`;
+    assert(/^Worker shut down cleanly$/m.test(stopLog), 'missing "Worker shut down cleanly"');
+    assert(exit === '0' && measured.workerStopMs < 45_000, `Worker exit ${exit} after ${measured.workerStopMs} ms`);
+    return `API exit 0 in ${measured.apiStopMs} ms; Worker exit 0 in ${measured.workerStopMs} ms (init → tini → node, one drain)`;
   });
 
   await step('M17', 'Graceful start after stop: both come back healthy, no orphan or zombie processes', async () => {
@@ -841,8 +845,9 @@ BEGIN; ${ctx(f.orgId, wsOwn)} SELECT count(*) FROM core.stored_file WHERE id = '
     const t = procTable(containerId('rab-worker'));
     const zombies = execAs('rab-worker', '0:0', "for p in /proc/[0-9]*; do awk '{print $3}' $p/stat 2>/dev/null; done | grep -c Z || true", { quiet: true }).out.trim();
     write(`${t.map((x) => `${x.pid} uid=${x.uid} ${x.cmd}`).join('\n')}\nzombies=${zombies}`);
-    assert(t.filter((x) => x.uid === 1000 || x.uid === 10001).length === 2 && zombies === '0', 'orphans or zombies');
-    return 'healthy; exactly two child-identity processes; 0 zombies';
+    const nodes = t.filter((x) => /\bnode\b/.test(x.cmd) && !INIT_RE.test(x.cmd));
+    assert(nodes.length === 1 && t.every((x) => x.uid === 1000) && zombies === '0', 'orphans, a second node process, a non-1000 process, or zombies');
+    return 'healthy; exactly one Worker node process, all uid 1000; 0 zombies';
   });
 
   finish();

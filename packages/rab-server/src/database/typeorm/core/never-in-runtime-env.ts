@@ -2,18 +2,17 @@
  * Security review L-4: the ONE list of environment variables that must never be present (non-empty) in a long-running
  * runtime process — the API, the ordinary Worker jobs process and the workspace provisioner child. Each is migration,
  * bootstrap, command or operations authority that belongs to a short-lived step (rab-migrate / deploy-prepare, the
- * one-off ops container, a CLI command) or to the Worker bundle launcher alone. A credential sitting unused in a
+ * one-off ops container, a CLI command). A credential sitting unused in a
  * long-lived process's environment is still readable (/proc/<pid>/environ, crash dumps, error reporters), which Phase B P7
  * says must never happen.
  *
  * Who enforces it:
  *   - runtime-database-guard.ts resolveRuntimeDatabase: every name in `forbiddenRuntimeEnvNames(process)`, in-process, so
  *     the refusal holds even when a platform starts `node .../main.js` directly and skips api-prestart.sh;
- *   - packages/rab-docker/rab/api-prestart.sh: its two refusal loops must name exactly `forbiddenRuntimeEnvNames('api')`;
- *   - packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs FORBIDDEN_SERVICE_KEYS (the Worker service, i.e. the
- *     root launcher) must name exactly `forbiddenWorkerServiceEnvNames()`.
- * The shell script and the launcher are not TypeScript (the launcher ships standalone in the Worker image), so they keep
- * literal copies; never-in-runtime-env.spec.ts fails the build when either copy drifts from this list.
+ *   - packages/rab-docker/rab/api-prestart.sh: its two refusal loops must name exactly `forbiddenRuntimeEnvNames('api')`.
+ * The shell script is not TypeScript, so it keeps a literal copy; never-in-runtime-env.spec.ts fails the build when that
+ * copy drifts from this list. (O1, one image: the Worker bundle launcher and its FORBIDDEN_SERVICE_KEYS copy are retired;
+ * the Worker runs main.js directly and is covered by the in-process guard above.)
  *
  * Values are never read, with ONE value-aware exception (L-4 follow-up, coordinator decision 2026-10-30): DB_TARGET.
  * Local `yarn start` runs the API under Nx, which injects packages/rab-server/.env (where .env.example ships
@@ -24,8 +23,8 @@
  * (NODE_ENV=production or RAB_RUNTIME_ENV=production), is still refused. ALLOW_PRODUCTION_DB_COMMANDS stays refused by
  * name everywhere.
  *
- * The two IMAGE enforcers (api-prestart.sh and the Worker bundle launcher) stay strict by name for every entry, DB_TARGET
- * included: they only ever run inside the container images, whose compose files never inject a developer .env into them
+ * The IMAGE enforcer (api-prestart.sh) stays strict by name for every entry, DB_TARGET
+ * included: it only ever runs inside the container image, whose compose files never inject a developer .env into it
  * (docker-compose.yml blanks DB_TARGET on the api and worker services; production and QA set no DB_TARGET on them), so
  * nothing legitimate is refused there and the stricter rule costs nothing. The drift test compares NAMES, which is
  * unchanged.
@@ -38,21 +37,12 @@ export interface NeverInRuntimeEnvEntry {
   why: string;
   /** Runtime processes that MAY hold it (default: none). */
   allowedIn?: readonly RuntimeProcessName[];
-  /** True when the Worker bundle launcher (the Worker SERVICE environment) legitimately holds it. */
-  launcherHolds?: boolean;
   /**
    * Values (trimmed, exact) the IN-PROCESS runtime guard tolerates in a NON-production runtime only; ignored, never read.
    * Any other value, and any value at all in a production runtime, is refused. The image enforcers ignore this (strict by
    * name). Only DB_TARGET has one.
    */
   toleratedOutsideProduction?: readonly string[];
-  /**
-   * Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): false for the names added with it. The Worker bundle
-   * launcher (start-worker-bundle.cjs, a superseded separated-mode path that #61/#62 also touch) keeps its literal list
-   * unchanged until it is removed in the final clean-up PR, so these names are not part of its parity check. The API
-   * (api-prestart.sh) and every in-process guard enforce them.
-   */
-  enforcedByLauncher?: boolean;
 }
 
 const MIGRATION_ONLY = 'Migration authority is consumed only by the short-lived migration step and never reaches a long-running process.';
@@ -62,18 +52,17 @@ const OPS_ONLY = 'It belongs to the one-off operations container only (`docker c
 const ONE_URL =
   'The API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login). Remove this second database URL.';
 const ROLE_PASSWORD = 'Role passwords never belong in application configuration: the runtime connects only as the PG_DATABASE_URL owner login. Remove it.';
-/** Names added by the owner-login architecture: enforced by api-prestart.sh and the in-process guards, not by the superseded launcher. */
-const OWNER_LOGIN = { allowedIn: ['provisioner'] as const, enforcedByLauncher: false };
+/** Names added by the owner-login architecture: enforced by api-prestart.sh and the in-process guards. */
+const OWNER_LOGIN = { allowedIn: ['provisioner'] as const };
 
 export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.freeze([
   // The historical privileged name: the provisioner's deprecated non-production DDL connection only (the factory refuses it
   // everywhere in production).
   { name: 'DATABASE_URL_UNPOOLED', why: 'Remove it: only the provisioner process may hold it (deprecated, non-production only).', allowedIn: ['provisioner'] },
-  // Only the Worker bundle launcher holds it; it hands the provisioner child the credential as PG_DATABASE_URL.
+  // The retired separated-mode provisioner credential (O1: no launcher holds it any more; provisioning runs in-process).
   {
     name: 'CREWFLOW_PROVISIONER_DATABASE_URL',
-    why: 'Only the Worker bundle launcher may hold it. Remove it from this process\'s environment.',
-    launcherHolds: true,
+    why: 'Workspace provisioning runs inside the Worker on the one owner login; there is no provisioner credential. Remove it.',
   },
   { name: 'CREWFLOW_PRESTART_MIGRATION_DATABASE_URL', why: MIGRATION_ONLY },
   { name: 'CREWFLOW_MIGRATION_DATABASE_URL', why: MIGRATION_ONLY },
@@ -175,7 +164,3 @@ export function runtimeEnvRefusal(env: Record<string, string | undefined>, proce
   return null;
 }
 
-/** Names the Worker SERVICE (the bundle launcher's own environment) must not carry. */
-export function forbiddenWorkerServiceEnvNames(): string[] {
-  return NEVER_IN_RUNTIME_ENV.filter((e) => !e.launcherHolds && e.enforcedByLauncher !== false).map((e) => e.name);
-}

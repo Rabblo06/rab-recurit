@@ -1,15 +1,12 @@
 'use strict';
 /**
- * Docker hardening H5 / PDF renderer migration P5: PDF render smoke test, run INSIDE the exact gated Worker image
- * (bind-mounted read-only by image_gate.py `pdf`; never shipped in an image). Synthetic data only; no database, no Redis,
+ * Docker hardening H5 / PDF renderer migration P5: PDF render smoke test, run INSIDE the exact gated image (O1: the one
+ * image that runs the API and the Worker; bind-mounted read-only by image_gate.py `pdf`; never shipped in an image). Synthetic data only; no database, no Redis,
  * no network. Since P5 the image has no browser: the render goes through the Worker's NATIVE renderer (pure JavaScript,
  * vendored fonts), selected explicitly, and the smoke refuses to run if the Chromium HTML renderer is still exported.
  *
- *   node pdf-render-smoke.cjs plan     The Worker bundle launcher's own jobs-child plan (start-worker-bundle.cjs makePlan),
- *                                      fed synthetic connection strings that are never used; prints the child's uid/gid
- *                                      and its non-secret runtime environment (HOME, TMPDIR, XDG_*, PATH, and any
- *                                      CHROMIUM_* / PLAYWRIGHT_* key, which image_gate.py then refuses).
- *   node pdf-render-smoke.cjs render   As that child (uid/gid/env applied by the caller): renders the real pre-shift report
+ *   node pdf-render-smoke.cjs render   As the Worker (uid 1000 and its jobs environment, applied by image_gate.py from
+ *                                      the production compose contract): renders the real pre-shift report
  *                                      (the same synthetic data as before P5) through the production data-in seam
  *                                      (compiled rab-worker render-pdf.util `renderReportPdf({ kind, data })`, owner
  *                                      decision D1) with PDF_RENDERER=native, and prints JSON with the PDF (base64),
@@ -27,26 +24,6 @@ const path = require('node:path');
 
 const APP = '/app';
 const MARKER = 'H5 NATIVE PDF GATE';
-const BROWSER_KEYS = /^(CHROMIUM_|PLAYWRIGHT_)/;
-
-function plan() {
-  const launcher = require('/opt/crewflow-bundle/start-worker-bundle.cjs');
-  const env = {
-    ...process.env,
-    NODE_ENV: 'development',
-    // Synthetic, never connected: makePlan only validates their shape and login names.
-    PG_DATABASE_URL: 'postgres://crewflow_app@db.invalid:5432/crewflow_h5_smoke',
-    REDIS_URL: 'redis://redis.invalid:6379',
-    CREWFLOW_PROVISIONER_ENABLED: 'false',
-  };
-  const plans = launcher.makePlan(env);
-  const jobs = plans.find((p) => p.name === 'jobs');
-  if (!jobs) throw new Error('launcher plan has no jobs child');
-  const keep = ['HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'PATH', 'PDF_RENDERER'];
-  const childEnv = {};
-  for (const k of Object.keys(jobs.env)) if (keep.includes(k) || BROWSER_KEYS.test(k)) childEnv[k] = jobs.env[k];
-  process.stdout.write(JSON.stringify({ uid: jobs.uid, gid: jobs.gid, cwd: jobs.cwd, env: childEnv }));
-}
 
 async function render() {
   // stdout carries exactly one JSON document, which the gate parses. The renderer logs through Nest's Logger, which
@@ -106,7 +83,7 @@ async function render() {
 }
 
 const mode = process.argv[2];
-(mode === 'plan' ? Promise.resolve().then(plan) : mode === 'render' ? render() : Promise.reject(new Error('mode?')))
+(mode === 'render' ? render() : Promise.reject(new Error('usage: pdf-render-smoke.cjs render')))
   .catch((err) => {
     process.stderr.write(`pdf-render-smoke: FATAL ${err && err.stack ? err.stack : err}\n`);
     process.exit(1);

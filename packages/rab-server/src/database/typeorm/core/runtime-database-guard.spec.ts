@@ -197,9 +197,9 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     );
   });
 
-  it('8d2. API, worker AND provisioner refuse to boot if the Worker bundle launcher variable CREWFLOW_PROVISIONER_DATABASE_URL reached them', () => {
+  it('8d2. API, worker AND provisioner refuse to boot if the retired provisioner credential CREWFLOW_PROVISIONER_DATABASE_URL reached them', () => {
     expectRefused('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the api process's environment/);
-    expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_DATABASE_URL: LOCAL_OWNER }, /Only the Worker bundle launcher may hold it/);
+    expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_DATABASE_URL: LOCAL_OWNER }, /there is no provisioner credential\. Remove it/);
     expectRefused('provisioner', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT, CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the provisioner/);
     // An empty value is treated as absent, like DATABASE_URL_UNPOOLED.
     expect(resolve('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: '' })).classification).toBe('PRODUCTION');

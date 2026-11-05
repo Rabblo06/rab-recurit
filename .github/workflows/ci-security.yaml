@@ -148,8 +148,8 @@ jobs:
         run: node tools/check-protected-table-writes.cjs
 
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
-  # never migrate, refuse migration credentials), the Worker bundle launcher (PG_* forwarding, legacy names refused in
-  # production, the provisioner child's own PG_DATABASE_URL), every committed compose definition fed to the real launcher,
+  # never migrate, refuse migration credentials), every committed compose definition that runs the Worker (O1: the one
+  # image, the Worker command, one non-root process under init, no CREWFLOW_PROVISIONER_*), the image's runtime-deps check,
   # and the compose credential isolation (the migration login reaches rab-migrate only; rab-api / rab-worker wait for it).
   deployment-config:
     runs-on: ubuntu-latest
@@ -161,8 +161,8 @@ jobs:
       - uses: ./.github/actions/yarn-install
       - name: API start shell tests (api-prestart.sh, start.sh)
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
-      - name: Worker bundle launcher and committed deployment definitions
-        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs packages/rab-docker/rab/test/runtime-deps.test.cjs
+      - name: Committed Worker deployment definitions and the image's runtime-deps check
+        run: node --test packages/rab-docker/rab/worker-bundle/test/deployment-worker.test.cjs packages/rab-docker/rab/test/runtime-deps.test.cjs
       # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
       # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
       # skip itself), fails; any check failure fails the job.
@@ -188,7 +188,7 @@ jobs:
       # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
       # in image-security-gate.yaml's static job, which the image-gate job below (and every release) calls.
 
-  # Docker hardening H5: replaces the former `trivy` job. Builds the API and Worker images exactly as a release would
+  # Docker hardening H5: replaces the former `trivy` job. Builds THE image (O1: API + Worker) exactly as a release would
   # (no cache, SBOM + provenance, nothing pushed) and gates the built images: floors, privileges, writable code paths,
   # dev packages, Trivy + Grype, layer secrets, SBOM/provenance, manifest. Mode pr: fixable High/Critical and every
   # structural check fail the PR; release-only items (unfixed High/Critical without an owner decision, H3's

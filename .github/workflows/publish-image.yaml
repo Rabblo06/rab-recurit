@@ -1,20 +1,21 @@
 name: publish-image
 
-# Publishes the gated API and Worker images to the PRIVATE Docker Hub repository docker.io/adhin007/adolphus (owner
-# decision, Docker hardening H5). Runs ONLY when a GitHub release is published or on manual dispatch: never on a push or
+# Publishes THE gated Crewflow image (O1: one image runs the API and the Worker, chosen by command) to the PRIVATE Docker
+# Hub repository docker.io/adhin007/adolphus (owner decision, Docker hardening H5). Runs ONLY when a GitHub release is published or on manual dispatch: never on a push or
 # a merge. GHCR is no longer a target.
 #
 #   1. environment-check  The protected GitHub environment `release` must exist with required reviewers (fails closed:
 #                         an unprotected or auto-created environment would publish without approval).
-#   2. gate               image-security-gate.yaml in RELEASE mode on native linux/amd64 + linux/arm64. It builds the API,
-#                         then the Worker FROM that exact API image digest, with SBOM + provenance, and runs every check
-#                         including the native PDF render on both architectures. With `candidate-run-id` it builds
-#                         nothing and re-verifies that earlier candidate by digest instead.
+#   2. gate               image-security-gate.yaml in RELEASE mode on native linux/amd64 + linux/arm64. It builds the
+#                         image once, with SBOM + provenance, and runs every check including the native PDF render (as
+#                         the Worker) on both architectures. With `candidate-run-id` it builds nothing and re-verifies
+#                         that earlier candidate by digest instead.
 #   3. publish            Only for a release or `mode: publish`, only after the gate passed, and only after a required
 #                         reviewer approves the `release` environment, having seen the gate's results (native ARM64 render
-#                         included). It pushes the two EXACT gated indexes, with digests preserved and no rebuild, under the
-#                         two immutable tags api-<commit> and worker-<commit>. It refuses an existing tag, verifies that
-#                         the registry serves the gated digests, attests provenance, and emits the release manifest.
+#                         included). It pushes the ONE EXACT gated index, with digests preserved and no rebuild, under
+#                         the two existing immutable tag names api-<commit> and worker-<commit> (the same digest; O2
+#                         replaces both with one <commit> tag). It refuses an existing tag, verifies that the registry
+#                         serves the gated digest, attests provenance, and emits the release manifest.
 #                         No `latest`, no per-architecture tags, no moving tags.
 #
 # Credentials (created by hand by the owner; see packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 9):
@@ -35,12 +36,8 @@ on:
         description: Optional. Re-verify (and, in publish mode, publish) the candidate exported by this run instead of building
         type: string
         default: ''
-      candidate-api-digest:
-        description: Candidate API index digest (sha256:...), required with candidate-run-id
-        type: string
-        default: ''
-      candidate-worker-digest:
-        description: Candidate Worker index digest (sha256:...), required with candidate-run-id
+      candidate-image-digest:
+        description: Candidate image index digest (sha256:...), required with candidate-run-id
         type: string
         default: ''
 
@@ -97,8 +94,7 @@ jobs:
       platforms: '["linux/amd64","linux/arm64"]'
       export-layouts: true
       candidate-run-id: ${{ inputs.candidate-run-id || '' }}
-      candidate-api-digest: ${{ inputs.candidate-api-digest || '' }}
-      candidate-worker-digest: ${{ inputs.candidate-worker-digest || '' }}
+      candidate-image-digest: ${{ inputs.candidate-image-digest || '' }}
 
   publish:
     needs: [environment-check, gate]
@@ -120,8 +116,7 @@ jobs:
       id-token: write
       attestations: write
     env:
-      API_DIGEST: ${{ needs.gate.outputs.api-index-digest }}
-      WORKER_DIGEST: ${{ needs.gate.outputs.worker-index-digest }}
+      IMAGE_DIGEST: ${{ needs.gate.outputs.image-index-digest }}
       DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
       DOCKERHUB_PUSH_TOKEN: ${{ secrets.DOCKERHUB_PUSH_TOKEN }}
     steps:
@@ -144,50 +139,35 @@ jobs:
         run: |
           python3 packages/rab-docker/scripts/image-security/release_guard.py candidate \
             --repo "$GITHUB_REPOSITORY" --run-id "$CANDIDATE_RUN" --sha "$GITHUB_SHA"
-      - name: Download the gated API layout
+      - name: Download the gated layout
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: gated-api-layout
-          path: ${{ runner.temp }}/gated/api
-      - name: Download the gated Worker layout
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: gated-worker-layout
-          path: ${{ runner.temp }}/gated/worker
+          name: gated-image-layout
+          path: ${{ runner.temp }}/gated/image
       - name: Download the candidate release manifest
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-manifest-candidate
           path: ${{ runner.temp }}/release
-      - name: Push the API index (api-<commit>), then the Worker index (worker-<commit>); verify served digests
+      - name: Push the one index under api-<commit>, then worker-<commit> (same digest); verify served digests
         run: |
           set -euo pipefail
           COMMIT="$(git rev-parse HEAD)"
           export COMMIT
-          for d in "$API_DIGEST" "$WORKER_DIGEST"; do
-            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::the gate returned no index digest"; exit 1; }
-          done
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::the gate returned no index digest"; exit 1; }
           s=packages/rab-docker/scripts/image-security/publish-gated.sh
-          bash "$s" "$RUNNER_TEMP/gated/api" "$API_DIGEST" "api-$COMMIT"
-          bash "$s" "$RUNNER_TEMP/gated/worker" "$WORKER_DIGEST" "worker-$COMMIT"
-      - name: Build-provenance attestation for the API index (GitHub, OIDC-signed)
-        id: attest-api
+          bash "$s" "$RUNNER_TEMP/gated/image" "$IMAGE_DIGEST" "api-$COMMIT"
+          bash "$s" "$RUNNER_TEMP/gated/image" "$IMAGE_DIGEST" "worker-$COMMIT"
+      - name: Build-provenance attestation for the index (GitHub, OIDC-signed)
+        id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY_REPO }}
-          subject-digest: ${{ env.API_DIGEST }}
-          push-to-registry: false
-      - name: Build-provenance attestation for the Worker index (GitHub, OIDC-signed)
-        id: attest-worker
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY_REPO }}
-          subject-digest: ${{ env.WORKER_DIGEST }}
+          subject-digest: ${{ env.IMAGE_DIGEST }}
           push-to-registry: false
       - name: Release manifest (published)
         env:
-          API_ATTESTATION: ${{ steps.attest-api.outputs.attestation-url }}
-          WORKER_ATTESTATION: ${{ steps.attest-worker.outputs.attestation-url }}
+          IMAGE_ATTESTATION: ${{ steps.attest.outputs.attestation-url }}
         run: |
           python3 - "$RUNNER_TEMP/release/release-manifest.json" << 'EOF'
           import json, os, subprocess, sys
@@ -195,10 +175,10 @@ jobs:
           m = json.load(open(p))
           commit = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
           assert m['commit'] == commit, (m['commit'], commit)
-          for role, digest in (('api', os.environ['API_DIGEST']), ('worker', os.environ['WORKER_DIGEST'])):
-              assert m['images'][role]['index_digest'] == digest, (role, digest)
-              m['images'][role]['published_tag'] = f"{os.environ['REGISTRY_REPO']}:{role}-{commit}"
-              m['images'][role]['github_attestation'] = os.environ[f'{role.upper()}_ATTESTATION']
+          img = m['images']['image']
+          assert img['index_digest'] == os.environ['IMAGE_DIGEST'], (img['index_digest'], os.environ['IMAGE_DIGEST'])
+          img['published_tags'] = [f"{os.environ['REGISTRY_REPO']}:{t}" for t in (f'api-{commit}', f'worker-{commit}')]
+          img['github_attestation'] = os.environ['IMAGE_ATTESTATION']
           m['status'] = 'published'
           def version(cmd):
               try:
@@ -214,8 +194,7 @@ jobs:
           commit="$(git rev-parse HEAD)"
           {
             echo "### Published (deploy by digest only)"
-            echo "- API: \`$REGISTRY_REPO@$API_DIGEST\` (tag \`api-$commit\`)"
-            echo "- Worker: \`$REGISTRY_REPO@$WORKER_DIGEST\` (tag \`worker-$commit\`)"
+            echo "- Image (API + Worker): \`$REGISTRY_REPO@$IMAGE_DIGEST\` (tags \`api-$commit\` and \`worker-$commit\`, the same digest)"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the release manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

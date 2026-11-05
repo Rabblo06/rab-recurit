@@ -71,11 +71,12 @@ services:
         condition: service_started
 
   rab-worker:
-    image: ${H6_WORKER_IMAGE:?prebuilt Worker bundle image}
+    # O1 (one image): the same image as rab-api (H6_WORKER_IMAGE may name it); the production file's Worker command runs it.
+    # No CREWFLOW_PROVISIONER_DATABASE_URL: provisioning runs in-process and the Worker refuses that prefix.
+    image: ${H6_WORKER_IMAGE:?prebuilt Crewflow image, O1 the same image as H6_APP_IMAGE}
     pull_policy: never
     environment:
       <<: *runtime-env
-      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${H6_CREWFLOW_PASSWORD:?}@pg:5432/rab
     depends_on:
       pg:
         condition: service_healthy

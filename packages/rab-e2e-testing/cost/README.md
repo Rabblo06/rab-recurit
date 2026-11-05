@@ -25,11 +25,14 @@ committed, and fixes three gaps in it:
   - phase B runs as the bootstrap superuser.
 
   This is the same sequence as `packages/rab-e2e-testing/system/docker-compose.e2e.yml`.
-- **Runtime roles.** The API and the worker jobs child connect as `crewflow_app`. The provisioner child connects as
-  `crewflow`.
+- **Runtime roles.** The API and the Worker connect as `crewflow_app`. O1 (one image): the Worker is one process that
+  provisions in-process; the separate provisioner child and its `crewflow` login are retired, so the provisioner rows of
+  earlier reports describe the old shape. (The stack still uses the separated logins; the runtime now requires the owner
+  login, a known gap since #72.)
 - **Secrets** live in `$COST_SECRETS`, outside the repo. The default is `C:/rab-ai-wt/cost-secrets/cost.env`.
   `scripts/gen-secrets.sh` generates random values on first use. Scripts never print them.
-- **Images** are `crewflow-cost/server:<tag>`, `crewflow-cost/worker:<tag>` and `crewflow-cost/loadgen:<hash>`.
+- **Images** are `crewflow-cost/server:<tag>`, `crewflow-cost/worker:<tag>` (O1: one build, both tags) and
+  `crewflow-cost/loadgen:<hash>`.
   `rab-server:latest` and `rab-worker:latest` are never built or retagged.
 - **Teardown.** `docker compose -p crewflow-cost down -v` runs at the end, unless you pass `--keep`. It runs only
   after the project-scope guard (below) has passed.

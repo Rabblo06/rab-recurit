@@ -2,7 +2,7 @@
 /**
  * LOCAL ISOLATED STAGING REHEARSAL of packages/rab-docker/docker-compose.image.yml (owner decisions R4/R5, 2026-11-03).
  *
- *   S_API_IMAGE=<repository>@sha256:<digest> S_WORKER_IMAGE=<repository>@sha256:<digest> \
+ *   S_API_IMAGE=<repository>@sha256:<digest> S_WORKER_IMAGE=<repository>@sha256:<digest (O1: the same digest)> \
  *   S_REDIS_IMAGE=redis@sha256:<digest> S_SEED_IMAGE=<image with PR #38 seed-qa> S_REDIS_CONF=<reviewed redis.conf> \
  *     node packages/rab-docker/staging/rehearsal/run-image-rehearsal.cjs <evidence-dir> [--keep]
  *
@@ -18,15 +18,20 @@
  *       phase A as rab_owner, phase B as the bootstrap superuser, a wrong token refused (1, nothing applied), final
  *       check (0); ledger, the gated 1786721330000 absent; rab-migrate's own container read-only / no capability
  *   R04 rab-api healthy under CREWFLOW_RUNTIME_ISOLATION=enforce (depends_on: rab-migrate check run completes first)
- *   R05 rab-worker healthy under enforce (both children; identities agree)
+ *   R05 rab-worker healthy under enforce (O1: one process, in-process provisioning)
  *   R06 restrictions hold: CapBnd / CapEff / NoNewPrivs per process, read-only root (EROFS), kernel PID / memory limits
- *   R07 a real report PDF rendered by the Worker's jobs child lands in MinIO; PostgreSQL holds only the reference
+ *   R07 a real report PDF rendered by the Worker lands in MinIO; PostgreSQL holds only the reference
  *   R08 enforce refuses a weakened container (read-only root removed from rab-api, no-new-privileges from rab-worker).
  *       BLOCKED when the images predate the enforce mode (they only report "WARNING ... starting anyway").
  *
  * Safety: project `crewflow-s-rehearsal` only; no host port; no .env read (random credentials per run, redacted from every
  * evidence file); no Docker volume created; cleanup stops and removes this project's containers BY EXACT NAME (never
  * `down -v`, never a prune). The project network is left in place. Adapted from rab/runtime-isolation-test/run-h6-runtime.cjs.
+ *
+ * O1 (one image): the Worker is the same image as the API, ONE process as uid 1000 under compose's init and tini, no
+ * capability, two jobs tmpfs mounts; the retired launcher and its provisioner child are gone. KNOWN GAP (pre-existing since
+ * #72, not changed by O1): the rehearsal's database steps still use the separated logins (crewflow_app / crewflow); the
+ * runtime now requires the owner login (crewflow_owner).
  */
 const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -362,18 +367,19 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return `healthy in ${measured.apiStartToHealthyMs} ms; ${fx.enforceInImage ? 'mode=enforce reported' : 'image reports no mode (pre-enforce image: report-only)'}`;
   });
 
-  await step('R05', 'rab-worker healthy under enforce (both children, identities agree)', async () => {
+  await step('R05', 'rab-worker healthy under enforce (one process, in-process provisioning)', async () => {
     const t0 = Date.now();
     const r = compose(['up', '-d', '--wait', '--wait-timeout', '300', '--pull', 'never', 'rab-worker'], { timeout: 400_000 });
     measured.workerStartToHealthyMs = Date.now() - t0;
     const logs = logsOf('rab-worker');
-    write(logs.split('\n').filter((l) => /worker-bundle\]|runtime-db-guard|rab-worker ready|EROFS|EACCES/.test(l)).join('\n'));
+    write(logs.split('\n').filter((l) => /worker-isolation\]|runtime-db-guard|rab-worker ready|workspace provisioning: in-process|EROFS|EACCES/.test(l)).join('\n'));
     assert(r.code === 0, 'rab-worker not healthy');
     assert(inspectId(containerId('rab-worker'), '{{.Config.Image}}') === process.env.S_WORKER_IMAGE, 'rab-worker is not the pinned image');
-    assert(/\[worker-bundle\] live identity probes agree: database=rab cluster=\d+ \(jobs=crewflow_app, provisioner=crewflow\)/.test(logs), 'no agreeing identity line');
-    const iso = isolationLine(logs, '\\[worker-bundle\\] ');
+    assert(/workspace provisioning: in-process on the owner login/.test(logs), 'no in-process provisioning line');
+    assert(!/\[worker-bundle\]|start-worker-bundle/.test(logs), 'launcher output (the launcher is retired)');
+    const iso = isolationLine(logs, '\\[worker-isolation\\] ');
     measured.workerIsolationLine = iso;
-    assert(/runtime isolation as declared: CapBnd=00000000000000e0 NoNewPrivs=1 root=read-only tmpfs=4\/4/.test(iso), `Worker isolation: ${iso || '(none)'}`);
+    assert(/runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only/.test(iso), `Worker isolation: ${iso || '(none)'}`);
     return `healthy in ${measured.workerStartToHealthyMs} ms`;
   });
 
@@ -381,12 +387,11 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const api = containerId('rab-api');
     const w = containerId('rab-worker');
     const t = procTable(w);
-    const pid = (uid, re) => t.find((p) => p.uid === uid && re.test(p.cmd))?.pid;
+    const pid = (uid, re) => t.find((p) => p.uid === uid && re.test(p.cmd) && !/\b(docker-init|tini)\b/.test(p.cmd))?.pid;
     const procs = {
       'rab-api pid1': procStatus(api, 1),
-      'rab-worker launcher': procStatus(w, pid(0, /start-worker-bundle\.cjs/)),
+      'rab-worker pid1': procStatus(w, 1),
       'rab-worker jobs': procStatus(w, pid(1000, /rab-worker\/dist\/main\.js/)),
-      'rab-worker provisioner': procStatus(w, pid(10001, /workspace-provisioner\.main\.js/)),
     };
     const hc = (id) => { const h = JSON.parse(inspectId(id, '{{json .HostConfig}}')); return { ReadonlyRootfs: h.ReadonlyRootfs, Privileged: h.Privileged, CapDrop: h.CapDrop, CapAdd: h.CapAdd, SecurityOpt: h.SecurityOpt, PidsLimit: h.PidsLimit, MemoryMiB: h.Memory / 1048576, Cpus: h.NanoCpus / 1e9, Tmpfs: Object.keys(h.Tmpfs || {}), PortBindings: h.PortBindings, Binds: h.Binds }; };
     const hosts = { 'rab-api': hc(api), 'rab-worker': hc(w) };
@@ -394,17 +399,15 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       'rab-api uid 1000 /app': execIn(api, '1000:1000', 'touch /app/.s-probe 2>&1; echo rc=$?', { quiet: true }).out.trim(),
       'rab-worker jobs /': execIn(w, '1000:1000', 'touch /.s-probe 2>&1; echo rc=$?', { quiet: true }).out.trim(),
       'rab-worker jobs own tmpfs': execIn(w, '1000:1000', 'touch /tmp/crewflow-jobs/.s-probe && rm /tmp/crewflow-jobs/.s-probe; echo rc=$?', { quiet: true }).out.trim(),
-      'rab-worker jobs -> provisioner tmpfs': execIn(w, '1000:1000', 'touch /tmp/crewflow-provisioner/.s-probe 2>&1; echo rc=$?', { quiet: true }).out.trim(),
     };
     const limits = { 'rab-api': cgroup(api), 'rab-worker': cgroup(w) };
     measured.restrictions = { procs, hosts, erofs, limits };
     write(JSON.stringify(measured.restrictions, null, 2));
     const zero = '0000000000000000';
-    for (const k of ['rab-api pid1', 'rab-worker jobs', 'rab-worker provisioner']) {
+    for (const k of ['rab-api pid1', 'rab-worker pid1', 'rab-worker jobs']) {
       assert(procs[k].CapEff === zero && procs[k].CapAmb === zero && procs[k].NoNewPrivs === '1', `${k}: CapEff ${procs[k].CapEff} NoNewPrivs ${procs[k].NoNewPrivs}`);
+      assert(procs[k].CapBnd === zero, `${k} CapBnd ${procs[k].CapBnd} (O1: no capability anywhere)`);
     }
-    assert(procs['rab-api pid1'].CapBnd === zero, 'rab-api CapBnd');
-    assert(procs['rab-worker launcher'].CapBnd === '00000000000000e0' && procs['rab-worker launcher'].NoNewPrivs === '1', 'launcher CapBnd/NoNewPrivs');
     for (const [n, h] of Object.entries(hosts)) {
       assert(h.ReadonlyRootfs === true && h.Privileged === false && JSON.stringify(h.CapDrop) === '["ALL"]' && (h.SecurityOpt || []).includes('no-new-privileges:true'), `${n} host config`);
       assert(h.PidsLimit > 0 && h.MemoryMiB > 0 && h.Cpus > 0, `${n} limits`);
@@ -412,9 +415,10 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       assert(!h.PortBindings || Object.keys(h.PortBindings).length === 0, `${n} publishes a port`);
     }
     assert(/Read-only file system[\s\S]*rc=1/.test(erofs['rab-api uid 1000 /app']) && /Read-only file system[\s\S]*rc=1/.test(erofs['rab-worker jobs /']), 'root filesystem writable');
-    assert(/rc=0/.test(erofs['rab-worker jobs own tmpfs']) && /rc=1/.test(erofs['rab-worker jobs -> provisioner tmpfs']), 'per-child tmpfs isolation');
+    assert(/rc=0/.test(erofs['rab-worker jobs own tmpfs']), 'the Worker cannot use its own tmpfs');
+    assert(!hosts['rab-worker'].CapAdd || hosts['rab-worker'].CapAdd.length === 0, `rab-worker CapAdd ${JSON.stringify(hosts['rab-worker'].CapAdd)}`);
     assert(limits['rab-api']['pids.max'] === '256' && limits['rab-worker']['pids.max'] === '1024', 'PID limits not applied by the kernel');
-    return `API CapBnd 0, launcher e0, children CapEff 0, NNP=1 everywhere, EROFS, pids.max 256/1024, memory.max ${(Number(limits['rab-api']['memory.max']) / 1048576).toFixed(0)}/${(Number(limits['rab-worker']['memory.max']) / 1048576).toFixed(0)} MiB`;
+    return `API and Worker CapBnd 0, NNP=1 everywhere, EROFS, pids.max 256/1024, memory.max ${(Number(limits['rab-api']['memory.max']) / 1048576).toFixed(0)}/${(Number(limits['rab-worker']['memory.max']) / 1048576).toFixed(0)} MiB`;
   });
 
   await step('R07', 'Report PDF rendered by the Worker lands in MinIO; PostgreSQL stores the reference only', async () => {
@@ -468,7 +472,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
       write(`${service}: state ${state}\n${line}`);
     }
     measured.weakened = outcome;
-    // Refused = never running, exit 64 (API) / 1 (launcher), and the refusal names the enforce mode.
+    // Refused = never running, exit 64 (API) / 1 (the Worker's startup refusal), and the refusal names the enforce mode.
     const refused = (o) => /^(exited|restarting)\|(64|1)$/.test(o.state) && /CREWFLOW_RUNTIME_ISOLATION=enforce/.test(o.line);
     if (refused(outcome['rab-api']) && refused(outcome['rab-worker'])) return 'both refused to start under enforce';
     const reportOnly = (o) => /WARNING runtime isolation weaker[^\n]*starting anyway/.test(o.line) && !/mode=/.test(o.line);

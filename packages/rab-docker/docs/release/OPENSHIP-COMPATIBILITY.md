@@ -1,6 +1,8 @@
 # OpenShip compatibility of the image Compose variant
 
-> **Owner login (2026-11-04).** The root Worker launcher is retired, so a platform that drops `user:` now runs the Worker process itself as root (the Worker image's default user). OpenShip is therefore **unsupported** for the owner-login deployment (M0 D11); see `OWNER-LOGIN-DEPLOYMENT.md` section 6 and `OWNER-LOGIN-ORACLE-VM-PLAN.md`.
+> **Owner login (2026-11-04).** The root Worker launcher is retired. OpenShip stays **unsupported** for the owner-login deployment (M0 D11); see `OWNER-LOGIN-DEPLOYMENT.md` section 6 and `OWNER-LOGIN-ORACLE-VM-PLAN.md`.
+>
+> **O1 (one image, 2026-11-05).** The API and the Worker are one image whose default user is the non-root `node` (1000), so a platform that drops `user:` no longer runs the Worker as root. The other dropped keys (read-only root, capabilities, no-new-privileges, PID limits, tmpfs, init) still make OpenShip unsupported. The rows below describe the earlier two-image, launcher-based deployment.
 
 Status: analysis from public source, 2026-11-03. Owner decision R5: verify every H6 restriction against OpenShip and
 never drop a security setting silently. Nothing was deployed, imported or connected.
