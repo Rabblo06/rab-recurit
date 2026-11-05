@@ -26,7 +26,7 @@ import {
  *  - the crewflow_worker LOGIN-shape gate (old gate 1b) is gone with it; the role's SCHEMA shape (zero members, member of
  *    crewflow_app only) is enforced by the inventory, the 1786721300000 preflight, invariant 8 and check-rls-coverage;
  *  - gate 8: the API CAN execute the Worker-only dispatch-claim functions with one login. It no longer refuses: it is
- *    RECORDED as a boot warning (BC-08, DBA-01 lost, PENDING OWNER APPROVAL), asserted below so it can never go silent.
+ *    RECORDED as a boot warning (BC-08, DBA-01 lost, accepted by the owner 2026-11-05), asserted below so it can never go silent.
  * Unchanged: WORKER_CLAIM_MODE is read fail closed; a Worker that cannot run the due-work functions refuses; global mode
  * needs every dispatch-claim function; a pending migration is reported before the grants gate.
  */
@@ -180,14 +180,14 @@ describe('owner login: gate 8 routine grants', () => {
     );
   });
 
-  it('BC-08 (DBA-01 lost, PENDING OWNER APPROVAL): the API / CLI CAN execute the dispatch-claim functions, recorded as a warning on every boot, never silent', async () => {
+  it('BC-08 (DBA-01 lost, accepted by the owner 2026-11-05): the API / CLI CAN execute the dispatch-claim functions, recorded as a warning on every boot, never silent', async () => {
     // Before: refused at gate `grants` ("the dispatch-claim functions are for crewflow_worker only").
     for (const over of [{}, { processName: 'cli' as const, cliCommand: 'seed' }]) {
       const report = await evaluateBootGates(input(db('crewflow_owner'), over));
       expect(report.grants).toEqual({ dueWork: 'granted', dispatchClaims: 'granted' });
       const bc08 = report.warnings.filter((w) => w.startsWith('BC-08'));
       expect(bc08).toHaveLength(1);
-      expect(bc08[0]).toMatch(/PENDING OWNER APPROVAL.*core\.worker_claim_email_dispatch, .*core\.worker_release_dispatch_claim/);
+      expect(bc08[0]).toMatch(/accepted by the owner 2026-11-05.*core\.worker_claim_email_dispatch, .*core\.worker_release_dispatch_claim/);
     }
     // The Worker itself carries no BC-08 warning (it is the intended caller).
     const w = await evaluateBootGates(input(db('crewflow_owner'), worker('global')));

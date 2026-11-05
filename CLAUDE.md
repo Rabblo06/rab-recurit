@@ -167,6 +167,13 @@ structural changes.
   the account doesn't exist.
 - **Migrations only.** `synchronize: false` always. Every schema change is a
   versioned TypeORM migration, never edited after merge.
+- **Production upgrades need no deployment ID or approval token** (owner
+  decision 2026-11-05, BC-11, like Twenty). Both stay available as an opt-in
+  and are off by default. Do not reintroduce them as a requirement, and do
+  not describe them as a production control. What protects an upgrade is the
+  migration lock, the identity and refusal gates, the posture and semantic
+  goldens, RLS, and the mandatory pre-upgrade backup in the runbook. A
+  mistaken upgrade is recovered by restore-from-backup only.
 - **Every value reaches SQL as a bound parameter; every identifier comes from
   an allow-list.** One injected statement runs with the schema owner's
   privileges (PT-01).
