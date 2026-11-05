@@ -159,6 +159,17 @@ export function blockingPostCheckProblems(state: Classification['state'] | 'UNKN
   return { blocking: problems.filter((p) => !AHEAD_TOLERATED.test(p)), warnings: problems.filter((p) => AHEAD_TOLERATED.test(p)) };
 }
 
+/**
+ * Agent 2 (O3): DISABLE_DB_MIGRATIONS=true means "this process never migrates" (api-prestart.sh then never starts the child).
+ * The child run directly with it refuses (exit 64, configuration) instead of migrating against the operator's setting. Pure.
+ */
+export function migrateChildConfigRefusal(config: object): string | null {
+  // `object`: the parsed RuntimeDbConfig (Agent 2 adds `disableDbMigrations` to it on o3/app-startup).
+  return (config as { disableDbMigrations?: unknown }).disableDbMigrations === true
+    ? 'DISABLE_DB_MIGRATIONS=true: this deployment does not migrate on start, so the migrate child refuses to run. Unset it (or set CREWFLOW_MIGRATE_ON_START=true without it) to let the API apply migrations, or run the release migration step. Refusing.'
+    : null;
+}
+
 export type MarkerState = 'absent' | 'unbound' | 'bound';
 
 /**

@@ -8,7 +8,7 @@
  * STARTUP_EXIT_CODES. Prints exactly one TWENTY_MIGRATE_RESULT line. Deliberately does NOT import dotenv.
  */
 import { readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
-import { installSigtermSelfCancel, RESULT_LINE_PREFIX, runMigrateOnStart } from '../owner-login/migrate-on-start';
+import { installSigtermSelfCancel, migrateChildConfigRefusal, RESULT_LINE_PREFIX, runMigrateOnStart } from '../owner-login/migrate-on-start';
 
 async function main(): Promise<number> {
   const log = (line: string) => console.log(`[migrate-on-start] ${line}`); // eslint-disable-line no-console
@@ -22,6 +22,12 @@ async function main(): Promise<number> {
       return STARTUP_EXIT_CODES.config;
     }
     throw error;
+  }
+  const refusal = migrateChildConfigRefusal(config);
+  if (refusal) {
+    log(`FAILED (config): ${refusal}`);
+    console.log(`${RESULT_LINE_PREFIX} ${JSON.stringify({ state: 'UNKNOWN', applied: [], pending: [], failedMigration: null, exitCode: STARTUP_EXIT_CODES.config, serve: false, policy: config.upgradeFailurePolicy, reason: 'DISABLE_DB_MIGRATIONS=true: the migrate child does not run', checks: [] })}`); // eslint-disable-line no-console
+    return STARTUP_EXIT_CODES.config;
   }
   let pid: number | null = null;
   installSigtermSelfCancel(process.env, () => pid, log);
