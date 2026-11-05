@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
 import { ownerLoginRolePostureProblems } from '../../database/boot-checks/owner-login-posture';
@@ -139,12 +140,46 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
   });
 
   it('BC-06: DROP SCHEMA core CASCADE succeeds for the owner login (rolled back)', async () => {
-    await rolledBack(owner, async () => {
-      await owner.query('SET LOCAL lock_timeout = 5000');
-      await owner.query('DROP SCHEMA core CASCADE');
-      const [{ n }] = await q(owner)(`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = 'core'`);
-      expect(n).toBe(0);
-    });
+    // Shown in two exact parts instead of dropping core itself: a real `DROP SCHEMA core CASCADE` takes one lock per object
+    // and exhausts max_locks_per_transaction on a full CI database ("out of shared memory"), proving nothing about privileges.
+    // 1. Catalog: core and every core table belong to roles the owner login holds with USAGE (it inherits them), and DROP
+    //    SCHEMA … CASCADE needs only ownership of the schema; crewflow_app holds neither.
+    const [own] = await q(owner)(
+      `SELECT pg_get_userbyid(n.nspowner)::text AS owner,
+              pg_has_role(current_user, n.nspowner, 'USAGE') AS me,
+              pg_has_role('crewflow_app', n.nspowner, 'USAGE') AS app,
+              (SELECT count(*)::int FROM pg_class c WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'p')
+                  AND NOT pg_has_role(current_user, c.relowner, 'USAGE')) AS tables_not_mine
+         FROM pg_namespace n WHERE n.nspname = 'core'`,
+    );
+    expect(own).toEqual({ owner: 'rab_secure_owner', me: true, app: false, tables_not_mine: 0 });
+    // 2. The same statement on a throwaway schema with the same owner as core (rab_secure_owner), holding a table owned by
+    //    crewflow and one by rab_secure_owner, run AS crewflow_owner: it drops the schema and everything in it. crewflow_app
+    //    is refused. Built through the superuser fixture inside one transaction that is always rolled back.
+    const schema = `bc06_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const dropAs = async (role: string) =>
+      rolledBack(admin, async () => {
+        await admin.query(`CREATE SCHEMA ${schema} AUTHORIZATION rab_secure_owner`);
+        await admin.query(`CREATE TABLE ${schema}.t_crewflow (id int)`);
+        await admin.query(`ALTER TABLE ${schema}.t_crewflow OWNER TO crewflow`);
+        await admin.query(`CREATE TABLE ${schema}.t_secure (id int)`);
+        await admin.query(`ALTER TABLE ${schema}.t_secure OWNER TO rab_secure_owner`);
+        await admin.query(`SET LOCAL ROLE ${role}`);
+        expect((await q(admin)('SELECT current_user::text AS u'))[0]!.u).toBe(role);
+        await admin.query('SAVEPOINT bc06'); // a refused DROP must not abort the transaction before the checks below
+        const outcome = await admin.query(`DROP SCHEMA ${schema} CASCADE`).then(
+          () => 'ok',
+          async (e: { code?: string }) => {
+            await admin.query('ROLLBACK TO SAVEPOINT bc06');
+            return e.code ?? 'error';
+          },
+        );
+        await admin.query('RESET ROLE');
+        const [{ n }] = await q(admin)(`SELECT count(*)::int AS n FROM pg_namespace WHERE nspname = $1`, [schema]);
+        return { outcome, remaining: n };
+      });
+    expect(await dropAs('crewflow_owner')).toEqual({ outcome: 'ok', remaining: 0 });
+    expect(await dropAs('crewflow_app')).toEqual({ outcome: '42501', remaining: 1 });
   });
 
   it('BC-07: the owner login can re-grant itself UPDATE / DELETE / TRUNCATE on audit_log', async () => {
