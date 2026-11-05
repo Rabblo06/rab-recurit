@@ -69,10 +69,31 @@ describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; n
     for (const c of [app, worker, worker2, crewflow, admin]) await c?.end().catch(() => undefined);
   });
 
-  it('the API login cannot reach any of the three definers (42501)', async () => {
-    expect(await sqlstateOf(app.query('SELECT * FROM core.worker_expire_account_invites(1)'))).toBe('42501');
-    expect(await sqlstateOf(app.query('SELECT * FROM core.worker_account_invite_cleanup_candidates(1, NULL, NULL)'))).toBe('42501');
-    expect(await sqlstateOf(app.query('SELECT core.worker_delete_expired_invited_user(gen_random_uuid())'))).toBe('42501');
+  // P-class (owner-login architecture): the schema role crewflow_app (the old API login) still cannot reach any of the three
+  // definers (42501; fixture superuser + SET LOCAL ROLE, rolled back). The one runtime login inherits their owner and can:
+  // catalogue BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL), asserted inside a rolled-back transaction so nothing expires or is
+  // deleted.
+  it('the schema role crewflow_app cannot reach any of the three definers (42501); the runtime login can (BC-08, rolled back)', async () => {
+    const calls = [
+      'SELECT * FROM core.worker_expire_account_invites(1)',
+      'SELECT * FROM core.worker_account_invite_cleanup_candidates(1, NULL, NULL)',
+      'SELECT core.worker_delete_expired_invited_user(gen_random_uuid())',
+    ];
+    for (const sql of calls) {
+      await admin.query('BEGIN');
+      try {
+        await admin.query(`SELECT set_config('role', 'crewflow_app', true)`);
+        expect({ sql, code: await sqlstateOf(admin.query(sql)) }).toEqual({ sql, code: '42501' });
+      } finally {
+        await admin.query('ROLLBACK').catch(() => undefined);
+      }
+      await app.query('BEGIN');
+      try {
+        expect({ sql, code: await sqlstateOf(app.query(sql)) }).toEqual({ sql, code: 'ACCEPTED' });
+      } finally {
+        await app.query('ROLLBACK').catch(() => undefined);
+      }
+    }
   });
 
   it('expire: the Worker login, with NO tenant context, moves an exhausted, expired, unaccepted invite to invite_expired', async () => {

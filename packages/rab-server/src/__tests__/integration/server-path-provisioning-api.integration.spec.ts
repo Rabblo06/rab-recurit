@@ -14,6 +14,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { WorkspaceProvisioningService } from '../../modules/manager-workspace/services/workspace-provisioning.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 
 /**
  * Server-path workspace provisioning — SERVER layer (owner's brief §13). The real HTTP route `POST
@@ -106,12 +107,15 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
     org = await factory.createOrganisation('spp-api');
     otherOrg = await factory.createOrganisation('spp-api-other');
     const [{ current_user: who }] = await replicaA.get(DataSource).query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // BC-02 (owner-login architecture), merged with Agent 2's deferral-seam change: the suite runs as the CONFIGURED runtime
+    // login (crewflow_owner on the owner-login CI database; crewflow_app only on a separated fixture) and never as the admin
+    // superuser that seeds fixtures.
+    expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
+    expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
   }, 180_000);
 
   afterAll(async () => {
     await clearFailure().catch(() => undefined);
-    await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`).catch(() => undefined);
     await admin?.destroy();
     await replicaA?.close();
     await replicaB?.close();
@@ -150,17 +154,13 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
 
   it('cross-organisation and cross-owner provisioning attempts are 404 at the service layer and leave the victim untouched', async () => {
     const victim = await newManager();
-    // A victim workspace left CREATING (provisioning unavailable at the time it was created).
-    await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    let victimWs: string;
-    try {
+    // A victim workspace left CREATING (server-path provisioning deferred when it was created: test seam).
+    const victimWs: string = await withServerProvisioningDeferred(async () => {
       const res = await post(replicaA, victim.token, body());
       expect(res.status).toBe(201);
       expect(res.body.schemaStatus).toBe('CREATING');
-      victimWs = res.body.id;
-    } finally {
-      await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+      return res.body.id as string;
+    });
     const provisioning = replicaA.get(WorkspaceProvisioningService);
     const foreign = await newManager(otherOrg);
     const colleague = await newManager();
@@ -245,8 +245,11 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
       // Kill the API's own backend once it is blocked inside the template (an outage seen from the API's side).
       let killed = false;
       for (let i = 0; i < 200 && !killed; i++) {
+        // The API's own backend: its CONFIGURED runtime login (crewflow_app on a separated fixture, crewflow_owner on an
+        // owner-login database) — never a hard-coded role name.
         const rows = await admin.query(
-          `SELECT pid FROM pg_stat_activity WHERE usename = 'crewflow_app' AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
+          `SELECT pid FROM pg_stat_activity WHERE usename = $1 AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
+          [new URL(process.env.TEST_DATABASE_URL!).username],
         );
         if (rows.length) {
           await admin.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
@@ -298,16 +301,12 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
   it('server restart: a workspace left CREATING by a process that stopped is completed by a fresh process', async () => {
     const m = await newManager();
     const b = body();
-    // The function is unavailable while "the old process" serves the request (e.g. mid-rollback): it answers CREATING.
-    await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    let id: string;
-    try {
+    // Provisioning is deferred while "the old process" serves the request (test seam, as a timeout would): it answers CREATING.
+    const id: string = await withServerProvisioningDeferred(async () => {
       const res = await post(replicaA, m.token, b);
       expect(res.body.schemaStatus).toBe('CREATING');
-      id = res.body.id;
-    } finally {
-      await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+      return res.body.id as string;
+    });
     const restarted = await boot();
     try {
       const res = await post(restarted, m.token, b);

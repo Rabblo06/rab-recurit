@@ -174,7 +174,10 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
     await app?.close();
   });
 
-  it('5a. the owner-member login really can see every tenant and execute the cleanup definers (so the OFF tests below are not vacuous)', async () => {
+  // M-class (owner-login architecture, M-T1 1786721400000): core."user" and core.account_invite are FORCE now, so an
+  // owner-member login no longer reads every tenant DIRECTLY (a control that now holds, asserted below). What still reaches
+  // every tenant is the cleanup definers, which run as rab_secure_owner: that is what keeps the OFF tests non-vacuous.
+  it('5a. the owner-member login can execute the cleanup definers, which reach every tenant (so the OFF tests below are not vacuous)', async () => {
     const ownerMember = await openAs(ownerMemberRole, ownerMemberPassword);
     const [{ who, usable }] = await ownerMember.query<[{ who: string; usable: boolean }]>(
       `SELECT current_user AS who, bool_and(has_function_privilege(f, 'EXECUTE')) AS usable
@@ -184,13 +187,24 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
     );
     expect(who).toBe(ownerMemberRole);
     expect(usable).toBe(true);
-    // No tenant context bound, yet both organisations' invited users are visible: owner of a NOT-FORCE table.
-    const visible = await ownerMember.query<Array<{ organisation_id: string }>>(
-      `SELECT DISTINCT organisation_id FROM core."user" WHERE id = ANY($1::uuid[])`,
-      [allIds()],
-    );
+    // M-T1 control (holds on normal paths): with no tenant context the owner-member login sees NONE of them directly.
+    const direct = await ownerMember.query(`SELECT 1 FROM core."user" WHERE id = ANY($1::uuid[])`, [allIds()]);
+    expect(direct).toHaveLength(0);
+    // Non-vacuity: as rab_secure_owner (the definers' owner and security context) both organisations' invited users are
+    // visible, so a cleanup cycle that called the definers WOULD reach every tenant. Read in a rolled-back transaction.
+    const runner = ownerMember.createQueryRunner();
+    await runner.connect();
+    let visible: Array<{ organisation_id: string }> = [];
+    try {
+      await runner.query('BEGIN');
+      await runner.query(`SELECT set_config('role', 'rab_secure_owner', true)`);
+      visible = await runner.query(`SELECT DISTINCT organisation_id FROM core."user" WHERE id = ANY($1::uuid[])`, [allIds()]);
+    } finally {
+      await runner.query('ROLLBACK').catch(() => undefined);
+      await runner.release();
+    }
     expect(visible.map((r) => r.organisation_id).sort()).toEqual(fixtures.map((f) => f.owner.organisationId).sort());
-    // crewflow_app with no tenant context sees none of them (the only reason the old OFF path was harmless there).
+    // The runtime login (crewflow_owner since the owner-login architecture, BC-02) with no tenant context sees none of them.
     const appVisible = await runtimeApp.query(`SELECT 1 FROM core."user" WHERE id = ANY($1::uuid[])`, [allIds()]);
     expect(appVisible).toHaveLength(0);
   });
@@ -212,9 +226,11 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
     expect(await snapshot()).toEqual(before);
   });
 
-  it('3. OFF as crewflow_app (the separated-mode runtime login): zero changes', async () => {
+  // BC-02 (owner-login architecture): the runtime login is crewflow_owner now (crewflow_app is a schema role); OFF still
+  // changes nothing on it.
+  it('3. OFF as the runtime login (crewflow_owner): zero changes', async () => {
     const [{ who }] = await runtimeApp.query<[{ who: string }]>('SELECT current_user AS who');
-    expect(who).toBe('crewflow_app');
+    expect(who).toBe('crewflow_owner');
     const before = await snapshot();
     expect(await runAccountInviteCleanupCycle(runtimeApp, { autoDeleteEnabled: false })).toEqual(ZERO);
     expect(await runAccountInviteCleanupCycle(runtimeApp)).toEqual(ZERO);

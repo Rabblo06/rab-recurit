@@ -69,7 +69,7 @@ describe('env validation: owner-login database start-up settings', () => {
   it('migration test seams: accepted under NODE_ENV=test, refused otherwise (actionable)', () => {
     expect(() => validate({ ...base, NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' })).not.toThrow();
     expect(() => validate({ ...base, NODE_ENV: 'development', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '1786700000000' })).toThrow(
-      /CREWFLOW_MIGRATION_TEST_STOP_BEFORE is a migration test seam: it is allowed only with NODE_ENV=test/,
+      /CREWFLOW_MIGRATION_TEST_STOP_BEFORE is a test seam: it is allowed only with NODE_ENV=test/,
     );
   });
 });

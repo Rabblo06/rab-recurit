@@ -64,7 +64,8 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     await moduleRef.init();
     const runtimeDataSource = moduleRef.get(DataSource);
     const [{ current_user: role }] = await runtimeDataSource.query('SELECT current_user');
-    expect(role).toBe('crewflow_app');
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+    expect(role).toBe('crewflow_owner');
     direct = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL, schema: 'core', entities: [], synchronize: false });
     await direct.initialize();
     redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });

@@ -21,6 +21,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { runWorkspaceProvisioningHealthCycle } from '../../queues/rab-maintenance/workspace-provisioning-health.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { withServerProvisioningDeferred } from '@rab/server/modules/manager-workspace/services/workspace-provisioning-test-seam';
 
 jest.setTimeout(180_000);
 
@@ -40,11 +41,11 @@ describe('Worker: workspace provisioning health (counts-only definer, runtime ro
     await admin.initialize();
     factory = new TestIdentityFactory({ app, dataSource: runtime, adminDataSource: admin, tenantContext: moduleRef.get(TenantContextService), passwordHashing: moduleRef.get(PasswordHashingService) });
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+    expect(who).toBe('crewflow_owner');
   });
 
   afterAll(async () => {
-    await admin?.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`).catch(() => undefined);
     await admin?.destroy();
     await app?.close();
   });
@@ -54,14 +55,13 @@ describe('Worker: workspace provisioning health (counts-only definer, runtime ro
     const manager = await factory.createInternalManager(org, { permissions: 'production', workspace: false });
     const token = await factory.login(manager);
     const sub = `p8w-${randomUUID().slice(0, 8)}`;
-    if (deferred) await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    try {
+    const create = async () => {
       const res = await request(app.getHttpServer()).post('/rest/v1/manager-workspaces').set('Authorization', `Bearer ${token}`).send({ name: sub, subdomain: sub });
       expect(res.status).toBe(201);
       return res.body.id as string;
-    } finally {
-      if (deferred) await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+    };
+    // Deferred = server-path provisioning deferred by the test seam (owner login: REVOKE from crewflow_app no longer defers).
+    return deferred ? withServerProvisioningDeferred(create) : create();
   };
 
   it('stuck-workspace alert: counts only, warn line + Sentry warning when either count > 0, on the runtime connection', async () => {

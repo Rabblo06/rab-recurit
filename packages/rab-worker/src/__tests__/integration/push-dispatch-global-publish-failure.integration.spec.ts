@@ -69,7 +69,8 @@ describeIfApproved(
       const [{ current_user: who }] = await worker.query<
         [{ current_user: string }]
       >('SELECT current_user');
-      expect(who).toBe('crewflow_worker');
+      // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+      expect(who).toBe('crewflow_owner');
       const factory = new TestIdentityFactory({
         app,
         dataSource: runtime,

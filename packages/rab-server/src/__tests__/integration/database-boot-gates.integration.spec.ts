@@ -56,6 +56,8 @@ class BootGateFakePending9999999999999 implements MigrationInterface {
   }
 }
 
+const OWNER_LOGIN_DOCUMENTED_WARNING = (w: string) => w.startsWith('BC-08 (DBA-01') || w.startsWith('semantic posture: the PostgreSQL');
+
 describe('database boot gates (integration, migrations-only test database)', () => {
   let report: BootGateReport;
 
@@ -63,22 +65,27 @@ describe('database boot gates (integration, migrations-only test database)', () 
     report = await runDatabaseBootGates('api', options(appUrl));
   });
 
-  it('the API runtime login passes every gate: crewflow_app, PostgreSQL 16+, extensions, FORCE RLS, no pending migration', () => {
-    expect(report.role).toBe('crewflow_app');
+  // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner. Its boot report also carries the
+  // documented owner-login warnings: BC-08 (DBA-01 lost, PENDING OWNER APPROVAL; asserted present) and, on a database with
+  // workspace schemas the PostgreSQL golden has no template for, the semantic-posture note. Any OTHER warning still counts.
+  it('the API runtime login passes every gate: crewflow_owner, PostgreSQL 16+, extensions, FORCE RLS, no pending migration', () => {
+    expect(report.role).toBe('crewflow_owner');
     expect(report.serverVersionNum).toBeGreaterThanOrEqual(160000);
     expect(report.forceRlsTables).toBeGreaterThanOrEqual(10);
     // The marker migration is applied on the harness-built database but never left bound: unbound (absent on an older build).
     expect(['absent', 'unbound']).toContain(report.identity);
-    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings.filter((w) => w.startsWith('BC-08 (DBA-01'))).toHaveLength(1);
+    expect(report.warnings.filter((w) => !OWNER_LOGIN_DOCUMENTED_WARNING(w))).toHaveLength(1);
   });
 
-  it('the CLI gate accepts crewflow_app for runtime commands and for the operator commands', async () => {
-    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'storage:reconcile' }))).resolves.toMatchObject({ role: 'crewflow_app' });
-    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow_app' });
+  it('the CLI gate accepts the runtime login (crewflow_owner, BC-02) for runtime commands and for the operator commands', async () => {
+    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'storage:reconcile' }))).resolves.toMatchObject({ role: 'crewflow_owner' });
+    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow_owner' });
   });
 
   it('role: a superuser login is refused (API and CLI)', async () => {
-    await refusedAt(runDatabaseBootGates('api', options(adminUrl)), 'role', /expected crewflow_app/);
+    // Still refused; the message names the one login now (BC-02).
+    await refusedAt(runDatabaseBootGates('api', options(adminUrl)), 'role', /expected crewflow_owner/);
     await refusedAt(runDatabaseBootGates('cli', options(adminUrl, { cliCommand: 'bootstrap-admin' })), 'role', /expected crewflow or crewflow_app/);
   });
 

@@ -217,6 +217,80 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     controls:
       'App-level only, like Twenty: every write to the 7 tables must stay in the reviewed owning code (tools/check-protected-table-writes.cjs, CI job protected-table-writes); M-T1 FORCE keeps it to one tenant on normal paths.',
   },
+  // ── Found by Agent 5's differential runs (PR #74, twa/tests @ 7140692d); entries supplied by Agent 5, reviewed here. ──
+  {
+    id: 'COLGRANT-1',
+    title: 'Non-secret column-level INSERT grants no longer bind the runtime login',
+    severity: 'MEDIUM',
+    status: 'needs-owner-approval',
+    refs: ['C2/column-grants', 'Agent 5 COLGRANT-1'],
+    before: "crewflow_app's column INSERT grants kept server-owned columns (id, created_at, expires_at, origin) out of the runtime's hands.",
+    after:
+      'The runtime login inherits the owner: it may set them (core.ai_usage id / created_at, core.ai_skill id, ai_action_proposal expires_at / created_at / id / origin); there is no INSERT parity guard (column-level INSERT parity is not reproduced).',
+    controls:
+      'RLS WITH CHECK and INSERT policies still hold (another user / organisation refused; a forged updated_by on organisation_ai_model_preference refused; a decided proposal refused). Not covered: server-owned column values on own-tenant rows. NEEDS OWNER APPROVAL.',
+  },
+  {
+    id: 'REF-1',
+    title: 'Global reference tables (core.permission, core.migrations) writable by the runtime login',
+    severity: 'MEDIUM',
+    status: 'accepted-owner',
+    refs: ['Agent 5 REF-1', 'owner decision 2026-11-04 (like Twenty)'],
+    before: 'crewflow_app held SELECT / INSERT on core.permission and SELECT on core.migrations.',
+    after:
+      'The runtime login inherits crewflow\'s SELECT, INSERT, UPDATE, DELETE, TRUNCATE on both; neither has RLS or organisation_id, so one statement affects every tenant. Owner decision 2026-11-04: "Under the owner login, a bug or injected SQL can change the global permission-flag table and the migration ledger (no tenant boundary; affects every tenant). Accepted, like Twenty."',
+    controls:
+      'No parity guard (the seed commands and the migration runner write them as the owner login). The ledger-compatible lifecycle check sees a rewritten core.migrations at the next deploy.',
+  },
+  {
+    id: 'HL-1',
+    title: 'Table privileges on the host-label namespace tables',
+    severity: 'LOW',
+    status: 'needs-owner-approval',
+    refs: ['Agent 5 HL-1'],
+    before: 'crewflow_app had no privilege on core.host_label_claim / released_host_label / reserved_host_label (42501).',
+    after: 'The runtime login holds table privileges through the owner: it reads the global reserved-label list (no organisation_id) on a normal code path.',
+    controls:
+      'Without context it sees zero claim / quarantine rows (FORCE since M-T1, owner-only definer policy); DELETE of reserved labels is parity-guarded (42501); released_host_label is append-only for every role. NEEDS OWNER APPROVAL (not self-accepted under BC-01, which covers injection only).',
+  },
+  {
+    id: 'AI-1',
+    title: 'AI governance enforced by grants is lost for the runtime login',
+    severity: 'MEDIUM',
+    status: 'needs-owner-approval',
+    refs: ['Agent 5 TW-D', 'Agent 5 AI-1'],
+    before:
+      'Grants refused the runtime: ai_agent_trigger enable / run_as, standard / system agent edits, ai_skill name / is_system / organisation_id, TRUNCATE on AI tables, organisation_ai_setting.synthetic_data INSERT, EXECUTE on core.ai_dev_mark_organisation_synthetic.',
+    after:
+      'The runtime login holds TRUNCATE on ai_skill / ai_usage / ai_conversation / ai_action_proposal / organisation_ai_model_preference (ignores RLS), may INSERT synthetic_data, and can EXECUTE core.ai_dev_mark_organisation_synthetic (its body still refuses on a non-disposable database check, 55000).',
+    controls:
+      'UPDATE / DELETE parity guards on the AI tables (42501 for real changes; the guard fires first since 4caaef2a); ai_action_proposal_guard keeps content immutable for every role (23514); the EX-3 CHECK refuses enabling a trigger without approval (23514). Not covered: TRUNCATE, INSERT-time columns. NEEDS OWNER APPROVAL.',
+  },
+  {
+    id: 'MFA-SESS-1',
+    title: 'Runtime login could stamp a session MFA-verified by a direct UPDATE',
+    severity: 'HIGH',
+    status: 'mitigated',
+    refs: ['Agent 5 MFA-SESS-1', 'owner decision 2026-11-04: PROTECT', 'OwnerLoginGrantParityGuards1786721420000 (4caaef2a)'],
+    before: 'crewflow_app had no UPDATE on core.user_session.mfa_verified_at (42501).',
+    after: "Measured on PR #74: the runtime login could UPDATE mfa_verified_at on its own tenant's sessions. Fixed in place by 4caaef2a.",
+    controls:
+      'A statement-level BEFORE UPDATE OF mfa_verified_at trigger refuses any UPDATE naming the column, for every role (42501); the INSERT-time check (enabled factor, not in the future) is unchanged. Residual: injection with owner privileges can disable the trigger (BC-01 / BC-04; the drift monitor detects it).',
+  },
+  {
+    // Decision (Agent 3): its own entry, not folded into BC-08 (dispatch claims, unrelated) or BC-15 (registry versioning
+    // guard, MITIGATED by M-T2): folding a needs-owner-approval loss into a mitigated entry would hide it.
+    id: 'PROV-1',
+    title: 'The workspace migrator no longer refuses the runtime login (application-layer identity check)',
+    severity: 'MEDIUM',
+    status: 'needs-owner-approval',
+    refs: ['Agent 5 PROV-1', 'G-10'],
+    before:
+      'WorkspaceSchemaMigrator.assertMigrationIdentity refused crewflow_app (and any role without crewflow USAGE), so the API runtime could never migrate workspace schemas.',
+    after: 'crewflow_owner holds crewflow USAGE, so assertMigrationIdentity accepts the runtime login: only deployment wiring keeps the API from running the migrator.',
+    controls:
+      'The ledger / registry writes still pass the M-T2 allow-list only as crewflow (the migrator takes SET LOCAL ROLE crewflow itself). Not covered: the application-layer refusal. NEEDS OWNER APPROVAL.',
+  },
 ]);
 
 /** The five protections the addendum names as NOT accepted in §2 (+ BC-17 found here): each must stay needs-owner-approval. */

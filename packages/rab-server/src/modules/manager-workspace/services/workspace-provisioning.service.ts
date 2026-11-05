@@ -7,6 +7,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceHostResolverService } from '../../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
+import { serverProvisioningDeferredForTest, TestSeamDeferral } from './workspace-provisioning-test-seam';
 
 /**
  * - `READY`: this call built, verified and marked the schema READY (exactly once per workspace).
@@ -113,6 +114,9 @@ export class WorkspaceProvisioningService {
           throw new ConflictException({ code: 'WORKSPACE_NOT_PROVISIONABLE', message: 'This workspace cannot be prepared from here.' });
         }
 
+        // TEST-ONLY seam (workspace-provisioning-test-seam.ts): three gates, never effective outside a disposable test
+        // database; when effective it defers through the real catch path below, after every check above.
+        if (await serverProvisioningDeferredForTest(manager, (line) => this.logger.warn(line))) throw new TestSeamDeferral();
         const [row] = await manager.query<Array<{ outcome: 'READY' | 'ALREADY_READY' | 'FAILED' }>>(
           'SELECT core.provision_workspace($1) AS outcome',
           [workspaceId],

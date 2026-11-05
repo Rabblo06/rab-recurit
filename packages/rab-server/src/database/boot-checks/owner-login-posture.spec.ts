@@ -112,7 +112,8 @@ describe('owner-login behaviour-change catalogue', () => {
   it('the protections the owner did NOT accept in §2 stay needs-owner-approval (never flipped to accepted / passing)', () => {
     // Addendum: DBA-01 (BC-08), worker_due_work + pointers (BC-10), deployment-identity rebind (BC-11), logical backup
     // (BC-12), column-level secret grants (BC-13); plus the legacy-login passwords found during the refactor (BC-17).
-    expect([...NEEDS_OWNER_APPROVAL_IDS].sort()).toEqual(['BC-08', 'BC-10', 'BC-11', 'BC-12', 'BC-13', 'BC-17']);
+    // + Agent 5's differential findings awaiting the owner (2026-11-04): COLGRANT-1, HL-1, AI-1, PROV-1.
+    expect([...NEEDS_OWNER_APPROVAL_IDS].sort()).toEqual(['AI-1', 'BC-08', 'BC-10', 'BC-11', 'BC-12', 'BC-13', 'BC-17', 'COLGRANT-1', 'HL-1', 'PROV-1']);
   });
 
   it('every catalogue id has its own reproducing test in the integration catalogue spec', () => {

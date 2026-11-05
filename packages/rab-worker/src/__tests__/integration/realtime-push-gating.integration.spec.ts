@@ -134,7 +134,8 @@ describeIfDb('Phase A gating — realtime publish / push dispatch adapters do no
 
   it('flags OFF: both adapters return idle with zero runtime-DB / tenant-context / Redis / queue calls, and pending rows are untouched', async () => {
     const [{ current_user: role }] = await dataSource.query('SELECT current_user');
-    expect(role).toBe('crewflow_app');
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+    expect(role).toBe('crewflow_owner');
     const beforeDelivery = await deliveryRow();
     expect(await realtimeStatuses()).toEqual({ pending: BACKLOG });
     expect(beforeDelivery.status).toBe('PENDING');
