@@ -448,7 +448,9 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATE_ON_START: 'yes' }, /The api process: CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }, /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly one of: refuse, continue-if-compatible/);
-      expectRefused('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true' }), /CREWFLOW_MIGRATION_APPROVAL_MODE must be set explicitly/);
+      // Owner decision BC-11: production no longer needs an explicit approval mode (none by default); an invalid one refuses.
+      expect(resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true' })).classification).toBe('PRODUCTION');
+      expectRefused('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'Token' }), /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
       // Not required in-process (only the API image entrypoint requires it); valid values pass.
       expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL }).classification).toBe('LOCAL');
       expect(

@@ -97,10 +97,15 @@ describe('runtime-db-config (owner-login architecture)', () => {
     expect(runtimeDbConfigProblems({})).toEqual([]);
   });
 
-  it('defaults: approval none, policy refuse; production + migrate-on-start needs an explicit approval mode', () => {
+  it('defaults: approval none, policy refuse — production included (owner decision BC-11: the approval token is optional, off by default)', () => {
     expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true' }, API)).toEqual({ migrateOnStart: true, migrationApprovalMode: 'none', upgradeFailurePolicy: 'refuse' });
-    expect(() => readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production' })).toThrow(/must be set explicitly/);
+    // Production with migrate-on-start and NO approval mode: accepted, none.
+    expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' }, API).migrationApprovalMode).toBe('none');
+    // Production with token: token (enforced by the migrate child).
     expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' }).migrationApprovalMode).toBe('token');
+    // A present but invalid value still refuses (exit 64).
+    expect(() => readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' })).toThrow(RuntimeDbConfigError);
+    expect(() => readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' })).toThrow(/must be exactly one of: none, token/);
   });
 
   it('allowed sets are exactly the documented ones', () => {
