@@ -10,6 +10,7 @@ import { EnvironmentService } from '@rab/server/engine/core-modules/environment/
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runStorageCleanupCycle } from '../../queues/rab-maintenance/storage-cleanup.job';
 import { WorkerModule } from '../../worker.module';
+import { assertRoleGate, BootGateFacts } from '@rab/server/database/boot-checks/database-boot-gate-rules';
 
 /**
  * Phase D (independent security review F1): the Worker's scheduled storage cleanup on the Worker-only login. Global claim
@@ -54,8 +55,16 @@ describeIfWorkerLogin('Phase D: storage cleanup on the crewflow_worker login, gl
     expect(command.lastReport).toBeDefined();
   });
 
-  it('a CLI-style run on the same credential is still refused: the operator command never runs as the Worker login', async () => {
-    await expect(command.run([], { lockWaitSeconds: 0 })).rejects.toThrow(/storage reconciliation connects as "crewflow_worker"/);
-    expect(command.lastReport).toBeUndefined();
+  // Owner-login architecture. Under the one login the operator CLI runs as crewflow_owner by design (Agent 3's CLI gate
+  // expects the owner): a CLI-style run on the Worker's credential is no longer refused. OWNER-LOGIN DIFFERENCE BC-11 / BC-08
+  // (deployment identity / DBA-01 lost, NEEDS OWNER APPROVAL), reproduced green. The SCHEMA ROLE crewflow_worker keeps the
+  // refusal below (a connection acting as it is refused by the command).
+  it('BC-11 / BC-08: a CLI-style run on the one runtime credential runs (the operator command and the Worker share crewflow_owner)', async () => {
+    await command.run([], { lockWaitSeconds: 0 }); // resolves (measured on #72)
+    expect(command.lastReport).toBeDefined();
+    // The schema role crewflow_worker is still refused by the CLI role gate (it can never be the operator identity).
+    expect(() =>
+      assertRoleGate({ who: 'crewflow_worker', login: 'crewflow_worker' } as unknown as BootGateFacts, ['crewflow_owner'], 'CLI command "storage:reconcile"'),
+    ).toThrow(/connects as "crewflow_worker", a schema role/);
   });
 });
