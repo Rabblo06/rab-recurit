@@ -20,7 +20,14 @@ Release procedure, transition and approval token: [`OWNER-LOGIN-DEPLOYMENT.md`](
 
 R2 proved this (section 5). Do not start an old image on an upgraded database and hope. In production that **fails closed** (section 3); in development it runs with warnings, which proves nothing about production.
 
-**The legacy logins are NOLOGIN after the transition (BC-17, Agent 1).** Once `transition-from-separated.sql` has run, `crewflow_app`, `crewflow`, `crewflow_worker` and `crewflow_migrator` can no longer log in, so the old image cannot connect even before any owner-login migration applies. **A restore of the pre-upgrade backup brings them back exactly as they were** (LOGIN, with their password verifiers): `roles.sql` on self-hosted (§4.1), or the restored instance's own roles on a managed provider (§4.2). That is one more reason the backup in §2 is mandatory.
+**The legacy logins are disabled after the transition (BC-17, Agent 1).** Once `transition-from-separated.sql` has run, `crewflow` and `crewflow_app` become **NOLOGIN with PASSWORD NULL**; `crewflow_worker` stays LOGIN (two existing migrations assert it) but gets **PASSWORD NULL**, so it has no password to authenticate with; `crewflow_migrator` (operator-created) can no longer be used either. A fresh owner-login install ends in the same state. The old image cannot connect even before any owner-login migration applies.
+
+**What brings them back.** Role attributes and password verifiers are **cluster-wide**: they live in `pg_dumpall --roles-only`, not in `pg_dump`.
+- **Self-hosted:** only a restore into a **FRESH** cluster of the `roles.sql` file taken before the transition, **plus** the database dump, brings back LOGIN and the old password verifiers. That is the proven R2 path (§4.1).
+- **A database-only `pg_restore` into the same cluster does NOT restore role attributes.** The roles keep their post-transition state (NOLOGIN, PASSWORD NULL), and the old image still cannot connect.
+- **Managed provider:** the restored NEW instance carries its own roles from the restore point (§4.2).
+
+That is one more reason the backup in §2 (both files) is mandatory.
 
 The expand-only image rollback in `OWNER-LOGIN-DEPLOYMENT.md` §3.6a stays available **only between owner-login releases whose pending sets were reviewed as expand-only**. It is **not** a way back from the separated → owner-login transition. That transition's migrations change grants, policies and the provisioning function, and the old code refuses them in production.
 
@@ -61,7 +68,7 @@ pg_dump    -U <cluster-superuser> -Fc --create -d <database> -f db.dump
 
 ### 4.1 Self-hosted, from the pre-upgrade dump (PROVEN, R2)
 
-Restore into a **fresh** cluster or volume. That is the proven path. In-place restore over the upgraded database is NOT TESTED.
+Restore into a **fresh** cluster or volume. That is the proven path, and the **only** one that brings back the legacy logins' LOGIN attribute and password verifiers (BC-17): they come from `roles.sql`, which only a fresh cluster can take without conflicts. **A database-only `pg_restore` into the same cluster does not restore role attributes**: after it, `crewflow` and `crewflow_app` are still NOLOGIN and every legacy login still has PASSWORD NULL. In-place restore over the upgraded database is NOT TESTED.
 1. Stop the owner-login stack: `docker compose … down`. **Never** use `-v` on a volume you may still need.
 2. Start a fresh PostgreSQL 16 cluster: a new data directory, or a new volume.
 3. **Restore the roles first**, skipping the fresh cluster's own superuser, which already exists:
@@ -77,10 +84,12 @@ Restore into a **fresh** cluster or volume. That is the proven path. In-place re
 5. **Verify** before any traffic:
    - the migration ledger has the pre-upgrade row count (250 in R2), with no owner-login migration in it;
    - the deployment identity marker is the pre-upgrade one (if the deployment declared an id; it is optional, BC-11);
-   - the legacy logins are LOGIN again with their password verifiers (the transition had made them NOLOGIN, BC-17), so the old URLs work unchanged:
+   - the legacy logins are LOGIN again **with** their password verifiers (the transition had made `crewflow` / `crewflow_app` NOLOGIN and set PASSWORD NULL on them and on `crewflow_worker`, BC-17), so the old URLs work unchanged. As the cluster superuser:
      ```sql
-     SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname IN ('crewflow_app','crewflow','crewflow_worker','crewflow_migrator');
+     SELECT rolname, rolcanlogin, rolpassword IS NOT NULL AS has_password
+       FROM pg_authid WHERE rolname IN ('crewflow_app','crewflow','crewflow_worker','crewflow_migrator') ORDER BY rolname;
      ```
+     Every row must show `rolcanlogin = t` **and** `has_password = t` (`crewflow_migrator` only if the deployment used it). If any row shows `f`, the roles were not restored from `roles.sql`: stop, and restore again into a fresh cluster.
 6. **Deploy the previous image digest** with its previous configuration. That means the separated env files, which the transition kept untouched (`OWNER-LOGIN-DEPLOYMENT.md` §5.4).
 7. **Check the old processes:** api, worker and provisioner start with no "ledger AHEAD" or unknown-`app_version` warning. Then run the functional smoke from `OWNER-LOGIN-DEPLOYMENT.md` §5.8 against the old stack.
 8. **Accept the loss:** every write made after the dump is lost. Record it.
@@ -88,7 +97,7 @@ Restore into a **fresh** cluster or volume. That is the proven path. In-place re
 ### 4.2 Managed provider, from PITR or a snapshot (text only, NOT TESTED)
 1. **Restore as a NEW instance or database** at the recorded PITR timestamp, or from the snapshot. The roles come back with it; never restore over the live instance.
 2. **Point the old image's legacy URLs at the new instance:** the separated `crewflow_app`, `crewflow` and migration logins, kept from before the transition. Use the new instance's **direct** host and its CA for verify-full.
-   The restore point is from before the transition, so these logins come back as LOGIN (BC-17 made them NOLOGIN only after the transition). Check `rolcanlogin` as in §4.1, step 5.
+   The restore point is from before the transition, so these logins come back as LOGIN with their passwords (BC-17 disabled them only after the transition). Check `rolcanlogin` and the password as in §4.1, step 5.
 3. **If the host changed and the deployment declared an id, rebind the deployment identity** with the existing `db:bind-identity` command. Do this before the old processes start, because they refuse an identity mismatch. The old separated code may require the id even though the owner-login code treats it as optional (BC-11); follow its refusal message.
 4. **Deploy the previous image digest** with its previous configuration. Check it as in 4.1, steps 5–7.
 5. **Accept the loss and choose the point carefully:**
