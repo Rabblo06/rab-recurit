@@ -203,6 +203,27 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
     expect(await auditCounts(ws!.id)).toEqual({ 'manager_workspace.created': 1, 'manager_workspace.provisioned': 1 });
   });
 
+  it('regression (CI 40P01 → 500): the same race, repeated 10x with 6 concurrent identical creates across both replicas — every one 201, one id, READY exactly once', async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const m = await newManager();
+      const b = body();
+      const results = await Promise.all([
+        post(replicaA, m.token, b),
+        post(replicaB, m.token, b),
+        post(replicaA, m.token, b),
+        post(replicaB, m.token, b),
+        post(replicaA, m.token, b),
+        post(replicaB, m.token, b),
+      ]);
+      expect([round, results.map((r) => r.status)]).toEqual([round, [201, 201, 201, 201, 201, 201]]);
+      expect([round, new Set(results.map((r) => r.body.id)).size]).toEqual([round, 1]);
+      expect([round, results.every((r) => r.body.schemaStatus === 'READY')]).toEqual([round, true]);
+      const [ws] = await workspaceOf(m.id.userId);
+      expect(ws).toMatchObject({ schema_status: 'READY', schemas: 1 });
+      expect(await auditCounts(ws!.id)).toEqual({ 'manager_workspace.created': 1, 'manager_workspace.provisioned': 1 });
+    }
+  }, 600_000);
+
   it('a different body from an owner who already has a workspace is still the original 409', async () => {
     const m = await newManager();
     expect((await post(replicaA, m.token, body())).status).toBe(201);
