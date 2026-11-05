@@ -27,8 +27,8 @@ git-ignored, so neither is committed.
 
 | File | Purpose | Lands |
 |---|---|---|
-| `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis`, and the one-off `rab-migrate`. **Controlled release is the default:** the API does not migrate; `rab-migrate` (`deploy-prepare.js`, same image, same login, token) does. | after #61/#62 |
-| `docker-compose.migrate-on-start.yml` | Quick-start override: the API migrates on start (approval `none`); `rab-migrate` is not part of the stack. | after #61/#62 |
+| `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis`, and the one-off `rab-migrate`. **Controlled release is the default:** the API does not migrate; `rab-migrate` (`deploy-prepare.js`, same image, same login) does. Approval mode `none` by default; token mode is an opt-in (BC-11). | after #61/#62 |
+| `docker-compose.migrate-on-start.yml` | Quick-start override: the API migrates on start; `rab-migrate` is not part of the stack. | after #61/#62 |
 | `docker-compose.local-db.yml` | Optional bundled PostgreSQL 16. Its one init file is Agent 1's `postgres-init/owner-login/01-crewflow-owner.sql`. | now |
 | `staging/docker-compose.staging.yml` (in place) | Project name and storage prefix only. The env files now come from the base file. | after #61/#62 |
 | `docker-compose.production.yml` (in place) | The build-based OpenShip file, reshaped to one URL. **OpenShip cannot run the owner-login Worker safely** (section 6). | after #61/#62 |
@@ -119,7 +119,7 @@ PT-01 pointers:
      printf '%s' "$REDIS_PW" | sha256sum   # replace <sha256-hex-of-the-redis-app-password>
      chown 999:1000 /etc/crewflow/secrets/redis-users.acl && chmod 0640 /etc/crewflow/secrets/redis-users.acl
      ```
-   - **Deployment id:** `uuidgen` goes in `CREWFLOW_DEPLOYMENT_ID`. It is optional on the very first boot of an empty database and mandatory ever after.
+   - **Deployment id (optional, BC-11):** `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are commented out in the template. When you declare an id (`uuidgen`), every process and the release step match it against the database's identity marker and refuse a mismatch. When it is absent, startup warns and continues.
 3. **Bundled database only:** TLS and the two password files.
    ```bash
    cd /etc/crewflow/secrets && install -d -m 0755 pg-tls && cd pg-tls
@@ -144,7 +144,7 @@ PT-01 pointers:
    Then render the files you will start, e.g. `$P $M [$L] config -q`.
 5. **Start.** Choose one:
    - **Quick start (migrate-on-start):** `$P $M [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks) and serves only after it succeeds. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The override gives the API a 900 s `start_period`. The Worker follows a healthy API.
-   - **Controlled (production):** use section 3 from step 3.2. On an EMPTY database `rab-migrate` exits 3 with the full chain as the pending set; approve it with the token.
+   - **Controlled (production):** use section 3 from step 3.2. On an EMPTY database, `rab-migrate` applies the whole chain (approval mode `none`, the default). With token mode on, it exits 3 with the full chain as the pending set; approve it with the token.
 6. **First platform admin (email only, activation link).** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`, which also supplies `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) and the same runtime config (`runtime.env`). The command creates the admin from an email address and sends an **activation link**; it takes no password (`BOOTSTRAP_ADMIN_PASSWORD` is ignored with a warning, so never set it).
    - Inputs: `BOOTSTRAP_ADMIN_EMAIL` (required); optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG`, `BOOTSTRAP_ADMIN_ORG_NAME`.
    - The CLI requires **per-invocation command authority**: `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true`, given on this one-off run ONLY, never in any service environment or env file.
@@ -181,8 +181,14 @@ PT-01 pointers:
 ## 3. Production release (controlled upgrade, the default)
 
 Production runs `docker-compose.image.yml` **without** `$M`. The API never changes the schema
-(`CREWFLOW_MIGRATE_ON_START=false`, approval `token`). The one-off `rab-migrate` does: `deploy-prepare.js`, updated in
-place by Agent 1, from the **same image digest** and the **same `database.env`**. The API and Worker depend on it.
+(`CREWFLOW_MIGRATE_ON_START=false`). The one-off `rab-migrate` does: `deploy-prepare.js`, updated in place by Agent 1,
+from the **same image digest** and the **same `database.env`**. The API and Worker depend on it.
+
+**Approval mode (BC-11, owner decision 2026-11-05).** The release step and migrate-on-start apply **without a token by
+default** (`CREWFLOW_MIGRATION_APPROVAL_MODE` unset = `none`): a `rab-migrate` run, or the `rab-migrate` that `up` runs
+first, applies every pending migration. **Token mode is an opt-in safety net:** set `CREWFLOW_MIGRATION_APPROVAL_MODE=token`
+in `database.env` (it reaches rab-api, rab-worker and rab-migrate alike). Its rule is unchanged when on: a run without a
+token is a check run, and every non-fresh apply needs the token, on any target (3.2).
 
 **3.1 Inputs.**
 - The API and Worker **index digests** from the gated release (`publish-image.yaml` → `publish-gated.sh`; the `release` environment needs reviewer approval). Never a tag.
@@ -195,31 +201,34 @@ place by Agent 1, from the **same image digest** and the **same `database.env`**
   cp compose.env compose.env.<old-sha>
   ```
 
-**The release step's authority (Agent 1, a4ef9bf8).** In production, `rab-migrate` carries **no `DB_TARGET` and no `ALLOW_PRODUCTION_DB_COMMANDS`**; the compose files and the gate refuse both on it. Its authority is:
-- the **deployment identity**: `deploy-prepare.js` derives its target from `CREWFLOW_DEPLOYMENT_ENVIRONMENT` (in `database.env`), in memory, and re-derives it after the migration lock, the same way the migrate child does; the database's identity marker must agree with `CREWFLOW_DEPLOYMENT_ID`;
-- the **per-release token**: every apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>` for exactly the pending set (3.4). Without it, a run is only a check.
+**The release step's authority (Agent 1, a4ef9bf8; BC-11).** In production, `rab-migrate` carries **no `DB_TARGET` and no `ALLOW_PRODUCTION_DB_COMMANDS`**; the compose files and the gate refuse both on it.
+- **Target:** `deploy-prepare.js` derives it from `CREWFLOW_DEPLOYMENT_ENVIRONMENT` when declared (in `database.env`), in memory, and re-derives it after the migration lock, the same way the migrate child does.
+- **Deployment id (optional):** when `CREWFLOW_DEPLOYMENT_ID` is declared, the database's identity marker must match it, or the run refuses. When it is absent, the run warns and continues.
+- **Token (optional):** with token mode on, every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED=<token>` for exactly the pending set (3.4). With the default mode `none`, a run applies.
 
-An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the legacy (separated) behaviour. This extends security trade-off ST-3 to the release step (section 6).
+An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the legacy (separated) behaviour.
+
+> **ACCEPTED RISK (BC-11, owner decision 2026-11-05).** With the defaults (approval mode `none`, no deployment id), nothing in the release path tells the right image or database from the wrong one. A wrong image digest, or a `database.env` that names the wrong database, applies that image's migrations to whatever database the URL reaches, production included, on the next `up`, `run` or migrating API start. **Recovery is a restore from the pre-upgrade backup only** ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md)). That is why the backup (3.3) stays **MANDATORY**. Opt-ins that narrow this risk: token mode, and a declared deployment id.
 
 **3.2 Preflight (read-only).**
 1. Lint the env files and run `$P config -q`.
 2. `$P pull`.
-3. Run the schema-compatibility check. `deploy-prepare.js` is **always in token mode**: run without a token it is a check run that applies nothing.
-   ```bash
-   $P run --rm rab-migrate
-   ```
-   - **0:** CURRENT or AHEAD. Nothing to apply; go to 3.5.
-   - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
-   - **64–69: STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7). Nothing was applied by a check run, and the running release is untouched.
+3. **What a `rab-migrate` run does depends on the approval mode:**
+   - **Mode `none` (default):** `$P run --rm rab-migrate` **applies** every pending migration. There is no separate check run, so take the backup (3.3) **before** any `run` or `up`. Review the pending set from the release notes (step 4).
+   - **Token mode (opt-in):** `$P run --rm rab-migrate` without a token is a **check run** that applies nothing:
+     - **0:** CURRENT or AHEAD. Nothing to apply; go to 3.5.
+     - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
 
-   **Approval rule (owner decision 2026-11-04):** with `CREWFLOW_MIGRATION_APPROVAL_MODE=token`, **every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target**: production, staging and test alike. Without it the run exits **65**. A proven fresh install, approval mode `none` (the migrate-on-start quick start) and check runs are unchanged.
+   In both modes, **64–69 means STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7).
+
+   **Token-mode rule (owner decision 2026-11-04, unchanged when token mode is on):** every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target (production, staging and test alike). Without it the run exits **65**. A proven fresh install, mode `none` and check runs are unchanged.
 
    With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
    The release is rollback-safe only if every pending migration only **adds** (tables, nullable or defaulted columns, indexes, functions, policies) and drops, renames, retypes or narrows nothing the previous image uses. Otherwise rollback is a restore (3.6b). Get the owner's go-ahead.
 
-**3.3 Backup or PITR marker (when 3.2 exited 3).** The app login cannot take a logical backup (FORCE-RLS tables dump empty).
+**3.3 Backup or PITR marker: MANDATORY before anything can apply.** In mode `none`, take it before the first `run` or `up` of the new image. In token mode, take it after a check run that exited 3. The app login cannot take a logical backup (FORCE-RLS tables dump empty).
 - **Managed provider:**
   - take a provider snapshot or branch, OR
   - record the PITR restore time (`SELECT now()`) and the provider's window.
@@ -231,7 +240,7 @@ An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the leg
   ```
   Use `0600` and keep a copy off the host, or snapshot the volume with the stack stopped. Test restores periodically.
 
-**3.4 Apply exactly the reviewed set.** The token goes through the environment of one command only. `-e NAME` with no value forwards it from the shell, so it never sits in a file or on a command line:
+**3.4 Apply.** **Mode `none` (default):** `$P run --rm rab-migrate` (or `up`, which runs it first) applies; exit 0 = applied and post-checks passed, 64–69 = failed by kind. **Token mode:** apply exactly the reviewed set. The token goes through the environment of one command only. `-e NAME` with no value forwards it from the shell, so it never sits in a file or on a command line:
 ```bash
 read -r CREWFLOW_MIGRATION_APPROVED && export CREWFLOW_MIGRATION_APPROVED   # paste the token from 3.2
 $P run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate; rc=$?
@@ -240,7 +249,7 @@ unset CREWFLOW_MIGRATION_APPROVED; echo "rab-migrate exit $rc"
 - **Exit 0:** applied, and the post-checks passed.
 - **64–69:** failed by kind (as in 3.2); see 3.6.
 
-An apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>`; without it the run is only a check. The token is recomputed under the lock, so a changed pending set applies nothing.
+In token mode, an apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>`; without it the run is only a check. The token is recomputed under the lock, so a changed pending set applies nothing.
 
 **3.5 Promote.**
 ```bash
@@ -335,10 +344,10 @@ These are what rollback compares against.
 - grants its memberships of the existing **schema** roles;
 - **never** makes it a member of `crewflow_app` or `crewflow_worker`.
 
-The file's own verification queries must pass before anything else happens. The old logins are **not** changed; they are the rollback path.
+The file's own verification queries must pass before anything else happens. **After the transition the legacy logins (`crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`) are NOLOGIN (BC-17, Agent 1).** The old stack can no longer connect. Restoring the pre-upgrade backup (5.2) brings them back as they were.
 
 **5.4 Host configuration (new files beside the old ones):**
-- `database.env`: the `crewflow_owner` URL, the **same** `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, the same CA.
+- `database.env`: the `crewflow_owner` URL and the same CA. If the separated deployment declared `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, keep the **same** values (they are optional, BC-11). Set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` here if you want the token safety net for the transition.
 - `runtime.env`: the **current** `APP_SECRET`, keyrings, S3, email and OAuth values, **unchanged**. Changing APP_SECRET breaks every session and every stored encrypted secret.
 - `compose.env`: the owner-login digests.
 - **Keep** the old separated files (`.env.migrate`, the per-service env files or platform entries) untouched, `0600`, until the rollback window closes.
@@ -359,12 +368,12 @@ The file's own verification queries must pass before anything else happens. The 
 - no service holds any old credential (`docker compose config` plus the gate).
 
 **5.9 Rollback to separated.** Full procedure and evidence: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
-- **(a) Nothing was applied in 5.6:**
+- **(a) 5.3 has not run yet:**
   1. `$P down`. Never `-v`.
   2. Restart the old stack from 5.5 with its old env files and digests.
 
-  The old logins still work, because 5.3 did not change them.
-- **(b) Anything was applied in 5.6 (the supported rollback, PROVEN):**
+  Nothing in the database changed, so the old logins still work.
+- **(b) 5.3 ran (the legacy logins are NOLOGIN, BC-17), or anything was applied in 5.6 (the supported rollback, PROVEN):**
   1. Stop everything.
   2. Restore 5.2 (`OWNER-LOGIN-RECOVERY.md` §4).
   3. Then do (a).
@@ -372,7 +381,7 @@ The file's own verification queries must pass before anything else happens. The 
   An old image on the upgraded database is **not** supported in production and fails closed. The old api and worker refuse at their boot gate (unknown `provision_workspace` version), and the old provisioner refuses because the ledger is AHEAD (`OWNER-LOGIN-RECOVERY.md` §3). The transition's migrations are not "expand-only" for the old code.
 - **`crewflow_owner` after a rollback:** the admin may `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Do not `DROP ROLE`** without Agent 1's guidance: objects it created would need `REASSIGN OWNED`.
 
-**5.10 After the rollback window.** Retiring the old logins (NOLOGIN, rotated or dropped passwords) and deleting `.env.migrate`, the per-service files and the separated compose paths all belong to the **final PR (#9)**. That needs:
+**5.10 After the rollback window.** The transition already makes the old logins NOLOGIN (BC-17). Dropping their passwords and deleting `.env.migrate`, the per-service files and the separated compose paths belong to the **final PR (#9)**. That needs:
 - the replacement passing every mandatory test;
 - this procedure independently reviewed;
 - owner approval.
@@ -395,16 +404,16 @@ The golden security posture expects some of those roles to stay LOGIN, so retiri
 **`docker-compose.migrate-on-start.yml` (API migrates at every start, approval `none`) is NOT acceptable for
 production.** It stays supported for quick self-hosting only. In production it causes the following:
 
-1. **Unreviewed production schema changes (G-07).** Any start of a new image applies whatever it ships: an auto-deploy, a mistaken `pull && up`, a platform redeploy. Nobody reviews the pending set and nobody takes a backup.
+1. **Unreviewed production schema changes (G-07).** Any start of a new image applies whatever it ships: an auto-deploy, a mistaken `pull && up`, a platform redeploy. Nobody reviews the pending set, and nobody takes a backup at the moment it applies. With BC-11 the release step also applies without a token by default; what it adds over migrate-on-start is **one** sequential run before the API, with the backup taken first (3.3), rather than a migration on every API start.
 2. **Rollback becomes an outage or data loss (C-1).** A contracting migration applied by the new image cannot be undone by starting the old one. Even expand-only rollback relies on the classifier tolerating AHEAD (NOT TESTED).
 3. **Two-version starts block and serve intermediate schemas.** The lock waiter blocks up to 600 s (840 s worst case); migrations commit one by one under live traffic.
 4. **Crash-loop amplification.** A failing migration retries on every restart, against production.
 5. **Authority in the long-running process (ST-3).** Under the owner login the API already holds schema authority (PT-01). Migrate-on-start adds the **act** of changing the schema to every API start.
 6. **It does not reduce the owner-login blast radius.** Neither does the release step: both use the one login.
 
-> **SECURITY TRADE-OFF (ST-3, restated for veto).** The quick-start override sets `CREWFLOW_MIGRATE_ON_START=true` with approval `none`, trading per-release review for a one-command self-hosted install. **Production uses the in-place default:** API `false`, a token-approved `rab-migrate`, a backup, and one API replica. The gate fails CI if the default ever renders the API with migrate-on-start on, without the token, or without waiting for `rab-migrate`.
+> **SECURITY TRADE-OFF (ST-3, as amended by BC-11, owner decision 2026-11-05).** Both lifecycle paths apply **without a token by default** (approval mode `none`), and the deployment id is optional, like Twenty. Token mode and a declared deployment id are opt-in safety nets; token mode's rule is unchanged when on. **Production uses the in-place default:** API `CREWFLOW_MIGRATE_ON_START=false`, the one-off `rab-migrate` run first, a **mandatory** pre-upgrade backup, and one API replica. The quick-start override migrates on every API start and stays for self-hosting only. The gate fails CI if the production default ever renders the API with migrate-on-start on, or not waiting for `rab-migrate`. It no longer requires token mode.
 >
-> **ST-3 extended to the release step.** `rab-migrate` no longer needs separately held command authority (`DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true`): its production authority is the deployment identity (`CREWFLOW_DEPLOYMENT_ENVIRONMENT`, re-derived after the lock, plus the database marker matching `CREWFLOW_DEPLOYMENT_ID`) and the per-release `CREWFLOW_MIGRATION_APPROVED` token, which still gates every apply. Anyone who can run the release step with the shared `database.env` can therefore run a check; an apply still needs the token for exactly the reviewed pending set. Mitigation: the token is never stored (one-run `run -e` only), `database.env` is root-only 0600, and the gate refuses `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS` on every service.
+> **The release step's authority.** `rab-migrate` holds no separately held command authority (`DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true`); the gate refuses both on every service. With the defaults, anyone who can run it with the shared `database.env` **applies** the pending set. Accepted risk: a wrong image or URL migrates production, and recovery is restore only (section 3, "ACCEPTED RISK"). Mitigation: `database.env` is root-only 0600, the backup is mandatory, and token mode plus a deployment id are available opt-ins.
 
 **OpenShip is unsupported for the owner-login deployment (M0 D11).** OpenShip drops these keys: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on` conditions. Without the root launcher, the Worker image's root default user runs **the Worker itself as root**.
 - **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Merging its in-place edit would redeploy the temporary deployment into a shape that cannot start there: no `crewflow_owner` exists on its database, and the Worker would run as root.
@@ -427,9 +436,9 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 | Assumption | Owner |
 |---|---|
-| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. Approval mode `token` = every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it); a proven fresh install, mode `none` and check runs are unchanged (owner decision; Agent 1, `approvalDecision`, f77fc9e5). | Agents 1 and 2 |
+| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. **Approval mode defaults to `none`** (BC-11): the release step and migrate-on-start apply without a token. Token mode is opt-in (`database.env`); when on, every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it), and a proven fresh install and check runs are unchanged (Agent 1, `approvalDecision`, f77fc9e5). `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are optional: matched when declared, a warning when absent. | Agents 1 and 2 |
 | `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
-| `deploy-prepare.js` (in place) is the release step and is **always in token mode**: no token = check run (0 current, 3 pending); `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run; failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1, confirmed.) | Agent 1 |
+| `deploy-prepare.js` (in place) is the release step. In mode `none` (default) a run applies; with token mode on, no token = check run (0 current, 3 pending) and `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run. Failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1; BC-11.) | Agent 1 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
 | `01-crewflow-owner.sql` reads the password file named by `-v owner_password_file=…` (default `/run/secrets/crewflow-owner-password`, at least 24 characters) inside psql, suppresses statement logging only for a superuser session, and grants on `:"DBNAME"`. (Agent 1, `twa/db-lifecycle`.) | Agent 1 |
 | `bootstrap-admin` is email-only with an activation link, runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy, with per-invocation `DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true` on that run only (section 2, step 6). (Agent 1, confirmed.) | Agent 1 |

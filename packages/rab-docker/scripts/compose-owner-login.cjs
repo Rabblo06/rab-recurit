@@ -23,9 +23,10 @@
  *   - the H1-H6 hardening on every service: image by digest and no `build:`, non-root numeric user, read_only, cap_drop ALL
  *     and no cap_add, no-new-privileges, pids/memory/CPU limits, health checks, a stop window, bounded logs, no privileged /
  *     host namespaces / Docker socket, read-only binds, only rab-api publishes and only on loopback;
- *   - the lifecycle: the controlled release (default) = API migrate-on-start OFF, token approval, waits for the one-off
- *     same-image rab-migrate; the migrate-on-start override = API migrates (approval none, start_period for a fresh
- *     install), no rab-migrate dependency; the Worker never migrates, runs main.js as 1000:1000 with tmpfs and a jobs-only
+ *   - the lifecycle: the controlled release (default) = API migrate-on-start OFF, waits for the one-off same-image
+ *     rab-migrate; the migrate-on-start override = API migrates (start_period for a fresh install), no rab-migrate
+ *     dependency. BC-11 (owner decision 2026-11-05): the approval mode and the deployment identity are OPT-IN settings
+ *     of database.env, never committed by a compose file (a committed value would override the operator's opt-in); the Worker never migrates, runs main.js as 1000:1000 with tmpfs and a jobs-only
  *     health check, starts after a healthy API, stop grace >= 45 s; Redis AOF + noeviction + ACL, never published;
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
@@ -102,14 +103,18 @@ const FORBIDDEN_PATTERNS = Object.freeze([
 const URL_KEY = 'PG_DATABASE_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
-  'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
+  'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START',
   'CREWFLOW_UPGRADE_FAILURE_POLICY', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER',
   'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'WORKER_SCHEDULER', 'HOME', 'TMPDIR',
   'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
 ]);
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
+  'CREWFLOW_MIGRATION_APPROVAL_MODE',
 ]);
+/** BC-11 opt-ins: database.env only (so rab-api, rab-worker and rab-migrate see one value), never committed in compose. */
+const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID']);
+const APPROVAL_MODES = Object.freeze(['none', 'token']);
 /** Provider admin logins and the former separated runtime logins: never the app login (M0 section 3.5). */
 const NOT_THE_APP_LOGIN = Object.freeze([
   'postgres', 'neondb_owner', 'doadmin', 'cloudsqlsuperuser', 'azure_pg_admin', 'azuresu', 'rdsadmin', 'supabase_admin',
@@ -253,6 +258,13 @@ function checkModel(model, combo) {
     if (!appServices.includes(name) && values.some((v) => v.includes(SENTINEL_OWNER_PW))) p(`${name}: received the database credential`);
   }
 
+  // BC-11: the approval mode and the deployment identity are opt-ins of database.env. The sentinel database.env sets none of
+  // them, so a value in the rendered model was committed by a compose file and would override the operator's choice.
+  for (const name of names) {
+    const env = services[name]?.environment ?? {};
+    for (const key of DATABASE_OPT_INS) if (key in env) p(`${name}: commits ${key} (an opt-in of database.env, never a compose value)`);
+  }
+
   // ONE database credential, identical everywhere.
   const urls = new Map();
   for (const name of appServices) {
@@ -285,11 +297,9 @@ function checkModel(model, combo) {
   if (JSON.stringify(api.command) !== JSON.stringify(['./api-prestart.sh'])) p('rab-api: command is not ./api-prestart.sh');
   if (release) {
     if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'false') p('rab-api: CREWFLOW_MIGRATE_ON_START must be "false" in the controlled release');
-    if (apiEnv.CREWFLOW_MIGRATION_APPROVAL_MODE !== 'token') p('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE must be "token" in the controlled release');
     if (api.depends_on?.['rab-migrate']?.condition !== 'service_completed_successfully') p('rab-api: does not wait for rab-migrate (service_completed_successfully)');
   } else {
     if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'true') p('rab-api: the migrate-on-start override must set CREWFLOW_MIGRATE_ON_START "true"');
-    if (apiEnv.CREWFLOW_MIGRATION_APPROVAL_MODE !== 'none') p('rab-api: the migrate-on-start override must set CREWFLOW_MIGRATION_APPROVAL_MODE "none"');
     if (!(durationSeconds(api.healthcheck?.start_period) >= MIN_FRESH_INSTALL_START_PERIOD_S)) p(`rab-api: healthcheck start_period below ${MIN_FRESH_INSTALL_START_PERIOD_S}s (it migrates first)`);
     if (api.depends_on?.['rab-migrate'] || worker.depends_on?.['rab-migrate']) p('rab-api/rab-worker: still depend on rab-migrate under migrate-on-start');
   }
@@ -331,9 +341,6 @@ function checkModel(model, combo) {
     if (m.image !== api.image) p('rab-migrate: image differs from rab-api (the release step must run the promoted image\'s migrations)');
     if (m.restart !== 'no') p(`rab-migrate: restart is "${m.restart}", expected "no" (one-off)`);
     if ((m.command ?? []).join(' ') !== `node ${MIGRATE_ENTRY}`) p('rab-migrate: command is not deploy-prepare.js');
-    // deploy-prepare.js is ALWAYS in token mode (no token = check run; CREWFLOW_MIGRATION_APPROVED = apply run): an approval
-    // mode on the release step would only suggest it can be switched off.
-    if ('CREWFLOW_MIGRATION_APPROVAL_MODE' in mEnv) p('rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE (deploy-prepare.js is always in token mode)');
     if ('CREWFLOW_MIGRATE_ON_START' in mEnv) p('rab-migrate: must not carry CREWFLOW_MIGRATE_ON_START');
     if (!(m.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) p('rab-migrate: long-form tmpfs /tmp is missing (also the OpenShip import guard)');
   }
@@ -389,6 +396,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
     if (kind === 'database' && !why && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
+    if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api, rab-worker and rab-migrate see the same value)`);
+    if (key === 'CREWFLOW_MIGRATION_APPROVAL_MODE' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
     if (kind === 'compose') {
       if (!key.startsWith('CREWFLOW_')) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
@@ -429,15 +438,17 @@ function lintComposeText(rel, text) {
   if (/^\s*build\s*:/m.test(text)) problems.push(`${rel}: has a build: key`);
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
+  if (/^\s*-?\s*CREWFLOW_(MIGRATION_APPROVAL_MODE|DEPLOYMENT_ENVIRONMENT|DEPLOYMENT_ID)\s*:/m.test(text)) problems.push(`${rel}: commits a BC-11 opt-in (approval mode / deployment identity belong in database.env)`);
   if (/^\s*privileged\s*:\s*true/m.test(text)) problems.push(`${rel}: privileged: true`);
   return problems;
 }
 
 // ------------------------------------------------------------------------------------------------------------ render
 
+// The sentinel database.env sets NONE of the BC-11 opt-ins (approval mode, deployment identity): any of them in a rendered
+// model was therefore committed by a compose file.
 const DATABASE_ENV_TEXT = [
-  `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow',
-  'CREWFLOW_DEPLOYMENT_ENVIRONMENT=production', 'CREWFLOW_DEPLOYMENT_ID=00000000-0000-4000-8000-000000000000', '',
+  `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow', '',
 ].join('\n');
 const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', ''].join('\n');
 /** Separated-mode env files a compose file must no longer read: their marker value must never reach a service. */

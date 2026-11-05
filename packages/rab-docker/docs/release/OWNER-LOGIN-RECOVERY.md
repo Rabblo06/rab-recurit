@@ -20,6 +20,8 @@ Release procedure, transition and approval token: [`OWNER-LOGIN-DEPLOYMENT.md`](
 
 R2 proved this (section 5). Do not start an old image on an upgraded database and hope. In production that **fails closed** (section 3); in development it runs with warnings, which proves nothing about production.
 
+**The legacy logins are NOLOGIN after the transition (BC-17, Agent 1).** Once `transition-from-separated.sql` has run, `crewflow_app`, `crewflow`, `crewflow_worker` and `crewflow_migrator` can no longer log in, so the old image cannot connect even before any owner-login migration applies. **A restore of the pre-upgrade backup brings them back exactly as they were** (LOGIN, with their password verifiers): `roles.sql` on self-hosted (§4.1), or the restored instance's own roles on a managed provider (§4.2). That is one more reason the backup in §2 is mandatory.
+
 The expand-only image rollback in `OWNER-LOGIN-DEPLOYMENT.md` §3.6a stays available **only between owner-login releases whose pending sets were reviewed as expand-only**. It is **not** a way back from the separated → owner-login transition. That transition's migrations change grants, policies and the provisioning function, and the old code refuses them in production.
 
 ## 2. Mandatory prerequisite: the backup or restore point comes FIRST
@@ -74,8 +76,11 @@ Restore into a **fresh** cluster or volume. That is the proven path. In-place re
    ```
 5. **Verify** before any traffic:
    - the migration ledger has the pre-upgrade row count (250 in R2), with no owner-login migration in it;
-   - the deployment identity marker is the pre-upgrade one;
-   - the role passwords came back, so the old logins work unchanged.
+   - the deployment identity marker is the pre-upgrade one (if the deployment declared an id; it is optional, BC-11);
+   - the legacy logins are LOGIN again with their password verifiers (the transition had made them NOLOGIN, BC-17), so the old URLs work unchanged:
+     ```sql
+     SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname IN ('crewflow_app','crewflow','crewflow_worker','crewflow_migrator');
+     ```
 6. **Deploy the previous image digest** with its previous configuration. That means the separated env files, which the transition kept untouched (`OWNER-LOGIN-DEPLOYMENT.md` §5.4).
 7. **Check the old processes:** api, worker and provisioner start with no "ledger AHEAD" or unknown-`app_version` warning. Then run the functional smoke from `OWNER-LOGIN-DEPLOYMENT.md` §5.8 against the old stack.
 8. **Accept the loss:** every write made after the dump is lost. Record it.
@@ -83,7 +88,8 @@ Restore into a **fresh** cluster or volume. That is the proven path. In-place re
 ### 4.2 Managed provider, from PITR or a snapshot (text only, NOT TESTED)
 1. **Restore as a NEW instance or database** at the recorded PITR timestamp, or from the snapshot. The roles come back with it; never restore over the live instance.
 2. **Point the old image's legacy URLs at the new instance:** the separated `crewflow_app`, `crewflow` and migration logins, kept from before the transition. Use the new instance's **direct** host and its CA for verify-full.
-3. **If the host changed, rebind the deployment identity** with the existing `db:bind-identity` command. Do this before the old processes start, because they refuse an identity mismatch.
+   The restore point is from before the transition, so these logins come back as LOGIN (BC-17 made them NOLOGIN only after the transition). Check `rolcanlogin` as in §4.1, step 5.
+3. **If the host changed and the deployment declared an id, rebind the deployment identity** with the existing `db:bind-identity` command. Do this before the old processes start, because they refuse an identity mismatch. The old separated code may require the id even though the owner-login code treats it as optional (BC-11); follow its refusal message.
 4. **Deploy the previous image digest** with its previous configuration. Check it as in 4.1, steps 5–7.
 5. **Accept the loss and choose the point carefully:**
    - Writes made after the restore point are lost.
@@ -92,7 +98,7 @@ Restore into a **fresh** cluster or volume. That is the proven path. In-place re
 
 ### 4.3 After a rollback
 - `crewflow_owner` may exist on the restored instance (managed PITR to a point after 5.3, or a later owner-login release). Have the admin run `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Never `DROP ROLE`** it without Agent 1's guidance.
-- Re-attempt the upgrade only from section 2 again: a fresh backup or restore point, a fresh check run and a fresh token.
+- Re-attempt the upgrade only from section 2 again: a fresh backup or restore point, then the release step (and, if token mode is on, a fresh check run and a fresh token).
 
 ## 5. Evidence (Agent 1, disposable PG16.15)
 
