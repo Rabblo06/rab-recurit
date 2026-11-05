@@ -24,6 +24,8 @@ const OUT = argv[1] ? path.resolve(argv[1]) : '';
 const KEEP = argv.includes('--keep');
 // --marker: the PRE-HOTFIX test-only workaround (crewflow.disposable_test_database=true on the disposable database).
 const MARKER = argv.includes('--marker');
+// --observe-skip-stop: ONCE (PG16) record what happens when an operator skips the documented stop (T8d).
+const OBSERVE_SKIP_STOP = argv.includes('--observe-skip-stop');
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 if (!['16', '18'].includes(MAJOR) || !OUT) {
   console.error('usage: run-o3-tests.cjs <16|18> <out-dir> [--keep] [--marker] [--only=T1,T7,...]');
@@ -247,11 +249,31 @@ function setImage(ref, extra = {}) {
   writeComposeEnv(ref, extra);
 }
 
-async function restartApiWorker() {
+/**
+ * The DOCUMENTED deployment (OWNER-LOGIN-DEPLOYMENT.md section 3.4, C5 stop-then-start), exactly:
+ *   $P stop rab-worker rab-api
+ *   $P up -d --wait --wait-timeout 1200
+ * Returns the compose exit code (non-zero when a service does not become healthy).
+ */
+function deploy() {
+  const stop = ctx.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 180_000 });
+  if (stop.code !== 0) throw new Error(`stop rab-worker rab-api failed: ${ctx.redact(stop.out).slice(-400)}`);
+  const r = ctx.compose(['up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '1200'], { timeout: 1_300_000 });
+  return r;
+}
+
+async function deployHealthy() {
+  const r = deploy();
+  if (r.code !== 0) throw new Error(`the documented deploy did not become healthy: ${ctx.redact(r.out).slice(-600)}`);
+  await ctx.waitHealthy('rab-api', 60_000);
+  await ctx.waitHealthy('rab-worker', 60_000);
+}
+
+/** A deploy that is EXPECTED to be refused: the documented stop, then the API alone (the Worker waits for a healthy API). */
+function deployExpectingRefusal() {
+  const stop = ctx.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 180_000 });
+  if (stop.code !== 0) throw new Error(`stop rab-worker rab-api failed: ${ctx.redact(stop.out).slice(-400)}`);
   up(['rab-api'], ['--force-recreate', '--no-deps']);
-  await ctx.waitHealthy('rab-api', 900_000);
-  up(['rab-worker'], ['--force-recreate', '--no-deps']);
-  await ctx.waitHealthy('rab-worker', 300_000);
 }
 
 /** Runs the Worker once on another database (compose run: the Worker service's own hardening and env files). */
@@ -321,7 +343,7 @@ async function main() {
     ctx.psql("ALTER DATABASE crewflow SET crewflow.disposable_test_database = 'true'");
     try {
       const since = new Date().toISOString();
-      up(['rab-api'], ['--force-recreate', '--no-deps']);
+      deployExpectingRefusal();
       await ctx.waitFor('the API refusal', () => /disposable_test_database|disposable test database/i.test(ctx.logs('rab-api', since)) && /identity/i.test(ctx.logs('rab-api', since)), 300_000, 5000);
       const al = ctx.logs('rab-api', since);
       ctx.evidence('T1b-api.log', al);
@@ -332,9 +354,8 @@ async function main() {
     } finally {
       ctx.psql('ALTER DATABASE crewflow RESET crewflow.disposable_test_database');
     }
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-api', 600_000);
-    check(true, 'marker removed: the API serves again');
+    await deployHealthy();
+    check(true, 'marker removed: the documented deploy serves again');
   });
 
   // ---------------------------------------------------------------------------------------------------------- 7
@@ -378,8 +399,7 @@ async function main() {
     check(before.length === 17, `17 job schedulers are registered by default (got ${before.length})`);
     check(new Set(before.map((x) => x.split('|')[1])).size === before.length, 'every scheduler id is unique');
     check(before.every((x) => /\|crewflow:[a-z-]+:[a-z-]+$/.test(x)), 'every id is a fixed crewflow:<queue>:<job> id');
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-api', 600_000);
+    await deployHealthy(); // the documented stop-then-start: a second deploy of the same release
     const after = ctx.schedulers();
     ctx.evidence('T2-schedulers-after.txt', after.join('\n'));
     check(JSON.stringify(after) === JSON.stringify(before), `after the second deploy: the same ${after.length} scheduler ids, no duplicate`);
@@ -414,14 +434,12 @@ async function main() {
 
   // ---------------------------------------------------------------------------------------------------------- 6
   await step('T6', 'after a Redis restart, the next API start re-registers every job scheduler (same ids, no duplicate)', async (check) => {
-    up(['rab-api'], ['--no-deps']);
-    await ctx.waitHealthy('rab-api', 600_000);
+    const since = new Date().toISOString();
+    await deployHealthy(); // the next API start, by the documented procedure
     const after = ctx.schedulers();
     ctx.evidence('T6-schedulers.txt', after.join('\n'));
     check(JSON.stringify(after) === JSON.stringify(state.schedulers), `the API start re-registered the same ${after.length}/${state.schedulers?.length} scheduler ids`);
-    ctx.run('docker', ['restart', '-t', '30', ctx.container('rab-worker')]);
-    await ctx.waitHealthy('rab-worker', 300_000);
-    check(/all 17 enabled Crewflow schedulers present/.test(ctx.logs('rab-worker', new Date(Date.now() - 120_000).toISOString())), 'the restarted Worker finds all 17 schedulers');
+    check(/all 17 enabled Crewflow schedulers present/.test(ctx.logs('rab-worker', since)), 'the Worker (started after the API) finds all 17 schedulers');
   });
 
   // ---------------------------------------------------------------------------------------------------------- 5
@@ -429,23 +447,19 @@ async function main() {
     ctx.psql("INSERT INTO core.migrations (timestamp, name) VALUES (9786700000000, 'NewerReleaseOnly9786700000000')");
     try {
       const since = new Date().toISOString();
-      up(['rab-api'], ['--force-recreate', '--no-deps']);
-      await ctx.waitHealthy('rab-api', 600_000);
+      await deployHealthy();
       const al = ctx.logs('rab-api', since);
       ctx.evidence('T5-api.log', al);
       check(/WARNING/.test(al) && /AHEAD|NewerReleaseOnly9786700000000/.test(al), 'the API logs a WARNING naming the newer ledger (AHEAD)');
       check(ctx.healthz().code === 0, 'the API serves /healthz');
       check(ctx.ledger().includes('NewerReleaseOnly9786700000000'), 'the newer row is kept (never rewound)');
-      const since2 = new Date().toISOString();
-      ctx.run('docker', ['restart', '-t', '30', ctx.container('rab-worker')]);
-      await ctx.waitHealthy('rab-worker', 300_000);
-      const wl = ctx.logs('rab-worker', since2);
+      const wl = ctx.logs('rab-worker', since);
       ctx.evidence('T5-worker.log', wl);
-      check(true, 'the Worker starts on the AHEAD database');
+      check(ctx.healthStatus('rab-worker').startsWith('healthy|'), 'the Worker starts on the AHEAD database');
     } finally {
       ctx.psql('DELETE FROM core.migrations WHERE timestamp = 9786700000000');
     }
-    await restartApiWorker();
+    await deployHealthy();
   });
 
   // ---------------------------------------------------------------------------------------------------------- 8
@@ -461,8 +475,9 @@ async function main() {
     const mailBefore = mailCount();
     setImage(process.env.O3T_IMAGE_BROKEN);
     const since = new Date().toISOString();
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-api', 900_000);
+    const dep = deploy();
+    check(dep.code === 0, `the documented deploy of the broken release returns 0 (API healthy degraded, Worker started) (${dep.code})`);
+    await ctx.waitHealthy('rab-api', 60_000);
     const al = ctx.logs('rab-api', since);
     ctx.evidence('T8a-api.log', al);
     check(new RegExp(`ERROR[^\\n]*${PROBE}|${PROBE}[^\\n]*ERROR`).test(al), `the API logs an ERROR naming ${PROBE}`);
@@ -471,8 +486,7 @@ async function main() {
     check(hz.code === 0 && /"upgradeFailed"\s*:\s*true/.test(hz.body), `/healthz serves with upgradeFailed:true (${hz.body.slice(0, 200)})`);
     check(!hz.body.includes(PROBE), '/healthz never names the failed migration');
     check(!ctx.ledger().includes(PROBE), 'the failed migration is not recorded');
-    const sinceW = new Date().toISOString();
-    up(['rab-worker'], ['--force-recreate', '--no-deps']);
+    const sinceW = since;
     await ctx.waitHealthy('rab-worker', 300_000);
     await sleep(15_000);
     const wl = ctx.logs('rab-worker', sinceW);
@@ -492,7 +506,7 @@ async function main() {
   await step('T9', 'approval token mode (compose.env CREWFLOW_MIGRATION_APPROVAL_MODE=token): a non-fresh database with a pending migration and no token is refused (65)', async (check, note) => {
     setImage(process.env.O3T_IMAGE_BROKEN, { CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' });
     const since = new Date().toISOString();
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
+    deployExpectingRefusal();
     await ctx.waitFor('the token-mode refusal', () => /"exitCode":65|exit 65/.test(ctx.logs('rab-api', since)), 300_000, 5000);
     const al = ctx.logs('rab-api', since);
     ctx.evidence('T9-api.log', al);
@@ -502,9 +516,8 @@ async function main() {
     const env = inspect('rab-api', '{{range .Config.Env}}{{println .}}{{end}}');
     check(/^CREWFLOW_MIGRATION_APPROVAL_MODE=token$/m.test(env), 'the API container got CREWFLOW_MIGRATION_APPROVAL_MODE=token from compose.env');
     setImage(process.env.O3T_IMAGE_BROKEN);
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-api', 600_000);
-    check(true, 'back to the default (none): the API serves degraded again');
+    await deployHealthy();
+    check(true, 'back to the default (none): the documented deploy serves degraded again');
     note('compose.env is the only place the token mode is set (Agent 4 c892babc)');
   });
 
@@ -524,7 +537,6 @@ async function main() {
     ctx.psql('DROP DATABASE IF EXISTS o3t_ooo', 'postgres');
     ctx.psql('CREATE DATABASE o3t_ooo TEMPLATE crewflow', 'postgres');
     ctx.psql('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE o3t_ooo TO crewflow_owner', 'postgres');
-    up(['rab-api'], ['--no-deps']);
     const last = ctx.psql('SELECT max(timestamp) FROM core.migrations', 'o3t_ooo');
     ctx.psql(`INSERT INTO core.migrations (timestamp, name) VALUES (${Number(last) - 1}, 'InterleavedUnknown${Number(last) - 1}')`, 'o3t_ooo');
     const o = await workerOn('o3t_ooo');
@@ -532,23 +544,18 @@ async function main() {
     check(typeof o.code === 'number' && o.code !== 0, `the Worker on the out-of-order database exits non-zero (${o.code})`);
     note(`out-of-order: ${(o.out.split('\n').find((l) => /refus/i.test(l)) || '').slice(0, 260)}`);
     check(/InterleavedUnknown|interleaved|unknown/i.test(o.out), 'the refusal names the unknown / interleaved ledger');
-    await ctx.waitHealthy('rab-api', 600_000);
-    up(['rab-worker'], ['--no-deps']);
-    await ctx.waitHealthy('rab-worker', 300_000);
     ctx.psql('DROP DATABASE IF EXISTS o3t_foreign', 'postgres');
     ctx.psql('DROP DATABASE IF EXISTS o3t_ooo', 'postgres');
+    await deployHealthy();
   });
 
   await step('T8b', 'Worker-starts-too: a job hitting a MISSING table (the one the broken migration should restore) fails and retries without crashing the Worker', async (check, note) => {
     // The table goes missing BEFORE both processes start (their boot posture baseline includes it), as after a real failed
     // migration that should have created it.
-    ctx.compose(['stop', '-t', '35', 'rab-worker', 'rab-api']);
+    ctx.compose(['stop', 'rab-worker', 'rab-api']);
     ctx.psql('ALTER TABLE core.shift_report RENAME TO shift_report_o3t_hidden');
     const since = new Date().toISOString();
-    up(['rab-api'], ['--no-deps']);
-    await ctx.waitHealthy('rab-api', 600_000);
-    up(['rab-worker'], ['--no-deps']);
-    await ctx.waitHealthy('rab-worker', 300_000);
+    await deployHealthy();
     const shift = newShift(state.f, 20);
     state.missingShift = shift;
     note(`shift ${shift} waits for its pre-shift report`);
@@ -565,19 +572,27 @@ async function main() {
 
   await step('T8d', 'after the fix (the migration repaired, the API restarted): no warning, and the previously failed job succeeds', async (check, note) => {
     setImage(process.env.O3T_IMAGE_FIXED);
+    if (OBSERVE_SKIP_STOP) {
+      // OBSERVATION (not the documented procedure): an operator SKIPS the stop; the old Worker keeps running while the new
+      // API migrates. Expected: the old Worker sees the posture change and shuts down with a SECURITY ALERT (fail-closed).
+      const sinceObs = new Date().toISOString();
+      up(['rab-api'], ['--force-recreate', '--no-deps']);
+      await ctx.waitHealthy('rab-api', 900_000);
+      await ctx.waitFor('the old Worker reacting', () => /SECURITY ALERT|shutting the Worker down/.test(ctx.logs('rab-worker', sinceObs)), 240_000, 5000).catch(() => undefined);
+      const ol = ctx.logs('rab-worker', sinceObs);
+      ctx.evidence('T8d-observation-old-worker.log', ol);
+      note(`OBSERVATION skip-the-stop: old Worker ${/SECURITY ALERT/.test(ol) ? 'raised a SECURITY ALERT' : 'raised NO alert'}; ${/shutting the Worker down/.test(ol) ? 'it shut itself down' : 'it kept running'}; state ${inspect('rab-worker', '{{.State.Status}}|{{.RestartCount}}')}`);
+    }
     const since = new Date().toISOString();
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-api', 900_000);
+    await deployHealthy();
     const al = ctx.logs('rab-api', since);
     ctx.evidence('T8d-api.log', al);
     check(ctx.ledger().includes(PROBE), `the repaired ${PROBE} is applied`);
-    check(/"outcome":"ok"/.test(al), 'the migrate child: outcome ok');
+    if (!OBSERVE_SKIP_STOP) check(/"outcome":"ok"/.test(al) && al.includes(PROBE), `the documented deploy applied ${PROBE} (outcome ok)`);
     const hz = ctx.healthz();
     check(hz.code === 0 && /"upgradeFailed"\s*:\s*false/.test(hz.body), `/healthz upgradeFailed:false (${hz.body.slice(0, 160)})`);
     check(ctx.psql("SELECT to_regclass('core.shift_report') IS NOT NULL") === 't', 'core.shift_report exists again');
-    const sinceW = new Date().toISOString();
-    up(['rab-worker'], ['--force-recreate', '--no-deps']);
-    await ctx.waitHealthy('rab-worker', 300_000);
+    const sinceW = since;
     await ctx.waitFor('the previously failed report', () => pdfInSink(state.missingShift), 600_000, 10_000);
     const wl = ctx.logs('rab-worker', sinceW);
     ctx.evidence('T8d-worker.log', wl);
@@ -588,14 +603,14 @@ async function main() {
   // ---------------------------------------------------------------------------------------------------------- 3
   await step('T3', 'upgrade failure vs FIRST-INSTALL failure: the upgrade continues (T8a); the same broken migration on a fresh install exits non-zero and never serves', async (check, note) => {
     check(results.some((r) => r.id === 'T8a' && r.status === 'PASS'), 'upgrade failure: the API continued (T8a PASS)');
-    ctx.compose(['stop', '-t', '35', 'rab-worker', 'rab-api']);
+    ctx.compose(['stop', 'rab-worker', 'rab-api']);
     // A fresh database: recreate rab-postgres (its data is a tmpfs).
     up(['rab-postgres'], ['--force-recreate', '--no-deps']);
     await ctx.waitHealthy('rab-postgres', 180_000);
     check(ctx.psql("SELECT to_regclass('core.migrations') IS NULL") === 't', 'the database is empty again');
     setImage(process.env.O3T_IMAGE_BROKEN);
     const since = new Date().toISOString();
-    up(['rab-api'], ['--force-recreate', '--no-deps']);
+    up(['rab-api'], ['--force-recreate', '--no-deps']); // a first install of the broken release (both already stopped)
     await ctx.waitFor('the first-install refusal', () => /REFUSED|"exitCode":66|exit 66/.test(ctx.logs('rab-api', since)), 900_000, 10_000);
     await sleep(20_000);
     const al = ctx.logs('rab-api', since);
