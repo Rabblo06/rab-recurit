@@ -371,7 +371,8 @@ function grantDetail(g: { missing: string[]; denied: string[] }, missingHint = '
  *    ownership of them via rab_secure_owner).
  *  - Any other process (the API, the CLI): it CAN execute the dispatch-claim functions — with one login it always can.
  *    That is the loss of the DBA-01 API/Worker separation, NOT listed among the protections the owner accepted in the
- *    final prompt §2: it is catalogued as BC-08 (NEEDS OWNER APPROVAL) and RECORDED as a boot warning on every start
+ *    final prompt §2: it is catalogued as BC-08 (accepted by the owner 2026-11-05, like Twenty) and still RECORDED as a
+ *    boot warning on every start
  *    (ownerLoginGrantWarnings), never silently treated as passing. It no longer refuses: no single-login process could boot.
  */
 export function assertRoutineGrantsGate(
@@ -400,13 +401,13 @@ export function assertRoutineGrantsGate(
   return { dueWork: dueWork.state, dispatchClaims: dispatch.state };
 }
 
-/** Gate 8 record for a non-Worker process (BC-08, NEEDS OWNER APPROVAL): which Worker-only functions it can EXECUTE. Pure. */
+/** Gate 8 record for a non-Worker process (BC-08, owner-accepted 2026-11-05): which Worker-only functions it can EXECUTE. Pure. */
 export function ownerLoginGrantWarnings(rows: Array<Record<string, unknown>>, input: { processName: BootProcess; who: string; label: string }): string[] {
   if (input.processName === 'worker') return [];
   const dispatch = routineGrantState(rows, DISPATCH_CLAIM_FUNCTIONS);
   if (dispatch.executable.length === 0) return [];
   return [
-    `BC-08 (DBA-01 API/Worker separation lost — PENDING OWNER APPROVAL): the ${input.label} login "${input.who}" can EXECUTE the ` +
+    `BC-08 (DBA-01 API/Worker separation lost — accepted by the owner 2026-11-05): the ${input.label} login "${input.who}" can EXECUTE the ` +
       `Worker-only functions core.${dispatch.executable.join(', core.')}.`,
   ];
 }

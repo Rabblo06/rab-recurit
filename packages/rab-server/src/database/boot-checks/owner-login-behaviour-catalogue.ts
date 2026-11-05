@@ -108,11 +108,11 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     id: 'BC-08',
     title: 'DBA-01 lost: the API can run the Worker-only dispatch-claim functions',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['G-08', 'DBA-01', 'D0-A1'],
+    status: 'accepted-owner',
+    refs: ['G-08', 'DBA-01', 'D0-A1', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'Only crewflow_worker held EXECUTE; boot gate 8 refused an API whose login could execute a claim function.',
     after: 'crewflow_owner executes every claim / release function through its ownership (rab_secure_owner); gate 8 records a BC-08 warning on every API/CLI boot instead of refusing.',
-    controls: 'Lease fencing prevents double sends; worst case is lease stealing delaying dispatch 15–60 s (M0-D). NEEDS OWNER APPROVAL.',
+    controls: 'Lease fencing prevents double sends; worst case is lease stealing delaying dispatch 15–60 s (M0-D). Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'BC-09',
@@ -128,41 +128,42 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     id: 'BC-10',
     title: 'Direct access to worker_due_work and the dispatch pointers',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['M0-B', 'D0-A1'],
+    status: 'accepted-owner',
+    refs: ['M0-B', 'D0-A1', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'crewflow_app held no privilege on core.worker_dispatch_pointer (read refused with 42501); worker_due_work was reached through definers.',
     after: 'The owner login holds the owner\'s table privileges on both: the pointer read is answered (zero rows, restrictive deny TO crewflow) instead of refused; worker_due_work is tenant-bound only since M-T1; SET ROLE rab_secure_owner reads and rewrites every tenant\'s pointers.',
-    controls: 'Restrictive deny policy (normal paths) and M-T1 FORCE on worker_due_work. Injection: not covered. NEEDS OWNER APPROVAL.',
+    controls: 'Restrictive deny policy (normal paths) and M-T1 FORCE on worker_due_work. Injection: not covered. Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'BC-11',
     title: 'Deployment identity can be rebound by the runtime',
     severity: 'HIGH',
-    status: 'needs-owner-approval',
-    refs: ['G-06', 'N1'],
+    status: 'accepted-owner',
+    refs: ['G-06', 'N1', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'core.deployment_identity_bind_gate admitted only a session that is a member of rab_secure_owner — never a runtime login.',
     after: 'The runtime login IS a member of rab_secure_owner: the API/Worker pass the bind gate and (with SET ROLE) can rewrite the marker.',
-    controls: 'Deployment id mandatory after the first bind; bind only on an empty database (Agent 1, D6). NEEDS OWNER APPROVAL.',
+    controls:
+      'Production no longer requires a deployment ID or a per-release approval token (both optional, off by default). A wrong or old image, or a staging config pointed at the production URL, migrates production with no second check; recovery from a mistaken upgrade is restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like Twenty. Remaining controls: the migration lock, the identity and refusal gates, the posture and semantic goldens, RLS, the mandatory pre-upgrade backup (runbook), and the optional opt-in deployment ID and approval token.',
   },
   {
     id: 'BC-12',
     title: 'No logical backup by the app login (PITR-only recovery)',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['G-11'],
+    status: 'accepted-owner',
+    refs: ['G-11', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'Separate migration / superuser identities could take a pg_dump; crewflow_app never had to.',
     after: 'crewflow_owner is NOBYPASSRLS: pg_dump of FORCE tables yields no rows (or refuses with --enable-row-security semantics), so the only backup is the provider\'s PITR; a post-compromise restore point carries the backdoors.',
-    controls: 'PITR retention ≥ detection time with a tested restore (runbook). NEEDS OWNER APPROVAL.',
+    controls: 'PITR retention ≥ detection time with a tested restore (runbook). Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'BC-13',
     title: 'Column-level secret grants lost (password_hash, TOTP secret, recovery codes)',
     severity: 'HIGH',
-    status: 'needs-owner-approval',
-    refs: ['M0-B', 'golden column lines'],
+    status: 'accepted-owner',
+    refs: ['M0-B', 'golden column lines', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'crewflow_app held column grants on core."user" / user_session / refresh_token without the secret columns: a SELECT of password_hash was refused (42501).',
     after: 'Column grants do not bind the table owner: crewflow_owner reads every column of its tenant\'s rows on normal paths.',
-    controls: 'None at the database level with one login. NEEDS OWNER APPROVAL.',
+    controls: 'None at the database level with one login. Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'BC-14',
@@ -222,13 +223,13 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     id: 'COLGRANT-1',
     title: 'Non-secret column-level INSERT grants no longer bind the runtime login',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['C2/column-grants', 'Agent 5 COLGRANT-1'],
+    status: 'accepted-owner',
+    refs: ['C2/column-grants', 'Agent 5 COLGRANT-1', 'owner decision 2026-11-05 (like Twenty)'],
     before: "crewflow_app's column INSERT grants kept server-owned columns (id, created_at, expires_at, origin) out of the runtime's hands.",
     after:
       'The runtime login inherits the owner: it may set them (core.ai_usage id / created_at, core.ai_skill id, ai_action_proposal expires_at / created_at / id / origin); there is no INSERT parity guard (column-level INSERT parity is not reproduced).',
     controls:
-      'RLS WITH CHECK and INSERT policies still hold (another user / organisation refused; a forged updated_by on organisation_ai_model_preference refused; a decided proposal refused). Not covered: server-owned column values on own-tenant rows. NEEDS OWNER APPROVAL.',
+      'RLS WITH CHECK and INSERT policies still hold (another user / organisation refused; a forged updated_by on organisation_ai_model_preference refused; a decided proposal refused). Not covered: server-owned column values on own-tenant rows. Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'REF-1',
@@ -246,25 +247,25 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     id: 'HL-1',
     title: 'Table privileges on the host-label namespace tables',
     severity: 'LOW',
-    status: 'needs-owner-approval',
-    refs: ['Agent 5 HL-1'],
+    status: 'accepted-owner',
+    refs: ['Agent 5 HL-1', 'owner decision 2026-11-05 (like Twenty)'],
     before: 'crewflow_app had no privilege on core.host_label_claim / released_host_label / reserved_host_label (42501).',
     after: 'The runtime login holds table privileges through the owner: it reads the global reserved-label list (no organisation_id) on a normal code path.',
     controls:
-      'Without context it sees zero claim / quarantine rows (FORCE since M-T1, owner-only definer policy); DELETE of reserved labels is parity-guarded (42501); released_host_label is append-only for every role. NEEDS OWNER APPROVAL (not self-accepted under BC-01, which covers injection only).',
+      'Without context it sees zero claim / quarantine rows (FORCE since M-T1, owner-only definer policy); DELETE of reserved labels is parity-guarded (42501); released_host_label is append-only for every role. Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'AI-1',
     title: 'AI governance enforced by grants is lost for the runtime login',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['Agent 5 TW-D', 'Agent 5 AI-1'],
+    status: 'accepted-owner',
+    refs: ['Agent 5 TW-D', 'Agent 5 AI-1', 'owner decision 2026-11-05 (like Twenty)'],
     before:
       'Grants refused the runtime: ai_agent_trigger enable / run_as, standard / system agent edits, ai_skill name / is_system / organisation_id, TRUNCATE on AI tables, organisation_ai_setting.synthetic_data INSERT, EXECUTE on core.ai_dev_mark_organisation_synthetic.',
     after:
       'The runtime login holds TRUNCATE on ai_skill / ai_usage / ai_conversation / ai_action_proposal / organisation_ai_model_preference (ignores RLS), may INSERT synthetic_data, and can EXECUTE core.ai_dev_mark_organisation_synthetic (its body still refuses on a non-disposable database check, 55000).',
     controls:
-      'UPDATE / DELETE parity guards on the AI tables (42501 for real changes; the guard fires first since 4caaef2a); ai_action_proposal_guard keeps content immutable for every role (23514); the EX-3 CHECK refuses enabling a trigger without approval (23514). Not covered: TRUNCATE, INSERT-time columns. NEEDS OWNER APPROVAL.',
+      'UPDATE / DELETE parity guards on the AI tables (42501 for real changes; the guard fires first since 4caaef2a); ai_action_proposal_guard keeps content immutable for every role (23514); the EX-3 CHECK refuses enabling a trigger without approval (23514). Not covered: TRUNCATE, INSERT-time columns. Accepted by the owner 2026-11-05, like Twenty.',
   },
   {
     id: 'MFA-SESS-1',
@@ -279,19 +280,29 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
   },
   {
     // Decision (Agent 3): its own entry, not folded into BC-08 (dispatch claims, unrelated) or BC-15 (registry versioning
-    // guard, MITIGATED by M-T2): folding a needs-owner-approval loss into a mitigated entry would hide it.
+    // guard, MITIGATED by M-T2): folding an open loss into a mitigated entry would have hidden it. Owner-accepted 2026-11-05.
     id: 'PROV-1',
     title: 'The workspace migrator no longer refuses the runtime login (application-layer identity check)',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['Agent 5 PROV-1', 'G-10'],
+    status: 'accepted-owner',
+    refs: ['Agent 5 PROV-1', 'G-10', 'owner decision 2026-11-05 (like Twenty)'],
     before:
       'WorkspaceSchemaMigrator.assertMigrationIdentity refused crewflow_app (and any role without crewflow USAGE), so the API runtime could never migrate workspace schemas.',
     after: 'crewflow_owner holds crewflow USAGE, so assertMigrationIdentity accepts the runtime login: only deployment wiring keeps the API from running the migrator.',
     controls:
-      'The ledger / registry writes still pass the M-T2 allow-list only as crewflow (the migrator takes SET LOCAL ROLE crewflow itself). Not covered: the application-layer refusal. NEEDS OWNER APPROVAL.',
+      'The ledger / registry writes still pass the M-T2 allow-list only as crewflow (the migrator takes SET LOCAL ROLE crewflow itself). Not covered: the application-layer refusal. Accepted by the owner 2026-11-05, like Twenty.',
   },
 ]);
 
-/** The five protections the addendum names as NOT accepted in §2 (+ BC-17 found here): each must stay needs-owner-approval. */
+/**
+ * Entries still waiting for an explicit owner decision. The owner accepted BC-08, BC-10, BC-11, BC-12, BC-13, AI-1,
+ * COLGRANT-1, HL-1 and PROV-1 on 2026-11-05 ("like Twenty"); BC-17 leaves this list when the legacy logins become NOLOGIN
+ * after the transition (Agent 1) and is marked mitigated with its proving test.
+ */
 export const NEEDS_OWNER_APPROVAL_IDS: readonly string[] = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.filter((e) => e.status === 'needs-owner-approval').map((e) => e.id);
+
+/**
+ * Accepted differences that stay TRACKED by the PR #9 removal gate (owner, 2026-11-05): HL-1 was under that gate before
+ * its acceptance and keeps being reported there, so the final removal PR still reviews it explicitly.
+ */
+export const PR9_TRACKED_ACCEPTED_IDS: readonly string[] = Object.freeze(['HL-1']);

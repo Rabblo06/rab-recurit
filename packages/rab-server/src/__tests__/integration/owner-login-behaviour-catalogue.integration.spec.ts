@@ -190,7 +190,7 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     });
   });
 
-  it('BC-08 (NEEDS OWNER APPROVAL): the API login can EXECUTE the Worker-only dispatch-claim functions', async () => {
+  it('BC-08: ACCEPTED (owner, 2026-11-05) — the API login can EXECUTE the Worker-only dispatch-claim functions', async () => {
     const rows = await q(owner)(
       `SELECT p.proname::text AS f, has_function_privilege(p.oid, 'EXECUTE') AS can FROM pg_proc p
         WHERE p.pronamespace = 'core'::regnamespace AND p.proname LIKE 'worker\\_claim\\_%\\_dispatch' ORDER BY 1`,
@@ -209,7 +209,7 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     });
   });
 
-  it('BC-10 (NEEDS OWNER APPROVAL): the pointer table is readable (0 rows, restrictive deny) instead of refused; SET ROLE reads it', async () => {
+  it('BC-10: ACCEPTED (owner, 2026-11-05) — the pointer table is readable (0 rows, restrictive deny) instead of refused; SET ROLE reads it', async () => {
     expect((await q(owner)(`SELECT has_table_privilege('core.worker_dispatch_pointer', 'SELECT') AS s`))[0]!.s).toBe(true);
     await expect(q(owner)(`SELECT count(*)::int AS n FROM core.worker_dispatch_pointer`)).resolves.toEqual([{ n: 0 }]);
     await rolledBack(owner, async () => {
@@ -219,7 +219,7 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     });
   });
 
-  it('BC-11 (NEEDS OWNER APPROVAL): the runtime login passes the deployment-identity bind gate', async () => {
+  it('BC-11: ACCEPTED (owner, 2026-11-05) — the runtime login passes the deployment-identity bind gate', async () => {
     // core.deployment_identity_bind refuses a login that is not a member of rab_secure_owner with 42501 BEFORE validating
     // its arguments. As the owner login the call gets past that gate and fails only on the deliberately invalid
     // environment (22023): the runtime could rebind the marker with valid arguments.
@@ -231,14 +231,14 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     expect(outcome).toBe('22023');
   });
 
-  it('BC-12 (NEEDS OWNER APPROVAL): no logical backup — row_security = off (what pg_dump sets) is refused for the NOBYPASSRLS owner', async () => {
+  it('BC-12: ACCEPTED (owner, 2026-11-05) — no logical backup — row_security = off (what pg_dump sets) is refused for the NOBYPASSRLS owner', async () => {
     await rolledBack(owner, async () => {
       await owner.query('SET LOCAL row_security = off');
       await expect(owner.query('SELECT count(*) FROM core.shift')).rejects.toThrow(/row-level security/);
     });
   });
 
-  it('BC-13 (NEEDS OWNER APPROVAL): the secret columns crewflow_app could not read are readable by the owner login', async () => {
+  it('BC-13: ACCEPTED (owner, 2026-11-05) — the secret columns crewflow_app could not read are readable by the owner login', async () => {
     const [r] = await q(owner)(
       `SELECT has_column_privilege('crewflow_app', 'core."user"', 'password_hash', 'SELECT') AS app,
               has_column_privilege('core."user"', 'password_hash', 'SELECT') AS me,
@@ -325,7 +325,7 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
   const tablePriv = async (table: string, op: string) =>
     (await q(owner)(`SELECT has_table_privilege('crewflow_app', $1::regclass, $2) AS app, has_table_privilege($1::regclass, $2) AS me`, [table, op]))[0];
 
-  it('COLGRANT-1 (NEEDS OWNER APPROVAL): server-owned columns crewflow_app could not INSERT are insertable by the owner login', async () => {
+  it('COLGRANT-1: ACCEPTED (owner, 2026-11-05) — server-owned columns crewflow_app could not INSERT are insertable by the owner login', async () => {
     for (const [table, column] of [['core.ai_usage', 'id'], ['core.ai_usage', 'created_at'], ['core.ai_skill', 'id'], ['core.ai_action_proposal', 'expires_at']] as const) {
       expect({ table, column, ...(await colPriv(table, column, 'INSERT')) }).toEqual({ table, column, app: false, me: true });
     }
@@ -342,14 +342,14 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     expect(ledger.rowCount).toBe(1);
   });
 
-  it('HL-1 (NEEDS OWNER APPROVAL): the owner login holds table privileges on the host-label namespace tables; no claim row without context', async () => {
+  it('HL-1: ACCEPTED (owner, 2026-11-05) — the owner login holds table privileges on the host-label namespace tables; no claim row without context', async () => {
     for (const table of ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label']) {
       expect({ table, ...(await tablePriv(table, 'SELECT')) }).toEqual({ table, app: false, me: true });
     }
     expect((await q(owner)(`SELECT count(*)::int AS n FROM core.host_label_claim`))[0]).toEqual({ n: 0 });
   });
 
-  it('AI-1 (NEEDS OWNER APPROVAL): TRUNCATE on the AI tables and EXECUTE on the synthetic-data marker reach the owner login', async () => {
+  it('AI-1: ACCEPTED (owner, 2026-11-05) — TRUNCATE on the AI tables and EXECUTE on the synthetic-data marker reach the owner login', async () => {
     for (const table of ['core.ai_skill', 'core.ai_usage', 'core.ai_conversation', 'core.ai_action_proposal', 'core.organisation_ai_model_preference']) {
       expect({ table, ...(await tablePriv(table, 'TRUNCATE')) }).toEqual({ table, app: false, me: true });
     }
@@ -371,7 +371,7 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     expect(refused).toBe('42501'); // …the statement-level trigger refuses it anyway (SQLSTATE only, never the message text)
   });
 
-  it('PROV-1 (NEEDS OWNER APPROVAL): the workspace migrator identity check accepts the owner login; crewflow_app is still refused', async () => {
+  it('PROV-1: ACCEPTED (owner, 2026-11-05) — the workspace migrator identity check accepts the owner login; crewflow_app is still refused', async () => {
     const { WorkspaceSchemaMigrator } = await import('../../database/typeorm/workspace-schema/workspace-schema-migrator');
     const runner = { query: async (sql: string, params?: unknown[]) => (await owner.query(sql, params as unknown[] | undefined)).rows };
     const migrator = new WorkspaceSchemaMigrator(runner as never);
