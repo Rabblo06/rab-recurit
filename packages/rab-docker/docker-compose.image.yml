@@ -25,7 +25,8 @@
 # scripts/compose-owner-login.cjs enforces all of this in CI.
 #
 # LIFECYCLE (O3, owner decisions C1-C5, 2026-11-05, "EXACTLY LIKE TWENTY"; G-07 accepted). There is NO release step and
-# no rab-migrate: the API MIGRATES ON START (CREWFLOW_MIGRATE_ON_START=true, approval mode none). api-prestart.sh runs the
+# no rab-migrate: the API MIGRATES ON START (CREWFLOW_MIGRATE_ON_START=true; approval mode none by default, token an opt-in
+# of compose.env, BC-11/C4; with token, the API's start needs CREWFLOW_MIGRATION_APPROVED). api-prestart.sh runs the
 # migration child under the migration lock before main.js (a first-install failure exits non-zero and the API never becomes
 # healthy; a failed UPGRADE logs an ERROR and the API starts degraded, C3), then registers the BullMQ job schedulers (C2).
 # The Worker NEVER migrates (DISABLE_DB_MIGRATIONS=true) and never registers schedulers (DISABLE_CRON_JOBS_REGISTRATION=
@@ -144,11 +145,13 @@ services:
       S3_SERVER_SIDE_ENCRYPTION: NONE
       # Refuse to start when the platform did not apply the runtime isolation below (H6 enforce mode). Never override.
       CREWFLOW_RUNTIME_ISOLATION: enforce
-      # O3 C1 (owner decision 2026-11-05, like Twenty): the API migrates on start, with no approval token. A failed UPGRADE
-      # starts degraded (C3: CREWFLOW_UPGRADE_FAILURE unset = continue; runtime.env may opt into refuse); a failed first
-      # install never serves. It registers the BullMQ job schedulers itself (C2: DISABLE_CRON_JOBS_REGISTRATION unset).
+      # O3 C1 (owner decision 2026-11-05, like Twenty): the API migrates on start. Approval mode none by default (C4), token
+      # an opt-in (BC-11): set CREWFLOW_MIGRATION_APPROVAL_MODE=token in compose.env (the ONLY place; the gate refuses it in
+      # database.env / runtime.env, where this line would silently override it). A failed UPGRADE starts degraded (C3:
+      # CREWFLOW_UPGRADE_FAILURE unset = continue; runtime.env may opt into refuse); a failed first install never serves. It
+      # registers the BullMQ job schedulers itself (C2: DISABLE_CRON_JOBS_REGISTRATION unset).
       CREWFLOW_MIGRATE_ON_START: "true"
-      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+      CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
 
     depends_on:
       rab-redis:

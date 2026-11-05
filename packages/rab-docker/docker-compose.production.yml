@@ -91,7 +91,8 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
       CREWFLOW_MIGRATE_ON_START: "true"
-      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+      # none by default (C4); token is an opt-in (BC-11), entered as the interpolation value (docker-compose.image.yml).
+      CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
     depends_on:
       rab-redis:
         condition: service_healthy

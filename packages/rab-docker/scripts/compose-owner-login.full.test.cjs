@@ -107,8 +107,8 @@ test('hardening: each H1-H6 key is required on every service', { skip }, () => {
 
 test('O3 lifecycle: the API migrates on start, with no token and a fresh-install start_period; nothing waits for a rab-migrate', { skip }, () => {
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'false'; }), /rab-api: CREWFLOW_MIGRATE_ON_START must be "true"/);
-  assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'token'; }), /APPROVAL_MODE must be committed as "none"/);
-  assertRefused(problemsAfter(DEF, (s) => { delete s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE; }), /APPROVAL_MODE must be committed as "none"/);
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'maybe'; }), /APPROVAL_MODE must render as none or token/);
+  assertRefused(problemsAfter(DEF, (s) => { delete s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE; }), /APPROVAL_MODE must render as none or token/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.DISABLE_DB_MIGRATIONS = 'true'; }), /rab-api: DISABLE_DB_MIGRATIONS=true/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.DISABLE_CRON_JOBS_REGISTRATION = 'true'; }), /rab-api: DISABLE_CRON_JOBS_REGISTRATION=true/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].healthcheck.start_period = '30s'; }), /start_period below 600s/);
@@ -122,6 +122,23 @@ test('O3 lifecycle: the API migrates on start, with no token and a fresh-install
   }
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].environment.CREWFLOW_UPGRADE_FAILURE = 'maybe'; }), /CREWFLOW_UPGRADE_FAILURE must be continue or refuse/);
   assert.deepEqual(problemsAfter(DEF, (s) => { s['rab-api'].environment.CREWFLOW_UPGRADE_FAILURE = 'refuse'; }), [], 'refuse is an allowed opt-in');
+});
+
+test('approval mode (BC-11/C4): unset in compose.env renders none; token renders token; a bogus value is refused', { skip }, () => {
+  // unset -> none: the committed sentinel compose.env does not set it.
+  for (const c of COMBOS) assert.equal(fresh(c.name).services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE, 'none', c.name);
+  // token -> token: rendered for real with the opt-in in compose.env, and the model passes every check.
+  const tokenModels = renderModels(COMBOS, ['CREWFLOW_MIGRATION_APPROVAL_MODE=token']);
+  for (const c of COMBOS) {
+    assert.equal(tokenModels[c.name].services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE, 'token', c.name);
+    assert.deepEqual(checkModel(tokenModels[c.name], c), [], c.name);
+  }
+  // A bogus value in compose.env renders and is refused by the gate (and by the compose.env lint).
+  const bogus = renderModels([combo(DEF)], ['CREWFLOW_MIGRATION_APPROVAL_MODE=off'])[DEF];
+  assertRefused(checkModel(bogus, combo(DEF)), /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE must render as none or token/);
+  assertRefused(gate.lintEnvText('compose', 'CREWFLOW_MIGRATION_APPROVAL_MODE=off'), /must be exactly none or token/);
+  // In runtime.env it would be overridden by rab-api's committed expression: refused, naming compose.env.
+  assertRefused(gate.lintEnvText('runtime', 'CREWFLOW_MIGRATION_APPROVAL_MODE=token'), /set it in compose\.env/);
 });
 
 test('O3 C5: exactly one API, stop-then-start', { skip }, () => {
