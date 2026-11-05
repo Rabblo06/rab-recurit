@@ -46,10 +46,17 @@ GRANT CONNECT, CREATE, TEMPORARY ON DATABASE :"DBNAME" TO crewflow_owner WITH GR
 --   rule could still let it in (none on a managed provider).
 ALTER ROLE crewflow NOLOGIN PASSWORD NULL;
 ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL;
--- (crewflow_worker exists only from Phase D on; an older database has none yet.)
+-- crewflow_migrator (the separated layout's restricted migration login, created only on clusters that approved it): NOLOGIN,
+-- password removed. Nothing after the transition logs in as it: the owner-login migrate runs as crewflow_owner, and the
+-- superseded rab-ops path (PG_OPS_APP_DATABASE_URL + this login) is not part of an owner-login deployment. Its memberships
+-- are left as they are (no object, grant or membership changes in this script).
+-- (Both exist only on some databases: crewflow_worker from Phase D on, crewflow_migrator where it was set up.)
 DO $bc17$ BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_worker') THEN
     ALTER ROLE crewflow_worker PASSWORD NULL;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_migrator') THEN
+    ALTER ROLE crewflow_migrator NOLOGIN PASSWORD NULL;
   END IF;
 END $bc17$;
 

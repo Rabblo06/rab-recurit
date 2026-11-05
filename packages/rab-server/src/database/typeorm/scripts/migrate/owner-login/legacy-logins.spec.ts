@@ -48,5 +48,8 @@ describe('BC-17: legacy logins on an owner-login database', () => {
       expect(sql.indexOf(stmt)).toBeGreaterThan(grant);
     }
     expect(sql).not.toMatch(/ALTER ROLE crewflow_worker NOLOGIN/);
+    // crewflow_migrator (an old login too): NOLOGIN without a password, guarded so a deployment without it does not fail.
+    expect(sql).toMatch(/IF EXISTS \(SELECT 1 FROM pg_catalog\.pg_roles WHERE rolname = 'crewflow_migrator'\) THEN\s+ALTER ROLE crewflow_migrator NOLOGIN PASSWORD NULL;\s+END IF;/);
+    expect(sql.indexOf('ALTER ROLE crewflow_migrator NOLOGIN PASSWORD NULL;')).toBeGreaterThan(grant);
   });
 });
