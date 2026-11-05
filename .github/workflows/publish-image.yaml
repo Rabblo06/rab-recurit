@@ -13,9 +13,8 @@ name: publish-image
 #   3. publish            Only for a release or `mode: publish`, only after the gate passed, and only after a required
 #                         reviewer approves the `release` environment, having seen the gate's results (native ARM64 render
 #                         included). It pushes the ONE EXACT gated index, with digests preserved and no rebuild, under
-#                         the two existing immutable tag names api-<commit> and worker-<commit> (the same digest; O2
-#                         replaces both with one <commit> tag). It refuses an existing tag, verifies that the registry
-#                         serves the gated digest, attests provenance, and emits the release manifest.
+#                         ONE immutable tag: the full source commit (O2). It refuses an existing tag, verifies that the
+#                         registry serves the gated digest, attests provenance, and emits the release manifest.
 #                         No `latest`, no per-architecture tags, no moving tags.
 #
 # Credentials (created by hand by the owner; see packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 9):
@@ -149,15 +148,14 @@ jobs:
         with:
           name: release-manifest-candidate
           path: ${{ runner.temp }}/release
-      - name: Push the one index under api-<commit>, then worker-<commit> (same digest); verify served digests
+      - name: Push the one index under the one <commit> tag; verify served digests
         run: |
           set -euo pipefail
           COMMIT="$(git rev-parse HEAD)"
           export COMMIT
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::the gate returned no index digest"; exit 1; }
           s=packages/rab-docker/scripts/image-security/publish-gated.sh
-          bash "$s" "$RUNNER_TEMP/gated/image" "$IMAGE_DIGEST" "api-$COMMIT"
-          bash "$s" "$RUNNER_TEMP/gated/image" "$IMAGE_DIGEST" "worker-$COMMIT"
+          bash "$s" "$RUNNER_TEMP/gated/image" "$IMAGE_DIGEST" "$COMMIT"
       - name: Build-provenance attestation for the index (GitHub, OIDC-signed)
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -177,7 +175,7 @@ jobs:
           assert m['commit'] == commit, (m['commit'], commit)
           img = m['images']['image']
           assert img['index_digest'] == os.environ['IMAGE_DIGEST'], (img['index_digest'], os.environ['IMAGE_DIGEST'])
-          img['published_tags'] = [f"{os.environ['REGISTRY_REPO']}:{t}" for t in (f'api-{commit}', f'worker-{commit}')]
+          img['published_tags'] = [f"{os.environ['REGISTRY_REPO']}:{commit}"]
           img['github_attestation'] = os.environ['IMAGE_ATTESTATION']
           m['status'] = 'published'
           def version(cmd):
@@ -194,7 +192,7 @@ jobs:
           commit="$(git rev-parse HEAD)"
           {
             echo "### Published (deploy by digest only)"
-            echo "- Image (API + Worker): \`$REGISTRY_REPO@$IMAGE_DIGEST\` (tags \`api-$commit\` and \`worker-$commit\`, the same digest)"
+            echo "- Image (API + Worker): \`$REGISTRY_REPO@$IMAGE_DIGEST\` (tag \`$commit\`)"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the release manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

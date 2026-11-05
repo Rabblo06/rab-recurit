@@ -1,11 +1,12 @@
 name: cd-deploy-tag
 
-# Production release: triggered by pushing a version tag (e.g. v0.1.0),
-# never automatically. Both rab-server AND rab-worker (render.yaml) are
-# deployed by Render's own GitHub integration (autoDeploy: true on both
-# services) as soon as the commit lands on main — by the time a tag is
-# pushed, that commit is already live on both, so this workflow's only
-# job is the release record.
+# Release record: triggered by pushing a version tag (e.g. v0.1.0), never
+# automatically. It deploys nothing and pushes no image. The only job is the
+# GitHub release, whose notes name the ONE release image (O2): the API and
+# the Worker run the same image, published by publish-image.yaml under ONE
+# immutable tag, the full commit (docker.io/adhin007/adolphus:<commit>).
+# Deploy by the index digest from that run's release manifest, never by tag
+# (IMAGE_SECURITY_RELEASE_POLICY.md section 8).
 on:
   push:
     tags:
@@ -28,3 +29,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
+          body: |
+            Release image (API + Worker, one image): `docker.io/adhin007/adolphus:${{ github.sha }}`, published by
+            `publish-image` under this single commit tag. Deploy by the index digest in that run's `release-manifest`
+            (`CREWFLOW_IMAGE_DIGEST`), never by tag.

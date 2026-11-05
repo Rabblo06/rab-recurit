@@ -68,8 +68,7 @@ jobs:
           : > "$t/secrets/runtime.env"
           z="$(printf '%064d' 0)"
           {
-            echo "CREWFLOW_API_IMAGE_DIGEST=sha256:$z"
-            echo "CREWFLOW_WORKER_IMAGE_DIGEST=sha256:$z"
+            echo "CREWFLOW_IMAGE_DIGEST=sha256:$z"
             echo "CREWFLOW_REDIS_IMAGE=redis@sha256:$z"
             echo "CREWFLOW_POSTGRES_IMAGE=postgres@sha256:$z"
             echo "CREWFLOW_SECRETS_DIR=$t/secrets"
@@ -84,7 +83,7 @@ jobs:
             docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
           done
           # Fail closed: a missing required interpolation value must refuse to render.
-          for var in CREWFLOW_API_IMAGE_DIGEST CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
+          for var in CREWFLOW_IMAGE_DIGEST CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
             grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
             if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
               echo "::error::docker-compose.image.yml rendered without $var"

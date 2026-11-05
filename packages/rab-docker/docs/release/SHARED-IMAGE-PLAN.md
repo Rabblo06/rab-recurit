@@ -5,7 +5,7 @@
 `Dockerfile.worker-bundle`, `start-worker.sh` and the root launcher `start-worker-bundle.cjs` are deleted. The image gate
 has ONE role (`image`, the union of the former `api` and `worker` checks: forbidden lists, PDF render, jobs dirs,
 module-path identities for uid 1000 with and without `HOME=/nonexistent`). Publishing pushes the one gated index under
-the two existing tag names (`api-<commit>`, `worker-<commit>`, same digest); O2 collapses them to one tag. Proofs 1-2
+ONE tag, the full commit (O2), and every compose file takes ONE digest, `CREWFLOW_IMAGE_DIGEST`. Proofs 1-2
 below (SBOM diff justification, "the API never loads PDF-only packages") are NOT yet automated by O1: the merged
 runtime-deps check forbids the same build/test tooling across every dist directory, but the import-graph / `require.cache`
 check is still open. The text below is the original plan, kept for those proofs.

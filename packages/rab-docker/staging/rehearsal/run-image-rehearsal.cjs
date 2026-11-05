@@ -2,7 +2,7 @@
 /**
  * LOCAL ISOLATED STAGING REHEARSAL of packages/rab-docker/docker-compose.image.yml (owner decisions R4/R5, 2026-11-03).
  *
- *   S_API_IMAGE=<repository>@sha256:<digest> S_WORKER_IMAGE=<repository>@sha256:<digest (O1: the same digest)> \
+ *   S_IMAGE=<repository>@sha256:<digest> (O2: the one image for every application service) \
  *   S_REDIS_IMAGE=redis@sha256:<digest> S_SEED_IMAGE=<image with PR #38 seed-qa> S_REDIS_CONF=<reviewed redis.conf> \
  *     node packages/rab-docker/staging/rehearsal/run-image-rehearsal.cjs <evidence-dir> [--keep]
  *
@@ -56,13 +56,13 @@ if (!argv[0] || argv[0].startsWith('--')) {
   process.exit(2);
 }
 const DIGEST_REF = /^(.+)@(sha256:[0-9a-f]{64})$/;
-for (const k of ['S_API_IMAGE', 'S_WORKER_IMAGE', 'S_REDIS_IMAGE', 'S_SEED_IMAGE', 'S_REDIS_CONF']) {
+for (const k of ['S_IMAGE', 'S_REDIS_IMAGE', 'S_SEED_IMAGE', 'S_REDIS_CONF']) {
   if (!process.env[k]) {
     console.error(`${k} is required`);
     process.exit(2);
   }
 }
-for (const k of ['S_API_IMAGE', 'S_WORKER_IMAGE', 'S_REDIS_IMAGE']) {
+for (const k of ['S_IMAGE', 'S_REDIS_IMAGE']) {
   if (!DIGEST_REF.test(process.env[k])) {
     console.error(`${k} must be <repository>@sha256:<64 hex>`);
     process.exit(2);
@@ -97,16 +97,13 @@ fs.writeFileSync(path.join(SECRETS_DIR, 'redis-users.acl'), [
   '',
 ].join('\n'), { mode: 0o644 }); // 0644 is acceptable: hashes only; read by the redis user (uid 999) through the bind mount; the mkdtemp directory is private and removed afterwards
 
-const [, apiRepo, apiDigest] = DIGEST_REF.exec(process.env.S_API_IMAGE);
-const [, workerRepo, workerDigest] = DIGEST_REF.exec(process.env.S_WORKER_IMAGE);
+const [, imageRepo, imageDigest] = DIGEST_REF.exec(process.env.S_IMAGE);
 const BASE_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(DATABASE_|TEST_|CREWFLOW_|REDIS_URL|DB_TARGET|PG_|COMPOSE_)/.test(k)));
 const ENV = {
   ...BASE_ENV,
   ...SECRETS,
-  CREWFLOW_API_IMAGE_REPOSITORY: apiRepo,
-  CREWFLOW_API_IMAGE_DIGEST: apiDigest,
-  CREWFLOW_WORKER_IMAGE_REPOSITORY: workerRepo,
-  CREWFLOW_WORKER_IMAGE_DIGEST: workerDigest,
+  CREWFLOW_IMAGE_REPOSITORY: imageRepo,
+  CREWFLOW_IMAGE_DIGEST: imageDigest,
   CREWFLOW_REDIS_IMAGE: process.env.S_REDIS_IMAGE,
   CREWFLOW_REDIS_CONF: path.resolve(process.env.S_REDIS_CONF).replace(/\\/g, '/'),
   CREWFLOW_SECRETS_DIR: SECRETS_DIR.replace(/\\/g, '/'),
@@ -199,8 +196,8 @@ function cleanup() {
   fs.rmSync(SECRETS_DIR, { recursive: true, force: true });
 }
 function finish() {
-  const md = ['# Image compose variant: local isolated staging rehearsal', '', `- project: ${PROJECT}`, `- api image: ${process.env.S_API_IMAGE}`,
-    `- worker image: ${process.env.S_WORKER_IMAGE}`, `- redis image: ${process.env.S_REDIS_IMAGE}`, `- redis config sha256: ${sha(fs.readFileSync(process.env.S_REDIS_CONF))}`,
+  const md = ['# Image compose variant: local isolated staging rehearsal', '', `- project: ${PROJECT}`, `- image: ${process.env.S_IMAGE}`,
+    `- redis image: ${process.env.S_REDIS_IMAGE}`, `- redis config sha256: ${sha(fs.readFileSync(process.env.S_REDIS_CONF))}`,
     `- finished: ${new Date().toISOString()}`, '', '| id | case | result | note |', '|---|---|---|---|',
     ...results.map((r) => `| ${r.id} | ${r.title} | ${r.status} | ${r.note.replace(/\|/g, '/')} |`), '', '## Measured', '', '```json', JSON.stringify(measured, null, 2), '```', ''];
   fs.writeFileSync(path.join(OUT, 'SUMMARY.md'), redact(md.join('\n')));
@@ -327,7 +324,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     write(`final check: exit ${fin.code}\nrab-migrate container: ${JSON.stringify(measured.migrateContainer)}`);
     assert(fin.code === 0 && /schema is current/.test(fin.out), 'final check run not clean');
     assert(hc.ReadonlyRootfs === true && JSON.stringify(hc.CapDrop) === '["ALL"]' && (hc.SecurityOpt || []).includes('no-new-privileges:true') && user === '1000:1000', 'rab-migrate container not hardened');
-    assert(image === process.env.S_API_IMAGE, 'rab-migrate did not run the API image by digest');
+    assert(image === process.env.S_IMAGE, 'rab-migrate did not run the image by digest');
     const ledgerInfo = sql1("SELECT count(*) || '|' || max(timestamp) || '|' || count(*) FILTER (WHERE timestamp = 1786721330000) || '|' || count(*) FILTER (WHERE timestamp > 1786719300000) FROM core.migrations");
     const [count, max, gated, afterMarker] = ledgerInfo.split('|');
     measured.ledger = { count: Number(count), max, gated: Number(gated), afterProductionMarker: Number(afterMarker) };
@@ -359,7 +356,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const migrateLogs = logsOf('rab-migrate');
     write(`rab-migrate (dependency run): ${migrateLogs.split('\n').filter((l) => /deploy-prepare/.test(l)).slice(-3).join(' / ')}`);
     assert(r.code === 0, 'rab-api not healthy');
-    assert(inspectId(containerId('rab-api'), '{{.Config.Image}}') === process.env.S_API_IMAGE, 'rab-api is not the pinned image');
+    assert(inspectId(containerId('rab-api'), '{{.Config.Image}}') === process.env.S_IMAGE, 'rab-api is not the pinned image');
     const iso = isolationLine(logs, 'api-prestart: ');
     measured.apiIsolationLine = iso;
     assert(/runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only/.test(iso), `API isolation: ${iso || '(none)'}`);
@@ -374,7 +371,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const logs = logsOf('rab-worker');
     write(logs.split('\n').filter((l) => /worker-isolation\]|runtime-db-guard|rab-worker ready|workspace provisioning: in-process|EROFS|EACCES/.test(l)).join('\n'));
     assert(r.code === 0, 'rab-worker not healthy');
-    assert(inspectId(containerId('rab-worker'), '{{.Config.Image}}') === process.env.S_WORKER_IMAGE, 'rab-worker is not the pinned image');
+    assert(inspectId(containerId('rab-worker'), '{{.Config.Image}}') === process.env.S_IMAGE, 'rab-worker is not the pinned image');
     assert(/workspace provisioning: in-process on the owner login/.test(logs), 'no in-process provisioning line');
     assert(!/\[worker-bundle\]|start-worker-bundle/.test(logs), 'launcher output (the launcher is retired)');
     const iso = isolationLine(logs, '\\[worker-isolation\\] ');
