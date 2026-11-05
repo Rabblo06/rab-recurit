@@ -48,8 +48,8 @@ export async function assertSemanticPostureAtBoot(
     label: string;
     golden?: Readonly<Record<number, readonly string[]>>;
     /**
-     * C3 (owner decision 2026-11-05): the named failed upgrade migration when gate 7 applied its relaxation (API only,
-     * first pending == named). The golden describes the NEW release, so a database whose upgrade failed always differs
+     * C3 (owner decision 2026-11-05): the first migration not applied when gate 7 applied its relaxation (the API with the
+     * named failed step first, or the Worker on an in-order pending tail). The golden describes the NEW release, so a database whose upgrade failed always differs
      * from it: the comparison is skipped with a WARNING. The posture is still read and returned as the monitor's baseline,
      * so any later policy / function / trigger / RLS change still turns readiness off. Everything else is unchanged
      * (no golden for the major in production still refuses).
@@ -68,8 +68,8 @@ export async function assertSemanticPostureAtBoot(
     return {
       posture,
       warnings: [
-        `semantic posture NOT compared with the golden: UPGRADE INCOMPLETE (owner decision C3, 2026-11-05) — the upgrade failed at ${input.upgradeIncomplete}, ` +
-          'so the database is behind this release; the boot snapshot is the runtime baseline (later drift still turns readiness off).',
+        `semantic posture NOT compared with the golden: UPGRADE INCOMPLETE (owner decision C3, 2026-11-05) — the database is behind this release ` +
+          `(first migration not applied: ${input.upgradeIncomplete}); the boot snapshot is the runtime baseline (later drift still turns readiness off).`,
       ],
     };
   }

@@ -177,11 +177,38 @@ export interface AssessOptions {
  *   - `pending` (the ledger is behind the code because that upgrade step failed);
  *   - `provision-function-behind` (the failed step may be the one that rewrites core.provision_workspace).
  * Everything else keeps its verdict: interleaved / unknown ledger names, an unknown provision function in production, a
- * ledger ahead for the provisioner, every Worker / CLI / provisioner verdict (the Worker WAITS: owner decision 2026-11-05),
- * and every case where the first pending migration is not the named one. Unset: nothing changes. The semantic-posture
- * golden comparison is skipped in the same case only (database-boot-gates.ts).
+ * ledger ahead for the provisioner, every CLI / provisioner verdict, and every case where the first pending migration is not
+ * the named one. Unset: nothing changes for the API.
+ *
+ * The WORKER (owner decision changed 2026-11-05: "the Worker starts too, like Twenty") cannot see that variable (another
+ * container): it decides from the database alone. When the pending set is a contiguous, in-order TAIL of this code's chain
+ * (isInOrderPendingTail: no unknown / foreign / interleaved / ahead / retired name), `pending` and
+ * `provision-function-behind` are loud warnings naming the first pending migration; anything else refuses as before.
+ *
+ * In both relaxed cases the semantic-posture golden comparison is skipped with a WARNING (the boot snapshot is still the
+ * runtime baseline): database-boot-gates.ts reads `upgradeIncomplete` from the assessment.
  */
 export const UPGRADE_INCOMPLETE_VAR = 'CREWFLOW_UPGRADE_INCOMPLETE';
+
+/**
+ * C3, Worker: the ledger is exactly a PREFIX of this code's chain and everything pending is the contiguous rest of it.
+ * Every applied name is a code migration (no unknown / foreign / interleaved / ahead / retired name), and every pending
+ * migration sorts after the last applied one in chain order (timestamp, then name). Anything else is not a failed upgrade
+ * of this release and keeps its refusal.
+ */
+export function isInOrderPendingTail(
+  expected: readonly string[],
+  ledger: Pick<ReturnType<typeof compareLedger>, 'pending' | 'unknownNewer' | 'unknownInterleaved' | 'retiredPresent'>,
+): boolean {
+  if (ledger.pending.length === 0) return false;
+  if (ledger.unknownNewer.length || ledger.unknownInterleaved.length || ledger.retiredPresent.length) return false;
+  const chain = [...expected].sort(chainOrder);
+  const pending = new Set(ledger.pending);
+  const firstPendingIndex = chain.findIndex((name) => pending.has(name));
+  return chain.slice(firstPendingIndex).every((name) => pending.has(name));
+}
+
+const chainOrder = (a: string, b: string) => (migrationTimestamp(a) ?? 0) - (migrationTimestamp(b) ?? 0) || a.localeCompare(b);
 
 /** The first pending migration in chain order (timestamp, then name), or undefined. */
 export function firstPendingMigration(pending: readonly string[]): string | undefined {
@@ -235,11 +262,27 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   const policy = POLICIES[process];
   const latest = options.latestModuleVersion ?? LATEST_WORKSPACE_MODULE_VERSION;
   const ledger = compareLedger(facts.expected, facts.applied, options.retired ?? RETIRED_MIGRATIONS);
-  // C3: API only, and only when the first pending migration is exactly the one api-prestart named as the failed step.
+  // C3, API: only when the first pending migration is exactly the one api-prestart named as the failed step.
   const named = options.upgradeIncomplete?.trim();
-  const relaxed = process === 'api' && !!named && firstPendingMigration(ledger.pending) === named;
-  const result: SchemaCompatibilityAssessment = { process, ...ledger, refusals: [], warnings: [], upgradeIncomplete: relaxed ? named! : null };
+  const apiRelaxed = process === 'api' && !!named && firstPendingMigration(ledger.pending) === named;
+  // C3, Worker ("the Worker starts too, like Twenty", owner 2026-11-05): decided from the database alone (it cannot see the
+  // API's CREWFLOW_UPGRADE_INCOMPLETE). Only a contiguous, in-order pending TAIL of this code's chain qualifies.
+  const workerRelaxed = process === 'worker' && isInOrderPendingTail(facts.expected, ledger);
+  const relaxed = apiRelaxed || workerRelaxed;
+  const first = firstPendingMigration(ledger.pending);
+  const result: SchemaCompatibilityAssessment = {
+    process,
+    ...ledger,
+    refusals: [],
+    warnings: [],
+    upgradeIncomplete: apiRelaxed ? named! : workerRelaxed ? first! : null,
+  };
   const c3 = (verdict: Verdict): Verdict => (relaxed && verdict !== 'ignore' ? 'warn' : verdict);
+  const pendingMessage = apiRelaxed
+    ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): the upgrade failed at ${named}; ${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}. Serving on the previous schema; deploy the fix.`
+    : workerRelaxed
+      ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): running on a partly-upgraded schema: ${first} and ${ledger.pending.length - 1} more not applied. Every job runs on it, payroll timers included; deploy the fix.`
+      : `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`;
 
   const apply = (verdict: Verdict, finding: CompatibilityFinding, message: string) => {
     if (verdict === 'ignore') return;
@@ -248,13 +291,7 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   };
 
   if (ledger.pending.length > 0) {
-    apply(
-      c3(policy.pending),
-      'pending',
-      relaxed
-        ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): the upgrade failed at ${named}; ${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}. Serving on the previous schema; deploy the fix.`
-        : `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`,
-    );
+    apply(c3(policy.pending), 'pending', pendingMessage);
   }
   if (ledger.unknownInterleaved.length > 0) {
     apply(
@@ -279,7 +316,7 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
     if (fn.state === 'missing' || fn.state === 'unknown') {
       apply(policy.functionUnknown, 'provision-function-unknown', `${described}; this code cannot tell which workspace modules it provisions.`);
     } else if (fn.state === 'legacy' || fn.moduleVersion < latest) {
-      apply(c3(policy.functionBehind), 'provision-function-behind', `${described}, below this code's workspace module ${latest}.${relaxed ? ` UPGRADE INCOMPLETE (C3): ${named} failed.` : ''}`);
+      apply(c3(policy.functionBehind), 'provision-function-behind', `${described}, below this code's workspace module ${latest}.${relaxed ? ` UPGRADE INCOMPLETE (C3): first not applied ${result.upgradeIncomplete}.` : ''}`);
     } else if (fn.moduleVersion > latest) {
       apply(policy.functionAhead, 'provision-function-ahead', `${described}, above this code's workspace module ${latest} (an image rollback).`);
     }

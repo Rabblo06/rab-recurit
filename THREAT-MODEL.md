@@ -5581,8 +5581,17 @@ writes a warning instead.
         honour it for the API process only, and only when the first pending migration is exactly the named one
         (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
         `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
-      - **The Worker waits** (owner decision 2026-11-05): its gate 7 still refuses pending migrations, so background
-        jobs (dispatch, reminders, payroll scans) pause until the fix is deployed.
+      - **Owner-accepted 2026-11-05 (decision changed the same day): "After a failed upgrade, the Worker runs all jobs,
+        including payroll timers, on a partly-applied schema (like Twenty)."**
+        - The Worker cannot see the API's variable (another container), so it decides from the database alone: when the
+          pending set is a contiguous, in-order tail of its chain, gate 7 writes a loud WARNING ("running on a
+          partly-upgraded schema: <first> and N more not applied"), `provision-function-behind` is a warning too, and
+          the semantic golden comparison is skipped (the boot snapshot is still the baseline).
+        - Residual: jobs that touch the missing tables or functions fail and retry under the normal BullMQ and outbox
+          rules.
+        - Still refused for the Worker: interleaved or out-of-order ledgers, unknown or foreign names, a different
+          chain, retired names, and an unknown provision function in production. The ahead rules are unchanged. The CLI
+          and the provisioner are unchanged.
       - Detection:
         - the ERROR log naming the migration, written on every start while the ledger is behind;
         - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
