@@ -3,24 +3,20 @@ import type { HealthIndicatorResult } from '@nestjs/terminus';
 /**
  * O3 C3 (owner decision 2026-11-05, "exactly like Twenty"): after a FAILED schema upgrade under
  * CREWFLOW_UPGRADE_FAILURE=continue, api-prestart.sh starts main.js with CREWFLOW_UPGRADE_INCOMPLETE=<failed migration>
- * (it refuses an inherited value, so only the entrypoint sets it). /healthz then reports it as an INFORMATIONAL field —
- * `upgrade: { status: 'up', upgradeFailed: '<migration>' }` — and stays 200: the API serves on the previous schema by the
- * owner's decision; the field makes the degraded state visible to operators and monitors. Absent when the variable is unset.
- *
- * Only a migration name ever leaves (env validation and this function both require letters, digits, `_`, `-`, `.`, at most
- * 200 characters); anything else is reported as `unknown`, never echoed.
+ * (it refuses an inherited value, so only the entrypoint sets it). /healthz reports ONLY whether that happened —
+ * `upgrade: { status: 'up', upgradeFailed: true | false }` — and stays 200: the API serves on the previous schema by the
+ * owner's decision. Coordinator decision (2026-11-05, the stricter option): the migration's NAME is never exposed on
+ * /healthz; it appears only in the start-up ERROR/WARNING logs.
  */
 export const UPGRADE_INCOMPLETE_ENV = 'CREWFLOW_UPGRADE_INCOMPLETE';
-const MIGRATION_NAME = /^[A-Za-z0-9_.-]{1,200}$/;
 
-export function upgradeFailedMigration(env: Record<string, string | undefined> = process.env): string | null {
+/** True when this API start follows a failed upgrade (CREWFLOW_UPGRADE_INCOMPLETE set by api-prestart.sh). */
+export function upgradeFailed(env: Record<string, string | undefined> = process.env): boolean {
   const value = env[UPGRADE_INCOMPLETE_ENV];
-  if (value === undefined || value === '') return null;
-  return MIGRATION_NAME.test(value) ? value : 'unknown';
+  return value !== undefined && value !== '';
 }
 
-/** The /healthz indicator, or null when the last upgrade did not fail. Always `up`: informational only. */
-export function upgradeStatusIndicator(env: Record<string, string | undefined> = process.env): HealthIndicatorResult | null {
-  const failed = upgradeFailedMigration(env);
-  return failed === null ? null : { upgrade: { status: 'up', upgradeFailed: failed } };
+/** The /healthz indicator. Always `up`: informational only; a boolean, never the migration name. */
+export function upgradeStatusIndicator(env: Record<string, string | undefined> = process.env): HealthIndicatorResult {
+  return { upgrade: { status: 'up', upgradeFailed: upgradeFailed(env) } };
 }

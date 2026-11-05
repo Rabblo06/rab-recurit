@@ -25,7 +25,7 @@
 #      a loud WARNING and the API starts anyway; the consume-only Worker reports any missing scheduler as an ERROR;
 #   5. execs main.js ONLY after exit 0 or a verified 70 (main.js runs its own boot gates as well), and after a verified 70
 #      with CREWFLOW_UPGRADE_INCOMPLETE=<the failed migration, or unknown> (the API's boot gate then accepts exactly that
-#      first pending migration; /healthz reports it as upgradeFailed). A fresh-install failure never serves: the child never
+#      first pending migration; /healthz reports upgradeFailed: true, never the name). A fresh-install failure never serves: the child never
 #      reports 70 for one, and the relay below vetoes a 70 result that names one.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
@@ -316,7 +316,7 @@ if [ "$MIGRATE_ON_START" = true ]; then
       case "$UPGRADE_INCOMPLETE" in
         '' | *[!A-Za-z0-9_.-]*) UPGRADE_INCOMPLETE=unknown ;;
       esac
-      echo "api-prestart: WARNING DEGRADED START - the upgrade FAILED at $UPGRADE_INCOMPLETE and CREWFLOW_UPGRADE_FAILURE=continue: the API serves on the previous schema (see the WARNING and TWENTY_MIGRATE_RESULT lines above; /healthz reports upgradeFailed). Fix the failing migration and redeploy. The Worker starts as well, on the partly-upgraded schema (owner decision 2026-11-05)." >&2
+      echo "api-prestart: WARNING DEGRADED START - the upgrade FAILED at $UPGRADE_INCOMPLETE and CREWFLOW_UPGRADE_FAILURE=continue: the API serves on the previous schema (see the WARNING and TWENTY_MIGRATE_RESULT lines above; /healthz reports upgradeFailed: true). Fix the failing migration and redeploy. The Worker starts as well, on the partly-upgraded schema (owner decision 2026-11-05)." >&2
       ;;
     64) fail_after_delay 64 "the migrate child refused its configuration" ;;
     65) fail_after_delay 65 "the schema is behind this code" ;;
