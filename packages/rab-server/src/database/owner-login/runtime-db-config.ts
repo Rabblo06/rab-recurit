@@ -12,9 +12,8 @@
  *   CREWFLOW_MIGRATE_ON_START         true | false. The API image entrypoint (api-prestart.sh) REQUIRES it — an operator must
  *                                     choose; there is no default for whether the API changes the schema on start.
  *                                     Everywhere else (Worker, CLI, tests) unset means false and it is never read.
- *   CREWFLOW_MIGRATION_APPROVAL_MODE  none | token. Default none, EXCEPT a production runtime with CREWFLOW_MIGRATE_ON_START=true,
- *                                     which must name it explicitly. ASSUMPTION (flagged for the owner, M0 G-07 / ST-3): no
- *                                     silent default may decide whether production schema changes need a per-release token.
+ *   CREWFLOW_MIGRATION_APPROVAL_MODE  none | token. Default none EVERYWHERE, production included (owner decision BC-11,
+ *                                     2026-11-05: optional and off by default, like Twenty). A present value is validated.
  *   CREWFLOW_UPGRADE_FAILURE_POLICY   refuse (default) | continue-if-compatible.
  *
  * Removed names, refused with an actionable message so nobody believes they still do something:
@@ -91,10 +90,6 @@ function oneOf<T extends string>(name: string, value: string, allowed: readonly 
   throw new RuntimeDbConfigError(`${name} must be exactly one of: ${allowed.join(', ')}. Refusing to start.`);
 }
 
-function isProductionRuntime(env: Env): boolean {
-  return raw(env, 'NODE_ENV') === 'production' || raw(env, 'RAB_RUNTIME_ENV') === 'production';
-}
-
 export interface ReadRuntimeDbConfigOptions {
   /** True only for the API image entrypoint (api-prestart.sh and its parity test): CREWFLOW_MIGRATE_ON_START has no default there. */
   requireMigrateOnStart?: boolean;
@@ -123,13 +118,11 @@ export function readMigrateOnStart(env: Env, options: ReadRuntimeDbConfigOptions
 /** CREWFLOW_MIGRATION_APPROVAL_MODE (see the header). */
 export function readMigrationApprovalMode(env: Env, options: ReadRuntimeDbConfigOptions = {}): MigrationApprovalMode {
   const value = raw(env, MIGRATION_APPROVAL_MODE_VAR);
-  if (value !== undefined) return oneOf(MIGRATION_APPROVAL_MODE_VAR, value, MIGRATION_APPROVAL_MODES);
-  if (isProductionRuntime(env) && readMigrateOnStart(env, options)) {
-    throw new RuntimeDbConfigError(
-      `${MIGRATION_APPROVAL_MODE_VAR} must be set explicitly (none or token) when a production runtime has ${MIGRATE_ON_START_VAR}=true: whether production schema changes need a per-release approval token is never decided by a default. Refusing to start.`,
-    );
-  }
-  return DEFAULT_MIGRATION_APPROVAL_MODE;
+  // Owner decision BC-11 (2026-11-05): the per-release approval token is OPTIONAL and OFF by default everywhere, production
+  // included (like Twenty). A value that is present is still validated (anything but none | token refuses, exit 64);
+  // `token` is enforced by the migrate child, and the approval value still reaches only that child, never main.js.
+  void options;
+  return value === undefined ? DEFAULT_MIGRATION_APPROVAL_MODE : oneOf(MIGRATION_APPROVAL_MODE_VAR, value, MIGRATION_APPROVAL_MODES);
 }
 
 /** CREWFLOW_UPGRADE_FAILURE_POLICY (see the header). Agent 1's parseUpgradeFailurePolicy delegates here. */
