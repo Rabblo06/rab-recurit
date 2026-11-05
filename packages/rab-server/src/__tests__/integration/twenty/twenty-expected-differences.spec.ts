@@ -15,8 +15,8 @@ export function removalGateProblems(c: typeof catalogue = catalogue): string[] {
   const out: string[] = [];
   for (const d of c.differences as Diff[]) if (/NEEDS OWNER APPROVAL/.test(d.acceptance)) out.push(`${d.id}: ${d.acceptance}`);
   if (!c.migratedTests.entries.length) out.push('migratedTests is empty: the TW-D differential has not been classified');
-  // Accepted differences the owner still wants revisited before PR #9 (HL-1, owner decision 2026-11-05).
-  for (const id of (c as { removalGateKeep?: { ids: string[] } }).removalGateKeep?.ids ?? []) out.push(`KEEP-ON-GATE: ${id} (accepted, revisit in PR #9)`);
+  // Accepted differences kept on the PR #9 removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05.
+  for (const id of (c as { removalGateKeep?: { ids: string[] } }).removalGateKeep?.ids ?? []) out.push(`KEEP-ON-GATE: ${id} (owner-accepted; kept on the PR #9 gate by coordinator decision)`);
   // Suites skipped BY NAME ("remove in PR #9"): the gate passes only once each file is gone.
   const repoRoot = join(__dirname, '../../../../../..');
   for (const f of (c as { removeInPr9?: { files: Array<{ file: string; reason: string }> } }).removeInPr9?.files ?? []) {

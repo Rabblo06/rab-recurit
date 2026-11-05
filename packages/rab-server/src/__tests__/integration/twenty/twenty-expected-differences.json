@@ -235,7 +235,7 @@
     {
       "id": "HL-1",
       "severity": "LOW",
-      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: HL-1 host-label namespace table privileges (stays on the PR #9 removal gate); was NEEDS OWNER APPROVAL)",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: HL-1 host-label namespace table privileges; kept on the PR #9 removal gate by coordinator decision (Agent 3 review); was NEEDS OWNER APPROVAL)",
       "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded. Measured on PR #74: core.reserved_host_label (global reference data, no organisation_id) is readable by the runtime login through the policy for crewflow (210 rows); its DELETE is refused by the parity guard.",
       "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace 'HL-1:')",
       "bc": [
@@ -643,7 +643,7 @@
     ]
   },
   "removalGateKeep": {
-    "$comment": "Accepted differences the owner still wants revisited before PR #9; removalGateProblems lists them until PR #9 removes the entry.",
+    "$comment": "Kept on the PR #9 removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05. removalGateProblems lists them until PR #9 removes the entry.",
     "ids": [
       "HL-1"
     ]
