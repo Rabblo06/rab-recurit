@@ -53,7 +53,8 @@ const fs = require('fs');
 const keys = (p) => fs.readFileSync(p, 'utf8').split('\\0').filter(Boolean).map((kv) => kv.split('=')[0]).sort();
 const read = (f, d) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return d; } };
 const n = Number(read('/tmp/migrate-attempts', '0')) + 1;
-fs.writeFileSync('/tmp/migrate-attempts', String(n));
+// Best effort: a --read-only container (the shipped rab-api has no tmpfs) cannot keep the counter; single-code cases need none.
+try { fs.writeFileSync('/tmp/migrate-attempts', String(n)); } catch {}
 const seq = read('/ctl/migrate-seq', '0').split(',');
 const code = Number(seq[Math.min(n, seq.length) - 1]);
 console.log('STUB twentymigrate attempt=' + n + ' approval=' + (process.env.CREWFLOW_MIGRATION_APPROVED || '') + ' self=' + keys('/proc/self/environ').join(','));
@@ -254,6 +255,16 @@ r = run('migrate-70-noname', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-
 check('8h2 a verified 70 without failedMigration -> main starts with CREWFLOW_UPGRADE_INCOMPLETE=unknown (the API gate then refuses: fail closed)', r.code === 0 && upgradeOf(r.out) === 'unknown', r.out);
 r = run('migrate-70-badname', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED.replace('"failedMigration":"Broken1786730000000"', '"failedMigration":"x;rm -rf /"') } });
 check('8h3 a failedMigration that is not a migration name is never passed on -> unknown', r.code === 0 && upgradeOf(r.out) === 'unknown' && !r.out.includes('upgrade=x;'), r.out);
+// O3 T8a-TMP regression: the shipped rab-api is read_only with NO tmpfs. The failed migration's name must still reach main.js
+// exactly (it used to go through a mktemp file, which failed, so main.js got "unknown" and gate 7 refused to serve).
+r = run('migrate-70-readonly', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED }, dockerArgs: ['--read-only', '--user', '1000:1000'] });
+check('8h6 read-only root, no tmpfs (as shipped): a verified 70 -> main.js gets CREWFLOW_UPGRADE_INCOMPLETE=<the exact failed migration>, not unknown', r.code === 0 && upgradeOf(r.out) === 'Broken1786730000000' && !/Read-only file system/.test(r.out), r.out);
+r = run('migrate-70-tmpdir-unwritable', { ...MIGRATE_ON, TMPDIR: '/proc' }, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
+check('8h7 TMPDIR pointing at a non-writable directory: a verified 70 still passes the exact name', r.code === 0 && upgradeOf(r.out) === 'Broken1786730000000', r.out);
+const prestartSource = fs.readFileSync(PRESTART, 'utf8');
+check('8h8 api-prestart.sh writes no file: no mktemp, no /tmp path, no output redirection to a file path', !/mktemp/.test(prestartSource) && !/\/tmp\//.test(prestartSource) && !/>>?\s*"?\$?\{?[A-Za-z_]*(NOTE|FILE)/.test(prestartSource), 'api-prestart.sh still references a temporary file');
+r = run('migrate-70-stream', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
+check('8h9 the child output still streams to the log (its own lines and the TWENTY_MIGRATE_RESULT line appear) and the machine lines never do', r.code === 0 && /STUB twentymigrate attempt=1 /.test(r.out) && /TWENTY_MIGRATE_RESULT \{/.test(r.out) && !/failed-migration=|relay-status=/.test(r.out), r.out);
 r = run('migrate-0-no-upgrade-flag', MIGRATE_ON, { ctl: { 'migrate-seq': '0', 'migrate-result': RESULT({ exitCode: 0, serve: true }) } });
 check('8h4 exit 0 -> main.js never receives CREWFLOW_UPGRADE_INCOMPLETE', r.code === 0 && upgradeOf(r.out) === '-' && !keysOf(line(r.out, 'main'), 'self').includes('CREWFLOW_UPGRADE_INCOMPLETE'), r.out);
 r = run('inherited-upgrade-incomplete', { ...BASE, CREWFLOW_UPGRADE_INCOMPLETE: 'Broken1786730000000' });

@@ -24,7 +24,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
 import { installSessionRoleResetOnDataSource } from '@rab/server/database/postgres/session-role-reset';
 import { securityReady, startSecurityPostureMonitoring } from '@rab/server/engine/core-modules/health/security-readiness';
@@ -50,7 +50,7 @@ import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
 import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
-import { resolveSchemaWaitMs, waitForCompatibleSchema, warnIfPartlyUpgraded } from './core/runtime/schema-wait';
+import { resolveSchemaWaitMs, waitForWorkerSchemaOn } from './core/runtime/schema-wait';
 import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
 import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
@@ -209,18 +209,14 @@ async function waitForWorkerSchema(pg: ReturnType<typeof resolvePgEnvironmentCac
   try {
     const expected = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
     const production = isProductionProcess('worker', process.env);
-    await waitForCompatibleSchema({
+    // O3 T8a-WORKER: the same check gate 7 makes for the Worker, WITH the C3 upgrade evidence (schema-wait.ts
+    // checkWorkerSchema) — so after a failed upgrade the wait lets the Worker start exactly when gate 7 does.
+    await waitForWorkerSchemaOn((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
+      expected,
+      production,
       maxWaitMs,
       // eslint-disable-next-line no-console
       log: (line) => console.log(line),
-      check: async () => {
-        await checkSchemaCompatibility((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
-          process: 'worker',
-          production,
-          expected,
-          label: 'worker process',
-        });
-      },
     });
   } finally {
     await dataSource.destroy().catch(() => undefined);
@@ -307,14 +303,10 @@ async function bootstrap(): Promise<void> {
   // Owner-login architecture (Agent 3's pool safety): this pool comes from TypeOrmModule.forRoot, not the connection
   // factory, so RESET ROLE on checkout is installed here explicitly (idempotent).
   installSessionRoleResetOnDataSource(runtimeDataSource);
-  // Owner decision 2026-11-05 ("the Worker starts too, like Twenty"): after a failed upgrade the boot gates accept an
-  // in-order pending tail for the Worker as a warning. ONE loud WARNING here names the first pending migration; every
-  // consumer and scan then starts normally — a job that needs the missing schema fails and retries under its own rules.
-  await warnIfPartlyUpgraded({
-    query: (sql, params) => runtimeDataSource.query(sql, params),
-    expected: gateReport.expectedMigrations ?? [],
-    log: (line) => logger.warn(line),
-  });
+  // Owner decision 2026-11-05 ("the Worker starts too, like Twenty"): after a failed upgrade gate 7 accepts an in-order
+  // pending tail on a stopped UPGRADE for the Worker and logs the ONE loud partly-upgraded WARNING naming the first pending
+  // migration (above, `[db-boot-gates] WARNING`); every consumer and scan then starts normally — a job that needs the
+  // missing schema fails and retries under its own rules.
   // Agent 3's external security audit sink and semantic posture monitor (boot baseline from the gates above). An invalid
   // audit-sink configuration refuses to start; posture drift is acted on below, once the runtime exists.
   const securityMonitoring = (() => {

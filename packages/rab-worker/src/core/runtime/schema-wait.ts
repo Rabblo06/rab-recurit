@@ -1,4 +1,5 @@
-import { firstPendingMigration, readLedgerNames } from '@rab/server/database/boot-checks/schema-compatibility';
+import { checkSchemaCompatibility, readUpgradeEvidence } from '@rab/server/database/boot-checks/database-boot-gates';
+import type { SchemaCompatibilityAssessment } from '@rab/server/database/boot-checks/schema-compatibility';
 
 /**
  * Owner-login architecture (M0 §7, M0-D: "a bounded wait on schema current"): the Worker NEVER migrates; the API's start
@@ -87,45 +88,40 @@ export async function waitForCompatibleSchema(options: SchemaWaitOptions): Promi
   }
 }
 
-/**
- * Owner decision 2026-11-05 (changed, "the Worker starts too, like Twenty"): after a FAILED upgrade the API serves on the
- * previous schema (CREWFLOW_UPGRADE_FAILURE=continue) and the Worker starts ALL its consumers and scans as well — the boot
- * gate (Agent 3's gate 7) accepts an in-order pending tail for the Worker as a warning; a foreign, unknown or interleaved
- * ledger still refuses. Jobs that touch the missing schema fail and retry under their own existing rules (outbox
- * attempts/backoff, the next scan tick, the dispatcher's lease); a failure is always a failed job, never a crash.
- *
- * This is the ONE loud start-up line for that state: the first pending migration (chain order) and how many are pending,
- * or null when the ledger holds every migration this code expects. Names only.
- */
-export function partlyUpgradedSchemaWarning(expected: readonly string[], applied: readonly string[]): string | null {
-  const have = new Set(applied);
-  const pending = expected.filter((name) => !have.has(name));
-  if (pending.length === 0) return null;
-  const first = firstPendingMigration(pending) ?? pending[0]!;
-  return (
-    `[worker-schema] WARNING running on a partly-upgraded schema: ${pending.length} migration(s) this code expects are not applied, ` +
-    `first pending ${first}. Starting every consumer and scan anyway (owner decision 2026-11-05, like Twenty): jobs that need ` +
-    'the missing schema fail and retry under their normal rules until the fix is deployed (the API applies it on its next start).'
-  );
-}
+/** A query on the Worker's own login (rows only). */
+export type WorkerSchemaQuery = (sql: string, params?: unknown[]) => Promise<unknown[]>;
 
 /**
- * Reads the migration ledger once (the caller's query function, on its own login) and logs `partlyUpgradedSchemaWarning`
- * EXACTLY ONCE when something is pending. Returns the warning (or null). A ledger that cannot be read is not this
- * function's concern — the boot gates have already decided on it — so it reports nothing rather than guessing.
+ * ONE Worker schema check — the same call gate 7 makes for the Worker (database-boot-gates.ts), INCLUDING the C3 upgrade
+ * evidence: `readUpgradeEvidence` (Agent 1's classifier CHAIN-PARTIAL + the physical fresh-install proof NOT fresh). Without it
+ * `workerRelaxed` is always false and, after a failed upgrade, the wait refused the Worker that gate 7 would have started
+ * (O3 T8a-WORKER, owner decision 2026-11-05 "the Worker starts too, like Twenty"). With it, an in-order pending tail on a
+ * stopped UPGRADE passes (its warning is returned in the assessment; gate 7 logs the one partly-upgraded WARNING); an
+ * out-of-order or interleaved ledger, a ledger ahead of a provisioner, and a first install (EMPTY, BOOTSTRAP-PARTIAL,
+ * fresh CHAIN-PARTIAL, no evidence) still refuse exactly as before.
  */
-export async function warnIfPartlyUpgraded(options: {
-  query: (sql: string, params?: unknown[]) => Promise<unknown>;
-  expected: readonly string[];
-  log: (line: string) => void;
-}): Promise<string | null> {
-  let applied: string[];
-  try {
-    applied = await readLedgerNames(options.query as (sql: string, params?: unknown[]) => Promise<unknown[]>, 'worker process');
-  } catch {
-    return null;
-  }
-  const warning = partlyUpgradedSchemaWarning(options.expected, applied);
-  if (warning) options.log(warning);
-  return warning;
+export function checkWorkerSchema(query: WorkerSchemaQuery, options: { expected: readonly string[]; production: boolean }): Promise<SchemaCompatibilityAssessment> {
+  return checkSchemaCompatibility(query, {
+    process: 'worker',
+    production: options.production,
+    expected: options.expected,
+    label: 'worker process',
+    readUpgradeEvidence: () => readUpgradeEvidence(query, options.expected),
+  });
+}
+
+/** The Worker's bounded wait (waitForCompatibleSchema) over `checkWorkerSchema`. Main.ts runs it on its own boot connection. */
+export async function waitForWorkerSchemaOn(
+  query: WorkerSchemaQuery,
+  options: { expected: readonly string[]; production: boolean } & Omit<SchemaWaitOptions, 'check'>,
+): Promise<SchemaWaitResult & { assessment: SchemaCompatibilityAssessment | null }> {
+  let assessment: SchemaCompatibilityAssessment | null = null;
+  const { expected, production, ...wait } = options;
+  const result = await waitForCompatibleSchema({
+    ...wait,
+    check: async () => {
+      assessment = await checkWorkerSchema(query, { expected, production });
+    },
+  });
+  return { ...result, assessment };
 }
