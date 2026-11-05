@@ -5618,6 +5618,16 @@ writes a warning instead.
     - **C5 (MEDIUM): one API server.** Deploys stop the API, then start the new one. No rolling or blue-green update:
       two versions would race for the migration lock and old code would serve intermediate schemas.
 
+    - **One image (O1, PR #76; MEDIUM): the API container now carries the Worker-only PDF packages.** About 55 npm
+      packages, including `@react-pdf/*`, pdfkit, fontkit, pako 0.2.9, png-js, jay-peg, yoga-layout and `@noble/*`
+      (+30.8 MB uncompressed; 0 high or critical CVEs at O1). This is an owner-accepted attack-surface increase (one image
+      like Twenty, owner decision 2026-11-05).
+      - Open proof (`SHARED-IMAGE-PLAN.md`): nothing yet proves the API never LOADS them. There is no static
+        import-graph gate and no runtime `require.cache` check on the API.
+      - Recommended follow-up: add both, failing CI when an API entrypoint can reach one of the PDF packages or when a
+        started API process has one in `require.cache`. Until then a vulnerability in those packages is reachable from
+        the API only through code that imports them, which is not proven absent.
+
     Design changes recorded with this decision (not risks):
 
     - **C1:** `DISABLE_DB_MIGRATIONS` is accepted again (Twenty's name). It is the Worker's switch: the Worker never
