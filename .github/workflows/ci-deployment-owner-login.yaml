@@ -2,8 +2,9 @@
 # and needs only `contents: read`.
 #
 #   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs) in FULL mode
-#                      (one identical PG_DATABASE_URL on rab-api / rab-worker / rab-migrate, no second identity, no token,
-#                      the H1-H6 keys, the controlled-release and migrate-on-start lifecycles, the bundled database), plus
+#                      (one identical PG_DATABASE_URL on rab-api / rab-worker, no second identity, no token, the H1-H6
+#                      keys, the O3 lifecycle: the API migrates on start, no rab-migrate, one API, the Worker never
+#                      migrates and only consumes the job schedulers; the bundled database), plus
 #                      `docker compose config` of every supported combination. ci-security.yaml's deployment-config job
 #                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
@@ -75,8 +76,10 @@ jobs:
             echo "CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt"
           } > "$t/compose.env"
           D=packages/rab-docker
-          I="$D/docker-compose.image.yml"; M="$D/docker-compose.migrate-on-start.yml"; L="$D/docker-compose.local-db.yml"; S="$D/staging/docker-compose.staging.yml"
-          for combo in "$I" "$I $L" "$I $M" "$I $M $L" "$I $S"; do
+          I="$D/docker-compose.image.yml"; L="$D/docker-compose.local-db.yml"; S="$D/staging/docker-compose.staging.yml"
+          # O3: docker-compose.migrate-on-start.yml is folded into the image compose (the API migrates on start).
+          test ! -e "$D/docker-compose.migrate-on-start.yml"
+          for combo in "$I" "$I $L" "$I $S"; do
             args=()
             for f in $combo; do args+=(-f "$f"); done
             echo "docker compose config: $combo"

@@ -587,16 +587,33 @@ export class EnvironmentVariables {
   WORKER_INVITE_AUTO_DELETE_ENABLED: boolean = false;
 
   /**
-   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its 20 periodic scans.
-   *  - `interval` (DEFAULT): every replica runs every loop on its own process-local timer, exactly as before.
+   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its periodic scans.
+   *  - `interval`: every replica runs every loop on its own process-local timer (development and test).
    *  - `bullmq`: ONE cluster-wide BullMQ job scheduler per scan (`crewflow:<queue>:<jobName>`) hands each tick to one
    *    replica; a per-scan PostgreSQL advisory lock stops two replicas running the same scan at once. Requires a Redis whose
    *    `maxmemory-policy` is `noeviction` (refuses to boot otherwise).
-   * Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
+   * O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): UNSET means `bullmq` when NODE_ENV=production and `interval`
+   * otherwise (env.validation.ts applies it), and `interval` in production refuses to boot — the interval timers are off
+   * the production path. Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
    */
   @IsOptional()
   @IsIn(['interval', 'bullmq'])
-  WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
+  WORKER_SCHEDULER!: 'interval' | 'bullmq';
+
+  /**
+   * O3 C2 (owner decision 2026-11-05, Twenty's `DISABLE_CRON_JOBS_REGISTRATION`): exactly true or false (default false).
+   *  - API image (api-prestart.sh): unless true, a one-shot `register-schedulers` command upserts every scan's BullMQ job
+   *    scheduler (fixed ids) after the migrate step and before main.js; a registration failure is a loud WARNING and the API
+   *    starts anyway (like Twenty's entrypoint).
+   *  - Worker: true = CONSUME ONLY. It never upserts or removes a scheduler and never starts interval timers; it only
+   *    verifies, read-only, that every enabled scheduler exists (a missing one is an ERROR and turns health unhealthy).
+   *    true with WORKER_SCHEDULER=interval refuses to boot (it would schedule nothing).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: 'DISABLE_CRON_JOBS_REGISTRATION must be exactly true or false' })
+  DISABLE_CRON_JOBS_REGISTRATION: boolean = false;
 
   /**
    * Phase D-Q4a (owner approval 2026-11-04, OD-1): how the Worker walks the four 300-s shift-family scans (shift monitor,
@@ -1991,8 +2008,35 @@ export class EnvironmentVariables {
   @IsIn(['none', 'token'], { message: 'CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly none or token' })
   CREWFLOW_MIGRATION_APPROVAL_MODE?: 'none' | 'token';
 
-  /** refuse (default) | continue-if-compatible: what the API does when a schema upgrade fails (exit 70 = degraded continue). */
+  /**
+   * O3 C1 (owner decision 2026-11-05, Twenty's switch): true = this process never migrates. On the API it overrides
+   * CREWFLOW_MIGRATE_ON_START (api-prestart.sh runs only the read-only pending check). The Worker never migrates either way.
+   */
+  @IsOptional()
+  @IsIn(['true', 'false'], { message: 'DISABLE_DB_MIGRATIONS must be exactly true or false' })
+  DISABLE_DB_MIGRATIONS?: 'true' | 'false';
+
+  /**
+   * O3 C3 (owner decision 2026-11-05): continue (default) | refuse — what the API does when a schema UPGRADE migration fails.
+   * continue: the migrate child logs an ERROR and exits 70; api-prestart.sh starts main.js with CREWFLOW_UPGRADE_INCOMPLETE.
+   * A first install, the configuration, the identity, the lock, the approval and the post-checks stay fail-closed.
+   */
+  @IsOptional()
+  @IsIn(['continue', 'refuse'], { message: 'CREWFLOW_UPGRADE_FAILURE must be exactly continue or refuse' })
+  CREWFLOW_UPGRADE_FAILURE?: 'continue' | 'refuse';
+
+  /** DEPRECATED alias of CREWFLOW_UPGRADE_FAILURE: refuse -> refuse, continue-if-compatible -> continue (the two must agree). */
   @IsOptional()
   @IsIn(['refuse', 'continue-if-compatible'], { message: 'CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly refuse or continue-if-compatible' })
   CREWFLOW_UPGRADE_FAILURE_POLICY?: 'refuse' | 'continue-if-compatible';
+
+  /**
+   * O3 C3: set ONLY by api-prestart.sh, on main.js, after a verified exit 70 (an upgrade migration failed and
+   * CREWFLOW_UPGRADE_FAILURE=continue): the failing migration's name, or `unknown`. api-prestart.sh REFUSES (exit 64) an
+   * inherited value, so an operator cannot pre-set it. Read by /healthz (`upgradeFailed: true`, informational; never the name) and by the API's
+   * boot gate (Agent 3). A migration name only: letters, digits, `_`, `-`, `.`, at most 200 characters.
+   */
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9_.-]{1,200}$/, { message: 'CREWFLOW_UPGRADE_INCOMPLETE must be a migration name (letters, digits, _ - .) or unknown' })
+  CREWFLOW_UPGRADE_INCOMPLETE?: string;
 }

@@ -74,7 +74,7 @@ const weakenings = [
   ['a build section', (v) => { v.services['rab-worker'].build = { context: '.' }; }, /rab-worker: has a build section/],
   ['an image tag instead of a digest', (v) => { v.services['rab-api'].image = 'adhin007/adolphus:latest'; }, /rab-api: image .* is not repository@sha256/],
   ['tag and digest together', (v) => { v.services['rab-api'].image = `adhin007/adolphus:v1@sha256:${'1'.repeat(64)}`; }, /rab-api: image/],
-  ['rab-migrate on another image than rab-api', (v) => { v.services['rab-migrate'].image = `adhin007/adolphus@sha256:${'2'.repeat(64)}`; }, /rab-migrate: image differs/],
+  ['a release step brought back (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present/],
   ['rab-worker on another image than rab-api (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'7a'.repeat(32)}`; }, /rab-worker: image differs from rab-api/],
   ['enforce mode switched to warn', (v) => { v.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION = 'warn'; }, /rab-worker: CREWFLOW_RUNTIME_ISOLATION is not "enforce"/],
   ['enforce mode removed from the API', (v) => { delete v.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION; }, /rab-api: CREWFLOW_RUNTIME_ISOLATION/],
@@ -86,20 +86,19 @@ const weakenings = [
   ['migration credential reaches the API', (v) => { v.services['rab-api'].environment.PG_DATABASE_URL = `postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@h:5432/rab`; }, /rab-api: PG_DATABASE_URL carries a migration\/ops credential/],
   ['migration approval on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_APPROVED = 'pending-1-x'; }, /rab-worker: sets CREWFLOW_MIGRATION_APPROVED/],
   ['API reads .env.migrate', (_v, f) => { f.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-api: names \.env\.migrate/],
-  ['API does not wait for rab-migrate', (v) => { delete v.services['rab-api'].depends_on['rab-migrate']; }, /rab-api: does not wait for rab-migrate|rab-api\.depends_on differs/],
-  ['rab-migrate restarts', (v) => { v.services['rab-migrate'].restart = 'always'; }, /rab-migrate: restart/],
-  ['rab-migrate writable root', (v) => { v.services['rab-migrate'].read_only = false; }, /rab-migrate: not read-only/],
-  ['rab-migrate on another login than the API', (v) => { v.services['rab-migrate'].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:other@h:5432/rab'; }, /PG_DATABASE_URL differs from rab-api's|credential does not reach it/],
-  ['rab-migrate reads runtime.env', (v, f) => { v.services['rab-migrate'].environment.APP_SECRET = 'x'; f.services['rab-migrate'].env_file = [{ path: '/s/database.env' }, { path: '/s/runtime.env' }]; }, /rab-migrate: (reads the runtime secrets|must read database.env only)/],
-  ['rab-migrate back on .env.migrate', (_v, f) => { f.services['rab-migrate'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-migrate: must read database.env only/],
-  ['rab-migrate with DB_TARGET', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'production'; }, /rab-migrate: sets DB_TARGET/],
-  ['an approval mode on rab-migrate', (v) => { v.services['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }, /rab-migrate: commits CREWFLOW_MIGRATION_APPROVAL_MODE/],
-  ['API migrates on start', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'true'; }, /rab-api\.environment\.CREWFLOW_MIGRATE_ON_START differs/],
+  ['the API waits for a rab-migrate again', (v) => { v.services['rab-api'].depends_on['rab-migrate'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on rab-migrate|rab-api\.depends_on differs/],
+  ['API no longer migrates on start (O3 C1)', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'false'; }, /rab-api: CREWFLOW_MIGRATE_ON_START is not "true"/],
+  ['a bogus approval mode', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token/],
+  ['API stops registering the schedulers (O3 C2)', (v) => { v.services['rab-api'].environment.DISABLE_CRON_JOBS_REGISTRATION = 'true'; }, /rab-api: must migrate and register/],
+  ['the Worker migrates (O3 C1)', (v) => { delete v.services['rab-worker'].environment.DISABLE_DB_MIGRATIONS; }, /rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION/],
+  ['the Worker registers schedulers (O3 C2)', (v) => { v.services['rab-worker'].environment.DISABLE_CRON_JOBS_REGISTRATION = 'false'; }, /rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION/],
+  ['interval scheduler committed again', (v) => { v.services['rab-worker'].environment.WORKER_SCHEDULER = 'interval'; }, /rab-worker: commits WORKER_SCHEDULER/],
+  ['the deprecated upgrade policy committed (O3 C3)', (v) => { v.services['rab-api'].environment.CREWFLOW_UPGRADE_FAILURE_POLICY = 'refuse'; }, /rab-api: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY/],
   ['a provisioner URL on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_PROVISIONER_DATABASE_URL = 'postgresql://crewflow:x@h/rab'; }, /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/],
   ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
   ['Redis evicting', (v) => { const c = v.services['rab-redis'].command; c[c.indexOf('--maxmemory-policy') + 1] = 'allkeys-lru'; }, /rab-redis: command lacks --maxmemory-policy noeviction/],
   ['Redis without the ACL file', (v) => { const c = v.services['rab-redis'].command; c.splice(c.indexOf('--aclfile'), 2); }, /rab-redis: command lacks --aclfile/],
-  ['OpenShip import guard removed', (v) => { v.services['rab-migrate'].volumes = []; }, /OpenShip import guard/],
+  ['OpenShip import guard removed', (v) => { v.services['rab-ops'].volumes = []; }, /OpenShip import guard is missing/],
   ['rab-ops started by up', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
 ];
 for (const [name, mutate, pattern] of weakenings) {
@@ -172,17 +171,15 @@ test('environment mode refuses migration/ops authority, foreign logins and unfil
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
 });
 
-// Review G1: overrides on rab-redis, rab-migrate and rab-ops are re-checked in the deployed model.
+// Review G1: overrides on rab-redis and rab-ops are re-checked in the deployed model (O3: and none may add a rab-migrate).
 const otherWeakenings = [
   ['rab-redis privileged', (v) => { v.services['rab-redis'].privileged = true; }, /rab-redis: privileged/],
   ['rab-redis on the host network', (v) => { v.services['rab-redis'].network_mode = 'host'; }, /rab-redis: host namespace/],
   ['rab-redis started without noeviction and the ACL', (v) => { v.services['rab-redis'].command = ['redis-server', '--appendonly', 'yes']; }, /rab-redis: command lacks --maxmemory-policy noeviction/],
   ['rab-redis without a memory limit', (v) => { delete v.services['rab-redis'].mem_limit; }, /rab-redis: no memory limit/],
-  ['the Docker socket in rab-migrate', (v) => { v.services['rab-migrate'].volumes.push({ type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' }); }, /rab-migrate: mounts the Docker socket/],
-  ['rab-migrate on another image', (v) => { v.services['rab-migrate'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-migrate: image differs/],
+  ['a bogus approval mode in the deployed model', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model/],
+  ['an override adds a rab-migrate (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present in the deployed model/],
   ['rab-worker on another image (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-worker: image differs from rab-api's in the deployed model/],
-  ['rab-migrate with DB_TARGET=local', (v) => { v.services['rab-migrate'].environment.DB_TARGET = 'local'; }, /rab-migrate: sets DB_TARGET/],
-  ['rab-migrate without database.env', (v) => { v.services['rab-migrate'].env_file = []; }, /rab-migrate: must read database.env only/],
   ['rab-ops without its profile', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
   ['rab-ops with a writable root', (v) => { v.services['rab-ops'].read_only = false; }, /rab-ops: not read-only/],
   ['rab-ops privileged', (v) => { v.services['rab-ops'].privileged = true; }, /rab-ops: privileged/],
@@ -193,15 +190,21 @@ for (const [name, mutate, pattern] of otherWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
 
+test('environment mode accepts the operator token opt-in (compose.env), and none', { skip }, () => {
+  for (const mode of ['none', 'token']) {
+    const problems = deployed((v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = mode; });
+    assert.ok(!problems.some((p) => /APPROVAL_MODE/.test(p)), `${mode}: ${problems.join(' | ')}`);
+  }
+});
+
 // Compose-version independence (CI runs Compose v2.38, which resolves env files and drops env_file even under
-// --no-env-resolution). A REAL variant file in which rab-migrate / rab-ops no longer read their env file must still fail.
-test('a variant file whose rab-migrate and rab-ops read no env file fails, whatever the Compose version', { skip }, () => {
-  const migrateEnvFile = /(\n  rab-migrate:\n[\s\S]*?)\n    env_file:\n      - path: [^\n]*\/database\.env\n        required: true\n/;
+// --no-env-resolution). A REAL variant file in which rab-ops no longer reads its env file must still fail.
+test('a variant file whose rab-ops reads no env file fails, whatever the Compose version', { skip }, () => {
   const fsx = require('node:fs');
   const os = require('node:os');
   const pathx = require('node:path');
   const src = fsx.readFileSync(pathx.join(__dirname, '../docker-compose.image.yml'), 'utf8');
-  const weakened = src.replace(migrateEnvFile, '$1\n').replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
+  const weakened = src.replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
   assert.notEqual(weakened, src, 'the fixture edit did not apply');
   const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'crewflow-image-verify-test-'));
   try {
@@ -211,9 +214,8 @@ test('a variant file whose rab-migrate and rab-ops read no env file fails, whate
     try {
       const m = renderModels(copy);
       const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /rab-migrate: must read database.env only/);
       assertRefused(problems, /rab-ops: must read \.env\.ops only/);
-      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-migrate: must read database.env only in the deployed model/);
+      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-ops: must read \.env\.ops only in the deployed model/);
     } finally {
       fsx.rmSync(copy, { force: true });
     }

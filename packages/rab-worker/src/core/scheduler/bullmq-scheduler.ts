@@ -19,7 +19,7 @@ import {
   ScanQueueName,
 } from './queue-registry';
 import { assertRedisReadyForBullmq, assertSupportedBullmqApi } from './redis-preflight';
-import { CrewflowSchedulerManager, ReconcileReport } from './scheduler-manager';
+import { CrewflowSchedulerManager, ReconcileReport, VerifyReport } from './scheduler-manager';
 import { lockDurationMsFor, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from './scan-jobs';
 
 /** The loop options both scheduler modes hand to WorkerRuntime for one scan (same name, stats keys, metric key). */
@@ -252,6 +252,15 @@ export interface BullmqSchedulerDeps {
    * scan's member locks exist for the very first job this replica takes (main.ts `combinedMemberLock`).
    */
   onScanLock?: (scanLock: ScanLock) => void;
+  /**
+   * O3 C2 (owner decision 2026-11-05, "exactly like Twenty"). true (default — development, test, and a Worker without
+   * DISABLE_CRON_JOBS_REGISTRATION): this process registers the schedulers (one reconcile at start, then every
+   * `reconcileMs`), exactly as before. false (DISABLE_CRON_JOBS_REGISTRATION=true — production, where the API registers them
+   * at start-up): CONSUME ONLY — the scan lock and the scan Workers as before, but never an upsert or a removal; every
+   * `reconcileMs` a READ-ONLY verify that each enabled scheduler exists (a missing one is logged as an ERROR naming the ids,
+   * and the reconcile-health timestamp is not refreshed, so the Worker's health check turns unhealthy).
+   */
+  registerSchedulers?: boolean;
 }
 
 export interface BullmqScheduler {
@@ -313,20 +322,60 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
   const writeStatus = (report: ReconcileReport) =>
     redis
       .multi()
-      .hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: deps.prefix, reconciledAt: Date.now(), schedulers: report.upserted.length, instance })
+      .hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', registration: 'worker', prefix: deps.prefix, reconciledAt: Date.now(), schedulers: report.upserted.length, missing: 0, instance })
       .expire(WORKER_SCHEDULER_STATUS_KEY, Math.max(180, Math.ceil((deps.reconcileMs * 3) / 1000)))
       .exec()
       .catch(() => undefined);
+  const writeVerifyStatus = (report: VerifyReport) =>
+    redis
+      .multi()
+      .hset(WORKER_SCHEDULER_STATUS_KEY, {
+        mode: 'bullmq',
+        registration: 'api',
+        prefix: deps.prefix,
+        reconciledAt: Date.now(),
+        schedulers: report.present.length,
+        missing: report.missing.length,
+        instance,
+      })
+      .expire(WORKER_SCHEDULER_STATUS_KEY, Math.max(180, Math.ceil((deps.reconcileMs * 3) / 1000)))
+      .exec()
+      .catch(() => undefined);
+  let lastMissing = '';
+  function onVerified(report: VerifyReport, first: boolean): void {
+    void writeVerifyStatus(report);
+    if (report.missing.length === 0) {
+      runtime.markReconcileOk();
+      if (first || lastMissing) {
+        logger.log(`bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all ${report.present.length} enabled Crewflow schedulers present under prefix ${deps.prefix}`);
+      }
+      lastMissing = '';
+      return;
+    }
+    lastMissing = report.missing.join(', ');
+    logger.error(
+      `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): ${report.missing.length} enabled Crewflow scheduler(s) MISSING under prefix ${deps.prefix}: ${lastMissing}. ` +
+        'Those scans do not run. This Worker never registers schedulers: restart the API (it registers them at start-up), and check Redis persistence.',
+    );
+  }
 
-  const first = await manager.reconcile();
-  runtime.markReconcileOk();
-  await writeStatus(first);
-  logger.log(
-    `bullmq scheduler: ${first.upserted.length} Crewflow schedulers reconciled under prefix ${deps.prefix}` +
-      (first.removedStale.length ? `, removed stale ${first.removedStale.join(', ')}` : '') +
-      (first.disabled.length ? `, ${first.disabled.length} disabled (not scheduled): ${first.disabled.join(', ')}` : '') +
-      (first.foreignUntouched.length ? `, ${first.foreignUntouched.length} foreign scheduler(s) left untouched` : ''),
-  );
+  const registers = deps.registerSchedulers !== false;
+  if (registers) {
+    const first = await manager.reconcile();
+    runtime.markReconcileOk();
+    await writeStatus(first);
+    logger.log(
+      `bullmq scheduler: ${first.upserted.length} Crewflow schedulers reconciled under prefix ${deps.prefix}` +
+        (first.removedStale.length ? `, removed stale ${first.removedStale.join(', ')}` : '') +
+        (first.disabled.length ? `, ${first.disabled.length} disabled (not scheduled): ${first.disabled.join(', ')}` : '') +
+        (first.foreignUntouched.length ? `, ${first.foreignUntouched.length} foreign scheduler(s) left untouched` : ''),
+    );
+  } else {
+    // O3 C2 consume-only: never registers. A missing scheduler does not refuse the start (the API may re-register it on its
+    // next start); it is an ERROR now and on every verify, and health stays unhealthy until it exists.
+    const first = await manager.verify();
+    onVerified(first, true);
+  }
 
   const byQueue = new Map<ScanQueueName, Map<string, ScanJobDefinition>>();
   for (const def of deps.jobs) {
@@ -371,14 +420,21 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
     scanWorkers.push(worker);
   }
 
-  manager.startPeriodic(deps.reconcileMs, (result) => {
-    if (result.ok) {
-      runtime.markReconcileOk();
-      void writeStatus(result.report);
-    } else {
-      logger.warn(`bullmq scheduler reconcile failed: ${result.error.message}`);
-    }
-  });
+  if (registers) {
+    manager.startPeriodic(deps.reconcileMs, (result) => {
+      if (result.ok) {
+        runtime.markReconcileOk();
+        void writeStatus(result.report);
+      } else {
+        logger.warn(`bullmq scheduler reconcile failed: ${result.error.message}`);
+      }
+    });
+  } else {
+    manager.startPeriodicVerify(deps.reconcileMs, (result) => {
+      if (result.ok) onVerified(result.report, false);
+      else logger.warn(`bullmq scheduler verify failed (read-only; this Worker never registers): ${result.error.message}`);
+    });
+  }
 
   return {
     manager,

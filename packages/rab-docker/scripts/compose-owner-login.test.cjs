@@ -12,6 +12,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const gate = require('./compose-owner-login.cjs');
@@ -53,7 +54,7 @@ test('forbidden names: every second database identity, role password, authority 
   ]) {
     assert.ok(forbiddenReason(name), `${name} must be forbidden`);
   }
-  assert.match(forbiddenReason('CREWFLOW_MIGRATION_APPROVED'), /run -e/);
+  assert.match(forbiddenReason('CREWFLOW_MIGRATION_APPROVED'), /approval mode none; there is no token/);
   assert.match(forbiddenReason('CREWFLOW_DB_MODE'), /no mode switch/);
 });
 
@@ -75,8 +76,8 @@ test('database env: a clean real file passes', () => {
   assert.deepEqual(lintEnvText('database', DATABASE_OK), []);
 });
 
-test('database env: the approval token is refused, with the run -e reason', () => {
-  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVED=pending-1-${'a'.repeat(64)}`), /CREWFLOW_MIGRATION_APPROVED: .*run -e/);
+test('database env: the approval token is refused (O3: approval mode none, there is no token)', () => {
+  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVED=pending-1-${'a'.repeat(64)}`), /CREWFLOW_MIGRATION_APPROVED: .*no token/);
   assertRefused(lintEnvText('runtime', `export CREWFLOW_MIGRATION_APPROVED=pending-1-${'a'.repeat(64)}`), /CREWFLOW_MIGRATION_APPROVED/);
 });
 
@@ -116,16 +117,72 @@ test('runtime env: PG_DATABASE_URL is refused there (it lives in database.env on
   assertRefused(lintEnvText('runtime', 'WORKER_INVITE_AUTO_DELETE_ENABLED=true'), /WORKER_INVITE_AUTO_DELETE_ENABLED/);
 });
 
-test('BC-11 opt-ins: approval mode and deployment identity live in database.env only, with valid values', () => {
+test('BC-11 opt-in: the deployment identity lives in database.env only; O3: the approval mode is committed, never an env file value', () => {
   const noIdentity = DATABASE_OK.split('\n').filter((l) => !l.startsWith('CREWFLOW_DEPLOYMENT_')).join('\n');
   assert.deepEqual(lintEnvText('database', noIdentity), [], 'the deployment identity is optional');
-  for (const mode of ['none', 'token']) assert.deepEqual(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), []);
-  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=off`), /must be exactly none or token/);
-  for (const key of ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ID', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT']) {
-    assertRefused(lintEnvText('runtime', `${key}=token`), new RegExp(`${key}: belongs in database.env only`));
+  for (const key of ['CREWFLOW_DEPLOYMENT_ID', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT']) {
+    assertRefused(lintEnvText('runtime', `${key}=x`), new RegExp(`${key}: belongs in database.env only`));
+    assertRefused(lintComposeText('x.yml', `services:\n  a:\n    environment:\n      ${key}: x\n`), /commits a BC-11 opt-in/);
   }
-  for (const key of ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ID']) {
-    assertRefused(lintComposeText('x.yml', `services:\n  a:\n    environment:\n      ${key}: token\n`), /commits a BC-11 opt-in/);
+  // O3 + BC-11/C4: the approval mode is a compose.env interpolation value (none by default, token an opt-in). In
+  // database.env / runtime.env rab-api's committed expression would silently override it, so it is refused there and the
+  // refusal names compose.env.
+  for (const kind of ['database', 'runtime']) {
+    for (const mode of ['none', 'token']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}CREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), /CREWFLOW_MIGRATION_APPROVAL_MODE: set it in compose\.env/);
+  }
+  for (const mode of ['none', 'token']) assert.deepEqual(lintEnvText('compose', `CREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), []);
+  assertRefused(lintEnvText('compose', 'CREWFLOW_MIGRATION_APPROVAL_MODE=off'), /must be exactly none or token/);
+  // The compose files may carry only the interpolation, never a literal that pins the mode.
+  assert.deepEqual(lintComposeText('x.yml', 'services:\n  a:\n    environment:\n      CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}\n'), []);
+  for (const literal of ['none', 'token', '${CREWFLOW_MIGRATION_APPROVAL_MODE:-token}']) {
+    assertRefused(lintComposeText('x.yml', `services:\n  a:\n    environment:\n      CREWFLOW_MIGRATION_APPROVAL_MODE: ${literal}\n`), /must be exactly \$\{CREWFLOW_MIGRATION_APPROVAL_MODE:-none\}/);
+  }
+});
+
+test('BC-07: CREWFLOW_AUDIT_SINK is required in runtime.env, with a production-accepted value only', () => {
+  const ok = 'CREWFLOW_AUDIT_SINK=stdout';
+  assert.deepEqual(lintEnvText('runtime', ok), []);
+  // missing
+  assertRefused(lintEnvText('runtime', 'APP_URL=https://crewflow.example'), /CREWFLOW_AUDIT_SINK: missing \(BC-07/);
+  // invalid value, and values the code accepts but production refuses
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=syslog'), /must be exactly none, stdout or file/);
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=STDOUT'), /must be exactly none, stdout or file/);
+  for (const v of ['none', 'file']) assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=${v}`), new RegExp(`production refuses ${v}`));
+  assertRefused(lintEnvText('runtime', `${ok}\nCREWFLOW_AUDIT_SINK_FAILURE=log`), /production requires refuse/);
+  assertRefused(lintEnvText('runtime', `${ok}\nCREWFLOW_AUDIT_SINK_FAILURE=maybe`), /must be exactly refuse or log/);
+  assert.deepEqual(lintEnvText('runtime', `${ok}\nCREWFLOW_AUDIT_SINK_FAILURE=refuse`), []);
+  assertRefused(lintEnvText('runtime', `${ok}\nCREWFLOW_AUDIT_SINK_FILE=/var/log/audit.jsonl`), /development-only/);
+  // only in runtime.env, never in another file and never committed in compose
+  assertRefused(lintEnvText('database', `${DATABASE_OK}\n${ok}`), /belongs in runtime\.env/);
+  assertRefused(lintEnvText('compose', ok), /belongs in runtime\.env/);
+  assertRefused(lintComposeText('x.yml', 'services:\n  a:\n    environment:\n      CREWFLOW_AUDIT_SINK: stdout\n'), /commits the audit sink/);
+});
+
+test('BC-07: the gate\'s audit-sink values are exactly the code\'s (security-audit-sink.ts), never invented', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/audit-sink/security-audit-sink.ts'), 'utf8');
+  const modes = /if \(mode !== '(\w+)' && mode !== '(\w+)' && mode !== '(\w+)'\)/.exec(src);
+  assert.ok(modes, 'the mode check moved: update the gate and this test together');
+  assert.deepEqual([...modes.slice(1)].sort(), [...gate.AUDIT_SINK_MODES].sort());
+  const failures = /if \(failure !== '(\w+)' && failure !== '(\w+)'\)/.exec(src);
+  assert.ok(failures, 'the failure-policy check moved');
+  assert.deepEqual([...failures.slice(1)].sort(), [...gate.AUDIT_SINK_FAILURES].sort());
+  // Production refuses none and file, and log; it accepts stdout and refuse (the gate's production lists).
+  assert.match(src, /if \(production && mode === 'none'\)/);
+  assert.match(src, /if \(production && mode === 'file'\)/);
+  assert.match(src, /if \(production && failure === 'log'\)/);
+  assert.deepEqual([...gate.AUDIT_SINK_PRODUCTION_MODES], gate.AUDIT_SINK_MODES.filter((m) => m !== 'none' && m !== 'file'));
+  assert.deepEqual([...gate.AUDIT_SINK_PRODUCTION_FAILURES], gate.AUDIT_SINK_FAILURES.filter((f) => f !== 'log'));
+});
+
+test('O3: the upgrade-failure policy, the scheduler keys and the start-up flag', () => {
+  for (const v of ['continue', 'refuse']) assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+CREWFLOW_UPGRADE_FAILURE=${v}`), []);
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_FAILURE=maybe'), /must be exactly continue or refuse/);
+  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_UPGRADE_FAILURE=refuse`), /belongs in runtime.env/);
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_FAILURE_POLICY=refuse'), /deprecated \(O3 C3\)/);
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_INCOMPLETE=Beta1'), /set only by api-prestart\.sh/);
+  for (const key of ['DISABLE_DB_MIGRATIONS', 'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'WORKER_SCHEDULER']) {
+    assertRefused(lintEnvText('runtime', `${key}=x`), new RegExp(`${key}: committed in the compose files`));
   }
 });
 
@@ -207,7 +264,7 @@ test('bundled database: superuser never the app login, no clear-text password, T
   assertRefused(problemsAfter((s) => { s['rab-postgres'].command = s['rab-postgres'].command.filter((t) => t !== 'ssl=on'); }), /TLS is not on/);
   assertRefused(problemsAfter((s) => { s['rab-postgres'].command = s['rab-postgres'].command.filter((t) => !t.startsWith('hba_file=')); }), /pg_hba/);
   assertRefused(problemsAfter((s) => {
-    for (const svc of ['rab-api', 'rab-worker', 'rab-migrate']) s[svc].environment = { ...s[svc].environment, PG_DATABASE_URL: 'postgresql://postgres:x@rab-postgres:5432/crewflow?sslmode=verify-full' };
+    for (const svc of ['rab-api', 'rab-worker']) s[svc].environment = { ...s[svc].environment, PG_DATABASE_URL: 'postgresql://postgres:x@rab-postgres:5432/crewflow?sslmode=verify-full' };
   }), /logs in as the bundled superuser/);
 });
 
@@ -222,7 +279,7 @@ test('bundled database: exactly Agent 1\'s fresh-install SQL as the one init fil
 test('bundled database: internal network only, and every app service waits for it', { skip }, () => {
   assertRefused(problemsAfter((s) => { s['rab-postgres'].networks.default = null; }), /internal crewflow-db network only/);
   assertRefused(problemsAfter((s, m) => { m.networks['crewflow-db'].internal = false; }), /crewflow-db is not internal/);
-  for (const svc of ['rab-api', 'rab-worker', 'rab-migrate']) {
+  for (const svc of ['rab-api', 'rab-worker']) {
     assertRefused(problemsAfter((s) => { delete s[svc].depends_on['rab-postgres']; }), new RegExp(`${svc}: does not wait for a healthy rab-postgres`));
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
   }

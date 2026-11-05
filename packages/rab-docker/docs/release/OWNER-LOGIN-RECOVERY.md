@@ -67,7 +67,7 @@ pg_dump    -U <cluster-superuser> -Fc --create -d <database> -f db.dump
 **Managed provider:** record the provider's **PITR timestamp** (`SELECT now()` on the database, plus the provider's restore window), or take a **snapshot**, and record its id.
 - PITR retention must cover your incident-detection time (M0 §6.4).
 
-**No backup or restore point means no transition.** The release step's token approves the apply; it does not make it reversible.
+**No backup or restore point means no transition, and no upgrade.** Since O3 the API applies pending migrations when it starts; nothing makes an apply reversible except this backup.
 
 ## 3. An old image on an upgraded database: NOT supported in production, fails closed
 
@@ -180,7 +180,7 @@ No data is restored or lost by this procedure; it changes only which images run.
 
 ### 4.3 After a rollback
 - `crewflow_owner` may exist on the restored instance (managed PITR to a point after 5.3, or a later owner-login release). Have the admin run `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Never `DROP ROLE`** it without Agent 1's guidance.
-- Re-attempt the upgrade only from section 2 again: a fresh backup or restore point, then the release step (and, if token mode is on, a fresh check run and a fresh token).
+- Re-attempt the upgrade only from section 2 again: a fresh backup or restore point, then the upgrade (`OWNER-LOGIN-DEPLOYMENT.md` section 3: stop-then-start; the API migrates on start).
 
 ## 5. Evidence (Agent 1, disposable PG16.15)
 

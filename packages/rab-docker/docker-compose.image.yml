@@ -2,41 +2,40 @@
 # (owner's final decision, 2026-11-04: ONE schema-owning login, crewflow_owner, for the API, the Worker and the release
 # step; no mode switch). Runbook: packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.
 #
-#   docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml up -d --wait        # controlled release
-#   + -f docker-compose.migrate-on-start.yml   quick start: the API migrates on start (NOT for production, runbook 6)
+#   docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml up -d --wait --wait-timeout 1200
 #   + -f docker-compose.local-db.yml           bundled PostgreSQL 16 (its init is Agent 1's crewflow_owner SQL)
 #   + -f staging/docker-compose.staging.yml    the isolated staging project
 #
 # Every application service runs a prebuilt image by IMMUTABLE DIGEST. Nothing is built on the host: this file has no
 # `build:` section anywhere, so a host can never rebuild the release from whatever commit it happens to have checked out.
 #
-#   rab-api, rab-worker, rab-migrate, rab-ops  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_DIGEST}
-#   rab-redis                                  ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
+#   rab-api, rab-worker, rab-ops  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_DIGEST}
+#   rab-redis                     ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
 # CREWFLOW_IMAGE_DIGEST is the multi-platform INDEX digest (amd64 + arm64) of the approved release, never a tag; compose
 # refuses to render without it. O1/O2: the API and the Worker are ONE image (rab/Dockerfile), chosen by command, published
 # under ONE tag (the full commit). The former CREWFLOW_API_IMAGE_DIGEST / CREWFLOW_WORKER_IMAGE_DIGEST pair is retired
 # (scripts/compose-owner-login.cjs refuses it in compose.env); rolling back to a two-digest release such as v0.4.0 uses
 # that release's own compose files (docs/release/OWNER-LOGIN-RECOVERY.md section 4.4).
 #
-# ONE DATABASE CREDENTIAL. rab-api, rab-worker and rab-migrate read PG_DATABASE_URL (crewflow_owner at the DIRECT host,
+# ONE DATABASE CREDENTIAL. rab-api and rab-worker read PG_DATABASE_URL (crewflow_owner at the DIRECT host,
 # sslmode=verify-full) from ONE file, ${CREWFLOW_SECRETS_DIR}/database.env (template env/database.env.example), so it is
 # byte-identical everywhere. There is no migrator, provisioner, worker, ops or replica URL, no .env.migrate and no role
 # password anywhere in this stack. The runtime settings (APP_SECRET, REDIS_URL, URLs, email, S3) are in a SECOND file,
-# ${CREWFLOW_SECRETS_DIR}/runtime.env (template env/runtime.env.example), read by rab-api and rab-worker only, so the
-# release step never holds them. scripts/compose-owner-login.cjs enforces all of this in CI.
+# ${CREWFLOW_SECRETS_DIR}/runtime.env (template env/runtime.env.example), read by rab-api and rab-worker.
+# scripts/compose-owner-login.cjs enforces all of this in CI.
 #
-# LIFECYCLE (this file = the CONTROLLED RELEASE, production's default). The API never changes the schema
-# (CREWFLOW_MIGRATE_ON_START=false): at start it only verifies code<->schema compatibility and refuses to serve otherwise.
-# The one-off rab-migrate (deploy-prepare.js, the SAME API image, the SAME login) runs to completion first; rab-api waits
-# for it (service_completed_successfully), the Worker waits for a healthy API. APPROVAL (BC-11, owner decision 2026-11-05):
-# mode none by default = rab-migrate APPLIES every pending migration (exit 0 applied / nothing pending; 64-69 by kind:
-# config, behind, failed, identity, post-check, lock timeout). Token mode is an OPT-IN of database.env
-# (CREWFLOW_MIGRATION_APPROVAL_MODE=token): then a run without a token is a check run (3 = pending, prints
-# pending-<n>-<sha256>) and every non-fresh apply needs `run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate` (runbook 3.4).
-# The deployment id (CREWFLOW_DEPLOYMENT_*) is likewise an optional database.env entry: matched when declared, a warning
-# when absent. This file commits neither (a committed value would override the operator's opt-in; the gate refuses it).
-# Accepted risk: with the defaults a wrong image or URL migrates production; recovery is the mandatory pre-upgrade backup
-# (docs/release/OWNER-LOGIN-RECOVERY.md).
+# LIFECYCLE (O3, owner decisions C1-C5, 2026-11-05, "EXACTLY LIKE TWENTY"; G-07 accepted). There is NO release step and
+# no rab-migrate: the API MIGRATES ON START (CREWFLOW_MIGRATE_ON_START=true; approval mode none by default, token an opt-in
+# of compose.env, BC-11/C4; with token, the API's start needs CREWFLOW_MIGRATION_APPROVED). api-prestart.sh runs the
+# migration child under the migration lock before main.js (a first-install failure exits non-zero and the API never becomes
+# healthy; a failed UPGRADE logs an ERROR and the API starts degraded, C3), then registers the BullMQ job schedulers (C2).
+# The Worker NEVER migrates (DISABLE_DB_MIGRATIONS=true) and never registers schedulers (DISABLE_CRON_JOBS_REGISTRATION=
+# true, consume only); it starts only after a healthy API and a healthy Redis, so it does not wait for the schema itself
+# (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0). ONE rab-api, deployed STOP-THEN-START (C5): `docker compose up -d` recreates the
+# API container (the old one stops, then the new one starts and migrates); never scale rab-api, never run a second stack
+# (blue-green) against the same database. The deployment id (CREWFLOW_DEPLOYMENT_*) stays an optional database.env entry.
+# Accepted risk: every start of a new image applies what it ships; recovery is the MANDATORY pre-upgrade backup
+# (docs/release/OWNER-LOGIN-DEPLOYMENT.md section 3, OWNER-LOGIN-RECOVERY.md).
 #
 # SECURITY POSTURE. The runtime login owns the schema (PT-01; M0 G-01..G-04 and the rest: runbook section 1, THREAT-MODEL.md).
 # Container isolation below limits what a compromised PROCESS can do to the HOST; it does nothing for what the database
@@ -49,8 +48,8 @@
 # capability bounding set, no-new-privileges, read-only root, PID and memory limits; "[worker-isolation] ..." log line).
 #
 # WHERE IT RUNS: plain `docker compose` (v2.24+) on a VM the operator controls. Never OpenShip (it drops user / read_only /
-# tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions; the Worker would run as ROOT); the
-# long-form tmpfs on rab-migrate makes OpenShip refuse to import this file (docs/release/OPENSHIP-COMPATIBILITY.md).
+# tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions); the long-form tmpfs on rab-ops makes
+# OpenShip refuse to import this file (docs/release/OPENSHIP-COMPATIBILITY.md).
 #
 # SUPERSEDED, KEPT UNTIL THE FINAL CLEAN-UP PR (#9, owner approval): rab-ops (profile "ops", never started by `up`) still
 # names .env.ops and its separated-mode credentials; it is not part of the owner-login deployment and must not be run.
@@ -111,13 +110,13 @@ services:
     cpus: ${CREWFLOW_REDIS_CPUS:-1}
 
   # ---------------------------------------------------------------------------
-  # rab-api — the HTTP API. Controlled release: never migrates; a read-only compatibility check, then main.js.
+  # rab-api — the HTTP API. Migrates on start (O3 C1), registers the job schedulers (C2), then main.js. ONE instance (C5).
   # ---------------------------------------------------------------------------
   rab-api:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
 
     # The image's default command, stated explicitly (api-prestart.sh: env refusals, the runtime-isolation check, the
-    # migration child when CREWFLOW_MIGRATE_ON_START=true or the read-only compatibility check otherwise, then main.js).
+    # migration child under the migration lock, the scheduler registration, then main.js).
     command: ["./api-prestart.sh"]
 
     env_file:
@@ -146,23 +145,25 @@ services:
       S3_SERVER_SIDE_ENCRYPTION: NONE
       # Refuse to start when the platform did not apply the runtime isolation below (H6 enforce mode). Never override.
       CREWFLOW_RUNTIME_ISOLATION: enforce
-      # Controlled release (runbook 3): the API never migrates; docker-compose.migrate-on-start.yml flips it for a quick
-      # start. The approval mode is NOT committed here: it is an opt-in of database.env (BC-11).
-      CREWFLOW_MIGRATE_ON_START: "false"
-      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
+      # O3 C1 (owner decision 2026-11-05, like Twenty): the API migrates on start. Approval mode none by default (C4), token
+      # an opt-in (BC-11): set CREWFLOW_MIGRATION_APPROVAL_MODE=token in compose.env (the ONLY place; the gate refuses it in
+      # database.env / runtime.env, where this line would silently override it). A failed UPGRADE starts degraded (C3:
+      # CREWFLOW_UPGRADE_FAILURE unset = continue; runtime.env may opt into refuse); a failed first install never serves. It
+      # registers the BullMQ job schedulers itself (C2: DISABLE_CRON_JOBS_REGISTRATION unset).
+      CREWFLOW_MIGRATE_ON_START: "true"
+      CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
 
     depends_on:
       rab-redis:
         condition: service_healthy
-      rab-migrate:
-        condition: service_completed_successfully
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 10s
       timeout: 5s
       retries: 15
-      start_period: 30s
+      # A fresh install applies the whole chain (plus a lock wait bounded at 600 s) before main.js listens.
+      start_period: 900s
 
     restart: unless-stopped
     logging: *logging
@@ -171,7 +172,8 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     pids_limit: 256
-    mem_limit: ${CREWFLOW_API_MEM_LIMIT:-768m}
+    # The migration child is a second Node process in this container on start. NOT MEASURED; tune after a fresh-install run.
+    mem_limit: ${CREWFLOW_API_MEM_LIMIT:-1024m}
     cpus: ${CREWFLOW_API_CPUS:-2}
     stop_grace_period: 35s
 
@@ -179,7 +181,8 @@ services:
   # rab-worker — background jobs, ONE process as uid/gid 1000 on the same crewflow_owner login (DBA-01, the API/Worker
   # separation, is lost: runbook section 1, NEEDS OWNER APPROVAL). O1: the SAME image as rab-api, a different command. The
   # image's ENTRYPOINT (tini -s) runs under compose's init and forwards SIGTERM; there is no root process, no capability and
-  # no provisioner identity (workspace provisioning runs in-process). It never migrates and starts only after a healthy API.
+  # no provisioner identity (workspace provisioning runs in-process). It never migrates, never registers job schedulers
+  # (it consumes them) and starts only after a healthy API and a healthy Redis (O3 C1/C2).
   # ---------------------------------------------------------------------------
   rab-worker:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
@@ -228,11 +231,13 @@ services:
       # workspace provisioner (Agent 2 interface). OWNER DECISION to relax it.
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: "5"
       PG_POOL_MAX_CONNECTIONS: "12"
-      WORKER_SCHEDULER: interval
       CREWFLOW_RUNTIME_ISOLATION: enforce
-      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
-      # The Worker never migrates.
-      CREWFLOW_MIGRATE_ON_START: "false"
+      # O3 C1/C2 (like Twenty): the Worker never migrates and only CONSUMES the job schedulers the API registers (production
+      # runs WORKER_SCHEDULER=bullmq by default; interval is refused in production). It starts after a healthy API, so it
+      # does not wait for the schema itself.
+      DISABLE_DB_MIGRATIONS: "true"
+      DISABLE_CRON_JOBS_REGISTRATION: "true"
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: "0"
       # What the retired launcher gave the jobs child (H1-M1): HOME a path the process can neither write nor create (Node
       # searches $HOME/.node_modules), temp and XDG caches in its own 0700 tmpfs, and the per-instance heartbeat file.
       HOME: /nonexistent
@@ -254,54 +259,12 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
-      rab-migrate:
-        condition: service_completed_successfully
-      # A healthy API means the schema is current (rab-migrate prepared it and the API verified compatibility).
+      # A healthy API means it ran the migrations (or started degraded after a failed upgrade, C3) and registered the job
+      # schedulers.
       rab-api:
         condition: service_healthy
 
     restart: unless-stopped
-
-  # ---------------------------------------------------------------------------
-  # rab-migrate — the one-off release step (deploy-prepare.js, updated in place for the owner login), run to completion
-  # BEFORE rab-api and rab-worker start. Same image (by digest) as rab-api: the migrations ship inside it. Same login, from
-  # the same database.env (so it sees the operator's opt-ins); it never reads runtime.env. Approval: header (BC-11).
-  # ---------------------------------------------------------------------------
-  rab-migrate:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
-
-    env_file:
-      - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/database.env
-        required: true
-
-    environment:
-      NODE_ENV: production
-      CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
-
-    # Mode none (default): a run applies. Token mode (opt-in): no token = check run (0 current, 3 pending),
-    # CREWFLOW_MIGRATION_APPROVED = apply run. Failures 64-69 by kind.
-    command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
-
-    restart: "no"
-    logging: *logging
-
-    # The release step needs no capability and writes nothing to its own filesystem. The long-form tmpfs is also the
-    # OpenShip import guard (header).
-    user: "1000:1000"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    volumes:
-      - ${CREWFLOW_PG_CA_FILE:?CREWFLOW_PG_CA_FILE must name the PostgreSQL CA certificate file}:/run/crewflow/pg-ca.crt:ro
-      - type: tmpfs
-        target: /tmp
-        tmpfs:
-          size: 16777216
-    pids_limit: 256
-    mem_limit: ${CREWFLOW_MIGRATE_MEM_LIMIT:-768m}
-    cpus: ${CREWFLOW_MIGRATE_CPUS:-1}
-    # SIGTERM: the migration child cancels its own statement so the lock is released; time to do so before SIGKILL.
-    stop_grace_period: 60s
 
   # ---------------------------------------------------------------------------
   # rab-ops — SUPERSEDED (separated mode). Kept unchanged, never started by `up`, until the final clean-up PR (#9) with
@@ -324,8 +287,13 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    tmpfs:
-      - /tmp
+    # The long-form tmpfs is the OpenShip IMPORT GUARD (OpenShip refuses a `type: tmpfs` volume as blocking, so this file
+    # can never be imported there). It moved here from the removed rab-migrate (O3); verify-image-compose.cjs requires it.
+    volumes:
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
 
 volumes:
   rab-redis-data:

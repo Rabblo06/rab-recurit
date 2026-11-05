@@ -2,35 +2,40 @@
 'use strict';
 /**
  * Owner-login deployment gate: the compose and env-file contract of the ONE-LOGIN deployment (owner decision 2026-11-04:
- * one schema-owning login, crewflow_owner, for the API, the Worker and the release step; no mode switch).
+ * one schema-owning login, crewflow_owner, for the API and the Worker; no mode switch). O3 (owner decisions C1-C5,
+ * 2026-11-05, "EXACTLY LIKE TWENTY"): no release step; the API migrates on start, the Worker never migrates.
  *
  *   node packages/rab-docker/scripts/compose-owner-login.cjs            # full: docker-compose.image.yml + every override
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --static   # templates + the bundled-database override only
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file <database|runtime|compose> <path>
  *
  * FULL mode renders, with `docker compose --env-file <throw-away> --project-directory <throw-away> config --format json`,
- *   docker-compose.image.yml [+ docker-compose.migrate-on-start.yml] [+ docker-compose.local-db.yml]
+ *   docker-compose.image.yml [+ docker-compose.local-db.yml]
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* are
  * removed from the child environment because they would win over --env-file), and asserts on each rendered model:
- *   - ONE database credential: PG_DATABASE_URL present and byte-identical on rab-api, rab-worker and rab-migrate (all three
+ *   - ONE database credential: PG_DATABASE_URL present and byte-identical on rab-api and rab-worker (both
  *     read the one shared database.env), and no service carries any other database URL — no migrator, provisioner,
  *     worker, ops, replica, posture, drift or test URL, no legacy DATABASE_URL* name, no libpq PG* variable, no postgres://
  *     value under another key; no CREWFLOW_DB_MODE (there is no mode switch); nothing from a separated-mode env file
  *     (.env.migrate / .env.ops / per-service staging files) reaches any service;
  *   - CREWFLOW_MIGRATION_APPROVED is never set by a compose or env file (a one-run `run -e` only), and no role password or
- *     command/ops authority reaches any service; the release step never holds the runtime secrets (runtime.env);
+ *     command/ops authority reaches any service; CREWFLOW_UPGRADE_INCOMPLETE (api-prestart.sh's own flag) is never set;
  *   - the H1-H6 hardening on every service: image by digest and no `build:`, non-root numeric user, read_only, cap_drop ALL
  *     and no cap_add, no-new-privileges, pids/memory/CPU limits, health checks, a stop window, bounded logs, no privileged /
  *     host namespaces / Docker socket, read-only binds, only rab-api publishes and only on loopback;
- *   - the lifecycle: the controlled release (default) = API migrate-on-start OFF, waits for the one-off same-image
- *     rab-migrate; the migrate-on-start override = API migrates (start_period for a fresh install), no rab-migrate
- *     dependency. BC-11 (owner decision 2026-11-05): the approval mode and the deployment identity are OPT-IN settings
- *     of database.env, never committed by a compose file (a committed value would override the operator's opt-in); the Worker never migrates, runs main.js as 1000:1000 with tmpfs and a jobs-only
- *     health check, starts after a healthy API, stop grace >= 45 s; Redis AOF + noeviction + ACL, never published;
+ *   - the lifecycle (O3): NO rab-migrate; the API migrates on start (CREWFLOW_MIGRATE_ON_START=true, approval mode
+ *     ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none} from compose.env, rendering only as none or token (BC-11/C4), a
+ *     fresh-install start_period, registers the job schedulers), exactly ONE instance and never a
+ *     start-first update (C5: stop-then-start); the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY is not committed (C3:
+ *     continue by default). The deployment identity stays an OPT-IN of database.env, never committed. The Worker never
+ *     migrates (DISABLE_DB_MIGRATIONS=true), only consumes the schedulers (DISABLE_CRON_JOBS_REGISTRATION=true), does not
+ *     wait for the schema itself (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy API and Redis, runs
+ *     main.js as 1000:1000 with tmpfs and a jobs-only health check, stop grace >= 45 s; WORKER_SCHEDULER is never
+ *     committed (production defaults to bullmq); Redis AOF + noeviction + ACL, never published;
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
- *     network only, and the app services (rab-migrate included) wait for it.
+ *     network only, and the app services wait for it.
  * STATIC mode (used until the in-place compose edits can land, i.e. until #61/#62 merge) lints the committed templates and
  * renders docker-compose.image.yml + docker-compose.local-db.yml, checking only the bundled-database rules, which do not
  * depend on the image compose's shape.
@@ -45,7 +50,6 @@ const path = require('node:path');
 const DOCKER_DIR = path.resolve(__dirname, '..');
 const FILES = Object.freeze({
   image: path.join(DOCKER_DIR, 'docker-compose.image.yml'),
-  migrateOnStart: path.join(DOCKER_DIR, 'docker-compose.migrate-on-start.yml'),
   localDb: path.join(DOCKER_DIR, 'docker-compose.local-db.yml'),
   staging: path.join(DOCKER_DIR, 'staging/docker-compose.staging.yml'),
 });
@@ -54,17 +58,14 @@ const TEMPLATES = Object.freeze({
   runtime: path.join(DOCKER_DIR, 'env/runtime.env.example'),
   compose: path.join(DOCKER_DIR, 'env/compose.env.example'),
 });
+// O3: one lifecycle (the API migrates on start); docker-compose.migrate-on-start.yml is folded into the image compose.
 const COMBOS = Object.freeze([
-  { name: 'release', files: ['image'], migrateOnStart: false, localDb: false, staging: false },
-  { name: 'release+local-db', files: ['image', 'localDb'], migrateOnStart: false, localDb: true, staging: false },
-  { name: 'migrate-on-start', files: ['image', 'migrateOnStart'], migrateOnStart: true, localDb: false, staging: false },
-  { name: 'migrate-on-start+local-db', files: ['image', 'migrateOnStart', 'localDb'], migrateOnStart: true, localDb: true, staging: false },
-  { name: 'staging', files: ['image', 'staging'], migrateOnStart: false, localDb: false, staging: true },
+  { name: 'default', files: ['image'], localDb: false, staging: false },
+  { name: 'local-db', files: ['image', 'localDb'], localDb: true, staging: false },
+  { name: 'staging', files: ['image', 'staging'], localDb: false, staging: true },
 ]);
 const STATIC_COMBO = Object.freeze({ name: 'static:image+local-db', files: ['image', 'localDb'], localDb: true });
 
-/** The release step: deploy-prepare.js, updated in place for the owner login (Agent 1). */
-const MIGRATE_ENTRY = 'packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js';
 /** Agent 1's fresh-install provider-admin SQL; the transition script must never be an init script. */
 const INIT_SQL = 'postgres-init/owner-login/01-crewflow-owner.sql';
 const OWNER_LOGIN = 'crewflow_owner';
@@ -88,6 +89,7 @@ const FORBIDDEN_NAMES = Object.freeze([
   'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'ALLOW_REMOTE_TEST_DATABASE',
   'NODE_OPTIONS', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE',
   'WORKER_INVITE_AUTO_DELETE_ENABLED', 'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED', 'PGCONNECT_TIMEOUT',
+  'CREWFLOW_UPGRADE_INCOMPLETE', 'CREWFLOW_UPGRADE_FAILURE_POLICY',
 ]);
 /** [pattern, reason] for whole families of forbidden names. */
 const FORBIDDEN_PATTERNS = Object.freeze([
@@ -103,18 +105,41 @@ const FORBIDDEN_PATTERNS = Object.freeze([
 const URL_KEY = 'PG_DATABASE_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
-  'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START',
-  'CREWFLOW_UPGRADE_FAILURE_POLICY', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER',
-  'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'WORKER_SCHEDULER', 'HOME', 'TMPDIR',
-  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
+  'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START', 'DISABLE_DB_MIGRATIONS',
+  'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED',
+  'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION',
+  'WORKER_SCHEDULER', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
 ]);
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
-  'CREWFLOW_MIGRATION_APPROVAL_MODE',
 ]);
-/** BC-11 opt-ins: database.env only (so rab-api, rab-worker and rab-migrate see one value), never committed in compose. */
-const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID']);
+/**
+ * BC-11 opt-ins: database.env only (so rab-api and rab-worker see one value), never committed in compose. O3: the approval
+ * mode is no longer one of them (below).
+ */
+const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID']);
+/**
+ * O3 + BC-11/C4: the approval mode is an INTERPOLATION value of compose.env (none by default, token an opt-in), committed on
+ * rab-api as exactly this expression. In database.env / runtime.env it would be silently overridden by that line.
+ */
+const APPROVAL_MODE_KEY = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
+const APPROVAL_MODE_EXPR = '${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}';
 const APPROVAL_MODES = Object.freeze(['none', 'token']);
+/**
+ * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
+ * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
+ * CREWFLOW_AUDIT_SINK_FAILURE refuse | log, of which production accepts only refuse (unset = refuse);
+ * CREWFLOW_AUDIT_SINK_FILE only with file (development). compose-owner-login.test.cjs re-reads the TypeScript source and
+ * fails when these lists drift from it. It lives in runtime.env (rab-api and rab-worker both start the sink), never
+ * committed in a compose file: the operator chooses it explicitly.
+ */
+const AUDIT_SINK_KEY = 'CREWFLOW_AUDIT_SINK';
+const AUDIT_SINK_MODES = Object.freeze(['none', 'stdout', 'file']);
+const AUDIT_SINK_PRODUCTION_MODES = Object.freeze(['stdout']);
+const AUDIT_SINK_FAILURES = Object.freeze(['refuse', 'log']);
+const AUDIT_SINK_PRODUCTION_FAILURES = Object.freeze(['refuse']);
+/** O3 C3: what runtime.env may set for the upgrade-failure policy (unset = continue). */
+const UPGRADE_FAILURE_VALUES = Object.freeze(['continue', 'refuse']);
 /** Provider admin logins and the former separated runtime logins: never the app login (M0 section 3.5). */
 const NOT_THE_APP_LOGIN = Object.freeze([
   'postgres', 'neondb_owner', 'doadmin', 'cloudsqlsuperuser', 'azure_pg_admin', 'azuresu', 'rdsadmin', 'supabase_admin',
@@ -127,7 +152,9 @@ const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 /** First reason a NAME is forbidden for any service or env file, or null. */
 function forbiddenReason(name) {
   if (name === URL_KEY) return null;
-  if (name === 'CREWFLOW_MIGRATION_APPROVED') return 'the release approval token: pass it ONLY with `run -e` on the one rab-migrate run it approves';
+  if (name === 'CREWFLOW_MIGRATION_APPROVED') return 'the approval token (O3: approval mode none; there is no token to pass)';
+  if (name === 'CREWFLOW_UPGRADE_INCOMPLETE') return 'set only by api-prestart.sh after a failed upgrade (an inherited value is refused at start)';
+  if (name === 'CREWFLOW_UPGRADE_FAILURE_POLICY') return 'deprecated (O3 C3): use CREWFLOW_UPGRADE_FAILURE=continue|refuse in runtime.env, or leave it unset (continue)';
   if (name === 'CREWFLOW_DB_MODE') return 'there is no mode switch (the owner login is the only architecture)';
   if (FORBIDDEN_NAMES.includes(name)) return 'forbidden (migration/bootstrap/ops/command authority, a second database identity, or an unapproved switch)';
   for (const [pattern, why] of FORBIDDEN_PATTERNS) if (pattern.test(name)) return why;
@@ -214,7 +241,7 @@ function localDbProblems(services, model, p) {
   if ((pg.volumes ?? []).some((v) => /transition-from-separated/.test(sourceOf(v)))) p('rab-postgres: mounts the transition script');
   if (JSON.stringify(Object.keys(pg.networks ?? {})) !== JSON.stringify(['crewflow-db'])) p('rab-postgres: must be on the internal crewflow-db network only');
   if (model?.networks?.['crewflow-db']?.internal !== true) p('network crewflow-db is not internal');
-  for (const name of ['rab-api', 'rab-worker', 'rab-migrate']) {
+  for (const name of ['rab-api', 'rab-worker']) {
     if (!services[name]) continue;
     if (services[name].depends_on?.['rab-postgres']?.condition !== 'service_healthy') p(`${name}: does not wait for a healthy rab-postgres`);
     if (!Object.keys(services[name].networks ?? {}).includes('crewflow-db')) p(`${name}: is not on the crewflow-db network`);
@@ -233,15 +260,15 @@ function checkModel(model, combo) {
   const p = (msg) => problems.push(`${combo.name}: ${msg}`);
   const services = model?.services ?? {};
   const names = Object.keys(services).sort();
-  const release = !combo.migrateOnStart;
-  const expected = ['rab-api', 'rab-redis', 'rab-worker', ...(release ? ['rab-migrate'] : []), ...(combo.localDb ? ['rab-postgres'] : [])].sort();
+  // O3: no rab-migrate (the API migrates on start).
+  const expected = ['rab-api', 'rab-redis', 'rab-worker', ...(combo.localDb ? ['rab-postgres'] : [])].sort();
   if (JSON.stringify(names) !== JSON.stringify(expected)) p(`services are [${names.join(', ')}], expected [${expected.join(', ')}]`);
-  const appServices = ['rab-api', 'rab-worker', ...(release ? ['rab-migrate'] : [])];
+  const appServices = ['rab-api', 'rab-worker'];
 
   for (const name of names) {
     if (name === 'rab-postgres') continue; // localDbProblems
     const s = services[name] ?? {};
-    hardeningProblems(name, s, p, { longRunning: name !== 'rab-migrate' });
+    hardeningProblems(name, s, p, { longRunning: true });
     if (Array.isArray(s.profiles) && s.profiles.length) p(`${name}: has profiles (it would not start with the stack)`);
     const env = s.environment ?? {};
     for (const [key, value] of Object.entries(env)) {
@@ -251,15 +278,15 @@ function checkModel(model, combo) {
     }
     const values = Object.values(env).map(String);
     if (values.some((v) => v.includes(SENTINEL_LEGACY_PW))) p(`${name}: received a value from a separated-mode env file (.env.migrate / .env.ops / per-service staging files)`);
-    if (!appServices.includes(name) && URL_KEY in env) p(`${name}: has ${URL_KEY} (only rab-api, rab-worker and rab-migrate hold the app login)`);
+    if (!appServices.includes(name) && URL_KEY in env) p(`${name}: has ${URL_KEY} (only rab-api and rab-worker hold the app login)`);
     if (!['rab-api', 'rab-worker'].includes(name) && values.some((v) => v.includes(SENTINEL_APP_SECRET) || v.includes(SENTINEL_REDIS_PW))) {
       p(`${name}: received a runtime secret (only rab-api and rab-worker read runtime.env)`);
     }
     if (!appServices.includes(name) && values.some((v) => v.includes(SENTINEL_OWNER_PW))) p(`${name}: received the database credential`);
   }
 
-  // BC-11: the approval mode and the deployment identity are opt-ins of database.env. The sentinel database.env sets none of
-  // them, so a value in the rendered model was committed by a compose file and would override the operator's choice.
+  // BC-11: the deployment identity is an opt-in of database.env. The sentinel database.env sets none of it, so a value in
+  // the rendered model was committed by a compose file and would override the operator's choice.
   for (const name of names) {
     const env = services[name]?.environment ?? {};
     for (const key of DATABASE_OPT_INS) if (key in env) p(`${name}: commits ${key} (an opt-in of database.env, never a compose value)`);
@@ -281,8 +308,12 @@ function checkModel(model, combo) {
   const envOf = (s) => s?.environment ?? {};
   for (const name of appServices) {
     const e = envOf(services[name]);
-    const want = { NODE_ENV: 'production', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' };
+    const want = { NODE_ENV: 'production' };
     for (const [k, v] of Object.entries(want)) if (e[k] !== v) p(`${name}: ${k} is "${e[k] ?? ''}", expected "${v}"`);
+    // O3 C3: the upgrade-failure policy is not committed (unset = continue); runtime.env may opt into refuse.
+    if ('CREWFLOW_UPGRADE_FAILURE' in e && !UPGRADE_FAILURE_VALUES.includes(String(e.CREWFLOW_UPGRADE_FAILURE))) p(`${name}: CREWFLOW_UPGRADE_FAILURE must be continue or refuse`);
+    // O3 C2: the scheduler mode is never committed (production defaults to bullmq; interval is refused there).
+    if ('WORKER_SCHEDULER' in e) p(`${name}: commits WORKER_SCHEDULER (leave it unset: production runs bullmq; interval is refused)`);
   }
   for (const name of ['rab-api', 'rab-worker']) {
     const e = envOf(services[name]);
@@ -290,19 +321,24 @@ function checkModel(model, combo) {
     if (e.CREWFLOW_RUNTIME_ISOLATION !== 'enforce') p(`${name}: CREWFLOW_RUNTIME_ISOLATION is "${e.CREWFLOW_RUNTIME_ISOLATION ?? ''}", expected "enforce"`);
     if (e.RAB_RUNTIME_ENV !== 'production') p(`${name}: RAB_RUNTIME_ENV is not production`);
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
+    // BC-07: the sink must reach both services, as a production-accepted value.
+    if (!AUDIT_SINK_PRODUCTION_MODES.includes(String(e[AUDIT_SINK_KEY] ?? ''))) p(`${name}: ${AUDIT_SINK_KEY} is "${e[AUDIT_SINK_KEY] ?? ''}", expected stdout (BC-07, from runtime.env)`);
   }
 
   // rab-api: the lifecycle.
   const apiEnv = envOf(api);
   if (JSON.stringify(api.command) !== JSON.stringify(['./api-prestart.sh'])) p('rab-api: command is not ./api-prestart.sh');
-  if (release) {
-    if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'false') p('rab-api: CREWFLOW_MIGRATE_ON_START must be "false" in the controlled release');
-    if (api.depends_on?.['rab-migrate']?.condition !== 'service_completed_successfully') p('rab-api: does not wait for rab-migrate (service_completed_successfully)');
-  } else {
-    if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'true') p('rab-api: the migrate-on-start override must set CREWFLOW_MIGRATE_ON_START "true"');
-    if (!(durationSeconds(api.healthcheck?.start_period) >= MIN_FRESH_INSTALL_START_PERIOD_S)) p(`rab-api: healthcheck start_period below ${MIN_FRESH_INSTALL_START_PERIOD_S}s (it migrates first)`);
-    if (api.depends_on?.['rab-migrate'] || worker.depends_on?.['rab-migrate']) p('rab-api/rab-worker: still depend on rab-migrate under migrate-on-start');
-  }
+  // O3 C1: the API migrates on start, without an approval token, with a start_period long enough for a fresh install.
+  if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'true') p('rab-api: CREWFLOW_MIGRATE_ON_START must be "true" (O3: the API migrates on start)');
+  if (!APPROVAL_MODES.includes(String(apiEnv[APPROVAL_MODE_KEY] ?? ''))) p(`rab-api: ${APPROVAL_MODE_KEY} must render as none or token (compose.env; default none)`);
+  if (String(apiEnv.DISABLE_DB_MIGRATIONS ?? '') === 'true') p('rab-api: DISABLE_DB_MIGRATIONS=true (the API is the one process that migrates)');
+  if (String(apiEnv.DISABLE_CRON_JOBS_REGISTRATION ?? '') === 'true') p('rab-api: DISABLE_CRON_JOBS_REGISTRATION=true (the API registers the job schedulers; nothing else does)');
+  if (!(durationSeconds(api.healthcheck?.start_period) >= MIN_FRESH_INSTALL_START_PERIOD_S)) p(`rab-api: healthcheck start_period below ${MIN_FRESH_INSTALL_START_PERIOD_S}s (it migrates first)`);
+  for (const [name, s] of Object.entries(services)) if (s.depends_on?.['rab-migrate']) p(`${name}: depends on rab-migrate (O3: there is no release step)`);
+  // C5: ONE API, deployed stop-then-start (two versions starting together would race for the migration lock).
+  const replicas = api.deploy?.replicas ?? api.scale;
+  if (replicas !== undefined && Number(replicas) !== 1) p(`rab-api: ${replicas} replicas (O3 C5: exactly one API)`);
+  if (api.deploy?.update_config?.order === 'start-first') p('rab-api: start-first update (O3 C5: stop-then-start only)');
   if (!(durationSeconds(api.stop_grace_period) >= MIN_API_STOP_GRACE_S)) p(`rab-api: stop_grace_period below ${MIN_API_STOP_GRACE_S}s`);
   if (api.depends_on?.['rab-redis']?.condition !== 'service_healthy') p('rab-api: does not wait for a healthy rab-redis');
 
@@ -317,13 +353,17 @@ function checkModel(model, combo) {
   const tmpfs = (worker.tmpfs ?? []).map(String);
   for (const dir of ['/tmp/crewflow-jobs', '/run/crewflow-health/jobs']) if (!tmpfs.some((t) => t === dir || t.startsWith(`${dir}:`))) p(`rab-worker: tmpfs ${dir} is missing`);
   if (!tmpfs.every((t) => /uid=1000/.test(t) && /gid=1000/.test(t))) p('rab-worker: a tmpfs is not owned by 1000:1000');
-  if (workerEnv.CREWFLOW_MIGRATE_ON_START !== 'false') p('rab-worker: CREWFLOW_MIGRATE_ON_START must be "false" (the Worker never migrates)');
+  if (String(workerEnv.CREWFLOW_MIGRATE_ON_START ?? 'false') !== 'false') p('rab-worker: CREWFLOW_MIGRATE_ON_START is set (the Worker never migrates)');
+  if (workerEnv.DISABLE_DB_MIGRATIONS !== 'true') p('rab-worker: DISABLE_DB_MIGRATIONS must be "true" (O3 C1: the Worker never migrates)');
+  if (workerEnv.DISABLE_CRON_JOBS_REGISTRATION !== 'true') p('rab-worker: DISABLE_CRON_JOBS_REGISTRATION must be "true" (O3 C2: the API registers the schedulers; the Worker consumes them)');
+  if (workerEnv.CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS !== '0') p('rab-worker: CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS must be "0" (it starts after a healthy API)');
   if (workerEnv.CREWFLOW_INSTANCE_HEALTH_FILE !== '/run/crewflow-health/jobs/heartbeat.json') p('rab-worker: CREWFLOW_INSTANCE_HEALTH_FILE does not name the jobs heartbeat on its tmpfs');
   if (workerEnv.HOME !== '/nonexistent') p('rab-worker: HOME must be /nonexistent (H1-M1: not a writable module search root)');
   const wTest = (worker.healthcheck?.test ?? []).map(String);
   if (!wTest.some((t) => t.endsWith('worker-bundle-health.cjs'))) p('rab-worker: health check is not the per-instance heartbeat check');
   if (!wTest.includes('CREWFLOW_PROVISIONER_ENABLED=false')) p('rab-worker: health check is not jobs-only (CREWFLOW_PROVISIONER_ENABLED=false on the check command)');
   if (worker.depends_on?.['rab-api']?.condition !== 'service_healthy') p('rab-worker: does not wait for a healthy rab-api (the schema must be current first)');
+  if (worker.depends_on?.['rab-redis']?.condition !== 'service_healthy') p('rab-worker: does not wait for a healthy rab-redis');
   if (!(durationSeconds(worker.stop_grace_period) >= MIN_WORKER_STOP_GRACE_S)) p(`rab-worker: stop_grace_period below ${MIN_WORKER_STOP_GRACE_S}s`);
 
   // rab-redis
@@ -334,16 +374,8 @@ function checkModel(model, combo) {
   if (!rc.includes('--aclfile')) p('rab-redis: --aclfile is missing (unauthenticated Redis)');
   if (!rc.includes('--maxmemory')) p('rab-redis: --maxmemory is missing');
 
-  // rab-migrate: the one-off release step.
-  if (release) {
-    const m = services['rab-migrate'] ?? {};
-    const mEnv = envOf(m);
-    if (m.image !== api.image) p('rab-migrate: image differs from rab-api (the release step must run the promoted image\'s migrations)');
-    if (m.restart !== 'no') p(`rab-migrate: restart is "${m.restart}", expected "no" (one-off)`);
-    if ((m.command ?? []).join(' ') !== `node ${MIGRATE_ENTRY}`) p('rab-migrate: command is not deploy-prepare.js');
-    if ('CREWFLOW_MIGRATE_ON_START' in mEnv) p('rab-migrate: must not carry CREWFLOW_MIGRATE_ON_START');
-    if (!(m.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) p('rab-migrate: long-form tmpfs /tmp is missing (also the OpenShip import guard)');
-  }
+  // O1/O2: one image for every application service.
+  if (worker.image !== api.image) p('rab-worker: image differs from rab-api (O2: one image)');
 
   if (combo.staging) {
     if (model?.name !== 'crewflow-staging') p(`project name is "${model?.name}", expected crewflow-staging`);
@@ -396,8 +428,21 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
     if (kind === 'database' && !why && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
-    if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api, rab-worker and rab-migrate see the same value)`);
-    if (key === 'CREWFLOW_MIGRATION_APPROVAL_MODE' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
+    if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
+    if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
+    if (/^CREWFLOW_AUDIT_SINK/.test(key) && kind !== 'runtime') problems.push(`${key}: belongs in runtime.env (rab-api and rab-worker both start the audit sink)`);
+    if (kind === 'runtime' && key === AUDIT_SINK_KEY) {
+      if (!AUDIT_SINK_MODES.includes(value)) problems.push(`${key}: must be exactly none, stdout or file (security-audit-sink.ts)`);
+      else if (!AUDIT_SINK_PRODUCTION_MODES.includes(value)) problems.push(`${key}: production refuses ${value}; set stdout with an off-host append-only log shipper (BC-07)`);
+    }
+    if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FAILURE') {
+      if (!AUDIT_SINK_FAILURES.includes(value)) problems.push(`${key}: must be exactly refuse or log (security-audit-sink.ts)`);
+      else if (!AUDIT_SINK_PRODUCTION_FAILURES.includes(value)) problems.push(`${key}: production requires refuse (or leave it unset)`);
+    }
+    if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FILE') problems.push(`${key}: the file sink is development-only (production refuses CREWFLOW_AUDIT_SINK=file)`);
+    if (key === APPROVAL_MODE_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): rab-api's committed ${APPROVAL_MODE_EXPR} would silently override a value here`);
+    if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
+    if (kind !== 'runtime' && key === 'CREWFLOW_UPGRADE_FAILURE') problems.push(`${key}: belongs in runtime.env (the API reads it)`);
     if (kind === 'compose') {
       if (!key.startsWith('CREWFLOW_')) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
@@ -411,6 +456,9 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+  }
+  if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
+    problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);
   }
   if (kind === 'database') {
     const url = entries.find((e) => e.key === URL_KEY)?.value;
@@ -441,7 +489,12 @@ function lintComposeText(rel, text) {
   if (/^\s*build\s*:/m.test(text)) problems.push(`${rel}: has a build: key`);
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
-  if (/^\s*-?\s*CREWFLOW_(MIGRATION_APPROVAL_MODE|DEPLOYMENT_ENVIRONMENT|DEPLOYMENT_ID)\s*:/m.test(text)) problems.push(`${rel}: commits a BC-11 opt-in (approval mode / deployment identity belong in database.env)`);
+  if (/^\s*-?\s*CREWFLOW_(DEPLOYMENT_ENVIRONMENT|DEPLOYMENT_ID)\s*:/m.test(text)) problems.push(`${rel}: commits a BC-11 opt-in (the deployment identity belongs in database.env)`);
+  if (/^\s*-?\s*CREWFLOW_AUDIT_SINK\w*\s*[:=]/m.test(text)) problems.push(`${rel}: commits the audit sink (BC-07: the operator sets CREWFLOW_AUDIT_SINK in runtime.env)`);
+  // The approval mode may only be the compose.env interpolation (none by default), never a literal that pins it.
+  for (const m of text.matchAll(/^\s*-?\s*CREWFLOW_MIGRATION_APPROVAL_MODE\s*[:=]\s*(.*?)\s*$/gm)) {
+    if (m[1] !== APPROVAL_MODE_EXPR) problems.push(`${rel}: ${APPROVAL_MODE_KEY} must be exactly ${APPROVAL_MODE_EXPR} (an opt-in of compose.env)`);
+  }
   if (/^\s*privileged\s*:\s*true/m.test(text)) problems.push(`${rel}: privileged: true`);
   return problems;
 }
@@ -453,12 +506,12 @@ function lintComposeText(rel, text) {
 const DATABASE_ENV_TEXT = [
   `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow', '',
 ].join('\n');
-const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', ''].join('\n');
+const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', 'CREWFLOW_AUDIT_SINK=stdout', ''].join('\n');
 /** Separated-mode env files a compose file must no longer read: their marker value must never reach a service. */
 const LEGACY_ENV_TEXT = `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_LEGACY_PW}@db-direct.example:5432/rab?sslmode=verify-full\nLEGACY_MARKER=${SENTINEL_LEGACY_PW}\n`;
 
 /** Renders the given combos; returns { [comboName]: model }. Throws when docker compose fails. */
-function renderModels(combos = COMBOS) {
+function renderModels(combos = COMBOS, extraComposeEnv = []) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-owner-login-'));
   try {
     const secrets = path.join(tmp, 'secrets');
@@ -480,6 +533,7 @@ function renderModels(combos = COMBOS) {
       `CREWFLOW_SECRETS_DIR=${fwd(secrets)}`,
       'CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt',
       'CREWFLOW_REDIS_CONF=/etc/crewflow/redis.conf',
+      ...extraComposeEnv,
       '',
     ].join('\n'), { mode: 0o600 });
     const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_)/i.test(k)));
@@ -555,7 +609,8 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, MIGRATE_ENTRY, INIT_SQL, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
 };

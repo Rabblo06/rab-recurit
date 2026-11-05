@@ -150,7 +150,8 @@ jobs:
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
   # never migrate, refuse migration credentials), every committed compose definition that runs the Worker (O1: the one
   # image, the Worker command, one non-root process under init, no CREWFLOW_PROVISIONER_*), the image's runtime-deps check,
-  # and the compose credential isolation (the migration login reaches rab-migrate only; rab-api / rab-worker wait for it).
+  # and the compose credential isolation (O3: the production files have no migration service and no .env.migrate; the
+  # dev/QA files keep their one-off migrate, which alone holds the migration login).
   deployment-config:
     runs-on: ubuntu-latest
     timeout-minutes: 20

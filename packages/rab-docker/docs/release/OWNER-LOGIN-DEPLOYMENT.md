@@ -9,7 +9,7 @@ in the session scratchpad (not committed); each line names its source.
 | End to end: empty database → API migrate-on-start → healthy → Worker → workspace READY | **PASS on PG16** (postgres:16-alpine; the API and Worker ran as host processes, not in the containers) | Agent 2: `twa-app/e2e.sh`, `twa-app/batch-e2e.log` ("E2E PASSED": state EMPTY → 254 ledger rows, `/healthz` 200, workspace provisioned in-process: attempted=1 ready=1), `twa-app/e2e-api.log`, `e2e-worker.log`, `e2e-healthz.json` |
 | Rollback | **PROVEN**: restore the pre-upgrade backup, then the previous image. R2: checksum equal on 112 facts, ledger 250, old api, Worker and provisioner healthy. R1: an old image on the upgraded database fails closed in production | Agent 1: `a1/rollback/r1b.log`, `r2.log`; [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) |
 | Bundled database (`docker-compose.local-db.yml` with Agent 1's init SQL) | **PASS**, 21/21 checks on PG16.15 (section 8) | Agent 4 |
-| Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 5 combinations; the gate's own tests pass | `ci-deployment-owner-login.yaml` |
+| Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 3 combinations (O3: default, bundled database, staging); the gate's own tests pass | `ci-deployment-owner-login.yaml` |
 | Full CI on #72 | **Green at `79a083e1`** (12/12 workflow runs). At head `91a5e699` (2026-11-05) the run was still in progress, and its e2e `web-isolated` job had failed; it needs a re-check before review | GitHub Actions, `deploy/twenty-mode-a` |
 
 **NOT TESTED:**
@@ -20,29 +20,31 @@ in the session scratchpad (not committed); each line names its source.
 
 Production use still needs the owner's approval of each release and of the open owner-approval items.
 
-The in-place edits of the deployment files (`docker-compose.image.yml`, `docker-compose.production.yml`, the staging
-override, `docker-compose.migrate-on-start.yml`) are on `twa/docker-owner-login-post61` and are merged into
-`deploy/twenty-mode-a`. #61/#62 are on main.
+**O3 (owner decisions C1-C5, 2026-11-05, "EXACTLY LIKE TWENTY"; G-07 accepted).** The API migrates on start in
+production; there is no release step and no `rab-migrate`. `docker-compose.migrate-on-start.yml` is folded into
+`docker-compose.image.yml` and deleted. The Worker never migrates and only consumes the BullMQ job schedulers the API
+registers. Run ONE API and deploy stop-then-start (C5). The pre-upgrade backup is the recovery path, so it is MANDATORY
+(section 3.3).
 
 **Architecture (owner's final decision, 2026-11-04).** There is ONE permanent architecture, with no mode switch:
 - one schema-owning login, `crewflow_owner`, for the API, the Worker and the release step;
 - one `PG_DATABASE_URL`.
 
 The former separated logins (`crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`) remain **schema roles**
-that historical migrations and definers need. They are no longer runtime logins. Two hardened images stay (API and
-Worker); a shared image is a later, separate PR (`SHARED-IMAGE-PLAN.md`). Design source: the M0 decision document
+that historical migrations and definers need. They are no longer runtime logins. O1/O2: ONE hardened image runs the
+API and the Worker (different commands), published under one tag and deployed by one digest (`CREWFLOW_IMAGE_DIGEST`).
+Design source: the M0 decision document
 `TWENTY_MODE_M0_DECISION_2026-11-04.md` ("M0") and the owner-login addendum. The repository's root `docs/` is
 git-ignored, so neither is committed.
 
 | File | Purpose | Lands |
 |---|---|---|
-| `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis`, and the one-off `rab-migrate`. **Controlled release is the default:** the API does not migrate; `rab-migrate` (`deploy-prepare.js`, same image, same login) does. Approval mode `none` by default; token mode is an opt-in (BC-11). | after #61/#62 |
-| `docker-compose.migrate-on-start.yml` | Quick-start override: the API migrates on start; `rab-migrate` is not part of the stack. | after #61/#62 |
+| `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis` (O3: no `rab-migrate`). The API migrates on start (approval mode `none` by default, `token` an opt-in of `compose.env`), registers the job schedulers, then serves; the Worker never migrates and only consumes the schedulers. | O3 |
 | `docker-compose.local-db.yml` | Optional bundled PostgreSQL 16. Its one init file is Agent 1's `postgres-init/owner-login/01-crewflow-owner.sql`. | now |
 | `staging/docker-compose.staging.yml` (in place) | Project name and storage prefix only. The env files now come from the base file. | after #61/#62 |
 | `docker-compose.production.yml` (in place) | The build-based OpenShip file, reshaped to one URL. **OpenShip cannot run the owner-login Worker safely** (section 6). | after #61/#62 |
-| `env/database.env.example` | **Shared** database file: `PG_DATABASE_URL` and the deployment identity. Read by rab-api, rab-worker and rab-migrate. | now |
-| `env/runtime.env.example` | Runtime secrets for rab-api and rab-worker only. The release step never reads it. | now |
+| `env/database.env.example` | **Shared** database file: `PG_DATABASE_URL` and the optional deployment identity. Read by rab-api and rab-worker. | now |
+| `env/runtime.env.example` | Runtime secrets for rab-api and rab-worker, and the optional `CREWFLOW_UPGRADE_FAILURE=refuse` opt-in (C3). | now |
 | `env/compose.env.example` | Interpolation values: digests, paths and limits. No secret. | now |
 | `env/redis-users.acl.example` | Redis ACL: `default` off, app user stored by SHA-256, PING-only health user. | now |
 | `local-db/pg_hba.conf` | Bundled database: superuser on the local socket only; `crewflow_owner` over TLS only. | now |
@@ -53,9 +55,8 @@ Shorthand, used from `packages/rab-docker/` on the host:
 
 ```bash
 I="-f docker-compose.image.yml"
-M="-f docker-compose.migrate-on-start.yml"     # quick start only
 L="-f docker-compose.local-db.yml"             # bundled database only
-P="docker compose --env-file /etc/crewflow/compose.env $I"        # production: controlled release
+P="docker compose --env-file /etc/crewflow/compose.env $I"        # production (the API migrates on start, O3)
 ```
 
 ---
@@ -150,10 +151,8 @@ PT-01 pointers:
    node scripts/compose-owner-login.cjs --lint-env-file database /etc/crewflow/secrets/database.env
    node scripts/compose-owner-login.cjs --lint-env-file runtime  /etc/crewflow/secrets/runtime.env
    ```
-   Then render the files you will start, e.g. `$P $M [$L] config -q`.
-5. **Start.** Choose one:
-   - **Quick start (migrate-on-start):** `$P $M [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks) and serves only after it succeeds. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The override gives the API a 900 s `start_period`. The Worker follows a healthy API.
-   - **Controlled (production):** use section 3 from step 3.2. On an EMPTY database, `rab-migrate` applies the whole chain (approval mode `none`, the default). With token mode on, it exits 3 with the full chain as the pending set; approve it with the token.
+   Then render the files you will start, e.g. `$P [$L] config -q`.
+5. **Start:** `$P [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks), registers the job schedulers, and serves only after it succeeds; a first-install failure never serves. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The API has a 900 s `start_period`. The Worker follows a healthy API and Redis.
 6. **First platform admin (email only, activation link).** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`, which also supplies `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) and the same runtime config (`runtime.env`). The command creates the admin from an email address and sends an **activation link**; it takes no password (`BOOTSTRAP_ADMIN_PASSWORD` is ignored with a warning, so never set it).
    - Inputs: `BOOTSTRAP_ADMIN_EMAIL` (required); optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG`, `BOOTSTRAP_ADMIN_ORG_NAME`.
    - The CLI requires **per-invocation command authority**: `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true`, given on this one-off run ONLY, never in any service environment or env file.
@@ -171,13 +170,14 @@ PT-01 pointers:
 |---|---|---|---|---|
 | `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS` | rab-api | 0–300 | 15 | Delay before a failed start exits, so a restart loop does not hammer the database. |
 | `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS` | rab-worker | 30–900 | 120 | An event loop silent this long is a stall; the watchdog kills the process and Docker restarts it. |
-| `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` | rab-worker | 0–3600 | 900 | How long the Worker waits for the schema to be current before refusing to start (it never migrates). |
+| `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` | rab-worker | 0–3600 | **0, committed** (O3) | The Worker starts after a healthy API, so it does not wait for the schema itself. Not settable in `runtime.env`. |
+| `CREWFLOW_UPGRADE_FAILURE` | rab-api | `continue` \| `refuse` | `continue` (C3) | What a failed UPGRADE does: `continue` logs an ERROR, sets `/healthz` `upgradeFailed: true` and serves the partly-upgraded schema; `refuse` keeps the API down. A first install never serves either way. |
 
 **The Worker runs with `init: true`.** Its watchdog SIGKILLs a stalled process, and the kernel ignores that signal for PID 1, so the Worker refuses to start as PID 1. Docker's init must be PID 1; every compose file that runs the Worker sets it, and the gate fails CI otherwise.
 
 **Failure semantics:**
 - **First install:** non-zero exit; the API never becomes healthy. Docker restarts it with capped backoff. Each start re-classifies: EMPTY or BOOTSTRAP-PARTIAL bootstraps, CHAIN-PARTIAL resumes, FOREIGN refuses.
-- **Upgrade:** governed by `CREWFLOW_UPGRADE_FAILURE_POLICY`, committed as `refuse`. Exit 70 = upgrade failed but `continue-if-compatible` passed every check; it is never set by these files.
+- **Upgrade (O3 C3, like Twenty):** governed by `CREWFLOW_UPGRADE_FAILURE`, not committed (unset = `continue`). A failed upgrade migration exits 70 from the migration child; the API logs an ERROR, `/healthz` reports `upgradeFailed: true` (never the migration's name), and it serves; the Worker starts on the partly-upgraded schema. Fix forward with a corrected image, or restore (3.6). `CREWFLOW_UPGRADE_FAILURE=refuse` in `runtime.env` keeps the API down instead. The deprecated `CREWFLOW_UPGRADE_FAILURE_POLICY` is refused by the gate.
 - **Half-initialised bundled database** (the init failed, e.g. a missing password file): `rab-postgres` stays **unhealthy**, because its check also requires `crewflow_owner`. The volume holds no data. Recover with:
   ```bash
   $P $L down
@@ -187,21 +187,44 @@ PT-01 pointers:
 
 ---
 
-## 3. Production release (controlled upgrade, the default)
+## 3. Production release (upgrade: back up, then stop-then-start)
 
-Production runs `docker-compose.image.yml` **without** `$M`. The API never changes the schema
-(`CREWFLOW_MIGRATE_ON_START=false`). The one-off `rab-migrate` does: `deploy-prepare.js`, updated in place by Agent 1,
-from the **same image digest** and the **same `database.env`**. The API and Worker depend on it.
+Production runs `docker-compose.image.yml` (plus `$L` for a bundled database). **O3 (owner decisions C1-C5, 2026-11-05,
+"EXACTLY LIKE TWENTY"; G-07 accepted):** there is no release step and no `rab-migrate`. On start, the API
+(`api-prestart.sh`):
+1. applies every pending migration under the migration lock. Approval mode is `none` by default (C4: no token). `token`
+   is an opt-in safety net (BC-11): set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` in **`compose.env`**, the only place
+   the gate accepts it. Then an API start that would apply to a non-fresh database needs `CREWFLOW_MIGRATION_APPROVED=<token>`
+   for exactly the pending set, passed to that one start (`-e`), never written to a file;
+2. registers the BullMQ job schedulers (`register-schedulers.js`);
+3. then serves.
 
-**Approval mode (BC-11, owner decision 2026-11-05).** The release step and migrate-on-start apply **without a token by
-default** (`CREWFLOW_MIGRATION_APPROVAL_MODE` unset = `none`): a `rab-migrate` run, or the `rab-migrate` that `up` runs
-first, applies every pending migration. **Token mode is an opt-in safety net:** set `CREWFLOW_MIGRATION_APPROVAL_MODE=token`
-in `database.env` (it reaches rab-api, rab-worker and rab-migrate alike). Its rule is unchanged when on: a run without a
-token is a check run, and every non-fresh apply needs the token, on any target (3.2).
+The Worker never migrates (`DISABLE_DB_MIGRATIONS=true`) and only consumes the schedulers
+(`DISABLE_CRON_JOBS_REGISTRATION=true`). It starts after a healthy API and a healthy Redis, so it does not wait for the
+schema itself (`CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0`). The compose gate (`compose-owner-login.cjs`) fails CI if any of
+this drifts.
+
+> **ACCEPTED RISK (G-07 and BC-11, owner decisions 2026-11-05).** Every start of a new image applies whatever it ships,
+> without a token and without a separate review step. A wrong image digest, or a `database.env` that names the wrong
+> database, migrates whatever database the URL reaches, production included, on the next `up`, and a platform redeploy
+> or a mistaken `pull && up` does the same. **Recovery is a restore from the pre-upgrade backup only**
+> ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md)). That is why the backup (3.3) is **MANDATORY, before every
+> upgrade**. The declared deployment id (optional, BC-11) still refuses a database bound to another deployment.
+
+**Security audit sink (BC-07): REQUIRED configuration.** In production, rab-api and rab-worker refuse to start without an
+external security audit sink (`security-audit-sink.ts`): `core.audit_log` alone is not tamper-evident under the owner
+login. Set it explicitly in `runtime.env`; it is never committed in a compose file, and the gate refuses it there.
+- `CREWFLOW_AUDIT_SINK=stdout` is the only value production accepts (`none` and `file` are refused). The gate requires it.
+- **`stdout` is compliant ONLY with an off-host, append-only log shipper** that collects rab-api's and rab-worker's
+  stdout (for example the Docker log driver or a host agent shipping to a write-once store), or with a reviewed adapter.
+  **The shipper is the operator's responsibility; the application cannot verify that it exists or that it is
+  append-only.** Without it, the security events land only in the local container log (`json-file`, rotated).
+- `CREWFLOW_AUDIT_SINK_FAILURE` stays unset (= `refuse`: an event that cannot be written fails closed; `log` is refused in
+  production). `CREWFLOW_AUDIT_SINK_FILE` is development-only.
 
 **3.1 Inputs.**
-- The API and Worker **index digests** from the gated release (`publish-image.yaml` → `publish-gated.sh`; the `release` environment needs reviewer approval). Never a tag.
-- Check the revision label equals the release SHA:
+- The release's ONE **index digest** (`CREWFLOW_IMAGE_DIGEST`) from the gated release (`publish-image.yaml` → `publish-gated.sh`, tag `<full commit>`; the `release` environment needs reviewer approval). Never a tag.
+- Check that the revision label equals the release SHA:
   ```bash
   docker buildx imagetools inspect <repo>@sha256:<digest>
   ```
@@ -210,34 +233,21 @@ token is a check run, and every non-fresh apply needs the token, on any target (
   cp compose.env compose.env.<old-sha>
   ```
 
-**The release step's authority (Agent 1, a4ef9bf8; BC-11).** In production, `rab-migrate` carries **no `DB_TARGET` and no `ALLOW_PRODUCTION_DB_COMMANDS`**; the compose files and the gate refuse both on it.
-- **Target:** `deploy-prepare.js` derives it from `CREWFLOW_DEPLOYMENT_ENVIRONMENT` when declared (in `database.env`), in memory, and re-derives it after the migration lock, the same way the migrate child does.
-- **Deployment id (optional):** when `CREWFLOW_DEPLOYMENT_ID` is declared, the database's identity marker must match it, or the run refuses. When it is absent, the run warns and continues.
-- **Token (optional):** with token mode on, every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED=<token>` for exactly the pending set (3.4). With the default mode `none`, a run applies.
-
-An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the legacy (separated) behaviour.
-
-> **ACCEPTED RISK (BC-11, owner decision 2026-11-05).** With the defaults (approval mode `none`, no deployment id), nothing in the release path tells the right image or database from the wrong one. A wrong image digest, or a `database.env` that names the wrong database, applies that image's migrations to whatever database the URL reaches, production included, on the next `up`, `run` or migrating API start. **Recovery is a restore from the pre-upgrade backup only** ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md)). That is why the backup (3.3) stays **MANDATORY**. Opt-ins that narrow this risk: token mode, and a declared deployment id.
-
 **3.2 Preflight (read-only).**
-1. Lint the env files and run `$P config -q`.
+1. Put the new digest in `compose.env`. Lint the env files, then run `$P config -q`.
 2. `$P pull`.
-3. **What a `rab-migrate` run does depends on the approval mode:**
-   - **Mode `none` (default):** `$P run --rm rab-migrate` **applies** every pending migration. There is no separate check run, so take the backup (3.3) **before** any `run` or `up`. Review the pending set from the release notes (step 4).
-   - **Token mode (opt-in):** `$P run --rm rab-migrate` without a token is a **check run** that applies nothing:
-     - **0:** CURRENT or AHEAD. Nothing to apply; go to 3.5.
-     - **3:** pending. The log lists each migration and prints `pending-<count>-<sha256>`. Nothing was applied.
-
-   In both modes, **64–69 means STOP.** Failures exit by kind: 64 config, 65 behind, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout (M0 §7).
-
-   **Token-mode rule (owner decision 2026-11-04, unchanged when token mode is on):** every apply to a non-fresh database needs the `CREWFLOW_MIGRATION_APPROVED` token, on any target (production, staging and test alike). Without it the run exits **65**. A proven fresh install, mode `none` and check runs are unchanged.
-
-   With the bundled database, `run` starts `rab-postgres` first, because the local-db override declares rab-migrate's dependency.
+3. **See the pending set without applying it.** Run the API's own read-only check from the NEW image, as a one-off. It replaces `api-prestart.sh`, so nothing migrates and nothing serves:
+   ```bash
+   $P run --rm --no-deps rab-api node packages/rab-server/dist/database/typeorm/scripts/check-pending-migrations.js
+   ```
+   - Exit 0: nothing pending.
+   - Exit 1: the log lists each pending migration.
+   - A refusal means STOP.
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
    The release is rollback-safe only if every pending migration only **adds** (tables, nullable or defaulted columns, indexes, functions, policies) and drops, renames, retypes or narrows nothing the previous image uses. Otherwise rollback is a restore (3.6b). Get the owner's go-ahead.
 
-**3.3 Backup or PITR marker: MANDATORY before anything can apply.** In mode `none`, take it before the first `run` or `up` of the new image. In token mode, take it after a check run that exited 3. The app login cannot take a logical backup (FORCE-RLS tables dump empty).
+**3.3 BACK UP FIRST: MANDATORY before every upgrade, before 3.4.** The API applies on start, so the backup must exist **before** the new image starts. The app login cannot take a logical backup (FORCE-RLS tables dump empty), so the cluster superuser or the provider takes it.
 - **Managed provider:**
   - take a provider snapshot or branch, OR
   - record the PITR restore time (`SELECT now()`) and the provider's window.
@@ -248,39 +258,38 @@ An explicit `DB_TARGET`, or any login other than `crewflow_owner`, keeps the leg
   $P $L exec -T rab-postgres pg_dump -U postgres -d crewflow -Fc > /var/backups/crewflow-<release>.dump
   ```
   Use `0600` and keep a copy off the host, or snapshot the volume with the stack stopped. Test restores periodically.
+- Check that the backup is non-empty and record where it is. **No backup, no upgrade.**
 
-**3.4 Apply.** **Mode `none` (default):** `$P run --rm rab-migrate` (or `up`, which runs it first) applies; exit 0 = applied and post-checks passed, 64–69 = failed by kind. **Token mode:** apply exactly the reviewed set. The token goes through the environment of one command only. `-e NAME` with no value forwards it from the shell, so it never sits in a file or on a command line:
+**3.4 Deploy: stop, then start (C5: one API, never rolling or blue-green).** Stop the old version completely, Worker first (it drains its 30 s jobs), so no old process runs against a schema that is being migrated. Then start the new one:
 ```bash
-read -r CREWFLOW_MIGRATION_APPROVED && export CREWFLOW_MIGRATION_APPROVED   # paste the token from 3.2
-$P run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate; rc=$?
-unset CREWFLOW_MIGRATION_APPROVED; echo "rab-migrate exit $rc"
+$P stop rab-worker rab-api
+$P [$L] up -d --wait --wait-timeout 1200
 ```
-- **Exit 0:** applied, and the post-checks passed.
-- **64–69:** failed by kind (as in 3.2); see 3.6.
+- `up` recreates rab-api: the old container is already stopped, and the new one starts and migrates under the lock.
+- The Worker starts only after the new API is healthy.
+- Compose returns non-zero when a service does not become healthy.
+- Failure semantics: section 2 (a first-install failure never serves; a failed upgrade serves degraded with `upgradeFailed: true` unless `CREWFLOW_UPGRADE_FAILURE=refuse`).
+- **Never** `up --scale rab-api=2`. **Never** start a second stack against the same database. Two versions race for the migration lock, a waiter can block for up to 600 s, and old processes would see intermediate schemas (M0-F S2).
 
-In token mode, an apply run needs `CREWFLOW_MIGRATION_APPROVED=<token>`; without it the run is only a check. The token is recomputed under the lock, so a changed pending set applies nothing.
-
-**3.5 Promote.**
-```bash
-$P up -d --wait --wait-timeout 600
-```
-`rab-migrate` re-checks and must exit 0. Then the API starts: it runs a read-only compatibility check and refuses to serve otherwise. The Worker follows a healthy API. Verify `$P ps`, `/healthz` through the edge, and the Worker health line. Compose returns 1 when `rab-migrate` does not exit 0; nothing new is promoted in that case.
+**3.5 Verify.**
+- `$P ps`: rab-api and rab-worker are healthy.
+- **Audit sink (BC-07):** the off-host shipper receives the new containers' stdout. Check that the release's first security events (for example a sign-in) arrive in the append-only store, and that the store refuses edits and deletes. The application cannot verify this for you: an API that starts with `CREWFLOW_AUDIT_SINK=stdout` and no shipper looks healthy.
+- `/healthz` through the edge returns 200 with `upgradeFailed: false`.
+- The API log shows the job schedulers registered.
+- The Worker log shows `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all <n> enabled Crewflow schedulers present`. A MISSING scheduler is an ERROR: restart the API, which registers them again.
 
 **3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
-- **(a) Expand-only release (only between owner-login releases reviewed as expand-only; never back across the transition):**
-  ```bash
-  docker compose --env-file /etc/crewflow/compose.env.<old-sha> $I up -d --wait
-  ```
-  The old image's `rab-migrate` classifies the ledger as AHEAD, warns and exits 0 (the C-1 fix). The old API then serves. **This is safe ONLY for expand-only releases.**
-- **(b) Contracting release, or a failed apply:**
-  1. `$P stop rab-api rab-worker`.
+- **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): put the old digest back (`compose.env.<old-sha>`) and deploy it as in 3.4. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
+  - Back to a release from before O3 (e.g. the two-image v0.4.0): use that release's own compose files ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.4).
+- **(b) Contracting release, or a failed apply you will not fix forward:**
+  1. `$P stop rab-worker rab-api`.
   2. Restore the 3.3 backup or PITR point. Every write since that point is lost.
-  3. Run the old digests as in (a).
+  3. Run the old digest as in (a).
 
   Never run an old image's migrations against a newer schema. Never `down -v` production.
-- **(c) A partial apply.** Migrations commit one by one. Re-run 3.2: CHAIN-PARTIAL resumes on the **new** image, after review. Otherwise do (b).
+- **(c) A partial apply (`upgradeFailed: true`).** Migrations commit one by one. Under C3 the API is already serving the partly-upgraded schema. Either fix forward with a corrected image (its migration child resumes CHAIN-PARTIAL), after review, or do (b).
 
-**3.7 One API replica.** Rolling and blue-green deploys are not supported:
+**3.7 One API (C5).** Rolling and blue-green deploys are not supported, and the gate refuses more than one rab-api replica or a start-first update:
 - two versions race for the migration lock, and a waiter can block for up to 600 s;
 - old replicas see intermediate schemas;
 - DDL lock queues become user-visible stalls (M0-F S2).
@@ -375,17 +384,17 @@ These are what rollback compares against.
 The file's own verification queries must pass before anything else happens. **After the transition the legacy logins are disabled (BC-17, Agent 1):** `crewflow` and `crewflow_app` become **NOLOGIN with PASSWORD NULL**; `crewflow_worker` stays LOGIN (two existing migrations assert it) but gets **PASSWORD NULL**, so it has no password to authenticate with; `crewflow_migrator` (if your deployment has it) becomes NOLOGIN with PASSWORD NULL at the transition (Agent 1, f91f1038): it keeps its role memberships but cannot log in, and a fresh owner-login install never creates it. A fresh owner-login install ends in the same state. The old stack can no longer connect. Only a restore of the pre-upgrade backup into a **fresh** cluster, with the `pg_dumpall --roles-only` file, brings back LOGIN and the old password verifiers ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.1).
 
 **5.4 Host configuration (new files beside the old ones):**
-- `database.env`: the `crewflow_owner` URL and the same CA. If the separated deployment declared `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, keep the **same** values (they are optional, BC-11). Set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` here if you want the token safety net for the transition.
+- `database.env`: the `crewflow_owner` URL and the same CA. If the separated deployment declared `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, keep the **same** values (they are optional, BC-11). For the token safety net during the transition, set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` in `compose.env` (3, step 1).
 - `runtime.env`: the **current** `APP_SECRET`, keyrings, S3, email and OAuth values, **unchanged**. Changing APP_SECRET breaks every session and every stored encrypted secret.
-- `compose.env`: the owner-login digests.
+- `compose.env`: the owner-login release digest (`CREWFLOW_IMAGE_DIGEST`).
 - **Keep** the old separated files (`.env.migrate`, the per-service env files or platform entries) untouched, `0600`, until the rollback window closes.
 - Lint all three new files.
 
 **5.5 Stop the old stack, Worker first.** The Worker drains its 30 s jobs; then the API. Keep its containers and images (`stop`, not `down`).
 
-**5.6 Release step:** 3.2 → 3.3 (already done in 5.2) → 3.4, as in a normal release. The classifier must report the separated ledger as an upgrade (CURRENT or behind), **never FOREIGN**. A FOREIGN or identity refusal (67) means stop and roll back (5.9a).
+**5.6 Preflight:** 3.2 (the read-only pending check from the new image) → 3.3 (already done in 5.2). The classifier must report the separated ledger as an upgrade (CURRENT or behind), **never FOREIGN**. A FOREIGN or identity refusal means stop and roll back (5.9a).
 
-**5.7 Promote:** `$P up -d --wait`.
+**5.7 Start (the API migrates on start, O3):** `$P [$L] up -d --wait --wait-timeout 1200`. A failed transition migration leaves the API serving with `upgradeFailed: true` (C3): treat it as 5.9b unless the owner approves a fix-forward.
 
 **5.8 Verify (owner-login stack):**
 - `/healthz`;
@@ -401,7 +410,7 @@ The file's own verification queries must pass before anything else happens. **Af
   2. Restart the old stack from 5.5 with its old env files and digests.
 
   Nothing in the database changed, so the old logins still work.
-- **(b) 5.3 ran (the legacy logins are NOLOGIN, BC-17), or anything was applied in 5.6 (the supported rollback, PROVEN):**
+- **(b) 5.3 ran (the legacy logins are NOLOGIN, BC-17), or anything was applied in 5.7 (the supported rollback, PROVEN):**
   1. Stop everything.
   2. Restore 5.2 (`OWNER-LOGIN-RECOVERY.md` §4).
   3. Then do (a).
@@ -421,30 +430,35 @@ The golden security posture expects some of those roles to stay LOGIN, so retiri
 | Failure | Action |
 |---|---|
 | 5.3 fails | Nothing app-side changed. Follow the script's recovery notes, then restart the old stack. |
-| 5.6 exits 3 with an unexpected pending set | Stop. Review it, or roll back (5.9a). |
-| 5.6 fails part-way | Resume on the NEW image after review (3.6c), or restore: 5.9b. |
+| 5.6 shows an unexpected pending set | Stop. Review it, or roll back (5.9a). |
+| 5.7 fails part-way (`upgradeFailed: true`) | Fix forward on a NEW image after review (3.6c), or restore: 5.9b. |
 | 5.7/5.8 fail | 5.9b (restore, then the previous image). The old image on the upgraded database fails closed in production. |
 
 ---
 
 ## 6. Production risk of migrate-on-start (explicit statement)
 
-**`docker-compose.migrate-on-start.yml` (API migrates at every start, approval `none`) is NOT acceptable for
-production.** It stays supported for quick self-hosting only. In production it causes the following:
+**O3 (owner decisions C1-C5, 2026-11-05, "EXACTLY LIKE TWENTY"): the API migrates on start in production. G-07 is
+ACCEPTED by the owner.** The risks below are what the owner accepted; the controls that remain are listed after them.
 
-1. **Unreviewed production schema changes (G-07).** Any start of a new image applies whatever it ships: an auto-deploy, a mistaken `pull && up`, a platform redeploy. Nobody reviews the pending set, and nobody takes a backup at the moment it applies. With BC-11 the release step also applies without a token by default; what it adds over migrate-on-start is **one** sequential run before the API, with the backup taken first (3.3), rather than a migration on every API start.
-2. **Rollback becomes an outage or data loss (C-1).** A contracting migration applied by the new image cannot be undone by starting the old one. Even expand-only rollback relies on the classifier tolerating AHEAD (NOT TESTED).
-3. **Two-version starts block and serve intermediate schemas.** The lock waiter blocks up to 600 s (840 s worst case); migrations commit one by one under live traffic.
-4. **Crash-loop amplification.** A failing migration retries on every restart, against production.
-5. **Authority in the long-running process (ST-3).** Under the owner login the API already holds schema authority (PT-01). Migrate-on-start adds the **act** of changing the schema to every API start.
-6. **It does not reduce the owner-login blast radius.** Neither does the release step: both use the one login.
+1. **Unreviewed production schema changes (G-07, accepted).** Any start of a new image applies whatever it ships: an auto-deploy, a mistaken `pull && up`, a platform redeploy. Mitigations: deploy by digest only (3.1), the read-only pending check (3.2), the expand-only review, and the MANDATORY backup before every upgrade (3.3).
+2. **Rollback becomes an outage or data loss (C-1).** A contracting migration applied by the new image cannot be undone by starting the old one. Even expand-only rollback relies on the classifier tolerating AHEAD (NOT TESTED). Recovery is restore only.
+3. **Two-version starts block and serve intermediate schemas.** Hence C5: one API, stop-then-start (3.4, 3.7), enforced by the gate.
+4. **Crash-loop amplification.** A failing first install retries on every restart, against production (bounded by `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`). A failing upgrade does not loop under C3: the API serves degraded and reports `upgradeFailed: true`.
+5. **Authority in the long-running process (ST-3).** Under the owner login the API already holds schema authority (PT-01); migrate-on-start adds the **act** of changing the schema to every API start.
 
-> **SECURITY TRADE-OFF (ST-3, as amended by BC-11, owner decision 2026-11-05).** Both lifecycle paths apply **without a token by default** (approval mode `none`), and the deployment id is optional, like Twenty. Token mode and a declared deployment id are opt-in safety nets; token mode's rule is unchanged when on. **Production uses the in-place default:** API `CREWFLOW_MIGRATE_ON_START=false`, the one-off `rab-migrate` run first, a **mandatory** pre-upgrade backup, and one API replica. The quick-start override migrates on every API start and stays for self-hosting only. The gate fails CI if the production default ever renders the API with migrate-on-start on, or not waiting for `rab-migrate`. It no longer requires token mode.
+> **SECURITY TRADE-OFF (ST-3 as amended by BC-11 and O3 C1-C5, owner decisions 2026-11-05).** Approval mode is `none` by default (C4), so a start needs no token; `token` stays an opt-in of `compose.env` (BC-11). The deployment id stays optional. The API migrates on every start. What protects an upgrade:
+> - the migration lock;
+> - the identity and refusal gates;
+> - the posture and semantic goldens;
+> - RLS;
+> - one API deployed stop-then-start;
+> - the MANDATORY pre-upgrade backup.
 >
-> **The release step's authority.** `rab-migrate` holds no separately held command authority (`DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true`); the gate refuses both on every service. With the defaults, anyone who can run it with the shared `database.env` **applies** the pending set. Accepted risk: a wrong image or URL migrates production, and recovery is restore only (section 3, "ACCEPTED RISK"). Mitigation: `database.env` is root-only 0600, the backup is mandatory, and token mode plus a deployment id are available opt-ins.
+> A mistaken upgrade is recovered by restore only. A failed UPGRADE serves degraded by default (C3), and the Worker runs on the partly-upgraded schema. Anything that reads or writes a not-yet-migrated object fails at that point. `/healthz` shows only `upgradeFailed: true|false`, never the migration's name. The gate fails CI if the production compose stops migrating on start, pins the approval mode to a literal instead of `${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}`, renders anything but `none` or `token`, brings back a `rab-migrate`, or allows more than one API.
 
-**OpenShip is unsupported for the owner-login deployment (M0 D11).** OpenShip drops these keys: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on` conditions. Without the root launcher, the Worker image's root default user runs **the Worker itself as root**.
-- **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Merging its in-place edit would redeploy the temporary deployment into a shape that cannot start there: no `crewflow_owner` exists on its database, and the Worker would run as root.
+**OpenShip is unsupported for the owner-login deployment (M0 D11).** OpenShip drops these keys: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on` conditions. Since O1 the image's default user is the non-root `node`, but the other dropped keys still make it unsupported, and without `depends_on` conditions the Worker could start before the API has migrated.
+- **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Merging its in-place edit would redeploy the temporary deployment into a shape that cannot start there: no `crewflow_owner` exists on its database.
 - **NEEDS OWNER APPROVAL:** disable OpenShip auto-deploy, or accept the outage, before that PR merges.
 
 Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
@@ -456,7 +470,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 - **Owner password rotation:** done by the admin at the provider. Then update `database.env` and restart rab-api and rab-worker. After a suspected compromise, rotation is **not** remediation: inventory roles, memberships, ADMIN rows, definers, policies and triggers first (M0 §6.4 item 9).
 - **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce is ported into `rab-worker` itself (Agent 2). At start it logs `[worker-isolation] runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=… memory.max=… mode=enforce`, and with `CREWFLOW_RUNTIME_ISOLATION=enforce` (committed in `docker-compose.image.yml`) it **refuses to start** when any of these is missing: uid 1000, an empty capability bounding set, no-new-privileges, a read-only root, a PID limit, a memory limit.
 - **Resources:**
-  - API: 1 GB (raised from 768 MB for the migration child under migrate-on-start; NOT MEASURED).
+  - API: 1 GB (raised from 768 MB for the migration child; the API migrates on start, O3; NOT MEASURED).
   - Worker: 1.5 GB, with the native PDF budget rule from #61 (`PDF_NATIVE_MEMORY_BUDGET_MB`).
   - Redis: 640 MB.
 
@@ -464,16 +478,17 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 | Assumption | Owner |
 |---|---|
-| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE=none\|token` and `CREWFLOW_UPGRADE_FAILURE_POLICY` are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. **Approval mode defaults to `none`** (BC-11): the release step and migrate-on-start apply without a token. Token mode is opt-in (`database.env`); when on, every non-fresh apply needs `CREWFLOW_MIGRATION_APPROVED`, on any target (exit 65 without it), and a proven fresh install and check runs are unchanged (Agent 1, `approvalDecision`, f77fc9e5). `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are optional: matched when declared, a warning when absent. | Agents 1 and 2 |
-| `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true`, and a read-only compatibility check otherwise. | Agent 2 |
-| `deploy-prepare.js` (in place) is the release step. In mode `none` (default) a run applies; with token mode on, no token = check run (0 current, 3 pending) and `CREWFLOW_MIGRATION_APPROVED=<token>` = apply run. Failures exit 64–69 by kind. It reads `PG_DATABASE_URL`, with no `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`. (Agent 1; BC-11.) | Agent 1 |
+| `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE`, `DISABLE_DB_MIGRATIONS` (C1), `CREWFLOW_UPGRADE_FAILURE` (C3; the deprecated `CREWFLOW_UPGRADE_FAILURE_POLICY` is an alias the gate refuses in these files) are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. The production compose commits `CREWFLOW_MIGRATE_ON_START=true` and `CREWFLOW_MIGRATION_APPROVAL_MODE=${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}` on rab-api (compose.env opt-in: `token`). `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are optional: matched when declared, a warning when absent. | Agents 1 and 2 |
+| `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true` (and `DISABLE_DB_MIGRATIONS` is not true), then registers the job schedulers unless `DISABLE_CRON_JOBS_REGISTRATION=true` (C2), then `main.js`; it sets `CREWFLOW_UPGRADE_INCOMPLETE` itself after a failed upgrade under `continue` (C3) and refuses an inherited value. | Agent 2 |
+| `check-pending-migrations.js` is the read-only pending check (exit 1 when pending), usable as a one-off `run --rm --no-deps rab-api` (3.2). `deploy-prepare.js` still exists but no committed compose file runs it (O3). | Agent 1 |
+| The Worker with `DISABLE_CRON_JOBS_REGISTRATION=true` consumes the schedulers only and reports a missing one as an ERROR; with `WORKER_SCHEDULER` unset, production runs `bullmq` (`interval` is refused in production). | Agent 2 |
 | `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
 | `01-crewflow-owner.sql` reads the password file named by `-v owner_password_file=…` (default `/run/secrets/crewflow-owner-password`, at least 24 characters) inside psql, suppresses statement logging only for a superuser session, and grants on `:"DBNAME"`. (Agent 1, `twa/db-lifecycle`.) | Agent 1 |
 | `bootstrap-admin` is email-only with an activation link, runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy, with per-invocation `DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true` on that run only (section 2, step 6). (Agent 1, confirmed.) | Agent 1 |
 | The Worker refuses to run as PID 1 (watchdog SIGKILL); `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`, `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS`, `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` with the ranges above. | Agent 2 |
 
 **Tested (Docker side, Agent 4):**
-- the gate: full mode on all 5 combinations, and its self-tests;
+- the gate: full mode on all 3 combinations (O3), and its self-tests;
 - `docker compose config` of every supported combination;
 - a disposable PG16.15 run of `docker-compose.local-db.yml` with **Agent 1's `01-crewflow-owner.sql` (`twa/db-lifecycle` b5a03348)** as its one init file, 21/21 checks:
   - the exact `crewflow_owner` attributes and the database grant `WITH GRANT OPTION`; no other role or membership created;

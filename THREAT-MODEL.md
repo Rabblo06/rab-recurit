@@ -1453,6 +1453,7 @@ topology is unchanged. Report: `CREWFLOW_TWENTY_ARCHITECTURE_PARITY_REPORT.md`. 
               fail closed (main.js never starts after a failed step or with migrations pending); exec env -u scrub proven
               on /proc/1/environ; runtime-database-guard refuses any migration variable in api/worker.
   Reversal:   Do not adopt it; keep the one-shot rab-migrate service as the only migration path.
+  Superseded 2026-11-05: the owner adopted API migrate-on-start for production ("EXACTLY LIKE TWENTY", G-07 accepted).
   ```
 
 ## HWS dev cutover: backfill fidelity fixes + one-off privileged copy (2026-10-22, rab-devdb ONLY, owner-approved)
@@ -4112,6 +4113,9 @@ databases only.
 
 ### B6: migration isolation (one-off `rab-migrate`, never the API or the Worker)
 
+> **Superseded 2026-11-05** by the owner decision "EXACTLY LIKE TWENTY" (the API migrates on start in production; G-07
+> accepted). See the owner-login section, consequence item 13. Kept below as the history of the earlier control.
+
 - **Threats:** a long-running API or Worker holding a migration-capable credential (any RCE or SSRF then reaches DDL); an
   API that migrates at start (concurrent starts racing, a bad release migrating production before review); a release
   promoted onto a schema behind its code; the migration credential baked into an image layer or committed.
@@ -5558,6 +5562,108 @@ writes a warning instead.
     seed commands write the permission catalogue, and the migration runner writes the ledger, both as the owner login.
     No database guard is added. Agent 5 updates the catalogue entry and the CF-09 test to record the accepted difference.
 
+13. **Owner-accepted, 2026-11-05: "EXACTLY LIKE TWENTY"** (one image; the API migrates on start). Each risk below is
+    accepted, like Twenty. Nothing claims it is a passing control.
+
+    - **G-07 (HIGH): unreviewed DDL at start-up in production.**
+      - The API migrates on start, with no approval list and no `rab-migrate` release step. A new image's DDL reaches
+        production when the API starts.
+      - Controls kept: the migration lock; the check-first classifier; the refusals (identity, wrong or unknown ledger,
+        version, roles); FORCE RLS; the mandatory backup before each upgrade (runbook).
+    - **C3 (HIGH): serving after a failed upgrade, with a partly-applied schema.**
+      - The default `CREWFLOW_UPGRADE_FAILURE=continue` logs an ERROR naming the failed migration and keeps starting.
+      - A first-install failure still exits non-zero (an empty or bootstrap-partial database never serves).
+      - Residual: the code can be served against a schema that lacks the failed migration's objects. For example, a
+        missing RLS policy or function. A transactional migration rolls back whole, so its tables never appear without
+        their policies; one of the `transaction = false` migrations can stop half-way.
+      - Trigger: api-prestart sets `CREWFLOW_UPGRADE_INCOMPLETE=<migration>` only after the migrate child exits 70 with
+        `"policy":"continue"` on a database that is not a first install, and strips any inherited value. The boot gates
+        honour it for the API process only, only when the first pending migration is exactly the named one, and only
+        on a stopped UPGRADE (see the first-install rule below)
+        (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
+        `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
+      - **Owner-accepted 2026-11-05 (decision changed the same day): "After a failed upgrade, the Worker runs all jobs,
+        including payroll timers, on a partly-applied schema (like Twenty)."**
+        - The Worker cannot see the API's variable (another container), so it decides from the database alone: when the
+          database is a stopped upgrade (below) and the pending set is a contiguous, in-order tail of its chain, gate 7
+          writes a loud WARNING ("running on a
+          partly-upgraded schema: <first> and N more not applied"), `provision-function-behind` is a warning too, and
+          the semantic golden comparison is skipped (the boot snapshot is still the baseline).
+        - Residual: jobs that touch the missing tables or functions fail and retry under the normal BullMQ and outbox
+          rules.
+        - Still refused for the Worker: interleaved or out-of-order ledgers, unknown or foreign names, a different
+          chain, retired names, and an unknown provision function in production. The ahead rules are unchanged. The CLI
+          and the provisioner are unchanged.
+      - **A first install never serves and never starts the Worker.** Both relaxations need Agent 1's classifier to say
+        CHAIN-PARTIAL and its fresh-install proof to say NOT fresh (`database/owner-login/install-state.ts`; read
+        physically: `pg_relation_size` of `core.organisation`, `core.manager_workspace` and
+        `core.workspace_schema_registry`, workspace schemas, and the bootstrap-role ADMIN row; never an RLS-bound count).
+        EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install (CHAIN-PARTIAL, fresh), FOREIGN and an empty ledger refuse
+        exactly as before (`readUpgradeEvidence` in `database-boot-gates.ts`).
+      - **Known behaviour, kept (coordinator decision 2026-11-05):** the in-process workspace provisioner's per-cycle
+        provisioner-strict check keeps refusing on a partly-upgraded schema. Provisioning of NEW workspaces waits (it
+        does not crash) until the fix is deployed. This stops new workspace schemas being built from an incomplete
+        template. It is data integrity, not an extra block on running jobs.
+      - Detection:
+        - the ERROR log naming the migration, written on every start while the ledger is behind;
+        - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
+          force-rls spot check (5), tls (6), dispatch-notify (1c), objects (FORCE on every core tenant table, the 16
+          pre-auth tables with their definer policies, ownership), grants (8);
+        - gate 7 (pending / schema-compatibility) still refuses unknown or interleaved ledger names, a ledger ahead for
+          the provisioner, and every case that is not the declared failed upgrade; for that one case it warns;
+        - the semantic-posture golden comparison is skipped in that case only (the golden describes the new release, so
+          a rolled-back upgrade always differs), and a WARNING says so;
+        - the runtime posture monitor still compares every timer tick with the boot snapshot: any later policy,
+          function, trigger or RLS change turns readiness off.
+    - **C5 (MEDIUM): one API server.** Deploys stop the API, then start the new one. No rolling or blue-green update:
+      two versions would race for the migration lock and old code would serve intermediate schemas.
+
+    - **One image (O1, PR #76; MEDIUM): the API container now carries the Worker-only PDF packages.** About 55 npm
+      packages, including `@react-pdf/*`, pdfkit, fontkit, pako 0.2.9, png-js, jay-peg, yoga-layout and `@noble/*`
+      (+30.8 MB uncompressed; 0 high or critical CVEs at O1). This is an owner-accepted attack-surface increase (one image
+      like Twenty, owner decision 2026-11-05).
+      - Open proof (`SHARED-IMAGE-PLAN.md`): nothing yet proves the API never LOADS them. There is no static
+        import-graph gate and no runtime `require.cache` check on the API.
+      - Recommended follow-up: add both, failing CI when an API entrypoint can reach one of the PDF packages or when a
+        started API process has one in `require.cache`. Until then a vulnerability in those packages is reachable from
+        the API only through code that imports them, which is not proven absent.
+    - **Stop signal during the migrate step (O3 fix T8a-TMP; LOW): owner-accepted 2026-11-05.** The read-only rab-api
+      has no writable path, so `api-prestart.sh` takes the failed migration's name back from the migrate child through
+      a command substitution instead of a temp file. A POSIX shell runs its trap only after a command substitution
+      returns, so a `docker compose stop rab-api` that arrives while migrations are being applied is handled when the
+      child ends, or becomes Docker's SIGKILL after `stop_grace_period` (35 s). Every other prestart step still reacts
+      immediately.
+      - Measured (O3 container test T10, PG16, with a transactional test migration): both a stop and a direct SIGKILL
+        mid-migration left the database consistent. The session ended, the advisory lock was released, there was no
+        ledger row, the change was rolled back, and the next documented start applied it (outcome ok).
+      - Residual: 8 migrations in the chain set `transaction = false` (several use `CREATE INDEX CONCURRENTLY`):
+        1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000 and
+        1786721430000. A kill inside one of them is not rolled back. For example, an interrupted concurrent build
+        can leave an INVALID index, and its re-run depends on that migration's own idempotence. This was already true
+        before the change (the stop then reached the child immediately and interrupted it the same way); the grace
+        period only changes when the kill lands. NOT measured by T10. Operators must not stop rab-api during the
+        migrate step; the deployment guide's backup step is the recovery path.
+      - Stricter alternatives, declined by the owner: a /tmp tmpfs on rab-api (breaks the H6 "API has no writable path"
+        rule), or a larger prestart rework.
+
+    Design changes recorded with this decision (not risks):
+
+    - **C1:** `DISABLE_DB_MIGRATIONS` is accepted again (Twenty's name). It is the Worker's switch: the Worker never
+      migrates.
+    - **C2:** the API registers the BullMQ schedulers and the Worker only consumes them (Twenty's split; Crewflow's
+      Worker registered them before).
+      - Accepted risk (MEDIUM, owner-accepted 2026-11-05 as part of C2, like Twenty): a BullMQ Job Scheduler lost from
+        Redis stays lost until the next API start. Examples are Redis data loss without AOF, or a manual `FLUSHALL`.
+        The timed jobs it drives pause until then, payroll and attendance timers included.
+      - Mitigations in place:
+        - the Worker's read-only reconcile check logs an ERROR naming the missing scheduler ids and turns Worker health
+          unhealthy;
+        - production Redis runs AOF with `noeviction`;
+        - the API's registration step is idempotent, so any API start restores every scheduler.
+      - Recommended follow-up: alert on Worker unhealthy.
+      - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
+        decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
+
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 
 | Id | Sev | Finding | State after this change |
@@ -5568,7 +5674,7 @@ writes a warning instead.
 | G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
 | G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
 | G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
-| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Agent 1 (approval token, migrate-on-start defaults) |
+| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Accepted by the owner 2026-11-05, like Twenty (item 13 above): the API migrates on start in production |
 | G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
 | G-09 | MED | Pool poisoning: a session-level SET ROLE survives COMMIT | **Mitigated:** RESET ROLE on checkout and at the start of every tenant transaction, plus a `current_user = session_user` assertion |
 | G-10 | MED | The workspace registry and bound constraints are writable | **Mitigated on normal paths** by M-T2 and the grant-parity guards. The injection case is accepted. |
@@ -5681,3 +5787,46 @@ No migration, role, grant, RLS or posture change; no money or worked-minutes val
   allowed one are still checked. Regression: `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security
   deployment-config job): `@swc/html-linux-x64-musl` and seven other SWC names fail, `@swc/helpers` passes, a disguised
   package fails, and the Dockerfile gate keeps exactly one exception.
+
+## HOTFIX — the semantic-posture boot gate refused every real database (branch fix/posture-test-marker, 2026-11-05)
+
+**Security finding (§5.8).**
+
+- **Severity:** HIGH (availability). Plus a secondary security risk from the operator workaround (below).
+- **Actor → action → consequence:** any operator installs or upgrades on a real (unmarked) database → the API and
+  Worker boot gates read the semantic posture and compare it with the committed golden → the golden contains
+  `setting|*|this|crewflow.disposable_test_database=true`, which only CI's throwaway databases carry → every real
+  database "differs from the reviewed posture" → `semantic-posture refused …` → a fresh install applies all 254
+  migrations and then restart-loops. Nothing serves.
+- **Secondary risk:** the obvious operator workaround is to mark the production database disposable
+  (`ALTER DATABASE … SET crewflow.disposable_test_database = 'true'`) so that it matches the golden. That marker relaxes
+  test-only allowances (unmarked-remote-host acceptance for NODE_ENV=test, test seams, seeds). Before this fix nothing
+  refused production on a marked database.
+- **Where:**
+  - `packages/rab-server/src/database/posture-drift/semantic-golden.pg16.ts:539` and `semantic-golden.pg18.ts:540`
+    (the captured line);
+  - `packages/rab-server/src/database/posture-drift/semantic-posture.ts:89-93` (the reader includes every per-database
+    and per-role setting).
+  - On main since 53595f02 (2026-11-04). **The published v0.4.0 images carry the defect.**
+- **Root cause:** the goldens were generated by `check-semantic-posture.ts --write` from CI databases that are marked
+  disposable by design. The reader treated that test-infrastructure setting as security posture.
+- **Fix:**
+  1. The reader excludes the setting by EXACT name (`POSTURE_EXCLUDED_SETTING = 'crewflow.disposable_test_database'`,
+     whatever its value; no `crewflow.*` wildcard). Every other per-database or per-role setting is still compared.
+     The line is removed from both goldens; they carry no hash or count.
+  2. Fail closed separately: `assertDeploymentIdentity` (boot gate 4 "identity", the runtime guard and production
+     commands) now refuses a PRODUCTION process on a database whose catalog carries the marker
+     (`pg_db_role_setting`, database level). The message names the remedy (`ALTER DATABASE <name> RESET …`). Excluding
+     the marker from the posture therefore does not make it undetectable, and the workaround above now fails closed.
+- **Regression tests:**
+  - `posture-drift/semantic-posture-test-marker.spec.ts`:
+    - no golden line names the setting;
+    - the reader's exclusion is by exact name;
+    - production plus the marker is refused;
+    - test plus the marker is allowed;
+    - production without the marker is not refused by this rule.
+  - `__tests__/integration/semantic-posture-test-marker.integration.spec.ts`: the posture reads the same with the
+    marker `true`, `false` and reset (rolled back).
+- **Operators on v0.4.0:**
+  - Do NOT mark production disposable.
+  - Deploy the release carrying this fix. On a test database the old images keep working (it carries the marker).

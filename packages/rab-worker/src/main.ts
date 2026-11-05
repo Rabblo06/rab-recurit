@@ -24,7 +24,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
 import { installSessionRoleResetOnDataSource } from '@rab/server/database/postgres/session-role-reset';
 import { securityReady, startSecurityPostureMonitoring } from '@rab/server/engine/core-modules/health/security-readiness';
@@ -50,7 +50,7 @@ import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
 import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
-import { resolveSchemaWaitMs, waitForCompatibleSchema } from './core/runtime/schema-wait';
+import { resolveSchemaWaitMs, waitForWorkerSchemaOn } from './core/runtime/schema-wait';
 import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
 import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
@@ -60,16 +60,17 @@ import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/d
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
 import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
 import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
-import { assertQueueRegistryValid, resolveScanPrefix } from './core/scheduler/queue-registry';
+import { assertQueueRegistryValid } from './core/scheduler/queue-registry';
+import { buildSchedulerPlan, resolveWorkerSchedulerRole } from './core/scheduler/scheduler-plan';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
-import { assertCombinedShiftScanTick, isScanJobEnabled, resolveIntervalMs, resolveShiftScanMode, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { SCAN_JOBS } from './core/scheduler/scan-jobs';
 import { COMBINED_SHIFT_SCAN_JOB, combinedMemberLock, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
 import { DispatchWakeListener } from './core/wake/dispatch-listener';
 import { createNotificationQueueMonitor, NotificationQueueMonitor } from './core/wake/notification-queue-monitor';
 import { resolveInviteAutoDeleteEnabled } from './queues/rab-maintenance/account-invite-cleanup.job';
-import { buildDispatchBindings, DISPATCH_SCAN_JOBS, dispatchIntervalOf, resolveDispatchConfig, withGlobalDispatch } from './core/wake/dispatch-wiring';
+import { buildDispatchBindings, DISPATCH_SCAN_JOBS, resolveDispatchConfig, withGlobalDispatch } from './core/wake/dispatch-wiring';
 import { WorkerModule } from './worker.module';
 import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/connection-budget';
 import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
@@ -208,18 +209,14 @@ async function waitForWorkerSchema(pg: ReturnType<typeof resolvePgEnvironmentCac
   try {
     const expected = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
     const production = isProductionProcess('worker', process.env);
-    await waitForCompatibleSchema({
+    // O3 T8a-WORKER: the same check gate 7 makes for the Worker, WITH the C3 upgrade evidence (schema-wait.ts
+    // checkWorkerSchema) — so after a failed upgrade the wait lets the Worker start exactly when gate 7 does.
+    await waitForWorkerSchemaOn((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
+      expected,
+      production,
       maxWaitMs,
       // eslint-disable-next-line no-console
       log: (line) => console.log(line),
-      check: async () => {
-        await checkSchemaCompatibility((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
-          process: 'worker',
-          production,
-          expected,
-          label: 'worker process',
-        });
-      },
     });
   } finally {
     await dataSource.destroy().catch(() => undefined);
@@ -306,6 +303,10 @@ async function bootstrap(): Promise<void> {
   // Owner-login architecture (Agent 3's pool safety): this pool comes from TypeOrmModule.forRoot, not the connection
   // factory, so RESET ROLE on checkout is installed here explicitly (idempotent).
   installSessionRoleResetOnDataSource(runtimeDataSource);
+  // Owner decision 2026-11-05 ("the Worker starts too, like Twenty"): after a failed upgrade gate 7 accepts an in-order
+  // pending tail on a stopped UPGRADE for the Worker and logs the ONE loud partly-upgraded WARNING naming the first pending
+  // migration (above, `[db-boot-gates] WARNING`); every consumer and scan then starts normally — a job that needs the
+  // missing schema fails and retries under its own rules.
   // Agent 3's external security audit sink and semantic posture monitor (boot baseline from the gates above). An invalid
   // audit-sink configuration refuses to start; posture drift is acted on below, once the runtime exists.
   const securityMonitoring = (() => {
@@ -332,6 +333,17 @@ async function bootstrap(): Promise<void> {
 
   const environmentService = appContext.get(EnvironmentService);
   const schedulerMode = environmentService.get('WORKER_SCHEDULER');
+  // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): interval (development/test only) | register (bullmq, this
+  // Worker registers the schedulers — development) | consume (bullmq + DISABLE_CRON_JOBS_REGISTRATION=true — production:
+  // the API registers them at start-up; this Worker never upserts/removes one and never starts an interval timer).
+  // Re-checked here, fail closed, behind env.validation.ts.
+  const schedulerRole = (() => {
+    try {
+      return resolveWorkerSchedulerRole({ get: (key: string) => environmentService.get(key as never) });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   const realtimePublish = (channel: string, message: string) =>
     boundedPublish(realtimePublisherRedis, 'realtime publish', () => realtimePublisherRedis.publish(channel, message));
   // Approved Shift Statement producer (legacy `bull` prefix): the dispatcher adapter publishes through it.
@@ -420,27 +432,19 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     refuseStartup(error);
   }
-  // event mode: the four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS (the backstop); every other interval as before.
-  const intervalOf = (def: (typeof SCAN_JOBS)[number]) => dispatchIntervalOf(def, resolveIntervalMs(def, environmentService), dispatchConfig);
-  // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.
-  const isEnabled = (def: (typeof SCAN_JOBS)[number]) => isScanJobEnabled(def, environmentService);
-  // Fail closed before any consumer, scheduler or loop exists: every scan interval must resolve (validated env + bounds).
-  try {
-    for (const def of SCAN_JOBS) intervalOf(def);
-  } catch (error) {
-    refuseStartup(error);
-  }
-  // Phase D-Q4a: WORKER_SHIFT_SCAN_MODE (default separate = the four shift-family scans exactly as before). Re-checked here,
-  // fail closed: an unknown value, or combined mode with a common tick under 30 s, refuses to start.
-  const shiftScanMode = (() => {
+  // O3 C2: the scan schedule from the ONE plan builder the API's start-up registration (register-schedulers.ts) uses too, so
+  // both compute identical cadences. Unchanged rules: event mode's four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS;
+  // push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true (Phase A); every scan
+  // interval must resolve; WORKER_SHIFT_SCAN_MODE (Phase D-Q4a, default separate) — an unknown value, or combined mode with a
+  // common tick under 30 s, refuses to start. Fail closed before any consumer, scheduler or loop exists.
+  const schedulerPlan = (() => {
     try {
-      const mode = resolveShiftScanMode({ get: (key) => environmentService.get(key) });
-      if (mode === 'combined') assertCombinedShiftScanTick(intervalOf(SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!));
-      return mode;
+      return buildSchedulerPlan({ get: (key: string) => environmentService.get(key as never) }, dispatchConfig);
     } catch (error) {
       return refuseStartup(error);
     }
   })();
+  const { intervalOf, isEnabled, shiftScanMode } = schedulerPlan;
 
   // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
   // any consumer exists — fail closed.
@@ -598,10 +602,13 @@ async function bootstrap(): Promise<void> {
   logger.log(`workspace provisioning: in-process on the owner login (interval ${provisioningInterval.intervalSeconds}s)`);
   // ---- end T4 ----
 
-  if (schedulerMode === 'bullmq') {
+  if (schedulerRole !== 'interval') {
     // ONE cluster-wide job scheduler per scan; this replica consumes whichever ticks it wins. Redis preflight
     // (noeviction, API support) and the dedicated scan-lock connection come first — any failure refuses to start.
-    const prefix = resolveScanPrefix(environmentService.get('NODE_ENV'), environmentService.get('BULLMQ_PREFIX'));
+    // O3 C2: `consume` (DISABLE_CRON_JOBS_REGISTRATION=true, production) never registers — the API did at start-up; this
+    // Worker only verifies, read-only, that every enabled scheduler exists. `register` keeps today's reconcile loop.
+    const prefix = schedulerPlan.prefix;
+    if (schedulerRole === 'consume') logger.log('bullmq scheduler: consume only (DISABLE_CRON_JOBS_REGISTRATION=true) - the API registers the job schedulers at start-up');
     scheduler = await startBullmqScheduler({
       redis,
       redisUrl,
@@ -619,11 +626,12 @@ async function bootstrap(): Promise<void> {
       onScanLock: (lock) => {
         memberScanLock = lock;
       },
+      registerSchedulers: schedulerRole === 'register',
     }).catch(refuseStartup);
     beat();
   } else {
-    // interval (default): the historical behaviour — every ENABLED loop on this process's own timer, in the original
-    // order, registered exactly once.
+    // interval (development and test only — O3 C2: refused in production and with DISABLE_CRON_JOBS_REGISTRATION=true): the
+    // historical behaviour — every ENABLED loop on this process's own timer, in the original order, registered exactly once.
     // Phase D (D3): the daily scans (firstRunAfterInterval) are timed from their persisted cluster stamp — a restart neither
     // re-runs them nor postpones an overdue one. An unreadable stats hash → one full interval (never an extra run).
     // D-Q5a (audit §13 #9): a daily scan whose stamp is MISSING (Redis lost its data) is timed from the first boot that

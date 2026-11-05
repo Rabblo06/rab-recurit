@@ -14,6 +14,9 @@
  *   R00 static: the verifier on the variant; the override changes no runtime security key and no image
  *   R01 throwaway infrastructure up; Redis is the variant's own hardened service (reviewed config + per-run ACL)
  *   R02 Redis hardening holds: unauthenticated NOAUTH, PING-only health user, app user denied admin, noeviction + AOF
+ *   O3 (owner decisions C1-C5): docker-compose.image.yml has NO rab-migrate any more; the API migrates on start. R03 is
+ *       therefore BLOCKED until this driver is reworked for O3 and the owner login (KNOWN GAP, like its separated-login
+ *       database steps); its original text follows.
  *   R03 guarded migrations through the variant's rab-migrate (API image by digest): deploy-prepare check (3) / apply,
  *       phase A as rab_owner, phase B as the bootstrap superuser, a wrong token refused (1, nothing applied), final
  *       check (0); ledger, the gated 1786721330000 absent; rab-migrate's own container read-only / no capability
@@ -229,7 +232,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const alone = render([VARIANT]);
     const merged = render([VARIANT, OVERRIDE]);
     const diffs = [];
-    for (const svc of ['rab-api', 'rab-worker', 'rab-migrate', 'rab-redis']) {
+    for (const svc of ['rab-api', 'rab-worker', 'rab-redis']) {
       for (const k of keys) {
         // The one documented exception: rab-redis's data directory is a tmpfs instead of a named volume (no Docker volume).
         if (svc === 'rab-redis' && k === 'tmpfs' && JSON.stringify(merged.services[svc][k]) === '["/data"]' && alone.services[svc][k] === undefined) continue;
@@ -240,7 +243,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
         if (merged.services[svc].depends_on?.[dep]?.condition !== v.condition) diffs.push(`${svc}.depends_on.${dep}`);
       }
     }
-    write(`images: ${['rab-api', 'rab-worker', 'rab-migrate', 'rab-redis'].map((s) => `${s}=${merged.services[s].image}`).join(' ')}`);
+    write(`images: ${['rab-api', 'rab-worker', 'rab-redis'].map((s) => `${s}=${merged.services[s].image}`).join(' ')}`);
     write(`differences in security keys: ${diffs.join(', ') || 'none'}`);
     assert(diffs.length === 0, `override changes ${diffs.join(', ')}`);
     assert(merged.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION === 'enforce' && merged.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION === 'enforce', 'enforce not set');
@@ -284,6 +287,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   });
 
   await step('R03', 'Guarded migrations via the variant\'s rab-migrate (deploy-prepare, approval token, phases A and B)', async () => {
+    // O3: there is no rab-migrate in docker-compose.image.yml; the API migrates on start (R04). Not reworked yet.
+    if (!fx.o3ReleaseStep) return { status: 'BLOCKED', note: 'O3: no rab-migrate (the API migrates on start); this step needs the O3 / owner-login rework' };
     const run = (name, env) => {
       const r = compose(['run', '--rm', '--no-deps', '--pull', 'never', ...Object.keys(env).flatMap((k) => ['-e', k]), 'rab-migrate'], { env, timeout: 900_000 });
       const token = (/approval token for exactly this set: (pending-\d+-[0-9a-f]{64})/.exec(r.out) || [])[1];
@@ -347,14 +352,12 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return 'applied 250, nothing pending / unknown / gated; crewflow_worker shape as reviewed; read-only session';
   });
 
-  await step('R04', 'rab-api healthy under CREWFLOW_RUNTIME_ISOLATION=enforce (after the rab-migrate dependency run)', async () => {
+  await step('R04', 'rab-api healthy under CREWFLOW_RUNTIME_ISOLATION=enforce (it migrates on start, O3)', async () => {
     const t0 = Date.now();
     const r = compose(['up', '-d', '--wait', '--wait-timeout', '300', '--pull', 'never', 'rab-api'], { timeout: 400_000 });
     measured.apiStartToHealthyMs = Date.now() - t0;
     const logs = logsOf('rab-api');
     write(logs.split('\n').filter((l) => /api-prestart|runtime-db-guard|Nest application successfully started|EROFS|EACCES/i.test(l)).join('\n'));
-    const migrateLogs = logsOf('rab-migrate');
-    write(`rab-migrate (dependency run): ${migrateLogs.split('\n').filter((l) => /deploy-prepare/.test(l)).slice(-3).join(' / ')}`);
     assert(r.code === 0, 'rab-api not healthy');
     assert(inspectId(containerId('rab-api'), '{{.Config.Image}}') === process.env.S_IMAGE, 'rab-api is not the pinned image');
     const iso = isolationLine(logs, 'api-prestart: ');

@@ -1,27 +1,28 @@
 /**
- * Owner-login architecture (PR 3): what the migrate-on-start child decides after a FAILED upgrade, under
- * CREWFLOW_UPGRADE_FAILURE_POLICY (parsed by Agent 2's runtime-db-config.ts readUpgradeFailurePolicy; default `refuse`).
+ * Owner-login architecture: what the migrate-on-start child decides after a FAILED upgrade, under CREWFLOW_UPGRADE_FAILURE
+ * (parsed by runtime-db-config.ts readUpgradeFailurePolicy; default `continue`, owner decision C3 2026-11-05, "exactly like
+ * Twenty": "completed with errors ... continuing startup").
  *
  *   fresh install (the run started EMPTY / BOOTSTRAP-PARTIAL, or a proven fresh CHAIN-PARTIAL)  never serves: the child keeps
  *                                                                                                its failure exit code;
- *   refuse                                                                                       never serves;
- *   continue-if-compatible                                                                       serves (exit 70, logged as a
- *     FAILURE, never as success) only when EVERY check below passes; otherwise it does not serve and keeps the failure code.
+ *   refuse                                                                                       never serves (the previous
+ *                                                                                                behaviour, unchanged);
+ *   continue (default)                                                                           serves (exit 70) after an
+ *     UPGRADE MIGRATION failure, logged as an ERROR naming the migration and the reason, never as success. The caller
+ *     (migrate-on-start.ts) offers only a migration failure (outcome migrationFailed) here: configuration, identity, lock
+ *     timeout, approval (behind) and post-check failures stay fail-closed under every policy.
  *
- * Checks (all read-only, on a fresh session of the same login; each is reported, pass or fail):
- *   ledger-compatible     schema-compatibility.ts for process 'api' (the API's own boot gate): nothing pending, no
- *                         interleaved name, provision function not behind. In practice this means a failure that left the
- *                         schema current (a post-check, the auto-bind, a lock timeout after another run finished it).
+ * Under continue every check below still runs and is reported (the operator sees the whole picture), but only ONE gates the
+ * start: deployment-identity (fail closed on identity). The others are diagnostics of the degraded state:
+ *   ledger-compatible     schema-compatibility.ts for process 'api': after a failed upgrade it normally reports the pending
+ *                         migrations (the API's boot gate 7 is relaxed for that by api-prestart's signal, Agent 2).
  *   no-partial-migration  the failed migration (if any) is not one of the seven `transaction = false` migrations, which can
  *                         leave partial DDL without a ledger row.
  *   post-checks           deploy-post-checks.ts deployPostCheckProblems(): secure-owner invariants, RLS enabled on every
  *                         tenant table, the login owns nothing, schema compatibility (function + READY workspaces).
  *   required-functions    the functions the API and the Worker call exist and the login may EXECUTE them.
- *   deployment-identity   the caller's hook: the deployment identity check the API boot performs (marker, id, host).
- *   posture               the caller's hook: Agent 3's posture / drift monitor. NOT wired yet: absent = FAIL (fail closed),
- *                         so continue-if-compatible cannot serve until that monitor exists.
- * Columns: with nothing pending and the ledger equal to the code (ledger-compatible), every column the code's migrations
- * create exists; no separate column scan is made.
+ *   deployment-identity   the caller's hook: the deployment identity check the API boot performs (marker, id, host). GATES.
+ *   posture               the caller's hook: Agent 3's posture / drift monitor (absent = reported as not wired).
  *
  * Importing this module has no side effects (no environment read, no connection).
  */
@@ -33,7 +34,7 @@ import { readUpgradeFailurePolicy, UpgradeFailurePolicy } from '../../../../owne
 
 export type { UpgradeFailurePolicy };
 
-/** CREWFLOW_UPGRADE_FAILURE_POLICY, parsed by the ONE runtime config module (default refuse; invalid = exit 64). */
+/** CREWFLOW_UPGRADE_FAILURE (+ its deprecated alias), parsed by the ONE runtime config module (default continue; invalid = exit 64). */
 export function parseUpgradeFailurePolicy(env: Record<string, string | undefined>): UpgradeFailurePolicy {
   return readUpgradeFailurePolicy(env);
 }
@@ -105,7 +106,7 @@ export async function assessUpgradeFailure(input: AssessUpgradeFailureInput): Pr
     return { serve: false, policy, reason: 'a first-install failure never serves (the API must not become healthy on a half-installed database)', checks: [] };
   }
   if (policy === 'refuse') {
-    return { serve: false, policy, reason: 'CREWFLOW_UPGRADE_FAILURE_POLICY=refuse (the default): the API stays unready', checks: [] };
+    return { serve: false, policy, reason: 'CREWFLOW_UPGRADE_FAILURE=refuse: the API stays unready', checks: [] };
   }
   const q = input.query;
   const checks: UpgradeCheck[] = [];
@@ -169,7 +170,11 @@ export async function assessUpgradeFailure(input: AssessUpgradeFailureInput): Pr
       : { name: 'posture', ok: false, detail: 'the posture / drift monitor is not wired yet (Agent 3): fail closed' },
   );
   const failed = checks.filter((c) => !c.ok);
-  return failed.length
-    ? { serve: false, policy, reason: `continue-if-compatible: ${failed.length} check(s) failed (${failed.map((c) => c.name).join(', ')}); the API stays unready`, checks }
-    : { serve: true, policy, reason: 'continue-if-compatible: every check passed; serving DEGRADED after a FAILED upgrade (exit 70)', checks };
+  const identity = checks.find((c) => c.name === 'deployment-identity');
+  if (!identity?.ok) {
+    return { serve: false, policy, reason: `continue: the deployment identity check failed (${identity?.detail ?? 'missing'}); fail closed on identity, the API stays unready`, checks };
+  }
+  const what = input.failedMigration ?? 'unknown migration';
+  const diagnostics = failed.length ? `; ${failed.length} diagnostic check(s) failed (${failed.map((c) => c.name).join(', ')})` : '';
+  return { serve: true, policy, reason: `continue: the upgrade FAILED at ${what}; continuing startup on the previous schema (exit 70)${diagnostics}`, checks };
 }

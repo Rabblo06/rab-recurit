@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
 import { DataSourceOptions, MigrationInterface } from 'typeorm';
 
 import { BootGateReport, DatabaseBootGateError, runDatabaseBootGates, RunBootGatesOptions } from '../../database/boot-checks/database-boot-gates';
@@ -43,6 +45,20 @@ async function refusedAt(promise: Promise<unknown>, gate: string, pattern: RegEx
   expect((error as DatabaseBootGateError).gate).toBe(gate);
   expect((error as Error).message).toMatch(pattern);
   expect((error as Error).message).not.toMatch(/postgres:\/\//);
+}
+
+/**
+ * An OLD-timestamped migration the ledger has never seen while newer ones are applied: pending, but NOT an in-order tail
+ * (out of order), so no C3 relaxation can apply.
+ */
+class BootGateFakeOutOfOrder1700000000000 implements MigrationInterface {
+  name = 'BootGateFakeOutOfOrder1700000000000';
+  async up(): Promise<void> {
+    throw new Error('never run');
+  }
+  async down(): Promise<void> {
+    throw new Error('never run');
+  }
 }
 
 /** A migration the ledger has never seen: the database is then "behind the code". */
@@ -98,9 +114,41 @@ describe('database boot gates (integration, migrations-only test database)', () 
     await refusedAt(runDatabaseBootGates('api', options(withRole.toString())), 'connect', /sets "options"/);
   });
 
-  it('pending migrations: a migration the ledger lacks refuses the boot', async () => {
+  // ASSERTION CHANGE (owner decision 2026-11-05, C3 "the Worker starts too, like Twenty"): one pending migration that is
+  // an in-order tail of the chain, on a database with physical upgrade evidence (CHAIN-PARTIAL and not a fresh install),
+  // no longer refuses the WORKER: it starts with the one partly-upgraded warning. The refusals that still hold are asserted
+  // here: the API without CREWFLOW_UPGRADE_INCOMPLETE, and the Worker on an out-of-order pending migration.
+  it('pending migrations: the API without CREWFLOW_UPGRADE_INCOMPLETE refuses one pending migration', async () => {
     const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakePending9999999999999];
-    await refusedAt(runDatabaseBootGates('worker', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakePending9999999999999/);
+    await refusedAt(runDatabaseBootGates('api', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakePending9999999999999/);
+  });
+
+  it('pending migrations: the Worker refuses an OUT-OF-ORDER pending migration (older than the newest applied)', async () => {
+    const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakeOutOfOrder1700000000000];
+    await refusedAt(runDatabaseBootGates('worker', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakeOutOfOrder1700000000000/);
+  });
+
+  it('pending migrations: the Worker STARTS on an in-order pending tail with upgrade evidence (C3), with the partly-upgraded warning', async () => {
+    // Physical upgrade evidence, deterministic on any test database (a pristine owner-login fresh install has none and must
+    // refuse — the first-install rule, covered by unit tests): a rolled-back INSERT still allocates a heap page, so
+    // pg_relation_size(core.organisation) > 0, exactly what Agent 1's fresh-install proof reads. Superuser fixture.
+    const su = new Client({ connectionString: adminUrl });
+    await su.connect();
+    try {
+      await su.query('BEGIN');
+      const slug = `bootgate-evidence-${randomUUID().slice(0, 8)}`;
+      await su.query(`INSERT INTO core.organisation (name, slug) VALUES ($1, $2)`, [slug, slug]);
+      await su.query('ROLLBACK');
+    } finally {
+      await su.end();
+    }
+    const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakePending9999999999999];
+    const lines: string[] = [];
+    const result = await runDatabaseBootGates('worker', options(appUrl, { log: (l: string) => lines.push(l) }, migrations));
+    expect(result).toBeDefined();
+    const warnings = [...result.warnings, ...lines].join(String.fromCharCode(10));
+    expect(warnings).toMatch(/running on a partly-upgraded schema: BootGateFakePending9999999999999 and 0 more not applied/);
+    expect(warnings).toMatch(/semantic posture NOT compared with the golden: UPGRADE INCOMPLETE/);
   });
 
   it('identity: PG_EXPECTED_DATABASE_NAME must equal current_database()', async () => {

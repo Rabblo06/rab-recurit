@@ -3,8 +3,8 @@ import { resolveRuntimeDatabase, RuntimeDbError } from '../../../database/typeor
 
 /**
  * Owner-login architecture: env.validation runs the shared runtime-db-config parser (database/owner-login/runtime-db-config.ts)
- * for CREWFLOW_MIGRATE_ON_START / CREWFLOW_MIGRATION_APPROVAL_MODE / CREWFLOW_UPGRADE_FAILURE_POLICY and refuses the removed
- * CREWFLOW_DB_MODE / DISABLE_DB_MIGRATIONS. The second-URL and role-password names are refused by the runtime guard
+ * for DISABLE_DB_MIGRATIONS / CREWFLOW_MIGRATE_ON_START / CREWFLOW_MIGRATION_APPROVAL_MODE / CREWFLOW_UPGRADE_FAILURE (and
+ * its deprecated alias CREWFLOW_UPGRADE_FAILURE_POLICY) and refuses the removed CREWFLOW_DB_MODE. The second-URL and role-password names are refused by the runtime guard
  * (never-in-runtime-env.ts), which the API and Worker run before boot.
  */
 const base = { REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32), PG_DATABASE_URL: 'postgres://crewflow_owner:pg-secret@localhost:5432/rab' };
@@ -26,6 +26,28 @@ describe('env validation: owner-login database start-up settings', () => {
     }
     // A compose `KEY=` line (blank) is unset.
     expect(() => validate({ ...base, CREWFLOW_MIGRATE_ON_START: '', CREWFLOW_UPGRADE_FAILURE_POLICY: '' })).not.toThrow();
+    // Owner decision C3: the new name, both values; and with the deprecated alias when the two agree.
+    for (const CREWFLOW_UPGRADE_FAILURE of ['continue', 'refuse'] as const) {
+      expect(validate({ ...base, CREWFLOW_UPGRADE_FAILURE }).CREWFLOW_UPGRADE_FAILURE).toBe(CREWFLOW_UPGRADE_FAILURE);
+    }
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).not.toThrow();
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).not.toThrow();
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: '' })).not.toThrow();
+  });
+
+  it('CREWFLOW_UPGRADE_FAILURE and its deprecated alias disagreeing refuses (owner decision C3)', () => {
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(
+      /CREWFLOW_UPGRADE_FAILURE and the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY disagree/,
+    );
+  });
+
+  it('CREWFLOW_UPGRADE_INCOMPLETE (set only by api-prestart.sh after a verified exit 70) must be a migration name or unknown', () => {
+    for (const value of ['unknown', '1786730000000-Broken', 'StatementDispatchPointer1786721320000']) {
+      expect(validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value }).CREWFLOW_UPGRADE_INCOMPLETE).toBe(value);
+    }
+    for (const value of ['a b', '<script>', 'x'.repeat(201), 'name;rm']) {
+      expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE must be a migration name/);
+    }
   });
 
   it('refuses a value outside the allowed set, never echoing it', () => {
@@ -33,6 +55,8 @@ describe('env validation: owner-login database start-up settings', () => {
       ['CREWFLOW_MIGRATE_ON_START', 'yes-S3cret'],
       ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'allowlist-S3cret'],
       ['CREWFLOW_UPGRADE_FAILURE_POLICY', 'continue-S3cret'],
+      ['CREWFLOW_UPGRADE_FAILURE', 'continue-S3cret'],
+      ['DISABLE_DB_MIGRATIONS', 'yes-S3cret'],
     ] as const) {
       let message = '';
       try {
@@ -45,10 +69,20 @@ describe('env validation: owner-login database start-up settings', () => {
     }
   });
 
-  it('refuses the removed mode switch and Twenty CRM\'s migrate switch with an actionable message', () => {
+  it('refuses the removed mode switch with an actionable message', () => {
     expect(() => validate({ ...base, CREWFLOW_DB_MODE: 'twenty' })).toThrow(/no database mode switch any more.*Remove CREWFLOW_DB_MODE/);
     expect(() => validate({ ...base, CREWFLOW_DB_MODE: 'separated' })).toThrow(/Remove CREWFLOW_DB_MODE/);
-    expect(() => validate({ ...base, DISABLE_DB_MIGRATIONS: 'true' })).toThrow(/Twenty CRM's switch.*CREWFLOW_MIGRATE_ON_START/);
+  });
+
+  // ASSERTION CHANGE (owner decision C1, 2026-11-05): DISABLE_DB_MIGRATIONS used to be refused as "Twenty CRM's switch"; it is
+  // now accepted (true | false; true = this process never migrates) on the API and the Worker alike.
+  it('accepts DISABLE_DB_MIGRATIONS=true|false (owner decision C1), with or without CREWFLOW_MIGRATE_ON_START', () => {
+    for (const DISABLE_DB_MIGRATIONS of ['true', 'false'] as const) {
+      expect(validate({ ...base, DISABLE_DB_MIGRATIONS }).DISABLE_DB_MIGRATIONS).toBe(DISABLE_DB_MIGRATIONS);
+      expect(() => validate({ ...base, DISABLE_DB_MIGRATIONS, CREWFLOW_MIGRATE_ON_START: 'true' })).not.toThrow();
+    }
+    expect(() => validate({ ...base, DISABLE_DB_MIGRATIONS: '' })).not.toThrow();
+    expect(() => validate({ ...base, DISABLE_DB_MIGRATIONS: 'TRUE' })).toThrow(/DISABLE_DB_MIGRATIONS must be exactly/);
   });
 
   it('DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS: accepted by env validation (one-off CLI commands such as bootstrap-admin need them per invocation; database-target.ts decides) but refused by the API and Worker runtime guard', () => {

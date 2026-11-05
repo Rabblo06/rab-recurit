@@ -38,6 +38,12 @@ import { createHash } from 'node:crypto';
 const LAYOUT = ['crewflow_owner', 'rab_owner', 'rab_app', 'rab_secure_owner', 'crewflow', 'crewflow_app', 'crewflow_worker'];
 const layoutList = LAYOUT.map((r) => `'${r}'`).join(', ');
 const WS = `'^workspace_[0-9a-f]{32}$'`;
+/**
+ * Settings excluded from the semantic posture by EXACT name (never a `crewflow.*` wildcard): the disposable-test marker
+ * (test-database-guard.ts DISPOSABLE_TEST_DATABASE_SETTING). It is set on CI's throwaway databases only; a production
+ * process on a marked database is refused by assertDeploymentIdentity, so excluding it here hides nothing.
+ */
+export const POSTURE_EXCLUDED_SETTING = 'crewflow.disposable_test_database';
 
 /** Object section: compared with the committed golden. Rows: (schema, line); schema = 'core' or a workspace schema. */
 export const SEMANTIC_OBJECT_SQL = `
@@ -90,6 +96,10 @@ SELECT schema, line FROM (
          || '|' || CASE WHEN s.setdatabase = 0 THEN '*' ELSE 'this' END || '|' || c.cfg
     FROM pg_catalog.pg_db_role_setting s CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(cfg)
    WHERE s.setdatabase IN (0, (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()))
+     -- Excluded by EXACT name (whatever its value): the disposable-test marker is a property of CI's throwaway databases,
+     -- not of the security posture, and it made every real database differ from goldens captured in CI (hotfix
+     -- fix/posture-test-marker). Production on a marked database is refused by the identity gate instead.
+     AND pg_catalog.split_part(c.cfg, '=', 1) <> '${POSTURE_EXCLUDED_SETTING}'
 ) facts`;
 
 /** Role section: compared with the boot snapshot (the exact layout is judged by owner-login-posture.ts). */

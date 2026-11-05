@@ -1,3 +1,6 @@
+import { checkSchemaCompatibility, readUpgradeEvidence } from '@rab/server/database/boot-checks/database-boot-gates';
+import type { SchemaCompatibilityAssessment } from '@rab/server/database/boot-checks/schema-compatibility';
+
 /**
  * Owner-login architecture (M0 §7, M0-D: "a bounded wait on schema current"): the Worker NEVER migrates; the API's start
  * (or the release step) does. A Worker that starts while the migration is still running would see pending migrations, and
@@ -83,4 +86,42 @@ export async function waitForCompatibleSchema(options: SchemaWaitOptions): Promi
       await sleep(pollMs);
     }
   }
+}
+
+/** A query on the Worker's own login (rows only). */
+export type WorkerSchemaQuery = (sql: string, params?: unknown[]) => Promise<unknown[]>;
+
+/**
+ * ONE Worker schema check — the same call gate 7 makes for the Worker (database-boot-gates.ts), INCLUDING the C3 upgrade
+ * evidence: `readUpgradeEvidence` (Agent 1's classifier CHAIN-PARTIAL + the physical fresh-install proof NOT fresh). Without it
+ * `workerRelaxed` is always false and, after a failed upgrade, the wait refused the Worker that gate 7 would have started
+ * (O3 T8a-WORKER, owner decision 2026-11-05 "the Worker starts too, like Twenty"). With it, an in-order pending tail on a
+ * stopped UPGRADE passes (its warning is returned in the assessment; gate 7 logs the one partly-upgraded WARNING); an
+ * out-of-order or interleaved ledger, a ledger ahead of a provisioner, and a first install (EMPTY, BOOTSTRAP-PARTIAL,
+ * fresh CHAIN-PARTIAL, no evidence) still refuse exactly as before.
+ */
+export function checkWorkerSchema(query: WorkerSchemaQuery, options: { expected: readonly string[]; production: boolean }): Promise<SchemaCompatibilityAssessment> {
+  return checkSchemaCompatibility(query, {
+    process: 'worker',
+    production: options.production,
+    expected: options.expected,
+    label: 'worker process',
+    readUpgradeEvidence: () => readUpgradeEvidence(query, options.expected),
+  });
+}
+
+/** The Worker's bounded wait (waitForCompatibleSchema) over `checkWorkerSchema`. Main.ts runs it on its own boot connection. */
+export async function waitForWorkerSchemaOn(
+  query: WorkerSchemaQuery,
+  options: { expected: readonly string[]; production: boolean } & Omit<SchemaWaitOptions, 'check'>,
+): Promise<SchemaWaitResult & { assessment: SchemaCompatibilityAssessment | null }> {
+  let assessment: SchemaCompatibilityAssessment | null = null;
+  const { expected, production, ...wait } = options;
+  const result = await waitForCompatibleSchema({
+    ...wait,
+    check: async () => {
+      assessment = await checkWorkerSchema(query, { expected, production });
+    },
+  });
+  return { ...result, assessment };
 }

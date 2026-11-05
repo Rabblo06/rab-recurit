@@ -51,7 +51,8 @@ const RUNTIME_KEYS = [
 const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
   'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
-  'CREWFLOW_UPGRADE_FAILURE_POLICY'];
+  'CREWFLOW_UPGRADE_FAILURE_POLICY', 'CREWFLOW_UPGRADE_FAILURE', 'DISABLE_DB_MIGRATIONS', 'DISABLE_CRON_JOBS_REGISTRATION',
+  'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS'];
 const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_DATABASE_URL', 'CREWFLOW_MIGRATION_PHASE',
   'ALLOW_PRODUCTION_DB_COMMANDS', 'DATABASE_URL_UNPOOLED', 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
   'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'CREWFLOW_MIGRATOR_PASSWORD',
@@ -97,7 +98,8 @@ function checkVariant(variant, production, variantFiles = variant) {
   const fail = (m) => problems.push(m);
   const services = variant?.services ?? {};
   const names = Object.keys(services).sort();
-  const expected = ['rab-api', 'rab-migrate', 'rab-ops', 'rab-redis', 'rab-worker'];
+  // O3 (owner decisions C1-C5): no rab-migrate; the API migrates on start.
+  const expected = ['rab-api', 'rab-ops', 'rab-redis', 'rab-worker'];
   if (stable(names) !== stable(expected)) fail(`services are ${names.join(',')}; expected exactly ${expected.join(',')}`);
 
   // 1. Image-based and digest-pinned only.
@@ -164,27 +166,23 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (!redis.mem_limit) fail('rab-redis: no memory limit');
   }
 
-  // 7. Credential model (owner login): rab-migrate reads ONLY the shared database.env, holding the same crewflow_owner URL as
-  // rab-api and rab-worker; nothing reads .env.migrate.
-  const migrate = services['rab-migrate'];
-  if (migrate) {
-    if (stable(envFiles('rab-migrate').map(baseName)) !== stable(['database.env'])) fail('rab-migrate: must read database.env only');
-    if (!String(envOf(migrate).PG_DATABASE_URL ?? '').includes(SENTINEL_OWNER_PW)) fail('rab-migrate: the shared database.env credential does not reach it');
-    for (const other of ['rab-api', 'rab-worker']) {
-      if (services[other] && envOf(services[other]).PG_DATABASE_URL !== envOf(migrate).PG_DATABASE_URL) fail(`rab-migrate: PG_DATABASE_URL differs from ${other}'s (one login)`);
-    }
-    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'APP_SECRET')) fail('rab-migrate: reads the runtime secrets (runtime.env)');
-    // BC-11: the approval mode is an opt-in of database.env; the sentinel database.env does not set it, so a value here was
-    // committed by the compose file and would override the operator's choice.
-    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'CREWFLOW_MIGRATION_APPROVAL_MODE')) fail('rab-migrate: commits CREWFLOW_MIGRATION_APPROVAL_MODE (a BC-11 opt-in of database.env is always in token mode)');
-    if (migrate.restart !== 'no') fail('rab-migrate: restart is not "no"');
-    if ((migrate.profiles ?? []).length) fail('rab-migrate: has a profile (it must run on every up)');
-    if (!/deploy-prepare\.js$/.test(stable(migrate.command).replace(/"\]$/, ''))) fail('rab-migrate: does not run deploy-prepare.js');
-    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'DB_TARGET')) fail('rab-migrate: sets DB_TARGET (command authority is gone with the owner login)');
-    if (!migrate.read_only || stable(migrate.cap_drop) !== stable(['ALL']) || !(migrate.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-migrate: not read-only / cap_drop ALL / no-new-privileges');
-    if (!(migrate.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) fail('rab-migrate: the long-form tmpfs /tmp (OpenShip import guard) is missing');
+  // 7. Lifecycle (O3, owner decisions C1-C5, like Twenty): no release step. rab-api migrates on start without a token and
+  // registers the job schedulers; rab-worker never migrates, never registers them, and starts after a healthy API and Redis.
+  if (services['rab-migrate']) fail('rab-migrate: present (O3: the API migrates on start; there is no release step)');
+  const api = envOf(services['rab-api']);
+  const worker = envOf(services['rab-worker']);
+  if (api.CREWFLOW_MIGRATE_ON_START !== 'true') fail('rab-api: CREWFLOW_MIGRATE_ON_START is not "true" (O3 C1)');
+  if (!['none', 'token'].includes(String(api.CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token (compose.env; default none)');
+  if (api.DISABLE_DB_MIGRATIONS === 'true' || api.DISABLE_CRON_JOBS_REGISTRATION === 'true') fail('rab-api: must migrate and register the job schedulers (O3 C1/C2)');
+  if (worker.DISABLE_DB_MIGRATIONS !== 'true' || worker.DISABLE_CRON_JOBS_REGISTRATION !== 'true') fail('rab-worker: DISABLE_DB_MIGRATIONS and DISABLE_CRON_JOBS_REGISTRATION must be "true" (O3 C1/C2)');
+  for (const name of ['rab-api', 'rab-worker']) {
+    if ('WORKER_SCHEDULER' in envOf(services[name])) fail(`${name}: commits WORKER_SCHEDULER (production runs bullmq; interval is refused)`);
+    if ('CREWFLOW_UPGRADE_FAILURE_POLICY' in envOf(services[name])) fail(`${name}: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY (O3 C3)`);
   }
   const ops = services['rab-ops'];
+  // The OpenShip import guard (a long-form tmpfs volume; OpenShip refuses the file at import). O3 moved it from the removed
+  // rab-migrate to rab-ops.
+  if (!Object.values(services).some((svc) => (svc.volumes ?? []).some((v) => v.type === 'tmpfs'))) fail('no long-form tmpfs volume: the OpenShip import guard is missing');
   if (ops) {
     if (stable(ops.profiles) !== stable(['ops'])) fail('rab-ops: not in (only) the "ops" profile');
     if (stable(envFiles('rab-ops').map(baseName)) !== stable(['.env.ops'])) fail('rab-ops: must read .env.ops only');
@@ -205,7 +203,7 @@ function checkVariant(variant, production, variantFiles = variant) {
     for (const k of [...MIGRATION_AUTHORITY, ...OPS_ONLY, ...LEGACY_DB]) {
       if (Object.prototype.hasOwnProperty.call(env, k)) fail(`${name}: sets ${k}`);
     }
-    if (svc.depends_on?.['rab-migrate']?.condition !== 'service_completed_successfully') fail(`${name}: does not wait for rab-migrate (service_completed_successfully)`);
+    if (svc.depends_on?.['rab-migrate']) fail(`${name}: depends on rab-migrate (O3: there is none)`);
   }
   for (const [name, svc] of Object.entries(services)) {
     if (name !== 'rab-ops' && svc.depends_on?.['rab-ops']) fail(`${name}: depends on rab-ops`);
@@ -278,9 +276,11 @@ function checkDeployment(merged, production, envFileKeys = {}) {
       const expected = key === 'volumes' ? withoutCa(b.volumes) : b[key];
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
-    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX')) {
+    // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
+    for (const key of PINNED_ENV.filter((k) => k !== 'STORAGE_KEY_PREFIX' && k !== 'CREWFLOW_MIGRATION_APPROVAL_MODE')) {
       if (stable(envOf(a)[key]) !== stable(envOf(b)[key])) fail(`${name}.environment.${key} is overridden in the deployed model`);
     }
+    if (name === 'rab-api' && !['none', 'token'].includes(String(envOf(a).CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model');
     if (envOf(a).CREWFLOW_RUNTIME_ISOLATION !== 'enforce') fail(`${name}: CREWFLOW_RUNTIME_ISOLATION is not "enforce" in the deployed model`);
     const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
     if (stable(deps(a)) !== stable(deps(b))) fail(`${name}.depends_on differs from docker-compose.production.yml`);
@@ -288,16 +288,9 @@ function checkDeployment(merged, production, envFileKeys = {}) {
       if (!p.host_ip || p.host_ip === '0.0.0.0' || p.host_ip === '::') fail(`${name}: port ${p.target} is published on every interface (CREWFLOW_API_BIND)`);
     }
   }
-  const migrate = services['rab-migrate'];
-  if (!migrate || !migrate.read_only || stable(migrate.cap_drop) !== stable(['ALL']) || !(migrate.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-migrate: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
-  if (migrate && !(migrate.volumes ?? []).some((v) => v.type === 'tmpfs' && v.target === '/tmp')) fail('rab-migrate: the long-form tmpfs /tmp (OpenShip import guard) is missing');
+  // O3: an override must not bring a release step back (a second migrating process next to the API).
+  if (services['rab-migrate']) fail('rab-migrate: present in the deployed model (O3: the API migrates on start)');
   const fileNames = (svc) => (svc?.env_file ?? []).map((e) => baseName(typeof e === 'string' ? e : e.path));
-  if (migrate) {
-    if (migrate.image !== services['rab-api']?.image) fail('rab-migrate: image differs from rab-api\'s in the deployed model');
-    if (Object.prototype.hasOwnProperty.call(envOf(migrate), 'DB_TARGET')) fail('rab-migrate: sets DB_TARGET in the deployed model');
-    if (stable(fileNames(migrate)) !== stable(['database.env'])) fail('rab-migrate: must read database.env only in the deployed model');
-    if (migrate.restart !== 'no' || (migrate.profiles ?? []).length) fail('rab-migrate: restart is not "no" or it has a profile in the deployed model');
-  }
   const ops = services['rab-ops'];
   if (ops) {
     if (ops.image !== services['rab-api']?.image) fail('rab-ops: image differs from rab-api\'s in the deployed model');

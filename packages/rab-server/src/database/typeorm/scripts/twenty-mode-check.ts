@@ -665,8 +665,8 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await withClient(withDb(ctx.admin, head), (c) => c.query(`INSERT INTO core.migrations (timestamp, name) VALUES (9786700000000, 'NewerReleaseOnly9786700000000')`));
     try {
       const before = await readState(ctx, head);
-      for (const policy of ['refuse', 'continue-if-compatible']) {
-        const c = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: policy });
+      for (const policy of ['refuse', 'continue']) {
+        const c = await child(head, { CREWFLOW_UPGRADE_FAILURE: policy });
         expect(r, c.exitCode === EXIT.ok && c.result?.state === 'AHEAD' && (c.result?.applied ?? ['?']).length === 0, `policy ${policy}: exit 0, AHEAD, applied nothing (${summary(c)})`);
         expect(r, c.lines.some((l) => /AHEAD/.test(l) && /WARNING/.test(l)), 'a WARNING names the AHEAD ledger');
       }
@@ -677,14 +677,14 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     }
   });
 
-  await step('POST-1', 'post-check failure (RLS disabled on a tenant table): 68 under refuse; never serves under continue-if-compatible', async (r) => {
+  await step('POST-1', 'post-check failure (RLS disabled on a tenant table): 68 under refuse AND under continue (C3: post-checks stay fail-closed); never serves', async (r) => {
     r.database = head;
     await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log DISABLE ROW LEVEL SECURITY`));
     try {
       const refuse = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
       expect(r, refuse.exitCode === EXIT.postCheck && refuse.result?.serve === false, `refuse: exit 68, serve=false (${summary(refuse)})`);
-      const cont = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
-      expect(r, cont.exitCode !== EXIT.ok && cont.exitCode !== EXIT.degraded && cont.result?.serve === false, `continue-if-compatible: not 0/70, serve=false (${summary(cont)}; checks ${checksSummary(cont)})`);
+      const cont = await child(head, { CREWFLOW_UPGRADE_FAILURE: 'continue' });
+      expect(r, cont.exitCode === EXIT.postCheck && cont.result?.serve === false, `continue (C3): post-check still 68, serve=false (${summary(cont)}; checks ${checksSummary(cont)})`);
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log ENABLE ROW LEVEL SECURITY`));
     }
@@ -700,9 +700,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       // sql-injection-reviewed: MIGRATION_LOCK_KEY_SQL is a code constant (the crewmigr bigint literal), no input
       await holder.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY_SQL})`);
-      const c = await child(head, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5' }, { timeoutMs: 120_000 });
-      expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `exit 69, serve=false (${summary(c)})`);
-      expect(r, c.ms < 60_000, `gave up within the bounded wait (${c.ms} ms)`);
+      // C3 (Agent 1 76dade62): the lock timeout is 69 under EVERY policy (no longer 70 under continue); the default is continue.
+      for (const policy of ['refuse', 'continue', undefined]) {
+        const c = await child(head, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5', CREWFLOW_UPGRADE_FAILURE: policy }, { timeoutMs: 120_000 });
+        expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `policy ${policy ?? 'default (continue)'}: exit 69, serve=false (${summary(c)})`);
+        expect(r, c.ms < 60_000, `gave up within the bounded wait (${c.ms} ms)`);
+      }
     } finally {
       await holder.end();
     }
@@ -756,8 +759,9 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await providerStep(ctx, empty, r);
     const cases: Array<[string, Record<string, string | undefined>]> = [
       ['CREWFLOW_DB_MODE set', { CREWFLOW_DB_MODE: 'twenty' }],
-      ['DISABLE_DB_MIGRATIONS set', { DISABLE_DB_MIGRATIONS: 'true' }],
       ['CREWFLOW_UPGRADE_FAILURE_POLICY=ignore', { CREWFLOW_UPGRADE_FAILURE_POLICY: 'ignore' }],
+      ['CREWFLOW_UPGRADE_FAILURE=ignore', { CREWFLOW_UPGRADE_FAILURE: 'ignore' }],
+      ['CREWFLOW_UPGRADE_FAILURE and the deprecated alias disagree', { CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
       ['CREWFLOW_MIGRATION_APPROVAL_MODE=sometimes', { CREWFLOW_MIGRATION_APPROVAL_MODE: 'sometimes' }],
       ['CREWFLOW_MIGRATE_ON_START=maybe', { CREWFLOW_MIGRATE_ON_START: 'maybe' }],
     ];
@@ -765,6 +769,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       const c = await child(empty, extra);
       expect(r, c.exitCode === EXIT.config && c.result?.serve === false, `${label}: exit 64 (${summary(c)})`);
     }
+    // O3 C1 (owner decision 2026-11-05, "exactly like Twenty"): DISABLE_DB_MIGRATIONS=true is an ACCEPTED setting, "this
+    // process never migrates" (api-prestart then never starts the child; the Worker never migrates either way). It is no
+    // longer a misconfiguration; the child, if started anyway, declines to run with its own documented answer (Agent 1
+    // cbd5880d): exit 64, the reason naming DISABLE_DB_MIGRATIONS, nothing created.
+    const disabled = await child(empty, { DISABLE_DB_MIGRATIONS: 'true' });
+    expect(r, disabled.exitCode === EXIT.config && disabled.result?.serve === false && /DISABLE_DB_MIGRATIONS=true: the migrate child does not run/.test(disabled.result?.reason ?? ''), `DISABLE_DB_MIGRATIONS=true (C1, accepted): the child does not run, reason says so (${summary(disabled)})`);
     // BC-11 (owner decision 2026-11-05, Agent 2 d27a371a): production without an explicit approval mode is no longer a
     // configuration refusal; the mode defaults to `none`. This disposable database has no TLS, so a production child stops
     // later (N1/TLS, not config): asserted as "not refused at config (exit != 64)". The invalid-mode pin above stays.
@@ -871,8 +881,8 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const org = randomUUID();
     await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 tenant', $2)`, [org, `twa-t5-${RUN_ID}`]));
     const before = await readState(ctx, db);
-    for (const policy of ['refuse', 'continue-if-compatible']) {
-      const c = await child(db, { CREWFLOW_UPGRADE_FAILURE_POLICY: policy });
+    for (const policy of ['refuse', 'continue']) {
+      const c = await child(db, { CREWFLOW_UPGRADE_FAILURE: policy });
       expect(r, c.exitCode !== EXIT.ok && c.exitCode !== EXIT.degraded && c.result?.serve === false, `policy ${policy}: refused, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(0, 160)})`);
       expect(r, !c.events.some((e) => /^(HwsHistoricalRowsPrivilegedCopy|AiActionProposalActivate|AiAssistantRoundOnly)\d{13}$/.test(e.name)), 'no ROW_COPY migration started');
     }
@@ -882,15 +892,17 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, kept === 1, 'the tenant row is intact');
   });
 
-  await step('UPF-0', `an interrupted FIRST install (CHAIN-PARTIAL, still provably fresh) that fails (FAIL_AT=${FAIL_AT}) never serves, even under continue-if-compatible`, async (r) => {
+  await step('UPF-0', `an interrupted FIRST install (CHAIN-PARTIAL, still provably fresh) that fails (FAIL_AT=${FAIL_AT}) never serves under any policy (C3: default continue, continue, the alias)`, async (r) => {
     const db = dbName('upf0');
     r.database = db;
     await partial(db, STOP_BEFORE, r);
-    const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
-    expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `exit 66, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(-120)})`);
+    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
+      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, ...extra });
+      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `${JSON.stringify(extra)}: exit 66, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(-120)})`);
+    }
   });
 
-  await step('UPF-1', `failed UPGRADE of a database holding tenant data (FAIL_AT=${FAIL_AT}): refuse → 66; continue-if-compatible → 70 only if every check passes; then recovery`, async (r) => {
+  await step('UPF-1', `failed UPGRADE of a database holding tenant data (FAIL_AT=${FAIL_AT}): refuse → 66; continue (default, explicit, the alias) → ERROR + 70, serve; then recovery`, async (r) => {
     const db = dbName('upf');
     r.database = db;
     await partial(db, STOP_BEFORE, r);
@@ -906,24 +918,29 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const ts = Number(FAIL_AT.slice(-13));
     expect(r, !s1.ledger.includes(FAIL_AT) && s1.ledger.some((n) => Number(n.slice(-13)) >= Number(STOP_BEFORE) && Number(n.slice(-13)) < ts), 'the migrations before it committed; the failed one is not recorded');
     expect(r, s1.lockHolders === 0, 'lock released');
-    const cont = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
-    const checks = cont.result?.checks ?? [];
-    const allOk = checks.length > 0 && checks.every((k) => k.ok);
-    r.evidence.push(`continue-if-compatible: ${summary(cont)}; checks ${checksSummary(cont)}`);
-    expect(r, cont.exitCode === EXIT.degraded ? allOk && cont.result?.serve === true : cont.exitCode === EXIT.failed && cont.result?.serve === false && !allOk, 'exit 70 iff every compatibility check passed (otherwise 66, serve=false)');
-    expect(r, checks.length > 0, 'the assessment reported its checks');
+    // C3 (owner decision 2026-11-05, Agent 1 76dade62): under continue a failed UPGRADE migration logs an ERROR naming it and
+    // exits 70 with serve=true when the deployment identity is OK; the other checks are reported as diagnostics only.
+    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
+      const cont = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, ...extra });
+      r.evidence.push(`${JSON.stringify(extra)}: ${summary(cont)}; checks ${checksSummary(cont)}`);
+      expect(r, cont.exitCode === EXIT.degraded && cont.result?.serve === true && cont.result?.policy === 'continue', `${JSON.stringify(extra)}: exit 70, serve=true, policy continue (${summary(cont)})`);
+      expect(r, cont.result?.failedMigration === FAIL_AT && cont.lines.some((l) => /ERROR/.test(l) && l.includes(FAIL_AT)), `${JSON.stringify(extra)}: an ERROR names ${FAIL_AT}`);
+      expect(r, !(await readState(ctx, db)).ledger.includes(FAIL_AT), `${JSON.stringify(extra)}: the failed migration is not recorded`);
+    }
     const rec = await child(db, {});
     expect(r, rec.exitCode === EXIT.ok && rec.result?.state === 'CHAIN-PARTIAL', `recovery without the seam: exit 0 (${summary(rec)})`);
     await assertHeadState(ctx, db, r);
   });
 
-  await step('UPF-2', `failed FIRST install (FAIL_AT=${FRESH_FAIL_AT}) never serves, even under continue-if-compatible; a restart resumes`, async (r) => {
+  await step('UPF-2', `failed FIRST install (FAIL_AT=${FRESH_FAIL_AT}) never serves under any policy (C3: default continue, the alias); a restart resumes`, async (r) => {
     const db = dbName('upf2');
     r.database = db;
     await createEmptyDatabase(ctx, db);
     await providerStep(ctx, db, r);
-    const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FRESH_FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' });
-    expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `exit 66, serve=false (${summary(c)})`);
+    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
+      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FRESH_FAIL_AT, ...extra });
+      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `${JSON.stringify(extra)}: exit 66, serve=false (${summary(c)})`);
+    }
     const rec = await child(db, {});
     expect(r, rec.exitCode === EXIT.ok, `restart without the seam completes the install (${summary(rec)})`);
     await assertHeadState(ctx, db, r);

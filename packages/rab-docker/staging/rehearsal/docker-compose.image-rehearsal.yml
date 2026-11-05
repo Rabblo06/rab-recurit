@@ -23,19 +23,6 @@ services:
     tmpfs:
       - /data
 
-  rab-migrate:
-    env_file: !reset []
-    environment:
-      # NODE_ENV=production would demand TLS verify-full, which the throwaway database does not offer (header).
-      NODE_ENV: development
-      DB_TARGET: local
-      # Used by the `up` dependency run only (a check run: nothing pending means exit 0). Every apply run is an explicit
-      # `run -e PG_DATABASE_URL=... -e CREWFLOW_MIGRATION_APPROVED=...` from the driver.
-      PG_DATABASE_URL: postgres://rab:${S_SUPERUSER_PASSWORD:?}@pg:5432/rab
-    depends_on:
-      pg:
-        condition: service_healthy
-
   rab-api:
     ports: !reset []
     environment: &runtime-env
