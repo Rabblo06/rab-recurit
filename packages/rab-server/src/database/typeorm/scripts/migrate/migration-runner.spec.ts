@@ -460,6 +460,62 @@ describe('final review F5: deploy-prepare check run prints the set and its token
   });
 });
 
+describe('BC-11 (owner decision 2026-11-05): deploy-prepare follows CREWFLOW_MIGRATION_APPROVAL_MODE for the owner login', () => {
+  const OWNER_URL = 'postgres://crewflow_owner:x@127.0.0.1:5432/crewflow';
+  function fakeRunner(pendingNow: string[]) {
+    const applied: string[] = [];
+    const calls: LockedMigrationOptions[] = [];
+    const runner = (async (options: LockedMigrationOptions): Promise<LockedMigrationResult> => {
+      calls.push(options);
+      if (options.mode === 'apply') {
+        options.approvePending?.(pendingNow);
+        applied.push(...pendingNow);
+      }
+      return { target: 'production', pendingBefore: [...pendingNow], applied: [...applied], waitedMs: 0, currentUser: 'crewflow_owner' };
+    }) as typeof runLockedMigrations;
+    return { runner, applied, calls };
+  }
+  const run = (env: Record<string, string>) => {
+    const fake = fakeRunner(PENDING_AB);
+    const lines: string[] = [];
+    const result = deployPrepare({ env: { ...env }, argv: [], log: (l) => lines.push(l), runner: fake.runner, cacheFlush: async () => undefined, deriveGuardEnv: async () => null });
+    return { result, lines, ...fake };
+  };
+
+  it('mode none (the default): an apply run without a token; the runner gets approvalMode none (N1 still applies there)', async () => {
+    for (const env of [{ PG_DATABASE_URL: OWNER_URL }, { PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' }] as Array<Record<string, string>>) {
+      const r = run(env);
+      await expect(r.result).resolves.toBe(0);
+      expect(r.calls[0].mode).toBe('apply');
+      expect(r.calls[0].approvalMode).toBe('none');
+      expect(r.calls[0].approvePending).toBeUndefined();
+      expect(r.applied).toEqual(PENDING_AB);
+    }
+    // A token set in mode none is ignored, loudly.
+    const t = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVED: 'stale' });
+    await expect(t.result).resolves.toBe(0);
+    expect(t.lines.join(' ')).toMatch(/CREWFLOW_MIGRATION_APPROVAL_MODE is none: it is ignored/);
+  });
+
+  it('mode token: exactly the F5 flow (no token = check run, exit 3; the token applies exactly that set)', async () => {
+    const check = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' });
+    await expect(check.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(check.calls[0].mode).toBe('check');
+    expect(check.applied).toEqual([]);
+    const apply = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_MIGRATION_APPROVED: TOKEN_AB });
+    await expect(apply.result).resolves.toBe(0);
+    expect(apply.calls[0].approvalMode).toBe('token');
+    expect(apply.applied).toEqual(PENDING_AB);
+  });
+
+  it('the legacy CF-41 login keeps the F5 flow in every mode until PR #9', async () => {
+    const r = run({ PG_DATABASE_URL: 'postgres://crewflow_migrator:x@127.0.0.1:5432/crewflow', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' });
+    await expect(r.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(r.calls[0].mode).toBe('check');
+    expect(r.calls[0].approvalMode).toBeUndefined();
+  });
+});
+
 /**
  * C-2 (M0 review, 2026-11-04): the post-checks used to run only on apply runs. After an apply run failed its post-checks
  * (the migrations themselves committed), the next CHECK run found nothing pending and exited 0, so the release could be
