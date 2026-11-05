@@ -27,7 +27,7 @@ import { AppModule } from '../../app.module';
 import { ProvisionWorkspaceGuards1786721210000 } from '../../database/typeorm/core/migrations/1786721210000-ProvisionWorkspaceGuards';
 import { ProvisioningHealth1786721220000 } from '../../database/typeorm/core/migrations/1786721220000-ProvisioningHealth';
 import { PROVISION_WORKSPACE_STATE_SQL, provisionWorkspaceFunctionV3Sql } from '../../database/typeorm/core/provision-workspace-guards-sql';
-import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { composeServerPathTemplateV1GrantParity } from '../../database/typeorm/workspace-schema/v1/server-path-template-grant-parity';
 import { composeServerPathTemplateV1StatementPointer } from '../../database/typeorm/workspace-schema/v1/server-path-template-statement-pointer';
 import { moduleChecksum, modulesThrough } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
@@ -137,6 +137,9 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // superuser that seeds fixtures.
     expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
     expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
+    // D4: the approved body embeds the expected fingerprint of the server's major (PG16 and PG18 differ), so the table is
+    // selected exactly as the runner selects it, before approvedProvisionBody() reads it in a test.
+    await selectWorkspaceFingerprintsForServer((sql) => admin.query(sql));
   }, 180_000);
 
   afterAll(async () => {
