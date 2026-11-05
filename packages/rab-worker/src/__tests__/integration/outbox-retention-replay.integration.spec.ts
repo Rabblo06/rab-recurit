@@ -222,7 +222,7 @@ describeIfDb('outbox retention + FAILED email replay (G6)', () => {
   });
 
   // The runtime login (owner-login architecture): DELETE on all four outbox tables is covered by the grant-parity guard
-  // (OwnerLoginGrantParityGuards1786721420000, GRANT_PARITY_TARGETS; catalogue OUTBOX-1 mitigated), a ROW-level trigger. A
+  // (OwnerLoginGrantParityGuards1786721420000, GRANT_PARITY_TARGETS; catalogue OUTBOX-1 mitigated), a row-level trigger today (per statement after Agent 3's PAY-1b). A
   // zero-row DELETE would pass any row trigger, so each row's visibility to the runtime login is checked first: a VISIBLE row's
   // direct DELETE must be refused (42501); every row must survive. At least the email and push rows must be visible (they are
   // the tenant's own, under its bound context).

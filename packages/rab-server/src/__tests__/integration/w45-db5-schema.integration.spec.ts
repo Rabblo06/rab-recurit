@@ -678,7 +678,7 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     });
 
     // P-class (owner-login architecture): the schema role crewflow_app can no longer DELETE outbox rows directly (42501).
-    // For the runtime login crewflow_owner the same DELETE is covered by the ROW-level grant-parity guard
+    // For the runtime login crewflow_owner the same DELETE is covered by the grant-parity guard (a row-level trigger today; per statement after Agent 3's PAY-1b)
     // (OwnerLoginGrantParityGuards1786721420000; catalogue OUTBOX-1 mitigated): asserted on a row the runtime login can see.
     it('schema role crewflow_app can no longer DELETE outbox rows directly (42501) on any of the four tables; the runtime login is refused on a visible row (grant parity)', async () => {
       for (const t of ['email_outbox', 'push_delivery', 'realtime_event', 'worker_event']) {

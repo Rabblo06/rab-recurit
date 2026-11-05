@@ -66,9 +66,9 @@ crewflow_runtime_db_config() {
     refuse "DISABLE_DB_MIGRATIONS is Twenty CRM's switch and is not read by Crewflow. Remove it and set CREWFLOW_MIGRATE_ON_START=true or false. Refusing to start."
   fi
   if [ "${NODE_ENV:-}" != test ]; then
-    for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT; do
+    for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
-      if [ -n "$seam_value" ]; then refuse "$seam is a migration test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start."; fi
+      if [ -n "$seam_value" ]; then refuse "$seam is a test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start."; fi
     done
   fi
   case "${CREWFLOW_MIGRATE_ON_START:-}" in
