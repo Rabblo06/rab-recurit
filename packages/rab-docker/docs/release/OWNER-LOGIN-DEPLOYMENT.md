@@ -6,7 +6,7 @@ in the session scratchpad (not committed); each line names its source.
 | Area | Result | Evidence |
 |---|---|---|
 | Fresh install, lifecycle, transition from separated, Test C/D | **PASS on PostgreSQL 16 and 18**; the v20 workspace fingerprints for both majors are committed. The negative cases refuse as designed: a non-owner identity; PG15 (below 16); PG17 (no fingerprints) | Agent 1: `a1/batch-pg16*.log`, `a1/batch-pg18*.log`, `a1/batch-v20-*.log` ("all checks passed") |
-| End to end: empty database → API migrate-on-start → healthy → Worker → workspace READY | **PASS on PG16** | Agent 2's integration run |
+| End to end: empty database → API migrate-on-start → healthy → Worker → workspace READY | **PASS on PG16** (postgres:16-alpine; the API and Worker ran as host processes, not in the containers) | Agent 2: `twa-app/e2e.sh`, `twa-app/batch-e2e.log` ("E2E PASSED": state EMPTY → 254 ledger rows, `/healthz` 200, workspace provisioned in-process: attempted=1 ready=1), `twa-app/e2e-api.log`, `e2e-worker.log`, `e2e-healthz.json` |
 | Rollback | **PROVEN**: restore the pre-upgrade backup, then the previous image. R2: checksum equal on 112 facts, ledger 250, old api, Worker and provisioner healthy. R1: an old image on the upgraded database fails closed in production | Agent 1: `a1/rollback/r1b.log`, `r2.log`; [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) |
 | Bundled database (`docker-compose.local-db.yml` with Agent 1's init SQL) | **PASS**, 21/21 checks on PG16.15 (section 8) | Agent 4 |
 | Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 5 combinations; the gate's own tests pass | `ci-deployment-owner-login.yaml` |
@@ -353,7 +353,7 @@ These are what rollback compares against.
 - grants its memberships of the existing **schema** roles;
 - **never** makes it a member of `crewflow_app` or `crewflow_worker`.
 
-The file's own verification queries must pass before anything else happens. **After the transition the legacy logins (`crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`) are NOLOGIN (BC-17, Agent 1).** The old stack can no longer connect. Restoring the pre-upgrade backup (5.2) brings them back as they were.
+The file's own verification queries must pass before anything else happens. **After the transition the legacy logins are disabled (BC-17, Agent 1):** `crewflow` and `crewflow_app` become **NOLOGIN with PASSWORD NULL**; `crewflow_worker` stays LOGIN (two existing migrations assert it) but gets **PASSWORD NULL**, so it has no password to authenticate with; `crewflow_migrator` (operator-created) can no longer be used either. A fresh owner-login install ends in the same state. The old stack can no longer connect. Only a restore of the pre-upgrade backup into a **fresh** cluster, with the `pg_dumpall --roles-only` file, brings back LOGIN and the old password verifiers ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.1).
 
 **5.4 Host configuration (new files beside the old ones):**
 - `database.env`: the `crewflow_owner` URL and the same CA. If the separated deployment declared `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, keep the **same** values (they are optional, BC-11). Set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` here if you want the token safety net for the transition.
