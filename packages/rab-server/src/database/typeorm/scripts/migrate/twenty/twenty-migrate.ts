@@ -2,7 +2,8 @@
  * Owner-login architecture (PR 3): the process entry of the migrate-on-start child (core: ../owner-login/migrate-on-start.ts;
  * the path keeps the name agreed with api-prestart.sh and Agent 5 before the owner-login rename). api-prestart.sh runs
  *   node packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js
- * only when CREWFLOW_MIGRATE_ON_START=true, and execs main.js only on exit 0 (ok) or 70 (degraded continue, logged as a
+ * only when CREWFLOW_MIGRATE_ON_START=true, and execs main.js only on exit 0 (ok) or 70 (an upgrade migration failed and
+ * CREWFLOW_UPGRADE_FAILURE=continue, owner decision C3: an ERROR, the API starts anyway; still logged as a
  * failure). Settings come from Agent 2's runtime-db-config.ts (one source of truth); exit codes are its
  * STARTUP_EXIT_CODES. Prints exactly one TWENTY_MIGRATE_RESULT line. Deliberately does NOT import dotenv.
  */

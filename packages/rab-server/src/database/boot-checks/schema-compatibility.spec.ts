@@ -81,6 +81,9 @@ describe('compatibility matrix per process type', () => {
   });
 
   it('(a) pending migrations: API, Worker, CLI and provisioner refuse; rab-migrate applies them (not a compatibility finding)', () => {
+    // C3 (owner decision 2026-11-05): the API (named failed migration) and the Worker relax ONLY with physical upgrade
+    // evidence (CHAIN-PARTIAL, not a fresh install) on an in-order pending tail — not given here, so both refuse as before.
+    // The relaxed cases are in schema-compatibility.c3.spec.ts.
     table(
       { api: 'refuse', worker: 'refuse', cli: 'refuse', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'ok' },
       { applied: CODE.slice(0, 2) },

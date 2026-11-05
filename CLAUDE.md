@@ -128,7 +128,9 @@ structural changes.
   context bound returns zero rows, never all rows.
   - **Owner exception (2026-11-05, C3, like Twenty):** an upgrade migration
     failure continues start-up by default. The API logs an ERROR naming the
-    failed migration and serves. A first-install failure, and identity,
+    failed migration and serves. The Worker also starts, and runs every job,
+    when the pending migrations are an in-order tail of its chain (decided
+    from the database alone). A first-install failure, and identity,
     config and RLS failures, still fail closed. Do not widen this exception:
     no other gate may be downgraded because of it (THREAT-MODEL consequence
     item 13 lists the gates that still refuse).

@@ -37,7 +37,9 @@
  *                C3 (owner decision 2026-11-05, like Twenty): for the API only, when CREWFLOW_UPGRADE_INCOMPLETE names the
  *                FIRST pending migration (set by api-prestart after a failed, non-first-install upgrade), `pending` and
  *                `provision-function-behind` are warnings and the semantic-posture golden comparison is skipped (the boot
- *                snapshot is still the runtime baseline). Every other gate and verdict is unchanged; the Worker waits.
+ *                snapshot is still the runtime baseline). The Worker ("starts too, like Twenty") applies the same two
+ *                warnings and the same skip when the pending set is a contiguous, in-order tail of its chain, decided from
+ *                the database alone. CLI and provisioner unchanged; every other gate and verdict is unchanged.
  *   1c. dispatch-notify  (Phase D wave 3) no PERSISTENT crewflow.dispatch_notify in pg_db_role_setting (this database or
  *                all; every role or a role the login is a member of), and the gate session's own value is 'on' for an
  *                event-mode API/Worker (its startup option) and absent for every other process/mode. Runs after gate 1.
@@ -69,15 +71,29 @@ import {
   withDatabaseRetry,
 } from './database-boot-gate-rules';
 import { checkSchemaCompatibility, UPGRADE_INCOMPLETE_VAR } from './schema-compatibility';
+import { classifyDatabaseState, readFreshInstallProof } from '../owner-login/install-state';
 import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
 import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
 export * from './database-boot-gate-rules';
 
 /**
- * C3: the failed upgrade migration api-prestart named in CREWFLOW_UPGRADE_INCOMPLETE, for the API only. Any other process
- * (Worker, CLI, provisioner) never reads it: the Worker waits until the fix is deployed (owner decision 2026-11-05).
+ * C3: the failed upgrade migration api-prestart named in CREWFLOW_UPGRADE_INCOMPLETE, for the API only. No other process
+ * reads it: the Worker decides from the database alone (in-order pending tail), the CLI and provisioner are unchanged.
  */
+/**
+ * C3: "an upgrade stopped here" — Agent 1's classifier says CHAIN-PARTIAL (every ledger name is this code's, migrations
+ * pending) AND its fresh-install proof says NOT fresh, read physically (pg_relation_size of organisation / manager_workspace /
+ * workspace_schema_registry, workspace schemas, the bootstrap-role ADMIN row): an RLS-bound count reads 0 for this login
+ * after M-T1 whatever the tables hold. EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install and FOREIGN are not.
+ */
+export async function readUpgradeEvidence(query: (sql: string, params?: unknown[]) => Promise<unknown[]>, expected: readonly string[]): Promise<boolean> {
+  const { state } = await classifyDatabaseState(query, expected);
+  if (state !== 'CHAIN-PARTIAL') return false;
+  const proof = await readFreshInstallProof(query, state);
+  return proof.fresh === false;
+}
+
 export function upgradeIncompleteFor(processName: string, env: NodeJS.ProcessEnv): string | undefined {
   if (processName !== 'api') return undefined;
   const value = env[UPGRADE_INCOMPLETE_VAR]?.trim();
@@ -153,7 +169,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
         const query = (sql: string, params?: unknown[]) => session.query(sql, params) as Promise<Array<Record<string, unknown>>>;
         const expectedMigrations = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
         // C3 (owner decision 2026-11-05): set by api-prestart only after a failed, non-first-install upgrade under the
-        // continue policy. Honoured for the API only (the Worker waits); gate 7 decides whether it applies.
+        // continue policy. Read for the API only; gate 7 decides whether the relaxation applies (API or Worker).
         const upgradeIncomplete = upgradeIncompleteFor(processName, env);
         let c3Applied: string | null = null;
         const gateReport = await evaluateBootGates({
@@ -170,6 +186,9 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
               label,
               workspaces: processName === 'provisioner',
               upgradeIncomplete,
+              // C3: Agent 1's classifier + physical fresh-install proof (not defeated by FORCE RLS). Only CHAIN-PARTIAL and
+              // NOT fresh lets an in-order pending tail serve (API with the signal) or start the Worker.
+              readUpgradeEvidence: () => readUpgradeEvidence(query, expectedMigrations),
             });
             c3Applied = assessment.upgradeIncomplete;
             return assessment;

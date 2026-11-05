@@ -34,7 +34,7 @@ describe('C3: assertSemanticPostureAtBoot with upgradeIncomplete', () => {
     readSemanticPosture.mockResolvedValue(p);
     const r = await assertSemanticPostureAtBoot(query, { production: true, label: 'api process', golden: GOLDEN, upgradeIncomplete: 'Beta1786000000100' });
     expect(r.posture).toBe(p);
-    expect(r.warnings).toEqual([expect.stringMatching(/NOT compared with the golden: UPGRADE INCOMPLETE \(owner decision C3, 2026-11-05\) — the upgrade failed at Beta1786000000100/)]);
+    expect(r.warnings).toEqual([expect.stringMatching(/NOT compared with the golden: UPGRADE INCOMPLETE \(owner decision C3, 2026-11-05\) — the database is behind this release \(first migration not applied: Beta1786000000100\)/)]);
     expect(readSemanticPosture).toHaveBeenCalledTimes(1);
   });
 
