@@ -5576,7 +5576,14 @@ writes a warning instead.
       - Residual: the code can be served against a schema that lacks the failed migration's objects. For example, a
         missing RLS policy or function. A transactional migration rolls back whole, so its tables never appear without
         their policies; one of the `transaction = false` migrations can stop half-way.
-      - Detection, as specified for Agents 1 and 2 (security review of 2026-11-05):
+      - Trigger: api-prestart sets `CREWFLOW_UPGRADE_INCOMPLETE=<migration>` only after the migrate child exits 70 with
+        `"policy":"continue"` on a database that is not a first install, and strips any inherited value. The boot gates
+        honour it for the API process only, and only when the first pending migration is exactly the named one
+        (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
+        `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
+      - **The Worker waits** (owner decision 2026-11-05): its gate 7 still refuses pending migrations, so background
+        jobs (dispatch, reminders, payroll scans) pause until the fix is deployed.
+      - Detection:
         - the ERROR log naming the migration, written on every start while the ledger is behind;
         - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
           force-rls spot check (5), tls (6), dispatch-notify (1c), objects (FORCE on every core tenant table, the 16
@@ -5596,6 +5603,9 @@ writes a warning instead.
       migrates.
     - **C2:** the API registers the BullMQ schedulers and the Worker only consumes them (Twenty's split; Crewflow's
       Worker registered them before).
+      - Accepted risk (MEDIUM): a scheduler lost to a Redis flush stays lost until the next API start.
+      - Mitigations: Redis runs `noeviction` with AOF persistence, and the Worker's scheduler verification turns it
+        unhealthy when an expected scheduler is missing.
 
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 

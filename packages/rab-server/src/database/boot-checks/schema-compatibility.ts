@@ -162,6 +162,30 @@ export interface AssessOptions {
   production: boolean;
   retired?: readonly string[];
   latestModuleVersion?: number;
+  /**
+   * C3 (owner decision 2026-11-05, "EXACTLY LIKE TWENTY"): the migration api-prestart reported as the failed upgrade step
+   * (CREWFLOW_UPGRADE_INCOMPLETE). Honoured for the API only. See UPGRADE_INCOMPLETE_VAR.
+   */
+  upgradeIncomplete?: string;
+}
+
+/**
+ * C3 (owner decision 2026-11-05, like Twenty): api-prestart sets CREWFLOW_UPGRADE_INCOMPLETE=<migration> on the API's
+ * environment ONLY after the migrate child exits 70 with "policy":"continue" on a database that is NOT a first install, and
+ * strips any inherited value otherwise. With it, and only for the API, and only when the FIRST pending migration is exactly
+ * that named one, gate 7 downgrades two findings to warnings:
+ *   - `pending` (the ledger is behind the code because that upgrade step failed);
+ *   - `provision-function-behind` (the failed step may be the one that rewrites core.provision_workspace).
+ * Everything else keeps its verdict: interleaved / unknown ledger names, an unknown provision function in production, a
+ * ledger ahead for the provisioner, every Worker / CLI / provisioner verdict (the Worker WAITS: owner decision 2026-11-05),
+ * and every case where the first pending migration is not the named one. Unset: nothing changes. The semantic-posture
+ * golden comparison is skipped in the same case only (database-boot-gates.ts).
+ */
+export const UPGRADE_INCOMPLETE_VAR = 'CREWFLOW_UPGRADE_INCOMPLETE';
+
+/** The first pending migration in chain order (timestamp, then name), or undefined. */
+export function firstPendingMigration(pending: readonly string[]): string | undefined {
+  return [...pending].sort((a, b) => (migrationTimestamp(a) ?? 0) - (migrationTimestamp(b) ?? 0) || a.localeCompare(b))[0];
 }
 
 export interface SchemaCompatibilityAssessment {
@@ -173,6 +197,8 @@ export interface SchemaCompatibilityAssessment {
   retiredPresent: string[];
   refusals: Array<{ finding: CompatibilityFinding; message: string }>;
   warnings: string[];
+  /** C3: the named failed migration when the relaxation applied (API, first pending == named), else null. */
+  upgradeIncomplete: string | null;
 }
 
 /** The 13-digit millisecond suffix of a migration name, or null (no suffix: counted as interleaved, fail closed). */
@@ -209,7 +235,11 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   const policy = POLICIES[process];
   const latest = options.latestModuleVersion ?? LATEST_WORKSPACE_MODULE_VERSION;
   const ledger = compareLedger(facts.expected, facts.applied, options.retired ?? RETIRED_MIGRATIONS);
-  const result: SchemaCompatibilityAssessment = { process, ...ledger, refusals: [], warnings: [] };
+  // C3: API only, and only when the first pending migration is exactly the one api-prestart named as the failed step.
+  const named = options.upgradeIncomplete?.trim();
+  const relaxed = process === 'api' && !!named && firstPendingMigration(ledger.pending) === named;
+  const result: SchemaCompatibilityAssessment = { process, ...ledger, refusals: [], warnings: [], upgradeIncomplete: relaxed ? named! : null };
+  const c3 = (verdict: Verdict): Verdict => (relaxed && verdict !== 'ignore' ? 'warn' : verdict);
 
   const apply = (verdict: Verdict, finding: CompatibilityFinding, message: string) => {
     if (verdict === 'ignore') return;
@@ -218,7 +248,13 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   };
 
   if (ledger.pending.length > 0) {
-    apply(policy.pending, 'pending', `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`);
+    apply(
+      c3(policy.pending),
+      'pending',
+      relaxed
+        ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): the upgrade failed at ${named}; ${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}. Serving on the previous schema; deploy the fix.`
+        : `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`,
+    );
   }
   if (ledger.unknownInterleaved.length > 0) {
     apply(
@@ -243,7 +279,7 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
     if (fn.state === 'missing' || fn.state === 'unknown') {
       apply(policy.functionUnknown, 'provision-function-unknown', `${described}; this code cannot tell which workspace modules it provisions.`);
     } else if (fn.state === 'legacy' || fn.moduleVersion < latest) {
-      apply(policy.functionBehind, 'provision-function-behind', `${described}, below this code's workspace module ${latest}.`);
+      apply(c3(policy.functionBehind), 'provision-function-behind', `${described}, below this code's workspace module ${latest}.${relaxed ? ` UPGRADE INCOMPLETE (C3): ${named} failed.` : ''}`);
     } else if (fn.moduleVersion > latest) {
       apply(policy.functionAhead, 'provision-function-ahead', `${described}, above this code's workspace module ${latest} (an image rollback).`);
     }
@@ -344,6 +380,8 @@ export interface CheckSchemaCompatibilityOptions {
   /** Skip the ledger comparison (deploy post-checks: the runner already compared it). */
   ledger?: boolean;
   retired?: readonly string[];
+  /** C3: see UPGRADE_INCOMPLETE_VAR (honoured for the API only). */
+  upgradeIncomplete?: string;
 }
 
 /** Reads what the policy needs on the caller's session, assesses, throws on refusal, returns the assessment (warnings). */
@@ -357,7 +395,11 @@ export async function checkSchemaCompatibility(query: CompatibilityQuery, option
   const applied = checkLedger ? await readLedgerNames(query, options.label) : [...expected];
   // Pending migrations refuse before anything else is read: the function and the workspaces of a database behind the code
   // are expected to be behind too.
-  const ledgerOnly = assessSchemaCompatibility(options.process, { expected, applied }, { production: options.production, retired: options.retired });
+  const ledgerOnly = assessSchemaCompatibility(
+    options.process,
+    { expected, applied },
+    { production: options.production, retired: options.retired, upgradeIncomplete: options.upgradeIncomplete },
+  );
   assertSchemaCompatible(ledgerOnly, options.label);
 
   const functionMatters = [policy.functionUnknown, policy.functionBehind, policy.functionAhead].some((v) => v !== 'ignore');
@@ -366,7 +408,7 @@ export async function checkSchemaCompatibility(query: CompatibilityQuery, option
   const assessment = assessSchemaCompatibility(
     options.process,
     { expected, applied, provisionFunction, workspaces },
-    { production: options.production, retired: options.retired },
+    { production: options.production, retired: options.retired, upgradeIncomplete: options.upgradeIncomplete },
   );
   assertSchemaCompatible(assessment, options.label);
   return assessment;
