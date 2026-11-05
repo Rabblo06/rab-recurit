@@ -6,13 +6,13 @@ import { QUEUE_SETTINGS } from '@rab/server/engine/worker-shared/queue-registry'
 
 import { createConsumerJobProcessor, createScanJobProcessor } from '../scheduler/bullmq-scheduler';
 import { SCAN_JOBS } from '../scheduler/scan-jobs';
-import { partlyUpgradedSchemaWarning, waitForCompatibleSchema, warnIfPartlyUpgraded } from './schema-wait';
+import { waitForCompatibleSchema } from './schema-wait';
 import { WorkerRuntime } from './worker-runtime';
 
 /**
  * Owner decision 2026-11-05 (changed): "the Worker starts too, like Twenty". After a FAILED upgrade (the API serves under
- * CREWFLOW_UPGRADE_FAILURE=continue) the Worker logs ONE loud WARNING naming the first pending migration and starts every
- * consumer and scan. A job that needs the missing schema fails (42P01 undefined_table, 42703 undefined_column, ...) and is
+ * CREWFLOW_UPGRADE_FAILURE=continue) the Worker starts every consumer and scan; gate 7 logs the ONE loud partly-upgraded
+ * WARNING (the wait itself on a real database: worker-schema-wait-c3.integration.spec.ts). A job that needs the missing schema fails (42P01 undefined_table, 42703 undefined_column, ...) and is
  * retried under the existing rules; it is always a FAILED JOB, never an unhandled rejection or a crashed process. A foreign,
  * unknown or interleaved ledger is still refused exactly as before.
  */
@@ -40,33 +40,6 @@ async function withoutUnhandledRejection<T>(work: () => Promise<T>): Promise<T> 
     process.off('unhandledRejection', onUnhandled);
   }
 }
-
-describe('partly-upgraded schema: one loud start-up WARNING', () => {
-  const expected = ['Init1786000000000', 'AddThing1786100000000', 'Broken1786200000000', 'Later1786300000000'];
-
-  it('names the FIRST pending migration in chain order and the count; null when nothing is pending', () => {
-    expect(partlyUpgradedSchemaWarning(expected, expected)).toBeNull();
-    const warning = partlyUpgradedSchemaWarning(expected, ['Init1786000000000', 'AddThing1786100000000'])!;
-    expect(warning).toMatch(/WARNING running on a partly-upgraded schema: 2 migration\(s\) .* first pending Broken1786200000000/);
-    expect(warning).toMatch(/Starting every consumer and scan anyway/);
-  });
-
-  it('is logged exactly ONCE at start', async () => {
-    const log = jest.fn();
-    const query = jest.fn(async () => [{ name: 'Init1786000000000' }, { name: 'AddThing1786100000000' }]);
-    const warning = await warnIfPartlyUpgraded({ query, expected, log });
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log).toHaveBeenCalledWith(warning);
-    expect(query).toHaveBeenCalledTimes(1);
-  });
-
-  it('logs nothing when the schema is current, or when the ledger cannot be read (the boot gates already decided)', async () => {
-    const log = jest.fn();
-    expect(await warnIfPartlyUpgraded({ query: async () => expected.map((name) => ({ name })), expected, log })).toBeNull();
-    expect(await warnIfPartlyUpgraded({ query: async () => Promise.reject(pgError('42P01', 'relation "core.migrations" does not exist')), expected, log })).toBeNull();
-    expect(log).not.toHaveBeenCalled();
-  });
-});
 
 describe('a job that hits the missing schema is a failed job, never a crash', () => {
   it.each([

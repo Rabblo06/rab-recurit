@@ -40,18 +40,14 @@ refuse() {
 }
 
 # Signal handling while this shell is PID 1: a stop during a step terminates the child and exits.
+# O3 T8a-TMP trade-off (stated, not silent): the migrate child's output is captured by a command substitution (no file is
+# ever written: rab-api runs read_only with no tmpfs), and a POSIX shell runs a trap only after a command substitution ends.
+# A stop that arrives WHILE the migrate child runs is therefore acted on when the child ends (or by the platform's kill
+# after stop_grace_period); the child keeps its own lock and statement bounds. Every other step stays interruptible.
 CHILD=""
-CHILD_GROUP=""
 abort() {
   echo "api-prestart: received a stop signal during startup - aborting"
   if [ -n "$CHILD" ]; then kill "$CHILD" 2>/dev/null || true; fi
-  # The migrate child runs inside a relay pipeline: signal every process of this (non-interactive, single process group)
-  # shell so the child itself gets SIGTERM and cancels its statement instead of holding the migration lock until it ends.
-  if [ -n "$CHILD_GROUP" ]; then
-    trap '' TERM INT
-    kill -TERM 0 2>/dev/null || true
-    wait 2>/dev/null || true
-  fi
   exit 0
 }
 trap abort TERM INT
@@ -244,8 +240,10 @@ isolation_report
 # and carries no secret. The relay (awk) prints every line and, for an exit-70 result, the loud WARNING naming the reason and
 # the failing migration. It VETOES (exits 66, which pipefail reports) a 70 result that does not say serve:true, names a
 # fresh install (EMPTY / BOOTSTRAP-PARTIAL) or another policy than "continue": a degraded start is never taken on the exit
-# code alone. For a verified 70 it writes the result's failedMigration (only when it is a migration name: letters, digits,
-# _ - ., at most 200 characters; otherwise "unknown") to $UPGRADE_NOTE, which becomes main.js's CREWFLOW_UPGRADE_INCOMPLETE.
+# code alone. For a verified 70 it hands the result's failedMigration back to this shell on fd 4 (the command substitution
+# in run_migrate_child; NO file is written: rab-api is read_only with no tmpfs, O3 T8a-TMP) while every line still streams
+# to the log on fd 3. The shell accepts it only as a plain migration name (letters, digits, _ - ., at most 200 characters;
+# anything else -> "unknown") and passes it to main.js as CREWFLOW_UPGRADE_INCOMPLETE.
 MIGRATE_CHILD="$SCRIPTS/migrate/twenty/twenty-migrate.js"
 RELAY_AWK='
 function field(name,   m) {
@@ -260,7 +258,7 @@ function field(name,   m) {
     printf "api-prestart: WARNING DEGRADED START - the schema upgrade FAILED and CREWFLOW_UPGRADE_FAILURE=continue; serving on the previous schema. reason=%s failing_migration=%s state=%s\n", field("reason"), failing, field("state") > "/dev/stderr"
     fflush("/dev/stderr")
     if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"policy":"continue"[,}]/) veto = 1
-    else if (note != "") { printf "%s\n", failing > note; close(note) }
+    else { printf "failed-migration=%s\n", failing > "/dev/fd/4"; close("/dev/fd/4") }
   }
 }
 END {
@@ -270,27 +268,31 @@ END {
   }
 }
 '
-# Where the relay leaves a verified 70's failed migration name (created only when migrating; best effort: no writable temp
-# directory -> "unknown").
-UPGRADE_NOTE=
+# run_migrate_child: fd 3 = this shell's stdout (the container log); inside the command substitution the relay's stdout is
+# fd 3 (every line streams to the log as before) and its fd 4 is the substitution's pipe, which carries only two
+# machine lines back to this shell: `failed-migration=<name>` (a verified 70) and `relay-status=<exit status of the
+# pipeline>` (the child's code, or the relay's veto 66). Sets FAILED_MIGRATION; returns the status.
+FAILED_MIGRATION=""
 run_migrate_child() {
-  if [ -n "$MIGRATION_APPROVAL" ]; then
-    (set -o pipefail; CREWFLOW_MIGRATION_APPROVED="$MIGRATION_APPROVAL" node "$MIGRATE_CHILD" 2>&1 | awk -v note="$UPGRADE_NOTE" "$RELAY_AWK") &
-  else
-    (set -o pipefail; node "$MIGRATE_CHILD" 2>&1 | awk -v note="$UPGRADE_NOTE" "$RELAY_AWK") &
-  fi
-  CHILD=$!
-  CHILD_GROUP=1
-  STATUS=0
-  wait "$CHILD" || STATUS=$?
-  CHILD=""
-  CHILD_GROUP=""
+  FAILED_MIGRATION=""
+  exec 3>&1
+  RELAY_CAPTURE=$(
+    if [ -n "$MIGRATION_APPROVAL" ]; then
+      (set -o pipefail; CREWFLOW_MIGRATION_APPROVED="$MIGRATION_APPROVAL" node "$MIGRATE_CHILD" 2>&1 | awk "$RELAY_AWK" 4>&1 1>&3)
+    else
+      (set -o pipefail; node "$MIGRATE_CHILD" 2>&1 | awk "$RELAY_AWK" 4>&1 1>&3)
+    fi
+    echo "relay-status=$?"
+  )
+  exec 3>&-
+  STATUS=$(printf '%s\n' "$RELAY_CAPTURE" | sed -n 's/^relay-status=\([0-9][0-9]*\)$/\1/p' | tail -n 1)
+  FAILED_MIGRATION=$(printf '%s\n' "$RELAY_CAPTURE" | sed -n 's/^failed-migration=//p' | tail -n 1)
+  if [ -z "$STATUS" ]; then STATUS=1; fi
   return "$STATUS"
 }
 
 UPGRADE_INCOMPLETE=""
 if [ "$MIGRATE_ON_START" = true ]; then
-  UPGRADE_NOTE=$(mktemp 2>/dev/null || true)
   attempt=1
   while :; do
     echo "api-prestart: applying pending migrations on start (CREWFLOW_MIGRATE_ON_START=true, approval=$APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE=$UPGRADE_POLICY, attempt $attempt of 3)"
@@ -311,11 +313,13 @@ if [ "$MIGRATE_ON_START" = true ]; then
       if [ "$UPGRADE_POLICY" != continue ]; then
         fail_after_delay 66 "the migrate child reported a degraded continue (70) but CREWFLOW_UPGRADE_FAILURE is not continue"
       fi
-      UPGRADE_INCOMPLETE=""
-      if [ -n "$UPGRADE_NOTE" ] && [ -s "$UPGRADE_NOTE" ]; then UPGRADE_INCOMPLETE=$(head -n 1 "$UPGRADE_NOTE"); fi
+      # The relay's failedMigration, re-validated here: a plain migration name of at most 200 characters, else unknown (which
+      # the API's gate 7 then refuses: fail closed).
+      UPGRADE_INCOMPLETE="$FAILED_MIGRATION"
       case "$UPGRADE_INCOMPLETE" in
         '' | *[!A-Za-z0-9_.-]*) UPGRADE_INCOMPLETE=unknown ;;
       esac
+      if [ "${#UPGRADE_INCOMPLETE}" -gt 200 ]; then UPGRADE_INCOMPLETE=unknown; fi
       echo "api-prestart: WARNING DEGRADED START - the upgrade FAILED at $UPGRADE_INCOMPLETE and CREWFLOW_UPGRADE_FAILURE=continue: the API serves on the previous schema (see the WARNING and TWENTY_MIGRATE_RESULT lines above; /healthz reports upgradeFailed: true). Fix the failing migration and redeploy. The Worker starts as well, on the partly-upgraded schema (owner decision 2026-11-05)." >&2
       ;;
     64) fail_after_delay 64 "the migrate child refused its configuration" ;;
@@ -338,7 +342,6 @@ else
     fail_after_delay 65 "the schema is behind this code (or the database login is wrong). Run the release migration step for this release first, or set CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS unset or false)"
   fi
 fi
-if [ -n "$UPGRADE_NOTE" ]; then rm -f "$UPGRADE_NOTE"; fi
 
 # O3 C2 — job scheduler registration, like Twenty's entrypoint: after the migrate step, before main.js. Idempotent (fixed
 # ids); a failure is tolerated with a loud WARNING (owner decision 2026-11-05) — the API still starts, and the consume-only
