@@ -112,12 +112,17 @@ test('ports: only rab-api publishes, never on every interface', { skip }, () => 
 
 test('controlled release: API never migrates, token, waits for the same-image one-off rab-migrate', { skip }, () => {
   assertRefused(problemsAfter('release', (s) => { s['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'true'; }), /must be "false" in the controlled release/);
-  assertRefused(problemsAfter('release', (s) => { s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }), /must be "token" in the controlled release/);
+  // BC-11: the approval mode and the deployment identity are database.env opt-ins, never committed by a compose file.
+  for (const svc of APP) {
+    for (const key of ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ID']) {
+      assertRefused(problemsAfter('release', (s) => { s[svc].environment[key] = 'token'; }), new RegExp(`${svc}: commits ${key}`));
+    }
+  }
+  assertRefused(problemsAfter('migrate-on-start', (s) => { s['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'none'; }), /rab-api: commits CREWFLOW_MIGRATION_APPROVAL_MODE/);
   assertRefused(problemsAfter('release', (s) => { delete s['rab-api'].depends_on['rab-migrate']; }), /rab-api: does not wait for rab-migrate/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].image = `x/y@sha256:${'9'.repeat(64)}`; }), /rab-migrate: image differs from rab-api/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].restart = 'unless-stopped'; }), /rab-migrate: restart/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].command = ['node', 'x.js']; }), /not deploy-prepare\.js/);
-  assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'token'; }), /rab-migrate: sets CREWFLOW_MIGRATION_APPROVAL_MODE/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].profiles = ['release']; }), /rab-migrate: has profiles/);
   assertRefused(problemsAfter('release', (s) => { s['rab-migrate'].volumes = s['rab-migrate'].volumes.filter((v) => v.type !== 'tmpfs'); }), /long-form tmpfs/);
   assertRefused(problemsAfter('release', (s) => { delete s['rab-migrate']; }), /services are/);

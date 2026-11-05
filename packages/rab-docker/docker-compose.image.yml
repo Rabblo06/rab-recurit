@@ -25,12 +25,16 @@
 #
 # LIFECYCLE (this file = the CONTROLLED RELEASE, production's default). The API never changes the schema
 # (CREWFLOW_MIGRATE_ON_START=false): at start it only verifies code<->schema compatibility and refuses to serve otherwise.
-# The one-off rab-migrate (deploy-prepare.js, the SAME API image, the SAME login, ALWAYS token mode) runs to completion
-# first; rab-api waits for it (service_completed_successfully), the Worker waits for a healthy API. Exit codes of
-# rab-migrate: 0 nothing pending / applied; 3 pending and not approved (lists them, prints pending-<n>-<sha256>); 64-69 per
-# M0 section 7 by kind (config, behind, failed, identity, post-check, lock timeout). Without a token it is a check run that
-# applies nothing; an apply run needs CREWFLOW_MIGRATION_APPROVED=<token>. Approve with
-# `run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate` (runbook 3.4): the token is never in a file.
+# The one-off rab-migrate (deploy-prepare.js, the SAME API image, the SAME login) runs to completion first; rab-api waits
+# for it (service_completed_successfully), the Worker waits for a healthy API. APPROVAL (BC-11, owner decision 2026-11-05):
+# mode none by default = rab-migrate APPLIES every pending migration (exit 0 applied / nothing pending; 64-69 by kind:
+# config, behind, failed, identity, post-check, lock timeout). Token mode is an OPT-IN of database.env
+# (CREWFLOW_MIGRATION_APPROVAL_MODE=token): then a run without a token is a check run (3 = pending, prints
+# pending-<n>-<sha256>) and every non-fresh apply needs `run --rm -e CREWFLOW_MIGRATION_APPROVED rab-migrate` (runbook 3.4).
+# The deployment id (CREWFLOW_DEPLOYMENT_*) is likewise an optional database.env entry: matched when declared, a warning
+# when absent. This file commits neither (a committed value would override the operator's opt-in; the gate refuses it).
+# Accepted risk: with the defaults a wrong image or URL migrates production; recovery is the mandatory pre-upgrade backup
+# (docs/release/OWNER-LOGIN-RECOVERY.md).
 #
 # SECURITY POSTURE. The runtime login owns the schema (PT-01; M0 G-01..G-04 and the rest: runbook section 1, THREAT-MODEL.md).
 # Container isolation below limits what a compromised PROCESS can do to the HOST; it does nothing for what the database
@@ -140,10 +144,9 @@ services:
       S3_SERVER_SIDE_ENCRYPTION: NONE
       # Refuse to start when the platform did not apply the runtime isolation below (H6 enforce mode). Never override.
       CREWFLOW_RUNTIME_ISOLATION: enforce
-      # Controlled release (runbook 3): the API never migrates; docker-compose.migrate-on-start.yml flips both for a quick
-      # start. Token mode here too, so a mistaken migrate-on-start override without its approval mode refuses.
+      # Controlled release (runbook 3): the API never migrates; docker-compose.migrate-on-start.yml flips it for a quick
+      # start. The approval mode is NOT committed here: it is an opt-in of database.env (BC-11).
       CREWFLOW_MIGRATE_ON_START: "false"
-      CREWFLOW_MIGRATION_APPROVAL_MODE: token
       CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
 
     depends_on:
@@ -260,7 +263,7 @@ services:
   # ---------------------------------------------------------------------------
   # rab-migrate — the one-off release step (deploy-prepare.js, updated in place for the owner login), run to completion
   # BEFORE rab-api and rab-worker start. Same image (by digest) as rab-api: the migrations ship inside it. Same login, from
-  # the same database.env; it never reads runtime.env. Approval: token mode (header).
+  # the same database.env (so it sees the operator's opt-ins); it never reads runtime.env. Approval: header (BC-11).
   # ---------------------------------------------------------------------------
   rab-migrate:
     image: ${CREWFLOW_API_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_API_IMAGE_DIGEST:?CREWFLOW_API_IMAGE_DIGEST must be the API index digest (sha256:<64 hex>)}
@@ -273,7 +276,8 @@ services:
       NODE_ENV: production
       CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
 
-    # Always token mode: no token = check run (0 current, 3 pending); CREWFLOW_MIGRATION_APPROVED = apply run; 64-69 by kind.
+    # Mode none (default): a run applies. Token mode (opt-in): no token = check run (0 current, 3 pending),
+    # CREWFLOW_MIGRATION_APPROVED = apply run. Failures 64-69 by kind.
     command: ["node", "packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js"]
 
     restart: "no"
