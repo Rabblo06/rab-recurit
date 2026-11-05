@@ -2,6 +2,7 @@ import { Controller, Get } from '@nestjs/common';
 import { HealthCheck, HealthCheckError, HealthCheckService, HealthIndicatorResult, TypeOrmHealthIndicator } from '@nestjs/terminus';
 
 import { securityReady } from './security-readiness';
+import { upgradeStatusIndicator } from './upgrade-status';
 
 /** Render's healthCheckPath (render.yaml) points here. */
 @Controller('healthz')
@@ -22,7 +23,14 @@ export class HealthController {
     // moment without false-flagging.
     // Owner-login architecture: also unready once the semantic posture monitor saw the database's security objects change
     // since boot (security-readiness.ts). It stays unready until a restart passes the boot check again.
-    return this.health.check([() => this.db.pingCheck('database', { timeout: 5_000 }), () => this.securityPosture()]);
+    // O3 C3: after a failed upgrade served under CREWFLOW_UPGRADE_FAILURE=continue, an informational `upgrade` entry names the
+    // failed migration (upgrade-status.ts). Always `up`: the status stays 200 by the owner's decision.
+    const upgrade = upgradeStatusIndicator();
+    return this.health.check([
+      () => this.db.pingCheck('database', { timeout: 5_000 }),
+      () => this.securityPosture(),
+      ...(upgrade ? [() => upgrade] : []),
+    ]);
   }
 
   private securityPosture(): HealthIndicatorResult {

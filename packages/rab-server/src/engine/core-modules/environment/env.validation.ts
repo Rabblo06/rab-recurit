@@ -58,6 +58,19 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
     throw new Error(`Invalid environment configuration:\n${message}`);
   }
 
+  // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): WORKER_SCHEDULER unset → bullmq in production (the API
+  // registers the job schedulers at start-up, the Worker consumes), interval elsewhere (development and test keep the
+  // process-local timers: `yarn start` has no api-prestart.sh to register anything). An explicit `interval` in production is
+  // refused below (productionConfigurationProblems).
+  validated.WORKER_SCHEDULER = validated.WORKER_SCHEDULER ?? (validated.NODE_ENV === 'production' ? 'bullmq' : 'interval');
+  // DISABLE_CRON_JOBS_REGISTRATION=true means "consume the BullMQ schedulers, never register them": with interval timers
+  // there is nothing to consume, so nothing would ever be scheduled. Refused in every environment.
+  if (validated.DISABLE_CRON_JOBS_REGISTRATION === true && validated.WORKER_SCHEDULER !== 'bullmq') {
+    throw new Error(
+      'Invalid environment configuration:\nDISABLE_CRON_JOBS_REGISTRATION=true requires WORKER_SCHEDULER=bullmq (it consumes the BullMQ job schedulers the API registers; with interval timers nothing would be scheduled).',
+    );
+  }
+
   // Cross-field rule: an S3 deployment missing any of these must fail at boot, not on the first upload at 2am.
   // S3_ENDPOINT is required here (not merely "optional, only for non-AWS providers") because production's actual
   // target is Cloudflare R2, which has no default AWS endpoint to fall back to — a boot with S3 selected and no
@@ -200,8 +213,9 @@ ${(error as Error).message}`);
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }
 
-  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): the remaining database start-up settings and the removed
-  // mode switch (CREWFLOW_DB_MODE, DISABLE_DB_MIGRATIONS), through the one shared parser
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): the remaining database start-up settings (DISABLE_DB_MIGRATIONS,
+  // CREWFLOW_MIGRATE_ON_START, the approval mode, CREWFLOW_UPGRADE_FAILURE and its deprecated alias) and the removed mode
+  // switch (CREWFLOW_DB_MODE), through the one shared parser
   // (database/owner-login/runtime-db-config.ts) — the same rules api-prestart.sh and the runtime guard apply. Read from the
   // RAW configuration (a blank value is unset). Names and allowed values only, never a value.
   const runtimeDbProblems = runtimeDbConfigProblems(config as Record<string, string | undefined>);
@@ -228,6 +242,12 @@ export function productionConfigurationProblems(env: EnvironmentVariables): stri
   if (env.WORKER_INVITE_AUTO_DELETE_ENABLED === true && !WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED) {
     problems.push(
       'WORKER_INVITE_AUTO_DELETE_ENABLED=true would let the Worker automatically delete user accounts, and the owner has not approved a retention policy for that (grace period, eligibility, audit wording, rollback/monitoring). Missing owner approval: set WORKER_INVITE_AUTO_DELETE_ENABLED=false (or leave it unset) in production.',
+    );
+  }
+  // O3 C2: the interval timers are off the production path (unset already defaults to bullmq in production).
+  if (env.WORKER_SCHEDULER === 'interval') {
+    problems.push(
+      'WORKER_SCHEDULER=interval runs every scan on each replica\'s own timer, which is not the production path: the API registers the BullMQ job schedulers at start-up and the Worker consumes them. Remove WORKER_SCHEDULER (production defaults to bullmq) or set it to bullmq.',
     );
   }
   if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');

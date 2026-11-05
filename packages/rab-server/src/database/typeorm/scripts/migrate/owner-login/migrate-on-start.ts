@@ -18,8 +18,11 @@
  *     for the length of a statement (M0-C, VERIFIED: up to 900 s otherwise).
  *   - after the chain: auto-bind (fresh install only), then deploy-post-checks on EVERY start (C-2), with an AHEAD ledger's
  *     provision-function-ahead / workspace-ahead findings as warnings (C-1: the image rollback stays healthy).
- *   - on failure: upgrade-failure-policy.ts decides, on a fresh session of the same login, whether the API may serve
- *     degraded (exit 70, logged as a FAILURE) — never after a first-install failure.
+ *   - on failure: upgrade-failure-policy.ts decides, on a fresh session of the same login, whether the API may start anyway.
+ *     Owner decision C3 (2026-11-05, "exactly like Twenty"): CREWFLOW_UPGRADE_FAILURE=continue (the default) turns a failed
+ *     UPGRADE MIGRATION into an ERROR line naming it and exit 70 (deployment identity still checked); configuration (64),
+ *     approval / N1 (65), identity (67), post-check (68) and lock timeout (69) stay fail-closed, and a first-install
+ *     failure never serves. refuse keeps the failure code.
  *
  * One machine-readable line on stdout at the end, never a secret:
  *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","policy","reason","checks"}
@@ -154,6 +157,17 @@ const AHEAD_TOLERATED = /^schema-compatibility (provision-function-ahead|workspa
 export function blockingPostCheckProblems(state: Classification['state'] | 'UNKNOWN', problems: readonly string[]): { blocking: string[]; warnings: string[] } {
   if (state !== 'AHEAD') return { blocking: [...problems], warnings: [] };
   return { blocking: problems.filter((p) => !AHEAD_TOLERATED.test(p)), warnings: problems.filter((p) => AHEAD_TOLERATED.test(p)) };
+}
+
+/**
+ * Agent 2 (O3): DISABLE_DB_MIGRATIONS=true means "this process never migrates" (api-prestart.sh then never starts the child).
+ * The child run directly with it refuses (exit 64, configuration) instead of migrating against the operator's setting. Pure.
+ */
+export function migrateChildConfigRefusal(config: object): string | null {
+  // `object`: the parsed RuntimeDbConfig (Agent 2 adds `disableDbMigrations` to it on o3/app-startup).
+  return (config as { disableDbMigrations?: unknown }).disableDbMigrations === true
+    ? 'DISABLE_DB_MIGRATIONS=true: this deployment does not migrate on start, so the migrate child refuses to run. Unset it (or set CREWFLOW_MIGRATE_ON_START=true without it) to let the API apply migrations, or run the release migration step. Refusing.'
+    : null;
 }
 
 export type MarkerState = 'absent' | 'unbound' | 'bound';
@@ -384,8 +398,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     } catch {
       // Unreadable after the failure: keep the failure, report nothing as pending-known.
     }
-    if (outcome === 'config' || outcome === 'identity' || outcome === 'behind') {
-      // Never a candidate for continue-if-compatible: the configuration, the identity or the approval is wrong.
+    if (outcome !== 'migrationFailed') {
+      // Owner decision C3 (2026-11-05): only a MIGRATION failure of an upgrade may continue. The configuration (64), the
+      // approval / N1 (65), the identity (67), a post-check (68) and the lock timeout (69) stay fail-closed under every policy.
       return result(outcome, { pending, failedMigration, serve: false, reason: message.slice(0, 300) });
     }
     const verdict = await withLoginClient(env, (query) =>
@@ -415,7 +430,10 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     }));
     for (const check of verdict.checks) log(`  check ${check.ok ? 'PASS' : 'FAIL'} ${check.name}: ${check.detail}`);
     if (verdict.serve) {
-      log(`*** UPGRADE FAILED (${outcome}) — continue-if-compatible passed every check: the API will serve DEGRADED (exit 70). This is NOT a success. ***`);
+      log(
+        `ERROR: the schema upgrade FAILED at ${failedMigration ?? 'an unknown migration'}: ${message.slice(0, 300)} ` +
+          `-- CREWFLOW_UPGRADE_FAILURE=continue: continuing startup on the previous schema (exit 70). This is NOT a success: fix the migration and redeploy.`,
+      );
       return result('degradedContinue', { pending, failedMigration, serve: true, reason: verdict.reason, checks: verdict.checks });
     }
     return result(outcome, { pending, failedMigration, serve: false, reason: `${message.slice(0, 200)} | ${verdict.reason}`, checks: verdict.checks });

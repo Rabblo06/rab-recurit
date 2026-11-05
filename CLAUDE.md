@@ -126,6 +126,14 @@ structural changes.
   refuses to boot (env is validated on process start). An unknown state
   transition is rejected, never silently accepted. A query run with no tenant
   context bound returns zero rows, never all rows.
+  - **Owner exception (2026-11-05, C3, like Twenty):** an upgrade migration
+    failure continues start-up by default. The API logs an ERROR naming the
+    failed migration and serves. The Worker also starts, and runs every job,
+    when the pending migrations are an in-order tail of its chain (decided
+    from the database alone). A first-install failure, and identity,
+    config and RLS failures, still fail closed. Do not widen this exception:
+    no other gate may be downgraded because of it (THREAT-MODEL consequence
+    item 13 lists the gates that still refuse).
 - **404, not 403, for a record outside the caller's tenant, venue, or own
   scope.** A 403 confirms the row exists, which is itself a disclosure. 403 is
   reserved for "this exists and you may see it exists, but you categorically
@@ -174,6 +182,10 @@ structural changes.
   migration lock, the identity and refusal gates, the posture and semantic
   goldens, RLS, and the mandatory pre-upgrade backup in the runbook. A
   mistaken upgrade is recovered by restore-from-backup only.
+- **The API migrates on start in production** (owner decision 2026-11-05,
+  "EXACTLY LIKE TWENTY", G-07 accepted). There is no `rab-migrate` release
+  step; the Worker never migrates (`DISABLE_DB_MIGRATIONS`). Run one API
+  server and deploy stop-then-start, never rolling or blue-green (C5).
 - **Every value reaches SQL as a bound parameter; every identifier comes from
   an allow-list.** One injected statement runs with the schema owner's
   privileges (PT-01).
