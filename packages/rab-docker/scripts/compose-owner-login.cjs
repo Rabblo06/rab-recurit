@@ -125,6 +125,19 @@ const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREW
 const APPROVAL_MODE_KEY = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
 const APPROVAL_MODE_EXPR = '${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}';
 const APPROVAL_MODES = Object.freeze(['none', 'token']);
+/**
+ * BC-07: the external security audit sink, required in production by security-audit-sink.ts (securityAuditSinkConfig).
+ * The values are the code's own: CREWFLOW_AUDIT_SINK none | stdout | file, of which production accepts only stdout;
+ * CREWFLOW_AUDIT_SINK_FAILURE refuse | log, of which production accepts only refuse (unset = refuse);
+ * CREWFLOW_AUDIT_SINK_FILE only with file (development). compose-owner-login.test.cjs re-reads the TypeScript source and
+ * fails when these lists drift from it. It lives in runtime.env (rab-api and rab-worker both start the sink), never
+ * committed in a compose file: the operator chooses it explicitly.
+ */
+const AUDIT_SINK_KEY = 'CREWFLOW_AUDIT_SINK';
+const AUDIT_SINK_MODES = Object.freeze(['none', 'stdout', 'file']);
+const AUDIT_SINK_PRODUCTION_MODES = Object.freeze(['stdout']);
+const AUDIT_SINK_FAILURES = Object.freeze(['refuse', 'log']);
+const AUDIT_SINK_PRODUCTION_FAILURES = Object.freeze(['refuse']);
 /** O3 C3: what runtime.env may set for the upgrade-failure policy (unset = continue). */
 const UPGRADE_FAILURE_VALUES = Object.freeze(['continue', 'refuse']);
 /** Provider admin logins and the former separated runtime logins: never the app login (M0 section 3.5). */
@@ -308,6 +321,8 @@ function checkModel(model, combo) {
     if (e.CREWFLOW_RUNTIME_ISOLATION !== 'enforce') p(`${name}: CREWFLOW_RUNTIME_ISOLATION is "${e.CREWFLOW_RUNTIME_ISOLATION ?? ''}", expected "enforce"`);
     if (e.RAB_RUNTIME_ENV !== 'production') p(`${name}: RAB_RUNTIME_ENV is not production`);
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
+    // BC-07: the sink must reach both services, as a production-accepted value.
+    if (!AUDIT_SINK_PRODUCTION_MODES.includes(String(e[AUDIT_SINK_KEY] ?? ''))) p(`${name}: ${AUDIT_SINK_KEY} is "${e[AUDIT_SINK_KEY] ?? ''}", expected stdout (BC-07, from runtime.env)`);
   }
 
   // rab-api: the lifecycle.
@@ -415,6 +430,16 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
+    if (/^CREWFLOW_AUDIT_SINK/.test(key) && kind !== 'runtime') problems.push(`${key}: belongs in runtime.env (rab-api and rab-worker both start the audit sink)`);
+    if (kind === 'runtime' && key === AUDIT_SINK_KEY) {
+      if (!AUDIT_SINK_MODES.includes(value)) problems.push(`${key}: must be exactly none, stdout or file (security-audit-sink.ts)`);
+      else if (!AUDIT_SINK_PRODUCTION_MODES.includes(value)) problems.push(`${key}: production refuses ${value}; set stdout with an off-host append-only log shipper (BC-07)`);
+    }
+    if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FAILURE') {
+      if (!AUDIT_SINK_FAILURES.includes(value)) problems.push(`${key}: must be exactly refuse or log (security-audit-sink.ts)`);
+      else if (!AUDIT_SINK_PRODUCTION_FAILURES.includes(value)) problems.push(`${key}: production requires refuse (or leave it unset)`);
+    }
+    if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FILE') problems.push(`${key}: the file sink is development-only (production refuses CREWFLOW_AUDIT_SINK=file)`);
     if (key === APPROVAL_MODE_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): rab-api's committed ${APPROVAL_MODE_EXPR} would silently override a value here`);
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
     if (kind !== 'runtime' && key === 'CREWFLOW_UPGRADE_FAILURE') problems.push(`${key}: belongs in runtime.env (the API reads it)`);
@@ -431,6 +456,9 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+  }
+  if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
+    problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);
   }
   if (kind === 'database') {
     const url = entries.find((e) => e.key === URL_KEY)?.value;
@@ -462,6 +490,7 @@ function lintComposeText(rel, text) {
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
   if (/^\s*-?\s*CREWFLOW_(DEPLOYMENT_ENVIRONMENT|DEPLOYMENT_ID)\s*:/m.test(text)) problems.push(`${rel}: commits a BC-11 opt-in (the deployment identity belongs in database.env)`);
+  if (/^\s*-?\s*CREWFLOW_AUDIT_SINK\w*\s*[:=]/m.test(text)) problems.push(`${rel}: commits the audit sink (BC-07: the operator sets CREWFLOW_AUDIT_SINK in runtime.env)`);
   // The approval mode may only be the compose.env interpolation (none by default), never a literal that pins it.
   for (const m of text.matchAll(/^\s*-?\s*CREWFLOW_MIGRATION_APPROVAL_MODE\s*[:=]\s*(.*?)\s*$/gm)) {
     if (m[1] !== APPROVAL_MODE_EXPR) problems.push(`${rel}: ${APPROVAL_MODE_KEY} must be exactly ${APPROVAL_MODE_EXPR} (an opt-in of compose.env)`);
@@ -477,7 +506,7 @@ function lintComposeText(rel, text) {
 const DATABASE_ENV_TEXT = [
   `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow', '',
 ].join('\n');
-const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', ''].join('\n');
+const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', 'CREWFLOW_AUDIT_SINK=stdout', ''].join('\n');
 /** Separated-mode env files a compose file must no longer read: their marker value must never reach a service. */
 const LEGACY_ENV_TEXT = `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_LEGACY_PW}@db-direct.example:5432/rab?sslmode=verify-full\nLEGACY_MARKER=${SENTINEL_LEGACY_PW}\n`;
 
@@ -580,7 +609,8 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
 };

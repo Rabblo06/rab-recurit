@@ -141,6 +141,14 @@ test('approval mode (BC-11/C4): unset in compose.env renders none; token renders
   assertRefused(gate.lintEnvText('runtime', 'CREWFLOW_MIGRATION_APPROVAL_MODE=token'), /set it in compose\.env/);
 });
 
+test('BC-07: the audit sink reaches rab-api and rab-worker from runtime.env as stdout; missing or invalid is refused', { skip }, () => {
+  for (const svc of APP) {
+    assert.equal(fresh(DEF).services[svc].environment.CREWFLOW_AUDIT_SINK, 'stdout', svc);
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.CREWFLOW_AUDIT_SINK; }), new RegExp(`${svc}: CREWFLOW_AUDIT_SINK is "", expected stdout`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.CREWFLOW_AUDIT_SINK = 'none'; }), new RegExp(`${svc}: CREWFLOW_AUDIT_SINK is "none", expected stdout`));
+  }
+});
+
 test('O3 C5: exactly one API, stop-then-start', { skip }, () => {
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].deploy = { replicas: 2 }; }), /rab-api: 2 replicas/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].scale = 3; }), /rab-api: 3 replicas/);

@@ -211,6 +211,17 @@ this drifts.
 > ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md)). That is why the backup (3.3) is **MANDATORY, before every
 > upgrade**. The declared deployment id (optional, BC-11) still refuses a database bound to another deployment.
 
+**Security audit sink (BC-07): REQUIRED configuration.** In production, rab-api and rab-worker refuse to start without an
+external security audit sink (`security-audit-sink.ts`): `core.audit_log` alone is not tamper-evident under the owner
+login. Set it explicitly in `runtime.env`; it is never committed in a compose file, and the gate refuses it there.
+- `CREWFLOW_AUDIT_SINK=stdout` is the only value production accepts (`none` and `file` are refused). The gate requires it.
+- **`stdout` is compliant ONLY with an off-host, append-only log shipper** that collects rab-api's and rab-worker's
+  stdout (for example the Docker log driver or a host agent shipping to a write-once store), or with a reviewed adapter.
+  **The shipper is the operator's responsibility; the application cannot verify that it exists or that it is
+  append-only.** Without it, the security events land only in the local container log (`json-file`, rotated).
+- `CREWFLOW_AUDIT_SINK_FAILURE` stays unset (= `refuse`: an event that cannot be written fails closed; `log` is refused in
+  production). `CREWFLOW_AUDIT_SINK_FILE` is development-only.
+
 **3.1 Inputs.**
 - The release's ONE **index digest** (`CREWFLOW_IMAGE_DIGEST`) from the gated release (`publish-image.yaml` → `publish-gated.sh`, tag `<full commit>`; the `release` environment needs reviewer approval). Never a tag.
 - Check that the revision label equals the release SHA:
@@ -262,6 +273,7 @@ $P [$L] up -d --wait --wait-timeout 1200
 
 **3.5 Verify.**
 - `$P ps`: rab-api and rab-worker are healthy.
+- **Audit sink (BC-07):** the off-host shipper receives the new containers' stdout. Check that the release's first security events (for example a sign-in) arrive in the append-only store, and that the store refuses edits and deletes. The application cannot verify this for you: an API that starts with `CREWFLOW_AUDIT_SINK=stdout` and no shipper looks healthy.
 - `/healthz` through the edge returns 200 with `upgradeFailed: false`.
 - The API log shows the job schedulers registered.
 - The Worker log shows `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all <n> enabled Crewflow schedulers present`. A MISSING scheduler is an ERROR: restart the API, which registers them again.
