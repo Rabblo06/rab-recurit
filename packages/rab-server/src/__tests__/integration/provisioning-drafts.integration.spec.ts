@@ -42,6 +42,7 @@ import { ManagerWorkspaceService } from '../../modules/manager-workspace/service
 import { WorkspaceProvisioningService } from '../../modules/manager-workspace/services/workspace-provisioning.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 
 const { appUrl } = resolveIntegrationTestDatabase(process.env);
 
@@ -83,16 +84,13 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     const id = await factory.createInternalManager(o, { permissions: 'production', label: `p8d-${randomUUID().slice(0, 6)}`, workspace: false });
     return { id, token: await factory.login(id) };
   };
-  /** A CREATING workspace owned by `m` (create while the function is unavailable to the runtime role). */
+  /** A CREATING workspace owned by `m` (create while server-path provisioning is deferred: test seam). */
   const creatingWorkspace = async (m: { token: string }): Promise<string> => {
-    await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    try {
+    return withServerProvisioningDeferred(async () => {
       const res = await http().post('/rest/v1/manager-workspaces').set('Authorization', `Bearer ${m.token}`).send(body());
       expect(res.body.schemaStatus).toBe('CREATING');
       return res.body.id as string;
-    } finally {
-      await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+    });
   };
   /** Runs core.provision_workspace as crewflow_app with the given identity bound; returns the outcome or the SQLSTATE. */
   const provisionAs = async (id: TestIdentity, workspaceId: string): Promise<string> => {
@@ -129,11 +127,13 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // Invitation e-mail is queued only while a Worker heartbeat is fresh (same as initial-manager-invitation.integration.spec.ts).
     await app.get(ThrottlerRedisClientProvider).client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 300);
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // Owner-login architecture: the suite must run as the CONFIGURED runtime login (crewflow_app on a separated fixture,
+    // crewflow_owner on an owner-login database) and never as the admin superuser that seeds fixtures.
+    expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
+    expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
   }, 180_000);
 
   afterAll(async () => {
-    await admin?.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`).catch(() => undefined);
     await admin?.destroy();
     await app?.close();
   });

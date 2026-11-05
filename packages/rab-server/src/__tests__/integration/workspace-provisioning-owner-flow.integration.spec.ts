@@ -18,6 +18,7 @@ import { ManagerWorkspaceService } from '../../modules/manager-workspace/service
 import { WorkspaceProvisioningService } from '../../modules/manager-workspace/services/workspace-provisioning.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 
 /**
  * Phase B P8 — the owner's own request is the only provisioning path (no privileged background builder):
@@ -58,13 +59,9 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
   const workspaceRows = async (userId: string) =>
     (await admin.query(`SELECT id, schema_status FROM core.manager_workspace WHERE owner_user_id = $1`, [userId])) as Array<{ id: string; schema_status: string }>;
   const withProvisioningUnavailable = async <T>(fn: () => Promise<T>): Promise<T> => {
-    // The function is unavailable (e.g. mid-rollback): create answers CREATING (DEFERRED) and nothing is built.
-    await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    try {
-      return await fn();
-    } finally {
-      await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+    // Provisioning is deferred (test seam, as a timeout or an unavailable function would): create answers CREATING
+    // (DEFERRED) and nothing is built.
+    return withServerProvisioningDeferred(fn);
   };
   const ctxOf = (id: TestIdentity, workspaceId: string | null = null): AuthContext => ({
     organisationId: id.organisationId,
@@ -96,7 +93,10 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
     const realGet = environment.get.bind(environment) as (key: string) => unknown;
     jest.spyOn(environment, 'get').mockImplementation(((key: string) => (key === 'HWS_RUNTIME_ENABLED' ? hwsOn : realGet(key))) as never);
     const [{ current_user: who }] = await app.get(DataSource).query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // Owner-login architecture: the suite must run as the CONFIGURED runtime login (crewflow_app on a separated fixture,
+    // crewflow_owner on an owner-login database) and never as the admin superuser that seeds fixtures.
+    expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
+    expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
   }, 180_000);
 
   afterEach(() => {
@@ -104,7 +104,6 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
   });
 
   afterAll(async () => {
-    await admin?.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`).catch(() => undefined);
     await admin?.destroy();
     await app?.close();
   });

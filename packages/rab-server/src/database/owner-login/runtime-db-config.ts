@@ -43,6 +43,12 @@ export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.f
  * are refused everywhere this parser runs (env validation, the runtime guard, api-prestart.sh).
  */
 export const MIGRATION_TEST_SEAM_VARS = Object.freeze(['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT'] as const);
+/**
+ * Every test seam refused outside NODE_ENV=test: Agent 1's migration seams, and the server-path provisioning deferral seam
+ * (modules/manager-workspace/services/workspace-provisioning-test-seam.ts; itself effective only with NODE_ENV=test AND a
+ * database marked crewflow.disposable_test_database).
+ */
+export const TEST_SEAM_VARS = Object.freeze([...MIGRATION_TEST_SEAM_VARS, 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING'] as const);
 
 export const MIGRATION_APPROVAL_MODES: readonly MigrationApprovalMode[] = Object.freeze(['none', 'token'] as const);
 export const UPGRADE_FAILURE_POLICIES: readonly UpgradeFailurePolicy[] = Object.freeze(['refuse', 'continue-if-compatible'] as const);
@@ -138,9 +144,9 @@ export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOption
     if (raw(env, name) !== undefined) throw new RuntimeDbConfigError(`${why} Refusing to start.`);
   }
   if (raw(env, 'NODE_ENV') !== 'test') {
-    for (const name of MIGRATION_TEST_SEAM_VARS) {
+    for (const name of TEST_SEAM_VARS) {
       if (raw(env, name) !== undefined) {
-        throw new RuntimeDbConfigError(`${name} is a migration test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start.`);
+        throw new RuntimeDbConfigError(`${name} is a test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start.`);
       }
     }
   }
