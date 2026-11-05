@@ -5462,13 +5462,15 @@ them is a control that "passed".
 | AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
 | The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
 
-**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512):** the legacy schema roles kept their
-old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on the
-transition and on fresh installs. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
+**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512 and f91f1038):** the legacy schema roles
+kept their old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on
+the transition and on fresh installs; `crewflow_migrator` too, on the transition, when the role exists. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
 authenticate only via non-password methods, which the provider's `pg_hba` must not grant. It stays LOGIN because
 migrations 1786721300000 and 1786721340000 assert its LOGIN, and `crewflow_owner` cannot administer it. Proving test:
-owner-login-lifecycle-check (fresh + transition golden: `login=false` on the fresh, reference, interrupted and
-transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any more.
+the PG16 lifecycle check "transition: BC-17 the old logins are disabled (crewflow, crewflow_app, crewflow_migrator
+NOLOGIN without a password; crewflow_worker LOGIN without a password)" (the goldens show `login=false` on the fresh,
+reference, interrupted and transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any
+more.
 
 - **`crewflow_worker`:** stays LOGIN without a password. Only a `trust`, `peer` or `cert` rule in the provider's
   `pg_hba` could admit it; the provider must not grant one.
@@ -5477,8 +5479,9 @@ transition paths), plus catalogue test BC-17. No catalogue entry waits for the o
   less-privileged login that survives credential rotation. The privilege-drift snapshot and the posture golden catch
   `login=true`; nothing prevents it. A transitioned database is not exposed: there `crewflow_owner` is NOCREATEROLE.
 - **Rollback:** roles are cluster-wide. Only a fresh-cluster restore of `roles.sql` plus the dump brings LOGIN back.
-- **Pending (same owner decision):** Agent 1 is adding `crewflow_migrator` NOLOGIN PASSWORD NULL on the transition.
-  BC-17 names it once that SHA lands.
+- **`crewflow_migrator` (f91f1038):** NOLOGIN PASSWORD NULL on the transition, but it keeps its memberships
+  (`rab_secure_owner` and `crewflow`, SET + INHERIT). A NOLOGIN member is inert. Removing it (REVOKE or DROP ROLE)
+  would need a separate owner decision. The transition passed the second-boot posture check with it present.
 
 **BC-11 / G-06, owner-accepted 2026-11-05 (HIGH):**
 
