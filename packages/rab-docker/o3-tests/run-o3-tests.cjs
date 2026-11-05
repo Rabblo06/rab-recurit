@@ -653,7 +653,7 @@ main()
   })
   .finally(async () => {
     await cleanup();
-    const lines = [`# O3 real-container tests, PostgreSQL ${MAJOR}`, '', `rab-api /tmp workaround: ${API_TMP_WORKAROUND ? 'ON (TEST-ONLY overlay o3-tests/docker-compose.o3t-api-tmp.yml, defect T8a-TMP)' : 'off (shipped compose files only)'}`, '', '| test | status | checks |', '|---|---|---|'];
+    const lines = [`# O3 real-container tests, PostgreSQL ${MAJOR}`, '', `rab-api /tmp workaround: ${API_TMP_WORKAROUND ? 'ON (TEST-ONLY overlay o3-tests/docker-compose.o3t-api-tmp.yml, defect T8a-TMP)' : 'off (shipped compose files only)'}`, `images: base ${process.env.O3T_IMAGE}; broken ${process.env.O3T_IMAGE_BROKEN}; fixed ${process.env.O3T_IMAGE_FIXED}${process.env.O3T_IMAGE_LABEL ? ` (${process.env.O3T_IMAGE_LABEL})` : ''}`, '', '| test | status | checks |', '|---|---|---|'];
     for (const r of results) lines.push(`| ${r.id} ${r.title} | ${r.status} | ${r.checks.filter((c) => c.ok).length}/${r.checks.length} |`);
     fs.writeFileSync(path.join(OUT, 'SUMMARY.md'), `${lines.join('\n')}\n`);
     fs.writeFileSync(path.join(OUT, 'RESULTS.json'), JSON.stringify(results, null, 2));
