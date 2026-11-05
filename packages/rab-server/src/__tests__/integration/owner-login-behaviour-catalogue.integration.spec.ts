@@ -341,9 +341,11 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     const runner = { query: async (sql: string, params?: unknown[]) => (await owner.query(sql, params as unknown[] | undefined)).rows };
     const migrator = new WorkspaceSchemaMigrator(runner as never);
     await expect(migrator.assertMigrationIdentity()).resolves.toBeUndefined();
-    await rolledBack(owner, async () => {
-      await owner.query('SET LOCAL ROLE crewflow_app');
-      await expect(migrator.assertMigrationIdentity()).rejects.toThrow(/refuses to run as "crewflow_app"/);
+    // The schema role crewflow_app, reached through the superuser fixture (the owner login is not a member of it).
+    const asApp = new WorkspaceSchemaMigrator({ query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[] | undefined)).rows } as never);
+    await rolledBack(admin, async () => {
+      await admin.query('SET LOCAL ROLE crewflow_app');
+      await expect(asApp.assertMigrationIdentity()).rejects.toThrow(/refuses to run as "crewflow_app"/);
     });
   });
 });
