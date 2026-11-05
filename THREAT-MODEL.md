@@ -5458,6 +5458,10 @@ acceptable.
 | No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Catalogue test (`row_security = off` is refused) |
 | Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Catalogue test |
 | Legacy LOGIN schema roles keep their old passwords on an upgraded database | BC-17 | MEDIUM | Catalogue test. Recommended fix: `ALTER ROLE … NOLOGIN` (changes the golden). |
+| Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | PENDING OWNER APPROVAL (found by Agent 5, 2026-11-04). Catalogue test. RLS WITH CHECK still holds. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | PENDING OWNER APPROVAL (Agent 5). Catalogue test. No claim or quarantine row without context; reserved-label DELETE is parity-guarded. |
+| AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | PENDING OWNER APPROVAL (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
+| The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | PENDING OWNER APPROVAL (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. Kept as its own entry rather than folded into BC-08 (dispatch claims) or BC-15 (mitigated), so the open part stays visible. |
 
 ### The ten consequences PT-01's wording did not cover (M0 §6.2)
 

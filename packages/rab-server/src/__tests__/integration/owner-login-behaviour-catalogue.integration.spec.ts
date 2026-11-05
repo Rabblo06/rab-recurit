@@ -279,4 +279,71 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     const result = await rolledBack(owner, () => owner.query(`DELETE FROM core.member_invitation`));
     expect(result.rowCount).toBe(0);
   });
+
+  // ── Agent 5's differential findings (PR #74). Each reproduces the difference; none is a passing control. ──
+
+  const colPriv = async (table: string, column: string, op: string) =>
+    (await q(owner)(
+      `SELECT has_column_privilege('crewflow_app', $1::regclass, $2, $3) AS app, has_column_privilege($1::regclass, $2, $3) AS me`,
+      [table, column, op],
+    ))[0];
+  const tablePriv = async (table: string, op: string) =>
+    (await q(owner)(`SELECT has_table_privilege('crewflow_app', $1::regclass, $2) AS app, has_table_privilege($1::regclass, $2) AS me`, [table, op]))[0];
+
+  it('COLGRANT-1 (NEEDS OWNER APPROVAL): server-owned columns crewflow_app could not INSERT are insertable by the owner login', async () => {
+    for (const [table, column] of [['core.ai_usage', 'id'], ['core.ai_usage', 'created_at'], ['core.ai_skill', 'id'], ['core.ai_action_proposal', 'expires_at']] as const) {
+      expect({ table, column, ...(await colPriv(table, column, 'INSERT')) }).toEqual({ table, column, app: false, me: true });
+    }
+  });
+
+  it('REF-1: ACCEPTED (owner, 2026-11-04) — the owner login can rewrite core.permission and core.migrations rows (every tenant)', async () => {
+    for (const [table, op] of [['core.permission', 'UPDATE'], ['core.permission', 'DELETE'], ['core.migrations', 'UPDATE'], ['core.migrations', 'DELETE']] as const) {
+      expect({ table, op, ...(await tablePriv(table, op)) }).toEqual({ table, op, app: false, me: true });
+    }
+    // Non-vacuous: one real row each, rolled back.
+    const perm = await rolledBack(owner, () => owner.query(`UPDATE core.permission SET key = key WHERE key = (SELECT min(key) FROM core.permission)`));
+    expect(perm.rowCount).toBe(1);
+    const ledger = await rolledBack(owner, () => owner.query(`UPDATE core.migrations SET name = name WHERE id = (SELECT max(id) FROM core.migrations)`));
+    expect(ledger.rowCount).toBe(1);
+  });
+
+  it('HL-1 (NEEDS OWNER APPROVAL): the owner login holds table privileges on the host-label namespace tables; no claim row without context', async () => {
+    for (const table of ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label']) {
+      expect({ table, ...(await tablePriv(table, 'SELECT')) }).toEqual({ table, app: false, me: true });
+    }
+    expect((await q(owner)(`SELECT count(*)::int AS n FROM core.host_label_claim`))[0]).toEqual({ n: 0 });
+  });
+
+  it('AI-1 (NEEDS OWNER APPROVAL): TRUNCATE on the AI tables and EXECUTE on the synthetic-data marker reach the owner login', async () => {
+    for (const table of ['core.ai_skill', 'core.ai_usage', 'core.ai_conversation', 'core.ai_action_proposal', 'core.organisation_ai_model_preference']) {
+      expect({ table, ...(await tablePriv(table, 'TRUNCATE')) }).toEqual({ table, app: false, me: true });
+    }
+    const [fn] = await q(owner)(
+      `SELECT bool_or(has_function_privilege('crewflow_app', p.oid, 'EXECUTE')) AS app, bool_or(has_function_privilege(p.oid, 'EXECUTE')) AS me
+         FROM pg_proc p WHERE p.pronamespace = 'core'::regnamespace AND p.proname = 'ai_dev_mark_organisation_synthetic'`,
+    );
+    expect(fn).toEqual({ app: false, me: true });
+  });
+
+  it('MFA-SESS-1: MITIGATED (4caaef2a) — mfa_verified_at cannot be stamped by an UPDATE, by the owner login or any role', async () => {
+    expect(await colPriv('core.user_session', 'mfa_verified_at', 'UPDATE')).toEqual({ app: false, me: true }); // the privilege is there…
+    const refused = await rolledBack(owner, () =>
+      owner.query(`UPDATE core.user_session SET mfa_verified_at = now() WHERE false`).then(
+        () => 'ok',
+        (e: { code?: string }) => e.code,
+      ),
+    );
+    expect(refused).toBe('42501'); // …the statement-level trigger refuses it anyway (SQLSTATE only, never the message text)
+  });
+
+  it('PROV-1 (NEEDS OWNER APPROVAL): the workspace migrator identity check accepts the owner login; crewflow_app is still refused', async () => {
+    const { WorkspaceSchemaMigrator } = await import('../../database/typeorm/workspace-schema/workspace-schema-migrator');
+    const runner = { query: async (sql: string, params?: unknown[]) => (await owner.query(sql, params as unknown[] | undefined)).rows };
+    const migrator = new WorkspaceSchemaMigrator(runner as never);
+    await expect(migrator.assertMigrationIdentity()).resolves.toBeUndefined();
+    await rolledBack(owner, async () => {
+      await owner.query('SET LOCAL ROLE crewflow_app');
+      await expect(migrator.assertMigrationIdentity()).rejects.toThrow(/refuses to run as "crewflow_app"/);
+    });
+  });
 });
