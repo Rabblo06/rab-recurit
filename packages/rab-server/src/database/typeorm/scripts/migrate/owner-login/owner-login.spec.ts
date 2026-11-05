@@ -16,7 +16,7 @@ import {
   workspaceFingerprintMajor,
 } from '../../../workspace-schema/v1/expected-fingerprints';
 import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
-import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
+import { BOOTSTRAP_ROLES, isRoleRace, OWNER_LOGIN, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
 import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
@@ -626,5 +626,22 @@ describe('BC-11 (owner decision 2026-11-05): the deployment identity and the app
     expect(approvalDecision({ ...base, approvalMode: 'token' })).toBe('refuse-token');
     expect(approvalDecision({ ...base, approvalMode: 'token', hasApprover: true })).toBe('f5');
     expect(approvalDecision({ ...base, approvalMode: 'token', fresh: true })).toBe('f5');
+  });
+});
+
+describe('install-state move (database/owner-login/install-state.ts): fresh-install.ts re-exports the same objects', () => {
+  it('the runner, the child and the boot gates share ONE classifier and ONE evidence query', async () => {
+    const moved = await import('../../../../owner-login/install-state');
+    const reexported = await import('./fresh-install');
+    for (const name of ['CATALOG_FACTS_SQL', 'classifyDatabase', 'classifyDatabaseState', 'decideFreshInstall', 'readCatalogFacts', 'readFreshInstallProof', 'TENANT_EVIDENCE_SQL'] as const) {
+      expect(reexported[name]).toBe(moved[name]);
+    }
+    // The proof's default owner is the bootstrap's owner login.
+    let seen: unknown[] | undefined;
+    await moved.readFreshInstallProof(async (_sql, params) => {
+      seen = params;
+      return [];
+    }, 'EMPTY');
+    expect(seen).toEqual([OWNER_LOGIN]);
   });
 });
