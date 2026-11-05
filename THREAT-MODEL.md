@@ -5634,9 +5634,17 @@ writes a warning instead.
       migrates.
     - **C2:** the API registers the BullMQ schedulers and the Worker only consumes them (Twenty's split; Crewflow's
       Worker registered them before).
-      - Accepted risk (MEDIUM): a scheduler lost to a Redis flush stays lost until the next API start.
-      - Mitigations: Redis runs `noeviction` with AOF persistence, and the Worker's scheduler verification turns it
-        unhealthy when an expected scheduler is missing.
+      - Accepted risk (MEDIUM, owner-accepted 2026-11-05 as part of C2, like Twenty): a BullMQ Job Scheduler lost from
+        Redis stays lost until the next API start. Examples are Redis data loss without AOF, or a manual `FLUSHALL`.
+        The timed jobs it drives pause until then, payroll and attendance timers included.
+      - Mitigations in place:
+        - the Worker's read-only reconcile check logs an ERROR naming the missing scheduler ids and turns Worker health
+          unhealthy;
+        - production Redis runs AOF with `noeviction`;
+        - the API's registration step is idempotent, so any API start restores every scheduler.
+      - Recommended follow-up: alert on Worker unhealthy.
+      - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
+        decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
 
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 
