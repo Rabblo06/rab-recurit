@@ -9,9 +9,15 @@
  *     runtime-db-config.spec.ts runs that shell copy against the same table of cases and fails when the two drift.
  *
  * Settings:
- *   CREWFLOW_MIGRATE_ON_START         true | false. The API image entrypoint (api-prestart.sh) REQUIRES it — an operator must
- *                                     choose; there is no default for whether the API changes the schema on start.
- *                                     Everywhere else (Worker, CLI, tests) unset means false and it is never read.
+ *   DISABLE_DB_MIGRATIONS             true | false (unset = false). Owner decision C1 (2026-11-05, "exactly like Twenty"):
+ *                                     true means THIS PROCESS NEVER MIGRATES. On the API it overrides
+ *                                     CREWFLOW_MIGRATE_ON_START (api-prestart.sh skips the migrate child and runs only the
+ *                                     read-only pending check), and CREWFLOW_MIGRATE_ON_START is then not required. The Worker
+ *                                     never migrates, whether this is set or not.
+ *   CREWFLOW_MIGRATE_ON_START         true | false. The API image entrypoint (api-prestart.sh) REQUIRES it unless
+ *                                     DISABLE_DB_MIGRATIONS=true — an operator must choose; there is no default for whether
+ *                                     the API changes the schema on start. Everywhere else (Worker, CLI, tests) unset means
+ *                                     false. A present value is always validated.
  *   CREWFLOW_MIGRATION_APPROVAL_MODE  none | token. Default none EVERYWHERE, production included (owner decision BC-11,
  *                                     2026-11-05: optional and off by default, like Twenty). A present value is validated.
  *   CREWFLOW_UPGRADE_FAILURE          continue (default) | refuse. Owner decision C3 (2026-11-05, "exactly like Twenty"): an
@@ -22,8 +28,7 @@
  *                                     Set together with CREWFLOW_UPGRADE_FAILURE, the two must agree (else exit 64).
  *
  * Removed names, refused with an actionable message so nobody believes they still do something:
- *   CREWFLOW_DB_MODE        there is no mode switch any more (one architecture: the owner login);
- *   DISABLE_DB_MIGRATIONS   Twenty CRM's switch; Crewflow reads CREWFLOW_MIGRATE_ON_START.
+ *   CREWFLOW_DB_MODE        there is no mode switch any more (one architecture: the owner login).
  *
  * Values are compared exactly (case-sensitive, no trimming); unset and blank are the same thing (a compose `KEY=` line).
  * A refusal names the variable and the allowed values and never echoes the value.
@@ -33,6 +38,8 @@ export type MigrationApprovalMode = 'none' | 'token';
 export type UpgradeFailurePolicy = 'continue' | 'refuse';
 
 export const MIGRATE_ON_START_VAR = 'CREWFLOW_MIGRATE_ON_START';
+/** Owner decision C1 (2026-11-05): Twenty's switch, accepted — true = this process never migrates (see the header). */
+export const DISABLE_DB_MIGRATIONS_VAR = 'DISABLE_DB_MIGRATIONS';
 export const MIGRATION_APPROVAL_MODE_VAR = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
 export const UPGRADE_FAILURE_VAR = 'CREWFLOW_UPGRADE_FAILURE';
 /** Deprecated alias of CREWFLOW_UPGRADE_FAILURE (owner decision C3): its two values map onto the new ones. */
@@ -44,7 +51,6 @@ export const DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES: Readonly<Record<string, U
 /** Names that no longer exist; refused (see the header). */
 export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.freeze({
   CREWFLOW_DB_MODE: 'There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE.',
-  DISABLE_DB_MIGRATIONS: 'DISABLE_DB_MIGRATIONS is Twenty CRM\'s switch and is not read by Crewflow. Remove it and set CREWFLOW_MIGRATE_ON_START=true or false.',
 });
 
 /**
@@ -107,23 +113,36 @@ export interface ReadRuntimeDbConfigOptions {
 }
 
 export interface RuntimeDbConfig {
+  /** DISABLE_DB_MIGRATIONS=true: this process never migrates. */
+  disableDbMigrations: boolean;
+  /** The EFFECTIVE value: CREWFLOW_MIGRATE_ON_START=true and DISABLE_DB_MIGRATIONS not true. */
   migrateOnStart: boolean;
   migrationApprovalMode: MigrationApprovalMode;
   upgradeFailurePolicy: UpgradeFailurePolicy;
 }
 
-/** CREWFLOW_MIGRATE_ON_START (see the header). */
+/** DISABLE_DB_MIGRATIONS (see the header): exactly true or false; unset or blank = false. */
+export function readDisableDbMigrations(env: Env): boolean {
+  const value = raw(env, DISABLE_DB_MIGRATIONS_VAR);
+  return value !== undefined && oneOf(DISABLE_DB_MIGRATIONS_VAR, value, ['true', 'false'] as const) === 'true';
+}
+
+/**
+ * CREWFLOW_MIGRATE_ON_START (see the header): the EFFECTIVE value. DISABLE_DB_MIGRATIONS=true overrides it (false) and lifts
+ * the API's requirement; a value that is present is still validated.
+ */
 export function readMigrateOnStart(env: Env, options: ReadRuntimeDbConfigOptions = {}): boolean {
+  const disabled = readDisableDbMigrations(env);
   const value = raw(env, MIGRATE_ON_START_VAR);
   if (value === undefined) {
-    if (options.requireMigrateOnStart) {
+    if (options.requireMigrateOnStart && !disabled) {
       throw new RuntimeDbConfigError(
         `${MIGRATE_ON_START_VAR} is required on the API service: set it to true (the API applies pending migrations on start, under the migration lock) or false (a release step runs them first). Refusing to start.`,
       );
     }
     return false;
   }
-  return oneOf(MIGRATE_ON_START_VAR, value, ['true', 'false'] as const) === 'true';
+  return oneOf(MIGRATE_ON_START_VAR, value, ['true', 'false'] as const) === 'true' && !disabled;
 }
 
 /** CREWFLOW_MIGRATION_APPROVAL_MODE (see the header). */
@@ -141,10 +160,14 @@ export function readUpgradeFailurePolicy(env: Env): UpgradeFailurePolicy {
   const value = raw(env, UPGRADE_FAILURE_VAR);
   const current = value === undefined ? undefined : oneOf(UPGRADE_FAILURE_VAR, value, UPGRADE_FAILURE_POLICIES);
   const legacy = raw(env, UPGRADE_FAILURE_POLICY_VAR);
-  const aliased = legacy === undefined ? undefined : DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES[legacy];
+  // Own keys only: an inherited name ('constructor', 'toString', ...) is not a deprecated value.
+  const aliased =
+    legacy !== undefined && Object.prototype.hasOwnProperty.call(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES, legacy)
+      ? DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES[legacy]
+      : undefined;
   if (legacy !== undefined && aliased === undefined) {
     throw new RuntimeDbConfigError(
-      `${UPGRADE_FAILURE_POLICY_VAR} is deprecated and must be exactly one of: ${Object.keys(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).join(', ')}; use ${UPGRADE_FAILURE_VAR}=continue|refuse instead. Refusing to start.`,
+      `${UPGRADE_FAILURE_POLICY_VAR} is deprecated and must be exactly one of: ${Object.keys(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).join(', ')}; set ${UPGRADE_FAILURE_VAR} (continue or refuse) instead. Refusing to start.`,
     );
   }
   if (current !== undefined && aliased !== undefined && current !== aliased) {
@@ -166,6 +189,7 @@ export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOption
     }
   }
   return {
+    disableDbMigrations: readDisableDbMigrations(env),
     migrateOnStart: readMigrateOnStart(env, options),
     migrationApprovalMode: readMigrationApprovalMode(env, options),
     upgradeFailurePolicy: readUpgradeFailurePolicy(env),

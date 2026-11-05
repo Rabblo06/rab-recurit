@@ -447,7 +447,14 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE / UPGRADE_FAILURE_POLICY is refused in-process too (a start that skips api-prestart.sh)', () => {
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATE_ON_START: 'yes' }, /The api process: CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }, /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
-      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly one of: refuse, continue-if-compatible/);
+      // Owner decision C3 (2026-11-05): `continue` is a value of the NEW name only; under the deprecated alias it still refuses,
+      // now with the alias message (assertion change: the message text, not the refusal).
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible/);
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse/);
+      expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'yes' }, /DISABLE_DB_MIGRATIONS must be exactly one of: true, false/);
+      // Owner decision C1: DISABLE_DB_MIGRATIONS=true is accepted on both processes (the Worker never migrates either way).
+      expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
+      expect(resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
       // Owner decision BC-11: production no longer needs an explicit approval mode (none by default); an invalid one refuses.
       expect(resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true' })).classification).toBe('PRODUCTION');
       expectRefused('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'Token' }), /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);

@@ -5,20 +5,28 @@
 # ONE database URL, PG_DATABASE_URL (the schema-owning crewflow_owner login). This script:
 #   1. validates the database start-up settings — a literal copy of database/owner-login/runtime-db-config.ts between the
 #      BEGIN/END markers below (runtime-db-config.spec.ts runs this copy against the TypeScript parser and fails on drift):
-#      CREWFLOW_MIGRATE_ON_START is REQUIRED here (true | false), CREWFLOW_MIGRATION_APPROVAL_MODE (none | token),
-#      CREWFLOW_UPGRADE_FAILURE_POLICY (refuse | continue-if-compatible); the removed CREWFLOW_DB_MODE and Twenty's
-#      DISABLE_DB_MIGRATIONS are refused (exit 64);
+#      DISABLE_DB_MIGRATIONS (true | false; true = this process never migrates — O3 C1), CREWFLOW_MIGRATE_ON_START is
+#      REQUIRED here (true | false) unless DISABLE_DB_MIGRATIONS=true, CREWFLOW_MIGRATION_APPROVAL_MODE (none | token),
+#      CREWFLOW_UPGRADE_FAILURE (continue | refuse, default continue — O3 C3; the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY
+#      maps refuse -> refuse, continue-if-compatible -> continue and must agree); the removed CREWFLOW_DB_MODE is refused
+#      (exit 64). CREWFLOW_UPGRADE_INCOMPLETE is set ONLY by this script: an inherited value is refused (exit 64);
 #   2. refuses to start when a second database URL, a role password, migration/command authority or an operations variable
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
-#   3. CREWFLOW_MIGRATE_ON_START=true: runs the short-lived migrate child (Agent 1: migration lock, fresh-install
-#      classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger ahead; 70 = the upgrade FAILED
-#      but CREWFLOW_UPGRADE_FAILURE_POLICY=continue-if-compatible passed every compatibility check (degraded start, loud
-#      WARNING); 69 = migration lock timeout (retried with bounded backoff); anything else = no start.
-#      CREWFLOW_MIGRATE_ON_START=false: the read-only pending-migration check (exit 65 when the schema is behind);
-#   4. execs main.js ONLY after exit 0 or a verified 70 (main.js runs its own boot gates as well). A fresh-install failure
-#      never serves: the child never reports 70 for one, and the relay below vetoes a 70 result that names one.
+#   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
+#      migration lock, fresh-install classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger
+#      ahead; 70 = an UPGRADE migration FAILED and CREWFLOW_UPGRADE_FAILURE=continue (degraded start, loud ERROR/WARNING);
+#      69 = migration lock timeout (retried with bounded backoff); anything else = no start.
+#      Otherwise (CREWFLOW_MIGRATE_ON_START=false, or DISABLE_DB_MIGRATIONS=true): the read-only pending-migration check
+#      (exit 65 when the schema is behind);
+#   4. O3 C2 (like Twenty's entrypoint): unless DISABLE_CRON_JOBS_REGISTRATION=true, registers every scan's BullMQ job
+#      scheduler (one-shot packages/rab-worker/dist/register-schedulers.js: fixed ids, idempotent). A registration failure is
+#      a loud WARNING and the API starts anyway; the consume-only Worker reports any missing scheduler as an ERROR;
+#   5. execs main.js ONLY after exit 0 or a verified 70 (main.js runs its own boot gates as well), and after a verified 70
+#      with CREWFLOW_UPGRADE_INCOMPLETE=<the failed migration, or unknown> (the API's boot gate then accepts exactly that
+#      first pending migration; /healthz reports it as upgradeFailed). A fresh-install failure never serves: the child never
+#      reports 70 for one, and the relay below vetoes a 70 result that names one.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
 # The Worker never runs this, and never migrates.
@@ -62,33 +70,74 @@ crewflow_runtime_db_config() {
   if [ -n "${CREWFLOW_DB_MODE:-}" ]; then
     refuse "There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE. Refusing to start."
   fi
-  if [ -n "${DISABLE_DB_MIGRATIONS:-}" ]; then
-    refuse "DISABLE_DB_MIGRATIONS is Twenty CRM's switch and is not read by Crewflow. Remove it and set CREWFLOW_MIGRATE_ON_START=true or false. Refusing to start."
-  fi
   if [ "${NODE_ENV:-}" != test ]; then
     for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
       if [ -n "$seam_value" ]; then refuse "$seam is a test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start."; fi
     done
   fi
+  # Owner decision C1 (2026-11-05): DISABLE_DB_MIGRATIONS=true = this process never migrates; it overrides
+  # CREWFLOW_MIGRATE_ON_START, which is then not required (a present value is still validated).
+  case "${DISABLE_DB_MIGRATIONS:-}" in
+    true) DISABLE_MIGRATIONS=true ;;
+    false | '') DISABLE_MIGRATIONS=false ;;
+    *) refuse "DISABLE_DB_MIGRATIONS must be exactly one of: true, false. Refusing to start." ;;
+  esac
   case "${CREWFLOW_MIGRATE_ON_START:-}" in
     true | false) MIGRATE_ON_START="$CREWFLOW_MIGRATE_ON_START" ;;
-    '') refuse "CREWFLOW_MIGRATE_ON_START is required on the API service: set it to true (the API applies pending migrations on start, under the migration lock) or false (a release step runs them first). Refusing to start." ;;
+    '')
+      if [ "$DISABLE_MIGRATIONS" != true ]; then
+        refuse "CREWFLOW_MIGRATE_ON_START is required on the API service: set it to true (the API applies pending migrations on start, under the migration lock) or false (a release step runs them first). Refusing to start."
+      fi
+      MIGRATE_ON_START=false
+      ;;
     *) refuse "CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false. Refusing to start." ;;
   esac
+  if [ "$DISABLE_MIGRATIONS" = true ]; then MIGRATE_ON_START=false; fi
   case "${CREWFLOW_MIGRATION_APPROVAL_MODE:-}" in
     none | token) APPROVAL_MODE="$CREWFLOW_MIGRATION_APPROVAL_MODE" ;;
     '') APPROVAL_MODE=none ;; # owner decision BC-11: optional, off by default everywhere (production included)
     *) refuse "CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token. Refusing to start." ;;
   esac
-  case "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" in
-    refuse | continue-if-compatible) UPGRADE_POLICY="$CREWFLOW_UPGRADE_FAILURE_POLICY" ;;
-    '') UPGRADE_POLICY=refuse ;;
-    *) refuse "CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly one of: refuse, continue-if-compatible. Refusing to start." ;;
+  # Owner decision C3 (2026-11-05): CREWFLOW_UPGRADE_FAILURE continue (default) | refuse; CREWFLOW_UPGRADE_FAILURE_POLICY is
+  # a deprecated alias (refuse -> refuse, continue-if-compatible -> continue); the two must agree when both are set.
+  case "${CREWFLOW_UPGRADE_FAILURE:-}" in
+    continue | refuse) UPGRADE_POLICY="$CREWFLOW_UPGRADE_FAILURE" ;;
+    '') UPGRADE_POLICY="" ;;
+    *) refuse "CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse. Refusing to start." ;;
   esac
+  case "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" in
+    refuse) UPGRADE_ALIAS=refuse ;;
+    continue-if-compatible) UPGRADE_ALIAS=continue ;;
+    '') UPGRADE_ALIAS="" ;;
+    *) refuse "CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible; set CREWFLOW_UPGRADE_FAILURE (continue or refuse) instead. Refusing to start." ;;
+  esac
+  if [ -n "$UPGRADE_POLICY" ] && [ -n "$UPGRADE_ALIAS" ] && [ "$UPGRADE_POLICY" != "$UPGRADE_ALIAS" ]; then
+    refuse "CREWFLOW_UPGRADE_FAILURE and the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY disagree; remove CREWFLOW_UPGRADE_FAILURE_POLICY. Refusing to start."
+  fi
+  if [ -z "$UPGRADE_POLICY" ]; then UPGRADE_POLICY="${UPGRADE_ALIAS:-continue}"; fi
 }
 # END owner-login runtime-db-config
 crewflow_runtime_db_config
+
+# O3 C3: CREWFLOW_UPGRADE_INCOMPLETE tells main.js (API boot gate 7, /healthz) that THIS start follows a failed upgrade. Only
+# this script sets it, after a verified exit 70 below; a value that reached the container from outside could relax the API's
+# pending-migration gate without any failure having happened, so it is refused, never silently overridden.
+if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
+  refuse "CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service: api-prestart.sh sets it itself, only after a failed upgrade under CREWFLOW_UPGRADE_FAILURE=continue. Remove it."
+fi
+# O3 C2: DISABLE_CRON_JOBS_REGISTRATION (Twenty's switch; exactly true or false, unset = false) and the scheduler mode the
+# Worker will run (WORKER_SCHEDULER unset = bullmq in production, interval elsewhere — env.validation.ts's rule).
+case "${DISABLE_CRON_JOBS_REGISTRATION:-}" in
+  true) CRON_REGISTRATION=false ;;
+  false | '') CRON_REGISTRATION=true ;;
+  *) refuse 'DISABLE_CRON_JOBS_REGISTRATION must be exactly true or false (unset = false).' ;;
+esac
+case "${WORKER_SCHEDULER:-}" in
+  bullmq | interval) SCHEDULER_MODE="$WORKER_SCHEDULER" ;;
+  '') if [ "${NODE_ENV:-}" = production ]; then SCHEDULER_MODE=bullmq; else SCHEDULER_MODE=interval; fi ;;
+  *) refuse 'WORKER_SCHEDULER must be exactly interval or bullmq (unset = bullmq in production, interval elsewhere).' ;;
+esac
 
 # Bounded backoff before a failure exit (configuration refusals exit 64 at once).
 case "${CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS:-15}" in
@@ -194,7 +243,9 @@ isolation_report
 #                          "failedMigration":...,"checks":[...]}
 # and carries no secret. The relay (awk) prints every line and, for an exit-70 result, the loud WARNING naming the reason and
 # the failing migration. It VETOES (exits 66, which pipefail reports) a 70 result that does not say serve:true, names a
-# fresh install (EMPTY / BOOTSTRAP-PARTIAL) or another policy: a degraded start is never taken on the exit code alone.
+# fresh install (EMPTY / BOOTSTRAP-PARTIAL) or another policy than "continue": a degraded start is never taken on the exit
+# code alone. For a verified 70 it writes the result's failedMigration (only when it is a migration name: letters, digits,
+# _ - ., at most 200 characters; otherwise "unknown") to $UPGRADE_NOTE, which becomes main.js's CREWFLOW_UPGRADE_INCOMPLETE.
 MIGRATE_CHILD="$SCRIPTS/migrate/twenty/twenty-migrate.js"
 RELAY_AWK='
 function field(name,   m) {
@@ -205,25 +256,28 @@ function field(name,   m) {
 /^TWENTY_MIGRATE_RESULT / {
   if ($0 ~ /"exitCode":70[,}]/) {
     failing = field("failedMigration")
-    if (failing == "" && match($0, /"pending":\["[^"]*"/)) failing = substr($0, RSTART + 12, RLENGTH - 13)
-    if (failing == "") failing = "unknown"
-    printf "api-prestart: WARNING DEGRADED START - the schema upgrade FAILED and CREWFLOW_UPGRADE_FAILURE_POLICY=continue-if-compatible passed every compatibility check; serving on the previous schema. reason=%s failing_migration=%s state=%s\n", field("reason"), failing, field("state") > "/dev/stderr"
+    if (failing !~ /^[A-Za-z0-9_.-]+$/ || length(failing) > 200) failing = "unknown"
+    printf "api-prestart: WARNING DEGRADED START - the schema upgrade FAILED and CREWFLOW_UPGRADE_FAILURE=continue; serving on the previous schema. reason=%s failing_migration=%s state=%s\n", field("reason"), failing, field("state") > "/dev/stderr"
     fflush("/dev/stderr")
-    if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"policy":"continue-if-compatible"/) veto = 1
+    if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"policy":"continue"[,}]/) veto = 1
+    else if (note != "") { printf "%s\n", failing > note; close(note) }
   }
 }
 END {
   if (veto) {
-    print "api-prestart: REFUSED - the migrate child reported a degraded continue (70) that is not a verified continue-if-compatible upgrade (serve not true, a fresh install, or another policy)" > "/dev/stderr"
+    print "api-prestart: REFUSED - the migrate child reported a degraded continue (70) that is not a verified continue upgrade (serve not true, a fresh install, or another policy)" > "/dev/stderr"
     exit 66
   }
 }
 '
+# Where the relay leaves a verified 70's failed migration name (created only when migrating; best effort: no writable temp
+# directory -> "unknown").
+UPGRADE_NOTE=
 run_migrate_child() {
   if [ -n "$MIGRATION_APPROVAL" ]; then
-    (set -o pipefail; CREWFLOW_MIGRATION_APPROVED="$MIGRATION_APPROVAL" node "$MIGRATE_CHILD" 2>&1 | awk "$RELAY_AWK") &
+    (set -o pipefail; CREWFLOW_MIGRATION_APPROVED="$MIGRATION_APPROVAL" node "$MIGRATE_CHILD" 2>&1 | awk -v note="$UPGRADE_NOTE" "$RELAY_AWK") &
   else
-    (set -o pipefail; node "$MIGRATE_CHILD" 2>&1 | awk "$RELAY_AWK") &
+    (set -o pipefail; node "$MIGRATE_CHILD" 2>&1 | awk -v note="$UPGRADE_NOTE" "$RELAY_AWK") &
   fi
   CHILD=$!
   CHILD_GROUP=1
@@ -234,10 +288,12 @@ run_migrate_child() {
   return "$STATUS"
 }
 
+UPGRADE_INCOMPLETE=""
 if [ "$MIGRATE_ON_START" = true ]; then
+  UPGRADE_NOTE=$(mktemp 2>/dev/null || true)
   attempt=1
   while :; do
-    echo "api-prestart: applying pending migrations on start (CREWFLOW_MIGRATE_ON_START=true, approval=$APPROVAL_MODE, upgrade-failure policy=$UPGRADE_POLICY, attempt $attempt of 3)"
+    echo "api-prestart: applying pending migrations on start (CREWFLOW_MIGRATE_ON_START=true, approval=$APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE=$UPGRADE_POLICY, attempt $attempt of 3)"
     STATUS=0
     run_migrate_child || STATUS=$?
     if [ "$STATUS" -eq 69 ] && [ "$attempt" -lt 3 ]; then
@@ -252,27 +308,56 @@ if [ "$MIGRATE_ON_START" = true ]; then
   case "$STATUS" in
     0) echo "api-prestart: the schema is current for this code" ;;
     70)
-      if [ "$UPGRADE_POLICY" != continue-if-compatible ]; then
-        fail_after_delay 66 "the migrate child reported a degraded continue (70) but CREWFLOW_UPGRADE_FAILURE_POLICY is not continue-if-compatible"
+      if [ "$UPGRADE_POLICY" != continue ]; then
+        fail_after_delay 66 "the migrate child reported a degraded continue (70) but CREWFLOW_UPGRADE_FAILURE is not continue"
       fi
-      echo "api-prestart: WARNING DEGRADED START - the upgrade failed and continue-if-compatible passed every check (see the WARNING and TWENTY_MIGRATE_RESULT lines above). Fix the failing migration and redeploy." >&2
+      UPGRADE_INCOMPLETE=""
+      if [ -n "$UPGRADE_NOTE" ] && [ -s "$UPGRADE_NOTE" ]; then UPGRADE_INCOMPLETE=$(head -n 1 "$UPGRADE_NOTE"); fi
+      case "$UPGRADE_INCOMPLETE" in
+        '' | *[!A-Za-z0-9_.-]*) UPGRADE_INCOMPLETE=unknown ;;
+      esac
+      echo "api-prestart: WARNING DEGRADED START - the upgrade FAILED at $UPGRADE_INCOMPLETE and CREWFLOW_UPGRADE_FAILURE=continue: the API serves on the previous schema (see the WARNING and TWENTY_MIGRATE_RESULT lines above; /healthz reports upgradeFailed). Fix the failing migration and redeploy. The Worker starts as well, on the partly-upgraded schema (owner decision 2026-11-05)." >&2
       ;;
     64) fail_after_delay 64 "the migrate child refused its configuration" ;;
     65) fail_after_delay 65 "the schema is behind this code" ;;
-    66) fail_after_delay 66 "a migration failed (a fresh install never serves; an upgrade serves only with a verified continue-if-compatible)" ;;
+    66) fail_after_delay 66 "a migration failed (a fresh install never serves; an upgrade serves only with CREWFLOW_UPGRADE_FAILURE=continue and a verified result)" ;;
     67) fail_after_delay 67 "the deployment identity check failed" ;;
     68) fail_after_delay 68 "a post-migration check failed" ;;
     69) fail_after_delay 69 "the migration lock was not acquired after 3 attempts" ;;
     *) fail_after_delay "$STATUS" "the migrate child failed" ;;
   esac
 else
-  echo "api-prestart: checking the schema is current (read-only; CREWFLOW_MIGRATE_ON_START=false)"
+  if [ "$DISABLE_MIGRATIONS" = true ]; then
+    echo "api-prestart: DISABLE_DB_MIGRATIONS=true - this process never migrates; checking the schema is current (read-only)"
+  else
+    echo "api-prestart: checking the schema is current (read-only; CREWFLOW_MIGRATE_ON_START=false)"
+  fi
   STATUS=0
   run_step node "$SCRIPTS/check-pending-migrations.js" || STATUS=$?
   if [ "$STATUS" -ne 0 ]; then
-    fail_after_delay 65 "the schema is behind this code (or the database login is wrong). Run the release migration step for this release first, or set CREWFLOW_MIGRATE_ON_START=true"
+    fail_after_delay 65 "the schema is behind this code (or the database login is wrong). Run the release migration step for this release first, or set CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS unset or false)"
+  fi
+fi
+if [ -n "$UPGRADE_NOTE" ]; then rm -f "$UPGRADE_NOTE"; fi
+
+# O3 C2 — job scheduler registration, like Twenty's entrypoint: after the migrate step, before main.js. Idempotent (fixed
+# ids); a failure is tolerated with a loud WARNING (owner decision 2026-11-05) — the API still starts, and the consume-only
+# Worker's read-only verify reports the missing schedulers as an ERROR (and turns unhealthy) until a later start registers them.
+if [ "$CRON_REGISTRATION" != true ]; then
+  echo "api-prestart: DISABLE_CRON_JOBS_REGISTRATION=true - job schedulers are not registered by this start"
+elif [ "$SCHEDULER_MODE" != bullmq ]; then
+  echo "api-prestart: WORKER_SCHEDULER=interval - each Worker runs its own timers; no job schedulers to register"
+else
+  echo "api-prestart: registering the job schedulers (DISABLE_CRON_JOBS_REGISTRATION unset; idempotent, fixed ids)"
+  STATUS=0
+  run_step node packages/rab-worker/dist/register-schedulers.js || STATUS=$?
+  if [ "$STATUS" -ne 0 ]; then
+    echo "api-prestart: WARNING job scheduler registration FAILED (exit $STATUS) - starting the API anyway; scheduled scans do not run until a later API start registers them (the Worker reports the missing schedulers as an ERROR)" >&2
   fi
 fi
 
 trap - TERM INT
+if [ -n "$UPGRADE_INCOMPLETE" ]; then
+  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec node packages/rab-server/dist/main.js
+fi
 exec node packages/rab-server/dist/main.js
