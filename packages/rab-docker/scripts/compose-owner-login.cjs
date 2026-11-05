@@ -445,9 +445,10 @@ function lintComposeText(rel, text) {
 
 // ------------------------------------------------------------------------------------------------------------ render
 
+// The sentinel database.env sets NONE of the BC-11 opt-ins (approval mode, deployment identity): any of them in a rendered
+// model was therefore committed by a compose file.
 const DATABASE_ENV_TEXT = [
-  `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow',
-  'CREWFLOW_DEPLOYMENT_ENVIRONMENT=production', 'CREWFLOW_DEPLOYMENT_ID=00000000-0000-4000-8000-000000000000', '',
+  `${URL_KEY}=${SENTINEL_URL}`, 'PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt', 'PG_EXPECTED_DATABASE_NAME=crewflow', '',
 ].join('\n');
 const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis://crewflow:${SENTINEL_REDIS_PW}@rab-redis:6379`, 'APP_URL=https://crewflow.example', ''].join('\n');
 /** Separated-mode env files a compose file must no longer read: their marker value must never reach a service. */
