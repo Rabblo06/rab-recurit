@@ -615,6 +615,64 @@ async function main() {
     check(Boolean(pdfInSink(state.missingShift)), 'the previously failed report job succeeded (PDF stored)');
   });
 
+  // --------------------------------------------------------------------------------------------------------- 10
+  // Measured once (PG16) when O3T_IMAGE_SLOW is given: an interrupted migrate step leaves the ledger consistent.
+  if (process.env.O3T_IMAGE_SLOW) {
+    await step('T10', 'an interrupted migrate step (compose stop rab-api, then SIGKILL) rolls the in-flight migration back, releases the migration lock, and the next start completes', async (check, note) => {
+      const SLOW = 'O3tSlowProbe1786721999002';
+      // migration-lock.ts: pg_advisory_lock(0x637265776d696772) -> classid = high 32 bits, objid = low 32 bits, objsubid 1.
+      const lockHolders = () => ctx.psql(`SELECT coalesce(string_agg(pid::text, ',' ORDER BY pid), '') FROM pg_locks WHERE locktype = 'advisory' AND classid = ${parseInt('63726577', 16)}::oid AND objid = ${parseInt('6d696772', 16)}::oid AND objsubid = 1 AND granted`);
+      const comment = () => ctx.psql("SELECT coalesce(obj_description('core.shift_report'::regclass, 'pg_class'), '')");
+      const alive = (pid) => ctx.psql(`SELECT count(*) FROM pg_stat_activity WHERE pid = ${Number(pid)}`) !== '0';
+      const startMidMigration = async (label) => {
+        const since = new Date().toISOString();
+        up(['rab-api'], ['--force-recreate', '--no-deps']);
+        await ctx.waitFor(`${label}: the migrate child inside ${SLOW}`, () => new RegExp(`"event":"start","name":"${SLOW}"`).test(ctx.logs('rab-api', since)), 600_000, 2000);
+        await sleep(5000); // inside pg_sleep(90), after the COMMENT (uncommitted)
+        const al = ctx.logs('rab-api', since);
+        const pid = (/migration session pid (\d+)/.exec(al) || [])[1];
+        check(Boolean(pid) && lockHolders().split(',').includes(pid), `${label}: the migration session (pid ${pid}) holds the migration lock mid-migration`);
+        return { since, pid };
+      };
+      const consistentAfter = async (label, pid) => {
+        await ctx.waitFor(`${label}: the killed migration session ends`, () => !alive(pid), 120_000, 2000).catch(() => undefined);
+        check(!alive(pid), `${label}: the interrupted migration session (pid ${pid}) is gone`);
+        check(!lockHolders().split(',').includes(pid), `${label}: the migration lock is not held by it (holders now: ${lockHolders() || 'none'})`);
+        check(!ctx.ledger().includes(SLOW), `${label}: ${SLOW} is not recorded in the ledger`);
+        check(comment() === '', `${label}: its in-flight effect (the comment) was rolled back`);
+      };
+      setImage(process.env.O3T_IMAGE_SLOW);
+      ctx.compose(['stop', 'rab-worker', 'rab-api']);
+      // (a) the documented stop arrives during the migrate step: SIGTERM, Docker's SIGKILL after the 35 s grace.
+      const a = await startMidMigration('stop');
+      const t0 = Date.now();
+      const stop = ctx.compose(['stop', 'rab-api'], { timeout: 180_000 });
+      const took = Math.round((Date.now() - t0) / 1000);
+      const exitA = inspect('rab-api', '{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}');
+      ctx.evidence('T10-stop-api.log', ctx.logs('rab-api', a.since));
+      note(`compose stop rab-api mid-migration: returned ${stop.code} after ${took} s; container ${exitA}`);
+      check(stop.code === 0 && exitA.startsWith('exited|'), `stop: the API container stopped (${exitA}, ${took} s)`);
+      await consistentAfter('stop', a.pid);
+      // (b) SIGKILL mid-migration (no grace at all).
+      const b = await startMidMigration('kill');
+      ctx.run('docker', ['kill', '-s', 'KILL', ctx.container('rab-api')]);
+      await sleep(2000);
+      const exitB = inspect('rab-api', '{{.State.Status}}|{{.State.ExitCode}}|{{.RestartCount}}');
+      ctx.evidence('T10-kill-api.log', ctx.logs('rab-api', b.since));
+      note(`docker kill -s KILL mid-migration: container ${exitB} (restart policy unless-stopped)`);
+      await consistentAfter('kill', b.pid);
+      // (c) the next start, by the documented procedure, completes the interrupted migration.
+      const since = new Date().toISOString();
+      await deployHealthy();
+      const al = ctx.logs('rab-api', since);
+      ctx.evidence('T10-next-start-api.log', al);
+      check(ctx.ledger().includes(SLOW) && comment() === 'o3t-slow-probe', `the next start applied ${SLOW} (ledger row and its effect)`);
+      check(/"outcome":"ok"/.test(al), 'the next start: migrate child outcome ok');
+      note(`the next start's migrate child applied ${al.includes(`"applied":["${SLOW}"]`) ? SLOW : 'nothing (a Docker restart after the SIGKILL had already applied it)'}`);
+      check(lockHolders() === '', 'no migration lock held after the next start');
+    });
+  }
+
   // ---------------------------------------------------------------------------------------------------------- 3
   await step('T3', 'upgrade failure vs FIRST-INSTALL failure: the upgrade continues (T8a); the same broken migration on a fresh install exits non-zero and never serves', async (check, note) => {
     check(results.some((r) => r.id === 'T8a' && r.status === 'PASS'), 'upgrade failure: the API continued (T8a PASS)');
