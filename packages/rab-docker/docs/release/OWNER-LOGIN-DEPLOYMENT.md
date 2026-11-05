@@ -1,19 +1,28 @@
 # Owner-login deployment: install, release, transition and rollback runbook
 
-**Status (2026-11-04): procedure and templates. NOT TESTED end to end.** What exists and is checked on this branch:
-- the bundled-database override (`docker-compose.local-db.yml`);
-- the env templates (`packages/rab-docker/env/`);
-- the compose gate (`scripts/compose-owner-login.cjs`) and its CI (`ci-deployment-owner-login.yaml`).
+**Status (verified state as of 2026-11-05).** Integration branch `deploy/twenty-mode-a`, draft PR #72. Evidence logs are
+in the session scratchpad (not committed); each line names its source.
 
-The in-place edits of the existing deployment files cannot land before #61/#62 merge (they touch the same files). They
-are prepared on branch `twa/docker-owner-login-post61`:
-- `docker-compose.image.yml` and `docker-compose.production.yml`;
-- the staging override and the new `docker-compose.migrate-on-start.yml`.
+| Area | Result | Evidence |
+|---|---|---|
+| Fresh install, lifecycle, transition from separated, Test C/D | **PASS on PostgreSQL 16 and 18**; the v20 workspace fingerprints for both majors are committed. The negative cases refuse as designed: a non-owner identity; PG15 (below 16); PG17 (no fingerprints) | Agent 1: `a1/batch-pg16*.log`, `a1/batch-pg18*.log`, `a1/batch-v20-*.log` ("all checks passed") |
+| End to end: empty database → API migrate-on-start → healthy → Worker → workspace READY | **PASS on PG16** | Agent 2's integration run |
+| Rollback | **PROVEN**: restore the pre-upgrade backup, then the previous image. R2: checksum equal on 112 facts, ledger 250, old api, Worker and provisioner healthy. R1: an old image on the upgraded database fails closed in production | Agent 1: `a1/rollback/r1b.log`, `r2.log`; [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) |
+| Bundled database (`docker-compose.local-db.yml` with Agent 1's init SQL) | **PASS**, 21/21 checks on PG16.15 (section 8) | Agent 4 |
+| Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 5 combinations; the gate's own tests pass | `ci-deployment-owner-login.yaml` |
+| Full CI on #72 | **Green at `79a083e1`** (12/12 workflow runs). At head `91a5e699` (2026-11-05) the run was still in progress, and its e2e `web-isolated` job had failed; it needs a re-check before review | GitHub Actions, `deploy/twenty-mode-a` |
 
-The application side (Agents 1–3) is not yet on `deploy/twenty-mode-a`. Nothing below has been run against real
-owner-login images. Production use waits for:
-- Agent 5's integrated verification;
-- the owner's approval of each release.
+**NOT TESTED:**
+- a real production boot (TLS verify-full, S3, a production deployment identity);
+- managed-provider PITR or snapshot restore, and any managed-provider fresh install;
+- OpenShip (unsupported, section 6);
+- the Oracle VM plan.
+
+Production use still needs the owner's approval of each release and of the open owner-approval items.
+
+The in-place edits of the deployment files (`docker-compose.image.yml`, `docker-compose.production.yml`, the staging
+override, `docker-compose.migrate-on-start.yml`) are on `twa/docker-owner-login-post61` and are merged into
+`deploy/twenty-mode-a`. #61/#62 are on main.
 
 **Architecture (owner's final decision, 2026-11-04).** There is ONE permanent architecture, with no mode switch:
 - one schema-owning login, `crewflow_owner`, for the API, the Worker and the release step;
@@ -95,7 +104,7 @@ PT-01 pointers:
 - A database:
   - **EITHER** a managed PostgreSQL 16 where the provider admin has run **`postgres-init/owner-login/01-crewflow-owner.sql`** (section 4), and you hold the `crewflow_owner` URL at the **direct** host;
   - **OR** the bundled database (`$L`), whose init runs that same file.
-- PostgreSQL 18 waits for the PG18 workspace fingerprints. Below 16 is refused.
+- PostgreSQL 16 and 18 are supported (v20 workspace fingerprints for both). Below 16, and PG17, are refused.
 - **"A URL alone" never works:** a provider-admin step always comes first.
 - **Production config refusals apply to every install, a trial included.** The API and Worker refuse to boot without:
   - `EMAIL_DRIVER` SMTP or RESEND;
@@ -295,7 +304,7 @@ verification queries.
 | Provider | Extra admin steps | Status |
 |---|---|---|
 | Self-hosted 16 | Alternatively `CREATE DATABASE crewflow OWNER crewflow_owner;` | VERIFIED (M0) |
-| Self-hosted 18 | Wait for the PG18 fingerprints. | BLOCKED until D4 |
+| Self-hosted 18 | None beyond 16's. | VERIFIED (Agent 1, PG18 fresh install, lifecycle and transition) |
 | Neon | The console-created `crewflow_app` (BYPASSRLS, REPLICATION, `neon_superuser`) must first be deleted in the Neon console, which **NEEDS OWNER APPROVAL**. Use PG16 for new projects until D4. Direct host, never `-pooler`. **Never touch the temporary deployment's Neon project without approval.** | EXPECTED |
 | DigitalOcean | The admin may pre-create the extensions. Never the pool port 25061. Never `doadmin` as the app login. | EXPECTED |
 | AWS RDS | Keep `rds.restrict_password_commands=0`. Never RDS Proxy, never the master user. | EXPECTED |
@@ -307,7 +316,7 @@ verification queries.
 **Optional hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0).
 - **Flagged assumption:** a later release whose migrations create roles would need CREATEROLE again. Check pending lists for `CREATE ROLE` before each release.
 
-**Fresh install is BLOCKED on every provider** until Agent 1's ROW_COPY shim, the PG18 fingerprints and the rolemaker land (M0 §8). After that it is EXPECTED to work, NOT TESTED on any managed provider.
+**Fresh install from an empty database is VERIFIED on self-hosted PostgreSQL 16 and 18** (Agent 1; end to end on PG16 by Agent 2). It is EXPECTED on the managed providers above, and NOT TESTED on any of them.
 
 ---
 
@@ -444,9 +453,9 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 | `bootstrap-admin` is email-only with an activation link, runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy, with per-invocation `DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true` on that run only (section 2, step 6). (Agent 1, confirmed.) | Agent 1 |
 | The Worker refuses to run as PID 1 (watchdog SIGKILL); `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`, `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS`, `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` with the ranges above. | Agent 2 |
 
-**Tested here:**
-- the gate: 18 self-tests, plus `--static` on the committed files;
-- `docker compose config` of image + local-db;
+**Tested (Docker side, Agent 4):**
+- the gate: full mode on all 5 combinations, and its self-tests;
+- `docker compose config` of every supported combination;
 - a disposable PG16.15 run of `docker-compose.local-db.yml` with **Agent 1's `01-crewflow-owner.sql` (`twa/db-lifecycle` b5a03348)** as its one init file, 21/21 checks:
   - the exact `crewflow_owner` attributes and the database grant `WITH GRANT OPTION`; no other role or membership created;
   - SCRAM storage; TLS on; verify-full accepted;
@@ -455,9 +464,10 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
   - read-only root, `CapBnd` 0, `NoNewPrivs` 1;
   - a second start does not re-run the init; a short password refuses the init and the container never becomes healthy.
 
+**Tested elsewhere:** see the status table at the top: fresh install, lifecycle and transition on PG16/PG18 (Agent 1); end to end on PG16 (Agent 2); rollback R1/R2 (Agent 1).
+
 **NOT TESTED:**
-- any real owner-login image;
-- the transition procedure;
-- the rollback paths;
-- managed providers;
+- a real production boot;
+- managed-provider PITR, snapshot restore and fresh install;
+- OpenShip;
 - the Oracle VM plan.
