@@ -45,8 +45,9 @@ export const LAYOUT_SCHEMA_ROLES: readonly string[] = [...OWNER_SCHEMA_ROLES, 'c
 /** Must stay NOLOGIN (G-04: an owner role turned into a password login is persistence that survives rotation). */
 export const NOLOGIN_SCHEMA_ROLES: readonly string[] = ['rab_owner', 'rab_app', 'rab_secure_owner'];
 /**
- * LOGIN roles that may exist in the layout. `crewflow` and `crewflow_app` stay LOGIN without a password so the posture
- * matches the posture golden (M0 §5.2 note); making them NOLOGIN changes the golden (NEEDS OWNER APPROVAL; recommended).
+ * LOGIN roles that MAY exist in the layout (an allow-list, not a requirement). Since BC-17 was mitigated (owner decision
+ * 2026-11-05, Agent 1) `crewflow` and `crewflow_app` are NOLOGIN with no password; `crewflow_worker` stays LOGIN with no
+ * password (residual: only non-password authentication, which the provider's pg_hba must not grant).
  */
 export const EXPECTED_LOGIN_ROLES: readonly string[] = [OWNER_LOGIN_ROLE, 'crewflow', 'crewflow_app', 'crewflow_worker'];
 

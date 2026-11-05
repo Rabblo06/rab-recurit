@@ -277,12 +277,19 @@ suite('owner-login behaviour-change catalogue (real PostgreSQL, as crewflow_owne
     expect(r).toEqual({ cr: true, b: false, s: false });
   });
 
-  it('BC-17 (NEEDS OWNER APPROVAL): the legacy schema roles are still LOGIN roles (a password set on them is not visible here)', async () => {
+  it('BC-17: MITIGATED (owner decision 2026-11-05, Agent 1) — crewflow / crewflow_app are NOLOGIN without a password; crewflow_worker stays LOGIN without a password (residual)', async () => {
     const rows = await q(owner)(`SELECT rolname::text AS r, rolcanlogin AS l FROM pg_roles WHERE rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker') ORDER BY 1`);
     expect(rows).toEqual([
-      { r: 'crewflow', l: true },
-      { r: 'crewflow_app', l: true },
-      { r: 'crewflow_worker', l: true },
+      { r: 'crewflow', l: false },
+      { r: 'crewflow_app', l: false },
+      { r: 'crewflow_worker', l: true }, // residual: migrations 1786721300000 / 1786721340000 assert its LOGIN
+    ]);
+    // No password on any of the three (pg_authid is superuser-only, so read through the fixture; the owner login cannot).
+    const pw = await q(admin)(`SELECT rolname::text AS r, rolpassword IS NULL AS none FROM pg_authid WHERE rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker') ORDER BY 1`);
+    expect(pw).toEqual([
+      { r: 'crewflow', none: true },
+      { r: 'crewflow_app', none: true },
+      { r: 'crewflow_worker', none: true },
     ]);
     await expect(owner.query(`SELECT rolpassword FROM pg_authid LIMIT 1`)).rejects.toThrow(/permission denied/);
   });

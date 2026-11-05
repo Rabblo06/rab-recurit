@@ -5462,9 +5462,23 @@ them is a control that "passed".
 | AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
 | The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
 
-**Still open:** legacy LOGIN schema roles keep their old passwords on an upgraded database (BC-17, MEDIUM). Owner
-decision 2026-11-05: mitigated by making them NOLOGIN after the transition (Agent 1). The entry becomes `mitigated`, with
-its proving test, when that change lands.
+**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512):** the legacy schema roles kept their
+old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on the
+transition and on fresh installs. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
+authenticate only via non-password methods, which the provider's `pg_hba` must not grant. It stays LOGIN because
+migrations 1786721300000 and 1786721340000 assert its LOGIN, and `crewflow_owner` cannot administer it. Proving test:
+owner-login-lifecycle-check (fresh + transition golden: `login=false` on the fresh, reference, interrupted and
+transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any more.
+
+- **`crewflow_worker`:** stays LOGIN without a password. Only a `trust`, `peer` or `cert` rule in the provider's
+  `pg_hba` could admit it; the provider must not grant one.
+- **Fresh install, residual (detection only):** `crewflow_owner` keeps CREATEROLE plus ADMIN on `crewflow` and
+  `crewflow_app`. Injected SQL could run `ALTER ROLE crewflow_app LOGIN PASSWORD '…'` and regain a persistent,
+  less-privileged login that survives credential rotation. The privilege-drift snapshot and the posture golden catch
+  `login=true`; nothing prevents it. A transitioned database is not exposed: there `crewflow_owner` is NOCREATEROLE.
+- **Rollback:** roles are cluster-wide. Only a fresh-cluster restore of `roles.sql` plus the dump brings LOGIN back.
+- **Pending (same owner decision):** Agent 1 is adding `crewflow_migrator` NOLOGIN PASSWORD NULL on the transition.
+  BC-17 names it once that SHA lands.
 
 **BC-11 / G-06, owner-accepted 2026-11-05 (HIGH):**
 
@@ -5481,6 +5495,10 @@ The production safeguards become optional and are off by default. Remaining cont
 - RLS;
 - the mandatory pre-upgrade backup in the runbook;
 - the optional, opt-in deployment ID and approval token.
+
+Also accepted with BC-11 (Agent 1, 0074cecb): a production deployment that declares no deployment ID skips the marker and
+location checks. It therefore does not detect the wrong database, a restored database or a cloned database. Every boot
+writes a warning instead.
 
 ### The ten consequences PT-01's wording did not cover (M0 §6.2)
 

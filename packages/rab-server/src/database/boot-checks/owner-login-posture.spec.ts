@@ -109,10 +109,13 @@ describe('owner-login behaviour-change catalogue', () => {
     }
   });
 
-  it('only BC-17 still waits for the owner (the rest were accepted 2026-11-05); accepted entries carry the dated decision', () => {
-    // Owner decisions 2026-11-05: BC-08, BC-10, BC-11, BC-12, BC-13, AI-1, COLGRANT-1, HL-1, PROV-1 accepted "like Twenty".
-    // BC-17 becomes mitigated (legacy logins NOLOGIN after the transition, Agent 1) — then this list is empty.
-    expect([...NEEDS_OWNER_APPROVAL_IDS].sort()).toEqual(['BC-17']);
+  it('nothing waits for the owner any more (decisions 2026-11-05); accepted entries carry the dated decision; BC-17 is mitigated', () => {
+    // Owner decisions 2026-11-05: BC-08, BC-10, BC-11, BC-12, BC-13, AI-1, COLGRANT-1, HL-1, PROV-1 accepted "like Twenty";
+    // BC-17 mitigated (legacy logins NOLOGIN / no password after the transition, Agent 1; crewflow_worker residual stated).
+    expect([...NEEDS_OWNER_APPROVAL_IDS]).toEqual([]);
+    const bc17 = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.find((x) => x.id === 'BC-17')!;
+    expect(bc17.status).toBe('mitigated');
+    expect(bc17.controls).toMatch(/crewflow_worker remains a LOGIN role with no password; it can authenticate only via non-password methods, which the provider's pg_hba must not grant/);
     for (const id of ['BC-08', 'BC-10', 'BC-11', 'BC-12', 'BC-13', 'AI-1', 'COLGRANT-1', 'HL-1', 'PROV-1']) {
       const e = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.find((x) => x.id === id)!;
       expect({ id, status: e.status, dated: e.refs.includes('owner decision 2026-11-05 (like Twenty)') }).toEqual({ id, status: 'accepted-owner', dated: true });

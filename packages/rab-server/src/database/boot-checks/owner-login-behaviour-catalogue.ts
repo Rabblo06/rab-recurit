@@ -143,7 +143,7 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     before: 'core.deployment_identity_bind_gate admitted only a session that is a member of rab_secure_owner — never a runtime login.',
     after: 'The runtime login IS a member of rab_secure_owner: the API/Worker pass the bind gate and (with SET ROLE) can rewrite the marker.',
     controls:
-      'Production no longer requires a deployment ID or a per-release approval token (both optional, off by default). A wrong or old image, or a staging config pointed at the production URL, migrates production with no second check; recovery from a mistaken upgrade is restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like Twenty. Remaining controls: the migration lock, the identity and refusal gates, the posture and semantic goldens, RLS, the mandatory pre-upgrade backup (runbook), and the optional opt-in deployment ID and approval token.',
+      'Production no longer requires a deployment ID or a per-release approval token (both optional, off by default). A wrong or old image, or a staging config pointed at the production URL, migrates production with no second check; recovery from a mistaken upgrade is restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like Twenty. Remaining controls: the migration lock, the identity and refusal gates, the posture and semantic goldens, RLS, the mandatory pre-upgrade backup (runbook), and the optional opt-in deployment ID and approval token. Also accepted (Agent 1, 0074cecb): a production deployment that declares no deployment ID skips the marker and location checks, so it does not detect a wrong, restored or cloned database; every boot writes a warning.',
   },
   {
     id: 'BC-12',
@@ -199,11 +199,12 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
     id: 'BC-17',
     title: 'Legacy LOGIN schema roles keep their old passwords on an upgraded database',
     severity: 'MEDIUM',
-    status: 'needs-owner-approval',
-    refs: ['G-04', 'addendum'],
+    status: 'mitigated',
+    refs: ['G-04', 'addendum', 'owner decision 2026-11-05: mitigate (NOLOGIN after transition)', 'Agent 1 (SHA: 80686512)'],
     before: 'crewflow / crewflow_app / crewflow_worker were the restricted runtime logins with passwords in the deployment config.',
     after: 'They remain LOGIN (golden posture) though nothing connects as them; an old credential still logs in. The boot check cannot see passwords (pg_authid is superuser-only).',
-    controls: 'Recommended: ALTER ROLE … NOLOGIN (or PASSWORD NULL) for all three after cut-over — changes the posture golden and workerRoleProblems. NEEDS OWNER APPROVAL.',
+    controls:
+      "Agent 1 (80686512): crewflow and crewflow_app become NOLOGIN with PASSWORD NULL on the transition and on fresh installs; crewflow_worker becomes PASSWORD NULL. Residual: crewflow_worker remains a LOGIN role with no password; it can authenticate only via non-password methods, which the provider's pg_hba must not grant (migrations 1786721300000 / 1786721340000 assert its LOGIN, and crewflow_owner cannot administer it); only a trust / peer / cert pg_hba rule could admit it. Fresh-install residual (detection only): crewflow_owner keeps CREATEROLE plus ADMIN on crewflow / crewflow_app, so injected SQL could ALTER ROLE crewflow_app LOGIN PASSWORD to regain a persistent login; the privilege-drift snapshot and the posture golden catch login=true (a transitioned database is not exposed: crewflow_owner is NOCREATEROLE there). Rollback: roles are cluster-wide; only a fresh-cluster restore of roles.sql plus the dump brings LOGIN back. Pending: crewflow_migrator NOLOGIN PASSWORD NULL on the transition (Agent 1). Proving test: owner-login-lifecycle-check (fresh + transition golden); catalogue test BC-17.",
   },
   {
     id: 'BC-18',
