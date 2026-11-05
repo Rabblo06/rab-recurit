@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AI_P2_MIGRATION_QUEUED_TURN_CHECKPOINT, AI_P2_MIGRATION_USAGE_TITLE_CALLS } from '../../modules/ai/constants/ai.constants';
 import { AiKit, aiOrganisation, ask, bootAiKit, newConversation } from './helpers/ai-test-kit';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Phase 2 M1 / M2 on the REAL runtime role crewflow_app (T2-5): the database itself allows at most ONE running and ONE
@@ -105,13 +106,23 @@ describeIfDb('AI Phase 2 schema: one running + one queued turn, checkpoint and t
     await asTenant(a, `UPDATE core.ai_message SET checkpointed_at = now() WHERE id = $1`, [turn.turnId]);
     await asTenant(a, `UPDATE core.ai_conversation SET title_source = 'pending' WHERE id = $1`, [conversationId]);
     expect(pgCode(await asTenant(a, `UPDATE core.ai_conversation SET title_source = 'bogus' WHERE id = $1`, [conversationId]).catch((e) => e))).toBe('23514');
+    // P-class (owner-login architecture). The schema role crewflow_app has no UPDATE grant on the tenant / owner columns
+    // (42501, even for a self-assignment). The runtime login is checked with REAL changes: the ai_message / ai_conversation
+    // UPDATE grant-parity guards (value-based, so a self-assignment is a no-op there) refuse them with 42501.
+    const ctx = ctxOf(a);
     for (const col of ['organisation_id', 'workspace_id', 'user_id', 'conversation_id']) {
-      expect(pgCode(await asTenant(a, `UPDATE core.ai_message SET ${col} = ${col} WHERE id = $1`, [turn.turnId]).catch((e) => e))).toBe('42501');
+      expect({ col, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctx, [{ sql: `UPDATE core.ai_message SET ${col} = ${col} WHERE id = $1`, params: [turn.turnId] }]) }).toEqual({ col, code: '42501' });
+      expect({ col, code: pgCode(await asTenant(a, `UPDATE core.ai_message SET ${col} = gen_random_uuid() WHERE id = $1`, [turn.turnId]).catch((e) => e)) }).toEqual({ col, code: '42501' });
     }
     for (const col of ['organisation_id', 'workspace_id', 'user_id']) {
-      expect(pgCode(await asTenant(a, `UPDATE core.ai_conversation SET ${col} = ${col} WHERE id = $1`, [conversationId]).catch((e) => e))).toBe('42501');
+      expect({ col, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctx, [{ sql: `UPDATE core.ai_conversation SET ${col} = ${col} WHERE id = $1`, params: [conversationId] }]) }).toEqual({ col, code: '42501' });
+      expect({ col, code: pgCode(await asTenant(a, `UPDATE core.ai_conversation SET ${col} = gen_random_uuid() WHERE id = $1`, [conversationId]).catch((e) => e)) }).toEqual({ col, code: '42501' });
     }
-    expect(pgCode(await asTenant(a, `DELETE FROM core.ai_message WHERE id = $1`, [turn.turnId]).catch((e) => e))).toBe('42501');
+    // DELETE: schema role refused (42501); the runtime login's attempt leaves the turn in place (RLS / the ai_message DELETE
+    // parity guard).
+    expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctx, [{ sql: `DELETE FROM core.ai_message WHERE id = $1`, params: [turn.turnId] }])).toBe('42501');
+    await asTenant(a, `DELETE FROM core.ai_message WHERE id = $1`, [turn.turnId]).catch(() => undefined);
+    expect(await kit.owner.query(`SELECT 1 FROM core.ai_message WHERE id = $1`, [turn.turnId])).toHaveLength(1);
     await asTenant(a, `INSERT INTO core.ai_usage_daily (organisation_id, usage_date, model, title_calls) VALUES ($1, current_date, 'grant-check', 1)
                        ON CONFLICT (organisation_id, usage_date, model) DO UPDATE SET title_calls = core.ai_usage_daily.title_calls + 1`, [a.orgId]);
     expect(pgCode(await asTenant(a, `UPDATE core.ai_usage_daily SET title_calls = -1 WHERE organisation_id = $1 AND model = 'grant-check'`, [a.orgId]).catch((e) => e))).toBe('23514');

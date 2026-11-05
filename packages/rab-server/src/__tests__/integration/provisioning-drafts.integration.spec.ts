@@ -127,8 +127,9 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // Invitation e-mail is queued only while a Worker heartbeat is fresh (same as initial-manager-invitation.integration.spec.ts).
     await app.get(ThrottlerRedisClientProvider).client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 300);
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    // Owner-login architecture: the suite must run as the CONFIGURED runtime login (crewflow_app on a separated fixture,
-    // crewflow_owner on an owner-login database) and never as the admin superuser that seeds fixtures.
+    // BC-02 (owner-login architecture), merged with Agent 2's deferral-seam change: the suite runs as the CONFIGURED runtime
+    // login (crewflow_owner on the owner-login CI database; crewflow_app only on a separated fixture) and never as the admin
+    // superuser that seeds fixtures.
     expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
     expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
   }, 180_000);

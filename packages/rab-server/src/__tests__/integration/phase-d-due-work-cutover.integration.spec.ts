@@ -20,24 +20,26 @@ const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
 const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && (MODE === 'before' || MODE === 'after') && Boolean(process.env.TEST_DATABASE_URL && WORKER_URL);
 const describeIfApproved = RUN ? describe : describe.skip;
 
-describeIfApproved(`Phase D D5 due-work EXECUTE cutover (${MODE ?? 'off'}; integration)`, () => {
-  let app: Client;
-  let worker: Client;
-  let crewflow: Client | null = null;
+/**
+ * Owner-login architecture (approved: "keep it, retitled under one login"). Every process connects as crewflow_owner
+ * (TEST_DATABASE_URL and TEST_DATABASE_WORKER_URL are both the owner login in CI). The D5 EXECUTE boundary is a property
+ * of the SCHEMA ROLES, so the BEFORE/AFTER expectations are checked as crewflow_worker / crewflow_app / crewflow through the
+ * fixture superuser's `SET LOCAL ROLE` (rolled back). The runtime login itself can run all three functions (it inherits
+ * their owner): catalogue BC-08 (DBA-01 separation lost), NEEDS OWNER APPROVAL. PHASE_D_D5=before only in CI.
+ */
+describeIfApproved(`Phase D D5 due-work EXECUTE cutover under one login (${MODE ?? 'off'}; integration)`, () => {
+  let runtime: Client;
+  let admin: Client;
 
   beforeAll(async () => {
-    app = new Client({ connectionString: process.env.TEST_DATABASE_URL! });
-    worker = new Client({ connectionString: WORKER_URL! });
-    await app.connect();
-    await worker.connect();
-    if (process.env.TEST_DATABASE_CREWFLOW_URL) {
-      crewflow = new Client({ connectionString: process.env.TEST_DATABASE_CREWFLOW_URL });
-      await crewflow.connect();
-    }
+    runtime = new Client({ connectionString: WORKER_URL! });
+    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    await runtime.connect();
+    await admin.connect();
   });
 
   afterAll(async () => {
-    for (const c of [app, worker, crewflow]) await c?.end().catch(() => undefined);
+    for (const c of [runtime, admin]) await c?.end().catch(() => undefined);
   });
 
   const calls = [
@@ -45,19 +47,35 @@ describeIfApproved(`Phase D D5 due-work EXECUTE cutover (${MODE ?? 'off'}; integ
     `SELECT core.worker_complete_due_work(gen_random_uuid(), gen_random_uuid())`,
     `SELECT core.worker_reschedule_due_work(gen_random_uuid(), gen_random_uuid(), now())`,
   ];
+  /** SQLSTATE of `sql` run as the schema role `role` (superuser + SET LOCAL ROLE), always rolled back. */
+  const asSchemaRole = async (role: 'crewflow_worker' | 'crewflow_app' | 'crewflow', sql: string): Promise<string> => {
+    await admin.query('BEGIN');
+    try {
+      await admin.query(`SELECT set_config('role', $1, true)`, [role]);
+      return await sqlstateOf(admin.query(sql));
+    } finally {
+      await admin.query('ROLLBACK').catch(() => undefined);
+    }
+  };
 
-  it('crewflow_worker can claim / complete / reschedule in both modes', async () => {
-    for (const sql of calls) expect(await sqlstateOf(worker.query(sql))).toBe('ACCEPTED');
+  it('schema role crewflow_worker can claim / complete / reschedule in both modes', async () => {
+    for (const sql of calls) expect(await asSchemaRole('crewflow_worker', sql)).toBe('ACCEPTED');
   });
 
-  it(MODE === 'after' ? 'crewflow_app and crewflow are refused (42501)' : 'crewflow_app (old Worker identity) still can', async () => {
-    for (const sql of calls) expect(await sqlstateOf(app.query(sql))).toBe(MODE === 'after' ? '42501' : 'ACCEPTED');
-    if (crewflow) for (const sql of calls) expect(await sqlstateOf(crewflow.query(sql))).toBe(MODE === 'after' ? '42501' : 'ACCEPTED');
+  it(MODE === 'after' ? 'schema roles crewflow_app and crewflow are refused (42501)' : 'schema roles crewflow_app (old Worker identity) and crewflow still can', async () => {
+    for (const sql of calls) expect(await asSchemaRole('crewflow_app', sql)).toBe(MODE === 'after' ? '42501' : 'ACCEPTED');
+    for (const sql of calls) expect(await asSchemaRole('crewflow', sql)).toBe(MODE === 'after' ? '42501' : 'ACCEPTED');
   });
 
-  it('producers are unchanged: crewflow_app keeps INSERT / UPDATE on core.worker_due_work (schedulePointer) under RLS', async () => {
-    const { rows } = await app.query(
-      `SELECT has_table_privilege('core.worker_due_work', 'INSERT') AS i, has_table_privilege('core.worker_due_work', 'UPDATE') AS u`,
+  it('OWNER-LOGIN DIFFERENCE BC-08 (NEEDS OWNER APPROVAL): the one runtime login (API and Worker alike) can run all three', async () => {
+    const [{ u }] = (await runtime.query(`SELECT current_user AS u`)).rows;
+    expect(u).toBe('crewflow_owner');
+    for (const sql of calls) expect(await sqlstateOf(runtime.query(sql))).toBe('ACCEPTED');
+  });
+
+  it('producers are unchanged: the schema role crewflow_app keeps INSERT / UPDATE on core.worker_due_work (schedulePointer) under RLS', async () => {
+    const { rows } = await admin.query(
+      `SELECT has_table_privilege('crewflow_app', 'core.worker_due_work', 'INSERT') AS i, has_table_privilege('crewflow_app', 'core.worker_due_work', 'UPDATE') AS u`,
     );
     expect(rows[0]).toEqual({ i: true, u: true });
   });

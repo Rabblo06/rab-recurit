@@ -74,7 +74,8 @@ describeIfApproved('Phase D #24: pointerless email backlog drains through bounde
     const ds = new DataSource({ type: 'postgres', url: WORKER_URL, entities: [], synchronize: false, extra: { max: 4, application_name: name } });
     await ds.initialize();
     const [{ current_user: who }] = await ds.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
     workers.push(ds);
     return ds;
   }

@@ -93,8 +93,9 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
     const realGet = environment.get.bind(environment) as (key: string) => unknown;
     jest.spyOn(environment, 'get').mockImplementation(((key: string) => (key === 'HWS_RUNTIME_ENABLED' ? hwsOn : realGet(key))) as never);
     const [{ current_user: who }] = await app.get(DataSource).query('SELECT current_user');
-    // Owner-login architecture: the suite must run as the CONFIGURED runtime login (crewflow_app on a separated fixture,
-    // crewflow_owner on an owner-login database) and never as the admin superuser that seeds fixtures.
+    // BC-02 (owner-login architecture), merged with Agent 2's deferral-seam change: the suite runs as the CONFIGURED runtime
+    // login (crewflow_owner on the owner-login CI database; crewflow_app only on a separated fixture) and never as the admin
+    // superuser that seeds fixtures.
     expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
     expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
   }, 180_000);

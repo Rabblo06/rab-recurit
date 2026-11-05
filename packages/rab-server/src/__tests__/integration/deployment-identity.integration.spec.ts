@@ -128,12 +128,37 @@ describe('deployment identity marker (integration, migration DeploymentIdentity1
         await c.query('RESET ROLE');
       }
     });
-    // The real runtime login, over its own connection: same denials (nothing is bound on this committed database).
+    // The real runtime login, over its own connection (owner-login architecture: crewflow_owner, BC-02). The SET LOCAL ROLE
+    // block above is the schema-role test and is unchanged. The runtime login is a member of rab_secure_owner, the tables'
+    // owner, which keeps only SELECT/INSERT/UPDATE (singleton) and SELECT/INSERT (history): DELETE / TRUNCATE everywhere and
+    // UPDATE on the history stay refused by privilege, direct INSERTs by the owner-only policies (CURRENT_USER must be
+    // rab_secure_owner), and a direct UPDATE of the singleton matches no row. bind() itself is reachable:
+    // OWNER-LOGIN DIFFERENCE BC-11 / G-06 (HIGH, NEEDS OWNER APPROVAL), asserted only inside this rolled-back transaction.
     await inRolledBackTx(async (c) => {
-      expect((await c.query('SELECT current_user::text AS u, session_user::text AS s')).rows[0]).toEqual({ u: 'crewflow_app', s: 'crewflow_app' });
-      for (const sql of WRITE_ATTEMPTS) await expectSqlState(c, sql, [], '42501');
-      await expectSqlState(c, bind, ['test', ID_A, REASON, 'test', null, [BIND_HOST]], '42501');
+      expect((await c.query('SELECT current_user::text AS u, session_user::text AS s')).rows[0]).toEqual({ u: 'crewflow_owner', s: 'crewflow_owner' });
+      const outcome: Record<string, string> = {};
+      for (const sql of WRITE_ATTEMPTS) {
+        await c.query('SAVEPOINT w');
+        outcome[sql.slice(0, 48)] = await c.query(sql).then(
+          (r) => `OK rows=${r.rowCount ?? 0}`,
+          (e: { code?: string }) => e.code ?? 'ERROR',
+        );
+        await c.query('ROLLBACK TO SAVEPOINT w');
+      }
+      expect(outcome).toEqual(
+        Object.fromEntries(
+          WRITE_ATTEMPTS.map((sql) => [sql.slice(0, 48), sql.startsWith('UPDATE core.deployment_identity SET') ? 'OK rows=0' : '42501']),
+        ),
+      );
       expect((await c.query('SELECT * FROM core.deployment_identity_check()')).rows).toEqual([]);
+      // BC-11 (NEEDS OWNER APPROVAL): the runtime login passes the bind gate. Rolled back with the transaction.
+      await c.query('SAVEPOINT b');
+      const bound = await c.query(bind, ['test', ID_A, REASON, 'test', null, [BIND_HOST]]).then(
+        () => 'ACCEPTED',
+        (e: { code?: string }) => e.code ?? 'ERROR',
+      );
+      await c.query('ROLLBACK TO SAVEPOINT b');
+      expect(bound).toBe('ACCEPTED');
     }, appUrl);
   });
 
@@ -276,7 +301,11 @@ describe('deployment identity marker (integration, migration DeploymentIdentity1
     });
     const declared = (id: string) => ({ NODE_ENV: 'test', CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: id });
     try {
-      await expect(runDatabaseBootGates('api', opts(declared(ID_A)))).resolves.toMatchObject({ identity: `ci/${ID_A}`, warnings: [] });
+      // Owner-login architecture: the only warnings allowed are the documented owner-login ones (BC-08, PENDING OWNER
+      // APPROVAL; the semantic-posture note for workspace schemas without a PostgreSQL-major template). Any other fails.
+      const matched = await runDatabaseBootGates('api', opts(declared(ID_A)));
+      expect(matched.identity).toBe(`ci/${ID_A}`);
+      expect(matched.warnings.filter((w) => !w.startsWith('BC-08 (DBA-01') && !w.startsWith('semantic posture: the PostgreSQL'))).toEqual([]);
       await expect(runDatabaseBootGates('api', opts(declared(ID_B)))).rejects.toBeInstanceOf(DatabaseBootGateError);
       await expect(runDatabaseBootGates('api', opts({ NODE_ENV: 'test' }))).resolves.toMatchObject({ identity: `ci/${ID_A}` });
       // The same marker bound only at OTHER hosts (what a restore / clone elsewhere, or a provider-issued new host name,

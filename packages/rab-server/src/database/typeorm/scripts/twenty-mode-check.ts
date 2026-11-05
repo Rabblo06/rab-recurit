@@ -592,7 +592,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, JSON.stringify(after.ledger) === JSON.stringify(before.ledger), 'ledger unchanged');
   });
 
-  await step('ID-2', 'deployment identity: a bound marker refuses a different id, a missing id and no declaration (67)', async (r) => {
+  await step('ID-2', 'deployment identity: a bound marker refuses a different id and a missing id (67); with no declaration only a production-bound marker refuses (67), outside production it starts (intentional)', async (r) => {
     r.database = declared;
     if (!bound) {
       r.failures.push('FAIL: no bound marker to test (TW-I1d did not bind; see its failure)');
@@ -603,8 +603,24 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, wrong.exitCode === EXIT.identity && wrong.result?.serve === false, `different CREWFLOW_DEPLOYMENT_ID: exit 67, serve=false (${summary(wrong)})`);
     const missing = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test' });
     expect(r, missing.exitCode === EXIT.identity, `missing CREWFLOW_DEPLOYMENT_ID on a bound database: exit 67 (${summary(missing)})`);
+    // Agent 1 (twa/db-lifecycle 97ffa32e, pinned in owner-login.spec.ts): outside production a bound marker with NO
+    // declaration at all starts (intentional leniency); a PRODUCTION-bound marker refuses it (67), and refuses a production
+    // declaration without an id. The marker is rebound to production through the bind definer (fixture superuser, a member of
+    // every role) on this disposable twa database only, then rebound to the original id in `finally`.
     const none = await child(head, {});
-    expect(r, none.exitCode === EXIT.identity, `no deployment declaration at all on a bound database: exit 67 (${summary(none)})`);
+    expect(r, none.exitCode === EXIT.ok, `no deployment declaration on a TEST-bound database: starts (intentional outside production) (${summary(none)})`);
+    const productionId = randomUUID();
+    const bindSql = `SELECT core.deployment_identity_bind($1, $2::uuid, $3, $4, $5::uuid, $6::text[])`;
+    const hosts = await withClient(withDb(ctx.admin, head), async (c) => (await c.query(`SELECT bound_hosts FROM core.deployment_identity`)).rows[0]?.bound_hosts as string[]);
+    await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['production', productionId, 'ID-2 production-bound probe (twenty-mode-check)', 'twenty-mode-check', deploymentId, hosts]));
+    try {
+      const noneProd = await child(head, {});
+      expect(r, noneProd.exitCode === EXIT.identity && noneProd.result?.serve === false, `no deployment declaration on a PRODUCTION-bound database: exit 67, serve=false (${summary(noneProd)})`);
+      const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' });
+      expect(r, missingProd.exitCode === EXIT.identity && missingProd.result?.serve === false, `production declared without CREWFLOW_DEPLOYMENT_ID on a PRODUCTION-bound database: exit 67 (${summary(missingProd)})`);
+    } finally {
+      await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['test', deploymentId, 'ID-2 probe restores the test binding', 'twenty-mode-check', productionId, hosts]));
+    }
     const s = await readState(ctx, head);
     expect(r, s.marker?.deploymentId === deploymentId, 'marker still bound to the original id');
     const same = await child(head, idEnv);

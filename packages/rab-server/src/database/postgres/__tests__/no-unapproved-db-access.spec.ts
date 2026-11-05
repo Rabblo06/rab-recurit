@@ -38,6 +38,10 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   // Developer tool.
   'tools/generate-workspace-schema-v1.js': { hits: 1, why: 'developer template generator (HWS_TEMPLATE_SOURCE_URL)' },
   // Security review L-5: the migration / operator scripts, one entry each (the directory used to be exempt wholesale).
+  // Agent 5 (Twenty Mode T7): the disposable-database lifecycle harness. Its connections go ONLY to databases it created
+  // itself (twa_* names, assertHarnessDatabaseName + qi allow-list) on the CI / twa-t5 container, through the admin URL of
+  // MIGRATION_SECURITY_ADMIN_URL (parsed once, credentials never printed): one withClient helper and the LOCK-1 lock holder.
+  'packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts': { hits: 2, why: 'T7 lifecycle harness: withClient + LOCK-1 holder, disposable twa_* databases only' },
   'packages/rab-server/src/database/typeorm/scripts/check-db-security-posture.ts': {
     hits: 1,
     why: 'operator script reads its own POSTURE_DATABASE_URL; connects through the factory (security-posture.ts createPgClientForUrl)',

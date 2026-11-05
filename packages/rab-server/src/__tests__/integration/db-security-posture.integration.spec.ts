@@ -29,13 +29,91 @@ describeIfDb('database security posture (integration)', () => {
     await client.connect();
     try {
       const [who] = (await client.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`)).rows;
-      expect(who).toEqual({ u: 'crewflow_app', s: false, b: false });
+      // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+      // The only other runtime accepted here is crewflow_app on the LEGACY separated database that ci-migration-security's
+      // restricted-migrator job still builds (LEGACY, REMOVE IN PR #9): there the original separated-mode assertions run
+      // unchanged, the runtime login itself must be refused (42501).
+      expect(['crewflow_owner', 'crewflow_app']).toContain(who.u);
+      expect({ s: who.s, b: who.b }).toEqual({ s: false, b: false });
+      const legacySeparated = who.u === 'crewflow_app';
       // A real call, not only a catalog check: an unknown hash resolves to no row (and no permission error).
       expect((await client.query(`SELECT * FROM core.auth_find_session_by_web_token_hash($1)`, ['0'.repeat(64)])).rows).toEqual([]);
-      await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: '42501' });
-      await expect(client.query(`UPDATE core.permission SET key = key WHERE false`)).rejects.toMatchObject({ code: '42501' });
-      await expect(client.query(`DELETE FROM core.migrations WHERE false`)).rejects.toMatchObject({ code: '42501' });
+      // P-class (owner-login architecture): the schema role crewflow_app still cannot run the provisioner-only function or
+      // write the ledger, the reference tables or audit_log (42501), checked through the fixture superuser's SET LOCAL ROLE.
+      if (legacySeparated) {
+        await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`UPDATE core.permission SET key = key WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`DELETE FROM core.migrations WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
+        return;
+      }
+      const writes = [
+        `SELECT core.register_workspace_schema(gen_random_uuid())`,
+        `UPDATE core.permission SET key = key WHERE false`,
+        `DELETE FROM core.migrations WHERE false`,
+        `DELETE FROM core.audit_log WHERE false`,
+      ];
+      const admin = new Client({ connectionString: adminUrl });
+      await admin.connect();
+      try {
+        for (const sql of writes) {
+          await admin.query('BEGIN');
+          try {
+            await admin.query(`SELECT set_config('role', 'crewflow_app', true)`);
+            const code = await admin.query(sql).then(
+              () => 'OK',
+              (e: { code?: string }) => e.code ?? 'ERROR',
+            );
+            expect({ sql, code }).toEqual({ sql, code: '42501' });
+          } finally {
+            await admin.query('ROLLBACK').catch(() => undefined);
+          }
+        }
+      } finally {
+        await admin.end();
+      }
+      // The runtime login crewflow_owner:
+      //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, NEEDS OWNER APPROVAL) and is refused
+      //    there: an unknown workspace is P0002, nothing is registered;
+      //  - audit_log stays insert-only against DML: the table owner crewflow holds only SELECT/INSERT on it (42501);
+      //  - core.permission / core.migrations: see REF-1 below (owner-accepted difference, its own reproduction).
+      await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: 'P0002' });
       await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await client.end();
+    }
+  });
+
+  // OWNER-LOGIN DIFFERENCE REF-1, OWNER-ACCEPTED 2026-11-04 (like Twenty; THREAT-MODEL entry by Agent 3): the global,
+  // non-RLS reference tables core.permission and core.migrations are writable by the one runtime login (it inherits crewflow's
+  // S,I,U,D,T). Reproduced on REAL rows inside a transaction that is always rolled back; the totals are checked afterwards.
+  // The schema role crewflow_app is still refused (CF-09 above). On the LEGACY separated database the runtime login is
+  // crewflow_app and this reproduction does not apply (CF-09 asserts its 42501 there; REMOVE IN PR #9).
+  it('REF-1: the runtime login can rewrite core.permission and core.migrations rows (owner-accepted 2026-11-04; rolled back)', async () => {
+    const client = new Client({ connectionString: appUrl });
+    await client.connect();
+    const totals = async () => {
+      const admin = new Client({ connectionString: adminUrl });
+      await admin.connect();
+      try {
+        return (await admin.query(`SELECT (SELECT count(*)::int FROM core.permission) AS p, (SELECT count(*)::int FROM core.migrations) AS m`)).rows[0];
+      } finally {
+        await admin.end();
+      }
+    };
+    try {
+      const [who] = (await client.query(`SELECT current_user AS u`)).rows;
+      if (who.u === 'crewflow_app') return; // legacy separated database (CF-09 covers it)
+      expect(who.u).toBe('crewflow_owner');
+      const before = await totals();
+      await client.query('BEGIN');
+      try {
+        expect((await client.query(`UPDATE core.permission SET key = key WHERE key = (SELECT min(key) FROM core.permission)`)).rowCount).toBe(1);
+        expect((await client.query(`DELETE FROM core.migrations WHERE timestamp = (SELECT min(timestamp) FROM core.migrations)`)).rowCount).toBe(1);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+      }
+      expect(await totals()).toEqual(before);
     } finally {
       await client.end();
     }

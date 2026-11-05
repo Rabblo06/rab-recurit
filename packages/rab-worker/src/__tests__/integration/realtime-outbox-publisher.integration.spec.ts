@@ -480,7 +480,7 @@ describeIfDb('realtime outbox publisher — Redis Pub/Sub distribution (integrat
    * SUPERUSER or BYPASSRLS. Anything else fails this test. It never skips and never reads the developer's `.env`; that
    * file once pointed this test at the development database.
    */
-  it('19. the restricted crewflow_app role (no elevated credentials) can claim, publish-path-validate and complete a realtime_event row', async () => {
+  it('19. the runtime login (crewflow_owner, BC-02; no SUPERUSER / BYPASSRLS) can claim, publish-path-validate and complete a realtime_event row', async () => {
     const crewflowAppUrl = await verifiedRestrictedRuntimeUrl();
     const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'pub19' });
     const { id } = await seedEvent(manager);

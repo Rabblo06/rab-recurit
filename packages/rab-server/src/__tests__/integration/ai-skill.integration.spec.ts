@@ -15,6 +15,7 @@ import { builtinSkill } from '../../modules/ai/skills/builtin-skills';
 import { LoadSkillsTool } from '../../modules/ai/skills/load-skills.tool';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Phase 4 — organisation skills on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis
@@ -396,7 +397,7 @@ describeIfDb('AI skills (integration)', () => {
       expect((await rows(org.orgId)).map((r: { name: string }) => r.name)).toEqual(['crewflow-help', 'direct-ok']);
     });
 
-    it('T4-R5 no UPDATE grant on name / is_system / organisation_id / created_by / created_at, and no TRUNCATE', async () => {
+    it('AI-1: T4-R5 name / is_system / organisation_id / created_by / created_at are not updatable (runtime login: parity guard, 42501); TRUNCATE and a client-chosen id are refused to the schema role crewflow_app only (runtime login: AI-1 from the catalog / COLGRANT-1 rolled back)', async () => {
       const org = await aiOrganisation(kit, 'ai-skill-rls-grants');
       await insertAs(org.ceo, custom('grant-probe'));
       for (const sql of [
@@ -408,8 +409,25 @@ describeIfDb('AI skills (integration)', () => {
       ]) {
         expect({ sql, code: pgCode(await asTenant(org.ceo, sql, [org.orgId]).catch((e) => e)) }).toEqual({ sql, code: '42501' });
       }
-      expect(pgCode(await asTenant(org.ceo, `TRUNCATE core.ai_skill`).catch((e) => e))).toBe('42501');
-      expect(pgCode(await asTenant(org.ceo, `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`, [org.orgId, org.ceo.userId]).catch((e) => e))).toBe('42501');
+      // P-class (owner-login architecture): the schema role crewflow_app is refused TRUNCATE (42501). The runtime login holds
+      // TRUNCATE through the owner (no TRUNCATE parity guard on ai_skill; TRUNCATE ignores RLS, so it would empty EVERY tenant):
+      // OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL). Asserted from the catalog, never executed: a real TRUNCATE takes
+      // ACCESS EXCLUSIVE on the shared CI database (Agent 3 review note).
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId }, [{ sql: `TRUNCATE core.ai_skill` }])).toBe('42501');
+      const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_skill', 'TRUNCATE') AS t`);
+      expect(t).toBe(true);
+      const rollback = new Error('rollback');
+      // A client-chosen id: refused to the schema role crewflow_app by its column INSERT grant (42501). The runtime login is
+      // not refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL), rolled back.
+      const withId = `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`;
+      expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: withId, params: [org.orgId, org.ceo.userId] }])).toBe('42501');
+      await expect(
+        kit.runtime.transaction(async (m) => {
+          await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [org.orgId, org.ceo.userId]);
+          await m.query(withId, [org.orgId, org.ceo.userId]);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
       const [owner] = await kit.owner.query(`SELECT c.relrowsecurity AS rls, c.relforcerowsecurity AS forced, pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'core' AND c.relname = 'ai_skill'`);
       expect(owner).toEqual({ rls: true, forced: true, owner: 'crewflow' });
     });

@@ -65,7 +65,8 @@ describeIfApproved('Phase D global dispatch claim (integration — opt-in)', () 
     await workerA.initialize();
     await workerB.initialize();
     const [{ current_user: who }] = await workerA.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
   });
 
   afterAll(async () => {

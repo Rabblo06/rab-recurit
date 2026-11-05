@@ -33,7 +33,15 @@ import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
  * (backoff) and still recovers.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
-const describeIfDb = RUN ? describe : describe.skip;
+/**
+ * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
+ * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs
+ * in-process on the owner login (T4: workspace-provisioning-owner-login.integration.spec.ts). SKIPPED BY NAME until the
+ * separated code is deleted: REMOVE IN PR #9.
+ * Coverage: covered by T4 workspace-provisioning-owner-login 5 (session terminated mid-cycle, reconnect).
+ */
+const LEGACY_PROVISIONER_REMOVE_IN_PR9 = true;
+const describeIfDb = RUN && !LEGACY_PROVISIONER_REMOVE_IN_PR9 ? describe : describe.skip;
 jest.setTimeout(180_000);
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -62,7 +70,7 @@ class ProcessWatch {
   }
 }
 
-describeIfDb('W6-E2E-05 provisioner survives a terminated database connection (integration, real process)', () => {
+describeIfDb('LEGACY, REMOVE IN PR #9 (skipped: separate provisioner, no crewflow login under the owner login) — W6-E2E-05 provisioner survives a terminated database connection (integration, real process)', () => {
   let admin: DataSource;
   let passwordHashing: PasswordHashingService;
   let CREWFLOW_URL: string;

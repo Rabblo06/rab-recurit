@@ -6,6 +6,7 @@ import { AiActionProposalActivate1786720960000 } from '../../database/typeorm/co
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { proposeOk, runningTurn, venueAndRole, windowFromNow } from './helpers/ai-proposal-fixtures';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * AI Phase 1 — PostgreSQL isolation (brief §15 "PostgreSQL/RLS"), proven on the REAL runtime role crewflow_app:
@@ -56,7 +57,8 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
 
   it('the runtime connection is crewflow_app (no BYPASSRLS) — the role the API and the Worker step loop use', async () => {
     const [row] = await kit.runtime.query(`SELECT current_user AS u, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass`);
-    expect(row).toEqual({ u: 'crewflow_app', bypass: false });
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(row).toEqual({ u: 'crewflow_owner', bypass: false });
   });
 
   it('no tenant context bound ⇒ zero rows from every AI table (fail closed), although rows exist', async () => {
@@ -144,17 +146,32 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     ).resolves.toEqual([{ enabled: true }]);
   });
 
-  it('least privilege: no DELETE on messages/usage, no TRUNCATE, no tenant-column UPDATE', async () => {
+  // P-class (owner-login architecture): every statement stays refused to the schema role crewflow_app (42501). For the
+  // runtime login: the two tenant-column UPDATEs are real changes and the UPDATE grant-parity guards refuse them (42501);
+  // the DELETEs change no row (RLS / the DELETE parity guards); TRUNCATE is held through the owner (catalogue AI-1, NEEDS
+  // OWNER APPROVAL), asserted from the catalog and never executed.
+  it('least privilege: no DELETE on messages/usage, no TRUNCATE, no tenant-column UPDATE (schema role); the runtime login changes nothing', async () => {
     const ctxA = { organisationId: a.orgId, workspaceId: a.ceo.workspaceId, userId: a.ceo.userId };
-    for (const sql of [
-      `DELETE FROM core.ai_message WHERE conversation_id = '${a.conversationId}'`,
-      `DELETE FROM core.ai_usage_daily`,
-      `TRUNCATE core.ai_conversation`,
+    const updates = [
       `UPDATE core.ai_message SET organisation_id = '${b.orgId}' WHERE conversation_id = '${a.conversationId}'`,
       `UPDATE core.ai_conversation SET user_id = '${b.ceo.userId}' WHERE id = '${a.conversationId}'`,
-    ]) {
-      await expect(asTenant(ctxA, sql)).rejects.toMatchObject({ code: '42501' });
+    ];
+    const deletes = [`DELETE FROM core.ai_message WHERE conversation_id = '${a.conversationId}'`, `DELETE FROM core.ai_usage_daily`];
+    for (const sql of [...deletes, `TRUNCATE core.ai_conversation`, ...updates]) {
+      expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxA, [{ sql }]) }).toEqual({ sql, code: '42501' });
     }
+    for (const sql of updates) await expect(asTenant(ctxA, sql)).rejects.toMatchObject({ code: '42501' });
+    const counts = () =>
+      kit.owner.query(
+        `SELECT (SELECT count(*)::int FROM core.ai_message WHERE conversation_id = $1) AS m, (SELECT count(*)::int FROM core.ai_usage_daily WHERE organisation_id = $2) AS d`,
+        [a.conversationId, a.orgId],
+      );
+    const before = await counts();
+    expect(before[0].m).toBeGreaterThan(0);
+    for (const sql of deletes) await asTenant(ctxA, sql).catch(() => undefined);
+    expect(await counts()).toEqual(before);
+    const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_conversation', 'TRUNCATE') AS t`);
+    expect(t).toBe(true);
   });
 
   it('the purge function refuses a retention below its 30-day SQL floor and an out-of-range batch (whatever the caller passes)', async () => {
@@ -201,11 +218,17 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     expect((await asTenant<Array<{ id: string }>>(ctxOfA(), `SELECT id FROM core.ai_action_proposal WHERE id = $1`, [proposal.id])).map((r) => r.id)).toEqual([proposal.id]);
   });
 
-  it('T5-D1 INSERT: an ineligible manager is refused by RLS (42501); status / decided / expiry / id columns are not insertable (42501)', async () => {
+  it('T5-D1 INSERT: an ineligible manager is refused by RLS (42501); the schema role crewflow_app cannot set status / decided / expiry / id / created / final arguments / origin (42501); the runtime login: status and decided_by refused, the rest COLGRANT-1 (rolled back)', async () => {
     const other = await manager(kit, a.orgId); // holds ai.use, is not the Initial Manager
     await expect(
       asTenant({ organisationId: a.orgId, workspaceId: other.id.workspaceId, userId: other.id.userId }, insertSql({ ws: other.id.workspaceId!, user: other.id.userId, conv: randomUUID() })),
     ).rejects.toMatchObject({ code: '42501' });
+    // P-class (owner-login architecture): the schema role crewflow_app is refused every one of these columns by its column
+    // INSERT grant (42501). The runtime login is not bound by column grants (no INSERT parity guard): status and decided_by
+    // are still refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first, 23514);
+    // the others are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL) and are only ever tried in a rolled-back
+    // transaction.
+    const outcomes: Record<string, string> = {};
     for (const [col, val] of [
       ['status', `'APPROVED'`],
       ['decided_by', `'${a.ceo.userId}'`],
@@ -215,8 +238,32 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
       ['final_arguments', `'{}'::jsonb`],
       ['origin', `'agent'`],
     ]) {
-      await expect(asTenant(ctxOfA(), insertSql({ extraCols: `, ${col}`, extraVals: `, ${val}` }))).rejects.toMatchObject({ code: '42501' });
+      const sql = insertSql({ extraCols: `, ${col}`, extraVals: `, ${val}` });
+      expect({ col, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxOfA(), [{ sql }]) }).toEqual({ col, code: '42501' });
+      const rollback = new Error('rollback');
+      const outcome = await tenant
+        .runInTenantContext({ ...ctxOfA(), role: '' }, async (m) => {
+          await m.query(sql);
+          throw rollback;
+        })
+        .then(
+          () => 'OK',
+          (e: unknown) => (e === rollback ? 'OK' : ((e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code ?? 'ERROR')),
+        );
+      outcomes[col] = outcome;
     }
+    // The runtime login's measured outcome per column, asserted exactly (Agent 3 review of dbbda6e3). status / decided_by
+    // must be refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first). The others
+    // are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL): accepted (always rolled back here) or refused by a CHECK.
+    expect(outcomes).toEqual({
+      status: '23514',
+      decided_by: '42501',
+      expires_at: 'OK',
+      created_at: 'OK',
+      id: 'OK',
+      final_arguments: '23514',
+      origin: 'OK',
+    });
   });
 
   it('T5-D1 CHECKs: a 4th tool, forbidden keys in the arguments and an over-limit count are refused (23514), even for the owner role', async () => {
@@ -230,8 +277,19 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
   });
 
   it('T5-D1 UPDATE: identity / content / expiry columns are not updatable (42501); the trigger refuses them even for the owner (23514)', async () => {
+    // P-class (owner-login architecture): the schema role crewflow_app has no UPDATE grant on these columns (42501). For the
+    // runtime login the property is the state: each attempt is refused (the ai_action_proposal_guard trigger, 23514, or the
+    // UPDATE parity guard, 42501) or is a no-op assignment, and the row is byte-identical afterwards.
+    // updated_at is excluded: a no-op assignment still fires the row's updated_at maintenance (measured on PR #74); every
+    // identity, content, expiry and decision column is compared.
+    const rowOf = async () =>
+      (await kit.owner.query(`SELECT (row_to_json(p)::jsonb - 'updated_at')::text AS r FROM core.ai_action_proposal p WHERE id = $1`, [proposal.id]))[0].r;
     for (const set of [`arguments = '{}'::jsonb`, `tool = 'create_draft_shift'`, `expires_at = now() + interval '1 day'`, `summary = 'y'`, `user_id = '${b.ceo.userId}'`, `snapshot_hash = '${hash}'`]) {
-      await expect(asTenant(ctxOfA(), `UPDATE core.ai_action_proposal SET ${set} WHERE id = '${proposal.id}'`)).rejects.toMatchObject({ code: '42501' });
+      const sql = `UPDATE core.ai_action_proposal SET ${set} WHERE id = '${proposal.id}'`;
+      expect({ set, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxOfA(), [{ sql }]) }).toEqual({ set, code: '42501' });
+      const before = await rowOf();
+      await asTenant(ctxOfA(), sql).catch(() => undefined);
+      expect({ set, row: await rowOf() }).toEqual({ set, row: before });
     }
     for (const set of [`arguments = '{}'::jsonb`, `tool = 'add_staff_note'`, `expires_at = expires_at + interval '1 minute'`, `editable_fields = '{}'`]) {
       await expect(kit.owner.query(`UPDATE core.ai_action_proposal SET ${set} WHERE id = $1`, [proposal.id])).rejects.toMatchObject({ code: '23514' });
@@ -262,8 +320,16 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
   });
 
   it('T5-D1 no DELETE, no TRUNCATE for crewflow_app; FORCE RLS and exactly three per-command policies', async () => {
-    await expect(asTenant(ctxOfA(), `DELETE FROM core.ai_action_proposal WHERE id = '${proposal.id}'`)).rejects.toMatchObject({ code: '42501' });
-    await expect(asTenant(ctxOfA(), `TRUNCATE core.ai_action_proposal`)).rejects.toMatchObject({ code: '42501' });
+    // P-class (owner-login architecture): the schema role crewflow_app is refused DELETE and TRUNCATE (42501). The runtime
+    // login's DELETE leaves the proposal in place (no DELETE policy: RLS filters it; the DELETE parity guard would refuse a
+    // visible row); TRUNCATE is held through the owner (catalogue AI-1, NEEDS OWNER APPROVAL), never executed here.
+    for (const sql of [`DELETE FROM core.ai_action_proposal WHERE id = '${proposal.id}'`, `TRUNCATE core.ai_action_proposal`]) {
+      expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxOfA(), [{ sql }]) }).toEqual({ sql, code: '42501' });
+    }
+    await asTenant(ctxOfA(), `DELETE FROM core.ai_action_proposal WHERE id = '${proposal.id}'`).catch(() => undefined);
+    expect(await kit.owner.query(`SELECT 1 FROM core.ai_action_proposal WHERE id = $1`, [proposal.id])).toHaveLength(1);
+    const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_action_proposal', 'TRUNCATE') AS t`);
+    expect(t).toBe(true);
     const [grants] = await kit.owner.query(
       `SELECT has_table_privilege('crewflow_app', 'core.ai_action_proposal', 'DELETE') AS del, has_table_privilege('crewflow_app', 'core.ai_action_proposal', 'TRUNCATE') AS trunc,
               (SELECT array_agg(cmd::text ORDER BY cmd) FROM pg_policies WHERE schemaname = 'core' AND tablename = 'ai_action_proposal') AS policies,

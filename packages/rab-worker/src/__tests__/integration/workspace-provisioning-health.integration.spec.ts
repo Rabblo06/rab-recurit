@@ -41,7 +41,8 @@ describe('Worker: workspace provisioning health (counts-only definer, runtime ro
     await admin.initialize();
     factory = new TestIdentityFactory({ app, dataSource: runtime, adminDataSource: admin, tenantContext: moduleRef.get(TenantContextService), passwordHashing: moduleRef.get(PasswordHashingService) });
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+    expect(who).toBe('crewflow_owner');
   });
 
   afterAll(async () => {
