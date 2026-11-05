@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { checkWorkspaceSchemaDrift } from '../../database/typeorm/workspace-schema/workspace-schema-drift';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
@@ -42,7 +42,8 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
   let admin: Client;
   let crewflow: Client;
   const created: SeededWorkspace[] = [];
-  const latestFp = EXPECTED_WORKSPACE_FINGERPRINTS[LATEST_WORKSPACE_MODULE_VERSION]!;
+  /** Read in beforeAll, after the server's major is selected (D4: PG16 and PG18 have different tables). */
+  let latestFp: string;
 
   const fingerprint = async (id: string) => (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS f', [id])).rows[0].f as string | null;
   const hasMoneyChecks = async (schema: string) =>
@@ -67,6 +68,10 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
       throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
     }
+    // D4: select the fingerprint table by the server's major, as the runner does; every fingerprint read below (and in the
+    // migrator this suite drives) follows it.
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
+    latestFp = EXPECTED_WORKSPACE_FINGERPRINTS[LATEST_WORKSPACE_MODULE_VERSION]!;
     crewflow = new Client({ connectionString: adminUrl });
     await crewflow.connect();
     await crewflow.query('SET ROLE crewflow');

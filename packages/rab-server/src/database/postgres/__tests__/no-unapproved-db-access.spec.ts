@@ -62,7 +62,7 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     hits: 11,
     why: 'the M2 CI harness: builds disposable databases as the bootstrap superuser and hands each identity URL to the guarded DataSource',
   },
-  // Owner-login (reviewed 2026-11-05, Agent 1). The three CI/developer harnesses below are the owner-login analogues of
+  // Owner-login (reviewed 2026-11-05, Agent 1). The two CI/developer harnesses below (and twenty-mode-check.ts above) are the owner-login analogues of
   // migration-security-check.ts: each runs only against a disposable cluster it is pointed at as the bootstrap superuser
   // (a throwaway container in CI / heavy-run), creates and drops its own databases, and opens raw clients to them on
   // purpose — the factory's process policy is part of what they test, so it cannot be the way they connect.
@@ -77,10 +77,6 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts': {
     hits: 1,
     why: 'developer fingerprint generator: one Client per throwaway database it creates and drops on a disposable cluster',
-  },
-  'packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts': {
-    hits: 2,
-    why: 'owner-login T7 harness on a disposable cluster: superuser Client per throwaway database, plus a second session that holds the migration lock (LOCK-1)',
   },
 };
 
