@@ -81,7 +81,7 @@
     {
       "id": "G-06",
       "severity": "HIGH",
-      "acceptance": "NEEDS OWNER APPROVAL (not in §2: deployment identity rebindable by the runtime) — owner decision 2026-11-05: the deployment id and approval token are OPTIONAL, off by default, in production too (like Twenty); BC-11 itself is not in the accepted list: confirm",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: deployment identity rebindable by the runtime; the deployment id and approval token are OPTIONAL, off by default, in production too; risk recorded in THREAT-MODEL by Agent 3; was NEEDS OWNER APPROVAL)",
       "change": "deployment_identity_bind admits the runtime login (EXECUTE via rab_secure_owner, session login is a member and is not crewflow/crewflow_app).",
       "test": "twenty-behaviour-catalogue C6",
       "mitigation": "D6: deployment id mandatory after the first bind; bind only on an empty database",
