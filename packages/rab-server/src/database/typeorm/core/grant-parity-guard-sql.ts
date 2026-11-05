@@ -142,6 +142,9 @@ SELECT c.relname::text AS tbl, g.tgname::text AS guard, t.tgname::text AS earlie
  * "stamp an existing session MFA-verified" possible on a normal code path. A statement-level BEFORE UPDATE OF
  * mfa_verified_at trigger refuses any UPDATE that names the column, for every role, whatever the row count (the same
  * shape as a missing column privilege). Function owned by rab_secure_owner (the table owner; secure-owner invariants).
+ * Its body must not name a crewflow-owned core table, not even inside a message: R4 (secure-owner-invariants.ts) matches
+ * table names as whole words in any rab_secure_owner function body, so 'permission denied: …' read as core.permission and
+ * failed every chain build at 1786721420000. The SQLSTATE (42501) carries the "insufficient privilege" meaning instead.
  */
 export const MFA_VERIFIED_IMMUTABLE_UP_SQL: readonly string[] = Object.freeze([
   `CREATE FUNCTION core.user_session_mfa_verified_immutable()
@@ -151,7 +154,7 @@ SECURITY INVOKER
 SET search_path = pg_catalog, pg_temp
 AS $mfa$
 BEGIN
-  RAISE EXCEPTION 'permission denied: user_session.mfa_verified_at is set at INSERT only and never changed'
+  RAISE EXCEPTION 'refused: user_session.mfa_verified_at is set at INSERT only and never changed'
     USING ERRCODE = '42501';
 END;
 $mfa$`,
