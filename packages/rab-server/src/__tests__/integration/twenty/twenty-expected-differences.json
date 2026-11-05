@@ -566,7 +566,7 @@
       },
       {
         "bc": "BC-17",
-        "note": "mitigated (owner decision 2026-11-05): the legacy LOGIN schema roles become NOLOGIN after the transition (Agent 1)."
+        "note": "needs-owner-approval: legacy LOGIN schema roles keep their old passwords on an upgraded database. Becomes mitigated in both catalogues once Agent 1 lands the owner-decided NOLOGIN-after-transition change (2026-11-05)."
       }
     ],
     "missingFromBc": [
