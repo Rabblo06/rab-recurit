@@ -207,7 +207,9 @@ describe('database boot gates (fake connection)', () => {
     const prodBound = healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] });
     await refusedAt(evaluateBootGates(input(prodBound)), 'identity', /bound to production/);
     await refusedAt(evaluateBootGates(input(healthy(), { env: PROD_ENV })), 'identity', /production api process refuses to run: the database has no deployment identity marker/);
-    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'identity', /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+    // BC-11 (owner decision 2026-11-05): production with NO declaration skips the marker check (warning) and reaches the
+    // next gate; with a declaration the exact match above still refuses.
+    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'tls', /not using TLS/);
     // Production with the right marker but no TLS: the identity gate passes, the TLS gate refuses.
     await refusedAt(evaluateBootGates(input(prodBound, { env: PROD_ENV })), 'tls', /not using TLS/);
     const tls = healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] }, { ssl: true });

@@ -90,8 +90,9 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED })).classification).toBe('PRODUCTION');
   });
 
-  it('5. B3: production runtime needs the declared deployment identity; the marker check itself is live (deployment-identity.spec)', () => {
-    expectRefused('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: undefined, CREWFLOW_DEPLOYMENT_ID: undefined }), /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+  it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {
+    // Owner decision BC-11 (2026-11-05): undeclared resolves (the live check then warns instead of matching).
+    expect(resolve('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: undefined, CREWFLOW_DEPLOYMENT_ID: undefined })).declared).toBeNull();
     expectRefused('worker', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'staging' }), /must declare production/);
     expectRefused('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ID: undefined }), /must be set together/);
     expectRefused('api', PROD_ENV(), /present in a \.env file/, { CREWFLOW_DEPLOYMENT_ID: PROD_ID });

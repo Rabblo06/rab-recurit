@@ -76,6 +76,7 @@ import {
   SUPPORTED_FINGERPRINT_MAJORS,
 } from '../../workspace-schema/v1/expected-fingerprints';
 import { BootstrapResult, runOwnerLoginBootstrap } from './owner-login/bootstrap';
+import { disableLegacyLogins } from './owner-login/legacy-logins';
 import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './owner-login/fresh-install';
 import { LAST_ROLE_MIGRATION_TIMESTAMP, runOwnerLoginChain } from './owner-login/owner-login-chain';
 import { assertOwnerLoginMigrationIdentity, OwnerLoginIdentityError, readOwnerLoginIdentityFacts } from './owner-login/owner-login-identity';
@@ -493,6 +494,12 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     if (mode === 'apply') {
       const still = await pendingMigrationNames(query, dataSource);
       if (still.length) throw new Error(`${still.length} migration(s) are still pending after the run: ${still.join(', ')}`);
+    }
+    // BC-17 (owner decision 2026-11-05): a FRESH owner-login install ends with the legacy logins crewflow / crewflow_app
+    // NOLOGIN (crewflow_owner created them, so it holds ADMIN). Existing databases: the transition SQL (provider admin).
+    if (mode === 'apply' && ownerLogin && ownerState) {
+      const s = ownerState.classification.state;
+      if (s === 'EMPTY' || s === 'BOOTSTRAP-PARTIAL' || ownerState.proof.fresh) await disableLegacyLogins(query as (sql: string) => Promise<unknown[]>, log);
     }
     if (options.afterMigrations) await options.afterMigrations({ queryRunner: session, dataSource, applied, pendingBefore, guarded });
     return {
