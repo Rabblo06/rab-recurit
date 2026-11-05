@@ -564,6 +564,7 @@ async function main() {
   });
 
   await step('T8b', 'Worker-starts-too: a job hitting a MISSING table (the one the broken migration should restore) fails and retries without crashing the Worker', async (check, note) => {
+    // (The jobs query it unqualified on the search_path: the error reads relation "shift_report" does not exist.)
     // The table goes missing BEFORE both processes start (their boot posture baseline includes it), as after a real failed
     // migration that should have created it.
     ctx.compose(['stop', 'rab-worker', 'rab-api']);
@@ -573,10 +574,10 @@ async function main() {
     const shift = newShift(state.f, 20);
     state.missingShift = shift;
     note(`shift ${shift} waits for its pre-shift report`);
-    await ctx.waitFor('the report job failing on the missing table', () => countMatches(ctx.logs('rab-worker', since), /relation "core\.shift_report" does not exist/g) >= 2, 600_000, 10_000);
+    await ctx.waitFor('the report job failing on the missing table', () => countMatches(ctx.logs('rab-worker', since), /relation "(?:core\.)?shift_report" does not exist/g) >= 2, 600_000, 10_000);
     const wl = ctx.logs('rab-worker', since);
     ctx.evidence('T8b-worker.log', wl);
-    const failures = countMatches(wl, /relation "core\.shift_report" does not exist/g);
+    const failures = countMatches(wl, /relation "(?:core\.)?shift_report" does not exist/g);
     check(failures >= 2, `the report job failed on the missing table and was retried (${failures} failures logged)`);
     const st = inspect('rab-worker', '{{.State.Status}}|{{.RestartCount}}');
     check(st === 'running|0', `the Worker did not crash (${st})`);
