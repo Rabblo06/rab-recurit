@@ -78,12 +78,7 @@ crewflow_runtime_db_config() {
   esac
   case "${CREWFLOW_MIGRATION_APPROVAL_MODE:-}" in
     none | token) APPROVAL_MODE="$CREWFLOW_MIGRATION_APPROVAL_MODE" ;;
-    '')
-      if [ "$MIGRATE_ON_START" = true ] && { [ "${NODE_ENV:-}" = production ] || [ "${RAB_RUNTIME_ENV:-}" = production ]; }; then
-        refuse "CREWFLOW_MIGRATION_APPROVAL_MODE must be set explicitly (none or token) when a production runtime has CREWFLOW_MIGRATE_ON_START=true: whether production schema changes need a per-release approval token is never decided by a default. Refusing to start."
-      fi
-      APPROVAL_MODE=none
-      ;;
+    '') APPROVAL_MODE=none ;; # owner decision BC-11: optional, off by default everywhere (production included)
     *) refuse "CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token. Refusing to start." ;;
   esac
   case "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" in
