@@ -4,9 +4,10 @@
  * Phase A (pa-provisioner): the provisioner role is checked only when CREWFLOW_PROVISIONER_ENABLED=true in the container
  * environment (the same strict switch the launcher reads); otherwise only the jobs role is expected.
  *
- * Used two ways:
- *   1. As the container HEALTHCHECK command: `node /opt/crewflow-bundle/worker-bundle-health.cjs` (exit 0 healthy, 1 not).
- *   2. By the launcher's watchdog (start-worker-bundle.cjs), through `readHeartbeat()`.
+ * O1 (one image): the Worker is ONE process (provisioning in-process), so every committed compose runs this as the
+ * jobs-only check, `env CREWFLOW_PROVISIONER_ENABLED=false node /opt/crewflow-bundle/worker-bundle-health.cjs` (exit 0
+ * healthy, 1 not). The provisioner role below is the retired separated-mode child's (uid 10001) and is only evaluated when
+ * CREWFLOW_PROVISIONER_ENABLED=true reaches this check, which no committed deployment does.
  *
  * Source of truth: the per-instance heartbeat file each child writes (packages/rab-worker/src/core/runtime/
  * instance-heartbeat.ts) into a directory only that child's UID can write. NOT the global Redis keys
@@ -18,9 +19,9 @@
  * a recently succeeded cycle, a recent successful Redis write from that same process, and no cycle in flight for longer
  * than its hang budget.
  *
- * Dependency failures (Redis or the database down) make the check report unhealthy, but the launcher never restarts the
- * service for them — only a child that exits or whose event loop stops beating ends the service (see the watchdog in
- * start-worker-bundle.cjs), so a dependency outage cannot turn into a restart storm.
+ * Dependency failures (Redis or the database down) make the check report unhealthy, but nothing restarts the service for
+ * them — only a Worker that exits or whose event loop stops beating (its own in-process watchdog) ends the service, so a
+ * dependency outage cannot turn into a restart storm.
  */
 const fs = require('node:fs');
 

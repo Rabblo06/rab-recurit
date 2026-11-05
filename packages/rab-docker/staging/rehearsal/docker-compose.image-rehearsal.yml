@@ -68,9 +68,9 @@ services:
         condition: service_started
 
   rab-worker:
+    # O1 (one image): no CREWFLOW_PROVISIONER_DATABASE_URL (provisioning runs in-process; the Worker refuses that prefix).
     environment:
       <<: *runtime-env
-      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${S_CREWFLOW_PASSWORD:?}@pg:5432/rab
     depends_on:
       pg:
         condition: service_healthy

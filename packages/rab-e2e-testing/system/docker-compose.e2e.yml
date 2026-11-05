@@ -11,7 +11,7 @@ name: crewflow-e2e
 # Images are REUSED, never built here: rab-server:latest and rab-worker:latest (built from the branch head by the dev
 # rollout), or the exact images named by E2E_SERVER_IMAGE / E2E_WORKER_IMAGE (e.g. a release candidate's tags). Secrets come from an operator env file outside the repo (letters/digits only):
 #   E2E_PG_SUPERUSER_PASSWORD  the `rab` superuser (initdb; phase-B migration identity only)
-#   E2E_CREWFLOW_PASSWORD      becomes `crewflow` (migration 1786682000000): provisioner child, bootstrap-admin
+#   E2E_CREWFLOW_PASSWORD      becomes `crewflow` (migration 1786682000000): migrate, bootstrap-admin
 #   E2E_CREWFLOW_APP_PASSWORD  becomes `crewflow_app` (migration 1786687000000): api + jobs child
 #   E2E_APP_SECRET             application secret (32+ chars)
 #
@@ -118,36 +118,43 @@ services:
     image: ${E2E_WORKER_IMAGE:-rab-worker:latest}
     environment:
       <<: *app-env
-      # Phase B: PG_DATABASE_URL is also the jobs child's session-lock connection (direct); the launcher hands the
-      # provisioner URL below to the provisioner child alone, as its PG_DATABASE_URL.
+      # O1 (one image): the SAME image as `server` (E2E_WORKER_IMAGE may name the same digest), run as the Worker command,
+      # ONE process as uid 1000 under compose's init; workspace provisioning runs in-process. PG_DATABASE_URL is also the
+      # session-lock connection (direct).
+      # KNOWN GAP (pre-existing since #72, not changed here): this stack still logs in as crewflow_app; the runtime now
+      # requires the owner login (crewflow_owner).
       # Phase D: still crewflow_app (WORKER_CLAIM_MODE / WORKER_DISPATCH_MODE unset = per_scope / poll). A global-claim
       # e2e run swaps this value for the operator-created crewflow_worker login (same name) and sets WORKER_CLAIM_MODE=global.
       PG_DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
       # Phase B (B5): the Worker runtime pool size, as in production.
       PG_POOL_MAX_CONNECTIONS: '12'
-      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
-      # Phase A (pa-provisioner): the provisioner switch, explicitly on (worker only, never the shared app-env anchor). The 5 s
-      # interval keeps the pre-Phase-A cadence these specs time against (05-resilience expects a provisioning cycle to
-      # succeed within 30 s of a connection blip); the code default is now 60 s.
-      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      # In-process provisioning interval. 5 s keeps the cadence these specs time against (05-resilience expects a
+      # provisioning cycle to succeed within 30 s of a connection blip); the code default is 60 s. No CREWFLOW_PROVISIONER_*
+      # variable: the Worker refuses that prefix.
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
-    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
-    user: '0:0'
+      # What the retired launcher gave its jobs child (H1-M1), as in production.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
+    command: ['node', 'packages/rab-worker/dist/main.js']
+    # Docker's init as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1.
+    init: true
+    user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ['no-new-privileges:true']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    stop_grace_period: 55s
+    stop_grace_period: 45s
     volumes:
       - e2e-local-storage:/app/storage
     mem_limit: 1536m
     healthcheck:
-      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      # Jobs-only per-instance health (the provisioner role is off for this check only), as in production.
+      test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
       interval: 15s
       timeout: 10s
       retries: 3

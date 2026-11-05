@@ -6,7 +6,7 @@
  * Scope is deliberately NARROW: only @rab/worker and @rab/server, the code the Worker image runs. The web e2e suite
  * (packages/rab-e2e-testing, `@playwright/test`), the marketing site (packages/rab-website) and the docs tooling
  * (packages/rab-docs) legitimately drive a browser on CI runners and are not checked here. The runtime images are guarded
- * separately (Dockerfile.worker-bundle / Dockerfile `--forbid`, security-floors `apk-absent:chromium`, image_gate.py
+ * separately (the one image's rab/Dockerfile `--forbid`, security-floors `apk-absent:chromium`, image_gate.py
  * `forbidden_apk` / `forbidden_npm` / `sbom_must_not_include`).
  *
  * Fails (exit 1) when

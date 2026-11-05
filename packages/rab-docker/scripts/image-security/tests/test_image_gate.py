@@ -91,7 +91,10 @@ class P5NoBrowser(unittest.TestCase):
             self.assertIn('apk-absent:chromium', rp['floors_checks'], role)
             self.assertNotIn('apk-required:chromium', rp['floors_checks'], role)
             self.assertNotIn('chromium_binary', rp, role)
-        self.assertTrue(g.policy()['roles']['worker']['pdf_render'])
+        self.assertTrue(g.policy()['roles']['image']['pdf_render'])
+        # O1: ONE role (the merge of api + worker); the merge kept every Worker check.
+        self.assertEqual(sorted(g.policy()['roles']), ['image'])
+        self.assertGreaterEqual(g.policy()['roles']['image']['min_sbom_packages'], 300)
         self.assertNotIn('/usr/lib/chromium', g.policy()['filesystem']['code_paths'])
         self.assertNotIn('MIN_CHROMIUM_VERSION', g.policy()['provenance']['allowed_build_args'])
 
@@ -107,25 +110,38 @@ class P5NoBrowser(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertTrue(any('MIN_CHROMIUM_VERSION is retired' in f for f in result(d, 'static')['fails']))
         pol = g.policy()
-        del pol['roles']['worker']['forbidden_apk']
-        pol['roles']['api']['floors_checks'] = ['node', 'alpine']
+        del pol['roles']['image']['forbidden_apk']
+        pol['roles']['image']['floors_checks'] = ['node', 'alpine']
         d = tempfile.mkdtemp()
         with mock.patch.object(g, 'policy', lambda: pol):
             rc, _ = run(['--mode', 'pr', '--results', d, 'static'])
         fails = result(d, 'static')['fails']
         self.assertEqual(rc, 1)
-        self.assertTrue(any('worker: forbidden_apk must be a non-empty list' in f for f in fails), fails)
-        self.assertTrue(any('api: floors_checks must include apk-absent:chromium' in f for f in fails), fails)
+        self.assertTrue(any('image: forbidden_apk must be a non-empty list' in f for f in fails), fails)
+        self.assertTrue(any('image: floors_checks must include apk-absent:chromium' in f for f in fails), fails)
 
     def test_pdf_gate_refuses_a_role_without_pdf_render(self):
+        # O1: the one image renders PDFs; a role that does not (none exists today) is refused before anything runs.
+        pol = g.policy()
+        pol['roles']['nopdf'] = dict(pol['roles']['image'], pdf_render=False)
         d = tempfile.mkdtemp()
-        rc, _ = run(['--mode', 'pr', '--results', d, 'pdf', 'api', 'crewflow-gate/api:none'])
+        with mock.patch.object(g, 'policy', lambda: pol):
+            rc, _ = run(['--mode', 'pr', '--results', d, 'pdf', 'nopdf', 'crewflow-gate/image:none'])
         self.assertEqual(rc, 1)
-        self.assertTrue(any('does not render PDFs' in f for f in result(d, 'api-pdf')['fails']))
+        self.assertTrue(any('does not render PDFs' in f for f in result(d, 'nopdf-pdf')['fails']))
+
+    def test_pdf_gate_uses_the_worker_jobs_contract(self):
+        # O1: no launcher. The render runs as the Worker runs in the production compose: uid 1000, HOME=/nonexistent,
+        # TMPDIR and XDG caches on the jobs tmpfs, and the per-instance heartbeat file.
+        self.assertEqual((g.WORKER_JOBS_UID, g.WORKER_JOBS_GID), (1000, 1000))
+        self.assertEqual(g.WORKER_JOBS_ENV['HOME'], '/nonexistent')
+        self.assertTrue(g.WORKER_JOBS_ENV['TMPDIR'].startswith('/tmp/crewflow-jobs'))
+        self.assertTrue(all(v.startswith('/tmp/crewflow-jobs') for k, v in g.WORKER_JOBS_ENV.items() if k.startswith('XDG_')))
+        self.assertEqual(g.WORKER_JOBS_ENV['CREWFLOW_INSTANCE_HEALTH_FILE'], '/run/crewflow-health/jobs/heartbeat.json')
 
 
 class Decisions(unittest.TestCase):
-    base = {'id': 'CVE-2026-67215', 'packages': ['cjson'], 'images': ['worker'], 'decision': 'accepted-risk',
+    base = {'id': 'CVE-2026-67215', 'packages': ['cjson'], 'images': ['image'], 'decision': 'accepted-risk',
             'owner_decision_ref': 'OWNER-2026-11-10-1', 'decided_by': 'owner', 'decided_on': '2026-11-10',
             'expires': '2027-02-10', 'justification': 'unreachable: librist only'}
 
@@ -200,11 +216,11 @@ def grype_doc(matches):
 class Vulns(unittest.TestCase):
     def evaluate(self, mode, trivy=(), grype=(), apk=None, decisions=(), watch=None, today='2026-11-20'):
         d = tempfile.mkdtemp()
-        with open(os.path.join(d, 'worker-trivy-vuln.json'), 'w') as f:
+        with open(os.path.join(d, 'image-trivy-vuln.json'), 'w') as f:
             json.dump(trivy_doc(list(trivy)), f)
-        with open(os.path.join(d, 'worker-grype.json'), 'w') as f:
+        with open(os.path.join(d, 'image-grype.json'), 'w') as f:
             json.dump(grype_doc(list(grype)), f)
-        with open(os.path.join(d, 'worker-apk.json'), 'w') as f:
+        with open(os.path.join(d, 'image-apk.json'), 'w') as f:
             json.dump(apk or {}, f)
         dec = os.path.join(d, 'dec.json')
         with open(dec, 'w') as f:
@@ -214,8 +230,8 @@ class Vulns(unittest.TestCase):
             json.dump({'schema': 1, 'advisories': watch or []}, f)
         with mock.patch.object(g, 'DECISIONS_FILE', dec), mock.patch.object(g, 'WATCHLIST_FILE', wl), \
                 mock.patch.dict(os.environ, {'IMAGE_GATE_TODAY': today if mode == 'pr' else '', 'GITHUB_ACTIONS': ''}):
-            rc, out = run((['--mode', mode] if mode else []) + ['--results', d, 'vulns', 'worker'])
-        return rc, result(d, 'worker-vulns'), out
+            rc, out = run((['--mode', mode] if mode else []) + ['--results', d, 'vulns', 'image'])
+        return rc, result(d, 'image-vulns'), out
 
     fixable_high = {'VulnerabilityID': 'CVE-2026-1', 'PkgName': 'libexpat', 'InstalledVersion': '2.9.0-r0',
                     'FixedVersion': '2.10.0-r0', 'Severity': 'HIGH', 'Status': 'fixed'}
@@ -236,7 +252,7 @@ class Vulns(unittest.TestCase):
     @staticmethod
     def decision(cve, pkg, decided_days_ago=10, valid_days=60, kind='accepted-risk'):
         now = g.dt.date.today()
-        return {'id': cve, 'packages': [pkg], 'images': ['worker'], 'decision': kind, 'owner_decision_ref': 'OWNER-1',
+        return {'id': cve, 'packages': [pkg], 'images': ['image'], 'decision': kind, 'owner_decision_ref': 'OWNER-1',
                 'decided_by': 'owner', 'decided_on': (now - g.dt.timedelta(days=decided_days_ago)).isoformat(),
                 'expires': (now - g.dt.timedelta(days=decided_days_ago) + g.dt.timedelta(days=valid_days)).isoformat(),
                 'justification': 'x'}
@@ -337,10 +353,13 @@ class Dockerfiles(unittest.TestCase):
         c.mode = 'release'
         self.assertEqual(c.status, 'FAIL')
 
-    def test_policy_allowed_arg_base(self):
-        c = self.pins('ARG CREWFLOW_BASE_IMAGE\nFROM ${CREWFLOW_BASE_IMAGE}\n',
-                      'packages/rab-docker/rab/Dockerfile.worker-bundle')
-        self.assertEqual(c.fails, [])
+    def test_no_arg_base_is_allowed_any_more(self):
+        # O1: the Worker is no longer built FROM the API image, so policy.json allows no ARG-based FROM at all; the former
+        # Worker Dockerfile's `FROM ${CREWFLOW_BASE_IMAGE}` is refused wherever it appears (stricter than before).
+        self.assertEqual(g.policy()['dockerfiles']['arg_base_images'], {})
+        for name in ('packages/rab-docker/rab/Dockerfile', 'packages/rab-docker/rab/Dockerfile.worker-bundle'):
+            c = self.pins('ARG CREWFLOW_BASE_IMAGE\nFROM ${CREWFLOW_BASE_IMAGE}\n', name)
+            self.assertTrue(c.fails, name)
 
 
 class Summary(unittest.TestCase):
@@ -368,9 +387,9 @@ class Summary(unittest.TestCase):
 
     def test_unexpected_error_fails_closed(self):
         d = tempfile.mkdtemp()
-        rc, out = run(['--mode', 'pr', '--results', d, 'vulns', 'worker'])  # no scanner output at all
+        rc, out = run(['--mode', 'pr', '--results', d, 'vulns', 'image'])  # no scanner output at all
         self.assertEqual(rc, 1)
-        self.assertEqual(result(d, 'worker-vulns')['status'], 'FAIL')
+        self.assertEqual(result(d, 'image-vulns')['status'], 'FAIL')
 
 
 def minimal_pdf(text: str, truncate: bool = False) -> bytes:

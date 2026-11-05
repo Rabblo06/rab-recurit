@@ -26,7 +26,7 @@ cpu_snapshot() { for c in $CONTAINERS ${EXTRA_CONTAINERS:-}; do echo "$c $(cg_cp
 . "$COST_DIR/lib/worker-env.sh"
 # worker_up <name> [KEY=VALUE ...]: (re)creates costaudit-worker with that configuration (compose recreates it only if the
 # configuration differs from the running container).
-# If the worker does not stay up (e.g. a launcher refuses the configuration), <out>/worker-env/<name>.REFUSED records the
+# If the worker does not stay up (e.g. the Worker's runtime guard refuses the configuration), <out>/worker-env/<name>.REFUSED records the
 # last log lines (URLs redacted) and run.sh skips that configuration's window.
 worker_up() {
   local name="$1" st
@@ -58,8 +58,8 @@ redis_sched_keys() {
     esac
   done
 }
-# Health of one worker container: the image's own health command (worker-bundle-health.cjs: fresh heartbeats of BOTH
-# children), run with docker exec, and Docker's own HEALTHCHECK status.
+# Health of one worker container: the jobs-only health command (worker-bundle-health.cjs: a fresh per-instance heartbeat
+# of the one Worker process), run with docker exec, and Docker's own health status.
 worker_probe_ok() { docker exec "$1" node /opt/crewflow-bundle/worker-bundle-health.cjs >/dev/null 2>&1; }
 docker_health() { docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || echo missing; }
 # Logs since an instant, timestamped, URLs redacted (the worker never prints credentials; this is belt and braces).

@@ -16,7 +16,6 @@ exact generated name.
                                            code ownership, HOME, accounts, apk sources, test/env/.git files, dev packages,
                                            forbidden browser-stack apk/npm packages (P5), npm floors; writes the apk
                                            package list and size measurements
-  worker-base <api-image> <worker-image>   the Worker's lower layers are exactly the API image's layers
   scan       <role> <image> --image-id ID  Trivy (vuln, secret, CycloneDX, SARIF) + Grype, both pinned by digest; proves
                                            the scanned image ID and DB freshness
   vulns      <role>                        policy evaluation of the Trivy + Grype findings and the scanner-blind watch list
@@ -237,8 +236,8 @@ def validate_decisions(c: Check) -> list[dict]:
         if d['decision'] not in ('accepted-risk', 'not-affected', 'false-positive'):
             c.fail(f'{where}: decision must be accepted-risk, not-affected or false-positive')
             continue
-        if not isinstance(d['images'], list) or not set(d['images']) <= {'api', 'worker'} or not d['images']:
-            c.fail(f'{where}: images must be a non-empty subset of ["api", "worker"]')
+        if not isinstance(d['images'], list) or not set(d['images']) <= set(policy()['roles']) or not d['images']:
+            c.fail(f'{where}: images must be a non-empty subset of {sorted(policy()["roles"])} (O1: one image)')
             continue
         try:
             decided, expires = dt.date.fromisoformat(d['decided_on']), dt.date.fromisoformat(d['expires'])
@@ -439,17 +438,6 @@ def cmd_config(a, c: Check) -> None:
         if re.search(r'://[^/\s:@]+:[^/\s@]+@', v):
             c.fail(f'image config environment variable {k} carries a URL with embedded credentials')
     c.info(f'user={cfg.get("User")!r} entrypoint={cfg.get("Entrypoint")} cmd={cfg.get("Cmd")} id={img["Id"]}')
-
-
-def cmd_worker_base(a, c: Check) -> None:
-    api, worker = inspect_image(a.api_image), inspect_image(a.worker_image)
-    al, wl = api['RootFS']['Layers'], worker['RootFS']['Layers']
-    if len(wl) <= len(al) or wl[:len(al)] != al:
-        c.fail(f'the Worker image ({worker["Id"]}) is not built on the gated API image ({api["Id"]}): its first '
-               f'{len(al)} layers differ')
-    else:
-        c.info(f'Worker = API image {api["Id"]} ({len(al)} layers) + {len(wl) - len(al)} Worker layers')
-    c.data.update(api_id=api['Id'], worker_id=worker['Id'], api_layers=len(al), worker_layers=len(wl))
 
 
 # ----------------------------------------------------------------------------------------------------------- container
@@ -1574,35 +1562,41 @@ def inspect_pdf(pdf: bytes) -> dict:
             'page_texts': texts}
 
 
+# O1: the Worker's jobs runtime contract, exactly as the production compose runs it (docker-compose.image.yml rab-worker:
+# `node packages/rab-worker/dist/main.js` as 1000:1000 with these variables and a tmpfs on each jobs directory;
+# scripts/compose-owner-login.cjs enforces the user, HOME and the heartbeat path there). It replaces the retired launcher's
+# jobs-child plan, which computed the same values.
+WORKER_JOBS_UID, WORKER_JOBS_GID = 1000, 1000
+WORKER_JOBS_ENV = {
+    'HOME': '/nonexistent',
+    'TMPDIR': '/tmp/crewflow-jobs',
+    'XDG_CONFIG_HOME': '/tmp/crewflow-jobs/.config',
+    'XDG_CACHE_HOME': '/tmp/crewflow-jobs/.cache',
+    'CREWFLOW_INSTANCE_HEALTH_FILE': '/run/crewflow-health/jobs/heartbeat.json',
+}
+
+
 def cmd_pdf(a, c: Check) -> None:
-    """PDF render of a real report through the production (native, Chromium-free) renderer inside the exact gated Worker
-    image, as the launcher's jobs child, on a host of the image's own architecture."""
+    """PDF render of a real report through the production (native, Chromium-free) renderer inside the exact gated image,
+    as the Worker runs it (uid 1000, the jobs environment and tmpfs mounts of the production compose), on a host of the
+    image's own architecture."""
     import base64
     rp = role_policy(a.role)
     if not rp.get('pdf_render'):
-        c.fail(f'role {a.role} does not render PDFs; the PDF render gate applies to the Worker image')
+        c.fail(f'role {a.role} does not render PDFs; the PDF render gate applies to the image that runs the Worker')
         return
     smoke = os.path.join(HERE, 'pdf-render-smoke.cjs')
     hard = ['run', '--rm', '--pull', 'never', '--network', 'none', '--cap-drop', 'ALL', '--security-opt',
             'no-new-privileges', '--read-only', *_mount(smoke, '/gate/pdf-render-smoke.cjs')]
-    # 1. The launcher's own jobs-child plan (uid/gid, HOME=/nonexistent, TMPDIR, XDG_* dirs, PATH).
-    p = docker(*hard, '--user', '1000:1000', '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'plan',
-               check=False, timeout=120)
-    try:
-        plan = json.loads(p.stdout)
-    except ValueError:
-        c.fail(f'launcher plan failed (exit {p.returncode}): {(p.stderr or p.stdout)[-500:]}')
-        return
-    env = plan['env']
-    if env.get('HOME') != '/nonexistent' or not str(env.get('TMPDIR', '')).startswith('/tmp/crewflow-jobs'):
-        c.fail(f'unexpected jobs-child environment from the launcher: HOME={env.get("HOME")} TMPDIR={env.get("TMPDIR")}')
-    c.info(f'jobs child per launcher plan: uid {plan["uid"]} gid {plan["gid"]} HOME={env.get("HOME")} '
-           f'TMPDIR={env.get("TMPDIR")} XDG_CONFIG_HOME={env.get("XDG_CONFIG_HOME")} '
-           f'XDG_CACHE_HOME={env.get("XDG_CACHE_HOME")}')
-    leaked = sorted(k for k in env if k.startswith(('CHROMIUM_', 'PLAYWRIGHT_')))
+    # 1. The Worker's jobs environment (fixed contract above). P5: the image itself must carry no browser setting either.
+    env = dict(WORKER_JOBS_ENV)
+    cfg_env = (inspect_image(a.image).get('Config') or {}).get('Env') or []
+    leaked = sorted(e.partition('=')[0] for e in cfg_env if e.partition('=')[0].startswith(('CHROMIUM_', 'PLAYWRIGHT_')))
     if leaked:
-        c.fail(f'the launcher still forwards browser settings to the jobs child: {leaked} (P5: no browser)')
-    uid, gid = plan['uid'], plan['gid']
+        c.fail(f'the image config still sets browser settings: {leaked} (P5: no browser)')
+    c.info(f'Worker jobs contract: uid {WORKER_JOBS_UID} gid {WORKER_JOBS_GID} HOME={env["HOME"]} TMPDIR={env["TMPDIR"]} '
+           f'XDG_CONFIG_HOME={env["XDG_CONFIG_HOME"]} XDG_CACHE_HOME={env["XDG_CACHE_HOME"]}')
+    uid, gid = WORKER_JOBS_UID, WORKER_JOBS_GID
     # 2. Runtime facts: the kernel architecture the image ran on and the Node that rendered (the renderer is JavaScript).
     u = docker('run', '--rm', '--pull', 'never', '--network', 'none', '--entrypoint', 'uname', a.image, '-m',
                check=False).stdout.strip()
@@ -1622,7 +1616,7 @@ def cmd_pdf(a, c: Check) -> None:
     # 3. The render, as that child, with the production compose runtime settings (read-only root, per-child tmpfs,
     #    no capabilities, no-new-privileges, no network).
     envargs = [x for k, v in env.items() for x in ('-e', f'{k}={v}')]
-    p = docker(*hard, '--user', f'{uid}:{gid}', '--workdir', plan.get('cwd') or '/app',
+    p = docker(*hard, '--user', f'{uid}:{gid}', '--workdir', '/app',
                '--tmpfs', f'/tmp/crewflow-jobs:uid={uid},gid={gid},mode=0700',
                '--tmpfs', f'/run/crewflow-health/jobs:uid={uid},gid={gid},mode=0755',
                *envargs, '--entrypoint', 'node', a.image, '/gate/pdf-render-smoke.cjs', 'render',
@@ -1808,37 +1802,8 @@ def cmd_attest(a, c: Check) -> None:
         c.fail(f'provenance source revision {vcs.get("revision")!r} != commit {a.revision}')
     else:
         c.info(f'provenance ({pt}): revision {vcs.get("revision")}, source {vcs.get("source")}')
-    if a.base_api_layout:
-        check_worker_base(c, pred, a.base_api_layout, a.platform)
     with open(os.path.join(out, f'{a.role}-provenance.json'), 'w', encoding='utf-8') as f:
         json.dump(stmt, f, indent=1)
-
-
-def check_worker_base(c: Check, pred: dict, api_layout: str, platform: str) -> None:
-    """The Worker's provenance must name, as its base, the API image of the same gated run (by digest)."""
-    deps = ((pred.get('buildDefinition') or {}).get('resolvedDependencies') or []) or (pred.get('materials') or [])
-    base = [d for d in deps if str(d.get('uri', '')).startswith('pkg:oci/crewflow-gate-api-base')]
-    if len(base) != 1 or not (base[0].get('digest') or {}).get('sha256'):
-        c.fail(f'Worker provenance does not record exactly one crewflow-gate-api-base dependency: {base}')
-        return
-    dep = 'sha256:' + base[0]['digest']['sha256']
-    try:
-        top, entries = layout_entries(api_layout)
-        api_images = {d['digest'] for d in entries if not is_attestation(d) and plat(d) == platform}
-        if dep == top and api_images:
-            ok = True  # per-platform API build output: its own index is the base
-        else:
-            # gated multi-platform candidate: the per-platform API index blob is kept in the layout; its image must be
-            # the API image of this platform in the gated API index
-            sub = json.loads(blob(api_layout, dep))
-            ok = any(m['digest'] in api_images for m in sub.get('manifests') or [] if not is_attestation(m))
-    except (OSError, ValueError, KeyError) as e:
-        c.fail(f'Worker base {dep} cannot be resolved in the gated API layout: {e}')
-        return
-    if not ok:
-        c.fail(f'the Worker was built FROM {dep}, which is not the gated {platform} API image of this run')
-    else:
-        c.info(f'Worker built FROM the gated API image {dep} (provenance)')
 
 
 def cmd_manifest(a, c: Check) -> None:
@@ -1924,11 +1889,6 @@ def cmd_manifest(a, c: Check) -> None:
         digests[role] = {'index_digest': idx_digest, 'layout': dest,
                          'platforms': {plat(d): d['digest'] for d in merged if not is_attestation(d)}}
         c.info(f'{role}: multi-platform index {idx_digest} = {digests[role]["platforms"]}')
-    if 'api' in by_role and 'worker' in by_role:
-        for p in expected:
-            api, wk = diff_ids.get(('api', p), []), diff_ids.get(('worker', p), [])
-            if not api or wk[:len(api)] != api or len(wk) <= len(api):
-                c.fail(f'{p}: the Worker image is not layered on the gated API image')
     for role, d in digests.items():
         if role in want_digest and want_digest[role] != d['index_digest']:
             c.fail(f'{role}: index is {d["index_digest"]}, not the requested {want_digest[role]}')
@@ -1944,12 +1904,12 @@ def cmd_manifest(a, c: Check) -> None:
 
 
 def cmd_release_manifest(a) -> int:
-    """The release manifest: commit, both index digests, per-platform digests, SBOM/provenance references, the Worker's
-    base, scanner versions and DB timestamps, and the native PDF results, from the gated layouts and the gate evidence."""
+    """The release manifest: commit, the image's index digest, per-platform digests, SBOM/provenance references, scanner
+    versions and DB timestamps, and the native PDF results, from the gated layout and the gate evidence (O1: one image)."""
     digests = load_json(a.digests)
     out = {'schema': 1, 'status': a.status, 'commit': a.commit, 'repository': a.repo, 'gate_run': a.run_url,
            'images': {}}
-    for role in ('api', 'worker'):
+    for role in sorted(digests):
         d = digests[role]
         top, entries = layout_entries(d['layout'])
         platforms = {}
@@ -1968,18 +1928,15 @@ def cmd_release_manifest(a) -> int:
             scan = load_json(os.path.join(ev, f'{role}-scan.json'))['data'].get('scanners')                 if os.path.exists(os.path.join(ev, f'{role}-scan.json')) else None
             entry = {'manifest_digest': img['digest'], 'reference': f'{a.repo}@{img["digest"]}',
                      'attestations': refs, 'scanners': scan}
-            prov = os.path.join(ev, f'{role}-provenance.json')
-            if role == 'worker' and os.path.exists(prov):
-                deps = ((load_json(prov).get('predicate') or {}).get('buildDefinition') or {}).get(
-                    'resolvedDependencies') or []
-                entry['built_from'] = [x.get('uri') for x in deps if 'crewflow-gate-api-base' in str(x.get('uri'))]
-            pdf = os.path.join(ev, 'worker-pdf-run.json')
-            if role == 'worker' and os.path.exists(pdf):
+            pdf = os.path.join(ev, f'{role}-pdf-run.json')
+            if os.path.exists(pdf):
                 r = load_json(pdf)
                 entry['native_pdf_render'] = {k: r.get(k) for k in (
                     'native', 'uname_m', 'docker_host_arch', 'node', 'renderer', 'render_ms', 'pdf_pages', 'pdf_sha256')}
             platforms[p] = entry
-        out['images'][role] = {'tag': f'{role}-{a.commit}', 'index_digest': d['index_digest'],
+        # O1 (one image, two existing tag names): the same digest is published as api-<commit> and worker-<commit> until
+        # O2 replaces both with one <commit> tag.
+        out['images'][role] = {'tags': [f'api-{a.commit}', f'worker-{a.commit}'], 'index_digest': d['index_digest'],
                                'reference': f'{a.repo}@{d["index_digest"]}', 'platforms': platforms}
     with open(a.output, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=2)
@@ -2082,8 +2039,6 @@ def main(argv: list[str]) -> int:
     for n in ('container', 'fs', 'pdf'):
         p = sub.add_parser(n)
         p.add_argument('role'), p.add_argument('image')
-    p = sub.add_parser('worker-base')
-    p.add_argument('api_image'), p.add_argument('worker_image')
     p = sub.add_parser('scan')
     p.add_argument('role'), p.add_argument('image'), p.add_argument('--image-id', required=True)
     p.add_argument('--trivy-cache', required=True), p.add_argument('--grype-cache', required=True)
@@ -2093,7 +2048,6 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser('attest')
     p.add_argument('role'), p.add_argument('layout'), p.add_argument('--image-id', required=True)
     p.add_argument('--image', help='the loaded image; its ID and layer chain must match the build output')
-    p.add_argument('--base-api-layout', help='Worker only: the gated API layout its provenance must name as base')
     p.add_argument('--revision', required=True), p.add_argument('--platform', required=True)
     p = sub.add_parser('manifest')
     p.add_argument('--expect-platforms', required=True), p.add_argument('--revision', required=True)
@@ -2125,7 +2079,7 @@ def main(argv: list[str]) -> int:
         c.fail(str(e))
         return c.finish()
     handler = {'static': cmd_static, 'config': cmd_config, 'container': cmd_container, 'fs': cmd_fs,
-               'worker-base': cmd_worker_base, 'scan': cmd_scan, 'vulns': cmd_vulns, 'secrets': cmd_secrets,
+               'scan': cmd_scan, 'vulns': cmd_vulns, 'secrets': cmd_secrets,
                'attest': cmd_attest, 'manifest': cmd_manifest, 'pdf': cmd_pdf}[a.cmd]
     try:
         handler(a, c)

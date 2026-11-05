@@ -5,10 +5,10 @@
 # ---- worker configuration per phase (Phase A measurement) -----------------------------------------------------------
 # make_worker_env <name> [ITEM ...]: writes $OUT/worker-env/<name>.env = base.env (run.sh: --worker-env-file, else
 # empty) changed by the items, and sets WENV (file), WRT / WPU (REALTIME_ENABLED / PUSH_ENABLED, which compose sets by
-# interpolation because `environment:` would override an env file) and WNOURL (1 = run compose WITHOUT the pass-through
-# CREWFLOW_PROVISIONER_DATABASE_URL, so the worker does not have that variable at all). Items:
+# interpolation because `environment:` would override an env file) and WNOURL (kept for older phase definitions: since O1
+# the worker never receives a provisioner URL, so `-CREWFLOW_PROVISIONER_DATABASE_URL` only records WNOURL=1). Items:
 #   KEY=VALUE   set KEY in the env file (replacing a base.env value)
-#   -KEY        remove KEY from the env file; `-CREWFLOW_PROVISIONER_DATABASE_URL` removes the compose-provided URL
+#   -KEY        remove KEY from the env file
 # A key that compose already sets for the worker is refused (an env-file value would be silently ignored), as is
 # anything malformed.
 make_worker_env() {

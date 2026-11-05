@@ -1,6 +1,6 @@
 'use strict';
 /**
- * runtime-deps.cjs `check` — the H3 forbidden-package gate (review L-4: the Worker image bans the whole `@swc/*` scope
+ * runtime-deps.cjs `check` — the H3 forbidden-package gate (review L-4: the image bans the whole `@swc/*` scope
  * with ONE exact exception, `--allow @swc/helpers`). Real temporary node_modules trees, the real CLI.
  *
  *   node --test packages/rab-docker/rab/test/runtime-deps.test.cjs
@@ -13,7 +13,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const CLI = path.join(__dirname, '..', 'runtime-deps.cjs');
-// The Worker Dockerfile's SWC arguments, exactly (Dockerfile.worker-bundle H3 gate).
+// The image's SWC arguments, exactly (O1: the one runtime-deps check in rab/Dockerfile).
 const WORKER_ARGS = ['--forbid', '@swc/*', '@swc-node/*', '--allow', '@swc/helpers'];
 
 /** A tree: { 'dir/name': packageJsonName } under <tmp>/node_modules, plus one scanned .js file that imports nothing. */
@@ -86,10 +86,24 @@ test('an --allow that no --forbid entry covers is refused (an exception must be 
   assert.match(r.out, /--allow fontkit is not covered by any --forbid entry/);
 });
 
-test('the Worker Dockerfile bans the whole @swc scope with exactly one exception, @swc/helpers', () => {
-  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile.worker-bundle'), 'utf8');
+test('the image Dockerfile bans the whole @swc scope with exactly one exception, @swc/helpers', () => {
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
   const gate = dockerfile.slice(dockerfile.indexOf('node /tmp/runtime-deps.cjs check'), dockerfile.indexOf('test -f /app/node_modules/@react-pdf/renderer'));
   assert.match(gate, /--forbid [^;]*'@swc\/\*'/);
   assert.deepEqual([...gate.matchAll(/--allow\s+([^\s;\\]+)/g)].map((m) => m[1]), ['@swc/helpers']);
   assert.doesNotMatch(gate, /@swc\/core|@swc\/cli|@swc\/jest/); // no enumerated list left beside the scope ban
+});
+
+test('O1: ONE runtime-deps check covers the API and the Worker (the union of the former two lists)', () => {
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'Dockerfile'), 'utf8');
+  assert.equal(fs.existsSync(path.join(__dirname, '..', 'Dockerfile.worker-bundle')), false, 'the Worker Dockerfile is retired');
+  const checks = [...dockerfile.matchAll(/node \/tmp\/runtime-deps\.cjs check/g)];
+  assert.equal(checks.length, 1, 'exactly one runtime-deps check');
+  const gate = dockerfile.slice(dockerfile.indexOf('node /tmp/runtime-deps.cjs check'), dockerfile.indexOf('test -f /app/node_modules/@react-pdf/renderer'));
+  for (const dir of ['rab-worker/dist', 'rab-server/dist', 'rab-shared/dist-cjs', 'rab-emails/dist']) assert.match(gate, new RegExp(`--scan[^;]*/app/packages/${dir.replace('/', '\/')}`), dir);
+  for (const name of ['typescript', "'@nx/*'", "'@jest/*'", 'ts-node', 'tsx', 'vite', 'esbuild', "'@esbuild/*'", 'eslint', "'@swc/*'", "'@swc-node/*'", 'webpack', 'react-email', '@playwright/test', 'playwright', 'playwright-core', 'chromium-bidi']) {
+    assert.ok(gate.includes(` ${name}`), `--forbid lacks ${name}`);
+  }
+  assert.match(dockerfile, /worker-delta \/api\/node_modules \/app\/node_modules \/worker-delta/, 'the worker-modules delta stage stays');
+  assert.match(dockerfile, /COPY --from=worker-modules \/worker-delta\/node_modules\/ \.\/node_modules\//);
 });

@@ -1,14 +1,17 @@
 # Image security release policy (Docker hardening H5)
 
-This policy covers the Crewflow API image (`packages/rab-docker/rab/Dockerfile`, final stage `rab`) and the Worker bundle
-image (`packages/rab-docker/rab/Dockerfile.worker-bundle`, built FROM the API image). It says which checks block a
-release, how the version floors are raised, and how a finding that cannot be fixed gets an explicit owner decision.
+This policy covers THE Crewflow image (`packages/rab-docker/rab/Dockerfile`, final stage `rab`). O1 (one image): the
+API and the Worker run the same image and differ only by command (default CMD `./api-prestart.sh`; the Worker runs
+`node packages/rab-worker/dist/main.js`); the former Worker bundle image (`Dockerfile.worker-bundle`, built FROM the API
+image) and its root launcher are retired. The gate's single policy role `image` is the merge of the former `api` and
+`worker` roles and keeps every Worker check. It says which checks block a release, how the version floors are raised,
+and how a finding that cannot be fixed gets an explicit owner decision.
 
 | File | Purpose |
 |---|---|
-| `.github/workflows/image-security-gate.yaml` | The gate: builds both images per platform and checks them |
+| `.github/workflows/image-security-gate.yaml` | The gate: builds the one image per platform and checks it |
 | `.github/workflows/ci-security.yaml` (`image-gate`, `ci-security-gate`) | Runs the gate on every PR and every push to `main`, in PR mode |
-| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated API and Worker indexes to `docker.io/adhin007/adolphus` |
+| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated index to `docker.io/adhin007/adolphus` (O1: under both existing tag names) |
 | `packages/rab-docker/scripts/image-security/publish-gated.sh` | The only push path: one gated index, one immutable tag, existing tags refused, served digests verified |
 | `packages/rab-docker/rab/security-floors.env` | Minimum Node and libexpat versions, the Alpine branch, npm floors (no Chromium floor since P5: no image installs Chromium) |
 | `packages/rab-docker/rab/security-floors.sh`, `module-paths-gate.cjs` | H1 build-time gates, re-run by the gate against the finished image |
@@ -45,13 +48,12 @@ succeeded. The default mode of `image_gate.py` is `release`, so forgetting the f
 | `config` | Wrong platform, runtime user, entrypoint, cmd, exposed ports or healthcheck; `org.opencontainers.image.revision` ≠ the source commit; a secret-like env name or a URL with credentials in the image config | – |
 | `container` | `security-floors.sh` fails inside the image (Node or libexpat below the floor; Alpine branch or repositories wrong; Chromium present in either image); `module-paths-gate.cjs` finds a writable module path or a plantable `$HOME/.node_modules` for any runtime identity | – |
 | `fs` (exported filesystem) | setuid/setgid file; file capability; world-writable file or a non-sticky world-writable directory; code under `/app`, `/opt/crewflow-bundle`, `/usr/local` not `0:0` or group/other-writable; **P5: any installed apk matching the role's `forbidden_apk` (Chromium and the 149 OS packages only it pulled in: ffmpeg and every codec, the X11/Wayland/Mesa/GTK stack, fonts, audio, `libxml2`, `glib`, `cups-libs`, `cjson`, ...), any npm package matching `forbidden_npm` (`playwright`, `playwright-core`, `chromium-bidi`, `@playwright/*`, `puppeteer*`), or a `/usr/lib/chromium` / `/usr/bin/chromium*` path**; HOME writable; extra uid 0 account; unapproved apk repository, drop-in, apk config or tag pin; test files, `.env*` files or `.git` in application code; esbuild/vite; an npm package below an `NPM_FLOOR` | Development-only packages (the H3 list in `policy.json`) |
-| `worker-base` | The Worker's lower layers are not exactly the gated API image's layers | – |
 | `scan` | A scanner failed; the scanner version is not the pinned one; DB older than 72 h; the scanned image ID or layer chain is not the gated image | – |
 | `vulns` | **Fixable** High/Critical (either scanner knows a fixed version) without a valid owner decision | **Unfixed** High/Critical without a valid owner decision; a watch-list package whose version changed (re-verify) |
-| `pdf` (Worker) | No PDF: the launcher's jobs-child plan is not `HOME=/nonexistent` + its own TMPDIR/XDG dirs, or forwards a `CHROMIUM_*` / `PLAYWRIGHT_*` key; the render through the production native renderer (`pdf-render-smoke.cjs`; it refuses to run while the Chromium renderer is still exported) fails; the output lacks a `%PDF-` header, `%%EOF`, a page, the known text markers (including the synthetic markup, which must come out as literal text) or an embedded image; the image ran on a host of another architecture (emulated) | – |
+| `pdf` (the image, run as the Worker) | No PDF: the image config carries a `CHROMIUM_*` / `PLAYWRIGHT_*` key; the render does not run as the Worker runs in production (uid 1000, `HOME=/nonexistent`, TMPDIR/XDG on the jobs tmpfs, the per-instance heartbeat file); the render through the production native renderer (`pdf-render-smoke.cjs`; it refuses to run while the Chromium renderer is still exported) fails; the output lacks a `%PDF-` header, `%%EOF`, a page, the known text markers (including the synthetic markup, which must come out as literal text) or an embedded image; the image ran on a host of another architecture (emulated) | – |
 | `secrets` | Any Trivy secret finding in any layer (including files deleted in later layers) or in the image config | – |
 | `attest` | Build output is not the gated image; no SBOM; SBOM too small or missing key packages, or naming a package in `sbom_must_not_include` (P5: `chromium`, `playwright`, `playwright-core`); no or more than one provenance; provenance records a build argument not in the allowlist, a build secret, SSH, a credential-like string, or a source revision ≠ the commit | – |
-| `manifest` | Platforms ≠ the expected set; config OS/architecture ≠ descriptor; an image without its attestation manifest; revision label mismatch; Worker not layered on the API for every platform | – |
+| `manifest` | Platforms ≠ the expected set; config OS/architecture ≠ descriptor; an image without its attestation manifest; revision label mismatch | – |
 
 Medium and Low findings never block. They are counted and listed in the evidence artifacts and the job summary.
 
@@ -169,20 +171,19 @@ and update `verified_on`.
 ## 8. Publishing and tags
 
 - **Target.** The private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer published to: a
-  second registry would need its own tag policy, verification and cleanup, so it does not come for free. Both images
-  come from the same commit and are multi-arch indexes (linux/amd64 + linux/arm64).
-- **Exactly two immutable tags per release:**
-  - `api-<full commit sha>` and `worker-<full commit sha>`;
+  second registry would need its own tag policy, verification and cleanup, so it does not come for free. The image is
+  one multi-arch index (linux/amd64 + linux/arm64) built from the release commit.
+- **Exactly two immutable tags per release (O1; O2 replaces them with one `<full commit sha>` tag):**
+  - `api-<full commit sha>` and `worker-<full commit sha>`, both pointing at the SAME index digest;
   - no `latest`, no version or per-architecture tags, nothing that moves;
   - the push refuses any existing tag, whatever digest it points at.
 
   **Deploy only by index digest:** `docker.io/adhin007/adolphus@sha256:...`, taken from the release manifest. The tags
   are labels, not references.
 - **What is pushed.**
-  1. The Worker is built FROM the API image of the same run, through an OCI-layout build context pinned by digest. The
-     gate proves this from the Worker's provenance (its `crewflow-gate-api-base` dependency must resolve to the gated
-     API image for that platform) and from its layer chain.
-  2. The publish job pushes exactly the two gated layouts with `publish-gated.sh`, which:
+  1. ONE image is built per platform; there is no Worker image built FROM the API image any more, so there is no
+     base-image dependency to prove.
+  2. The publish job pushes exactly the one gated layout with `publish-gated.sh`, once per tag name, which:
      - checks every blob hash and the expected index digest;
      - logs in with the environment secret;
      - fails if the tag exists, or if the registry's answer is anything but "not found";
@@ -204,10 +205,11 @@ and update `verified_on`.
   and branch protection on `main` (owner settings, below) are the real controls; this job makes their absence fail
   closed.
 - **Candidate verify.** `publish-image.yaml` -> Run workflow -> `mode: candidate-verify`, with an optional
-  `candidate-run-id` plus both index digests (from that run's `release-manifest-candidate` artifact):
+  `candidate-run-id` plus the index digest (`candidate-image-digest`, from that run's `release-manifest-candidate`
+  artifact):
   - re-runs every gate against exactly that candidate, including the native PDF render on both architectures;
   - never publishes;
-  - to publish a verified candidate, dispatch again with `mode: publish` and the same three inputs;
+  - to publish a verified candidate, dispatch again with `mode: publish` and the same inputs;
   - dispatch on the candidate's commit, because the revision checks compare the images with the checked-out commit.
   - **Candidate origin** (review F1). Image labels and provenance are written by whoever builds the image, so they
     cannot prove where a candidate came from. Before any candidate artifact is downloaded (the gate's
@@ -224,9 +226,8 @@ and update `verified_on`.
     Any API error fails closed.
 - **Release manifest.** The gate's manifest job writes `release-manifest-candidate` with:
   - the commit;
-  - both index digests and references, and the per-platform manifest digests;
+  - the index digest and reference, and the per-platform manifest digests;
   - the SBOM (SPDX) and provenance (SLSA v1) attestation-manifest and blob digests;
-  - the Worker's recorded base;
   - the scanner versions and DB timestamps per image and platform;
   - the native PDF render results.
 

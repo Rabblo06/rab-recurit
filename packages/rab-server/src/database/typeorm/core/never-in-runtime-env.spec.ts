@@ -1,16 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { forbiddenRuntimeEnvNames, forbiddenRuntimeEnvPrefixes, forbiddenWorkerServiceEnvNames, NEVER_IN_RUNTIME_ENV, runtimeEnvRefusal } from './never-in-runtime-env';
+import { forbiddenRuntimeEnvNames, forbiddenRuntimeEnvPrefixes, NEVER_IN_RUNTIME_ENV, runtimeEnvRefusal } from './never-in-runtime-env';
 import { resolveRuntimeDatabase, RuntimeDbError } from './runtime-database-guard';
 
 /**
- * Security review L-4: one list (never-in-runtime-env.ts), three enforcers. The shell script and the standalone launcher keep
- * literal copies; these tests fail when either drifts, and prove the in-process guard refuses every name.
+ * Security review L-4: one list (never-in-runtime-env.ts), two enforcers (O1: the Worker bundle launcher is retired). The
+ * shell script keeps a literal copy; these tests fail when it drifts, and prove the in-process guard refuses every name.
  */
 const DOCKER = path.resolve(__dirname, '../../../../../rab-docker/rab');
 const PRESTART = path.join(DOCKER, 'api-prestart.sh');
-const LAUNCHER = path.join(DOCKER, 'worker-bundle/start-worker-bundle.cjs');
 const LOCAL = 'postgres://crewflow_app:S3cret-PW-do-not-print@127.0.0.1:55462/rab_test';
 
 /** Every name in the `for name in ...; do` refusal loops of api-prestart.sh (continuation lines joined). */
@@ -29,7 +28,7 @@ function prestartPrefixes(): string[] {
 
 const sorted = (xs: readonly string[]) => [...xs].sort();
 
-describe('never-in-runtime-env (security review L-4): one list, three enforcers', () => {
+describe('never-in-runtime-env (security review L-4): one list, two enforcers', () => {
   it('the list holds every name the review requires, each once', () => {
     const names = NEVER_IN_RUNTIME_ENV.map((e) => e.name);
     expect(new Set(names).size).toBe(names.length);
@@ -62,12 +61,12 @@ describe('never-in-runtime-env (security review L-4): one list, three enforcers'
     expect(sorted(names)).toEqual(sorted(forbiddenRuntimeEnvNames('api')));
   });
 
-  it('the Worker bundle launcher refuses exactly the Worker-service list (parity with the shared constant)', () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const launcher = require(LAUNCHER) as { FORBIDDEN_SERVICE_KEYS: readonly string[] };
-    expect(sorted(launcher.FORBIDDEN_SERVICE_KEYS)).toEqual(sorted(forbiddenWorkerServiceEnvNames()));
-    // The launcher legitimately holds the provisioner credential (it hands it to the provisioner child alone).
-    expect(launcher.FORBIDDEN_SERVICE_KEYS).not.toContain('CREWFLOW_PROVISIONER_DATABASE_URL');
+  it('O1: the Worker bundle launcher is gone, so nothing may hold the provisioner credential any more (API and Worker refuse it by name)', () => {
+    expect(fs.existsSync(path.join(DOCKER, 'worker-bundle/start-worker-bundle.cjs'))).toBe(false);
+    for (const processName of ['api', 'worker'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('CREWFLOW_PROVISIONER_DATABASE_URL');
+    }
+    expect(prestartNames()).toContain('CREWFLOW_PROVISIONER_DATABASE_URL');
   });
 
   it.each(['api', 'worker', 'provisioner'] as const)('the in-process runtime guard refuses every listed name in the %s process (DB_TARGET: any value but a tolerated non-production local|test)', (processName) => {
@@ -122,8 +121,6 @@ describe('never-in-runtime-env (security review L-4): one list, three enforcers'
     }
     // The superseded separate provisioner process (unused; removed in the final clean-up PR) is left exactly as it was.
     for (const name of OWNER_LOGIN_NAMES) expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain(name);
-    // The superseded Worker bundle launcher keeps its literal list until it is removed (it is a #61/#62 file).
-    for (const name of OWNER_LOGIN_NAMES) expect(forbiddenWorkerServiceEnvNames()).not.toContain(name);
     // Actionable messages: the legacy name says what to rename it to.
     expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);
   });
@@ -141,11 +138,8 @@ describe('never-in-runtime-env (security review L-4): one list, three enforcers'
     expect(runtimeEnvRefusal({ CREWFLOW_PROVISIONER_ENABLED: 'true' }, 'provisioner')).toBeNull();
   });
 
-  it('L-4 follow-up: the image enforcers stay strict BY NAME (DB_TARGET included); they never see a developer .env', () => {
+  it('L-4 follow-up: the image enforcer stays strict BY NAME (DB_TARGET included); it never sees a developer .env', () => {
     expect(prestartNames()).toContain('DB_TARGET');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const launcher = require(LAUNCHER) as { FORBIDDEN_SERVICE_KEYS: readonly string[] };
-    expect(launcher.FORBIDDEN_SERVICE_KEYS).toContain('DB_TARGET');
     // The dev compose blanks DB_TARGET on both image services, so the strict rule never refuses a legitimate start there.
     const compose = fs.readFileSync(path.join(DOCKER, '..', 'docker-compose.yml'), 'utf8');
     expect(compose.match(/^\s+DB_TARGET: ''$/gm)?.length).toBeGreaterThanOrEqual(2);

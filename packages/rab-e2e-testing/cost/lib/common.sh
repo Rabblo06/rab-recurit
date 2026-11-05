@@ -33,9 +33,9 @@ load_secrets() {
   # shellcheck disable=SC1090
   . "$COST_SECRETS"
   set +a
-  # The worker's provisioner URL is a compose pass-through (docker-compose.cost.yml); COST_NO_PROVISIONER_URL=1 leaves it out.
-  if [ "${COST_NO_PROVISIONER_URL:-0}" = 1 ]; then unset CREWFLOW_PROVISIONER_DATABASE_URL
-  else export CREWFLOW_PROVISIONER_DATABASE_URL="postgres://crewflow:${CREWFLOW_PW}@pg:5432/rab"; fi
+  # O1: the Worker provisions in-process and refuses CREWFLOW_PROVISIONER_*; nothing passes a provisioner URL any more
+  # (COST_NO_PROVISIONER_URL is accepted and has no effect).
+  unset CREWFLOW_PROVISIONER_DATABASE_URL
 }
 
 # COST_TAG selects the image pair crewflow-cost/{server,worker}:$COST_TAG.

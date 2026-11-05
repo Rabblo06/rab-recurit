@@ -11,7 +11,7 @@ icon: "cloud-arrow-up"
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |
 | API | `api-prestart.sh` (then `main.js`) | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. Checks read-only that no migration is pending. |
-| Worker | `start-worker-bundle.cjs` (launcher) | jobs: `crewflow_app`; provisioner: `crewflow` | Two supervised processes with separate non-root users. Only the provisioner process receives the provisioning login. |
+| Worker | `node packages/rab-worker/dist/main.js` (the same image as the API) | the one owner login | One non-root process (uid 1000) under the container init; workspace provisioning runs in-process. The former launcher and its provisioner child are retired (O1). |
 | Migrate (one-off release step) | `deploy-prepare.js` | `crewflow_migrator`, from `.env.migrate` only | Runs before the API and the Worker (they wait for it to exit 0). Applies migrations only for an approved release; exit 3 when migrations are pending but not approved. |
 
 Every process reads one database variable, `PG_DATABASE_URL`, holding its own credential; production refuses the legacy names (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX`) and requires TLS verify-full on a direct (non-pooled) endpoint. The image's default `CMD` is `api-prestart.sh`, which never migrates. Migrations run only in the one-off `rab-migrate` step, which takes the migration lock and checks the target, the deployment identity, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1). Full procedure: `docs/runbooks/database.md`.

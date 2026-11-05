@@ -3,9 +3,10 @@
 #
 # !!! OPENSHIP CANNOT RUN THIS STACK SAFELY (M0 D11) !!!
 # OpenShip drops `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on`
-# conditions (docs/release/OPENSHIP-COMPATIBILITY.md). The separated Worker relied on a root launcher that dropped each
-# child to its own uid; that launcher is retired, so on OpenShip the Worker image's root default user would run the
-# Worker ITSELF AS ROOT. The supported deployment is docker-compose.image.yml with plain `docker compose`
+# conditions (docs/release/OPENSHIP-COMPATIBILITY.md). O1 (one image): the image's default user is now the non-root
+# `node` (1000:1000) for every command, so a dropped `user:` no longer means a root Worker; the other dropped keys
+# (read-only root, capabilities, no-new-privileges, PID limits, tmpfs, init) still make OpenShip unsupported. The supported
+# deployment is docker-compose.image.yml with plain `docker compose`
 # (docs/release/OWNER-LOGIN-DEPLOYMENT.md, OWNER-LOGIN-ORACLE-VM-PLAN.md). A push to main may redeploy the temporary
 # OpenShip deployment from this file: before this version merges, the owner must disable that auto-deploy or accept that
 # the temporary deployment stops (its database has no crewflow_owner). NEEDS OWNER APPROVAL.
@@ -46,8 +47,8 @@
 # one-run `run -e` on rab-migrate; and any override of the keys committed below.
 #
 # SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). SUPERSEDED, KEPT UNTIL THE FINAL CLEAN-UP PR (#9, owner
-# approval): rab-ops (profile "ops") and the retired Worker bundle launcher (rab/worker-bundle/start-worker-bundle.cjs,
-# still the Worker image's default CMD; this file overrides it).
+# approval): rab-ops (profile "ops"). O1: the Worker bundle launcher and its separate Dockerfile are gone; the API and
+# the Worker build the SAME image (rab/Dockerfile) and differ only by command.
 
 name: rab-production
 
@@ -122,13 +123,10 @@ services:
   # rab-worker — background jobs, ONE process as uid/gid 1000 (no root launcher, no per-child credentials, in-process
   # provisioning). Never migrates; starts after a healthy API.
   rab-worker:
+    # O1: the same image as rab-api (rab/Dockerfile, its last stage `rab`), a different command.
     build:
       context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile.worker-bundle
-      additional_contexts:
-        crewflow-app: service:rab-api
-      args:
-        CREWFLOW_BASE_IMAGE: ${CREWFLOW_BASE_IMAGE:-crewflow-app}
+      dockerfile: packages/rab-docker/rab/Dockerfile
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
     # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,

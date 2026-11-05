@@ -200,28 +200,17 @@ services:
       retries: 15
       start_period: 20s
 
-  # Worker SERVICE = ordinary jobs + workspace provisioner, two supervised OS processes in ONE container (four-core-service
-  # packaging, 2026-10-22; owner decision 2026-10-15 still holds: provisioning is part of the default stack, otherwise a new
-  # workspace stays "CREATING" and onboarding never reaches the welcome). Same image recipe and security settings as
-  # production (docker-compose.production.yml rab-worker): a root-only launcher starts
-  #   jobs        packages/rab-worker/dist/main.js                    uid/gid 1000   crewflow_app (DEVDB_URL) only
-  #   provisioner packages/rab-worker/dist/workspace-provisioner.main.js uid/gid 10001  crewflow, direct
-  # each with an explicit allowlisted environment. ../rab-server/.env reaches ONLY the launcher: the jobs child receives the
-  # allowlisted application keys from it (APP_SECRET etc., the same values the server uses), the provisioner child none.
-  # Neither child ever runs core migrations; DATABASE_URL_UNPOOLED stays blank (the launcher refuses a non-empty one). The
-  # jobs child's one connection is PG_DATABASE_URL (crewflow_app, direct: it is also the session-lock connection); the
-  # provisioner child receives CREWFLOW_PROVISIONER_DATABASE_URL as its own PG_DATABASE_URL.
-  # CUTOVER from the old layout (separate `provisioner` service): editing this file does not remove the old container.
-  # Remove it deliberately — `docker compose up -d --remove-orphans`, or `docker rm -f rab-provisioner-1` — then rebuild
-  # and recreate `worker`. Two provisioners at once would still be safe (session advisory lock), just unaccounted for.
+  # Worker SERVICE (O1, one image): the SAME image as `server` (rab/Dockerfile), a different command:
+  # `node packages/rab-worker/dist/main.js`, ONE process as uid/gid 1000 under compose's init, with workspace provisioning
+  # in-process (owner-login architecture). The retired root launcher, its provisioner child (uid 10001) and the
+  # CREWFLOW_PROVISIONER_DATABASE_URL hand-off are gone; the runtime guard refuses that variable in this process.
+  # KNOWN GAP (pre-existing since #72, not changed here): this dev stack's database settings are still the separated ones
+  # (DEVDB_URL = crewflow_app); the runtime now requires the owner login (crewflow_owner), so point DEVDB_URL /
+  # DEVDB_WORKER_URL at it. Rebuilding the dev stack for the owner login is a separate change.
   worker:
     build:
       context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile.worker-bundle
-      additional_contexts:
-        crewflow-app: service:server
-      args:
-        CREWFLOW_BASE_IMAGE: crewflow-app
+      dockerfile: packages/rab-docker/rab/Dockerfile
     env_file:
       - ../rab-server/.env
     environment:
@@ -232,25 +221,20 @@ services:
       # DEVDB_WORKER_URL to it (same container name PG_DATABASE_URL; the server keeps DEVDB_URL = crewflow_app and refuses
       # crewflow_worker). Unset = DEVDB_URL, exactly as before.
       PG_DATABASE_URL: ${DEVDB_WORKER_URL:-${DEVDB_URL:-}}
-      # Command authority: the Worker bundle launcher refuses it (security review L-4); blanked in case ../rab-server/.env sets it.
+      # Command authority: the runtime guard refuses it in a long-running process (security review L-4); blanked in case
+      # ../rab-server/.env sets it.
       DB_TARGET: ''
       # Phase B (B5): the Worker runtime pool size (connection-budget.ts DEFAULT_WORKER_POOL_MAX).
       PG_POOL_MAX_CONNECTIONS: '12'
       DATABASE_URL: ''
       DATABASE_DIRECT_URL: ''
       DATABASE_URL_UNPOOLED: ''
-      # The provisioner child's privileged connection (handed to that child alone as its PG_DATABASE_URL; stays until G2).
-      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${CREWFLOW_BOOTSTRAP_PASSWORD:-}@devdb:5432/rab
+      # O1: no provisioner credential (provisioning runs in-process); blanked in case ../rab-server/.env sets it.
+      CREWFLOW_PROVISIONER_DATABASE_URL: ''
       REDIS_URL: redis://redis:6379
-      # HWS runtime routing ON for the jobs child — DEVELOPMENT ONLY, same decision as the server (see its comment). The
-      # launcher forwards it unchanged to both children (Phase A: it is no longer forced for the provisioner child).
+      # HWS runtime routing ON — DEVELOPMENT ONLY, same decision as the server (see its comment).
       HWS_RUNTIME_ENABLED: 'true'
-      # Phase A (pa-provisioner): the provisioner switch; the dev stack keeps the provisioner (owner decision 2026-10-15, see
-      # the service comment above). Unset = the pre-Phase-A behaviour (on, 5 s); "false" makes the launcher refuse to start
-      # while CREWFLOW_PROVISIONER_DATABASE_URL is set.
-      # Polling interval: WORKSPACE_PROVISIONER_INTERVAL_SECONDS (5..120, default 60 with the switch "true"; it was a fixed
-      # 5 s before Phase A).
-      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      # In-process provisioning interval (5..120 s): WORKSPACE_PROVISIONER_INTERVAL_SECONDS; unset = the code default.
       # Same workspace-host pair as the server (DEVELOPMENT ONLY): the shared validator refuses origin trust without host
       # routing, and the worker builds workspace-aware invitation links from the base domain.
       WORKSPACE_BASE_DOMAIN: localhost:5173
@@ -267,31 +251,38 @@ services:
       BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       # Phase D (D1/D2): dispatch claims and wake-ups for a deliberate local trial; unset = the code defaults (per_scope /
       # poll; backstop 30 s, reconciliation 900 s, batch 100). global needs DEVDB_WORKER_URL (crewflow_worker); event needs
-      # global. The launcher and the jobs child refuse any other combination.
+      # global. The Worker refuses any other combination.
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
-    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
+      # What the retired launcher gave its jobs child (H1-M1): HOME a path the process can neither write nor create, temp
+      # and XDG caches in its own 0700 tmpfs, and the per-instance heartbeat the health check reads.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
+    command: ['node', 'packages/rab-worker/dist/main.js']
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
     # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
     restart: unless-stopped
-    user: '0:0'
+    # Docker's init as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1.
+    init: true
+    user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ['no-new-privileges:true']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    stop_grace_period: 55s
+    stop_grace_period: 45s
     volumes:
       - rab-local-storage:/app/storage
     healthcheck:
-      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      # Jobs-only per-instance health (the provisioner role is off for this check only).
+      test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
       interval: 15s
       timeout: 10s
       retries: 3

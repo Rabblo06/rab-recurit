@@ -1,8 +1,8 @@
 'use strict';
 /**
- * Lane A — Linux-only BullMQ cases with the REAL Worker bundle image (launcher + jobs child + provisioner child, the
- * production security settings and health check): per-instance health in bullmq mode, SIGTERM drain with work in flight,
- * SIGKILL, provisioner stats identity. Runs against the disposable `crewflow-bullmq` project only (profile `bundle`),
+ * Lane A — Linux-only BullMQ cases with the REAL Crewflow image run as the Worker command (O1: one image, one process,
+ * in-process provisioning, the production security settings and jobs-only health check): per-instance health in bullmq
+ * mode, SIGTERM drain with work in flight, SIGKILL, provisioning stats kept apart from the jobs stats. Runs against the disposable `crewflow-bullmq` project only (profile `bundle`),
  * after run-bullmq-cluster.cjs (or reset) left it migrated. The caller supplies the four BQ_* secrets of that database.
  *
  *   BQ_...=... node packages/rab-docker/rab/worker-bundle/test/integration/run-bullmq-bundle.cjs <evidence-dir>
@@ -116,13 +116,14 @@ async function step(id, title, fn) {
     await redis.flushall();
   });
 
-  await step('B1', 'Two bundles in bullmq mode become healthy; both children identified; heartbeat file carries the bullmq contract', async () => {
+  await step('B1', 'Two Worker replicas in bullmq mode become healthy; in-process provisioning on; heartbeat file carries the bullmq contract', async () => {
     assert(compose(['up', '-d', 'bundle-a', 'bundle-b']).code === 0, 'up failed');
     await waitFor('both healthy', () => health('bundle-a') === 'healthy' && health('bundle-b') === 'healthy', 240_000, 3000);
     for (const s of ['bundle-a', 'bundle-b']) {
       const l = logs(s);
-      assert(/live identity probes agree: database=rab cluster=\d+ \(jobs=crewflow_app, provisioner=crewflow\)/.test(l), `${s}: identity line`);
-      assert(/\[jobs\] rab-worker ready \(scheduler=bullmq\)/.test(l), `${s}: jobs not ready in bullmq mode`);
+      assert(/workspace provisioning: in-process on the owner login/.test(l), `${s}: in-process provisioning line`);
+      assert(/^rab-worker ready \(scheduler=bullmq\)$/m.test(l), `${s}: not ready in bullmq mode`);
+      assert(!/start-worker-bundle|\[worker-bundle\]/.test(l), `${s}: launcher output (the launcher is retired)`);
       const hb = JSON.parse(docker(['exec', '-u', '1000:1000', cname(s), 'cat', '/run/crewflow-health/jobs/heartbeat.json'], { quiet: true }).out);
       write(`${s} jobs heartbeat: ${JSON.stringify(hb)}`);
       assert(hb.mode === 'bullmq' && hb.consumersReadyAt > 0 && hb.reconcileOkAt > 0, `${s}: heartbeat contract`);
@@ -142,7 +143,7 @@ async function step(id, title, fn) {
     return `36/36 samples healthy/healthy`;
   });
 
-  await step('B3', 'Provisioner stats identity: jobs startedAt no longer overwritten; old readers still see lastWorkspaceProvisioningAt', async () => {
+  await step('B3', 'Provisioning stats identity (in-process runtime): jobs startedAt not overwritten; old readers still see lastWorkspaceProvisioningAt', async () => {
     const jobs = await redis.hgetall('rab:worker:stats');
     const prov = await redis.hgetall('rab:workspace-provisioner:stats');
     write(`rab:worker:stats startedAt=${jobs.startedAt} lastWorkspaceProvisioningAt=${jobs.lastWorkspaceProvisioningAt}\nrab:workspace-provisioner:stats ${JSON.stringify(prov)}`);
@@ -158,17 +159,17 @@ async function step(id, title, fn) {
     return `jobs startedAt values seen=${seen.size}; provisioner startedAt kept separately`;
   });
 
-  await step('B4', 'SIGTERM with emails in flight: bounded drain, launcher exits 0, no email lost or sent twice', async () => {
+  await step('B4', 'SIGTERM with emails in flight: bounded drain, the Worker exits 0, no email lost or sent twice', async () => {
     const ids = await insertEmails(300, 'b4');
     await sleep(1_500);
     const t0 = Date.now();
-    const stop = docker(['stop', '-t', '55', cname('bundle-a')]);
+    const stop = docker(['stop', '-t', '45', cname('bundle-a')]);
     const ms = Date.now() - t0;
     const l = logs('bundle-a');
-    write(l.split('\n').filter((x) => /Worker received|shut down|exiting with code|still busy|force-clos|cycle\(s\) still running|provisioner\] shut down/.test(x)).join('\n'));
+    write(l.split('\n').filter((x) => /Worker received|shut down|still busy|force-clos|cycle\(s\) still running/.test(x)).join('\n'));
     const code = docker(['inspect', '-f', '{{.State.ExitCode}}', cname('bundle-a')], { quiet: true }).out.trim();
-    assert(stop.code === 0 && /\[jobs\] Worker shut down cleanly/.test(l) && /exiting with code 0/.test(l) && code === '0', `unclean stop (exit ${code})`);
-    assert(ms < 55_000, `stop took ${ms}ms`);
+    assert(stop.code === 0 && /^Worker shut down cleanly$/m.test(l) && code === '0', `unclean stop (exit ${code})`);
+    assert(ms < 45_000, `stop took ${ms}ms`);
     await deliveredExactlyOnce(ids);
     const schedulers = await redis.zcard('crewflow:development:bull:crewflow-scan-email:repeat');
     assert(schedulers === 1, 'email-dispatch scheduler removed by shutdown');
@@ -192,7 +193,7 @@ async function step(id, title, fn) {
     const r = spawnSync('docker', ['compose', '-p', PROJECT, '-f', FILE, '--profile', 'bundle', 'up', '-d', '--force-recreate', 'bundle-b'], { env, encoding: 'utf8' });
     write(redact(`${r.stdout}${r.stderr}`));
     await waitFor('b healthy (interval)', () => health('bundle-b') === 'healthy', 240_000, 3000);
-    assert(/\[jobs\] rab-worker ready$/m.test(logs('bundle-b')), 'not interval mode');
+    assert(/^rab-worker ready$/m.test(logs('bundle-b')), 'not interval mode');
     const before = await redis.zcard('crewflow:development:bull:crewflow-scan-email:completed');
     await sleep(30_000);
     const after = await redis.zcard('crewflow:development:bull:crewflow-scan-email:completed');

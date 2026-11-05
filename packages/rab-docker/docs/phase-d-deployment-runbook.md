@@ -50,14 +50,10 @@ Defaults are defined in `packages/rab-server/src/engine/core-modules/environment
 production compose file (`packages/rab-docker/docker-compose.production.yml`) sets none of the Phase D dispatch
 variables, so the code defaults apply. It pins `WORKER_SCHEDULER: interval`.
 
-The Worker bundle launcher (`packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs`) also refuses, before any
-child starts:
-
-- `WORKER_DISPATCH_MODE=event` without `WORKER_CLAIM_MODE=global`;
-- `WORKER_CLAIM_MODE=global` unless the jobs child's `PG_DATABASE_URL` logs in as `crewflow_worker`;
-- a jobs login other than `crewflow_app` or `crewflow_worker`.
-
-The jobs child's own environment validation and live boot gate remain the authority.
+O1 (one image): the Worker bundle launcher that used to pre-check these is retired; the Worker runs
+`node packages/rab-worker/dist/main.js` directly. The Worker's own start-up refuses `WORKER_DISPATCH_MODE=event` without
+`WORKER_CLAIM_MODE=global` (`packages/rab-worker/src/core/wake/dispatch-wiring.ts`), and its environment validation and
+live boot gate (database login included) remain the authority.
 
 ## 3. Creating the `crewflow_worker` login (operator step, not a migration)
 

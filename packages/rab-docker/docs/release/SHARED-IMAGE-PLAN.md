@@ -1,6 +1,16 @@
-# Shared API/Worker image: plan for a LATER, SEPARATE PR (not implemented)
+# Shared API/Worker image: plan (O1 implements the image; proofs below partly open)
 
-**Status (2026-11-04): plan only. Nothing here is implemented.** The owner-login deployment keeps the **two** hardened images:
+**Status (2026-11-05): O1 ("EXACTLY LIKE TWENTY", owner-approved) implements the one image.** `rab/Dockerfile` (stage
+`rab`) now carries the API and the Worker; the Worker runs it with `node packages/rab-worker/dist/main.js`.
+`Dockerfile.worker-bundle`, `start-worker.sh` and the root launcher `start-worker-bundle.cjs` are deleted. The image gate
+has ONE role (`image`, the union of the former `api` and `worker` checks: forbidden lists, PDF render, jobs dirs,
+module-path identities for uid 1000 with and without `HOME=/nonexistent`). Publishing pushes the one gated index under
+the two existing tag names (`api-<commit>`, `worker-<commit>`, same digest); O2 collapses them to one tag. Proofs 1-2
+below (SBOM diff justification, "the API never loads PDF-only packages") are NOT yet automated by O1: the merged
+runtime-deps check forbids the same build/test tooling across every dist directory, but the import-graph / `require.cache`
+check is still open. The text below is the original plan, kept for those proofs.
+
+**Original status (2026-11-04): plan only.** The owner-login deployment kept the **two** hardened images:
 - the API image (`rab/Dockerfile`);
 - the Worker image (`rab/Dockerfile.worker-bundle`, built FROM the API image).
 

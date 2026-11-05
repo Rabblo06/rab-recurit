@@ -12,8 +12,8 @@ import * as ts from 'typescript';
  *   - `new Pool(` / `new Client(` imported from 'pg' (or `new pg.Pool(` / `new pg.Client(`), and `new DataSource(` (or
  *     any `new …DataSource(`) — a connection constructed outside the factory.
  *
- * Allowed without a list: the factory itself and tests and test helpers (`__tests__/`, `*.spec.ts`, `jest-*`). The Worker
- * bundle launcher (packages/rab-docker/…/start-worker-bundle.cjs) is outside the scanned roots. Security review L-5: the
+ * Allowed without a list: the factory itself and tests and test helpers (`__tests__/`, `*.spec.ts`, `jest-*`). (The Worker
+ * bundle launcher that used to sit outside the scanned roots is retired, O1.) Security review L-5: the
  * migration scripts directory (src/database/typeorm/scripts) is no longer exempt as a whole — it ships in dist/ — so each
  * script that genuinely needs a raw read or construction has its own BASELINE entry, and a new script is scanned.
  *

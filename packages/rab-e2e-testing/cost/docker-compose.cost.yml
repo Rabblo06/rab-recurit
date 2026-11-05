@@ -192,15 +192,13 @@ services:
       - ${COST_WORKER_ENV_FILE:-./init/empty.env}
     environment:
       <<: *app-env
-      # Phase B: also the jobs child's session-lock connection (direct), as in the e2e/production compose.
+      # Phase B: also the Worker's session-lock connection (direct), as in the e2e/production compose.
       # Phase D: a global-claim phase logs the jobs child in as crewflow_worker by exporting COST_WORKER_DB_USER=crewflow_worker
       # and COST_WORKER_DB_PW (harness scripts); unset = crewflow_app with CREWFLOW_APP_PW, exactly as before.
       PG_DATABASE_URL: postgres://${COST_WORKER_DB_USER:-crewflow_app}:${COST_WORKER_DB_PW:-${CREWFLOW_APP_PW:?}}@pg:5432/rab
       PG_POOL_MAX_CONNECTIONS: '12'
-      # Pass-through (no value here): lib/common.sh load_secrets exports postgres://crewflow:<CREWFLOW_PW>@costaudit-pg:5432/rab;
-      # a configuration with `-CREWFLOW_PROVISIONER_DATABASE_URL` (lib/worker-env.sh) runs compose without it, so the key is
-      # ABSENT from the worker (Phase A: a disabled provisioner must not hold the URL).
-      CREWFLOW_PROVISIONER_DATABASE_URL:
+      # O1 (one image): no CREWFLOW_PROVISIONER_DATABASE_URL pass-through any more. Provisioning runs in-process and the
+      # Worker refuses any non-empty CREWFLOW_PROVISIONER_* variable.
       # Default false/false = the code defaults, which is also what the production compose runs (it sets neither key).
       # The `idleflags` phase recreates the worker with both true (COST_REALTIME_ENABLED / COST_PUSH_ENABLED).
       REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
@@ -211,18 +209,32 @@ services:
       WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
       WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
       WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
-    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
-    user: '0:0'
+      # What the retired launcher gave its jobs child (H1-M1), as in production.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
+    # O1: the same image as `api` (scripts/build-images.sh tags one build as both), the Worker command, ONE process as
+    # uid 1000 under compose's init (the watchdog's SIGKILL is ignored for PID 1).
+    command: ['node', 'packages/rab-worker/dist/main.js']
+    init: true
+    user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ['no-new-privileges:true']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    stop_grace_period: 55s
+    stop_grace_period: 45s
+    # O1: the one image has no HEALTHCHECK of its own (the retired Worker image had one); the jobs-only per-instance check
+    # the production compose uses, so measure.sh docker_health keeps reporting.
+    healthcheck:
+      test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     cpus: ${COST_WORKER_CPUS:-1}
     mem_limit: ${COST_WORKER_MEM:-1g}
     networks: [cost]
@@ -267,9 +279,8 @@ services:
         exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
 
   # Runs harness scripts that need the application's own compiled code/deps (seed, history backfill, storage CLI).
-  # The harness folder is mounted read-only at /cost. Docker hardening H2: the history backfill renders real PDFs and
-  # Chromium now exists only in the Worker image, so this one-off runs the Worker image as the jobs identity (uid 1000,
-  # the same user the server image runs as; the image's tini entrypoint just execs the given command).
+  # The harness folder is mounted read-only at /cost. The history backfill renders real PDFs (@react-pdf, no browser); O1:
+  # the server and worker tags are the same image, run as uid 1000 (the image's tini entrypoint just execs the command).
   tool:
     profiles: ['ops']
     image: crewflow-cost/worker:${COST_TAG:?}
@@ -283,8 +294,8 @@ services:
       SEED_PW: ${SEED_PW:?}
       # Docker hardening H1-M1 (main 824f0824..2733c7fb): the image's HOME is not writable by uid 1000, and Chromium's
       # crashpad handler then aborts the launch ("--database is required", SIGTRAP), so the backfill could not render.
-      # Same plan the Worker launcher gives its jobs child (start-worker-bundle.cjs): HOME=/nonexistent (not creatable),
-      # TMPDIR a private 0700 tmpfs, crashpad/fontconfig state in XDG_* directories inside it.
+      # Same plan the production Worker runs with: HOME=/nonexistent (not creatable), TMPDIR a private 0700 tmpfs,
+      # fontconfig state in XDG_* directories inside it.
       HOME: /nonexistent
       TMPDIR: /tmp/crewflow-jobs
       XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config

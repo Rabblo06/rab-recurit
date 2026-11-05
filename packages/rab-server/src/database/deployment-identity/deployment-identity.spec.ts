@@ -251,10 +251,11 @@ describe('deployment identity: the marker decision (pure)', () => {
 
   it('final review F4: only the listed compose database services count as local single-label hosts; any other single-label name is remote and refused unmarked', async () => {
     // The list is exactly the repository's own compose / harness database services (no env-var widening exists).
-    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'pg-other', 'postgres']);
-    for (const host of ['devdb', 'postgres', 'pg', 'pg-other', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
+    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'postgres']);
+    for (const host of ['devdb', 'postgres', 'pg', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
     // Resolved through a DNS search domain or a Kubernetes namespace: remote, whatever it looks like.
-    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'localhost.'];
+    // O1: pg-other (the retired bundle-test harness's second cluster) is remote again.
+    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'pg-other', 'localhost.'];
     for (const host of unlisted) expect(isRemoteDatabaseHost(host)).toBe(true);
     for (const connectionHost of unlisted) {
       for (const state of ['absent', 'unbound'] as const) {
@@ -287,7 +288,6 @@ describe('deployment identity: the marker decision (pure)', () => {
       'packages/rab-docker/docker-compose.qa.yml',
       'packages/rab-docker/docker-compose.production.yml',
       'packages/rab-e2e-testing/system/docker-compose.e2e.yml',
-      'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bundle-test.yml',
       'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml',
     ];
     const used = new Set<string>();
