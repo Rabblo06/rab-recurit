@@ -201,7 +201,9 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     // SET ROLE rab_secure_owner gets past this (G-03, owner-accepted).
     it('the runtime login (API and Worker alike) sees zero pointers, cannot insert one and changes none, with or without tenant context (BC-10)', async () => {
       const total = async () => (await admin.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer')).rows[0].n as number;
+      await insertEmail(a.org); // a due email write: its trigger creates a pointer, so "zero rows" below is RLS, not an empty table
       const before = await total();
+      expect(before).toBeGreaterThan(0);
       for (const c of [app, worker]) {
         expect((await c.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer')).rows[0].n).toBe(0);
         expect((await asTenant(c, a.org, null, () => c.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer'))).rows[0].n).toBe(0);
@@ -237,7 +239,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
       expect(await runtimeRolledBack(worker, () => claim(worker, 'email', 1))).toBe('ACCEPTED');
     });
 
-    it('the API login is not, and cannot become, the Worker: no membership either way', async () => {
+    it('the schema roles crewflow_app and crewflow_worker share no membership either way (the one runtime login is both: BC-08, NEEDS OWNER APPROVAL)', async () => {
       const { rows } = await admin.query(
         `SELECT pg_has_role('crewflow_app', 'crewflow_worker', 'USAGE') AS app_has_worker, pg_has_role('crewflow_worker', 'crewflow_app', 'SET') AS worker_set_app,
                 pg_has_role('crewflow_worker', 'crewflow', 'USAGE') AS worker_crewflow, pg_has_role('crewflow_worker', 'rab_secure_owner', 'USAGE') AS worker_secure`,

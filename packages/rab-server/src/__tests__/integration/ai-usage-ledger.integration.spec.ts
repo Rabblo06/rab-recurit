@@ -188,7 +188,7 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       expect(t).toBe(true); // AI-1 (NEEDS OWNER APPROVAL)
     });
 
-    it('WITH CHECK: no row for another user (not even by the CEO) or another organisation; id / created_at are not insertable', async () => {
+    it('COLGRANT-1: WITH CHECK still refuses a row for another user or organisation; id / created_at are refused to the schema role crewflow_app but accepted for the runtime login (NEEDS OWNER APPROVAL; rolled back)', async () => {
       const cols = `organisation_id, user_id, turn_id, usage_date, kind, model, outcome`;
       const vals = (org: string, user: string) => [org, user, randomUUID(), day, 'chat', TEST_MOCK_MODEL_ID, 'completed'];
       expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (${cols}) VALUES ($1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, im.id.userId)).catch((e) => e))).toBe('42501');

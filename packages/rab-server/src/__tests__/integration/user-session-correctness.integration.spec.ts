@@ -519,15 +519,15 @@ describeIfDb('core.user_session correctness (P1B)', () => {
   // ================================================================================================ P1B.1 COLUMN AUTHORITY (item 1)
   describe('P1B.1 — column authority: rab_app cannot arbitrarily mutate sensitive columns', () => {
     // Owner-login architecture (P-class): the column grant still refuses the SCHEMA ROLE crewflow_app (42501). The runtime
-    // login crewflow_owner holds the owner's column privileges, but a trigger still refuses the change (P0001): asserted as
-    // "refused, and the row is unchanged", independent of the SQLSTATE that does the refusing.
+    // login crewflow_owner holds the owner's column privileges, but the user_session trigger still refuses the change (P0001,
+    // asserted exactly), and the row is unchanged.
     it('20: absolute_expires_at cannot be changed directly, even on its own correctly-bound row: schema role crewflow_app 42501; runtime login refused, row unchanged', async () => {
       const login = await loginRaw(managerA.email, managerA.password, 'manager_web').expect(200);
       const sid = decodeSid(login.body.accessToken);
       const sql = `UPDATE core.user_session SET absolute_expires_at = now() + interval '100 days' WHERE id = $1`;
       expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', { organisationId: org.id, userId: managerA.userId }, [{ sql, params: [sid] }])).toBe('42501');
       const [before] = await adminDataSource.query(`SELECT absolute_expires_at FROM core.user_session WHERE id = $1`, [sid]);
-      await expect(asRabApp(managerA.userId, (manager) => manager.query(sql, [sid]))).rejects.toBeDefined();
+      await expect(asRabApp(managerA.userId, (manager) => manager.query(sql, [sid]))).rejects.toMatchObject({ code: 'P0001' }); // refused by the user_session trigger (measured)
       const [after] = await adminDataSource.query(`SELECT absolute_expires_at FROM core.user_session WHERE id = $1`, [sid]);
       expect(after).toEqual(before);
     });
@@ -543,9 +543,9 @@ describeIfDb('core.user_session correctness (P1B)', () => {
       expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: toUser, params: [sid, staffB.userId] }])).toBe('42501');
       expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: toOrg, params: [sid, org.id] }])).toBe('42501');
       const [before] = await adminDataSource.query(`SELECT user_id, organisation_id FROM core.user_session WHERE id = $1`, [sid]);
-      await expect(asRabApp(staffA.userId, (manager) => manager.query(toUser, [sid, staffB.userId]))).rejects.toBeDefined();
+      await expect(asRabApp(staffA.userId, (manager) => manager.query(toUser, [sid, staffB.userId]))).rejects.toMatchObject({ code: 'P0001' }); // refused by the user_session trigger (measured)
       // A REAL change for the runtime login (the same organisation id is a no-op the value-comparing trigger lets through).
-      await expect(asRabApp(staffA.userId, (manager) => manager.query(toOrg, [sid, randomUUID()]))).rejects.toBeDefined();
+      await expect(asRabApp(staffA.userId, (manager) => manager.query(toOrg, [sid, randomUUID()]))).rejects.toMatchObject({ code: 'P0001' }); // refused by the user_session trigger (measured)
       const [after] = await adminDataSource.query(`SELECT user_id, organisation_id FROM core.user_session WHERE id = $1`, [sid]);
       expect(after).toEqual(before);
     });

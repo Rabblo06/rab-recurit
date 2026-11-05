@@ -232,8 +232,8 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
   // P-class (owner-login architecture). The migrator's own refusal is keyed on the SCHEMA ROLE crewflow_app: a connection
   // acting as it (fixture superuser + SET ROLE, a dedicated client that is closed afterwards) is still refused, and that role
   // still cannot run the recorder or the fingerprint (42501). The one runtime login inherits the definers' owner and can run
-  // both, and the migrator does not refuse it: OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL), asserted from the
-  // catalog, never executed here (migrateAll would migrate every workspace). Ledger writes, the registry drift columns and
+  // both (catalog), and the migrator's identity check does not refuse it (reproduced below with assertMigrationIdentity):
+  // OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL); migrateAll itself is never run as the runtime login here. Ledger writes, the registry drift columns and
   // the zero-rows-without-context check below still bind the runtime login (parity guard / append-only trigger / M-T2).
   it('the runtime login cannot write or rewrite the ledger or forge drift columns; the schema role crewflow_app cannot migrate or run the recorder (PROV-1 for the runtime login)', async () => {
     const ws = created[0]!;
@@ -258,6 +258,10 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     const app = new Client({ connectionString: appUrl });
     await app.connect();
     try {
+      // OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL), reproduced, not dropped: the migrator's application-layer
+      // refusal (workspace-schema-migrator.ts assertMigrationIdentity) no longer stops the runtime login, because
+      // crewflow_owner holds crewflow USAGE. Side-effect free: only the identity check runs, nothing is migrated.
+      await expect(new WorkspaceSchemaMigrator(pgClientRunner(app)).assertMigrationIdentity()).resolves.toBeUndefined();
       await app.query('BEGIN');
       await app.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [ws.org, ws.owner]);
       // Reads its own organisation's history only.

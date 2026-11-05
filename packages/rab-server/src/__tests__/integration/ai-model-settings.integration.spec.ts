@@ -191,7 +191,7 @@ describeIfDb('Settings → AI model choice (integration)', () => {
       expect(await asTenant<unknown[]>(b.ceo, `UPDATE core.organisation_ai_model_preference SET model_id = 'x', updated_by = $2 WHERE organisation_id = $1 RETURNING tier`, [a.orgId, b.ceo.userId])).toEqual([[], 0]);
     });
 
-    it('the CEO cannot forge updated_by, move a row to another organisation/tier, or TRUNCATE (column grants + WITH CHECK)', async () => {
+    it('the CEO cannot forge updated_by (WITH CHECK) or move a row to another organisation/tier (runtime login: parity guard); TRUNCATE is refused to the schema role crewflow_app only (runtime login: AI-1, catalog)', async () => {
       const org = await aiOrganisation(kit, 'ai-set-grants');
       // P-class (owner-login architecture): a forged updated_by is refused to the schema role crewflow_app (column grant, 42501)
       // AND to the runtime login (the INSERT policy's WITH CHECK pins updated_by to the bound user; measured on PR #74).

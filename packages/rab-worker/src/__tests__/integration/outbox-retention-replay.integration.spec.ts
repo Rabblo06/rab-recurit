@@ -221,15 +221,35 @@ describeIfDb('outbox retention + FAILED email replay (G6)', () => {
     expect(await exists('email_outbox', id)).toBe(true);
   });
 
-  // The runtime login (owner-login architecture): core.email_outbox DELETE is covered by the grant-parity guard
-  // (OwnerLoginGrantParityGuards1786721420000, catalogue OUTBOX-1 mitigated), a ROW-level trigger. So the row is first proven
-  // VISIBLE to the runtime login (a zero-row DELETE would pass any row trigger), then its direct DELETE must be refused.
-  it('runtime login: a direct DELETE of a VISIBLE outbox row is refused by the grant-parity guard (42501); the row survives', async () => {
-    const id = await email('SENT', 400);
-    const visible = await tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT 1 FROM core.email_outbox WHERE id = $1`, [id]));
-    expect(visible).toHaveLength(1);
-    await expect(tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.email_outbox WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
-    expect(await exists('email_outbox', id)).toBe(true);
+  // The runtime login (owner-login architecture): DELETE on all four outbox tables is covered by the grant-parity guard
+  // (OwnerLoginGrantParityGuards1786721420000, GRANT_PARITY_TARGETS; catalogue OUTBOX-1 mitigated), a ROW-level trigger. A
+  // zero-row DELETE would pass any row trigger, so each row's visibility to the runtime login is checked first: a VISIBLE row's
+  // direct DELETE must be refused (42501); every row must survive. At least the email and push rows must be visible (they are
+  // the tenant's own, under its bound context).
+  it('runtime login: a direct DELETE of a visible row is refused by the grant-parity guard (42501) on every outbox table; every row survives', async () => {
+    const rowsByTable: Array<[string, string]> = [
+      ['email_outbox', await email('SENT', 400)],
+      ['push_delivery', await push('ACCEPTED', 400)],
+      ['realtime_event', await event('realtime_event', 'completed', 400, owner.workspaceId)],
+      ['worker_event', await event('worker_event', 'failed', 400, owner.workspaceId)],
+    ];
+    const visibleTables: string[] = [];
+    for (const [table, id] of rowsByTable) {
+      // sql-injection-reviewed: table comes from the constant list above
+      const visible = (await tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT 1 FROM core.${table} WHERE id = $1`, [id]))).length === 1;
+      if (visible) {
+        visibleTables.push(table);
+        await expect(
+          // sql-injection-reviewed: table comes from the constant list above
+          tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${table} WHERE id = $1`, [id])),
+        ).rejects.toMatchObject({ code: '42501' });
+      } else {
+        // sql-injection-reviewed: table comes from the constant list above
+        await tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${table} WHERE id = $1`, [id])).catch(() => undefined);
+      }
+      expect({ table, survives: await exists(table, id) }).toEqual({ table, survives: true });
+    }
+    expect(visibleTables).toEqual(expect.arrayContaining(['email_outbox', 'push_delivery']));
   });
 
   it('periods below the DB5 floors are refused by the job AND by the database (22023)', async () => {

@@ -454,7 +454,7 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       expect(await asApp({}, async (c) => (await c.query('SELECT * FROM core.login_handoff_peek($1, $2)', ['nothex', ws.label])).rows)).toEqual([]);
     });
 
-    it('a session may record mfa_verified_at at INSERT only if its user holds an enabled factor and never in the future; no UPDATE', async () => {
+    it('MFA-SESS-1: a session may record mfa_verified_at at INSERT only if its user holds an enabled factor and never in the future; no UPDATE (schema role and runtime login)', async () => {
       const ins = (ctx: { org: string; uid: string }, user: string, at: string) =>
         asApp(ctx, (c) => spq(c,
           `INSERT INTO core.user_session (id, organisation_id, user_id, application_target, absolute_expires_at, mfa_verified_at)
@@ -467,9 +467,9 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       });
       expect(await ins(ctx, ws.owner, "now() + interval '1 hour'")).toBe('23514');
       expect(await ins(ctx, ws.owner, "now() - interval '2 hours'")).toBe('ACCEPTED');
-      // The schema role crewflow_app has no UPDATE on mfa_verified_at (42501). For the runtime login this stays STRICT: no
-      // catalogue entry accepts stamping a session MFA-verified by a direct UPDATE (measured ACCEPTED on PR #74: Agent 5
-      // finding MFA-SESS-1, routed to Agent 3; user_session is not in the grant-parity targets). Not flipped.
+      // The schema role crewflow_app has no UPDATE on mfa_verified_at (42501). The runtime login must be refused too, STRICT:
+      // MFA-SESS-1 was an open defect (measured ACCEPTED on PR #74) and is FIXED by Agent 3 (4caaef2a, the owner chose
+      // PROTECT); this assertion passes unchanged once that fix is merged. Never flipped.
       expect(await asSchemaApp(ctx, (c) => spq(c, `UPDATE core.user_session SET mfa_verified_at = now() WHERE user_id = $1`, [ws.owner]))).toBe('42501');
       expect(await asApp(ctx, (c) => spq(c, `UPDATE core.user_session SET mfa_verified_at = now() WHERE user_id = $1`, [ws.owner]), false)).toBe('42501');
       await asApp(ctx, async (c) => c.query('SELECT core.mfa_disable($1)', [ws.owner]));

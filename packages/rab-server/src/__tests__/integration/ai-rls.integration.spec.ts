@@ -218,7 +218,7 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     expect((await asTenant<Array<{ id: string }>>(ctxOfA(), `SELECT id FROM core.ai_action_proposal WHERE id = $1`, [proposal.id])).map((r) => r.id)).toEqual([proposal.id]);
   });
 
-  it('T5-D1 INSERT: an ineligible manager is refused by RLS (42501); status / decided / expiry / id columns are not insertable (42501)', async () => {
+  it('T5-D1 INSERT: an ineligible manager is refused by RLS (42501); the schema role crewflow_app cannot set status / decided / expiry / id / created / final arguments / origin (42501); the runtime login: status and decided_by refused, the rest COLGRANT-1 (rolled back)', async () => {
     const other = await manager(kit, a.orgId); // holds ai.use, is not the Initial Manager
     await expect(
       asTenant({ organisationId: a.orgId, workspaceId: other.id.workspaceId, userId: other.id.userId }, insertSql({ ws: other.id.workspaceId!, user: other.id.userId, conv: randomUUID() })),
@@ -228,6 +228,7 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     // are still refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first, 23514);
     // the others are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL) and are only ever tried in a rolled-back
     // transaction.
+    const outcomes: Record<string, string> = {};
     for (const [col, val] of [
       ['status', `'APPROVED'`],
       ['decided_by', `'${a.ceo.userId}'`],
@@ -249,8 +250,20 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
           () => 'OK',
           (e: unknown) => (e === rollback ? 'OK' : ((e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code ?? 'ERROR')),
         );
-      if (col === 'status' || col === 'decided_by') expect({ col, outcome }).not.toEqual({ col, outcome: 'OK' });
+      outcomes[col] = outcome;
     }
+    // The runtime login's measured outcome per column, asserted exactly (Agent 3 review of dbbda6e3). status / decided_by
+    // must be refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first). The others
+    // are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL): accepted (always rolled back here) or refused by a CHECK.
+    expect(outcomes).toEqual({
+      status: '23514',
+      decided_by: '42501',
+      expires_at: 'OK',
+      created_at: 'OK',
+      id: 'OK',
+      final_arguments: '23514',
+      origin: 'OK',
+    });
   });
 
   it('T5-D1 CHECKs: a 4th tool, forbidden keys in the arguments and an over-limit count are refused (23514), even for the owner role', async () => {

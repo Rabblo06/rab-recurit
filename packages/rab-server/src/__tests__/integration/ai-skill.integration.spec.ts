@@ -397,7 +397,7 @@ describeIfDb('AI skills (integration)', () => {
       expect((await rows(org.orgId)).map((r: { name: string }) => r.name)).toEqual(['crewflow-help', 'direct-ok']);
     });
 
-    it('T4-R5 no UPDATE grant on name / is_system / organisation_id / created_by / created_at, and no TRUNCATE', async () => {
+    it('AI-1: T4-R5 name / is_system / organisation_id / created_by / created_at are not updatable (runtime login: parity guard, 42501); TRUNCATE and a client-chosen id are refused to the schema role crewflow_app only (runtime login: AI-1 / COLGRANT-1, rolled back)', async () => {
       const org = await aiOrganisation(kit, 'ai-skill-rls-grants');
       await insertAs(org.ceo, custom('grant-probe'));
       for (const sql of [

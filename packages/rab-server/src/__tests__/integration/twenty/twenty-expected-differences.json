@@ -184,8 +184,8 @@
       "id": "AI-1",
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: AI execution/skill governance enforced by grants)",
-      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard). Owner-login CI (PR #74) also measured: the runtime login holds TRUNCATE on ai_usage, ai_conversation, ai_action_proposal and organisation_ai_model_preference through the owner (asserted from the catalog, never executed). UPDATE / DELETE stay row-guarded: ai_action_proposal content is immutable for every role (ai_action_proposal_guard, 23514) and the tenant-column UPDATEs are refused by the parity guards (42501).",
-      "test": "twenty-behaviour-catalogue (TW-D: ai-agents.integration.spec.ts, ai-skill T4-R5)",
+      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard). Owner-login CI (PR #74) also measured: the runtime login holds TRUNCATE on ai_usage, ai_conversation, ai_action_proposal and organisation_ai_model_preference through the owner (asserted from the catalog, never executed). UPDATE / DELETE stay row-guarded: ai_action_proposal content is immutable for every role (ai_action_proposal_guard, 23514) and the tenant-column UPDATEs are refused by the parity guards (42501). The runtime login also reaches core.ai_dev_mark_organisation_synthetic (it inherits the owner; schema role crewflow_app 42501), whose body still refuses on a disposable test database (55000).",
+      "test": "twenty-behaviour-catalogue (owner-login CI: ai-skill 'AI-1:' T4-R5; ai-agents, ai-dev-real-provider)",
       "keptControl": "the EX-3 CHECK constraint still refuses enabled=true without approval for every login (23514)",
       "bc": []
     },
@@ -193,7 +193,7 @@
       "id": "PROV-1",
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: loss of DBA-01-style separation, provisioner-only functions)",
-      "change": "The ordinary runtime can call the provisioner-only workspace-schema functions (SUPERSEDED fencing's second layer is gone).",
+      "change": "The ordinary runtime can call the provisioner-only workspace-schema functions (SUPERSEDED fencing's second layer is gone). Also lost (Agent 3 review of a4c0c3db): the application-layer refusal in WorkspaceSchemaMigrator.assertMigrationIdentity (workspace-schema-migrator.ts) no longer stops the runtime login, which holds crewflow USAGE; reproduced green in workspace-schema-migrator.",
       "test": "twenty-behaviour-catalogue C5/C7 (TW-D: initial-manager-replacement SUPERSEDED fencing)",
       "bc": []
     },
@@ -221,7 +221,7 @@
       "severity": "MEDIUM",
       "acceptance": "NEEDS OWNER APPROVAL (not in §2: non-secret column-level INSERT grants no longer bind the runtime login)",
       "change": "Column INSERT grants that kept server-owned columns out of the runtime's hands (id, created_at, expires_at, origin) no longer bind the runtime login, and there is no INSERT parity guard. Measured on the owner-login CI (PR #74): core.ai_usage accepts a forged id / created_at; core.ai_skill accepts a client-chosen id. RLS WITH CHECK (own organisation, own user) and the INSERT policies still hold: an INSERT for another user / organisation, or a decided proposal (status / decided_by), is still refused. Measured NOT affected: a forged updated_by on organisation_ai_model_preference is still refused to the runtime login by the INSERT policy WITH CHECK.",
-      "test": "twenty-behaviour-catalogue (owner-login CI: ai-usage-ledger WITH CHECK, ai-model-settings forge, ai-rls T5-D1 INSERT; schema-role checks keep crewflow_app's 42501)",
+      "test": "twenty-behaviour-catalogue (owner-login CI: ai-usage-ledger 'COLGRANT-1:'; also ai-rls T5-D1 INSERT, ai-skill client-chosen id)",
       "bc": []
     },
     {
@@ -229,15 +229,15 @@
       "severity": "MEDIUM",
       "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-04, like Twenty: global reference tables writable by the runtime login; THREAT-MODEL entry by Agent 3)",
       "change": "core.permission (RBAC flag reference data) and core.migrations (TypeORM ledger) have no RLS and no organisation_id; the runtime login inherits crewflow's S,I,U,D,T on both (golden :926, :968), so one UPDATE / DELETE changes every tenant. Not in GRANT_PARITY_TARGETS. Before: crewflow_app S,I on permission and S on migrations.",
-      "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture CF-09, rolled back, WHERE false)",
+      "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture 'REF-1:', real rows, rolled back)",
       "bc": []
     },
     {
       "id": "HL-1",
       "severity": "LOW",
-      "acceptance": "OWNER-ACCEPTED (§2: SQL with owner privileges) — table privileges only; no observable effect without context",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2: the runtime login holds table privileges on the host-label namespace tables; Agent 3 review: not self-accepted, stays under the PR #9 removal gate)",
       "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded. Measured on PR #74: core.reserved_host_label (global reference data, no organisation_id) is readable by the runtime login through the policy for crewflow (210 rows); its DELETE is refused by the parity guard.",
-      "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace, the namespace-table privilege test)",
+      "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace 'HL-1:')",
       "bc": [
         "BC-01"
       ]
@@ -245,9 +245,9 @@
     {
       "id": "MFA-SESS-1",
       "severity": "HIGH",
-      "acceptance": "NEEDS OWNER APPROVAL (not in §2; OPEN DEFECT with the owner, overlaps X2's accepted user_session scope: the test stays strict and red, never accepted)",
+      "acceptance": "NEEDS OWNER APPROVAL (not in §2) — FIXED: the owner chose PROTECT; Agent 3's fix 4caaef2a (twa/security) refuses the runtime login; the test stays strict and passes unchanged once merged",
       "change": "The runtime login can UPDATE core.user_session.mfa_verified_at on its own sessions (measured ACCEPTED, PR #74 run 41910894672, w45-db5-schema:467): a session can be stamped MFA-verified without a factor check. Separated mode refused it by crewflow_app's column grant; user_session is not in GRANT_PARITY_TARGETS and no trigger covers the column after INSERT.",
-      "test": "twenty-behaviour-catalogue (owner-login CI: w45-db5-schema mfa_verified_at, kept strict)",
+      "test": "twenty-behaviour-catalogue (owner-login CI: w45-db5-schema 'MFA-SESS-1:', strict)",
       "bc": []
     }
   ],
@@ -608,7 +608,12 @@
       {
         "id": "MFA-SESS-1",
         "severity": "HIGH",
-        "ask": "fix (parity guard for user_session UPDATE mirroring crewflow_app's columns, or a trigger refusing any mfa_verified_at change after INSERT), then re-run w45-db5-schema."
+        "ask": "FIXED by Agent 3 (4caaef2a); add to the BC catalogue as mitigated with the fix referenced."
+      },
+      {
+        "id": "HL-1",
+        "severity": "LOW",
+        "ask": "add (needs-owner-approval): the runtime login holds table privileges on the host-label namespace tables; RLS / triggers / parity guards keep the observable effect nil."
       }
     ]
   }

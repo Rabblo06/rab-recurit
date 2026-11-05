@@ -172,7 +172,7 @@ describeIfDb('audit_log cross-organisation identity references (integration, P1)
       await adminDataSource.manager.query(`UPDATE core.platform_admin SET revoked_at = now(), security_version = security_version + 1 WHERE user_id = $1`, [managerA.userId]);
     });
 
-    it('no login role can ask the organisation-parameterised rule about another organisation; the runtime pre-check fails closed without tenant context', async () => {
+    it('the schema roles crewflow_app / crewflow cannot ask the organisation-parameterised rule about another organisation (the runtime login can: BC-01); the runtime pre-check fails closed without tenant context', async () => {
       const { orgB, managerB } = await twoOrganisations();
       const client = dataSource.createQueryRunner();
       await client.connect();

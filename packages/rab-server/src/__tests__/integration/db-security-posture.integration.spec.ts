@@ -76,18 +76,44 @@ describeIfDb('database security posture (integration)', () => {
       //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, NEEDS OWNER APPROVAL) and is refused
       //    there: an unknown workspace is P0002, nothing is registered;
       //  - audit_log stays insert-only against DML: the table owner crewflow holds only SELECT/INSERT on it (42501);
-      //  - core.permission / core.migrations (global, no RLS) are writable by the runtime login: OWNER-LOGIN DIFFERENCE REF-1,
-      //    OWNER-ACCEPTED 2026-11-04 (like Twenty; THREAT-MODEL entry by Agent 3). Asserted as the documented behaviour with
-      //    WHERE false inside a rolled-back transaction, so nothing can change; the schema role crewflow_app keeps 42501 above.
+      //  - core.permission / core.migrations: see REF-1 below (owner-accepted difference, its own reproduction).
       await expect(client.query(`SELECT core.register_workspace_schema(gen_random_uuid())`)).rejects.toMatchObject({ code: 'P0002' });
       await expect(client.query(`DELETE FROM core.audit_log WHERE false`)).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await client.end();
+    }
+  });
+
+  // OWNER-LOGIN DIFFERENCE REF-1, OWNER-ACCEPTED 2026-11-04 (like Twenty; THREAT-MODEL entry by Agent 3): the global,
+  // non-RLS reference tables core.permission and core.migrations are writable by the one runtime login (it inherits crewflow's
+  // S,I,U,D,T). Reproduced on REAL rows inside a transaction that is always rolled back; the totals are checked afterwards.
+  // The schema role crewflow_app is still refused (CF-09 above). On the LEGACY separated database the runtime login is
+  // crewflow_app and this reproduction does not apply (CF-09 asserts its 42501 there; REMOVE IN PR #9).
+  it('REF-1: the runtime login can rewrite core.permission and core.migrations rows (owner-accepted 2026-11-04; rolled back)', async () => {
+    const client = new Client({ connectionString: appUrl });
+    await client.connect();
+    const totals = async () => {
+      const admin = new Client({ connectionString: adminUrl });
+      await admin.connect();
+      try {
+        return (await admin.query(`SELECT (SELECT count(*)::int FROM core.permission) AS p, (SELECT count(*)::int FROM core.migrations) AS m`)).rows[0];
+      } finally {
+        await admin.end();
+      }
+    };
+    try {
+      const [who] = (await client.query(`SELECT current_user AS u`)).rows;
+      if (who.u === 'crewflow_app') return; // legacy separated database (CF-09 covers it)
+      expect(who.u).toBe('crewflow_owner');
+      const before = await totals();
       await client.query('BEGIN');
       try {
-        expect((await client.query(`UPDATE core.permission SET key = key WHERE false`)).rowCount).toBe(0); // REF-1 (accepted)
-        expect((await client.query(`DELETE FROM core.migrations WHERE false`)).rowCount).toBe(0); // REF-1 (accepted)
+        expect((await client.query(`UPDATE core.permission SET key = key WHERE key = (SELECT min(key) FROM core.permission)`)).rowCount).toBe(1);
+        expect((await client.query(`DELETE FROM core.migrations WHERE timestamp = (SELECT min(timestamp) FROM core.migrations)`)).rowCount).toBe(1);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);
       }
+      expect(await totals()).toEqual(before);
     } finally {
       await client.end();
     }

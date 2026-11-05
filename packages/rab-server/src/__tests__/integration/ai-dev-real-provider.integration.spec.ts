@@ -113,19 +113,23 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
     it('the marker cannot be set by a session-level SET of the GUC the definer uses', async () => {
       const org = await kit.factory.createOrganisation('ai-synth-guc');
       const admin = await kit.factory.createCeo(org, { permissions: 'production', platformAdmin: true });
+      // The row must EXIST, or the UPDATE matches nothing and proves nothing (Agent 3 review of 146cfcb0).
+      await kit.owner.query(`INSERT INTO core.organisation_ai_setting (organisation_id, enabled, synthetic_data) VALUES ($1, false, false) ON CONFLICT (organisation_id) DO NOTHING`, [org.id]);
+      expect(await kit.owner.query(`SELECT synthetic_data FROM core.organisation_ai_setting WHERE organisation_id = $1`, [org.id])).toEqual([{ synthetic_data: false }]);
       const result = await tenant
         .runInTenantContext({ organisationId: org.id, workspaceId: null, userId: admin.userId, role: '' }, async (m) => {
           await m.query(`SELECT set_config('rab.ai_synthetic_marker', 'on', true)`);
           return m.query(`UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, [org.id]);
         })
         .catch((e) => e);
-      // Owner-login architecture: the schema role crewflow_app is refused (42501) even with the GUC set; for the runtime
-      // login the property that matters is the state: the marker is NOT set.
+      // Owner-login architecture: the schema role crewflow_app is refused (42501) even with the GUC set. The runtime login is
+      // refused too, on a row that exists and that it may update: synthetic_data is not one of crewflow_app's updatable
+      // columns, so the organisation_ai_setting UPDATE grant-parity guard refuses it (42501). The marker stays unset.
       expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.id, workspaceId: null, userId: admin.userId }, [
         { sql: `SELECT set_config('rab.ai_synthetic_marker', 'on', true)` },
         { sql: `UPDATE core.organisation_ai_setting SET synthetic_data = true WHERE organisation_id = $1`, params: [org.id] },
       ])).toBe('42501');
-      void result;
+      expect(pgCode(result)).toBe('42501');
       const marked = await kit.owner.query(`SELECT 1 FROM core.organisation_ai_setting WHERE organisation_id = $1 AND synthetic_data`, [org.id]);
       expect(marked).toHaveLength(0);
     });
