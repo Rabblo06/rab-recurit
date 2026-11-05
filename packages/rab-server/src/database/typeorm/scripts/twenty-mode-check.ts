@@ -828,9 +828,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), 'nothing applied by the refused runs');
     let token: string | null = null;
     if (existsSync(DEPLOY_PREPARE)) {
-      const check = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+      // Token mode must be set on deploy-prepare's OWN environment (childEnvironment builds a clean one): since BC-11 (owner
+      // decision 2026-11-05, Agent 2 d27a371a) an unset mode defaults to `none` and applies (see BEHIND-2).
+      const check = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' }));
       token = check.lines.map((l) => /approval token for exactly this set: (\S+)/.exec(l)?.[1]).find(Boolean) ?? null;
       expect(r, check.exitCode === 3 && token !== null, `deploy-prepare check run: exit 3 and prints the token (exit ${check.exitCode}; ${check.lines.slice(-2).join(' | ').slice(0, 220)})`);
+      expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), 'deploy-prepare check run (token mode, no token) applied nothing');
     } else {
       r.failures.push('FAIL: deploy-prepare.js not built');
     }
@@ -839,9 +842,26 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       expect(r, ok.exitCode === EXIT.ok && ok.result?.state === 'CHAIN-PARTIAL', `token mode, the right token: exit 0 from CHAIN-PARTIAL (${summary(ok)})`);
       neverLoadedGated(r, ok);
       await assertHeadState(ctx, db, r);
-      const check2 = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+      const check2 = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' }));
       expect(r, check2.exitCode === 0, `deploy-prepare check run on head: exit 0 (${check2.exitCode}; ${check2.lines.slice(-1).join('').slice(0, 160)})`);
     }
+  });
+
+  await step('BEHIND-2', 'BC-11 (owner decision 2026-11-05): deploy-prepare with NO approval mode (default none) on a NON-fresh behind database applies directly: exit 0, head state', async (r) => {
+    const db = dbName('behind2');
+    r.database = db;
+    await partial(db, FAIL_AT.slice(-13), r);
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 behind2 tenant', $2)`, [randomUUID(), `twa-t5-behind2-${RUN_ID}`]));
+    const before = await readState(ctx, db);
+    if (!existsSync(DEPLOY_PREPARE)) {
+      r.failures.push('FAIL: deploy-prepare.js not built');
+      return;
+    }
+    const run = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+    const after = await readState(ctx, db);
+    expect(r, run.exitCode === 0, `deploy-prepare, no mode: exit 0 (${run.exitCode}; ${run.lines.slice(-1).join('').slice(0, 160)})`);
+    expect(r, after.ledger.length > before.ledger.length, `deploy-prepare, no mode: applied the pending migrations without a token (${before.ledger.length} -> ${after.ledger.length})`);
+    await assertHeadState(ctx, db, r);
   });
 
   await step('SHIM-1', 'the D3(b) ROW_COPY shim refuses a database that ever held tenant data; nothing applied, the data intact', async (r) => {
@@ -1067,7 +1087,7 @@ async function ciDatabase(ctx: Ctx, major: number): Promise<number> {
 // CLI
 // ---------------------------------------------------------------------------------------------------------------------
 
-const SCENARIO_IDS = ['TW-I1d', 'TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
+const SCENARIO_IDS = ['TW-I1d', 'TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'BEHIND-2', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
 
 async function main(argv: string[]): Promise<number> {
   const reportIdx = argv.indexOf('--report');
