@@ -236,10 +236,12 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
         ['DELETE FROM core.hws_backfill_checkpoint WHERE workspace_id = $1', [a.id]],
         ['DELETE FROM core.stored_file WHERE id = $1', [fileId]],
       ];
-      for (const [sql, params] of attempts) expect({ sql, refused: ['42501', 'NO ROW'].includes(await code(sql, params)) }).toEqual({ sql, refused: true });
-      // A spoofed scope finds no row of another tenant (RLS), so nothing of b's changes.
+      // Since PAY-1b (Agent 3, 4caaef2a) every operation crewflow_app lacked entirely is refused PER STATEMENT (42501),
+      // visible row or not (measured on #72 run 41948025136).
+      for (const [sql, params] of attempts) expect({ sql, code: await code(sql, params) }).toEqual({ sql, code: '42501' });
+      // A spoofed scope finds no row of another tenant (RLS), and the UPDATE is refused per statement anyway (42501).
       expect((await runtime.query('SELECT count(*)::int AS n FROM core.workspace_schema_registry WHERE workspace_id = $1', [b.id])).rows[0].n).toBe(0);
-      expect((await runtime.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [b.id])).rowCount).toBe(0);
+      await expect(runtime.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [b.id])).rejects.toMatchObject({ code: '42501' });
     } finally {
       await runtime.query('ROLLBACK').catch(() => undefined);
     }

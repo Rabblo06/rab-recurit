@@ -170,19 +170,19 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
     });
 
     // P-class (owner-login architecture): the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501). The
-    // runtime login changes NO row: ai_usage has no UPDATE policy and its DELETE policy admits only the retention definer
-    // (current_user = 'crewflow'), so RLS filters every row (and the UPDATE / DELETE parity guards would refuse a visible
-    // one). TRUNCATE ignores RLS: the runtime login holds it through the owner (catalogue AI-1, NEEDS OWNER APPROVAL),
-    // asserted from the catalog, never executed.
-    it('insert-only: the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501); the runtime login changes no row', async () => {
+    // runtime login is refused UPDATE and DELETE too: since PAY-1b (Agent 3, 4caaef2a) the grant-parity guard refuses every
+    // operation crewflow_app lacked entirely PER STATEMENT (42501, measured on #72 run 41948025136), and no row changes.
+    // TRUNCATE ignores RLS: the runtime login holds it through the owner (catalogue AI-1, NEEDS OWNER APPROVAL), asserted
+    // from the catalog, never executed.
+    it('insert-only: the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501); the runtime login is refused UPDATE / DELETE per statement (42501), no row changes', async () => {
       for (const sql of [`UPDATE core.ai_usage SET cost_usd_micros = 0`, `DELETE FROM core.ai_usage`, `TRUNCATE core.ai_usage`]) {
         expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', a.ceo, [{ sql }]) }).toEqual({ sql, code: '42501' });
       }
       const snapshot = () => kit.owner.query(`SELECT id, cost_usd_micros::text AS c FROM core.ai_usage WHERE organisation_id = $1 ORDER BY id`, [a.orgId]);
       const before = await snapshot();
       expect(before.length).toBeGreaterThan(0);
-      expect(await sqlAs(a.ceo, `UPDATE core.ai_usage SET cost_usd_micros = 0`)).toEqual([[], 0]);
-      expect(await sqlAs(a.ceo, `DELETE FROM core.ai_usage`)).toEqual([[], 0]);
+      expect(pgCode(await sqlAs(a.ceo, `UPDATE core.ai_usage SET cost_usd_micros = 0`).catch((e) => e))).toBe('42501');
+      expect(pgCode(await sqlAs(a.ceo, `DELETE FROM core.ai_usage`).catch((e) => e))).toBe('42501');
       expect(await snapshot()).toEqual(before);
       const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_usage', 'TRUNCATE') AS t`);
       expect(t).toBe(true); // AI-1 (NEEDS OWNER APPROVAL)
@@ -250,17 +250,17 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
     expect(await sqlAs(org.ceo, `SELECT core.ai_usage_purge_expired(interval '400 days') AS n`)).toEqual([{ n: 2 }]);
     expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [org.orgId])).toEqual([{ n: 1 }]);
     expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [other.orgId])).toEqual([{ n: 1 }]);
-    // The retention flag is no back door. The schema role crewflow_app holds no DELETE (42501). The runtime login is not
-    // `crewflow` either (the DELETE policy needs current_user = 'crewflow', the definer owner), so RLS filters every row and
-    // nothing is deleted (owner-login architecture; the DELETE parity guard would refuse a visible row).
+    // The retention flag is no back door. The schema role crewflow_app holds no DELETE (42501). The runtime login is refused
+    // the direct DELETE per statement by the grant-parity guard (42501, PAY-1b); only the definer (current_user = 'crewflow')
+    // purges, and nothing else is deleted.
     expect(
       await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: `SELECT set_config('rab.ai_usage_retention', 'on', true)` }, { sql: `DELETE FROM core.ai_usage` }]),
     ).toBe('42501');
     const backDoor = await asTenant(org.ceo, async (m) => {
       await m.query(`SELECT set_config('rab.ai_usage_retention', 'on', true)`);
       return m.query(`DELETE FROM core.ai_usage`);
-    });
-    expect(backDoor).toEqual([[], 0]);
+    }).catch((e) => e);
+    expect(pgCode(backDoor)).toBe('42501');
     expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [org.orgId])).toEqual([{ n: 1 }]);
   });
 
