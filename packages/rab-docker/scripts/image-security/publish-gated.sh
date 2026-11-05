@@ -6,14 +6,14 @@
 #
 # Environment:
 #   REGISTRY_REPO          default docker.io/adhin007/adolphus
-#   COMMIT                 full 40-hex source commit; the tag must be api-<COMMIT> or worker-<COMMIT>
+#   COMMIT                 full 40-hex source commit; the tag must be exactly <COMMIT> (O2: one image, one tag)
 #   DOCKERHUB_USERNAME     from vars.DOCKERHUB_USERNAME     } both required; absent or empty = fail closed
 #   DOCKERHUB_PUSH_TOKEN   from secrets.DOCKERHUB_PUSH_TOKEN } (never printed)
 #   DRY_RUN=1              verify the layout, the tag and the credentials' presence, print the plan; no registry call
 #   SKOPEO                 registry client (default: skopeo). Self-tests point it at a fake to prove the fail-closed paths
 #                          without any network or real push.
 #
-# Fails closed when: a credential is missing; the tag is not api-/worker-<COMMIT>; the layout's index is not the expected
+# Fails closed when: a credential is missing; the tag is not exactly <COMMIT>; the layout's index is not the expected
 # digest or any blob does not match its digest; the tag ALREADY EXISTS in the registry (any digest: tags are never
 # overwritten); the registry's answer to the existence check is anything but "not found"; after the push the tag, the
 # index digest or any per-platform manifest is not served with exactly the gated digest.
@@ -35,9 +35,9 @@ if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_PUSH_TOKEN:-}" ]; then
   fail "Docker Hub credentials are missing: the owner must create the repository variable/environment variable DOCKERHUB_USERNAME and the secret DOCKERHUB_PUSH_TOKEN in the protected GitHub environment 'release' (see packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 9). Nothing was pushed."
 fi
 
-# 2. Tag policy: exactly api-<full commit> or worker-<full commit>; no moving tags.
+# 2. Tag policy (O2): exactly the full 40-hex commit, one tag per release; no `latest`, no prefix, no moving tags.
 [[ "${COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] || fail "COMMIT must be the full 40-hex source commit (got '${COMMIT:-}')"
-[[ "$tag" =~ ^(api|worker)-${COMMIT}$ ]] || fail "tag '$tag' is not api-${COMMIT} or worker-${COMMIT}; only these two immutable tags are allowed"
+[[ "$tag" == "$COMMIT" ]] || fail "tag '$tag' is not ${COMMIT}; only the one immutable full-commit tag is allowed"
 [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "expected digest '$want' is not sha256:<64 hex>"
 
 # 3. The layout is exactly the gated index, and every blob is intact.

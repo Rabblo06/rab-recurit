@@ -405,6 +405,9 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (/:\/\/[^/\s]*@/.test(value)) problems.push(`${key}: a URL with credentials in the interpolation file`);
       if (/_IMAGE$/.test(key) && !template && !DIGEST_REF.test(value)) problems.push(`${key}: not pinned by digest (repository@sha256:<64 hex>)`);
       if (/_IMAGE_DIGEST$/.test(key) && !template && !/^sha256:[0-9a-f]{64}$/.test(value)) problems.push(`${key}: not a sha256:<64 hex> digest`);
+      // O2 (one image, one tag): the per-role image variables are retired. docker-compose.image.yml no longer reads them, so
+      // one left in compose.env would be silently ignored while CREWFLOW_IMAGE_DIGEST decides what runs.
+      if (/^CREWFLOW_(API|WORKER)_IMAGE_(DIGEST|REPOSITORY)$/.test(key)) problems.push(`${key}: retired (O2: one image); set CREWFLOW_IMAGE_${key.endsWith('DIGEST') ? 'DIGEST' : 'REPOSITORY'} instead`);
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
@@ -471,8 +474,7 @@ function renderModels(combos = COMBOS) {
     const fwd = (p) => p.split(path.sep).join('/');
     const composeEnv = path.join(tmp, 'compose.env');
     fs.writeFileSync(composeEnv, [
-      `CREWFLOW_API_IMAGE_DIGEST=sha256:${'0'.repeat(64)}`,
-      `CREWFLOW_WORKER_IMAGE_DIGEST=sha256:${'1'.repeat(64)}`,
+      `CREWFLOW_IMAGE_DIGEST=sha256:${'0'.repeat(64)}`,
       `CREWFLOW_REDIS_IMAGE=redis@sha256:${'2'.repeat(64)}`,
       `CREWFLOW_POSTGRES_IMAGE=postgres@sha256:${'3'.repeat(64)}`,
       `CREWFLOW_SECRETS_DIR=${fwd(secrets)}`,

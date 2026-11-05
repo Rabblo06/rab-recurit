@@ -124,6 +124,60 @@ Restore into a **fresh** cluster or volume. That is the proven path, and the **o
    - **Choose a point from before any incident.** A restore point taken after a compromise carries the attacker's roles, definers and policies with it (G-11, M0 §6.4). Under the owner login, rotating the password is not remediation.
    - Keep the upgraded instance, stopped and unreachable, for forensics until the owner releases it.
 
+### 4.4 Image-only rollback from a one-image release (O2) to the two-image v0.4.0
+
+O1/O2 changed only the image layout and the tag. One image now runs every application service, under ONE tag (the full
+commit) and ONE compose variable, `CREWFLOW_IMAGE_DIGEST`. Neither O1 nor O2 adds a migration. The last two-image
+release is **v0.4.0** (git tag `rab/v0.4.0`, commit `e1b1132a075fd6b821562eaaf0921eeee8243617`, publish-image run
+42030739036, both attested):
+
+| Image | Tag | Index digest |
+|---|---|---|
+| API (also rab-migrate, rab-ops) | `api-e1b1132a075fd6b821562eaaf0921eeee8243617` | `sha256:1120f03a223be14fcd635bcd32734c34dd2aec3213084d47894b727af7c230fa` |
+| Worker | `worker-e1b1132a075fd6b821562eaaf0921eeee8243617` | `sha256:bbe0e79adc8c5f84d1a8dee75c6403b1449ee9fc2d4a2fbcc33c5e93cafbaaf4` |
+
+**When it applies.** Only when the database has no migration that v0.4.0 does not know, or only migrations that were
+reviewed as expand-only (`OWNER-LOGIN-DEPLOYMENT.md` §3.6a). Otherwise this is not an image rollback: use the restore
+paths in §4.1 / §4.2. Check this first, as the owner login, read-only. Compare the ledger with v0.4.0's migration list:
+```sql
+SELECT count(*), max(timestamp) FROM core.migrations;
+```
+If the count is larger than v0.4.0's, list the extra rows and confirm each was reviewed as expand-only.
+
+**Procedure (NOT TESTED as a whole; each step uses v0.4.0's own committed files and checks):**
+1. **Use v0.4.0's compose files, not the current ones.** The current `docker-compose.image.yml` reads only
+   `CREWFLOW_IMAGE_DIGEST` and would start the API image as the Worker as well. Check out the release tag beside the
+   current tree:
+   ```bash
+   git -C <repo> worktree add /opt/crewflow-v0.4.0 rab/v0.4.0     # or: git archive rab/v0.4.0 packages/rab-docker | tar -x
+   ```
+2. **Write a v0.4.0 compose env file.** Copy the current `compose.env`. Remove `CREWFLOW_IMAGE_DIGEST` and
+   `CREWFLOW_IMAGE_REPOSITORY`, and set the two retired variables, which v0.4.0 reads:
+   ```
+   CREWFLOW_API_IMAGE_DIGEST=sha256:1120f03a223be14fcd635bcd32734c34dd2aec3213084d47894b727af7c230fa
+   CREWFLOW_WORKER_IMAGE_DIGEST=sha256:bbe0e79adc8c5f84d1a8dee75c6403b1449ee9fc2d4a2fbcc33c5e93cafbaaf4
+   ```
+   Lint it with **v0.4.0's** linter. The current linter refuses these two names on purpose:
+   `node /opt/crewflow-v0.4.0/packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file compose <file>`.
+   The secret files (`database.env`, `runtime.env`) stay as they are: v0.4.0 already ran on the owner login. If a later
+   release added runtime settings that v0.4.0 refuses, remove them from `runtime.env`, as its start-up refusal names them.
+3. **Verify the deployed model with v0.4.0's verifier:**
+   `node /opt/crewflow-v0.4.0/packages/rab-docker/staging/verify-image-compose.cjs --environment --env-file <file>`.
+4. **Pull both digests and stop the current stack**: `docker compose … down`, **never** `-v`.
+5. **Start v0.4.0:**
+   `docker compose --env-file <file> -f /opt/crewflow-v0.4.0/packages/rab-docker/docker-compose.image.yml up -d --wait`.
+   Add the same overlays the deployment uses, from the v0.4.0 tree. Its `rab-migrate` check must exit 0 (nothing
+   pending), or warn about an AHEAD ledger for reviewed expand-only migrations only.
+6. **Check:**
+   - `docker inspect -f '{{.Config.Image}}'` shows the API digest on rab-api and the Worker digest on rab-worker;
+   - both services are healthy;
+   - there is no unknown-`app_version` or "ledger AHEAD" refusal;
+   - run the functional smoke from `OWNER-LOGIN-DEPLOYMENT.md` §5.8.
+7. **Return to the current release** later the usual way. Use the current tree's compose files and `compose.env` with
+   `CREWFLOW_IMAGE_DIGEST`, and delete the v0.4.0 env file.
+
+No data is restored or lost by this procedure; it changes only which images run.
+
 ### 4.3 After a rollback
 - `crewflow_owner` may exist on the restored instance (managed PITR to a point after 5.3, or a later owner-login release). Have the admin run `ALTER ROLE crewflow_owner NOLOGIN` (reversible). **Never `DROP ROLE`** it without Agent 1's guidance.
 - Re-attempt the upgrade only from section 2 again: a fresh backup or restore point, then the release step (and, if token mode is on, a fresh check run and a fresh token).

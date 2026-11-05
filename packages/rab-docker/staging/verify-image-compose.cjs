@@ -116,7 +116,8 @@ function checkVariant(variant, production, variantFiles = variant) {
   for (const name of ['rab-migrate', 'rab-ops']) {
     if (services[name] && services[name].image !== apiImage) fail(`${name}: image differs from rab-api's (the migrations ship in the API image)`);
   }
-  if (services['rab-worker'] && services['rab-worker'].image === apiImage) fail('rab-worker: uses the API image (the Worker bundle is a separate image)');
+  // O1/O2: ONE image. The Worker runs rab-api's image with its own command; a different Worker image is a drift.
+  if (services['rab-worker'] && services['rab-worker'].image !== apiImage) fail('rab-worker: image differs from rab-api\'s (O2: one image for every application service)');
 
   // 2. Every H6 runtime key identical to the production file.
   for (const name of ['rab-api', 'rab-worker']) {
@@ -300,6 +301,9 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   const ops = services['rab-ops'];
   if (ops) {
     if (ops.image !== services['rab-api']?.image) fail('rab-ops: image differs from rab-api\'s in the deployed model');
+  }
+  if (services['rab-worker'] && services['rab-worker'].image !== services['rab-api']?.image) fail('rab-worker: image differs from rab-api\'s in the deployed model (O2: one image)');
+  if (ops) {
     if (stable(ops.profiles) !== stable(['ops'])) fail('rab-ops: not in (only) the "ops" profile in the deployed model');
     if (stable(fileNames(ops)) !== stable(['.env.ops'])) fail('rab-ops: must read .env.ops only in the deployed model');
     if (!ops.read_only || stable(ops.cap_drop) !== stable(['ALL']) || !(ops.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-ops: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
@@ -374,8 +378,7 @@ function renderModels(variantPath = VARIANT) {
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
     const env = {
       ...base,
-      CREWFLOW_API_IMAGE_DIGEST: SENTINEL_DIGEST,
-      CREWFLOW_WORKER_IMAGE_DIGEST: `sha256:${'7a'.repeat(32)}`,
+      CREWFLOW_IMAGE_DIGEST: SENTINEL_DIGEST,
       CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0c'.repeat(32)}`,
       CREWFLOW_SECRETS_DIR: secrets.split(path.sep).join('/'),
       CREWFLOW_PG_CA_FILE: '/etc/crewflow/pg-ca.crt',
@@ -410,7 +413,7 @@ function environmentMode(argv) {
     }
   }
   const allowed = [DEFAULT_APP_REPOSITORY, ...many('--allow-repository')];
-  for (const k of ['CREWFLOW_API_IMAGE_DIGEST', 'CREWFLOW_WORKER_IMAGE_DIGEST']) {
+  for (const k of ['CREWFLOW_IMAGE_DIGEST']) {
     if (!DIGEST.test(String(env[k] ?? ''))) return { problems: [`${k} is not sha256:<64 hex>`], lines: [] };
   }
   // The env_file checks below need a Compose that reports env_file under --no-env-resolution (v5 does; v2.38/v2.39

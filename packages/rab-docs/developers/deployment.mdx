@@ -59,18 +59,17 @@ Any other value refuses to start. `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` sets 
 | `ci-front`, `ci-shared`, `ci-ui`, `ci-mobile`, `ci-e2e` | Pull requests, pushes to `main` | Package checks, run only when the package changed. |
 | `ci-security` | Pull requests, pushes to `main` | `yarn npm audit`, constraints, `check-rls`, Docker build. |
 | `cd-deploy-tag` | Tags `v*.*.*` | Creates a GitHub release. |
-| `publish-image` | Release published, or manual | Runs the image security gate, then, after a reviewer approves the `release` environment, pushes the gated API and Worker images by digest to the private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer a target. |
+| `publish-image` | Release published, or manual | Runs the image security gate, then, after a reviewer approves the `release` environment, pushes the one gated image (API + Worker) by digest to the private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer a target. |
 
 A push to `main` may redeploy production if the hosting platform's auto-deploy is on. Keep it off until a release has been prepared with the runbook.
 
 ## Release image tags
 
-`publish-image` pushes the two exact gated images, with digests preserved and no rebuild, under exactly two immutable tags:
+`publish-image` pushes the one exact gated image (the API and the Worker run the same image with different commands), with digests preserved and no rebuild, under exactly one immutable tag:
 
-- `api-<full commit sha>`
-- `worker-<full commit sha>`
+- `<full commit sha>`
 
-There is no `latest`, version or per-architecture tag, and the push refuses a tag that already exists. Deploy by index digest (`docker.io/adhin007/adolphus@sha256:...`) from the release manifest; the tags are labels, not references. See `packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md` section 8.
+There is no `latest`, prefix, version or per-architecture tag, and the push refuses a tag that already exists. Releases up to v0.4.0 were two images tagged `api-<sha>` / `worker-<sha>`. The compose files take the one digest as `CREWFLOW_IMAGE_DIGEST`. Deploy by index digest (`docker.io/adhin007/adolphus@sha256:...`) from the release manifest; the tags are labels, not references. See `packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md` section 8.
 
 It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
 

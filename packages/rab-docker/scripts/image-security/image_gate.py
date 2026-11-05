@@ -1934,9 +1934,8 @@ def cmd_release_manifest(a) -> int:
                 entry['native_pdf_render'] = {k: r.get(k) for k in (
                     'native', 'uname_m', 'docker_host_arch', 'node', 'renderer', 'render_ms', 'pdf_pages', 'pdf_sha256')}
             platforms[p] = entry
-        # O1 (one image, two existing tag names): the same digest is published as api-<commit> and worker-<commit> until
-        # O2 replaces both with one <commit> tag.
-        out['images'][role] = {'tags': [f'api-{a.commit}', f'worker-{a.commit}'], 'index_digest': d['index_digest'],
+        # O2 (one image, one tag): the index is published under exactly one tag, the full source commit.
+        out['images'][role] = {'tags': [a.commit], 'index_digest': d['index_digest'],
                                'reference': f'{a.repo}@{d["index_digest"]}', 'platforms': platforms}
     with open(a.output, 'w', encoding='utf-8') as f:
         json.dump(out, f, indent=2)

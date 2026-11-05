@@ -138,10 +138,14 @@ test('bootstrap-admin authority and inputs are one-off `run -e` values only: ref
 });
 
 test('compose env: interpolation values only, digests, never a secret, never every interface', () => {
-  const ok = `CREWFLOW_API_IMAGE_DIGEST=sha256:${'a'.repeat(64)}\nCREWFLOW_REDIS_IMAGE=redis@sha256:${'b'.repeat(64)}\nCREWFLOW_SECRETS_DIR=/etc/crewflow/secrets`;
+  const ok = `CREWFLOW_IMAGE_DIGEST=sha256:${'a'.repeat(64)}\nCREWFLOW_REDIS_IMAGE=redis@sha256:${'b'.repeat(64)}\nCREWFLOW_SECRETS_DIR=/etc/crewflow/secrets`;
   assert.deepEqual(lintEnvText('compose', ok), []);
   assertRefused(lintEnvText('compose', 'CREWFLOW_REDIS_IMAGE=redis:7-alpine'), /not pinned by digest/);
-  assertRefused(lintEnvText('compose', 'CREWFLOW_API_IMAGE_DIGEST=latest'), /not a sha256/);
+  assertRefused(lintEnvText('compose', 'CREWFLOW_IMAGE_DIGEST=latest'), /not a sha256/);
+  // O2: the retired per-role image variables are refused with the replacement named.
+  assertRefused(lintEnvText('compose', `CREWFLOW_API_IMAGE_DIGEST=sha256:${'a'.repeat(64)}`), /retired \(O2: one image\); set CREWFLOW_IMAGE_DIGEST/);
+  assertRefused(lintEnvText('compose', `CREWFLOW_WORKER_IMAGE_DIGEST=sha256:${'a'.repeat(64)}`), /retired/);
+  assertRefused(lintEnvText('compose', 'CREWFLOW_WORKER_IMAGE_REPOSITORY=example/repo'), /set CREWFLOW_IMAGE_REPOSITORY/);
   assertRefused(lintEnvText('compose', 'CREWFLOW_OWNER_PASSWORD=x'), /secret-like name/);
   assertRefused(lintEnvText('compose', 'APP_SECRET=x'), /only CREWFLOW_\* interpolation values/);
   assertRefused(lintEnvText('compose', 'CREWFLOW_API_BIND=0.0.0.0'), /binds every interface/);

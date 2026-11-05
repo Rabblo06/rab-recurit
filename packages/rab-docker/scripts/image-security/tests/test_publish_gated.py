@@ -86,7 +86,7 @@ class PublishGated(unittest.TestCase):
             env.update(DOCKERHUB_USERNAME='ci-user', DOCKERHUB_PUSH_TOKEN='not-a-real-token')
         if dry:
             env['DRY_RUN'] = '1'
-        p = subprocess.run(['bash', SCRIPT, layout, digest or idx, tag or f'api-{COMMIT}'], env=env,
+        p = subprocess.run(['bash', SCRIPT, layout, digest or idx, tag or COMMIT], env=env,
                            capture_output=True, text=True)
         calls = ''
         if os.path.exists(log):
@@ -98,7 +98,7 @@ class PublishGated(unittest.TestCase):
         p, calls = self.run_publish()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn('copy ', calls)
-        self.assertIn('published docker.io/example/repo:api-' + COMMIT, p.stdout)
+        self.assertIn('published docker.io/example/repo:' + COMMIT, p.stdout)
 
     def test_missing_secret_fails_before_any_registry_call(self):
         p, calls = self.run_publish(creds=False)
@@ -131,8 +131,10 @@ class PublishGated(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertNotIn('copy ', calls)
 
-    def test_only_the_two_immutable_tags(self):
-        for t in ('latest', 'api-latest', 'api-' + 'b' * 40, 'worker-' + COMMIT[:12], 'other-' + COMMIT):
+    def test_only_the_one_immutable_commit_tag(self):
+        # O2: the former api-/worker-<commit> tags are refused too; only the bare full commit is a release tag.
+        for t in ('latest', 'api-latest', 'api-' + COMMIT, 'worker-' + COMMIT, 'b' * 40, COMMIT[:12], COMMIT + '-x',
+                  'v' + COMMIT, 'other-' + COMMIT):
             p, calls = self.run_publish(tag=t)
             self.assertEqual(p.returncode, 1, t)
             self.assertNotIn('copy ', calls)

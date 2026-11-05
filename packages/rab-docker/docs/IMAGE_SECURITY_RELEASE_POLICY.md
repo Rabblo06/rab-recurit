@@ -11,7 +11,7 @@ and how a finding that cannot be fixed gets an explicit owner decision.
 |---|---|
 | `.github/workflows/image-security-gate.yaml` | The gate: builds the one image per platform and checks it |
 | `.github/workflows/ci-security.yaml` (`image-gate`, `ci-security-gate`) | Runs the gate on every PR and every push to `main`, in PR mode |
-| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated index to `docker.io/adhin007/adolphus` (O1: under both existing tag names) |
+| `.github/workflows/publish-image.yaml` | Runs the gate in release mode on both platforms, then (after approval of the `release` environment) pushes the exact gated index to `docker.io/adhin007/adolphus` under ONE tag, the full commit (O2) |
 | `packages/rab-docker/scripts/image-security/publish-gated.sh` | The only push path: one gated index, one immutable tag, existing tags refused, served digests verified |
 | `packages/rab-docker/rab/security-floors.env` | Minimum Node and libexpat versions, the Alpine branch, npm floors (no Chromium floor since P5: no image installs Chromium) |
 | `packages/rab-docker/rab/security-floors.sh`, `module-paths-gate.cjs` | H1 build-time gates, re-run by the gate against the finished image |
@@ -173,17 +173,24 @@ and update `verified_on`.
 - **Target.** The private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer published to: a
   second registry would need its own tag policy, verification and cleanup, so it does not come for free. The image is
   one multi-arch index (linux/amd64 + linux/arm64) built from the release commit.
-- **Exactly two immutable tags per release (O1; O2 replaces them with one `<full commit sha>` tag):**
-  - `api-<full commit sha>` and `worker-<full commit sha>`, both pointing at the SAME index digest;
-  - no `latest`, no version or per-architecture tags, nothing that moves;
-  - the push refuses any existing tag, whatever digest it points at.
+- **Exactly ONE immutable tag per release (O2):**
+  - `<full commit sha>` (40 hex, nothing else), pointing at the one multi-arch index that runs the API, the Worker,
+    `rab-migrate` and `rab-ops`;
+  - no `latest`, no prefix, no version or per-architecture tags, nothing that moves; `publish-gated.sh` refuses any other
+    tag, including the retired `api-<sha>` / `worker-<sha>` (its self-tests prove it);
+  - the push refuses any existing tag, whatever digest it points at;
+  - after the push, the registry must serve that tag, the index digest and every per-platform manifest with exactly the
+    gated digests, or the publish fails.
+
+  Releases up to v0.4.0 were two images under `api-<sha>` / `worker-<sha>`; those tags stay as published. Rolling back to
+  one of them: `release/OWNER-LOGIN-RECOVERY.md` section 4.4.
 
   **Deploy only by index digest:** `docker.io/adhin007/adolphus@sha256:...`, taken from the release manifest. The tags
   are labels, not references.
 - **What is pushed.**
   1. ONE image is built per platform; there is no Worker image built FROM the API image any more, so there is no
      base-image dependency to prove.
-  2. The publish job pushes exactly the one gated layout with `publish-gated.sh`, once per tag name, which:
+  2. The publish job pushes exactly the one gated layout with `publish-gated.sh`, under the one tag, which:
      - checks every blob hash and the expected index digest;
      - logs in with the environment secret;
      - fails if the tag exists, or if the registry's answer is anything but "not found";
@@ -231,7 +238,7 @@ and update `verified_on`.
   - the scanner versions and DB timestamps per image and platform;
   - the native PDF render results.
 
-  After the push, the publish job adds the published tags and the GitHub attestation URLs, and uploads it as
+  After the push, the publish job adds the published tag and the GitHub attestation URL, and uploads it as
   `release-manifest` (retained 90 days).
 
 ## 9. Credentials
@@ -272,7 +279,7 @@ and update `verified_on`.
   - Optionally, CODEOWNERS for `packages/rab-docker/scripts/image-security/**` and `.github/workflows/**`, so that
     decision-register and gate changes need owner review.
   - **Docker Hub immutable tags** on `adhin007/adolphus` (repository settings), so even a holder of the PAT cannot
-    move `api-<sha>` / `worker-<sha>`. The workflow's own tag-existence check is serialised only within this
+    move a `<sha>` tag (or the historical `api-<sha>` / `worker-<sha>`). The workflow's own tag-existence check is serialised only within this
     workflow.
 - **Fail closed.**
   - If either value is absent, the publish job stops with an explicit error before any registry call.

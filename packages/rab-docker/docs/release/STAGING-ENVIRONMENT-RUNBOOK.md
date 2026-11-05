@@ -74,19 +74,18 @@ rm -rf /tmp/crewflow-release
 ### 3.4 Pull the images by digest
 
 - Log in with the read-only token. It is read from a prompt, never typed into the command line.
-- Pull **only** the approved index digests.
+- Pull **only** the approved index digest (O2: ONE image for every application service).
 
 ```bash
 read -rsp 'Docker Hub read-only token: ' T && printf '%s' "$T" | sudo docker login -u <dockerhub-user> --password-stdin; unset T
-sudo docker pull adhin007/adolphus@sha256:<api-index-digest>
-sudo docker pull adhin007/adolphus@sha256:<worker-index-digest>
+sudo docker pull adhin007/adolphus@sha256:<image-index-digest>
 sudo docker pull redis@sha256:<redis-index-digest>
-sudo docker buildx imagetools inspect adhin007/adolphus@sha256:<worker-index-digest>   # lists linux/amd64 AND linux/arm64
-sudo docker image inspect adhin007/adolphus@sha256:<worker-index-digest> --format '{{.Os}}/{{.Architecture}}'  # = this host
+sudo docker buildx imagetools inspect adhin007/adolphus@sha256:<image-index-digest>   # lists linux/amd64 AND linux/arm64
+sudo docker image inspect adhin007/adolphus@sha256:<image-index-digest> --format '{{.Os}}/{{.Architecture}}'  # = this host
 sudo docker logout
 ```
 
-The digests come from the release record (commit, both index digests, scanner results, SBOM). R1/R2: nothing is
+The digest comes from the release record (commit, the index digest, scanner results, SBOM); it is `CREWFLOW_IMAGE_DIGEST`. R1/R2: nothing is
 published yet, so this step is BLOCKED until the owner approves a release.
 
 ## 4. Secrets (staging-only, generated fresh)
@@ -234,7 +233,7 @@ The Infrastructure templates add Prometheus alert rules (`hosting/monitoring/`) 
 Production (Oracle) runs ARM64.
 - **[DO] Droplets are x86-64 only (assumption, verify at provisioning).** An x86-64 staging VM therefore does **not**
   satisfy the gate.
-- The ARM64 manifest of the **same** Worker index digest must render a real report PDF on **native** ARM64. Emulation
+- The ARM64 manifest of the **same** image index digest must render a real report PDF on **native** ARM64. Emulation
   never counts.
 
 Two ways, either acceptable for the owner (the current owner question in the release-readiness record):
@@ -248,9 +247,9 @@ Two ways, either acceptable for the owner (the current owner question in the rel
 
    ```bash
    uname -m && docker info --format '{{.Architecture}}'        # aarch64 / aarch64
-   docker pull --platform linux/arm64 adhin007/adolphus@sha256:<worker-index-digest>
+   docker pull --platform linux/arm64 adhin007/adolphus@sha256:<image-index-digest>
    docker run --rm --network none --user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-     --entrypoint sh adhin007/adolphus@sha256:<worker-index-digest> -c 'uname -m; node --version; test ! -e /usr/bin/chromium'
+     --entrypoint sh adhin007/adolphus@sha256:<image-index-digest> -c 'uname -m; node --version; test ! -e /usr/bin/chromium'
    # then the render smoke and the bundle integration harness from the procedure; record the digest, host arch,
    # Node version and the PDF's validity (size, page count, markers). P5: no Chromium exists in the image.
    ```
