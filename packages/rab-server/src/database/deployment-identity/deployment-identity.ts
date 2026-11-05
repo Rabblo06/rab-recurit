@@ -534,6 +534,17 @@ export async function assertDeploymentIdentity(query: Query, options: AssertDepl
     throw new DeploymentIdentityError(`${IDENTITY_BOOTSTRAP_VAR} is honoured only by production database commands, never by the ${processLabel}. Remove it.`);
   }
   const { marker, database, disposableTestDatabase } = await readDeploymentMarker(query);
+  // Hotfix fix/posture-test-marker (2026-11-05): production never runs on a database marked as a disposable TEST
+  // database. The semantic posture no longer carries that setting (it is excluded by exact name so a real database
+  // compares cleanly), so this refusal is what keeps the marker detectable — including the tempting operator
+  // "workaround" of marking a production database disposable to get past the old posture refusal.
+  if (production && disposableTestDatabase) {
+    throw new DeploymentIdentityError(
+      `the production ${processLabel} refuses to run: database "${database}" is marked as a disposable TEST database ` +
+        `(${DISPOSABLE_TEST_DATABASE_SETTING_NAME} = 'true' in pg_db_role_setting). Production must never run on a database marked disposable. ` +
+        `If this IS production, remove the marker (ALTER DATABASE <name> RESET ${DISPOSABLE_TEST_DATABASE_SETTING_NAME}); otherwise point this process at the production database. Refusing.`,
+    );
+  }
   const expectedDatabaseNameSet = assertExpectedDatabaseName(env, database, processLabel);
   const decision = decideDeploymentIdentity({
     processLabel,
