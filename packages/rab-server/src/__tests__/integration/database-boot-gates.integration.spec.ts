@@ -86,7 +86,7 @@ describe('database boot gates (integration, migrations-only test database)', () 
   it('role: a superuser login is refused (API and CLI)', async () => {
     // Still refused; the message names the one login now (BC-02).
     await refusedAt(runDatabaseBootGates('api', options(adminUrl)), 'role', /expected crewflow_owner/);
-    await refusedAt(runDatabaseBootGates('cli', options(adminUrl, { cliCommand: 'bootstrap-admin' })), 'role', /expected crewflow or crewflow_app/);
+    await refusedAt(runDatabaseBootGates('cli', options(adminUrl, { cliCommand: 'bootstrap-admin' })), 'role', /expected crewflow_owner/); // still refused (BC-02)
   });
 
   it('role: a privileged login cannot even ask to SET ROLE to crewflow_app — the factory refuses the URL option before connecting', async () => {

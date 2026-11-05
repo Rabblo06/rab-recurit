@@ -252,17 +252,19 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
         );
       outcomes[col] = outcome;
     }
-    // The runtime login's measured outcome per column, asserted exactly (Agent 3 review of dbbda6e3). status / decided_by
-    // must be refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first). The others
-    // are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL): accepted (always rolled back here) or refused by a CHECK.
+    // The runtime login's MEASURED outcome per column (PR #74 run 41939771482), asserted exactly (Agent 3 review of
+    // dbbda6e3). status / decided_by are refused by the INSERT policy (42501); expires_at / created_at / origin by CHECKs
+    // (23514). id and final_arguments are ACCEPTED: OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL), only ever in a
+    // rolled-back transaction here. (final_arguments on a PENDING row is not the decision: approval writes it again and the
+    // ai_action_proposal_guard keeps it unchangeable outside approval.)
     expect(outcomes).toEqual({
-      status: '23514',
+      status: '42501',
       decided_by: '42501',
-      expires_at: 'OK',
-      created_at: 'OK',
+      expires_at: '23514',
+      created_at: '23514',
       id: 'OK',
-      final_arguments: '23514',
-      origin: 'OK',
+      final_arguments: 'OK',
+      origin: '23514',
     });
   });
 
