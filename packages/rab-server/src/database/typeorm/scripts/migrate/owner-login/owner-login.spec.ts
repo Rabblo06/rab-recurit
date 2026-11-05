@@ -16,7 +16,7 @@ import {
   workspaceFingerprintMajor,
 } from '../../../workspace-schema/v1/expected-fingerprints';
 import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
-import { BOOTSTRAP_ROLES, isRoleRace, RoleFacts, roleShapeProblems } from './bootstrap';
+import { BOOTSTRAP_ROLES, isRoleRace, OWNER_LOGIN, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
 import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
@@ -34,7 +34,7 @@ import {
   shimMigrationInstance,
   shimQueryRunner,
 } from './row-copy-shim';
-import { assessUpgradeFailure } from './upgrade-failure-policy';
+import { assessUpgradeFailure, parseUpgradeFailurePolicy } from './upgrade-failure-policy';
 import { assertDeploymentIdentity, MARKER_PRESENT_SQL, MARKER_READ_SQL } from '../../../../deployment-identity/deployment-identity';
 
 const spec = (name: string) => BOOTSTRAP_ROLES.find((r) => r.name === name)!;
@@ -339,18 +339,51 @@ describe('migrate-on-start child: guard environment, post-check tolerance, outco
 describe('upgrade-failure policy', () => {
   const base = { failedMigration: null, expectedMigrations: CODE, production: true, query: async () => [] };
   it('a first-install failure never serves; refuse never serves; neither runs a check', async () => {
-    const fresh = await assessUpgradeFailure({ ...base, policy: 'continue-if-compatible', freshInstall: true });
+    const fresh = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: true });
     expect(fresh).toMatchObject({ serve: false, checks: [] });
     const refuse = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false });
     expect(refuse).toMatchObject({ serve: false, checks: [] });
   });
 
-  it('continue-if-compatible: fails closed while the posture monitor or the identity check is absent, and on a partial transaction=false migration', async () => {
-    const v = await assessUpgradeFailure({ ...base, policy: 'continue-if-compatible', freshInstall: false, failedMigration: 'StatementDispatchPointer1786721320000' });
+  it('C3 continue: fails closed on identity (no identity hook, or the hook reports a problem); every check is still reported', async () => {
+    const v = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000' });
     expect(v.serve).toBe(false);
-    const byName = Object.fromEntries(v.checks.map((c) => [c.name, c.ok]));
-    expect(byName).toMatchObject({ 'no-partial-migration': false, posture: false, 'deployment-identity': false });
+    expect(v.reason).toMatch(/deployment identity check failed .*fail closed on identity/);
     expect(v.checks.map((c) => c.name)).toEqual(['ledger-compatible', 'no-partial-migration', 'post-checks', 'required-functions', 'deployment-identity', 'posture']);
+    const wrong = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => 'bound to production/x' });
+    expect(wrong.serve).toBe(false);
+  });
+
+  it('C3 continue (the default): an UPGRADE migration failure serves (exit 70) with the identity OK; the other checks are diagnostics only', async () => {
+    const v = await assessUpgradeFailure({
+      ...base,
+      policy: 'continue',
+      freshInstall: false,
+      failedMigration: 'StatementDispatchPointer1786721320000',
+      deploymentIdentityCheck: async () => null,
+    });
+    expect(v.serve).toBe(true);
+    const byName = Object.fromEntries(v.checks.map((c) => [c.name, c.ok]));
+    // A partial transaction=false migration and the unwired posture monitor are REPORTED, but no longer stop the start.
+    expect(byName).toMatchObject({ 'no-partial-migration': false, posture: false, 'deployment-identity': true });
+    expect(v.reason).toMatch(/^continue: the upgrade FAILED at StatementDispatchPointer1786721320000; continuing startup on the previous schema \(exit 70\); \d+ diagnostic check\(s\) failed/);
+  });
+
+  it('C3 refuse: unchanged (no check, never serves)', async () => {
+    const v = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => null });
+    expect(v).toEqual({ serve: false, policy: 'refuse', reason: 'CREWFLOW_UPGRADE_FAILURE=refuse: the API stays unready', checks: [] });
+  });
+
+  it('C3 config: CREWFLOW_UPGRADE_FAILURE=continue|refuse (default continue); the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY is an alias', () => {
+    expect(parseUpgradeFailurePolicy({})).toBe('continue');
+    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse' })).toBe('refuse');
+    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue' })).toBe('continue');
+    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
+    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).toBe('continue');
+    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
+    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(/disagree/);
+    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' })).toThrow(/must be exactly one of: continue, refuse/);
+    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' })).toThrow(/deprecated .* use CREWFLOW_UPGRADE_FAILURE=continue\|refuse/);
   });
 });
 
@@ -593,5 +626,22 @@ describe('BC-11 (owner decision 2026-11-05): the deployment identity and the app
     expect(approvalDecision({ ...base, approvalMode: 'token' })).toBe('refuse-token');
     expect(approvalDecision({ ...base, approvalMode: 'token', hasApprover: true })).toBe('f5');
     expect(approvalDecision({ ...base, approvalMode: 'token', fresh: true })).toBe('f5');
+  });
+});
+
+describe('install-state move (database/owner-login/install-state.ts): fresh-install.ts re-exports the same objects', () => {
+  it('the runner, the child and the boot gates share ONE classifier and ONE evidence query', async () => {
+    const moved = await import('../../../../owner-login/install-state');
+    const reexported = await import('./fresh-install');
+    for (const name of ['CATALOG_FACTS_SQL', 'classifyDatabase', 'classifyDatabaseState', 'decideFreshInstall', 'readCatalogFacts', 'readFreshInstallProof', 'TENANT_EVIDENCE_SQL'] as const) {
+      expect(reexported[name]).toBe(moved[name]);
+    }
+    // The proof's default owner is the bootstrap's owner login.
+    let seen: unknown[] | undefined;
+    await moved.readFreshInstallProof(async (_sql, params) => {
+      seen = params;
+      return [];
+    }, 'EMPTY');
+    expect(seen).toEqual([OWNER_LOGIN]);
   });
 });
