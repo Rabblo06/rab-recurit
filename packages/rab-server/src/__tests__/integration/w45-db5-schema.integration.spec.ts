@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { dropWorkspaceSchema, ledgerOf, provisionLegacyV14, provisionServerPath, registryOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
@@ -94,6 +94,9 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
       throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
     }
+    // D4: the fingerprint table follows the server's major (PG16 and PG18 differ), exactly as the runner selects it; the
+    // migrator in this process and the assertions below then read the same table.
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
   });
 
   afterAll(async () => {
