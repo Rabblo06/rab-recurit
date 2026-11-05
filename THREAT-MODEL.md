@@ -5396,6 +5396,258 @@ approves; the renderer-source half is a separate follow-up patch (native only, `
   the native renderer's indirect `/Resources`; MEASURED: it extracted no text from a react-pdf PDF before this fix);
   `check-no-browser-in-worker.cjs` (fails on main: the manifest and six imports).
 
+---
+
+## Owner-login architecture (Option A, permanent): PT-01 and the controls that replace the restricted login (2026-11-04)
+
+**Owner decision (2026-11-04, final):** one schema-owning login, `crewflow_owner`, serves the API, the Worker, the CLI and
+the short-lived migration child. Its shape is M0 §5.1: NOSUPERUSER, NOBYPASSRLS, NOREPLICATION, NOCREATEDB, CREATEROLE.
+There is no mode switch.
+
+The legacy roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`, `crewflow_app` and `crewflow_worker` remain as
+**schema roles**: historical migrations and SECURITY DEFINER functions need them. None of them is a runtime login.
+
+Sources: `docs/TWENTY_MODE_M0_DECISION_2026-11-04.md`, the Option A brief and the permanent-owner-login addendum.
+
+Who can call this? — Every request and job, through the one login.
+Whose data is involved? — Every tenant's. The login owns every table through `rab_secure_owner` and `crewflow`.
+What if that identity is compromised? — Whole-database read and write, DDL and role creation (PT-01 below).
+What if it's malicious? — Same as compromised, plus persistence through roles and definers (G-04).
+What if the request is tampered with? — On normal paths, RLS (FORCE everywhere), the guards below and bound parameters
+apply. One SQL injection runs with owner privileges.
+What if two callers race? — Unchanged per feature. The pool-safety reset stops one request's SET ROLE reaching another.
+What if the DB returns data written by a lower-trust actor? — The posture monitor compares the security objects with the
+reviewed golden at boot and on a timer. Drift turns readiness off.
+What if a third party is compromised? — A leaked `PG_DATABASE_URL` is the schema owner (BC-16).
+What happens when authorisation fails? — Guards refuse with 42501 or 404 as before. The boot gates refuse to serve.
+What happens when the operation fails halfway? — Migrations run in transactions with self-checks. A failure rolls back.
+
+### PT-01: owner-accepted architectural risk (recorded 2026-11-04)
+
+> One SQL-injection bug, a compromised dependency, code execution or a leaked credential gives **whole-database**
+> access: every tenant, not one. It also cancels Phase D's API/Worker separation (DBA-01).
+
+Correction to the plan's wording: "one tenant → whole database" understates the baseline. RLS keys on a GUC the runtime
+can set, so injection already crossed tenants on FORCE tables in the separated design (G-13, pre-existing).
+
+PT-01 was **not** in this file before today. This entry records it.
+
+**Accepted by the owner in the final prompt §2.** These are owner-accepted risks, listed separately on purpose. None of
+them is a control that "passed".
+
+| Accepted consequence | Catalogue | Severity |
+|---|---|---|
+| Cross-organisation authentication data (password hashes, TOTP ciphertext, token hashes) | BC-03 / G-01 | CRITICAL |
+| SQL injection with owner privileges (DDL, NO FORCE, policy rewrite) | BC-01 / G-02 | CRITICAL |
+| Account takeover and MFA bypass, platform admins included | BC-04 / G-03 | CRITICAL |
+| Policy modification that a FORCE-only check cannot see | BC-05 / G-02 | CRITICAL |
+| Object deletion (`DROP SCHEMA core CASCADE`) | BC-06 | CRITICAL |
+| Audit tampering (`audit_log` insert-only cannot be enforced in the database) | BC-07 / G-05 | HIGH |
+| Persistence through roles or definers that survives credential rotation | BC-09 / G-04 | CRITICAL |
+| Credential-exposure impact (the one URL is the owner) | BC-16 | HIGH |
+| Direct writes to 7 pre-auth tables within one tenant (X2; owner decision 2026-11-04, below) | BC-18 | MEDIUM |
+
+**Not listed in §2, then accepted by the owner on 2026-11-05 ("like Twenty").** Each one keeps its catalogue entry
+(status `accepted-owner`, dated) and its reproducing test. An accepted loss is never reported as a passing control.
+
+| Protection lost | Catalogue | Severity | Recorded |
+|---|---|---|---|
+| DBA-01: the API can run the Worker-only dispatch-claim functions | BC-08 / G-08 | MEDIUM | Accepted 2026-11-05. Boot gate 8 still writes a `BC-08 …` warning on every API and CLI start. |
+| Direct access to `worker_due_work` and the dispatch pointers | BC-10 | MEDIUM | Accepted 2026-11-05. `check-rls-coverage` expects 0 rows (restrictive deny). |
+| Production deployment ID and per-release approval token no longer required (see below) | BC-11 / G-06 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
+| Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
+| The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
+
+**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512 and f91f1038):** the legacy schema roles
+kept their old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on
+the transition and on fresh installs; `crewflow_migrator` too, on the transition, when the role exists. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
+authenticate only via non-password methods, which the provider's `pg_hba` must not grant. It stays LOGIN because
+migrations 1786721300000 and 1786721340000 assert its LOGIN, and `crewflow_owner` cannot administer it. Proving test:
+the PG16 lifecycle check "transition: BC-17 the old logins are disabled (crewflow, crewflow_app, crewflow_migrator
+NOLOGIN without a password; crewflow_worker LOGIN without a password)" (the goldens show `login=false` on the fresh,
+reference, interrupted and transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any
+more.
+
+- **`crewflow_worker`:** stays LOGIN without a password. Only a `trust`, `peer` or `cert` rule in the provider's
+  `pg_hba` could admit it; the provider must not grant one.
+- **Fresh install, residual (detection only):** `crewflow_owner` keeps CREATEROLE plus ADMIN on `crewflow` and
+  `crewflow_app`. Injected SQL could run `ALTER ROLE crewflow_app LOGIN PASSWORD '…'` and regain a persistent,
+  less-privileged login that survives credential rotation. The privilege-drift snapshot and the posture golden catch
+  `login=true`; nothing prevents it. A transitioned database is not exposed: there `crewflow_owner` is NOCREATEROLE.
+- **Rollback:** roles are cluster-wide. Only a fresh-cluster restore of `roles.sql` plus the dump brings LOGIN back.
+- **`crewflow_migrator` (f91f1038):** NOLOGIN PASSWORD NULL on the transition, but it keeps its memberships
+  (`rab_secure_owner` and `crewflow`, SET + INHERIT). A NOLOGIN member is inert. Removing it (REVOKE or DROP ROLE)
+  would need a separate owner decision. The transition passed the second-boot posture check with it present.
+
+**BC-11 / G-06, owner-accepted 2026-11-05 (HIGH):**
+
+> "Production no longer requires a deployment ID or a per-release approval token. A wrong or old image, or a staging
+> config pointed at the production URL, migrates production with no second check. Recovery from a mistaken upgrade is
+> restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like
+> Twenty."
+
+The production safeguards become optional and are off by default. Remaining controls:
+
+- the migration lock;
+- the identity and refusal gates;
+- the posture and semantic goldens;
+- RLS;
+- the mandatory pre-upgrade backup in the runbook;
+- the optional, opt-in deployment ID and approval token.
+
+Also accepted with BC-11 (Agent 1, 0074cecb): a production deployment that declares no deployment ID skips the marker and
+location checks. It therefore does not detect the wrong database, a restored database or a cloned database. Every boot
+writes a warning instead.
+
+### The ten consequences PT-01's wording did not cover (M0 §6.2)
+
+1. **Cross-tenant pre-auth exposure without injection.** Closed on normal paths by M-T1 (below). The injection case is
+   accepted (BC-03).
+2. **Account takeover with MFA bypass, platform admins included.** Accepted (BC-04).
+3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
+4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
+   sink is required.
+5. **The deployment identity and the N1 approval are effectively removed.** Accepted by the owner 2026-11-05 (BC-11,
+   above).
+6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
+   backdoors. Accepted by the owner 2026-11-05 (BC-12).
+7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
+8. **The integrity gate is blind to policy and function rewrites that keep FORCE on.** The semantic posture monitor
+   detects them afterwards (BC-05).
+9. **One statement can destroy everything.** Accepted (BC-06). PITR is the only recovery.
+10. **CLAUDE.md's own rules became false.** CLAUDE.md was rewritten for the single architecture the same day. Every
+    changed rule is flagged in the PR.
+11. **Owner-accepted, 2026-11-04 (X2, catalogue BC-18):**
+
+    > "Under the owner login, the app can delete or change member invitations, login sessions and email-change requests
+    > within one tenant (7 tables). Accepted, like Twenty."
+
+    The 7 tables are `login_handoff`, `organisation_invitation`, `released_host_label`, `user_auth_identity`,
+    `user_session`, `member_invitation` and `email_change_request`.
+
+    - **Why:** `crewflow_app` held no DELETE on them, and on some of them no (or only column-level) INSERT or UPDATE, so
+      the database refused a direct write and SECURITY DEFINER functions were the only write path. The owner login
+      inherits the table owner `rab_secure_owner`, so on a normal code path the database no longer refuses such a write.
+      M-T1 (FORCE) still confines it to the bound tenant, and with no tenant context it affects 0 rows.
+    - **Decision:** no database guard (the proposed migration 1786721440000 was dropped by the owner). The protection is
+      app-level only, like Twenty: every write to these tables must stay in its reviewed owning service.
+      `tools/check-protected-table-writes.cjs` (CI job `protected-table-writes`) fails on any new direct write outside
+      the allow-list.
+    - **Write audit (27 sites, all in owning code):**
+      - the definer SQL in `host-label-namespace-sql.ts` and `login-handoff-sql.ts`;
+      - `RefreshTokenService`, `SessionValidityService` and `UserSessionBackfillService` for `user_session`;
+      - `UserAuthIdentityService`, `EmailChangeService` and `MemberInvitationService`.
+    - **Finding PTW-1 (LOW):** three security revocations write `user_session` directly instead of through
+      `RefreshTokenService`: `mfa-management.service.ts:220`, `admin-users.service.ts:181` and
+      `privileged-grant-session-reset.ts:28`. They touch `revoked_at`, `revoked_reason` and `security_version` only, are
+      scoped to one user and bound to the tenant. They are allow-listed so they stay visible; consolidation is
+      recommended.
+    - **Tests:** the member-invitation X2 test documents the difference per connected login. `crewflow_app` is still
+      refused (42501), the owner login is not, and RLS still leaves 0 rows without context. Catalogue test BC-18
+      reproduces it.
+12. **Owner-accepted, 2026-11-04 (REF-1):**
+
+    > "Under the owner login, a bug or injected SQL can change the global permission-flag table and the migration ledger
+    > (no tenant boundary; affects every tenant). Accepted, like Twenty."
+
+    The tables are `core.permission` and `core.migrations`. They stay outside the grant-parity guards on purpose: the
+    seed commands write the permission catalogue, and the migration runner writes the ledger, both as the owner login.
+    No database guard is added. Agent 5 updates the catalogue entry and the CF-09 test to record the accepted difference.
+
+### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
+
+| Id | Sev | Finding | State after this change |
+|---|---|---|---|
+| G-01 | CRITICAL | The runtime owns the 16 pre-auth tables, so a logic bug alone exposes every tenant's auth secrets | **Mitigated on normal paths** by M-T1 (FORCE plus an owner-only definer policy). The injection case is accepted (BC-03). Agent 5's INV-1 (a member invitation disclosed to another workspace) is this class. |
+| G-02 | CRITICAL | Injection gets full DDL, and the posture gate cannot see policy or body rewrites | Accepted (BC-01, BC-05). **Detected** by the semantic posture monitor (at boot and on a timer). |
+| G-03 | CRITICAL | Cross-tenant account takeover with MFA bypass | Accepted (BC-04). The monitor detects a disabled trigger. |
+| G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
+| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
+| G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
+| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Agent 1 (approval token, migrate-on-start defaults) |
+| G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
+| G-09 | MED | Pool poisoning: a session-level SET ROLE survives COMMIT | **Mitigated:** RESET ROLE on checkout and at the start of every tenant transaction, plus a `current_user = session_user` assertion |
+| G-10 | MED | The workspace registry and bound constraints are writable | **Mitigated on normal paths** by M-T2 and the grant-parity guards. The injection case is accepted. |
+| G-11 | MED | No logical backup by the app login | Accepted by the owner 2026-11-05 (BC-12) |
+| G-12 | LOW | The reachability walk must count ADMIN-only memberships and predefined roles | **Done.** The MEMBER-semantics walk follows every `pg_auth_members` edge, is cross-checked with `pg_has_role(…, 'MEMBER')`, and refuses predefined and provider-admin roles. |
+| G-13 | HIGH (pre-existing) | RLS keys on a GUC the runtime can set | Unchanged. Out of scope (it needs its own design). |
+
+### Controls added
+
+Each control below is tested. None of them prevents injection.
+
+- **M-T1** (`PreAuthTablesForceOwnerOnly1786721400000`):
+  - It adds FORCE plus `<table>_secure_owner_definer` (TO rab_secure_owner, `CURRENT_USER = 'rab_secure_owner'`) to the
+    16 pre-auth tables.
+  - Definers keep every row. The owner login gets only the tenant policies.
+  - `NOT_FORCED_ALLOWLIST` is now empty.
+  - Consequence for later migrations and scripts: to read those tables as the owner login, use `SET LOCAL ROLE
+    rab_secure_owner`. An "is the database empty?" row count run as the owner login would wrongly answer yes.
+  - Fixed in place on 2026-11-04 (owner-approved; M-T1 had run only on disposable databases). Under FORCE,
+    `core.platform_admin`'s three TO PUBLIC policies (`_select`, `_write`, `_update`) called
+    `core.is_active_platform_admin()`. That definer reads `core.platform_admin`, so policy and function called each other
+    until "stack depth limit exceeded", and every login failed once a second admin row existed (HIGH, fail-closed,
+    found on PR #72). Those policies are now `CASE WHEN CURRENT_USER = 'rab_secure_owner' THEN false ELSE <previous
+    predicate> END`, applied before FORCE. Definers keep every row through the owner-only policy. Every other role
+    keeps the previous predicate. No other policy on `core.platform_admin` calls the function, and a static scan of
+    the other 15 tables found no such loop. Test: `platform-admin-force-rls.integration.spec.ts`.
+- **M-T2** (`WorkspaceRegistryGuardAllowList1786721410000`): the registry versioning guard becomes an allow-list
+  (crewflow, rab_secure_owner, superuser). The workspace migrator takes `SET LOCAL ROLE crewflow`.
+- **Grant parity, for PAY-1** (`OwnerLoginGrantParityGuards1786721420000`):
+  - BEFORE INSERT, UPDATE, DELETE and TRUNCATE triggers give the owner login exactly crewflow_app's write privileges on
+    36 crewflow-owned core tables.
+  - Those tables cover payroll immutability, definer-only AI, registry and ledger writes, and outbox retention.
+  - The workspace-schema copies of the payroll tables (HWS runtime) get the same guards through workspace module v20
+    (`WorkspaceGrantParityGuards1786721430000`).
+  - Fixed in place on 2026-11-04 (owner-approved; both migrations had run only on disposable databases):
+    - **PAY-1b (MEDIUM, found by Agent 5 on `deploy/twenty-mode-a`):** the DELETE guards, and the UPDATE guards of
+      tables with no updatable column, were row-level. These tables have no DELETE (or UPDATE) policy, so as the owner
+      login such a statement matched 0 rows, no row trigger fired, and it "succeeded" without an error. No data
+      changed, but nothing refused or recorded the attempt (`payroll-runs.integration.spec.ts:410`,
+      `payroll-approval.integration.spec.ts:440`). Every operation `crewflow_app` lacked entirely is now refused per
+      statement (INSERT, DELETE, and UPDATE with no updatable column), like a missing privilege. The column allow-list
+      UPDATE guards stay per row.
+    - **Trigger order (functional regression, Agent 5 `ai-agents.integration.spec.ts:163`):** the allow-list guard ran
+      after `ai_agent_config_version`, saw the server-maintained `config_version` change and refused a legitimate
+      prompt edit. Every guard name now starts with `_`, so it fires before any other BEFORE UPDATE row trigger, and
+      the migration refuses a table where another one would fire first.
+    - **MFA-SESS-1 (fixed, not accepted; owner decision 2026-11-04):** `core.user_session.mfa_verified_at` is set at
+      INSERT only. No app path updates it: refresh-token, backfill and handoff INSERTs never set it, and no UPDATE
+      names it. A statement-level `BEFORE UPDATE OF mfa_verified_at` trigger now refuses any UPDATE that names the
+      column, for every role, the superuser included. The INSERT-time check (an enabled factor, not in the future) is
+      unchanged.
+    - Tests: `owner-login-guards.integration.spec.ts` (PAY-1b, trigger order and MFA-SESS-1 cases). The payroll and
+      ai-agents suites pass unchanged, and `w45-db5-schema` stays strict.
+- **Boot, runtime and CI guards** (updated in place): they accept the owner login only, run the MEMBER-semantics
+  reachability walk, enforce the exact role inventory, check FORCE and ownership, and refuse PostgreSQL below 16.
+- **Pool safety:** RESET ROLE on every pool checkout and at the start of every tenant transaction. A transaction fails
+  closed when `current_user <> session_user`. Never `DISCARD ALL`.
+- **Semantic posture monitor:**
+  - It hashes a canonical form of policies, function bodies and config, triggers, RLS flags, the audit ACL, owners,
+    settings and role memberships.
+  - At boot it compares with the committed golden for the PG major. On the timer it compares with the boot snapshot.
+  - Drift turns readiness off and raises an alert. The monitor never rewrites anything.
+- **External audit sink:** an interface plus redacted, structured events. Production requires it and fails closed
+  without it. Deployment dependency: an off-host append-only log shipper (not created here).
+- **SQL-injection lint** (`tools/check-sql-injection.cjs`) plus adversarial tests. The lint is a text scan, **not a
+  complete defence**.
+
+### Residual risks (no control above covers these)
+
+- Everything injection can do inside its own request (PT-01): read, rewrite, drop, persist.
+- Session-level settings other than the role (for example a session `rab.organisation_id`) that injected SQL leaves on
+  a pooled connection. Tenant-context calls re-bind theirs transaction-locally.
+- A rewrite made and undone between two monitor checks is not seen. The record for that is pgaudit or provider logs
+  shipped off the database (a deployment dependency).
+- Passwords of the LOGIN schema roles cannot be seen without superuser (BC-17).
+- PG18 has no semantic golden yet, so production on PG18 refuses at boot until one is generated and reviewed.
+- The workspace-schema copies of the payroll tables have no grant-parity guards yet (open; needs a workspace module).
+- The lint cannot follow SQL built across functions, or ORM `.where(string)` fragments.
+
 ## PDF renderer review fixes M-3 and L-6 (branch integration/pdf-native-pre-removal, #62, not merged)
 
 No migration, role, grant, RLS or posture change; no money or worked-minutes value changes.

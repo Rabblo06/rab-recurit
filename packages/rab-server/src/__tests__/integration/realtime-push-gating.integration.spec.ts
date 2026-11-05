@@ -113,7 +113,8 @@ describeIfDb('Phase A gating — realtime/push producers write nothing when thei
     expect(env.get('REALTIME_ENABLED')).toBe(false);
     expect(env.get('PUSH_ENABLED')).toBe(false);
     const [{ current_user: role }] = await dataSource.query('SELECT current_user');
-    expect(role).toBe('crewflow_app');
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(role).toBe('crewflow_owner');
     const rls = await adminDataSource.query<Array<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>>(
       `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid IN ('core.realtime_event'::regclass, 'core.push_delivery'::regclass) ORDER BY relname`,
     );

@@ -108,7 +108,8 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     workerA = workerDs('a');
     workerB = workerDs('b');
     await Promise.all([workerA.initialize(), workerB.initialize()]);
-    for (const w of [workerA, workerB]) expect((await w.query<[{ u: string }]>('SELECT current_user AS u'))[0].u).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): both Worker runtimes run on crewflow_owner; crewflow_worker is a schema role.
+    for (const w of [workerA, workerB]) expect((await w.query<[{ u: string }]>('SELECT current_user AS u'))[0].u).toBe('crewflow_owner');
     orgs = [];
     for (let i = 0; i < 3; i += 1) orgs.push(await factory.createInternalManager(await factory.createOrganisation(`w4-${i}`), { label: `w4-${i}` }));
   });

@@ -24,62 +24,104 @@ structural changes.
   verified session/token and bound into the DB session via `SET LOCAL`
   (`TenantContextService`). A request body containing `organisationId` is a
   validation failure (400), not a hint, and never a silent override.
+- **One runtime login: the owner login `crewflow_owner`** (owner's final
+  decision 2026-11-04, Option A, permanent; THREAT-MODEL.md PT-01). The API,
+  the Worker, the CLI and the short-lived migration child all connect as it
+  through one `PG_DATABASE_URL`. Its shape is fixed (M0 §5.1): NOSUPERUSER,
+  NOBYPASSRLS, NOREPLICATION, NOCREATEDB, CREATEROLE; it INHERITs
+  `rab_secure_owner` and `crewflow`, so it **owns every table**. The legacy
+  roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`,
+  `crewflow_app` and `crewflow_worker` remain as **schema roles** that
+  historical migrations and SECURITY DEFINER functions need. None of them is
+  a runtime login, and a process connecting as one of them is refused. The
+  boot gates, `assertRuntimeDbRole` and `tools/check-rls-coverage.ts` enforce
+  the exact owner-login shape through ONE shared rule set
+  (`database/boot-checks/owner-login-posture.ts`): the login itself (no SET
+  ROLE); a MEMBER-semantics reachability walk that may reach nothing
+  SUPERUSER, BYPASSRLS, CREATEDB, REPLICATION, dangerous-predefined or
+  provider-admin; the exact role inventory; FORCE everywhere; and the
+  expected ownership. Never add a second validator or a mode switch.
+  Every protection the former restricted login gave and this one cannot
+  keep is in the reviewed behaviour-change catalogue
+  (`owner-login-behaviour-catalogue.ts`), with a severity and a reproducing
+  test. A catalogue difference is never "fixed" by flipping a test to pass.
 - **Every tenant-scoped table gets `organisation_id` + an RLS policy
   (`ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + `USING` +
   `WITH CHECK`) in the *same* migration that creates it.** No exceptions, no
-  "add the policy later" follow-up PR. `tools/check-rls-coverage.ts` enforces
-  this in CI starting M1. **Exception:** a table read by a pre-auth lookup
-  (identifying *which* organisation a request belongs to — by email, by
-  slug, by presented token hash — before any tenant context can exist to
-  satisfy a forced policy) skips `FORCE` only, never `ENABLE`, and gets a
-  `SECURITY TRADE-OFF` note explaining which lookup needs it. Sixteen tables
-  carry this exception today — the authoritative list is
-  `NOT_FORCED_ALLOWLIST` ∪ `{organisation, platform_admin}` in
-  `tools/check-rls-coverage.ts`, which is what CI actually enforces; treat
-  that file, not this paragraph, as the source of truth if the two ever
-  disagree. As of 2026-10-31 (245 migrations): `user`, `login_history`,
-  `refresh_token`, `password_reset_token` (pre-auth identity/token lookups,
-  IdentitySchema1786665800000); `manager_workspace` (subdomain-uniqueness
-  SECURITY DEFINER check, Private Workspace Stage 2A); `worker_due_work`
-  (cross-tenant timer discovery, WorkerDueWork1786676800000);
-  `account_invite` (`auth_find_account_invite_org`,
-  AccountInviteSchema1786670100000); `user_auth_identity` (OIDC identity
-  lookup, UserAuthIdentity1786680200000); `user_session` (cookie-session
-  lookup, WebSessionCookieAuthentication1786681000000); `member_invitation`
-  (MemberInvitationSchema1786715000000); `email_change_request`
-  (EmailChangeRequest1786717800000); `released_host_label`
-  (HostLabelNamespace1786719820000); `login_handoff`
-  (LoginHandoff1786719910000); `organisation_invitation` (pre-auth
-  token-hash lookups `organisation_invitation_peek` / `_complete` for an
-  invited CEO who has no account yet, OrganisationCeoInvitation1786720010000);
-  and `organisation` + `platform_admin` (both
-  org-bootstrap/admin-bootstrap SECURITY DEFINER writes that can't satisfy a
-  self-referential `WITH CHECK` before the first row exists — these two have
-  no `organisation_id` column at all, so `check-rls-coverage.ts` verifies
-  them in a separate pass, not the main per-table scan). `staff_profile` and
-  `manager_profile` are **no longer** on the list: they FORCE again since
-  `resolve_workspace_for_user()` was retired
-  (StaffProfileForceRls1786675800000, ManagerProfileForceRls1786675810000).
-  **NOT FORCE never means RLS is disabled** — every one of these sixteen
-  still has `ENABLE ROW LEVEL SECURITY` and real `USING`/`WITH CHECK`
-  predicates; only the table *owner* is exempted from those predicates by
-  omitting FORCE. Since the role split the owner of all sixteen is
-  `rab_secure_owner`, a NOLOGIN role no connection can authenticate as (it
-  is reached only through its own SECURITY DEFINER functions); migrations
-  run as `crewflow`, and `crewflow_app` — the runtime connection every API
-  and Worker request actually uses — owns nothing and is therefore bound by
-  RLS on all sixteen regardless of the FORCE flag. `check-rls-coverage.ts`
-  also asserts the runtime role has `rolbypassrls = false` and connects as
-  itself (not the owner) specifically to catch that class of drift. (The
-  role names `rab_owner`/`rab_app` used elsewhere in this file are the
-  pre-split names: `rab_owner` → `crewflow` / `rab_secure_owner`, `rab_app`
-  → `crewflow_app`, CrewflowAppRestrictedRuntimeRole1786687000000.)
-  Separately, three `core` tables have no RLS at all because they hold no
-  tenant data and no `organisation_id`: `migrations`, `permission` (global
-  reference data) and `oauth_transaction_state` (pre-identity OIDC state,
-  justified in OAuthTransactionState1786680300000). Check whether a new
-  table is read by `AuthService` before context exists before assuming it
-  needs this exception; most tables don't.
+  "add the policy later" follow-up PR. **FORCE is now mandatory on every
+  table without exception**: the runtime login is the owner, so a NOT FORCE
+  table is unscoped for every query it runs, with no injection needed (G-01).
+  `tools/check-rls-coverage.ts` enforces this; its `NOT_FORCED_ALLOWLIST` is
+  empty and must stay empty.
+  - **Pre-auth lookups** need to find a row before any tenant context exists
+    (by email, slug or presented token hash). They use the M-T1 pattern
+    (PreAuthTablesForceOwnerOnly1786721400000), never NOT FORCE:
+    - the table is owned by the NOLOGIN `rab_secure_owner`;
+    - it has FORCE, plus one PERMISSIVE policy `<table>_secure_owner_definer`
+      TO rab_secure_owner USING / WITH CHECK
+      `(CURRENT_USER = 'rab_secure_owner'::name)`;
+    - the lookup is a narrow SECURITY DEFINER function owned by
+      `rab_secure_owner`, with a pinned `search_path`.
+  - Sixteen tables use this pattern today. The authoritative list is
+    `PREAUTH_FORCE_TABLES` (`preauth-force-sql.ts`):
+    - `user`, `login_history`, `refresh_token`, `password_reset_token`,
+      `manager_workspace`, `worker_due_work`, `account_invite`,
+      `user_session`, `user_auth_identity`, `member_invitation`,
+      `email_change_request`, `released_host_label`, `login_handoff`,
+      `organisation_invitation`;
+    - `organisation` and `platform_admin` (no `organisation_id`, so they are
+      checked in a separate pass).
+  - A migration or script that reads or writes one of these tables as the
+    owner login must `SET LOCAL ROLE rab_secure_owner` or go through a
+    definer. Otherwise it sees zero rows: an "is the database empty?" check
+    must never count these rows as the owner login.
+  - Three `core` tables have no RLS at all because they hold no tenant data
+    and no `organisation_id`: `migrations`, `permission` (global reference
+    data) and `oauth_transaction_state` (pre-identity OIDC state, justified in
+    OAuthTransactionState1786680300000).
+  - RLS binds the owner login on **normal code paths only**. An injected
+    statement can `SET ROLE`, rewrite a policy or drop FORCE. The owner
+    accepted this (final prompt §2; THREAT-MODEL.md PT-01). The semantic
+    posture monitor detects the change afterwards; it does not prevent it.
+- **Write invariants that used to rest on a missing grant need a
+  grant-parity guard.** The owner login inherits every privilege of the
+  table owner. So "crewflow_app has no UPDATE/DELETE here" no longer
+  protects anything on its own. Payroll immutability, definer-only writes
+  and retention are examples (PAY-1).
+  - In the same migration that creates such a table, attach
+    `core.owner_login_grant_parity_guard()`
+    (OwnerLoginGrantParityGuards1786721420000).
+  - Add the table to `GRANT_PARITY_TARGETS`.
+  - Writes then go through a SECURITY DEFINER function owned by `crewflow`
+    or `rab_secure_owner`, or after `SET LOCAL ROLE crewflow` (migrator,
+    provisioner).
+- **Never change the session role at session level.** Use only `SET LOCAL
+  ROLE` / `set_config('role', …, true)` inside a transaction, and restore it
+  where the caller's transaction continues. A session-level SET ROLE
+  survives COMMIT and would poison the pooled connection (G-09). Pools reset
+  the role on checkout and `TenantContextService` asserts `current_user =
+  session_user` (`database/postgres/session-role-reset.ts`). Never use
+  `DISCARD ALL` inside a transaction.
+  - **One reviewed exception (2026-11-04):** the Worker's workspace
+    provisioning and drift connections
+    (`rab-worker/.../workspace-provisioning.loops.ts`,
+    `actAsProvisioningRole`) run a session-level `SET ROLE crewflow`. This
+    is allowed only because each one is a dedicated `pg.Client`, never a
+    pool. It is private to that module, runs only that module's fixed
+    statements (no request input), verifies `current_user` after the SET,
+    and repeats the SET on every reconnect. It is not a privilege
+    boundary: the owner login can act as `crewflow` anyway. Any other
+    session-level SET ROLE needs its own SECURITY TRADE-OFF review and an
+    entry here.
+- **New database objects are owned by a schema role, never by the login.**
+  - Tables, functions and schemas belong to `crewflow` (through
+    `withCrewflowCoreCreate`) or `rab_secure_owner`.
+  - The boot gate refuses anything in `core`, `public` or a workspace schema
+    that `crewflow_owner` owns directly.
+  - A change to a policy, function body, trigger, RLS flag or the audit_log
+    ACL also changes the semantic posture golden (`posture-drift/`). Regenerate
+    the golden for each PG major from a migrations-only database and review it
+    like code. Never regenerate it from a database under investigation.
 - **Fail closed.** A permission check that throws denies. Missing config
   refuses to boot (env is validated on process start). An unknown state
   transition is rejected, never silently accepted. A query run with no tenant
@@ -105,9 +147,17 @@ structural changes.
 - **Permissions are resolved server-side per request**, never read off the JWT.
   Use the `PermissionGuard(flag)` mixin factory declaratively on the
   handler — never an inline `if` check in a resolver/controller body.
-- **`audit_log` is insert-only.** No update/delete route may ever be added for
-  it, at the application layer or the database grant (`REVOKE UPDATE, DELETE
-  ... FROM rab_app` in the same migration that creates the table).
+- **`audit_log` is insert-only.**
+  - No update or delete route may ever be added for it, at the application
+    layer or in the database grants. `UPDATE`, `DELETE` and `TRUNCATE` are
+    revoked from `crewflow` (the owner) and from `crewflow_app` in the same
+    migration that creates the table.
+  - Since the owner login, the database can no longer guarantee this against
+    injected SQL: the owner can re-grant itself (BC-07, owner-accepted).
+    Security-relevant events are therefore also emitted to the external
+    append-only audit sink (`engine/core-modules/audit-sink`).
+  - Production refuses to start without that sink (`CREWFLOW_AUDIT_SINK`)
+    and fails closed when a write to it fails.
 - **Rate resolution is snapshotted at confirmation** (`assignment → staff role
   rate → venue role rate → org default`), never recalculated later. A rate
   change must not reprice historical work.
@@ -117,6 +167,22 @@ structural changes.
   the account doesn't exist.
 - **Migrations only.** `synchronize: false` always. Every schema change is a
   versioned TypeORM migration, never edited after merge.
+- **Production upgrades need no deployment ID or approval token** (owner
+  decision 2026-11-05, BC-11, like Twenty). Both stay available as an opt-in
+  and are off by default. Do not reintroduce them as a requirement, and do
+  not describe them as a production control. What protects an upgrade is the
+  migration lock, the identity and refusal gates, the posture and semantic
+  goldens, RLS, and the mandatory pre-upgrade backup in the runbook. A
+  mistaken upgrade is recovered by restore-from-backup only.
+- **Every value reaches SQL as a bound parameter; every identifier comes from
+  an allow-list.** One injected statement runs with the schema owner's
+  privileges (PT-01).
+  - `tools/check-sql-injection.cjs` fails CI on any template-literal SQL with
+    `${…}`, any dynamic WHERE / ORDER BY builder and any DDL identifier
+    template unless it carries a reviewed `// sql-injection-reviewed: <why>`
+    comment.
+  - The lint is a text scan, not a complete defence. The adversarial tests
+    and the reviews remain required.
 - **No mock production logic.** No fake login, fake timer, fake sync between
   web and mobile, or seeded dashboard numbers. A running-shift timer renders
   `serverNow − clockInAt` from the attendance record, never client-local
@@ -220,6 +286,8 @@ From M1 onward (the moment auth + tenancy exist), every PR touching
 authorisation, tenancy, or a state machine needs the matching **abuse-case**
 test from `rab-workforce-architecture.md` §1.2 — the denial, not just the
 happy path. Every new tenant-scoped table needs an integration test that runs
-a query with no tenant context bound and asserts zero rows back.
+a query with no tenant context bound **as the owner login `crewflow_owner`**
+and asserts zero rows back. Run as the owner login, this proves FORCE; run as
+a non-owner, it proves nothing.
 `THREAT-MODEL.md` gets a new entry, in the same PR, for any feature touching
 auth, money, or another person's data — not written after the fact.

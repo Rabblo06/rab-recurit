@@ -46,12 +46,24 @@ export interface NeverInRuntimeEnvEntry {
    * name). Only DB_TARGET has one.
    */
   toleratedOutsideProduction?: readonly string[];
+  /**
+   * Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): false for the names added with it. The Worker bundle
+   * launcher (start-worker-bundle.cjs, a superseded separated-mode path that #61/#62 also touch) keeps its literal list
+   * unchanged until it is removed in the final clean-up PR, so these names are not part of its parity check. The API
+   * (api-prestart.sh) and every in-process guard enforce them.
+   */
+  enforcedByLauncher?: boolean;
 }
 
 const MIGRATION_ONLY = 'Migration authority is consumed only by the short-lived migration step and never reaches a long-running process.';
 const BOOTSTRAP_ONLY = 'Role bootstrap passwords belong to the migration / setup step only and never reach a long-running process.';
 const COMMAND_ONLY = 'It is command authority (migrations and CLI commands only); a running server is not a command.';
 const OPS_ONLY = 'It belongs to the one-off operations container only (`docker compose --profile ops run --rm rab-ops ...`).';
+const ONE_URL =
+  'The API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login). Remove this second database URL.';
+const ROLE_PASSWORD = 'Role passwords never belong in application configuration: the runtime connects only as the PG_DATABASE_URL owner login. Remove it.';
+/** Names added by the owner-login architecture: enforced by api-prestart.sh and the in-process guards, not by the superseded launcher. */
+const OWNER_LOGIN = { allowedIn: ['provisioner'] as const, enforcedByLauncher: false };
 
 export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.freeze([
   // The historical privileged name: the provisioner's deprecated non-production DDL connection only (the factory refuses it
@@ -83,7 +95,44 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   { name: 'CREWFLOW_OPS_ACTOR_SOURCE', why: OPS_ONLY },
   { name: 'CREWFLOW_OPS_ACTOR_ID', why: OPS_ONLY },
   { name: 'CREWFLOW_OPS_CHANGE_REF', why: OPS_ONLY },
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): one PG_DATABASE_URL. Legacy and second database URLs and role
+  // passwords are refused in the API and Worker. (The removed CREWFLOW_DB_MODE is refused by runtime-db-config.ts, which the
+  // runtime guard also runs, with its own actionable message.) `allowedIn: ['provisioner']` leaves the
+  // superseded separate provisioner process exactly as it was until the final clean-up PR removes it (it is unused).
+  { name: 'DATABASE_URL', why: `It is the retired name of PG_DATABASE_URL. Rename it to PG_DATABASE_URL (the one owner-login URL).`, ...OWNER_LOGIN },
+  { name: 'DATABASE_DIRECT_URL', why: ONE_URL, ...OWNER_LOGIN },
+  { name: 'PG_DATABASE_REPLICA_URL', why: ONE_URL, ...OWNER_LOGIN },
+  { name: 'PG_WORKER_DATABASE_URL', why: ONE_URL, ...OWNER_LOGIN },
+  { name: 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
+  { name: 'CREWFLOW_OWNER_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
+  // The provider step's / test harness's name for the owner password (twenty-test-env.cjs): never in a runtime process.
+  { name: 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
 ]);
+
+/**
+ * Owner-login architecture: whole NAME PREFIXES the API refuses (any variable whose name starts with one). The separate
+ * workspace provisioner's settings (CREWFLOW_PROVISIONER_*) never belong on the API or the Worker (which provisions
+ * in-process, always — T4). The superseded provisioner child legitimately receives CREWFLOW_PROVISIONER_ENABLED. The jobs-only
+ * health check sets CREWFLOW_PROVISIONER_ENABLED=false on its own check command, never in the Worker's environment.
+ */
+export interface NeverInRuntimeEnvPrefix {
+  prefix: string;
+  why: string;
+  processes: readonly RuntimeProcessName[];
+}
+
+export const NEVER_IN_RUNTIME_ENV_PREFIXES: readonly NeverInRuntimeEnvPrefix[] = Object.freeze([
+  {
+    prefix: 'CREWFLOW_PROVISIONER_',
+    why: 'Workspace provisioning runs inside the Worker on the one owner login; there is no separate provisioner credential or switch. Remove it.',
+    processes: ['api', 'worker'] as const,
+  },
+]);
+
+/** Prefixes the given runtime process refuses (api-prestart.sh keeps a literal copy for the API; parity-tested). */
+export function forbiddenRuntimeEnvPrefixes(processName: RuntimeProcessName): string[] {
+  return NEVER_IN_RUNTIME_ENV_PREFIXES.filter((p) => p.processes.includes(processName)).map((p) => p.prefix);
+}
 
 /**
  * Names the given runtime process refuses by name in the IMAGE enforcers (api-prestart.sh). The in-process guard refuses
@@ -115,10 +164,18 @@ export function runtimeEnvRefusal(env: Record<string, string | undefined>, proce
     if (!production && (entry.toleratedOutsideProduction ?? []).includes(value)) continue;
     return entry;
   }
+  // Prefix rules (owner-login architecture), names sorted so the refusal is deterministic. Blank counts as absent.
+  for (const rule of NEVER_IN_RUNTIME_ENV_PREFIXES) {
+    if (!rule.processes.includes(processName)) continue;
+    const name = Object.keys(env)
+      .filter((key) => key.startsWith(rule.prefix) && (env[key]?.trim() ?? '') !== '')
+      .sort()[0];
+    if (name !== undefined) return { name, why: rule.why };
+  }
   return null;
 }
 
 /** Names the Worker SERVICE (the bundle launcher's own environment) must not carry. */
 export function forbiddenWorkerServiceEnvNames(): string[] {
-  return NEVER_IN_RUNTIME_ENV.filter((e) => !e.launcherHolds).map((e) => e.name);
+  return NEVER_IN_RUNTIME_ENV.filter((e) => !e.launcherHolds && e.enforcedByLauncher !== false).map((e) => e.name);
 }

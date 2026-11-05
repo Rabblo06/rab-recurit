@@ -68,13 +68,15 @@ export interface ShiftReportSchedulerResult {
 export type ShiftReportCandidate = ScanCandidate;
 
 export async function discoverShiftReportCandidates(manager: EntityManager, reportAvailableBeforeMinutes: number, organisationId?: string): Promise<ShiftReportCandidate[]> {
+  // SQL-injection lint (owner login): the window is a bound integer parameter, never text spliced into the interval literal.
+  if (!Number.isInteger(reportAvailableBeforeMinutes) || reportAvailableBeforeMinutes < 0) throw new Error('reportAvailableBeforeMinutes must be a non-negative integer.');
   return await manager.query<ScanCandidate[]>(
     `
         SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
         FROM shift s
         LEFT JOIN shift_report sr ON sr.shift_id = s.id
         WHERE s.status NOT IN ('cancelled', 'completed', 'draft')
-          AND s.starts_at <= now() + interval '${reportAvailableBeforeMinutes} minutes'
+          AND s.starts_at <= now() + make_interval(mins => $2::int)
           AND s.ends_at > now()
           AND ($1::uuid IS NULL OR s.organisation_id = $1::uuid)
           AND (
@@ -85,7 +87,7 @@ export async function discoverShiftReportCandidates(manager: EntityManager, repo
         ORDER BY s.starts_at ASC
         LIMIT 200
       `,
-    [organisationId ?? null],
+    [organisationId ?? null, reportAvailableBeforeMinutes],
   );
 }
 

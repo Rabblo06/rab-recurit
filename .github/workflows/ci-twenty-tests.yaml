@@ -1,0 +1,122 @@
+name: ci-twenty-tests
+
+# T7 (Agent 5, independent tests): the owner-login (Option A, permanent) behaviour-change catalogue, injection simulation and
+# refusals on a REAL chain database, on PostgreSQL 16 AND 18, plus the lifecycle scenario driver (twenty-mode-check.ts).
+# The database is a REAL owner-login install (`twenty-mode-check.ts ci-db`: 01-crewflow-owner.sql + Agent 1's migrate child +
+# head-state checks); the lifecycle step then runs every scenario of `twenty-mode-check.ts lifecycle` against the same
+# cluster. Every credential is random per run and masked.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/rab-server/**'
+      - 'packages/rab-worker/**'
+      - 'packages/rab-shared/**'
+      - '.github/workflows/ci-twenty-tests.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-twenty-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  catalogue:
+    name: catalogue (PostgreSQL ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['16', '18']
+    env:
+      NODE_ENV: test
+      DB_TARGET: local
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries (the harness imports them)
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: Start a disposable PostgreSQL ${{ matrix.pg }} (random, masked credentials)
+        run: |
+          set -euo pipefail
+          su_pass="$(openssl rand -hex 24)"; cf="$(openssl rand -hex 24)"; app="$(openssl rand -hex 24)"
+          wk="$(openssl rand -hex 24)"; own="$(openssl rand -hex 24)"; secret="$(openssl rand -hex 32)"
+          for v in "$su_pass" "$cf" "$app" "$wk" "$own" "$secret"; do echo "::add-mask::$v"; done
+          mkdir -p "${RUNNER_TEMP}/pg"; printf '%s' "$su_pass" > "${RUNNER_TEMP}/pg/su"; chmod 644 "${RUNNER_TEMP}/pg/su"
+          docker run -d --name twenty-pg -p 127.0.0.1:5432:5432 -v "${RUNNER_TEMP}/pg/su:/run/su:ro" \
+            -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/su -e POSTGRES_DB=postgres \
+            "postgres:${{ matrix.pg }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+          for i in $(seq 1 90); do docker exec twenty-pg pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break; sleep 1; done
+          docker exec twenty-pg pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null
+          url="postgres://ci_bootstrap:${su_pass}@127.0.0.1:5432/postgres"; echo "::add-mask::$url"
+          {
+            echo "MIGRATION_SECURITY_ADMIN_URL=$url"
+            echo "CREWFLOW_BOOTSTRAP_PASSWORD=$cf"
+            echo "CREWFLOW_APP_BOOTSTRAP_PASSWORD=$app"
+            echo "CREWFLOW_WORKER_BOOTSTRAP_PASSWORD=$wk"
+            echo "CREWFLOW_OWNER_BOOTSTRAP_PASSWORD=$own"
+            echo "APP_SECRET=$secret"
+          } >> "$GITHUB_ENV"
+      # The migrate child runs from dist (built here once) for every scenario; the driver falls back to the source child.
+      - name: Build the server (the migrate child the scenarios spawn)
+        run: npx nx build rab-server
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          TWENTY_PG_CONTAINER: twenty-pg
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Behaviour-change catalogue, injection simulation, refusals (as crewflow_owner)
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          export TWENTY_FINDINGS_FILE="${RUNNER_TEMP}/twenty-findings-pg${{ matrix.pg }}.jsonl"
+          status=0
+          npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=180000 \
+            packages/rab-server/src/__tests__/integration/twenty \
+            --json "--outputFile=${RUNNER_TEMP}/twenty-pg${{ matrix.pg }}.json" || status=$?
+          # The E5 lesson: prove the gated suites ran, not "skipped".
+          node -e '
+            const r = require(process.argv[1]); let bad = 0;
+            for (const f of r.testResults) {
+              const n = (s) => f.assertionResults.filter((t) => t.status === s).length;
+              const name = f.name.split(/[\\/]/).pop();
+              console.log(`${name}: passed=${n("passed")} failed=${n("failed")} pending=${n("pending")} todo=${n("todo")}`);
+              if (n("passed") === 0) { console.error(`${name} passed 0 tests: the twenty suites did not run`); bad = 1; }
+            }
+            if (r.testResults.length < 4) { console.error("expected 4 twenty spec files"); bad = 1; }
+            process.exit(bad);' "${RUNNER_TEMP}/twenty-pg${{ matrix.pg }}.json"
+          node -e '
+            const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
+            const by = (k) => lines.filter((l) => l.kind === k);
+            console.log(`findings: EXPECTED-RISK=${by("EXPECTED-RISK").length} CONTROL-HOLDS=${by("CONTROL-HOLDS").length} HARD-FLOOR=${by("HARD-FLOOR").length}`);
+            for (const l of by("EXPECTED-RISK")) console.log(`  [${l.severity}] ${l.id}: ${l.acceptance}`);' "$TWENTY_FINDINGS_FILE"
+          exit $status
+      - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts lifecycle --report "${RUNNER_TEMP}/twenty-scenarios-pg${{ matrix.pg }}.json"
+        env:
+          TWENTY_PG_CONTAINER: twenty-pg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: twenty-findings-pg${{ matrix.pg }}
+          path: |
+            ${{ runner.temp }}/twenty-findings-pg${{ matrix.pg }}.jsonl
+            ${{ runner.temp }}/twenty-scenarios-pg${{ matrix.pg }}.json
+          if-no-files-found: warn
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f twenty-pg > /dev/null 2>&1 || true

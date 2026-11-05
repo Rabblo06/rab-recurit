@@ -26,9 +26,14 @@ const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
 describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () => {
   let moduleRef: TestingModule;
   let admin: DataSource; // superuser: fixture setup/inspection only
-  let crewflow: DataSource; // current_user = crewflow
-  let runtime: DataSource; // crewflow_app
-  let commandAsCrewflow: BootstrapAdminCommand;
+  // Owner-login architecture: crewflow / crewflow_app are SCHEMA ROLES. `crewflow` and `schemaApp` act as them through the
+  // fixture superuser (the legacy `-c role=` path); `runtime` is the one runtime login, crewflow_owner, which is also the
+  // deployment's bootstrap identity now.
+  let crewflow: DataSource; // fixture superuser acting as the schema role crewflow (legacy ci_bootstrap -> SET ROLE crewflow)
+  let schemaApp: DataSource; // fixture superuser acting as the schema role crewflow_app
+  let runtime: DataSource; // crewflow_owner
+  let commandAsLegacyCrewflow: BootstrapAdminCommand;
+  let commandAsSchemaApp: BootstrapAdminCommand;
   let commandAsRuntime: BootstrapAdminCommand;
   let passwordHashing: PasswordHashingService;
 
@@ -46,15 +51,24 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
       extra: { ...(base.extra as object | undefined), options: '-c search_path=core -c role=crewflow' },
     });
     await crewflow.initialize();
+    schemaApp = new DataSource({
+      ...base,
+      url: adminUrl,
+      name: `crewflow-app-bootstrap-${Math.random().toString(36).slice(2)}`,
+      extra: { ...(base.extra as object | undefined), options: '-c search_path=core -c role=crewflow_app' },
+    });
+    await schemaApp.initialize();
     runtime = createCrewflowOwnerProbeDataSource();
     await runtime.initialize();
     const deps = [moduleRef.get(AuditService), moduleRef.get(AccountLifecycleService), moduleRef.get(TenantContextService)] as const;
-    commandAsCrewflow = new BootstrapAdminCommand(crewflow, ...deps);
+    commandAsLegacyCrewflow = new BootstrapAdminCommand(crewflow, ...deps);
+    commandAsSchemaApp = new BootstrapAdminCommand(schemaApp, ...deps);
     commandAsRuntime = new BootstrapAdminCommand(runtime, ...deps);
   });
 
   afterAll(async () => {
     await crewflow.destroy();
+    await schemaApp.destroy();
     await runtime.destroy();
     await admin.destroy();
     await moduleRef.close();
@@ -79,18 +93,36 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
     });
   }
 
-  it('the connection really is crewflow (not a superuser, no BYPASSRLS) and the runtime role is crewflow_app', async () => {
+  it('identities: the legacy connection acts as the schema role crewflow (no superuser, no BYPASSRLS); the runtime login is crewflow_owner (BC-02)', async () => {
     const [who] = await crewflow.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`);
     expect(who).toEqual({ u: 'crewflow', s: false, b: false });
-    const [rt] = await runtime.query(`SELECT current_user AS u`);
-    expect(rt.u).toBe('crewflow_app');
+    const [app] = await schemaApp.query(`SELECT current_user AS u`);
+    expect(app.u).toBe('crewflow_app');
+    const [rt] = await runtime.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`);
+    expect(rt).toEqual({ u: 'crewflow_owner', s: false, b: false });
   });
 
-  it('fresh database: creates exactly one INVITED admin (no password), its operational CEO identity, a queued activation email and the audit entry', async () => {
+  // The legacy operator path (a bootstrap login that SET ROLEs to crewflow) is now refused by the pool-safety check
+  // (TenantContextService: the session must act as its own login): correct behaviour under the one login. The whole
+  // transaction rolls back, so nothing is created.
+  it('the legacy ci_bootstrap -> SET ROLE crewflow path is refused by pool safety, and nothing is created', async () => {
+    await clearPlatformAdmins();
+    const slug = `p2-legacy-${Date.now()}`;
+    await expect(withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, () => commandAsLegacyCrewflow.run())).rejects.toThrow(
+      /refusing the tenant transaction: the session acts as "crewflow"/,
+    );
+    expect(await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [slug])).toHaveLength(0);
+    expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(0);
+  });
+
+  // OWNER-LOGIN DIFFERENCE BC-11 (deployment identity; HIGH, ACCEPTED (owner, 2026-11-05)): the bootstrap command no longer refuses
+  // the runtime login, because crewflow_owner IS the deployment's bootstrap identity. Reproduced green below: every
+  // functional bootstrap guarantee (one-time, idempotent, CLOSED after revocation, existing account) holds on that login.
+  it('BC-11: fresh database (runtime login): creates exactly one INVITED admin (no password), its operational CEO identity, a queued activation email and the audit entry', async () => {
     await clearPlatformAdmins();
     const slug = `p2-crewflow-fresh-${Date.now()}`;
     const email = `admin-${slug}@example.test`;
-    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: email, BOOTSTRAP_ADMIN_ORG_SLUG: slug, BOOTSTRAP_ADMIN_ORG_NAME: 'P2 Org' }, () => commandAsCrewflow.run());
+    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: email, BOOTSTRAP_ADMIN_ORG_SLUG: slug, BOOTSTRAP_ADMIN_ORG_NAME: 'P2 Org' }, () => commandAsRuntime.run());
 
     const [org] = await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [slug]);
     const users = await admin.query(`SELECT id, status, password_hash FROM core."user" WHERE organisation_id = $1`, [org.id]);
@@ -116,8 +148,8 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
     await clearPlatformAdmins();
     const slug = `p2-crewflow-race-${Date.now()}`;
     await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, async () => {
-      await Promise.all([commandAsCrewflow.run(), commandAsCrewflow.run(), commandAsCrewflow.run()]);
-      await commandAsCrewflow.run();
+      await Promise.all([commandAsRuntime.run(), commandAsRuntime.run(), commandAsRuntime.run()]);
+      await commandAsRuntime.run();
     });
     const orgs = await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [slug]);
     expect(orgs).toHaveLength(1);
@@ -132,13 +164,13 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
     await clearPlatformAdmins();
     const first = `p2-crewflow-first-${Date.now()}`;
     const second = `p2-crewflow-second-${Date.now()}`;
-    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${first}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: first }, () => commandAsCrewflow.run());
-    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${second}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: second }, () => commandAsCrewflow.run());
+    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${first}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: first }, () => commandAsRuntime.run());
+    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${second}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: second }, () => commandAsRuntime.run());
     expect(await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [second])).toHaveLength(0);
     expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(1);
 
     // Calling the function directly (no command) cannot mint a second admin either.
-    const [direct] = await crewflow.query(`SELECT outcome, created_user FROM core.bootstrap_first_platform_admin($1, 'X', 'Y', $2, NULL)`, [`direct-${second}@example.test`, second]);
+    const [direct] = await runtime.query(`SELECT outcome, created_user FROM core.bootstrap_first_platform_admin($1, 'X', 'Y', $2, NULL)`, [`direct-${second}@example.test`, second]);
     expect(direct).toEqual({ outcome: 'ALREADY_BOOTSTRAPPED', created_user: false });
     expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(1);
   });
@@ -146,10 +178,10 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
   it('one-time: once every admin has been revoked the bootstrap is CLOSED (fails loudly, changes nothing) — it can never mint a replacement', async () => {
     await clearPlatformAdmins();
     const slug = `p2-crewflow-closed-${Date.now()}`;
-    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, () => commandAsCrewflow.run());
+    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, () => commandAsRuntime.run());
     await admin.query(`UPDATE core.platform_admin SET revoked_at = now(), security_version = security_version + 1`);
     const other = `p2-crewflow-closed-other-${Date.now()}`;
-    await expect(withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${other}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: other }, () => commandAsCrewflow.run())).rejects.toThrow(
+    await expect(withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${other}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: other }, () => commandAsRuntime.run())).rejects.toThrow(
       /bootstrap is closed/,
     );
     expect(await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [other])).toHaveLength(0);
@@ -166,7 +198,7 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
       `INSERT INTO core."user" (organisation_id, email, password_hash, first_name, last_name, status) VALUES ($1, $2, $3, 'Existing', 'Person', 'active') RETURNING id`,
       [org.id, email, hash],
     );
-    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: email }, () => commandAsCrewflow.run());
+    await withEnv({ BOOTSTRAP_ADMIN_EMAIL: email }, () => commandAsRuntime.run());
     expect(await admin.query(`SELECT user_id FROM core.platform_admin WHERE revoked_at IS NULL`)).toEqual([{ user_id: user.id }]);
     expect(await admin.query(`SELECT id FROM core."user" WHERE organisation_id = $1`, [org.id])).toHaveLength(1);
     expect(await admin.query(`SELECT id FROM core.account_invite WHERE user_id = $1`, [user.id])).toHaveLength(0);
@@ -175,20 +207,20 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
   });
 
   describe('abuse cases', () => {
-    it('the runtime role crewflow_app is refused by the command and by the database, and nothing is created', async () => {
+    it('the schema role crewflow_app is refused by the command and by the database, and nothing is created', async () => {
       await clearPlatformAdmins();
       const slug = `p2-runtime-${Date.now()}`;
-      await expect(withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, () => commandAsRuntime.run())).rejects.toThrow(
+      await expect(withEnv({ BOOTSTRAP_ADMIN_EMAIL: `admin-${slug}@example.test`, BOOTSTRAP_ADMIN_ORG_SLUG: slug }, () => commandAsSchemaApp.run())).rejects.toThrow(
         /"crewflow_app" may not run the bootstrap/,
       );
-      await expect(runtime.query(`SELECT * FROM core.bootstrap_first_platform_admin($1, 'A', 'B', $2, NULL)`, [`admin-${slug}@example.test`, slug])).rejects.toMatchObject({
+      await expect(schemaApp.query(`SELECT * FROM core.bootstrap_first_platform_admin($1, 'A', 'B', $2, NULL)`, [`admin-${slug}@example.test`, slug])).rejects.toMatchObject({
         code: '42501',
       });
       expect(await admin.query(`SELECT id FROM core.organisation WHERE slug = $1`, [slug])).toHaveLength(0);
       expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(0);
     });
 
-    it('crewflow itself still cannot write platform_admin or organisation directly — the narrow function is the only path', async () => {
+    it('the schema role crewflow still cannot write platform_admin or organisation directly — the narrow function is the only path', async () => {
       await clearPlatformAdmins();
       const [someUser] = await admin.query(`SELECT id FROM core."user" LIMIT 1`);
       await expect(crewflow.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1)`, [someUser.id])).rejects.toMatchObject({ code: '42501' });
@@ -199,8 +231,8 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
 
     it('rejects malformed input inside the database (no partial writes)', async () => {
       await clearPlatformAdmins();
-      await expect(crewflow.query(`SELECT * FROM core.bootstrap_first_platform_admin('not-an-email', 'A', 'B', NULL, NULL)`)).rejects.toMatchObject({ code: '22023' });
-      await expect(crewflow.query(`SELECT * FROM core.bootstrap_first_platform_admin('a@b.test', 'A', 'B', 'Bad Slug!', NULL)`)).rejects.toMatchObject({ code: '22023' });
+      await expect(runtime.query(`SELECT * FROM core.bootstrap_first_platform_admin('not-an-email', 'A', 'B', NULL, NULL)`)).rejects.toMatchObject({ code: '22023' });
+      await expect(runtime.query(`SELECT * FROM core.bootstrap_first_platform_admin('a@b.test', 'A', 'B', 'Bad Slug!', NULL)`)).rejects.toMatchObject({ code: '22023' });
       expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(0);
     });
   });

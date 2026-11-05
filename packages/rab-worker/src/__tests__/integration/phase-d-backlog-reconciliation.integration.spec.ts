@@ -74,7 +74,8 @@ describeIfApproved('Phase D #24: pointerless email backlog drains through bounde
     const ds = new DataSource({ type: 'postgres', url: WORKER_URL, entities: [], synchronize: false, extra: { max: 4, application_name: name } });
     await ds.initialize();
     const [{ current_user: who }] = await ds.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
     workers.push(ds);
     return ds;
   }
@@ -268,10 +269,14 @@ describeIfApproved('Phase D #24: pointerless email backlog drains through bounde
     // reconcileMs 2 s → the failed-sweep retry is min(60 s, 2 s): the test does not wait a minute.
     const { coordinator } = emailCoordinator(worker, published, { reconcileMs: 2_000, followUpDelayMs: 100 });
     await coordinator.tick('email');
-    // Every runtime session of this database dies (the Worker's crewflow_worker pool and the tenant-context crewflow_app pool).
+    // Every runtime session of this database dies (the Worker pool and the tenant-context pool). I-class (owner-login
+    // architecture, BC-02 / BC-08): the sessions are selected by the CONFIGURED runtime logins (TEST_DATABASE_WORKER_URL and
+    // TEST_DATABASE_URL users; both crewflow_owner under the one login), never by the legacy role names.
+    const runtimeLogins = [...new Set([new URL(process.env.TEST_DATABASE_WORKER_URL!).username, new URL(process.env.TEST_DATABASE_URL!).username])];
     const [{ killed }] = await admin.query<[{ killed: number }]>(
       `SELECT count(pg_terminate_backend(pid))::int AS killed FROM pg_stat_activity
-        WHERE datname = current_database() AND usename IN ('crewflow_worker', 'crewflow_app') AND pid <> pg_backend_pid()`,
+        WHERE datname = current_database() AND usename = ANY($1::text[]) AND pid <> pg_backend_pid()`,
+      [runtimeLogins],
     );
     expect(killed).toBeGreaterThan(0);
     const poll = setInterval(() => void coordinator.tick('email').catch(() => undefined), 250); // the scan's own poll ticks

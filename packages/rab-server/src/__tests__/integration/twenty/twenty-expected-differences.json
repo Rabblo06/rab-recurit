@@ -1,0 +1,651 @@
+{
+  "$comment": [
+    "T7 (Agent 5): the REVIEWED BEHAVIOUR-CHANGE CATALOGUE for the permanent owner login (owner addendum 2026-11-04).",
+    "Every protection the restricted runtime logins (crewflow_app / crewflow_worker) gave that the owner login crewflow_owner cannot keep is one entry here,",
+    "with a severity, the test that proves the new behaviour, and its acceptance status: OWNER-ACCEPTED (the owner's final prompt section 2) or",
+    "NEEDS OWNER APPROVAL (not listed there). The final removal PR (#9) is gated on: every entry has a passing test, no entry is NEEDS OWNER APPROVAL,",
+    "and every existing test that asserted restricted-login behaviour is listed under migratedTests (migrated to this catalogue, or kept as a schema-role test).",
+    "A test is never flipped to 'passes' because the owner can now do the thing: the new behaviour is asserted AND recorded as a finding."
+  ],
+  "version": 1,
+  "base": "origin/deploy/twenty-mode-a @ 3ed5f8b9",
+  "differences": [
+    {
+      "id": "G-01",
+      "severity": "CRITICAL",
+      "acceptance": "OWNER-ACCEPTED (§2: cross-organisation authentication data)",
+      "change": "The runtime login reads every tenant's rows of the 16 NOT FORCE pre-auth tables without injection (a missing tenant filter suffices).",
+      "test": "twenty-behaviour-catalogue C1",
+      "mitigation": "M-T1 (FORCE + owner-only definer policy) protects normal code paths only",
+      "bc": [
+        "BC-03"
+      ]
+    },
+    {
+      "id": "C2/column-grants",
+      "severity": "CRITICAL",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: BC-13 column-level secret grants; was NEEDS OWNER APPROVAL)",
+      "change": "Column grants no longer hide core.\"user\".password_hash, totp_secret_encrypted, temporary_password_hash, totp_last_used_step from the runtime login.",
+      "test": "twenty-behaviour-catalogue C2",
+      "bc": [
+        "BC-13"
+      ]
+    },
+    {
+      "id": "G-02",
+      "severity": "CRITICAL",
+      "acceptance": "OWNER-ACCEPTED (§2: SQL injection with owner privileges; policy modification; object deletion)",
+      "change": "Injected SQL has full DDL: NO FORCE / DISABLE RLS, ALTER POLICY USING (true), DROP TABLE, DROP SCHEMA core CASCADE.",
+      "test": "twenty-injection-simulation G-02a..G-02f",
+      "mitigation": "semantic posture hash at boot and on a timer (M0 §6.4 #4)",
+      "bc": [
+        "BC-01",
+        "BC-05",
+        "BC-06"
+      ]
+    },
+    {
+      "id": "G-03",
+      "severity": "CRITICAL",
+      "acceptance": "OWNER-ACCEPTED (§2: account takeover and MFA bypass)",
+      "change": "SET ROLE rab_secure_owner or DISABLE TRIGGER defeats the MFA column guard: cross-tenant MFA writes.",
+      "test": "twenty-behaviour-catalogue C4",
+      "keptControl": "the guard still refuses a direct write by the owner login on a normal path (C4, CONTROL-HOLDS)",
+      "bc": [
+        "BC-04"
+      ]
+    },
+    {
+      "id": "G-04",
+      "severity": "CRITICAL",
+      "acceptance": "OWNER-ACCEPTED (§2: persistence through roles or definers; credential-exposure impact)",
+      "change": "Backdoor LOGIN roles, re-granting the schema owner, replacing SECURITY DEFINER bodies, resetting crewflow_app's password survive rotation of the owner password.",
+      "test": "twenty-injection-simulation G-04a, G-04b, F-E2",
+      "mitigation": "incident runbook: rotation is not remediation; drop unknown roles",
+      "bc": [
+        "BC-09"
+      ]
+    },
+    {
+      "id": "G-05",
+      "severity": "HIGH",
+      "acceptance": "OWNER-ACCEPTED (§2: audit tampering)",
+      "change": "audit_log append-only no longer holds against the runtime: it can GRANT itself UPDATE/DELETE/TRUNCATE (owner of the table via membership).",
+      "test": "twenty-behaviour-catalogue C3; twenty-injection-simulation G-05b",
+      "keptControl": "UPDATE/DELETE/TRUNCATE are absent from the table owner's own ACL, so the owner login is refused on every normal path (C3, CONTROL-HOLDS)",
+      "mitigation": "external append-only audit sink is MANDATORY (M0 §3.4)",
+      "bc": [
+        "BC-07"
+      ]
+    },
+    {
+      "id": "G-06",
+      "severity": "HIGH",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: deployment identity rebindable by the runtime; the deployment id and approval token are OPTIONAL, off by default, in production too; risk recorded in THREAT-MODEL by Agent 3; was NEEDS OWNER APPROVAL)",
+      "change": "deployment_identity_bind admits the runtime login (EXECUTE via rab_secure_owner, session login is a member and is not crewflow/crewflow_app).",
+      "test": "twenty-behaviour-catalogue C6",
+      "mitigation": "D6: deployment id mandatory after the first bind; bind only on an empty database",
+      "bc": [
+        "BC-11"
+      ]
+    },
+    {
+      "id": "G-08",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: BC-08 DBA-01 API/Worker separation; was NEEDS OWNER APPROVAL)",
+      "change": "The API process can execute every crewflow_worker-only definer (dispatch claims, release, invite cleanup) and the due-work functions, and terminate the Worker's sessions.",
+      "test": "twenty-behaviour-catalogue C5, C8",
+      "bc": [
+        "BC-08"
+      ]
+    },
+    {
+      "id": "D0-A1/C9",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: BC-10 worker_due_work and pointer direct access; was NEEDS OWNER APPROVAL)",
+      "change": "Direct SELECT/UPDATE/DELETE on core.worker_due_work across tenants without a definer; dispatch pointers and the deployment marker after SET ROLE.",
+      "test": "twenty-behaviour-catalogue C9, C4b",
+      "bc": [
+        "BC-10"
+      ]
+    },
+    {
+      "id": "G-09",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (§2: SQL injection with owner privileges)",
+      "change": "A session-level set_config('role', ..., false) survives COMMIT: pool poisoning of later requests.",
+      "test": "twenty-injection-simulation G-09",
+      "mitigation": "RESET ROLE/DISCARD ALL on checkout + current_user = session_user assertion (mandatory, M0 §6.4 #3)",
+      "bc": [
+        "BC-14"
+      ]
+    },
+    {
+      "id": "G-10",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED pending M-T2 (approved forward migration)",
+      "change": "The workspace registry versioning guard is a deny-list (current_user <> 'crewflow_app'), so the runtime may write drift/version columns.",
+      "test": "twenty-behaviour-catalogue C7",
+      "bc": [
+        "BC-15"
+      ]
+    },
+    {
+      "id": "G-11",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: BC-12 no logical backup by the app login, PITR only; was NEEDS OWNER APPROVAL)",
+      "change": "A pg_dump with the only credential the deployment holds dumps every FORCE tenant table empty.",
+      "test": "twenty-behaviour-catalogue C10",
+      "bc": [
+        "BC-12"
+      ]
+    },
+    {
+      "id": "DOC-16",
+      "severity": "LOW",
+      "acceptance": "doc fix (CLAUDE.md, Agent 3 security)",
+      "change": "16 NOT FORCE pre-auth tables, not 15: organisation_invitation is missing from CLAUDE.md.",
+      "test": "twenty-behaviour-catalogue C0",
+      "bc": []
+    },
+    {
+      "id": "PAY-1",
+      "severity": "HIGH",
+      "acceptance": "MITIGATED (PAY-1 / PAY-1b fixed by Agent 3 4caaef2a: statement-level grant-parity guards on the payroll family, core and workspace v20; owner decision 2026-11-04)",
+      "change": "Inside a bound tenant/workspace context the runtime login can DELETE payroll_run_line, UPDATE payroll_run_line.amount_pence and payslip_document, and DELETE core.payroll_calendar_period: the database no longer enforces payroll immutability (money).",
+      "test": "twenty-behaviour-catalogue (TW-D: payroll-runs.integration.spec.ts 'lines and documents are insert-only')",
+      "evidence": "TW-D PG16, owner fixture: DELETE FROM payroll_run_line resolved instead of rejecting 42501",
+      "bc": []
+    },
+    {
+      "id": "INV-1",
+      "severity": "HIGH",
+      "acceptance": "NEEDS OWNER APPROVAL (G-01 reaching an API response on a NORMAL code path; §2 lists cross-organisation authentication data, not invitations)",
+      "change": "POST member invitations from workspace B for an address workspace A already invited no longer answers 'unavailable': the API discloses another workspace's invitation, because member_invitation is NOT FORCE and the runtime login now sees every tenant's rows. No injection needed.",
+      "test": "twenty-behaviour-catalogue (TW-D: member-invitation.integration.spec.ts S4, X2)",
+      "mitigation": "M-T1 must land before any production use (it restores normal-path isolation for the 16 pre-auth tables)",
+      "bc": [
+        "BC-03"
+      ]
+    },
+    {
+      "id": "SESS-1",
+      "severity": "HIGH",
+      "acceptance": "OWNER-ACCEPTED (§2: account takeover) + OWNER-ACCEPTED 2026-11-05 (BC-13 column-level grants)",
+      "change": "user_session: no-context reads return every tenant's sessions; the runtime can write cross-user rows and change absolute_expires_at, user_id and organisation_id (column authority lost).",
+      "test": "twenty-behaviour-catalogue C1/C2 (TW-D: user-session-correctness 18-21)",
+      "bc": [
+        "BC-03",
+        "BC-04",
+        "BC-13"
+      ]
+    },
+    {
+      "id": "AI-1",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: AI-1 AI governance enforced by grants; was NEEDS OWNER APPROVAL)",
+      "change": "ai_agent_trigger enable/run_as and standard/system agent edits are no longer refused by grants/policy for the runtime (only the EX-3 CHECK still refuses enabling, 23514); ai_skill name/is_system/organisation_id become updatable. Also measured on deploy e6c768f3: TRUNCATE core.ai_skill is not refused to the runtime login (no TRUNCATE parity guard; TRUNCATE ignores RLS, every tenant) and an INSERT setting organisation_ai_setting.synthetic_data is not refused (no INSERT parity guard). Owner-login CI (PR #74) also measured: the runtime login holds TRUNCATE on ai_usage, ai_conversation, ai_action_proposal and organisation_ai_model_preference through the owner (asserted from the catalog, never executed). UPDATE / DELETE stay row-guarded: ai_action_proposal content is immutable for every role (ai_action_proposal_guard, 23514) and the tenant-column UPDATEs are refused by the parity guards (42501). The runtime login also reaches core.ai_dev_mark_organisation_synthetic (it inherits the owner; schema role crewflow_app 42501), whose body still refuses on a disposable test database (55000).",
+      "test": "twenty-behaviour-catalogue (owner-login CI: ai-skill 'AI-1:' T4-R5; ai-agents, ai-dev-real-provider)",
+      "keptControl": "the EX-3 CHECK constraint still refuses enabled=true without approval for every login (23514)",
+      "bc": []
+    },
+    {
+      "id": "PROV-1",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: PROV-1 provisioner-only functions and the migrator identity check; was NEEDS OWNER APPROVAL)",
+      "change": "The ordinary runtime can call the provisioner-only workspace-schema functions (SUPERSEDED fencing's second layer is gone). Also lost (Agent 3 review of a4c0c3db): the application-layer refusal in WorkspaceSchemaMigrator.assertMigrationIdentity (workspace-schema-migrator.ts) no longer stops the runtime login, which holds crewflow USAGE; reproduced green in workspace-schema-migrator.",
+      "test": "twenty-behaviour-catalogue C5/C7 (TW-D: initial-manager-replacement SUPERSEDED fencing)",
+      "bc": []
+    },
+    {
+      "id": "OUTBOX-1",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: BC-08 (outbox rows; the DELETE parity guard refuses the runtime login since 1786721420000 / PAY-1b); was NEEDS OWNER APPROVAL)",
+      "change": "The runtime login can DELETE outbox rows directly on all four outbox tables (retention purge was definer-only).",
+      "test": "twenty-behaviour-catalogue C5 (TW-D: w45-db5-schema §5)",
+      "bc": []
+    },
+    {
+      "id": "MFA-RC",
+      "severity": "HIGH",
+      "acceptance": "OWNER-ACCEPTED (§2: account takeover and MFA bypass) + OWNER-ACCEPTED 2026-11-05 (BC-13 column-level grants)",
+      "change": "MFA recovery-code hashes and the TOTP secret become readable by the runtime; login_handoff gains table privileges for the runtime.",
+      "test": "twenty-behaviour-catalogue C2/C4 (TW-D: w45-db5-schema §1, §2)",
+      "bc": [
+        "BC-04",
+        "BC-13"
+      ]
+    },
+    {
+      "id": "COLGRANT-1",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: COLGRANT-1 non-secret column-level INSERT grants; was NEEDS OWNER APPROVAL)",
+      "change": "Column INSERT grants that kept server-owned columns out of the runtime's hands (id, created_at, final_arguments) no longer bind the runtime login, and there is no INSERT parity guard. Measured on the owner-login CI (PR #74): core.ai_usage accepts a forged id / created_at; core.ai_skill accepts a client-chosen id. RLS WITH CHECK (own organisation, own user) and the INSERT policies still hold: an INSERT for another user / organisation, or a decided proposal (status / decided_by), is still refused. Measured NOT affected: a forged updated_by on organisation_ai_model_preference is still refused to the runtime login by the INSERT policy WITH CHECK. Measured on ai_action_proposal (PR #74 run 41939771482): id and final_arguments accepted at INSERT; status / decided_by refused (42501, INSERT policy); expires_at / created_at / origin refused (23514, CHECKs).",
+      "test": "twenty-behaviour-catalogue (owner-login CI: ai-usage-ledger 'COLGRANT-1:'; also ai-rls T5-D1 INSERT, ai-skill client-chosen id)",
+      "bc": []
+    },
+    {
+      "id": "REF-1",
+      "severity": "MEDIUM",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-04, like Twenty: global reference tables writable by the runtime login; THREAT-MODEL entry by Agent 3)",
+      "change": "core.permission (RBAC flag reference data) and core.migrations (TypeORM ledger) have no RLS and no organisation_id; the runtime login inherits crewflow's S,I,U,D,T on both (golden :926, :968), so one UPDATE / DELETE changes every tenant. Not in GRANT_PARITY_TARGETS. Before: crewflow_app S,I on permission and S on migrations.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: db-security-posture 'REF-1:', real rows, rolled back)",
+      "bc": []
+    },
+    {
+      "id": "HL-1",
+      "severity": "LOW",
+      "acceptance": "OWNER-ACCEPTED (owner decision 2026-11-05, like Twenty: HL-1 host-label namespace table privileges; kept on the PR #9 removal gate by coordinator decision (Agent 3 review); was NEEDS OWNER APPROVAL)",
+      "change": "The runtime login holds table privileges on core.host_label_claim / released_host_label / reserved_host_label through the owner (crewflow_app had none). With no tenant context it sees zero rows (FORCE since M-T1, owner-only definer policy) and a DELETE removes nothing; released_host_label stays append-only for every role (trigger); host_label_claim / reserved_host_label writes are parity-guarded. Measured on PR #74: core.reserved_host_label (global reference data, no organisation_id) is readable by the runtime login through the policy for crewflow (210 rows); its DELETE is refused by the parity guard.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: host-label-namespace 'HL-1:')",
+      "bc": [
+        "BC-01"
+      ]
+    },
+    {
+      "id": "MFA-SESS-1",
+      "severity": "HIGH",
+      "acceptance": "MITIGATED (owner chose PROTECT 2026-11-04; fixed by Agent 3 4caaef2a: user_session.mfa_verified_at is INSERT-only for every role)",
+      "change": "The runtime login can UPDATE core.user_session.mfa_verified_at on its own sessions (measured ACCEPTED, PR #74 run 41910894672, w45-db5-schema:467): a session can be stamped MFA-verified without a factor check. Separated mode refused it by crewflow_app's column grant; user_session is not in GRANT_PARITY_TARGETS and no trigger covers the column after INSERT.",
+      "test": "twenty-behaviour-catalogue (owner-login CI: w45-db5-schema 'MFA-SESS-1:', strict)",
+      "bc": []
+    }
+  ],
+  "hardFloors": {
+    "$comment": "Real security properties that still hold for the owner login (HARD-FLOOR / CONTROL-HOLDS findings, PASS).",
+    "tests": [
+      "twenty-injection-simulation HF-1..HF-18",
+      "twenty-refusals REF-0, NEG-1..NEG-5, B3",
+      "twenty-behaviour-catalogue C1b, C3/acl, C4/mfa-guard, C4b, C8/superuser"
+    ]
+  },
+  "migratedTests": {
+    "$comment": "Existing suites that assert restricted-runtime-login behaviour. Each must end as: 'catalogue:<id>' (migrated, the difference is above), 'schema-role' (kept: it tests a schema role that still exists, e.g. a definer running as rab_secure_owner), or 'unchanged' (passes as the owner login without asserting a weaker property). Filled from the TW-D differential (run the suite with TEST_DATABASE_URL = crewflow_owner).",
+    "status": "First pass from the owner-login CI (deploy e6c768f3; worker complete, server complete: PR #74 run 41905033684, 422 suites). Classes: I = identity expectation -> crewflow_owner (BC-02/BC-08); P = schema-role test (superuser SET LOCAL ROLE crewflow_app/crewflow_worker -> 42501) PLUS an owner-side assertion labelled with its catalogue id; M = M-T1 posture effect (reviewed update); L = legacy separate provisioner, skipped by name 'remove in PR #9'. Agent 3 reviews every changed security assertion.",
+    "entries": [
+      {
+        "suite": "rab-worker helpers/verified-role-database.ts + verified-role-database",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "worker-scan-adapters, worker-runtime-cutover, ai-worker, realtime-push-gating, workspace-provisioning-health, manager-confirmation-timeout-correctness K2, offer-lifecycle-correctness L34/35, report-worker-concurrency PRE-01, scan-lock, realtime-outbox-publisher #19, provisioning-drafts",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "phase-d-{account-invite-cleanup-worker,backlog-reconciliation,dispatch-recovery,first-cutover-reconciliation,global-dispatch,storage-cleanup-worker-login}, push-dispatch-global-publish-failure, phase-d-dispatch-pointer (beforeAll)",
+        "class": "I",
+        "classification": [
+          "BC-08"
+        ]
+      },
+      {
+        "suite": "workspace-provisioner-resilience, workspace-provisioner-optin, workspace-provisioner-entrypoint, provisioner-db-connection-loss",
+        "class": "L",
+        "classification": [
+          "remove in PR #9"
+        ],
+        "t4Gaps": "R5a, R5b, opt-in 1, 3a, 3b, 4, entrypoint (routed to Agent 2)"
+      },
+      {
+        "suite": "login-handoff-cleanup",
+        "class": "P",
+        "classification": [
+          "catalogue:MFA-RC",
+          "BC-13"
+        ],
+        "owner": "direct read not refused (measured)"
+      },
+      {
+        "suite": "outbox-retention-replay",
+        "class": "P",
+        "classification": [
+          "catalogue:OUTBOX-1"
+        ],
+        "owner": "row-level grant-parity guard must refuse a VISIBLE row (strict check; fails if the guard does not hold)"
+      },
+      {
+        "suite": "account-invite-cleanup-off-means-off 5a / 3",
+        "class": "M / I",
+        "classification": [
+          "M-T1 control holds",
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "w45-db5-schema §1 / §2 / §5",
+        "class": "P",
+        "classification": [
+          "BC-13 (PENDING OWNER APPROVAL)",
+          "catalogue:MFA-RC",
+          "catalogue:OUTBOX-1"
+        ],
+        "kept": "MFA column WRITE guards still refuse the runtime login (unchanged)"
+      },
+      {
+        "suite": "identity-security-table-rls (password_hash, totp_secret_encrypted, column ACL)",
+        "class": "P / I",
+        "classification": [
+          "BC-13 HIGH PENDING OWNER APPROVAL (never accepted)"
+        ]
+      },
+      {
+        "suite": "user-session-correctness 20 / 21",
+        "class": "P",
+        "classification": [
+          "schema-role 42501",
+          "runtime login refused by trigger (P0001), row unchanged"
+        ]
+      },
+      {
+        "suite": "ai-agents (DELETE standard agent), ai-skill (TRUNCATE), ai-input-requests (DELETE), ai-dev-real-provider (synthetic_data marker)",
+        "class": "P",
+        "classification": [
+          "catalogue:AI-1"
+        ]
+      },
+      {
+        "suite": "initial-manager-replacement (provisioner-only functions)",
+        "class": "P",
+        "classification": [
+          "catalogue:PROV-1"
+        ]
+      },
+      {
+        "suite": "manager-workspace-abuse-cases (policy count 3: the M-T1 owner-only definer policy)",
+        "class": "M",
+        "classification": [
+          "M-T1"
+        ]
+      },
+      {
+        "suite": "phase-d-due-work-cutover",
+        "class": "I / P",
+        "classification": [
+          "BC-08"
+        ],
+        "note": "retitled 'under one login'; BEFORE expectations as schema-role checks (approved)"
+      },
+      {
+        "suite": "payroll-runs :410, payroll-approval :440",
+        "class": "DEFECT",
+        "classification": [
+          "catalogue:PAY-1 OPEN (HIGH), routed to Agent 3; tests unchanged"
+        ]
+      },
+      {
+        "suite": "server-path-provisioning-db",
+        "class": "OWNER DECISION",
+        "classification": [
+          "routed to Agent 2 (rework vs remove in PR #9)"
+        ]
+      },
+      {
+        "suite": "worker-identity-boot-gates",
+        "class": "OWNER DECISION",
+        "classification": [
+          "routed to Agent 3 (rewrite vs remove in PR #9)"
+        ]
+      },
+      {
+        "suite": "ai-agents functional failures (prompt PATCH 404, audit, role flags, T6-P3)",
+        "class": "DEFECT?",
+        "classification": [
+          "suspected grant-parity UPDATE allow-list vs a server-maintained column; routed to Agent 3"
+        ]
+      },
+      {
+        "suite": "realtime-push-gating, admin-panel-sql-functions, db-pool-runtime, payroll-import-calendar-command, seed-qa-restricted-runtime, workspace-provisioning-owner-flow, server-path-provisioning-api (incl. the pg_stat_activity usename), ai-rls, db-security-posture CF-09",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "runtime-db-role (superuser SET ROLE still refused; message now names crewflow_owner)",
+        "class": "I",
+        "classification": [
+          "BC-02"
+        ]
+      },
+      {
+        "suite": "admin-panel-sql-functions (user / user_session FORCE), seed-qa-restricted-runtime (organisation FORCE)",
+        "class": "M",
+        "classification": [
+          "M-T1"
+        ]
+      },
+      {
+        "suite": "db-security-posture CF-09",
+        "class": "P",
+        "classification": [
+          "PROV-1",
+          "catalogue:REF-1 (OWNER-ACCEPTED 2026-11-04)"
+        ],
+        "kept": "audit_log DML still 42501 for the runtime login (crewflow holds S,I only)"
+      },
+      {
+        "suite": "ai-usage-ledger (insert-only, WITH CHECK, retention back door)",
+        "class": "P",
+        "classification": [
+          "catalogue:AI-1",
+          "catalogue:COLGRANT-1"
+        ],
+        "kept": "RLS WITH CHECK for another user / organisation; no row changes"
+      },
+      {
+        "suite": "ai-model-settings (forged updated_by, TRUNCATE)",
+        "class": "P",
+        "classification": [
+          "catalogue:COLGRANT-1",
+          "catalogue:AI-1"
+        ],
+        "kept": "real UPDATEs of organisation_id / tier / created_at refused to the runtime login by the parity guard (42501)"
+      },
+      {
+        "suite": "ai-turn-indexes (tenant / owner columns, DELETE)",
+        "class": "P",
+        "classification": [
+          "parity guards"
+        ],
+        "kept": "real changes refused to the runtime login (42501); the turn survives a DELETE"
+      },
+      {
+        "suite": "ai-rls (least privilege, T5-D1 INSERT / UPDATE / DELETE)",
+        "class": "P",
+        "classification": [
+          "catalogue:AI-1",
+          "catalogue:COLGRANT-1"
+        ],
+        "kept": "status / decided_by INSERT still refused; proposal row byte-identical after every UPDATE attempt; proposal survives DELETE"
+      },
+      {
+        "suite": "workspace-lifecycle-grant-tightening (four lifecycle mutators)",
+        "class": "P",
+        "classification": [
+          "catalogue:PROV-1"
+        ],
+        "kept": "the runtime login is refused in the body (P0002)"
+      },
+      {
+        "suite": "audit-log-cross-organisation-identity (organisation-parameterised rule)",
+        "class": "P",
+        "classification": [
+          "BC-01"
+        ]
+      },
+      {
+        "suite": "host-label-namespace (namespace tables, items 8/9)",
+        "class": "P",
+        "classification": [
+          "catalogue:HL-1"
+        ],
+        "kept": "zero rows without context; DELETE removes nothing; superuser still refused on released_host_label"
+      },
+      {
+        "suite": "server-path-provisioning-db",
+        "class": "DEFECT (test isolation)",
+        "classification": [
+          "routed to Agent 2: its §12.2-§12.6 DDL attempts ran for real as crewflow_owner and replaced core.provision_workspace on the shared CI database (G-02 measured); ~20 suites failed in consequence"
+        ]
+      },
+      {
+        "suite": "phase-d-two-worker-concurrency (both Worker runtimes)",
+        "class": "I",
+        "classification": [
+          "BC-08"
+        ]
+      },
+      {
+        "suite": "phase-d-dispatch-pointer (no direct access; claims; API-login claims)",
+        "class": "P",
+        "classification": [
+          "BC-08",
+          "BC-10"
+        ],
+        "kept": "the three schema roles keep 42501; the runtime login still sees zero pointers, cannot insert one and changes none (definer policy + RESTRICTIVE deny); claims by the runtime login only in rolled-back transactions"
+      },
+      {
+        "suite": "phase-d-account-invite-cleanup-definer (API login and the three definers)",
+        "class": "P",
+        "classification": [
+          "BC-08"
+        ],
+        "kept": "schema role crewflow_app 42501; runtime calls rolled back"
+      },
+      {
+        "suite": "workspace-provisioning-health (stuck-workspace alert) and the other deferral users (provisioning-drafts, server-path-provisioning-api)",
+        "class": "HARNESS GAP",
+        "classification": [
+          "routed to Agent 2: the deferral seam REVOKE EXECUTE ON core.provision_workspace FROM crewflow_app is a no-op under the one login (it inherits the owner), so the workspace provisions at once and is never CREATING"
+        ]
+      },
+      {
+        "suite": "workspace-schema-migrator (runtime cannot migrate / recorder / ledger / drift columns)",
+        "class": "P",
+        "classification": [
+          "catalogue:PROV-1"
+        ],
+        "kept": "the migrator still refuses a connection acting as crewflow_app; ledger INSERT / UPDATE / DELETE and registry drift columns still 42501 for the runtime login; zero ledger rows without context"
+      },
+      {
+        "suite": "deployment-identity (the real runtime login block)",
+        "class": "P / I",
+        "classification": [
+          "BC-11 / G-06 (HIGH, NEEDS OWNER APPROVAL)"
+        ],
+        "kept": "the SET LOCAL ROLE crewflow_app / crewflow block unchanged; for the runtime login every direct write but a no-row singleton UPDATE is refused (privilege or owner-only policy); bind() reachable, rolled back"
+      },
+      {
+        "suite": "crewflow-app-copied-write-grants (whole suite)",
+        "class": "P",
+        "classification": [
+          "schema role crewflow_app via SET ROLE for every grant assertion",
+          "parity guards"
+        ],
+        "kept": "a new runtime-login test: the same registry / membership / checkpoint / file writes on visible rows are 42501; zero rows without context on the one-connection pool (runtime login)"
+      }
+    ]
+  },
+  "reconciliation": {
+    "$comment": "Reconciled with Agent 3's owner-login-behaviour-catalogue.ts (twa/security @ acbfcd83, BC-01..BC-17). Each difference above carries `bc`: the BC ids that cover it. Agent 3's catalogue is the one mirrored in THREAT-MODEL.md; this file adds the differences found empirically by the TW-D differential. Status words map: OWNER-ACCEPTED = accepted-s2, NEEDS OWNER APPROVAL = needs-owner-approval.",
+    "source": "origin/twa/security @ acbfcd83 packages/rab-server/src/database/boot-checks/owner-login-behaviour-catalogue.ts",
+    "inBcOnly": [
+      {
+        "bc": "BC-02",
+        "note": "behaviour-change: connecting as crewflow_app / crewflow_worker / crewflow is refused. Not a security loss; covered by Agent 3 tests."
+      },
+      {
+        "bc": "BC-16",
+        "note": "accepted-s2: credential exposure, the one URL is the owner. Consistent with G-04/F-E2 here."
+      },
+      {
+        "bc": "BC-17",
+        "note": "mitigated (owner decision 2026-11-05; Agent 1 80686512 / f91f1038): after a fresh install or the transition, crewflow and crewflow_app are NOLOGIN with no password, crewflow_migrator (where it exists) NOLOGIN with no password, crewflow_worker keeps LOGIN without a password. Asserted by twenty-mode-check assertHeadState (every successful install) and MIX-1."
+      }
+    ],
+    "missingFromBc": [
+      {
+        "id": "PAY-1",
+        "severity": "HIGH",
+        "ask": "add to the BC catalogue (needs-owner-approval): payroll lines/payslips/calendar periods no longer insert-only for the runtime (TW-D payroll-runs)."
+      },
+      {
+        "id": "INV-1",
+        "severity": "HIGH",
+        "ask": "confirm it is closed by M-T1 (member_invitation becomes FORCE): re-run member-invitation S4/X2 as the owner on an M-T1 database; if not closed, add an entry."
+      },
+      {
+        "id": "AI-1",
+        "severity": "MEDIUM",
+        "ask": "add (needs-owner-approval): AI agent trigger / skill governance enforced by grants is lost; the EX-3 CHECK still holds."
+      },
+      {
+        "id": "PROV-1",
+        "severity": "MEDIUM",
+        "ask": "add or fold into BC-08/BC-15: the runtime can call provisioner-only workspace-schema functions."
+      },
+      {
+        "id": "OUTBOX-1",
+        "severity": "MEDIUM",
+        "ask": "add or fold into BC-08: the runtime can DELETE outbox rows directly."
+      },
+      {
+        "id": "COLGRANT-1",
+        "severity": "MEDIUM",
+        "ask": "add (needs-owner-approval) or extend BC-13 beyond secret columns: non-secret column INSERT grants (id, created_at, updated_by) no longer bind the runtime; consider BEFORE INSERT parity guards."
+      },
+      {
+        "id": "REF-1",
+        "severity": "MEDIUM",
+        "ask": "add to the BC catalogue as accepted-owner (owner decision 2026-11-04, like Twenty); no parity guard."
+      },
+      {
+        "id": "MFA-SESS-1",
+        "severity": "HIGH",
+        "ask": "FIXED by Agent 3 (4caaef2a); add to the BC catalogue as mitigated with the fix referenced."
+      },
+      {
+        "id": "HL-1",
+        "severity": "LOW",
+        "ask": "add (needs-owner-approval): the runtime login holds table privileges on the host-label namespace tables; RLS / triggers / parity guards keep the observable effect nil."
+      }
+    ]
+  },
+  "removeInPr9": {
+    "$comment": "Suites skipped BY NAME under the owner login. The PR #9 removal gate fails while any of these files still exists (removalGateProblems).",
+    "files": [
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-resilience.integration.spec.ts",
+        "reason": "LEGACY separate provisioner (no crewflow login under the owner login)"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-optin.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-entrypoint.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/provisioner-db-connection-loss.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-server/src/__tests__/integration/worker-identity-boot-gates.integration.spec.ts",
+        "reason": "SUPERSEDED by owner-login-guards (Agent 3 ruling 2026-11-05)"
+      }
+    ]
+  },
+  "removalGateKeep": {
+    "$comment": "Kept on the PR #9 removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05. removalGateProblems lists them until PR #9 removes the entry.",
+    "ids": [
+      "HL-1"
+    ]
+  }
+}

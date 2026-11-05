@@ -1,0 +1,41 @@
+# OWNER-LOGIN DEPLOYMENT — QUICK-START override: the API MIGRATES ON START. Layer it on docker-compose.image.yml, BEFORE
+# docker-compose.local-db.yml if both are used:
+#
+#   docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml -f docker-compose.migrate-on-start.yml \
+#     [-f docker-compose.local-db.yml] up -d --wait --wait-timeout 1200
+#
+# NOT FOR PRODUCTION. Production uses docker-compose.image.yml alone: the one-off release step, run once before the API.
+# Here every start of a new image applies whatever it ships (approval mode none by default, BC-11; token mode is an opt-in
+# of database.env), rollback is a restore, and two versions starting together race for the lock. Full statement and the SECURITY TRADE-OFF (ST-3):
+# docs/release/OWNER-LOGIN-DEPLOYMENT.md section 6.
+#
+# What it changes, and nothing else:
+#   - rab-api: CREWFLOW_MIGRATE_ON_START=true. It runs the check-first migration child under the
+#     migration lock before it serves (a first-install failure exits non-zero; the API never becomes healthy), with a
+#     start_period long enough for a fresh install (whole chain + a lock wait bounded at 600 s) and memory for the child;
+#   - rab-api and rab-worker no longer wait for rab-migrate, and rab-migrate gets the "release" profile so `up` does not
+#     start it (`--profile release run --rm rab-migrate` still works for a manual check).
+# The Worker still never migrates and still starts only after a healthy API.
+
+services:
+
+  rab-api:
+    environment:
+      CREWFLOW_MIGRATE_ON_START: "true"
+    depends_on: !override
+      rab-redis:
+        condition: service_healthy
+    healthcheck:
+      start_period: 900s
+    # The migration child is a second Node process in this container on start. NOT MEASURED; tune after a fresh-install run.
+    mem_limit: ${CREWFLOW_API_MEM_LIMIT:-1024m}
+
+  rab-worker:
+    depends_on: !override
+      rab-redis:
+        condition: service_healthy
+      rab-api:
+        condition: service_healthy
+
+  rab-migrate:
+    profiles: ["release"]

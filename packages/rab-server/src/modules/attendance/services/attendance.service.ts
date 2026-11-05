@@ -179,6 +179,7 @@ export interface AttendanceHistoryPage {
   nextCursor: string | null;
 }
 
+// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
 const ATTENDANCE_SUMMARY_SELECT = `
   SELECT
     a.id, a.status, a.clock_in_at, a.clock_out_at, a.worked_minutes, a.earned_pence,
@@ -366,6 +367,7 @@ export class AttendanceService {
   }
 
   private async loadSummary(manager: EntityManager, attendanceId: string): Promise<AttendanceSummary> {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT} WHERE a.id = $1`, [attendanceId]);
     return toAttendanceSummary(rows[0] as Record<string, unknown>);
   }
@@ -952,6 +954,7 @@ export class AttendanceService {
       // summary of exactly those ids — so the plan always starts from this staff member's rows, never from the
       // organisation's venues/shifts (the RLS predicates hide every selectivity from the planner). Same rows, same order.
       const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT a.id, ${keysetTimestampSql('a.clock_in_at')} AS keyset_ts FROM attendance a
           WHERE ${conditions.join(' AND ')}
           ORDER BY a.clock_in_at DESC, a.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
@@ -963,6 +966,7 @@ export class AttendanceService {
       if (page.data.length) await manager.query(`SELECT set_config('jit', 'off', true)`);
       const rows: Array<Record<string, unknown>> = page.data.length
         ? await manager.query(
+            // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
             `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
                CROSS JOIN LATERAL (${ATTENDANCE_SUMMARY_SELECT} WHERE a.id = k.id AND a.staff_profile_id = $2 OFFSET 0) x
               ORDER BY x.clock_in_at DESC, x.id DESC`,
@@ -979,6 +983,7 @@ export class AttendanceService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return null;
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT} WHERE a.staff_profile_id = $1 AND a.shift_id = $2`, [
         staffProfile.id,
         shiftId,
@@ -1035,12 +1040,14 @@ export class AttendanceService {
       if (earningsVisible && dto.earnedPenceMin !== undefined) conditions.push(`a.earned_pence >= ${nextParam(dto.earnedPenceMin)}`);
       if (earningsVisible && dto.earnedPenceMax !== undefined) conditions.push(`a.earned_pence <= ${nextParam(dto.earnedPenceMax)}`);
 
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = `WHERE ${conditions.join(' AND ')}`;
       const sortKey = (dto.sort === 'earnedPence' && !earningsVisible) || (dto.sort === 'workedMinutes' && !workedVisible) ? 'clockInAt' : dto.sort;
       const sortColumn = ATTENDANCE_SORT_COLUMNS[sortKey ?? 'clockInAt'] ?? ATTENDANCE_SORT_COLUMNS.clockInAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*)::int AS count FROM attendance a
            JOIN shift s ON s.id = a.shift_id
            JOIN venue v ON v.id = s.venue_id
@@ -1055,6 +1062,7 @@ export class AttendanceService {
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
       const rows = await manager.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `${ATTENDANCE_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, a.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
         params,
       );
@@ -1099,6 +1107,7 @@ export class AttendanceService {
       const grace = nextParam(summary.lateGraceMinutes);
       const start = assignmentTimeSql('sa', 's').start;
       const statusRows: Array<{ status: string; n: number; late: number }> = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT a.status, count(*)::int AS n,
                 count(*) FILTER (WHERE a.clock_in_at > ${start} + make_interval(mins => ${grace}::int))::int AS late
            FROM attendance a
@@ -1115,6 +1124,7 @@ export class AttendanceService {
         if (r.status in summary.byStatus) summary.byStatus[r.status as AttendanceStatusType] = Number(r.n);
       }
       const [noShow] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*) FILTER (WHERE sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed,
                 count(*) FILTER (WHERE sa.attendance_reviewed_at IS NULL)::int AS provisional
            FROM shift_assignment sa
@@ -1126,6 +1136,7 @@ export class AttendanceService {
       summary.noShows = { confirmed: Number(noShow?.confirmed ?? 0), provisional: Number(noShow?.provisional ?? 0) };
       // AI Phase 3: booked assignments starting in the range and how many of them have a clock-in (counts only).
       const [booked] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*)::int AS starting,
                 count(*) FILTER (WHERE EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id AND a.clock_in_at IS NOT NULL))::int AS attended
            FROM shift_assignment sa
@@ -1389,6 +1400,7 @@ export class AttendanceService {
 
   /** Opaque optimistic-concurrency token for one attendance row (microsecond `updated_at`); the report exposes it as `attendanceVersion`. */
   private async attendanceVersion(manager: EntityManager, attendanceId: string): Promise<string> {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const [row] = await manager.query(`SELECT ${ATTENDANCE_VERSION_SQL('a')} AS v FROM attendance a WHERE a.id = $1`, [attendanceId]);
     return row.v as string;
   }

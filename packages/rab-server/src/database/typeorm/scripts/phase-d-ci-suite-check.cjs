@@ -26,12 +26,14 @@ const SUITES = {
       'phase-d-f2-pointer-identity.integration.spec.ts',
       'phase-d-invite-redemption-without-cleanup.integration.spec.ts',
       'phase-d-r4-secure-owner-regression.integration.spec.ts',
-      'worker-identity-boot-gates.integration.spec.ts',
     ],
     // Whole-file skips that are reviewed and expected in CI, with the reason.
     skippedFiles: {
       // Opt-in benchmark (PHASE_D_EXPLAIN=true): EXPLAIN ANALYZE over 500k synthetic pointers. Not a correctness gate.
       'phase-d-dispatch-pointer-explain.integration.spec.ts': 'PHASE_D_EXPLAIN benchmark (500k rows), opt-in only',
+      // Owner-login architecture: no crewflow_worker LOGIN exists; superseded by owner-login-guards (Agent 3 ruling,
+      // 2026-11-05), skipped by name and on the PR #9 removal gate (twenty-expected-differences.json removeInPr9).
+      'worker-identity-boot-gates.integration.spec.ts': 'SUPERSEDED by owner-login-guards; remove in PR #9',
     },
     // Individual pending tests allowed inside an otherwise running suite: file -> max count.
     pendingAllowed: {},
@@ -96,6 +98,19 @@ for (const r of report.testResults ?? []) {
   const runFailed = r.status === 'failed' || Boolean(r.testExecError) || (failed === 0 && r.failureMessage);
   seen.set(name, { passed, failed, pending, runFailed });
   process.stdout.write(`${kind}: ${name}: passed=${passed} failed=${failed} pending=${pending}${runFailed ? ' RUN-FAILED' : ''}\n`);
+  // The failure text itself (nx interleaving hides jest's own report in the job log): title + the first message lines,
+  // ANSI colours and stack frames stripped. Test output only; no secret is ever part of an assertion message here.
+  const clean = (m) =>
+    String(m)
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .split('\n')
+      .filter((l) => l.trim() && !/^\s+at /.test(l))
+      .slice(0, 12)
+      .join('\n      ');
+  for (const t of tests.filter((x) => x.status === 'failed')) {
+    process.stdout.write(`  FAILED-TEST ${name} :: ${t.fullName ?? t.title}\n      ${clean((t.failureMessages ?? []).join('\n'))}\n`);
+  }
+  if (failed === 0 && r.failureMessage) process.stdout.write(`  FILE-FAILURE ${name}\n      ${clean(r.failureMessage)}\n`);
 }
 
 for (const [name, s] of seen) {

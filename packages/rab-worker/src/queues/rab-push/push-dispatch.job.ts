@@ -89,6 +89,7 @@ export async function runPushDispatchCycle(
  * Phase D (D1): `WORKER_CLAIM_MODE=global` claim — the per_scope eligibility predicate, unchanged (asserted by
  * push-dispatch.job.spec.ts), restricted to the ids the global pointer claim returned for this organisation.
  */
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const GLOBAL_CLAIM_SQL = `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
                   dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
            FROM core.push_delivery
@@ -120,6 +121,7 @@ export async function dispatchPushScope(
       const claimed = ids !== undefined
         ? await manager.query<ClaimedRow[]>(GLOBAL_CLAIM_SQL, [ids.length, [...ids]])
         : await manager.query<ClaimedRow[]>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
                   dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
            FROM core.push_delivery

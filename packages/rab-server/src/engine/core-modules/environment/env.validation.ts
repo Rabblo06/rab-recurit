@@ -10,6 +10,7 @@ import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
 import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
+import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 
 /**
@@ -197,6 +198,15 @@ ${(error as Error).message}`);
     }
   } else if (databaseProblem) {
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
+  }
+
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): the remaining database start-up settings and the removed
+  // mode switch (CREWFLOW_DB_MODE, DISABLE_DB_MIGRATIONS), through the one shared parser
+  // (database/owner-login/runtime-db-config.ts) — the same rules api-prestart.sh and the runtime guard apply. Read from the
+  // RAW configuration (a blank value is unset). Names and allowed values only, never a value.
+  const runtimeDbProblems = runtimeDbConfigProblems(config as Record<string, string | undefined>);
+  if (runtimeDbProblems.length > 0) {
+    throw new Error(`Invalid environment configuration:\n${runtimeDbProblems.join('\n')}`);
   }
 
   return validated;

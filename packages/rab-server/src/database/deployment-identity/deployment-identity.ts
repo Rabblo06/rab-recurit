@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Phase B / B3 (P3, owner-approved design: Option B primary, Option A secondary): provider-neutral deployment identity.
  *
@@ -144,12 +145,9 @@ export function assertDeclaredIdentityForProcess(
 ): DeclaredDeploymentIdentity | null {
   const declared = readDeclaredDeploymentIdentity(env);
   if (production) {
-    if (!declared) {
-      throw new DeploymentIdentityError(
-        `the production ${processLabel} requires ${DEPLOYMENT_ENVIRONMENT_VAR}=production and ${DEPLOYMENT_ID_VAR}=<uuid> from the deployment environment.`,
-      );
-    }
-    if (declared.environment !== 'production') {
+    // Owner decision BC-11 (2026-11-05): the declaration is OPTIONAL in production too (null = undeclared; the marker check
+    // is skipped with a loud warning, decideDeploymentIdentity). A partial or invalid declaration is still refused above.
+    if (declared && declared.environment !== 'production') {
       throw new DeploymentIdentityError(
         `the production ${processLabel} declares ${DEPLOYMENT_ENVIRONMENT_VAR}=${declared.environment}. A production process must declare production.`,
       );
@@ -338,11 +336,32 @@ const BIND_HINT =
   'Bind it with the audited migration-identity command `db:bind-identity` (docs: deployment identity runbook), then set ' +
   `${DEPLOYMENT_ENVIRONMENT_VAR} and ${DEPLOYMENT_ID_VAR} to the bound values.`;
 
+/**
+ * Owner decision BC-11 (2026-11-05): a production process that declares no identity is not checked against the marker.
+ * Logged as a warning on every boot (runtime-database-guard.ts / the boot gate / the migrate child print every warning).
+ */
+export const UNDECLARED_IDENTITY_WARNING =
+  `deployment identity not declared (${DEPLOYMENT_ID_VAR} / ${DEPLOYMENT_ENVIRONMENT_VAR} unset): the marker was not verified against an expected value`;
+
 /** The whole marker decision. Throws DeploymentIdentityError; never returns for a refusal. */
 export function decideDeploymentIdentity(input: DeploymentIdentityDecisionInput): DeploymentIdentityDecision {
   const { processLabel, production, declared, marker } = input;
   const bootstrapRequested = input.bootstrapRequested === true;
   const warnings: string[] = [];
+
+  // Owner decision BC-11 (2026-11-05): the deployment identity is optional, OFF by default, in production too. Undeclared:
+  // no marker check at all (absent, unbound or bound, any location), one loud warning. Declared: everything below, unchanged
+  // (exact match, location, bootstrap). Outside production the existing undeclared rules below still apply unchanged
+  // (H-1 remote-unmarked refusal, a production-bound marker refused, location checked).
+  if (production && !declared) {
+    if (bootstrapRequested) {
+      throw new DeploymentIdentityError(
+        `${IDENTITY_BOOTSTRAP_VAR} binds a DECLARED identity: set ${DEPLOYMENT_ENVIRONMENT_VAR}=production and ${DEPLOYMENT_ID_VAR} as well, or remove the flag.`,
+      );
+    }
+    warnings.push(`${UNDECLARED_IDENTITY_WARNING} (marker ${marker.state}).`);
+    return { warnings, summary: 'undeclared', bootstrap: false };
+  }
 
   if (marker.state === 'absent' || marker.state === 'unbound') {
     const what =
@@ -405,10 +424,7 @@ export function decideDeploymentIdentity(input: DeploymentIdentityDecisionInput)
     }
     return { warnings, summary: bound, bootstrap: false };
   }
-  // No declaration (non-production only: production without a declaration was refused by assertDeclaredIdentityForProcess).
-  if (production) {
-    throw new DeploymentIdentityError(`the production ${processLabel} has no declared deployment identity. Refusing.`);
-  }
+  // No declaration: non-production only (production without a declaration returned above, BC-11).
   if (marker.environment === 'production') {
     throw new DeploymentIdentityError(
       `the database is bound to production (${bound}) and this non-production ${processLabel} must not use it. ` +

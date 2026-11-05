@@ -20,6 +20,11 @@ import { secureOwnerInvariantViolations } from './secure-owner-invariants';
  *   - the owner of schema `core` and of the database;
  *   - the number of objects crewflow_app and crewflow_worker own in any catalog (pg_shdepend; always 0: runtime logins own
  *     nothing).
+ * Owner-login architecture (Agent 5 finding, MEDIUM, 2026-11-04): `crewflow_owner`, the ONE runtime login, is snapshotted
+ * like the others — CREATE on core / public, database CREATE / TEMPORARY, its attributes, every role it is a member of AND
+ * every member OF it (a new member or a new membership is an escalation / persistence path, M0 G-04), its settings and the
+ * number of objects it owns (the bootstrap extensions; any other object would escape every policy not FORCEd for it). On a
+ * separated-layout database it does not exist and its lines are simply absent.
  * crewflow_worker (Phase D) is created by an operator before WorkerDispatchPointer1786721300000; on a database where it does
  * not exist yet its lines are simply absent (the harness creates it before the first post-0b drift snapshot).
  * Table, column and function grants are compared by the golden posture snapshot at the end of every harness scenario.
@@ -32,31 +37,31 @@ export const PRIVILEGE_DRIFT_SNAPSHOT_SQL = `
 SELECT line FROM (
   SELECT 'schema-create|' || n.nspname || '|' || r.rolname || '|' || pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE') AS line
     FROM pg_catalog.pg_namespace n CROSS JOIN pg_catalog.pg_roles r
-   WHERE n.nspname IN ('core', 'public') AND r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker')
+   WHERE n.nspname IN ('core', 'public') AND r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_owner')
   UNION ALL
   SELECT 'database|' || r.rolname || '|create=' || pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE')
          || '|temp=' || pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'TEMPORARY')
-    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker')
+    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_owner')
   UNION ALL
   SELECT 'role|' || r.rolname || '|login=' || r.rolcanlogin || '|super=' || r.rolsuper || '|bypassrls=' || r.rolbypassrls
          || '|createrole=' || r.rolcreaterole || '|createdb=' || r.rolcreatedb || '|inherit=' || r.rolinherit
          || '|replication=' || r.rolreplication
-    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner')
+    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner', 'crewflow_owner')
   UNION ALL
   SELECT 'member|' || pg_catalog.pg_get_userbyid(m.member) || '|of|' || pg_catalog.pg_get_userbyid(m.roleid)
          || '|admin=' || m.admin_option || '|inherit=' || m.inherit_option || '|set=' || m.set_option
     FROM pg_catalog.pg_auth_members m
-   WHERE pg_catalog.pg_get_userbyid(m.member) IN ('crewflow', 'crewflow_app', 'crewflow_worker')
-      OR pg_catalog.pg_get_userbyid(m.roleid) = 'crewflow_worker'
+   WHERE pg_catalog.pg_get_userbyid(m.member) IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_owner')
+      OR pg_catalog.pg_get_userbyid(m.roleid) IN ('crewflow_worker', 'crewflow_owner')
   UNION ALL
   SELECT 'role-config|' || r.rolname || '|' || COALESCE(pg_catalog.array_to_string(r.rolconfig, ','), '')
-    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner')
+    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner', 'crewflow_owner')
   UNION ALL
   SELECT 'db-role-config|' || COALESCE(pg_catalog.pg_get_userbyid(NULLIF(s.setrole, 0)), '*') || '|'
          || pg_catalog.array_to_string(s.setconfig, ',')
     FROM pg_catalog.pg_db_role_setting s
    WHERE s.setdatabase IN (0, (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()))
-     AND (s.setrole = 0 OR pg_catalog.pg_get_userbyid(s.setrole) IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner'))
+     AND (s.setrole = 0 OR pg_catalog.pg_get_userbyid(s.setrole) IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'rab_secure_owner', 'crewflow_owner'))
   UNION ALL
   SELECT 'default-acl|' || pg_catalog.pg_get_userbyid(a.defaclrole) || '|' || COALESCE(n.nspname, '*') || '|'
          || a.defaclobjtype::text || '|' || a.defaclacl::text
@@ -79,7 +84,7 @@ SELECT line FROM (
            SELECT pg_catalog.count(*) FROM pg_catalog.pg_shdepend d
             WHERE d.refobjid = r.oid AND d.deptype = 'o'
               AND d.dbid IN (0, (SELECT x.oid FROM pg_catalog.pg_database x WHERE x.datname = pg_catalog.current_database())))
-    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow_app', 'crewflow_worker')
+    FROM pg_catalog.pg_roles r WHERE r.rolname IN ('crewflow_app', 'crewflow_worker', 'crewflow_owner')
 ) s ORDER BY 1`;
 
 type Query = (sql: string) => Promise<Array<Record<string, unknown>>>;

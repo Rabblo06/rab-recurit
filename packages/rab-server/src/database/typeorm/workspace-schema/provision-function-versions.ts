@@ -19,6 +19,8 @@ export const PROVISION_FUNCTION_MODULE_VERSIONS: Readonly<Record<string, number>
   'db:provision_workspace@ProvisionWorkspaceGuards1786721210000': 18,
   // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): the guarded v3 body over the module-19 composition.
   'db:provision_workspace@StatementDispatchPointer1786721320000': 19,
+  // Owner-login PAY-1 (2026-11-04): the guarded v3 body over the module-20 composition (grant-parity guards).
+  'db:provision_workspace@WorkspaceGrantParityGuards1786721430000': 20,
 });
 
 /**

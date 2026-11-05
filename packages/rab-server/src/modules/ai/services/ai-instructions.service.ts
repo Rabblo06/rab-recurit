@@ -127,6 +127,7 @@ export class AiInstructionsService {
 
   private async row(m: EntityManager, organisationId: string, forUpdate = false): Promise<InstructionRow | null> {
     const [row] = await m.query<InstructionRow[]>(
+      // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
       `SELECT content, content_sha256, updated_at FROM core.organisation_ai_instruction WHERE organisation_id = $1${forUpdate ? ' FOR UPDATE' : ''}`,
       [organisationId],
     );

@@ -374,7 +374,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const ids = [...a.shiftIds, ...b.shiftIds];
     const candidates = await discoverInWorkspaces(adminDataSource, tenantContext, async manager => {
       const [role] = await manager.query('SELECT current_user AS name');
-      expect(role.name).toBe('crewflow_app');
+      // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+      expect(role.name).toBe('crewflow_owner');
       return manager.query('SELECT id, organisation_id, workspace_id FROM core.shift WHERE id=ANY($1::uuid[])', [ids]);
     });
     expect(candidates.map((r: any) => r.id).sort()).toEqual(ids.sort());

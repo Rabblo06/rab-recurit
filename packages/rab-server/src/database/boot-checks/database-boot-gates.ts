@@ -9,13 +9,13 @@
  *              privileged provisioning connection (the elevated endpoint when one is configured), expecting `crewflow`
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
- *   1. role      current_user AND session_user are the expected login (API: crewflow_app, never crewflow_worker; Worker:
- *                crewflow_app or crewflow_worker with WORKER_CLAIM_MODE=per_scope, crewflow_worker only with global;
- *                provisioner: crewflow; CLI: per command, see CLI_COMMAND_ROLES, never crewflow_worker) — code constants,
- *                never env; neither is SUPERUSER or BYPASSRLS, and the login is not a member (any membership, with
- *                or without INHERIT/SET — pg_has_role MEMBER, PG16) of rab_secure_owner, crewflow (unless it IS crewflow) or rab_owner;
- *                a non-Worker login is not a member of crewflow_worker. A crewflow_worker login must also have the reviewed
- *                shape (member of crewflow_app WITH INHERIT TRUE, SET FALSE only; no CREATEROLE/CREATEDB/REPLICATION; owns nothing).
+ *   1. role      (owner-login architecture, owner's final decision 2026-11-04) current_user AND session_user are the owner
+ *                login `crewflow_owner` for EVERY process, CLI command and WORKER_CLAIM_MODE — a code constant, never env; a
+ *                legacy schema-role login (crewflow_app, crewflow_worker, crewflow) is refused; the login is not SUPERUSER,
+ *                BYPASSRLS, REPLICATION or CREATEDB and not a member of crewflow_worker. After gate 2: a MEMBER-semantics
+ *                walk (INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) reaches nothing
+ *                SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION or dangerous, and the role layout is exactly the reviewed
+ *                owner-login inventory (owner-login-posture.ts). Membership of the owner roles is expected (catalogue BC-01).
  *   2. version   server_version_num >= 160000 (PostgreSQL 16; PG16 role-membership semantics are relied on).
  *   3. extensions  the extensions the migrations create are installed: btree_gist, citext, pg_trgm, pgcrypto, unaccent.
  *                (uuid-ossp is NOT required: no column default uses it — verified on a migrations-only database.)
@@ -37,9 +37,12 @@
  *   1c. dispatch-notify  (Phase D wave 3) no PERSISTENT crewflow.dispatch_notify in pg_db_role_setting (this database or
  *                all; every role or a role the login is a member of), and the gate session's own value is 'on' for an
  *                event-mode API/Worker (its startup option) and absent for every other process/mode. Runs after gate 1.
- *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions (refused otherwise: after the D5 cutover only
- *                crewflow_worker can — a mixed-version rollout is visible, not silently broken) and, in global mode, the
- *                dispatch-claim functions; every other process can EXECUTE none of the dispatch-claim functions.
+ *   objects      (after gate 7) FORCE on every core tenant table, the 16 pre-auth tables (M-T1, each with its exact
+ *                owner-only definer policy) and the deployment-identity tables; expected ownership; nothing unexpected owned
+ *                by the login or the owner roles in core / public / other schemas (owner-login-posture.ts).
+ *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions and, in global mode, the dispatch-claim functions.
+ *                A non-Worker process CAN execute the dispatch-claim functions with one login: recorded as a boot WARNING
+ *                on every start (BC-08, DBA-01 lost — accepted by the owner 2026-11-05), not a refusal.
  *
  * Connection: a short-lived DataSource from the connection factory (src/database/postgres: createPgDataSource for the
  * process's primary endpoint (the provisioner: its privileged endpoint), one session, the process's own role, pool max 1, application_name `crewflow-<process>-boot-gates`), so
@@ -52,8 +55,18 @@ import { DataSourceOptions } from 'typeorm';
 
 import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
-import { BootGateReport, BootProcess, DatabaseBootGateError, evaluateBootGates, RetryOptions, withDatabaseRetry } from './database-boot-gate-rules';
+import {
+  BootGateReport,
+  BootProcess,
+  DatabaseBootGateError,
+  evaluateBootGates,
+  isProductionProcess,
+  RetryOptions,
+  withDatabaseRetry,
+} from './database-boot-gate-rules';
 import { checkSchemaCompatibility } from './schema-compatibility';
+import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
+import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
 export * from './database-boot-gate-rules';
 export * from './schema-compatibility';
@@ -140,7 +153,17 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
               workspaces: processName === 'provisioner',
             }),
         });
-        return { ...gateReport, expectedMigrations };
+        // Semantic posture (M0 §6.4 control 4): the database's security objects equal the reviewed golden for this major.
+        // Production refuses when no golden exists for the major; elsewhere that is a warning. The snapshot is the
+        // baseline for the posture monitor (SemanticPostureMonitor, started by the API / Worker after boot).
+        let semantic: { posture: SemanticPosture; warnings: string[] };
+        try {
+          semantic = await assertSemanticPostureAtBoot(query, { production: isProductionProcess(processName, env), label });
+        } catch (error) {
+          if (error instanceof SemanticPostureError) throw new DatabaseBootGateError('semantic-posture', error.message);
+          throw error;
+        }
+        return { ...gateReport, warnings: [...gateReport.warnings, ...semantic.warnings], expectedMigrations, semanticBaseline: semantic.posture };
       } finally {
         await session.release().catch(() => undefined);
         await dataSource.destroy().catch(() => undefined);

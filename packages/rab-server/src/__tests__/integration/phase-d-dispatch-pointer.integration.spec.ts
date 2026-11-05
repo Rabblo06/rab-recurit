@@ -127,6 +127,32 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     return code;
   }
 
+  /**
+   * P-class (owner-login architecture): SQLSTATE of `sql` run as the SCHEMA ROLE `role` (fixture superuser + SET LOCAL ROLE,
+   * optional tenant binding), always rolled back. crewflow_app / crewflow_worker / crewflow are schema roles now; their
+   * grants and policies are still the reviewed boundary.
+   */
+  async function asSchemaRole(role: 'crewflow_app' | 'crewflow_worker' | 'crewflow', sql: string, params: unknown[] = [], org: string | null = null, ws: string | null = null): Promise<string> {
+    await admin.query('BEGIN');
+    try {
+      await admin.query(`SELECT set_config('role', $1, true)`, [role]);
+      if (org) await admin.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [org, ws ?? '']);
+      return await sqlstateOf(admin.query(sql, params));
+    } finally {
+      await admin.query('ROLLBACK').catch(() => undefined);
+    }
+  }
+  /** SQLSTATE of `fn` on the runtime connection `c` inside a transaction that is always rolled back. */
+  async function runtimeRolledBack(c: Client, fn: () => Promise<unknown>, org: string | null = null, ws: string | null = null): Promise<string> {
+    await c.query('BEGIN');
+    try {
+      if (org) await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [org, ws ?? '']);
+      return await sqlstateOf(fn());
+    } finally {
+      await c.query('ROLLBACK').catch(() => undefined);
+    }
+  }
+
   const claim = async (c: Client, queue: 'email' | 'push' | 'realtime' | 'statement', limit: number) => {
     const fn = { email: 'worker_claim_email_dispatch', push: 'worker_claim_push_dispatch', realtime: 'worker_claim_realtime_publish', statement: 'worker_claim_statement_dispatch' }[queue];
     const { rows } = await c.query(`SELECT * FROM core.${fn}($1)`, [limit]);
@@ -149,7 +175,8 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     worker2 = await connect(WORKER_URL!);
     if (process.env.TEST_DATABASE_CREWFLOW_URL) crewflow = await connect(process.env.TEST_DATABASE_CREWFLOW_URL);
     const { rows } = await worker.query('SELECT current_user AS u, session_user AS s');
-    expect(rows[0]).toEqual({ u: 'crewflow_worker', s: 'crewflow_worker' });
+    // BC-08 (Phase D under one login): TEST_DATABASE_WORKER_URL is the owner login; crewflow_worker is a schema role.
+    expect(rows[0]).toEqual({ u: 'crewflow_owner', s: 'crewflow_owner' });
     a = await seedWorkspace(admin, `pd-a-${run}`);
     b = await seedWorkspace(admin, `pd-b-${run}`);
   });
@@ -159,26 +186,60 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
   });
 
   describe('no direct access, fail closed', () => {
-    it.each(['app', 'worker', 'crewflow'] as const)('%s cannot read, insert, update or delete pointers (42501), with or without tenant context', async (who) => {
-      const c = who === 'app' ? app : who === 'worker' ? worker : crewflow;
-      if (!c) return;
-      expect(await sqlstateOf(c.query('SELECT count(*) FROM core.worker_dispatch_pointer'))).toBe('42501');
-      expect(await sqlstateOf(c.query(`INSERT INTO core.worker_dispatch_pointer (queue, subject_id, organisation_id, due_at) VALUES ('email', gen_random_uuid(), $1, now())`, [a.org]))).toBe('42501');
-      expect(await sqlstateOf(c.query(`UPDATE core.worker_dispatch_pointer SET due_at = now()`))).toBe('42501');
-      expect(await sqlstateOf(c.query(`DELETE FROM core.worker_dispatch_pointer`))).toBe('42501');
-      expect(await sqlstateOf(asTenant(c, a.org, null, () => c.query('SELECT count(*) FROM core.worker_dispatch_pointer')))).toBe('42501');
+    // P-class (owner-login architecture): the three schema roles keep "no direct access" (42501), with or without a tenant.
+    it.each(['crewflow_app', 'crewflow_worker', 'crewflow'] as const)('schema role %s cannot read, insert, update or delete pointers (42501), with or without tenant context', async (role) => {
+      expect(await asSchemaRole(role, 'SELECT count(*) FROM core.worker_dispatch_pointer')).toBe('42501');
+      expect(await asSchemaRole(role, `INSERT INTO core.worker_dispatch_pointer (queue, subject_id, organisation_id, due_at) VALUES ('email', gen_random_uuid(), $1, now())`, [a.org])).toBe('42501');
+      expect(await asSchemaRole(role, `UPDATE core.worker_dispatch_pointer SET due_at = now()`)).toBe('42501');
+      expect(await asSchemaRole(role, `DELETE FROM core.worker_dispatch_pointer`)).toBe('42501');
+      expect(await asSchemaRole(role, 'SELECT count(*) FROM core.worker_dispatch_pointer', [], a.org)).toBe('42501');
     });
 
-    it('only crewflow_worker may claim or release; the claim body is executable by nobody', async () => {
-      for (const c of [app, crewflow].filter(Boolean) as Client[]) {
-        for (const q of ['email', 'push', 'realtime', 'statement'] as const) expect(await sqlstateOf(claim(c, q, 1))).toBe('42501');
-        expect(await sqlstateOf(c.query(`SELECT core.worker_release_dispatch_claim('email', gen_random_uuid(), gen_random_uuid(), 1)`))).toBe('42501');
+    // The one runtime login holds table privileges through the owner (catalogue BC-10, ACCEPTED (owner, 2026-11-05)), but the pointer
+    // policies still fail it closed: the definer policy admits only current_user = rab_secure_owner and the RESTRICTIVE deny
+    // binds members of crewflow. It sees zero rows, cannot insert (42501) and changes nothing (rolled back). Only an injected
+    // SET ROLE rab_secure_owner gets past this (G-03, owner-accepted).
+    it('the runtime login (API and Worker alike) sees zero pointers, cannot insert one and changes none, with or without tenant context (BC-10)', async () => {
+      const total = async () => (await admin.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer')).rows[0].n as number;
+      await insertEmail(a.org); // a due email write: its trigger creates a pointer, so "zero rows" below is RLS, not an empty table
+      const before = await total();
+      expect(before).toBeGreaterThan(0);
+      for (const c of [app, worker]) {
+        expect((await c.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer')).rows[0].n).toBe(0);
+        expect((await asTenant(c, a.org, null, () => c.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer'))).rows[0].n).toBe(0);
+        expect(await runtimeRolledBack(c, () => c.query(`INSERT INTO core.worker_dispatch_pointer (queue, subject_id, organisation_id, due_at) VALUES ('email', gen_random_uuid(), $1, now())`, [a.org]))).toBe('42501');
+        await c.query('BEGIN');
+        try {
+          expect((await c.query(`UPDATE core.worker_dispatch_pointer SET due_at = now()`)).rowCount).toBe(0);
+          expect((await c.query(`DELETE FROM core.worker_dispatch_pointer`)).rowCount).toBe(0);
+        } finally {
+          await c.query('ROLLBACK').catch(() => undefined);
+        }
       }
-      expect(await sqlstateOf(worker.query(`SELECT * FROM core.worker_dispatch_claim_impl('email', 10, 300, 50)`))).toBe('42501');
-      expect(await sqlstateOf(claim(worker, 'email', 1))).toBe('ACCEPTED');
+      expect(await total()).toBe(before);
     });
 
-    it('the API login is not, and cannot become, the Worker: no membership either way', async () => {
+    // P-class (owner-login architecture): the boundary between the SCHEMA ROLES is unchanged: only crewflow_worker may claim
+    // or release, and the claim body is executable by none of them. The one runtime login inherits the definers' owner and
+    // can do all of it, the body included: catalogue BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)); asserted in rolled-back
+    // transactions so no pointer is leased.
+    it('only the schema role crewflow_worker may claim or release; the claim body is executable by no schema role; the runtime login can (BC-08)', async () => {
+      const claimSql = (q: 'email' | 'push' | 'realtime' | 'statement') =>
+        `SELECT * FROM core.${{ email: 'worker_claim_email_dispatch', push: 'worker_claim_push_dispatch', realtime: 'worker_claim_realtime_publish', statement: 'worker_claim_statement_dispatch' }[q]}(1)`;
+      const release = `SELECT core.worker_release_dispatch_claim('email', gen_random_uuid(), gen_random_uuid(), 1)`;
+      const impl = `SELECT * FROM core.worker_dispatch_claim_impl('email', 10, 300, 50)`;
+      for (const role of ['crewflow_app', 'crewflow'] as const) {
+        for (const q of ['email', 'push', 'realtime', 'statement'] as const) expect({ role, q, code: await asSchemaRole(role, claimSql(q)) }).toEqual({ role, q, code: '42501' });
+        expect({ role, code: await asSchemaRole(role, release) }).toEqual({ role, code: '42501' });
+      }
+      expect(await asSchemaRole('crewflow_worker', impl)).toBe('42501');
+      expect(await asSchemaRole('crewflow_worker', claimSql('email'))).toBe('ACCEPTED');
+      // OWNER-LOGIN DIFFERENCE BC-08 (ACCEPTED (owner, 2026-11-05)), rolled back.
+      expect(await runtimeRolledBack(worker, () => worker.query(impl))).toBe('ACCEPTED');
+      expect(await runtimeRolledBack(worker, () => claim(worker, 'email', 1))).toBe('ACCEPTED');
+    });
+
+    it('the schema roles crewflow_app and crewflow_worker share no membership either way (the one runtime login is both: BC-08, ACCEPTED (owner, 2026-11-05))', async () => {
       const { rows } = await admin.query(
         `SELECT pg_has_role('crewflow_app', 'crewflow_worker', 'USAGE') AS app_has_worker, pg_has_role('crewflow_worker', 'crewflow_app', 'SET') AS worker_set_app,
                 pg_has_role('crewflow_worker', 'crewflow', 'USAGE') AS worker_crewflow, pg_has_role('crewflow_worker', 'rab_secure_owner', 'USAGE') AS worker_secure`,
@@ -575,13 +636,19 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
       expect((await admin.query(STATEMENT_FUNCTION_STATE_SQL)).rows[0]).toEqual(STATEMENT_FUNCTION_EXPECTED);
     });
 
-    it('the API login cannot execute any claim or the release, even inside a tenant context (42501)', async () => {
+    // P-class (owner-login architecture): the schema role crewflow_app (the old API login) cannot execute any claim or the
+    // release, even inside a tenant context (42501). The one runtime login can: catalogue BC-08 (ACCEPTED (owner, 2026-11-05)),
+    // asserted inside rolled-back transactions so nothing is leased.
+    it('the schema role crewflow_app cannot execute any claim or the release, even inside a tenant context (42501); the runtime login can (BC-08)', async () => {
+      const fn = { email: 'worker_claim_email_dispatch', push: 'worker_claim_push_dispatch', realtime: 'worker_claim_realtime_publish', statement: 'worker_claim_statement_dispatch' };
       for (const q of ['email', 'push', 'realtime', 'statement'] as const) {
-        expect(await sqlstateOf(asTenant(app, a.org, a.id, () => claim(app, q, 1)))).toBe('42501');
+        // sql-injection-reviewed: fn[q] comes from the constant map above
+        expect({ q, code: await asSchemaRole('crewflow_app', `SELECT * FROM core.${fn[q]}(1)`, [], a.org, a.id) }).toEqual({ q, code: '42501' });
+        expect({ q, code: await runtimeRolledBack(app, () => claim(app, q, 1), a.org, a.id) }).toEqual({ q, code: 'ACCEPTED' });
       }
-      expect(
-        await sqlstateOf(asTenant(app, a.org, null, () => app.query(`SELECT core.worker_release_dispatch_claim('email', gen_random_uuid(), gen_random_uuid(), 1)`))),
-      ).toBe('42501');
+      const release = `SELECT core.worker_release_dispatch_claim('email', gen_random_uuid(), gen_random_uuid(), 1)`;
+      expect(await asSchemaRole('crewflow_app', release, [], a.org)).toBe('42501');
+      expect(await runtimeRolledBack(app, () => app.query(release), a.org)).toBe('ACCEPTED');
     });
 
     it('the pointer table carries routing ids only: exactly the reviewed columns, no payload / recipient / content column', async () => {

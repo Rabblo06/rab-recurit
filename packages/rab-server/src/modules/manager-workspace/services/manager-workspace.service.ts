@@ -21,6 +21,19 @@ import { SubdomainAvailability, SubdomainService } from './subdomain.service';
 import { assertCallerMayProvision, WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
+/**
+ * Race losers PostgreSQL resolves by aborting a transaction: 40P01 deadlock_detected, 40001 serialization_failure. For an
+ * idempotent create they mean the same as a lost unique race (another identical request is committing), never a 500.
+ */
+const POSTGRES_RACE_LOSER_CODES: ReadonlySet<string> = new Set(['40P01', '40001']);
+/** The per-owner create lock (pg_advisory_xact_lock(int4, int4)): concurrent creates for ONE owner queue, never interleave. */
+export const WORKSPACE_CREATE_LOCK_NAMESPACE = 'rab_manager_workspace_create';
+
+export function isRaceLoserError(error: unknown): boolean {
+  const e = error as { code?: string; driverError?: { code?: string } } | null | undefined;
+  const code = e?.driverError?.code ?? e?.code;
+  return typeof code === 'string' && POSTGRES_RACE_LOSER_CODES.has(code);
+}
 
 /**
  * Wave 3 lane H — lane S2's write-time host-label enforcement (CONTRACT.md section 3), mapped to the same responses the
@@ -315,9 +328,11 @@ export class ManagerWorkspaceService {
         return this.createFor(manager, core, { ownerUserId: ctx.userId, name: dto.name, subdomain: dto.subdomain });
       });
     } catch (error) {
-      if (!(error instanceof ConflictException)) throw error;
-      // A concurrent IDENTICAL request (double click, client retry after a lost response) committed first and this one
-      // lost the owner/subdomain unique race. That is a replay, not a conflict: answer with the same workspace.
+      // A concurrent IDENTICAL request (double click, client retry after a lost response, a second API replica) committed
+      // first and this one lost the race: the owner/subdomain unique key (ConflictException), or a lock cycle PostgreSQL
+      // resolved by aborting this transaction (40P01 / 40001; seen in CI with three concurrent identical creates). That is a
+      // replay, not a conflict and never a 500: answer with the same workspace. Anything else, or no replay, is rethrown.
+      if (!(error instanceof ConflictException) && !isRaceLoserError(error)) throw error;
       const replay = await this.tenantContext.runInTenantContext(core, (manager) => this.findReplay(manager, core, dto));
       if (!replay) throw error;
       created = toResponse(replay);
@@ -389,6 +404,15 @@ export class ManagerWorkspaceService {
     ctx: AuthContext,
     params: { ownerUserId: string; name: string; subdomain: string },
   ): Promise<ManagerWorkspaceResponse> {
+    // Concurrency: concurrent creates for the SAME owner (a double click, a client or load-balancer retry, two API
+    // replicas) queue on one transaction-scoped advisory lock, taken before any read that decides and before any write, so
+    // their transactions never interleave their row / unique-key locks into a deadlock. The second one then sees the first
+    // one's committed workspace (alreadyOwned below → ConflictException → the caller's replay path). Released at commit or
+    // rollback; different owners never wait on each other. Idempotent-create semantics are unchanged.
+    await manager.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext($1), pg_catalog.hashtext($2))', [
+      WORKSPACE_CREATE_LOCK_NAMESPACE,
+      params.ownerUserId,
+    ]);
     const ownProfile = await manager.findOne(ManagerProfile, { where: { userId: params.ownerUserId } });
     if (!ownProfile) throw new NotFoundException('Manager profile not found.');
     const bindsOperationalHome =

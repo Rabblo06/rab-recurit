@@ -81,7 +81,8 @@ describeIfDb('seed-qa under the restricted runtime role (integration)', () => {
               (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'core' AND c.relowner = r.oid) AS owned
          FROM pg_roles r WHERE r.rolname = current_user`,
     );
-    expect(who).toEqual({ u: 'crewflow_app', s: false, b: false, owned: 0 });
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept; it owns no core table.
+    expect(who).toEqual({ u: 'crewflow_owner', s: false, b: false, owned: 0 });
     // The direct write the old seed-qa made is refused to this role: the definer is the only path.
     await expect(runtime.query(`INSERT INTO core.organisation (name, slug) VALUES ('Direct', $1)`, [`seed-qa-direct-${Date.now()}`])).rejects.toThrow(
       /row-level security policy for table "organisation"/,
@@ -151,8 +152,9 @@ describeIfDb('seed-qa under the restricted runtime role (integration)', () => {
         ORDER BY c.relname`,
     );
     const byName = Object.fromEntries(rls.map((r: { t: string }) => [r.t, r]));
-    // organisation: RLS on, deliberately not FORCEd (pre-auth/bootstrap exception), owned by the NOLOGIN secure owner.
-    expect(byName.organisation).toEqual({ t: 'organisation', enabled: true, forced: false, owner: 'rab_secure_owner' });
+    // organisation: RLS on, owned by the NOLOGIN secure owner. M-class (M-T1 PreAuthTablesForceOwnerOnly1786721400000): FORCE
+    // now, with the owner-only definer policy, because the one runtime login inherits the owner.
+    expect(byName.organisation).toEqual({ t: 'organisation', enabled: true, forced: true, owner: 'rab_secure_owner' });
     for (const t of ['role', 'user_role', 'manager_profile', 'staff_profile', 'workspace_membership', 'audit_log']) {
       expect(byName[t]).toMatchObject({ enabled: true, forced: true });
     }

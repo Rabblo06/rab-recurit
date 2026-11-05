@@ -253,11 +253,48 @@ describeIfDb('host-label namespace, reserved labels and quarantine (C1/C2/C4/C5)
     expect((await app.query('SELECT core.organisation_slug_taken($1, $2) AS t', ['platform-' + sfx, NIL])).rows[0].t).toBe(false);
   });
 
-  it('the runtime role has no privilege on the namespace tables; quarantine rows are never deleted, even by the superuser', async () => {
-    for (const t of ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label']) {
-      expect(await sqlstateOf(app.query(`SELECT count(*) FROM ${t}`))).toBe('42501');
-      expect(await sqlstateOf(app.query(`DELETE FROM ${t}`))).toBe('42501');
+  // P-class (owner-login architecture). The schema role crewflow_app still has no privilege on the namespace tables (42501),
+  // checked through the fixture superuser's SET LOCAL ROLE and rolled back. The runtime login crewflow_owner holds table
+  // privileges through the owner (OWNER-LOGIN DIFFERENCE HL-1, catalogue): with no tenant context bound it sees ZERO claim /
+  // quarantine rows (FORCE RLS since M-T1; the owner-only definer policy admits only rab_secure_owner) and its DELETE removes
+  // nothing; the global reserved-label list (no organisation_id) is readable and its DELETE is refused by the parity guard.
+  it('HL-1: the schema role crewflow_app has no privilege on the namespace tables; the runtime login (ACCEPTED (owner, 2026-11-05)) sees no claim / quarantine row without context, reads the global reserved list, deletes nothing; quarantine rows are never deleted, even by the superuser', async () => {
+    const tables = ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label'];
+    const asSchemaApp = async (sql: string): Promise<string> => {
+      await admin.query('BEGIN');
+      try {
+        await admin.query(`SELECT set_config('role', 'crewflow_app', true)`);
+        return await sqlstateOf(admin.query(sql));
+      } finally {
+        await admin.query('ROLLBACK').catch(() => undefined);
+      }
+    };
+    const totals = async () => {
+      const out: Record<string, number> = {};
+      // sql-injection-reviewed: t comes from the constant table list above
+      for (const t of tables) out[t] = (await admin.query(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n;
+      return out;
+    };
+    const before = await totals();
+    for (const t of tables) {
+      // sql-injection-reviewed: t comes from the constant table list above
+      expect({ t, code: await asSchemaApp(`SELECT count(*) FROM ${t}`) }).toEqual({ t, code: '42501' });
+      // sql-injection-reviewed: t comes from the constant table list above
+      expect({ t, code: await asSchemaApp(`DELETE FROM ${t}`) }).toEqual({ t, code: '42501' });
+      if (t === 'core.reserved_host_label') {
+        // Global reference data (no organisation_id): the runtime login reads every reserved label through the policy for
+        // its owner role crewflow (measured 210 rows on PR #74; HL-1). Writes: the reserved_host_label parity guard refuses
+        // a DELETE of the visible rows (42501).
+        expect({ t, n: (await app.query(`SELECT count(*)::int AS n FROM core.reserved_host_label`)).rows[0].n }).toEqual({ t, n: before[t] });
+        expect(await sqlstateOf(app.query(`DELETE FROM core.reserved_host_label`))).toBe('42501');
+        continue;
+      }
+      // sql-injection-reviewed: t comes from the constant table list above
+      expect({ t, n: (await app.query(`SELECT count(*)::int AS n FROM ${t}`)).rows[0].n }).toEqual({ t, n: 0 });
+      // sql-injection-reviewed: t comes from the constant table list above
+      await app.query(`DELETE FROM ${t}`).catch(() => undefined);
     }
+    expect(await totals()).toEqual(before);
     const crewflow = new Client({ connectionString: adminUrl });
     await crewflow.connect();
     try {

@@ -496,6 +496,7 @@ export class SchedulingService {
       if (ids.length === 0) return empty;
       const truncated = ids.length > ASSISTANT_STAFFING_MAX_SHIFTS;
       const rows: Array<Record<string, unknown>> = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, v.name AS venue_name, jr.name AS job_role_name,
                 ${shiftSeatCountsSql('sa')}
            FROM shift s
@@ -566,6 +567,7 @@ export class SchedulingService {
       // organisation joined back by shift id: same numbers, but bounded by the caller's own requests. Measured on synthetic
       // volume (EXPLAIN ANALYZE, 100k offers in one organisation): the organisation-wide CTE cost ~0.2 s per call, and restricting it by
       // a sub-select made the planner (blind to the RLS predicates' selectivity) re-aggregate it once per request (~18 s).
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const rowsSql = `WITH rows AS (
           SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
             coalesce(s.default_starts_at, s.starts_at) AS "startsAt", coalesce(s.default_ends_at, s.ends_at) AS "endsAt",
@@ -615,9 +617,11 @@ export class SchedulingService {
       const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
       const pageParams: unknown[] = [...params, take + 1, skip];
       // The window total counts the view BEFORE the cursor bound (applied outside it), so `total` is the whole view's.
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const bound = after ? `WHERE ${keysetBeforeSql('"submittedAt"', 'id', '$7', '$8')}` : '';
       if (after) pageParams.push(after.t, after.i);
       const rows = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `${rowsSql} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${id ? 'TRUE' : VIEW_SQL[view]}) v ${bound}
           ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
         pageParams,
@@ -625,6 +629,7 @@ export class SchedulingService {
       if (id && !rows.length) throw new NotFoundException('Shift not found.');
       // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
       const [tabs] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `${rowsSql} SELECT ${Object.entries(VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
           count(*)::int AS submitted FROM classified`,
         params,

@@ -24,13 +24,19 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { checkSchemaCompatibility, isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
+import { installSessionRoleResetOnDataSource } from '@rab/server/database/postgres/session-role-reset';
+import { securityReady, startSecurityPostureMonitoring } from '@rab/server/engine/core-modules/health/security-readiness';
 import { createPgDataSource, pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
 import {
+  PROVISIONER_CYCLE_DURATIONS_KEY,
+  PROVISIONER_HEARTBEAT_KEY,
+  PROVISIONER_STATS_KEY,
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
@@ -42,6 +48,11 @@ import { boundedPublish, createQueueProducerConnection, QUEUE_PRODUCER_REDIS_OPT
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
+import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
+import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
+import { resolveSchemaWaitMs, waitForCompatibleSchema } from './core/runtime/schema-wait';
+import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
+import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
 import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
@@ -159,12 +170,60 @@ function refuseStartup(error: unknown): never {
               ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && (error.name === 'ProvisionerConfigError' || error.name === 'ProvisioningIdentityError')
+              ? '[workspace-provisioning] refused: '
+            : error instanceof Error && error.name === 'WatchdogConfigError'
+              ? '[worker-watchdog] refused: '
+            : error instanceof Error && error.name === 'RuntimeIsolationError'
+              ? '[worker-isolation] refused: '
+            : error instanceof Error && (error.name === 'SchemaWaitConfigError' || error.name === 'SchemaCompatibilityError')
+              ? '[worker-schema-wait] refused: '
             : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
               ? '[worker-pdf] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
+}
+
+/**
+ * The Worker's bounded wait for "schema current" (core/runtime/schema-wait.ts), on one short-lived boot-gate connection of
+ * its own login, with the same expected-migration list and policy the pending-migration boot gate uses.
+ */
+async function waitForWorkerSchema(pg: ReturnType<typeof resolvePgEnvironmentCached>): Promise<void> {
+  const maxWaitMs = resolveSchemaWaitMs(process.env);
+  const dataSource = createPgDataSource(
+    pg,
+    { endpoint: 'primary', purpose: 'boot-gates', max: 1 },
+    {
+      name: 'worker-schema-wait',
+      entities: [],
+      subscribers: [],
+      logging: false,
+      migrations: coreDataSourceOptions.migrations,
+      migrationsTableName: coreDataSourceOptions.migrationsTableName,
+    },
+  );
+  await dataSource.initialize();
+  try {
+    const expected = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
+    const production = isProductionProcess('worker', process.env);
+    await waitForCompatibleSchema({
+      maxWaitMs,
+      // eslint-disable-next-line no-console
+      log: (line) => console.log(line),
+      check: async () => {
+        await checkSchemaCompatibility((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
+          process: 'worker',
+          production,
+          expected,
+          label: 'worker process',
+        });
+      },
+    });
+  } finally {
+    await dataSource.destroy().catch(() => undefined);
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -179,12 +238,26 @@ async function bootstrap(): Promise<void> {
       return refuseStartup(error);
     }
   })();
+  // Owner-login architecture (no root launcher): the Worker itself now reports the container isolation it received (H6,
+  // CREWFLOW_RUNTIME_ISOLATION warn|enforce) and runs the event-loop watchdog the launcher used to provide (a stalled
+  // event loop is SIGKILLed so the restart policy replaces it; refused as PID 1, where the kernel ignores the kill — run
+  // the container with init: true). Both before any connection.
+  try {
+    enforceRuntimeIsolation(process.env, console);
+    startEventLoopWatchdog({ staleMs: resolveWatchdogStaleMs(process.env) });
+  } catch (error) {
+    refuseStartup(error);
+  }
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
   await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
+  // Owner-login architecture: the Worker NEVER migrates (the API start or the release step does). While the only schema
+  // finding is "pending" — that migration still running — it waits, bounded (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS), instead
+  // of the boot gate refusing it; anything else is refused exactly as before, by the wait or by the boot gates below.
+  await waitForWorkerSchema(pg).catch(refuseStartup);
   // ---- Phase B (A2): database boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending
   // migrations), before any queue consumer or pool. ----
-  await runDatabaseBootGates('worker').catch(refuseStartup);
+  const gateReport = await runDatabaseBootGates('worker').catch(refuseStartup);
   // ---- end Phase B (A2) ----
   // Phase B (P4): the session-lock connection must be session-stable — a live two-connection probe (pg-session-probe.ts),
   // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof; the URL denylist already ran above.
@@ -230,6 +303,18 @@ async function bootstrap(): Promise<void> {
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');
+  // Owner-login architecture (Agent 3's pool safety): this pool comes from TypeOrmModule.forRoot, not the connection
+  // factory, so RESET ROLE on checkout is installed here explicitly (idempotent).
+  installSessionRoleResetOnDataSource(runtimeDataSource);
+  // Agent 3's external security audit sink and semantic posture monitor (boot baseline from the gates above). An invalid
+  // audit-sink configuration refuses to start; posture drift is acted on below, once the runtime exists.
+  const securityMonitoring = (() => {
+    try {
+      return startSecurityPostureMonitoring({ dataSource: runtimeDataSource, baseline: gateReport.semanticBaseline, processLabel: 'worker process' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
   // run against the worker's own runtimeDataSource — it's the one whose entity metadata and migrationsTableName matter.
   await assertHwsStartupInvariants(runtimeDataSource, appContext.get(EnvironmentService).get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
@@ -467,6 +552,51 @@ async function bootstrap(): Promise<void> {
   };
   beat();
   runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
+  // Security readiness: the Worker has no readiness endpoint, so on posture drift it shuts down (exit 1). Its restart then
+  // meets the boot-time semantic check, which refuses while the drift is there — it never keeps running jobs on a database
+  // whose security objects changed under it.
+  runtime.interval(() => {
+    if (!securityReady()) {
+      logger.error('SECURITY: the database security posture changed since boot (posture monitor) — shutting the Worker down');
+      void shutdown('SECURITY-POSTURE-DRIFT', 1);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+
+  // ---- Owner-login architecture (T4): workspace provisioning IN-PROCESS, on the one owner login. ----
+  // The SAME loops the superseded separate provisioner ran (workspace-provisioning.loops.ts): its own session-affine
+  // ReconnectingPgClient acting as crewflow (SET ROLE), the per-cycle provisioner-strict schema check, the bounded
+  // provisioning advisory lock with shouldAbort, the daily drift check; ledger / readiness / createFor unchanged. Its own
+  // WorkerRuntime keeps the provisioner's own stats and heartbeat keys (Admin queue health, E2E 5.3 read them) and its own
+  // drain on shutdown. Two Worker replicas exclude each other through the provisioning advisory lock.
+  const provisioningInterval = (() => {
+    try {
+      return resolveInProcessProvisioningInterval(process.env);
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const provisioningRuntime = new WorkerRuntime(redis, {
+    statsKey: PROVISIONER_STATS_KEY,
+    mirrorKey: WORKER_STATS_KEY,
+    durationsKey: PROVISIONER_CYCLE_DURATIONS_KEY,
+  });
+  const provisioningBeat = () => {
+    redis.set(PROVISIONER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30).catch(() => undefined);
+  };
+  provisioningBeat();
+  provisioningRuntime.interval(provisioningBeat, 15_000);
+  const provisioningLoops: WorkspaceProvisioningLoopsHandle = await startWorkspaceProvisioningLoops({
+    pg,
+    endpoint: 'primary',
+    runtime: provisioningRuntime,
+    logger,
+    intervalMs: provisioningInterval.intervalMs,
+    expectedMigrations: gateReport.expectedMigrations ?? [],
+    production: isProductionProcess('worker', process.env),
+    actAsCrewflow: true,
+  }).catch(refuseStartup);
+  logger.log(`workspace provisioning: in-process on the owner login (interval ${provisioningInterval.intervalSeconds}s)`);
+  // ---- end T4 ----
 
   if (schedulerMode === 'bullmq') {
     // ONE cluster-wide job scheduler per scan; this replica consumes whichever ticks it wins. Redis preflight
@@ -560,7 +690,7 @@ async function bootstrap(): Promise<void> {
   const aiTurns = appContext.get(AiTurnRunnerService);
   const aiTitles = appContext.get(AiTitleService);
   let shutdownStarted = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shutdownStarted) return;
     shutdownStarted = true;
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
@@ -576,6 +706,8 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      securityMonitoring.stop();
+      provisioningRuntime.beginShutdown(); // the in-process provisioner too (a waiting provisioning lock is abandoned at once)
       // Phase D: no new wake-up or claim run; the LISTEN session closes (its in-flight runs are runtime cycles → drained below).
       coordinator?.stop();
       notificationQueueMonitor?.stop();
@@ -603,8 +735,11 @@ async function bootstrap(): Promise<void> {
       }
       await shiftStatementQueue.closeBounded();
       const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;
-      const { drained, pending } = await runtime.drain(remaining); // 3. in-flight cycles (a PDF render, an email claim)
+      const [{ drained, pending }, provisioningDrain] = await Promise.all([runtime.drain(remaining), provisioningRuntime.drain(remaining)]); // 3. in-flight cycles (a PDF render, an email claim, a workspace being provisioned)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
+      if (!provisioningDrain.drained) logger.warn(`${provisioningDrain.pending} provisioning cycle(s) still running — closing anyway (the advisory lock releases with the connection; CREATING/FAILED states make the retry safe)`);
+      await provisioningRuntime.flushMetrics();
+      await provisioningLoops.close();
       await runtime.flushMetrics();
       if (scheduler) {
         await scheduler.manager.close();
@@ -617,7 +752,7 @@ async function bootstrap(): Promise<void> {
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');
-      process.exit(0);
+      process.exit(exitCode);
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Worker shutdown failed:', error);

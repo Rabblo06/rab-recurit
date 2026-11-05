@@ -127,9 +127,38 @@ describeIfDb('M2: catalog drift check catches unsafe migrations and passes safe 
     expect(problems).toContain('crewflow holds CREATE on schema core');
   });
 
-  it('a database-level CREATE grant to crewflow_app is caught', async () => {
-    const problems = await problemsAfter('restricted', (qr) => qr.query(`DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO crewflow_app', current_database()); END $$`));
-    expect(problems).toContain('privilege-drift + database|crewflow_app|create=true|temp=true');
+  // Owner-login architecture (Agent 1's answer, 2026-11-04): on an owner-login database the provider admin owns the database
+  // and crewflow holds no grant option on it, so the restricted migrator's GRANT changes nothing; drift detection is proven
+  // with the role that CAN grant it (crewflow_owner). On the separated layout (ci-migration-security's restricted-migrator
+  // job; LEGACY, REMOVE IN PR #9) the original case runs unchanged.
+  const isOwnerLoginDatabase = async (): Promise<boolean> =>
+    ((await ds.query(`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner' AND rolcanlogin) AS o`)) as Array<{ o: boolean }>)[0]!.o;
+  const grantDatabaseCreate = `DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO crewflow_app', current_database()); END $$`;
+
+  it('a database-level CREATE grant to crewflow_app is caught (separated layout) / cannot be made by the restricted migrator (owner login)', async () => {
+    if (!(await isOwnerLoginDatabase())) {
+      const problems = await problemsAfter('restricted', (qr) => qr.query(grantDatabaseCreate));
+      expect(problems).toContain('privilege-drift + database|crewflow_app|create=true|temp=true');
+      return;
+    }
+    let granted: boolean | undefined;
+    const problems = await problemsAfter('restricted', async (qr) => {
+      await qr.query(grantDatabaseCreate); // no grant option: a WARNING, nothing granted
+      granted = ((await qr.query(`SELECT has_database_privilege('crewflow_app', current_database(), 'CREATE') AS g`)) as Array<{ g: boolean }>)[0]!.g;
+    });
+    expect(granted).toBe(false);
+    expect(problems.filter((l) => l.startsWith('privilege-drift + database|crewflow_app|create=true'))).toEqual([]);
+  });
+
+  it('owner login: a database-level CREATE grant to crewflow_app made by crewflow_owner (which holds the grant option) is caught', async () => {
+    if (!(await isOwnerLoginDatabase())) return; // separated layout: covered by the case above
+    const problems = await problemsAfter('superuser', async (qr) => {
+      await qr.query('SET LOCAL ROLE crewflow_owner');
+      await qr.query(grantDatabaseCreate);
+      await qr.query('RESET ROLE');
+    });
+    // temp= mirrors whatever TEMPORARY the database grants on this layout; the CREATE flip is the drift that must be caught.
+    expect(problems.filter((l) => l.startsWith('privilege-drift + database|crewflow_app|create=true'))).toHaveLength(1);
   });
 
   it('a new SECURITY DEFINER owned by rab_secure_owner without a pinned search_path is caught by the secure-owner invariants', async () => {

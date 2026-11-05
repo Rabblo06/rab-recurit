@@ -57,6 +57,7 @@ const DEFAULT_LEASE_SECONDS = 60;
  * `$1::uuid`: the claim token must be typed explicitly once it sits in a CASE next to NULL.
  */
 const RECLAIM_EXHAUSTED = `status = 'processing' AND attempt_count + 1 >= max_attempts`;
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const CLAIM_UPDATE_SQL = `UPDATE core.realtime_event
         SET status = CASE WHEN ${RECLAIM_EXHAUSTED} THEN 'failed' ELSE 'processing' END,
             attempt_count = CASE WHEN status = 'processing' THEN attempt_count + 1 ELSE attempt_count END,
@@ -164,6 +165,7 @@ export async function claimRealtimeEvents(
   // caught (more pending rows than the claim limit) lives in
   // `realtime-event-outbox-claim.integration.spec.ts`.
   const [rows] = await manager.query<[ClaimRow[], number]>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `WITH claimable AS MATERIALIZED (
        SELECT id FROM core.realtime_event
        WHERE (status IN ('pending', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= now()))
@@ -179,6 +181,7 @@ export async function claimRealtimeEvents(
 }
 
 /** Phase D (D1): the per_scope claim above with `AND id = ANY($4::uuid[])` inside the MATERIALIZED CTE (see `ids`). */
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const GLOBAL_CLAIM_SQL = `WITH claimable AS MATERIALIZED (
        SELECT id FROM core.realtime_event
        WHERE ((status IN ('pending', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= now()))

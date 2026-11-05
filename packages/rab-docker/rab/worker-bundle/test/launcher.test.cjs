@@ -336,6 +336,12 @@ test('14 the allowlist covers every variable the environment validator declares 
     'PG_DATABASE_REPLICA_URL',
     'PG_DATABASE_REPLICA_TIMEOUT_MS',
     'PG_DATABASE_REPLICA_MAX_LAG_MS',
+    // Owner-login architecture (database/owner-login/runtime-db-config.ts): read only by the API entrypoint
+    // (api-prestart.sh and its migrate-on-start child). The Worker never migrates and never reads them, so the launcher
+    // does not forward them to either child (unset is the Worker's default).
+    'CREWFLOW_MIGRATE_ON_START',
+    'CREWFLOW_MIGRATION_APPROVAL_MODE',
+    'CREWFLOW_UPGRADE_FAILURE_POLICY',
   ]);
   for (const key of ['PG_DATABASE_REPLICA_URL', 'PG_DATABASE_REPLICA_TIMEOUT_MS', 'PG_DATABASE_REPLICA_MAX_LAG_MS']) {
     assert.ok(declared.includes(key), `${key} is declared by the validator`);

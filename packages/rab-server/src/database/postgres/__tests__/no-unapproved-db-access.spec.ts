@@ -38,9 +38,17 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   // Developer tool.
   'tools/generate-workspace-schema-v1.js': { hits: 1, why: 'developer template generator (HWS_TEMPLATE_SOURCE_URL)' },
   // Security review L-5: the migration / operator scripts, one entry each (the directory used to be exempt wholesale).
+  // Agent 5 (Twenty Mode T7): the disposable-database lifecycle harness. Its connections go ONLY to databases it created
+  // itself (twa_* names, assertHarnessDatabaseName + qi allow-list) on the CI / twa-t5 container, through the admin URL of
+  // MIGRATION_SECURITY_ADMIN_URL (parsed once, credentials never printed): one withClient helper and the LOCK-1 lock holder.
+  'packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts': { hits: 2, why: 'T7 lifecycle harness: withClient + LOCK-1 holder, disposable twa_* databases only' },
   'packages/rab-server/src/database/typeorm/scripts/check-db-security-posture.ts': {
     hits: 1,
     why: 'operator script reads its own POSTURE_DATABASE_URL; connects through the factory (security-posture.ts createPgClientForUrl)',
+  },
+  'packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts': {
+    hits: 1,
+    why: 'operator script reads its own POSTURE_DATABASE_URL (as check-db-security-posture.ts); connects through the factory (createPgClientForUrl)',
   },
   'packages/rab-server/src/database/typeorm/scripts/check-workspace-schema-drift.ts': {
     hits: 1,
@@ -53,6 +61,22 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   'packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts': {
     hits: 11,
     why: 'the M2 CI harness: builds disposable databases as the bootstrap superuser and hands each identity URL to the guarded DataSource',
+  },
+  // Owner-login (reviewed 2026-11-05, Agent 1). The two CI/developer harnesses below (and twenty-mode-check.ts above) are the owner-login analogues of
+  // migration-security-check.ts: each runs only against a disposable cluster it is pointed at as the bootstrap superuser
+  // (a throwaway container in CI / heavy-run), creates and drops its own databases, and opens raw clients to them on
+  // purpose — the factory's process policy is part of what they test, so it cannot be the way they connect.
+  'packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/migrate-on-start.ts': {
+    hits: 1,
+    why: 'reads PG_DATABASE_URL only to parse its login name (crewflow_owner dispatch); every connection goes through the factory (withLoginClient)',
+  },
+  'packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts': {
+    hits: 9,
+    why: 'owner-login lifecycle CI harness on a disposable cluster: superuser probe/seed Clients, a one-migration replay DataSource, and the legacy-chain GuardedMigrationDataSource (sets DATABASE_URL* for it, then deletes them)',
+  },
+  'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts': {
+    hits: 1,
+    why: 'developer fingerprint generator: one Client per throwaway database it creates and drops on a disposable cluster',
   },
 };
 

@@ -57,7 +57,8 @@ describeIfDb('payroll:import-calendar command on the runtime role (integration)'
 
   it('runs on crewflow_app, which cannot bypass RLS and sees no organisation rows without a tenant context', async () => {
     const [who] = await dataSource.query(`SELECT current_user AS u, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`);
-    expect(who).toEqual({ u: 'crewflow_app', b: false });
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(who).toEqual({ u: 'crewflow_owner', b: false });
     expect(await dataSource.query(`SELECT id FROM core.organisation WHERE id = $1`, [orgId])).toEqual([]);
   });
 

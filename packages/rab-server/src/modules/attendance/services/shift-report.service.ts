@@ -221,6 +221,7 @@ export class ShiftReportService {
       params.push(take, skip);
       const bucketSql = dto.bucket === 'history' ? REPORT_IN_HISTORY_SQL : `(NOT ${REPORT_IN_HISTORY_SQL} OR ${REPORT_NEEDS_ATTENTION_SQL})`;
       const order = dto.bucket === 'history' ? 'r.ends_at DESC, r.shift_id' : `${REPORT_NEEDS_ATTENTION_SQL} DESC, r.starts_at ASC, r.shift_id`;
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${REPORT_ROWS_SQL(scopeSql)}
         SELECT r.*, now() AS db_now, count(*) OVER () AS total FROM rows r
         WHERE ${bucketSql}
@@ -246,6 +247,7 @@ export class ShiftReportService {
     await this.assertShiftOwned(manager, ctx, shift);
     const [summary] = await manager.query(REPORT_SUMMARY_SELECT, [shiftId]);
     const report = await manager.findOne(ShiftReport, { where: { shiftId } });
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     const rows = await manager.query(`SELECT sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS "staffName", u.avatar_file_id AS "avatarFileId",
       ${assignmentTimeSql().start} AS "scheduledStart", ${assignmentTimeSql().end} AS "scheduledEnd", sa.status AS "assignmentStatus", a.id AS "attendanceId", a.status AS "attendanceStatus", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
@@ -333,6 +335,7 @@ export class ShiftReportService {
     // Record attendance and the replacement approval claim (`applyOfferConfirmation`), so they serialise, never deadlock.
     if (lockShift) await manager.query(`SELECT 1 FROM shift WHERE id = $1 FOR UPDATE`, [shiftId]);
     const [seat] = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT sa.id, sa.status AS assignment_status, sa.attendance_reviewed_at, a.id AS attendance_id, a.status AS attendance_status, a.clock_out_at,
               now() >= s.starts_at AS shift_started,
               now() >= ${assignmentTimeSql().start} + make_interval(mins => $3) AS no_show_due
@@ -448,6 +451,7 @@ export class ShiftReportService {
   /** Delivery of the FINAL timesheet file: its outbox rows (one per recipient), CANCELLED excluded. */
   private async deliveryCounts(manager: EntityManager, finalFileId: string | null): Promise<DeliveryCounts> {
     if (!finalFileId) return { pending: 0, sent: 0, failed: 0, lastSentAt: null };
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const [row] = await manager.query(`SELECT ${DELIVERY_AGG_SQL} FROM core.email_outbox eo WHERE eo.attachment_file_id = $1 AND eo.status <> 'CANCELLED'`, [finalFileId]);
     return { pending: Number(row.d_pending), sent: Number(row.d_sent), failed: Number(row.d_failed), lastSentAt: row.d_last_sent_at ? new Date(row.d_last_sent_at) : null };
   }
@@ -559,6 +563,7 @@ const DELIVERY_AGG_SQL = `count(*) FILTER (WHERE eo.status IN ('PENDING','QUEUED
   count(*) FILTER (WHERE eo.status = 'SENT') AS d_sent, count(*) FILTER (WHERE eo.status = 'FAILED') AS d_failed, max(eo.sent_at) AS d_last_sent_at`;
 
 /** Per-shift report rows for the lists (`rows` CTE). One attendance row per assignment (unique shift_assignment_id). */
+// sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
 const REPORT_ROWS_SQL = (scopeSql: string) => `WITH base AS (
   SELECT s.id AS shift_id, s.status AS shift_status, s.starts_at, s.ends_at, s.required_count, s.filled_count,
     v.name AS venue_name, jr.name AS role_name,

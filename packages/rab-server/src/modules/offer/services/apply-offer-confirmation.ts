@@ -147,6 +147,7 @@ export async function applyOfferConfirmation(
   // occupied), and a legacy/denormalised filled_count can only ever make it stricter, never looser. filled_count is
   // re-written as effectiveFilled + 1 (≤ required_count by the WHERE, so `shift_capacity_bound` holds).
   const [claimedRows] = (await manager.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `UPDATE shift s SET filled_count = GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) + 1, updated_at = now()
        FROM (SELECT count(*) FILTER (WHERE ${occupiedSeatSql('sa')})::int AS occupied,
                     count(*) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows

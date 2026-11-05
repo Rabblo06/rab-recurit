@@ -299,6 +299,7 @@ export async function discoverShiftMonitorInWorkspace(manager: EntityManager): P
   //   reminders: shifts that have NOT started, starting within a day — soonest first.
   //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
   const combinedCandidates = await manager.query<ScanCandidate[]>(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `
         (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
            FROM shift_assignment sa

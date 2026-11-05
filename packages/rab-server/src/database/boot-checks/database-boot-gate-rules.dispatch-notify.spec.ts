@@ -1,3 +1,4 @@
+import { ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
   assertDispatchNotifyGate,
@@ -14,7 +15,6 @@ import {
   FORCE_RLS_SQL,
   RLS_DISABLED_TENANT_TABLES_SQL,
   ROUTINE_GRANTS_SQL,
-  WORKER_LOGIN_SHAPE_SQL,
 } from './database-boot-gate-rules';
 
 /**
@@ -37,7 +37,7 @@ interface Db {
 }
 
 function db(over: Partial<Db> = {}): Db {
-  return { who: 'crewflow_app', stored: [], session: null, seen: [], ...over };
+  return { who: 'crewflow_owner', stored: [], session: null, seen: [], ...over };
 }
 
 function fakeQuery(d: Db): Query {
@@ -51,8 +51,9 @@ function fakeQuery(d: Db): Query {
           super: false,
           bypassrls: false,
           login_privileged: false,
-          owner_roles: null,
-          worker_member: d.who === 'crewflow_worker',
+          login_repl_createdb: false,
+          owner_roles: 'crewflow,rab_owner,rab_secure_owner',
+          worker_member: false,
           server_version_num: 160004,
           database: 'crewflow',
           extensions: 'btree_gist,citext,pg_trgm,pgcrypto,unaccent',
@@ -60,7 +61,8 @@ function fakeQuery(d: Db): Query {
         },
       ];
     }
-    if (sql === WORKER_LOGIN_SHAPE_SQL) return [{ createrole: false, createdb: false, replication: false, inherit: true, app_inherit: true, app_set: false, other_memberships: null, owned_objects: 0 }];
+    const posture = ownerLoginPostureAnswer(sql);
+    if (posture) return posture;
     if (sql === DISPATCH_NOTIFY_STORED_SQL) return d.stored;
     if (sql === DISPATCH_NOTIFY_SESSION_SQL) return [{ dispatch_notify: d.session }];
     if (sql === MARKER_PRESENT_SQL) return [{ present: false, database: 'crewflow' }];
@@ -68,8 +70,8 @@ function fakeQuery(d: Db): Query {
     if (sql === FORCE_RLS_SQL) return FORCE_RLS_SPOT_CHECK_TABLES.map((relname) => ({ relname, enabled: true, forced: true }));
     if (sql === RLS_DISABLED_TENANT_TABLES_SQL) return [];
     if (sql === ROUTINE_GRANTS_SQL) {
-      // A crewflow_worker login holds the due-work and dispatch-claim grants (global mode passes gate 8); others due-work only.
-      const granted = d.who === 'crewflow_worker' ? [...DUE_WORK_FUNCTIONS, ...DISPATCH_CLAIM_FUNCTIONS] : DUE_WORK_FUNCTIONS;
+      // The owner login holds the due-work and dispatch-claim grants (through ownership; global mode passes gate 8).
+      const granted = [...DUE_WORK_FUNCTIONS, ...DISPATCH_CLAIM_FUNCTIONS];
       return granted.filter((n) => ((params?.[0] as string[]) ?? []).includes(n)).map((name) => ({ name, can_execute: true }));
     }
     throw new Error(`unexpected SQL ${sql.slice(0, 40)}`);
@@ -168,7 +170,7 @@ describe('dispatch-notify gate: pure decision', () => {
 describe('dispatch-notify gate inside evaluateBootGates', () => {
   it('runs the two read-only statements after the role gate, on every process kind', async () => {
     for (const processName of ['api', 'worker', 'cli', 'provisioner'] as const) {
-      const d = db({ who: processName === 'provisioner' ? 'crewflow' : 'crewflow_app' });
+      const d = db();
       const report = await evaluateBootGates(input(d, { processName, cliCommand: processName === 'cli' ? 'ping' : undefined }));
       expect(d.seen).toContain(DISPATCH_NOTIFY_STORED_SQL);
       expect(d.seen).toContain(DISPATCH_NOTIFY_SESSION_SQL);
@@ -178,22 +180,22 @@ describe('dispatch-notify gate inside evaluateBootGates', () => {
   });
 
   it('a wrong role is still reported as a role refusal (the gate runs after gate 1)', async () => {
-    await refusedAt(evaluateBootGates(input(db({ who: 'crewflow', stored: [{ role_name: 'crewflow', database_name: 'rab' }] }))), 'role', /expected crewflow_app/);
+    await refusedAt(evaluateBootGates(input(db({ who: 'crewflow', stored: [{ role_name: 'crewflow', database_name: 'rab' }] }))), 'role', /expected crewflow_owner/);
   });
 
   it('poll-mode API with a stored per-role setting refuses at gate dispatch-notify', async () => {
     await refusedAt(
-      evaluateBootGates(input(db({ stored: [{ role_name: 'crewflow_app', database_name: 'crewflow' }] }))),
+      evaluateBootGates(input(db({ stored: [{ role_name: 'crewflow_owner', database_name: 'crewflow' }] }))),
       'dispatch-notify',
-      /role crewflow_app in database crewflow/,
+      /role crewflow_owner in database crewflow/,
     );
   });
 
-  it('event-mode Worker (crewflow_worker) with its own startup option passes; a database-wide stored row refuses even then', async () => {
-    const ok = await evaluateBootGates(input(db({ who: 'crewflow_worker', session: 'on' }), { processName: 'worker', env: EVENT }));
+  it('event-mode Worker (owner login) with its own startup option passes; a database-wide stored row refuses even then', async () => {
+    const ok = await evaluateBootGates(input(db({ session: 'on' }), { processName: 'worker', env: EVENT }));
     expect(ok.dispatchNotify).toBe('on');
     await refusedAt(
-      evaluateBootGates(input(db({ who: 'crewflow_worker', session: 'on', stored: [{ role_name: null, database_name: 'crewflow' }] }), { processName: 'worker', env: EVENT })),
+      evaluateBootGates(input(db({ session: 'on', stored: [{ role_name: null, database_name: 'crewflow' }] }), { processName: 'worker', env: EVENT })),
       'dispatch-notify',
       /every role in database crewflow/,
     );
@@ -210,7 +212,7 @@ describe('dispatch-notify gate inside evaluateBootGates', () => {
 
   it('the CLI and the provisioner refuse a session that carries the setting, even with WORKER_DISPATCH_MODE=event', async () => {
     await refusedAt(evaluateBootGates(input(db({ session: 'on' }), { processName: 'cli', cliCommand: 'ping', env: EVENT })), 'dispatch-notify', /poll mode|must not carry/);
-    await refusedAt(evaluateBootGates(input(db({ who: 'crewflow', session: 'on' }), { processName: 'provisioner', env: EVENT })), 'dispatch-notify', /must not carry/);
+    await refusedAt(evaluateBootGates(input(db({ session: 'on' }), { processName: 'provisioner', env: EVENT })), 'dispatch-notify', /must not carry/);
   });
 });
 

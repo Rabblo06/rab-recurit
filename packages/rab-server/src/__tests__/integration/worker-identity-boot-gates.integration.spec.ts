@@ -17,7 +17,14 @@ import { assertRuntimeDbRole } from '../../engine/utils/assert-runtime-db-role';
  * Unit counterparts (mocked catalog facts, run): database-boot-gate-rules.worker-identity.spec.ts, assert-runtime-db-role.spec.ts.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const describeIfWorkerRole = WORKER_URL ? describe : describe.skip;
+/**
+ * SUPERSEDED (Agent 3 ruling, 2026-11-05): under the one owner login there is no crewflow_worker LOGIN; the worker / API
+ * identity boot gates are covered by owner-login-guards.integration.spec.ts. Every test below is skipped BY NAME and stays
+ * under the PR #9 removal gate (twenty-expected-differences.json removeInPr9): remove this file in PR #9.
+ */
+const SUPERSEDED_BY_OWNER_LOGIN_GUARDS_REMOVE_IN_PR9 = true;
+const SUPERSEDED = 'SUPERSEDED by owner-login-guards; remove in PR #9 (skipped) — ';
+const describeIfWorkerRole = WORKER_URL && !SUPERSEDED_BY_OWNER_LOGIN_GUARDS_REMOVE_IN_PR9 ? describe : describe.skip;
 const quiet = () => undefined;
 
 function options(url: string, env: Record<string, string> = {}): RunBootGatesOptions {
@@ -46,21 +53,21 @@ async function withSource<T>(url: string, fn: (ds: DataSource) => Promise<T>): P
   }
 }
 
-describeIfWorkerRole('Phase D worker identity boot gates (integration; needs crewflow_worker)', () => {
+describeIfWorkerRole(SUPERSEDED + 'Phase D worker identity boot gates (integration; needs crewflow_worker)', () => {
   const { appUrl, adminUrl } = WORKER_URL ? resolveIntegrationTestDatabase(process.env) : ({} as never);
 
-  it('crewflow_worker has the reviewed shape and passes the per_scope Worker gate; the report shows the due-work grant state', async () => {
+  it(SUPERSEDED + 'crewflow_worker has the reviewed shape and passes the per_scope Worker gate; the report shows the due-work grant state', async () => {
     const report = await runDatabaseBootGates('worker', options(WORKER_URL!, { WORKER_CLAIM_MODE: 'per_scope' }));
     expect(report).toMatchObject({ role: 'crewflow_worker', claimMode: 'per_scope', grants: { dueWork: 'granted' } });
   });
 
-  it('the API and a CLI command refuse the crewflow_worker login', async () => {
+  it(SUPERSEDED + 'the API and a CLI command refuse the crewflow_worker login', async () => {
     await refusedAt(runDatabaseBootGates('api', options(WORKER_URL!)), 'role', /Worker-only login/);
     await refusedAt(runDatabaseBootGates('cli', { ...options(WORKER_URL!), cliCommand: 'bootstrap-admin' }), 'role', /Worker-only login/);
     await withSource(WORKER_URL!, (ds) => expect(assertRuntimeDbRole(ds, 'API server')).rejects.toThrow(/Worker-only login/));
   });
 
-  it('global mode: crewflow_worker starts (dispatch-claim functions granted); crewflow_app refuses', async () => {
+  it(SUPERSEDED + 'global mode: crewflow_worker starts (dispatch-claim functions granted); crewflow_app refuses', async () => {
     await expect(runDatabaseBootGates('worker', options(WORKER_URL!, { WORKER_CLAIM_MODE: 'global' }))).resolves.toMatchObject({
       grants: { dispatchClaims: 'granted' },
     });
@@ -69,11 +76,11 @@ describeIfWorkerRole('Phase D worker identity boot gates (integration; needs cre
     await withSource(appUrl, (ds) => expect(assertRuntimeDbRole(ds, 'worker', { process: 'worker', claimMode: 'global' })).rejects.toThrow(/crewflow_worker/));
   });
 
-  it('the API login (crewflow_app) cannot EXECUTE any dispatch-claim function (gate 8 passes for it)', async () => {
+  it(SUPERSEDED + 'the API login (crewflow_app) cannot EXECUTE any dispatch-claim function (gate 8 passes for it)', async () => {
     await expect(runDatabaseBootGates('api', options(appUrl))).resolves.toMatchObject({ grants: { dispatchClaims: 'not-granted' } });
   });
 
-  it('PG16 membership options: an owner-role membership WITH INHERIT FALSE, SET FALSE (or SET-only) is still refused', async () => {
+  it(SUPERSEDED + 'PG16 membership options: an owner-role membership WITH INHERIT FALSE, SET FALSE (or SET-only) is still refused', async () => {
     // Throwaway roles: a member of crewflow_worker with a non-inheriting, non-SET membership of crewflow. pg_has_role(MEMBER)
     // must see it; the boot gate must refuse it on its owner-role rule.
     const pw = `pd_${Math.random().toString(36).slice(2)}`;

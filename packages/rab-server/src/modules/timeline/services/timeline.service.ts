@@ -273,6 +273,7 @@ export class TimelineService {
     }
     params.push(limit + 1);
     const rows = await m.query<Array<Record<string, unknown>>>(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.created_at,
               to_char(al.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_us,
               u.first_name AS actor_first_name, u.last_name AS actor_last_name

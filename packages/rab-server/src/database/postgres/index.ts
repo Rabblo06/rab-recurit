@@ -5,3 +5,4 @@ export * from './pg-tls';
 export * from './pg-config';
 export * from './create-pg-pool';
 export * from './pg-session-probe';
+export * from './session-role-reset';

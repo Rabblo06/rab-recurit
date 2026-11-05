@@ -68,6 +68,7 @@ export async function runShiftStatementDispatchCycle(
 ): Promise<ShiftStatementDispatchResult> {
   const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
   const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, async (m) => {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const rows = await m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`);
     // #24: a full discovery page (200) means more due records may remain in this workspace (global-mode follow-up sweep).
     if (rows.length >= STATEMENT_DISCOVERY_LIMIT) noteLegacyBatchLimitReached();
@@ -97,6 +98,7 @@ export async function dispatchStatementScope(
   const candidates = await tenantContext.runInTenantContext(workerCtx(organisationId, workspaceId), async (m) => {
     await m.query('SET TRANSACTION READ ONLY');
     return m.query<Candidate[]>(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
       [[...ids]],
     );
@@ -131,6 +133,7 @@ async function claimAndPublishCandidates(
   for (const c of candidates) {
     const generation = await tenantContext.runInTenantContext(workerCtx(c.organisation_id, c.workspace_id), async (m) => {
       const [rows] = (await m.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `UPDATE payroll_record SET statement_status = 'queued', statement_dispatch_generation = statement_dispatch_generation + 1,
                 statement_queued_at = now(), statement_processing_at = NULL, updated_at = now()
           WHERE id = $1 AND ${DUE_SQL}
@@ -235,6 +238,7 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
 
 async function loadStatementData(m: EntityManager, recordId: string): Promise<{ data: ApprovedShiftStatementData; staffUserId: string }> {
   const [r] = await m.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT pr.id, pr.organisation_id, pr.workspace_id, pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, pr.approved_at,
             a.clock_in_at, a.clock_out_at, COALESCE(a.break_minutes, sa.break_minutes, s.break_minutes) AS break_minutes,
             sp.staff_ref, sp.user_id AS staff_user_id, u.first_name, u.last_name, v.name AS venue_name, jr.name AS role_name,

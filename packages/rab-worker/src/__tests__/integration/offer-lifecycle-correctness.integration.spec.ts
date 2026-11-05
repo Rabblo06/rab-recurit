@@ -672,7 +672,8 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       // the real scoped query/limit, not a specific cost-based index choice.
       const plan = await withContext(ctxOf(fx.managerA), async manager => {
         const [role] = await manager.query('SELECT current_user AS name');
-        expect(role.name).toBe('crewflow_app');
+        // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+        expect(role.name).toBe('crewflow_owner');
         const explain = await manager.query(`EXPLAIN (FORMAT JSON)
           SELECT id AS offer_id, organisation_id, workspace_id FROM core.job_offer
           WHERE status='pending' AND expires_at < now() ORDER BY expires_at ASC LIMIT 500`);
