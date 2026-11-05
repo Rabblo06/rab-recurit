@@ -1453,6 +1453,7 @@ topology is unchanged. Report: `CREWFLOW_TWENTY_ARCHITECTURE_PARITY_REPORT.md`. 
               fail closed (main.js never starts after a failed step or with migrations pending); exec env -u scrub proven
               on /proc/1/environ; runtime-database-guard refuses any migration variable in api/worker.
   Reversal:   Do not adopt it; keep the one-shot rab-migrate service as the only migration path.
+  Superseded 2026-11-05: the owner adopted API migrate-on-start for production ("EXACTLY LIKE TWENTY", G-07 accepted).
   ```
 
 ## HWS dev cutover: backfill fidelity fixes + one-off privileged copy (2026-10-22, rab-devdb ONLY, owner-approved)
@@ -4112,6 +4113,9 @@ databases only.
 
 ### B6: migration isolation (one-off `rab-migrate`, never the API or the Worker)
 
+> **Superseded 2026-11-05** by the owner decision "EXACTLY LIKE TWENTY" (the API migrates on start in production; G-07
+> accepted). See the owner-login section, consequence item 13. Kept below as the history of the earlier control.
+
 - **Threats:** a long-running API or Worker holding a migration-capable credential (any RCE or SSRF then reaches DDL); an
   API that migrates at start (concurrent starts racing, a bad release migrating production before review); a release
   promoted onto a schema behind its code; the migration credential baked into an image layer or committed.
@@ -5558,6 +5562,51 @@ writes a warning instead.
     seed commands write the permission catalogue, and the migration runner writes the ledger, both as the owner login.
     No database guard is added. Agent 5 updates the catalogue entry and the CF-09 test to record the accepted difference.
 
+13. **Owner-accepted, 2026-11-05: "EXACTLY LIKE TWENTY"** (one image; the API migrates on start). Each risk below is
+    accepted, like Twenty. Nothing claims it is a passing control.
+
+    - **G-07 (HIGH): unreviewed DDL at start-up in production.**
+      - The API migrates on start, with no approval list and no `rab-migrate` release step. A new image's DDL reaches
+        production when the API starts.
+      - Controls kept: the migration lock; the check-first classifier; the refusals (identity, wrong or unknown ledger,
+        version, roles); FORCE RLS; the mandatory backup before each upgrade (runbook).
+    - **C3 (HIGH): serving after a failed upgrade, with a partly-applied schema.**
+      - The default `CREWFLOW_UPGRADE_FAILURE=continue` logs an ERROR naming the failed migration and keeps starting.
+      - A first-install failure still exits non-zero (an empty or bootstrap-partial database never serves).
+      - Residual: the code can be served against a schema that lacks the failed migration's objects. For example, a
+        missing RLS policy or function. A transactional migration rolls back whole, so its tables never appear without
+        their policies; one of the `transaction = false` migrations can stop half-way.
+      - Trigger: api-prestart sets `CREWFLOW_UPGRADE_INCOMPLETE=<migration>` only after the migrate child exits 70 with
+        `"policy":"continue"` on a database that is not a first install, and strips any inherited value. The boot gates
+        honour it for the API process only, and only when the first pending migration is exactly the named one
+        (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
+        `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
+      - **The Worker waits** (owner decision 2026-11-05): its gate 7 still refuses pending migrations, so background
+        jobs (dispatch, reminders, payroll scans) pause until the fix is deployed.
+      - Detection:
+        - the ERROR log naming the migration, written on every start while the ledger is behind;
+        - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
+          force-rls spot check (5), tls (6), dispatch-notify (1c), objects (FORCE on every core tenant table, the 16
+          pre-auth tables with their definer policies, ownership), grants (8);
+        - gate 7 (pending / schema-compatibility) still refuses unknown or interleaved ledger names, a ledger ahead for
+          the provisioner, and every case that is not the declared failed upgrade; for that one case it warns;
+        - the semantic-posture golden comparison is skipped in that case only (the golden describes the new release, so
+          a rolled-back upgrade always differs), and a WARNING says so;
+        - the runtime posture monitor still compares every timer tick with the boot snapshot: any later policy,
+          function, trigger or RLS change turns readiness off.
+    - **C5 (MEDIUM): one API server.** Deploys stop the API, then start the new one. No rolling or blue-green update:
+      two versions would race for the migration lock and old code would serve intermediate schemas.
+
+    Design changes recorded with this decision (not risks):
+
+    - **C1:** `DISABLE_DB_MIGRATIONS` is accepted again (Twenty's name). It is the Worker's switch: the Worker never
+      migrates.
+    - **C2:** the API registers the BullMQ schedulers and the Worker only consumes them (Twenty's split; Crewflow's
+      Worker registered them before).
+      - Accepted risk (MEDIUM): a scheduler lost to a Redis flush stays lost until the next API start.
+      - Mitigations: Redis runs `noeviction` with AOF persistence, and the Worker's scheduler verification turns it
+        unhealthy when an expected scheduler is missing.
+
 ### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
 
 | Id | Sev | Finding | State after this change |
@@ -5568,7 +5617,7 @@ writes a warning instead.
 | G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
 | G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
 | G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
-| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Agent 1 (approval token, migrate-on-start defaults) |
+| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Accepted by the owner 2026-11-05, like Twenty (item 13 above): the API migrates on start in production |
 | G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
 | G-09 | MED | Pool poisoning: a session-level SET ROLE survives COMMIT | **Mitigated:** RESET ROLE on checkout and at the start of every tenant transaction, plus a `current_user = session_user` assertion |
 | G-10 | MED | The workspace registry and bound constraints are writable | **Mitigated on normal paths** by M-T2 and the grant-parity guards. The injection case is accepted. |

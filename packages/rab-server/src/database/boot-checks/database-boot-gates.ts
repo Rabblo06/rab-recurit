@@ -34,6 +34,10 @@
  *                API/Worker/CLI and refuses the provisioner; the core.provision_workspace body is checked against the code's
  *                workspace module (API/Worker: unknown refuses in production, behind refuses, ahead warns; provisioner:
  *                anything but equal refuses) and the provisioner also refuses a READY workspace above its module.
+ *                C3 (owner decision 2026-11-05, like Twenty): for the API only, when CREWFLOW_UPGRADE_INCOMPLETE names the
+ *                FIRST pending migration (set by api-prestart after a failed, non-first-install upgrade), `pending` and
+ *                `provision-function-behind` are warnings and the semantic-posture golden comparison is skipped (the boot
+ *                snapshot is still the runtime baseline). Every other gate and verdict is unchanged; the Worker waits.
  *   1c. dispatch-notify  (Phase D wave 3) no PERSISTENT crewflow.dispatch_notify in pg_db_role_setting (this database or
  *                all; every role or a role the login is a member of), and the gate session's own value is 'on' for an
  *                event-mode API/Worker (its startup option) and absent for every other process/mode. Runs after gate 1.
@@ -64,11 +68,21 @@ import {
   RetryOptions,
   withDatabaseRetry,
 } from './database-boot-gate-rules';
-import { checkSchemaCompatibility } from './schema-compatibility';
+import { checkSchemaCompatibility, UPGRADE_INCOMPLETE_VAR } from './schema-compatibility';
 import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
 import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
 export * from './database-boot-gate-rules';
+
+/**
+ * C3: the failed upgrade migration api-prestart named in CREWFLOW_UPGRADE_INCOMPLETE, for the API only. Any other process
+ * (Worker, CLI, provisioner) never reads it: the Worker waits until the fix is deployed (owner decision 2026-11-05).
+ */
+export function upgradeIncompleteFor(processName: string, env: NodeJS.ProcessEnv): string | undefined {
+  if (processName !== 'api') return undefined;
+  const value = env[UPGRADE_INCOMPLETE_VAR]?.trim();
+  return value ? value : undefined;
+}
 export * from './schema-compatibility';
 
 // ------------------------------------------------------------------------------------------------ real entrypoint
@@ -138,27 +152,35 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
         await session.connect();
         const query = (sql: string, params?: unknown[]) => session.query(sql, params) as Promise<Array<Record<string, unknown>>>;
         const expectedMigrations = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
+        // C3 (owner decision 2026-11-05): set by api-prestart only after a failed, non-first-install upgrade under the
+        // continue policy. Honoured for the API only (the Worker waits); gate 7 decides whether it applies.
+        const upgradeIncomplete = upgradeIncompleteFor(processName, env);
+        let c3Applied: string | null = null;
         const gateReport = await evaluateBootGates({
           processName,
           env,
           cliCommand: options.cliCommand,
           connectionHost: endpointTarget.target.host,
           query,
-          checkPendingMigrations: ({ production }) =>
-            checkSchemaCompatibility(query, {
+          checkPendingMigrations: async ({ production }) => {
+            const assessment = await checkSchemaCompatibility(query, {
               process: processName,
               production,
               expected: expectedMigrations,
               label,
               workspaces: processName === 'provisioner',
-            }),
+              upgradeIncomplete,
+            });
+            c3Applied = assessment.upgradeIncomplete;
+            return assessment;
+          },
         });
         // Semantic posture (M0 §6.4 control 4): the database's security objects equal the reviewed golden for this major.
         // Production refuses when no golden exists for the major; elsewhere that is a warning. The snapshot is the
         // baseline for the posture monitor (SemanticPostureMonitor, started by the API / Worker after boot).
         let semantic: { posture: SemanticPosture; warnings: string[] };
         try {
-          semantic = await assertSemanticPostureAtBoot(query, { production: isProductionProcess(processName, env), label });
+          semantic = await assertSemanticPostureAtBoot(query, { production: isProductionProcess(processName, env), label, upgradeIncomplete: c3Applied });
         } catch (error) {
           if (error instanceof SemanticPostureError) throw new DatabaseBootGateError('semantic-posture', error.message);
           throw error;
