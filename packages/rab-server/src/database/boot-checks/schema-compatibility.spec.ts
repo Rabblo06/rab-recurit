@@ -80,12 +80,12 @@ describe('compatibility matrix per process type', () => {
     table({ api: 'ok', worker: 'ok', cli: 'ok', provisioner: 'ok', 'migrate-check': 'ok', 'migrate-apply': 'ok' }, { provisionFunction: CURRENT_FN, workspaces: [] });
   });
 
-  it('(a) pending migrations: API, CLI and provisioner refuse; the Worker warns on an in-order pending tail (C3); rab-migrate applies them', () => {
-    // C3 (owner decision 2026-11-05, "the Worker starts too, like Twenty"): an in-order pending tail is a loud warning for
-    // the Worker; a gap or a foreign name still refuses (schema-compatibility.c3.spec.ts). The API relaxes only with the
-    // named failed migration (CREWFLOW_UPGRADE_INCOMPLETE), not set here.
+  it('(a) pending migrations: API, Worker, CLI and provisioner refuse; rab-migrate applies them (not a compatibility finding)', () => {
+    // C3 (owner decision 2026-11-05): the API (named failed migration) and the Worker relax ONLY with physical upgrade
+    // evidence (CHAIN-PARTIAL, not a fresh install) on an in-order pending tail — not given here, so both refuse as before.
+    // The relaxed cases are in schema-compatibility.c3.spec.ts.
     table(
-      { api: 'refuse', worker: 'warn', cli: 'refuse', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'ok' },
+      { api: 'refuse', worker: 'refuse', cli: 'refuse', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'ok' },
       { applied: CODE.slice(0, 2) },
     );
     expect(findings('api', { applied: CODE.slice(0, 2) })).toEqual(['pending']);

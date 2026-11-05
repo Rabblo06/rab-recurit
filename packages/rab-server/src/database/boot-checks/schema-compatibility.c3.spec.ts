@@ -1,6 +1,7 @@
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../typeorm/workspace-schema/workspace-schema-modules';
 import { PROVISION_FUNCTION_SOURCE_SQL, ProvisionFunctionState } from '../typeorm/workspace-schema/provision-function-versions';
-import { upgradeIncompleteFor } from './database-boot-gates';
+import { readUpgradeEvidence, upgradeIncompleteFor } from './database-boot-gates';
+import { CATALOG_FACTS_SQL, TENANT_EVIDENCE_SQL } from '../owner-login/install-state';
 import {
   assessSchemaCompatibility,
   checkSchemaCompatibility,
@@ -24,8 +25,9 @@ const INTERLEAVED = 'OtherBranch1786000000150';
 const BEHIND_FN: ProvisionFunctionState = { state: 'known', literal: 'db:provision_workspace@older', moduleVersion: LATEST_WORKSPACE_MODULE_VERSION - 1 };
 const UNKNOWN_FN: ProvisionFunctionState = { state: 'unknown', literal: 'db:provision_workspace@NotInTheMap' } as ProvisionFunctionState;
 
+/** `upgradeEvidence` defaults to TRUE here (a stopped upgrade); the first-install cases pass false explicitly. */
 function assess(process: CompatibilityProcess, facts: Partial<SchemaCompatibilityFacts>, upgradeIncomplete?: string, production = true) {
-  return assessSchemaCompatibility(process, { expected: CODE, applied: CODE, ...facts }, { production, upgradeIncomplete });
+  return assessSchemaCompatibility(process, { expected: CODE, applied: CODE, upgradeEvidence: true, ...facts }, { production, upgradeIncomplete });
 }
 const refused = (a: ReturnType<typeof assess>) => a.refusals.map((r) => r.finding).sort();
 
@@ -59,7 +61,8 @@ describe('C3: CREWFLOW_UPGRADE_INCOMPLETE relaxes gate 7 for the API, only for t
   });
 
   it('API, relaxed: an interleaved ledger name and an unknown provision function in production still refuse', () => {
-    expect(refused(assess('api', { applied: [CODE[0]!, INTERLEAVED] }, 'Beta1786000000100'))).toEqual(['ledger-interleaved']);
+    // Not an in-order tail: nothing is relaxed (pending refuses too).
+    expect(refused(assess('api', { applied: [CODE[0]!, INTERLEAVED] }, 'Beta1786000000100'))).toEqual(['ledger-interleaved', 'pending']);
     expect(refused(assess('api', { applied: CODE.slice(0, 1), provisionFunction: UNKNOWN_FN }, 'Beta1786000000100'))).toEqual(['provision-function-unknown']);
   });
 
@@ -89,7 +92,12 @@ describe('C3: CREWFLOW_UPGRADE_INCOMPLETE relaxes gate 7 for the API, only for t
     };
     const opts = { process: 'api' as const, production: true, expected: CODE, label: 'api process' };
     await expect(checkSchemaCompatibility(query, opts)).rejects.toMatchObject({ gate: 'pending-migrations' });
-    const a = await checkSchemaCompatibility(query, { ...opts, upgradeIncomplete: 'Beta1786000000100' });
+    // Without upgrade evidence (a first install, or not readable) the API still refuses even with the variable.
+    await expect(checkSchemaCompatibility(query, { ...opts, upgradeIncomplete: 'Beta1786000000100' })).rejects.toMatchObject({ gate: 'pending-migrations' });
+    await expect(checkSchemaCompatibility(query, { ...opts, upgradeIncomplete: 'Beta1786000000100', readUpgradeEvidence: async () => false })).rejects.toMatchObject({
+      gate: 'pending-migrations',
+    });
+    const a = await checkSchemaCompatibility(query, { ...opts, upgradeIncomplete: 'Beta1786000000100', readUpgradeEvidence: async () => true });
     expect(a.upgradeIncomplete).toBe('Beta1786000000100');
     expect(a.refusals).toEqual([]);
     expect(seen).toContain(PROVISION_FUNCTION_SOURCE_SQL);
@@ -114,10 +122,24 @@ describe('C3, Worker ("starts too, like Twenty"): an in-order pending tail of it
     expect(a.upgradeIncomplete).toBe('Beta1786000000100');
     expect(a.warnings.join(String.fromCharCode(10))).toMatch(/running on a partly-upgraded schema: Beta1786000000100 and 1 more not applied/);
     expect(a.warnings.join(String.fromCharCode(10))).toMatch(/UPGRADE INCOMPLETE \(C3\): first not applied Beta1786000000100/);
-    // A tail of one, and the whole chain on an empty ledger, are tails too.
+    // A tail of one is a tail too.
     expect(refused(assess('worker', { applied: CODE.slice(0, 2) }))).toEqual([]);
     // The API's variable is irrelevant to the Worker (another container).
     expect(assess('worker', { applied: CODE.slice(0, 1) }, 'Gamma1786000000200').upgradeIncomplete).toBe('Beta1786000000100');
+  });
+
+  it('a FIRST install never starts the Worker: empty ledger, or a partial prefix without upgrade evidence, refuses', () => {
+    // Empty ledger (EMPTY / BOOTSTRAP-PARTIAL), even if evidence were claimed.
+    expect(refused(assess('worker', { applied: [] }))).toEqual(['pending']);
+    expect(refused(assess('worker', { applied: [], upgradeEvidence: false }))).toEqual(['pending']);
+    // A failed first install: an in-order prefix of the chain, but no tenant evidence (interrupted fresh install).
+    const firstInstall = assess('worker', { applied: CODE.slice(0, 1), upgradeEvidence: false });
+    expect(refused(firstInstall)).toEqual(['pending']);
+    expect(firstInstall.upgradeIncomplete).toBeNull();
+    // Evidence absent (not read): same.
+    expect(refused(assessSchemaCompatibility('worker', { expected: CODE, applied: CODE.slice(0, 1) }, { production: true }))).toEqual(['pending']);
+    // And for the API with its variable.
+    expect(refused(assess('api', { applied: CODE.slice(0, 1), upgradeEvidence: false }, 'Beta1786000000100'))).toEqual(['pending']);
   });
 
   it('nothing pending: no warning, no flag (a behind function still refuses)', () => {
@@ -151,7 +173,7 @@ describe('C3, Worker ("starts too, like Twenty"): an in-order pending tail of it
   it('isInOrderPendingTail: exact rule', () => {
     const l = (applied: string[], retired: string[] = []) => compareLedger(CODE, applied, retired);
     expect(isInOrderPendingTail(CODE, l(CODE.slice(0, 1)))).toBe(true);
-    expect(isInOrderPendingTail(CODE, l([]))).toBe(true);
+    expect(isInOrderPendingTail(CODE, l([]))).toBe(false); // empty ledger: a first install, never a tail
     expect(isInOrderPendingTail(CODE, l(CODE))).toBe(false); // nothing pending
     expect(isInOrderPendingTail(CODE, l([CODE[0]!, CODE[2]!]))).toBe(false); // gap
     expect(isInOrderPendingTail(CODE, l([CODE[0]!, INTERLEAVED]))).toBe(false);
@@ -159,5 +181,53 @@ describe('C3, Worker ("starts too, like Twenty"): an in-order pending tail of it
 
   it('the API rule is unchanged: without the named variable an in-order tail still refuses for the API', () => {
     expect(refused(assess('api', { applied: CODE.slice(0, 1) }))).toEqual(['pending']);
+  });
+});
+
+describe('C3: readUpgradeEvidence = Agent 1 classifier CHAIN-PARTIAL and physical fresh-install proof NOT fresh', () => {
+  const catalog = (hasLedger: boolean, coreExists = hasLedger) => ({
+    coreExists,
+    coreOwner: coreExists ? 'rab_secure_owner' : null,
+    coreRelations: coreExists ? 100 : 0,
+    hasLedger,
+    workspaceSchemas: 0,
+    otherSchemas: [] as string[],
+    publicForeignObjects: 0,
+  });
+  const evidence = (o: Partial<{ organisationBytes: number; workspaceBytes: number; registryBytes: number; workspaceSchemas: number; bootstrapRoles: boolean }> = {}) => ({
+    organisationBytes: 0,
+    workspaceBytes: 0,
+    registryBytes: 0,
+    workspaceSchemas: 0,
+    bootstrapRoles: true,
+    ...o,
+  });
+  function db(facts: ReturnType<typeof catalog>, ledger: string[], tenant: ReturnType<typeof evidence>) {
+    return async (sql: string): Promise<unknown[]> => {
+      if (sql === CATALOG_FACTS_SQL) return [facts];
+      if (sql === 'SELECT name FROM core.migrations') return ledger.map((name) => ({ name }));
+      if (sql === TENANT_EVIDENCE_SQL) return [tenant];
+      throw new Error(`unexpected SQL ${sql.slice(0, 60)}`);
+    };
+  }
+
+  it('empty database (EMPTY): no evidence', async () => {
+    expect(await readUpgradeEvidence(db(catalog(false), [], evidence()), CODE)).toBe(false);
+  });
+
+  it('failed first install (CHAIN-PARTIAL, zero pages, owner-login bootstrap roles): fresh → no evidence', async () => {
+    expect(await readUpgradeEvidence(db(catalog(true), CODE.slice(0, 1), evidence()), CODE)).toBe(false);
+  });
+
+  it('failed upgrade (CHAIN-PARTIAL, tenant pages written): evidence', async () => {
+    expect(await readUpgradeEvidence(db(catalog(true), CODE.slice(0, 1), evidence({ organisationBytes: 8192 })), CODE)).toBe(true);
+    expect(await readUpgradeEvidence(db(catalog(true), CODE.slice(0, 1), evidence({ workspaceSchemas: 2 })), CODE)).toBe(true);
+    // A transitioned existing database (roles not created by an owner-login bootstrap) is not a fresh install either.
+    expect(await readUpgradeEvidence(db(catalog(true), CODE.slice(0, 1), evidence({ bootstrapRoles: false })), CODE)).toBe(true);
+  });
+
+  it('FOREIGN (interleaved ledger) and CURRENT: no evidence', async () => {
+    expect(await readUpgradeEvidence(db(catalog(true), [CODE[0]!, INTERLEAVED], evidence({ organisationBytes: 8192 })), CODE)).toBe(false);
+    expect(await readUpgradeEvidence(db(catalog(true), CODE, evidence({ organisationBytes: 8192 })), CODE)).toBe(false);
   });
 });

@@ -71,6 +71,7 @@ import {
   withDatabaseRetry,
 } from './database-boot-gate-rules';
 import { checkSchemaCompatibility, UPGRADE_INCOMPLETE_VAR } from './schema-compatibility';
+import { classifyDatabaseState, readFreshInstallProof } from '../owner-login/install-state';
 import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
 import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
@@ -80,6 +81,19 @@ export * from './database-boot-gate-rules';
  * C3: the failed upgrade migration api-prestart named in CREWFLOW_UPGRADE_INCOMPLETE, for the API only. No other process
  * reads it: the Worker decides from the database alone (in-order pending tail), the CLI and provisioner are unchanged.
  */
+/**
+ * C3: "an upgrade stopped here" — Agent 1's classifier says CHAIN-PARTIAL (every ledger name is this code's, migrations
+ * pending) AND its fresh-install proof says NOT fresh, read physically (pg_relation_size of organisation / manager_workspace /
+ * workspace_schema_registry, workspace schemas, the bootstrap-role ADMIN row): an RLS-bound count reads 0 for this login
+ * after M-T1 whatever the tables hold. EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install and FOREIGN are not.
+ */
+export async function readUpgradeEvidence(query: (sql: string, params?: unknown[]) => Promise<unknown[]>, expected: readonly string[]): Promise<boolean> {
+  const { state } = await classifyDatabaseState(query, expected);
+  if (state !== 'CHAIN-PARTIAL') return false;
+  const proof = await readFreshInstallProof(query, state);
+  return proof.fresh === false;
+}
+
 export function upgradeIncompleteFor(processName: string, env: NodeJS.ProcessEnv): string | undefined {
   if (processName !== 'api') return undefined;
   const value = env[UPGRADE_INCOMPLETE_VAR]?.trim();
@@ -172,6 +186,9 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
               label,
               workspaces: processName === 'provisioner',
               upgradeIncomplete,
+              // C3: Agent 1's classifier + physical fresh-install proof (not defeated by FORCE RLS). Only CHAIN-PARTIAL and
+              // NOT fresh lets an in-order pending tail serve (API with the signal) or start the Worker.
+              readUpgradeEvidence: () => readUpgradeEvidence(query, expectedMigrations),
             });
             c3Applied = assessment.upgradeIncomplete;
             return assessment;

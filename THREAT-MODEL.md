@@ -5578,13 +5578,15 @@ writes a warning instead.
         their policies; one of the `transaction = false` migrations can stop half-way.
       - Trigger: api-prestart sets `CREWFLOW_UPGRADE_INCOMPLETE=<migration>` only after the migrate child exits 70 with
         `"policy":"continue"` on a database that is not a first install, and strips any inherited value. The boot gates
-        honour it for the API process only, and only when the first pending migration is exactly the named one
+        honour it for the API process only, only when the first pending migration is exactly the named one, and only
+        on a stopped UPGRADE (see the first-install rule below)
         (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
         `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
       - **Owner-accepted 2026-11-05 (decision changed the same day): "After a failed upgrade, the Worker runs all jobs,
         including payroll timers, on a partly-applied schema (like Twenty)."**
         - The Worker cannot see the API's variable (another container), so it decides from the database alone: when the
-          pending set is a contiguous, in-order tail of its chain, gate 7 writes a loud WARNING ("running on a
+          database is a stopped upgrade (below) and the pending set is a contiguous, in-order tail of its chain, gate 7
+          writes a loud WARNING ("running on a
           partly-upgraded schema: <first> and N more not applied"), `provision-function-behind` is a warning too, and
           the semantic golden comparison is skipped (the boot snapshot is still the baseline).
         - Residual: jobs that touch the missing tables or functions fail and retry under the normal BullMQ and outbox
@@ -5592,6 +5594,16 @@ writes a warning instead.
         - Still refused for the Worker: interleaved or out-of-order ledgers, unknown or foreign names, a different
           chain, retired names, and an unknown provision function in production. The ahead rules are unchanged. The CLI
           and the provisioner are unchanged.
+      - **A first install never serves and never starts the Worker.** Both relaxations need Agent 1's classifier to say
+        CHAIN-PARTIAL and its fresh-install proof to say NOT fresh (`database/owner-login/install-state.ts`; read
+        physically: `pg_relation_size` of `core.organisation`, `core.manager_workspace` and
+        `core.workspace_schema_registry`, workspace schemas, and the bootstrap-role ADMIN row; never an RLS-bound count).
+        EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install (CHAIN-PARTIAL, fresh), FOREIGN and an empty ledger refuse
+        exactly as before (`readUpgradeEvidence` in `database-boot-gates.ts`).
+      - **Known behaviour, kept (coordinator decision 2026-11-05):** the in-process workspace provisioner's per-cycle
+        provisioner-strict check keeps refusing on a partly-upgraded schema. Provisioning of NEW workspaces waits (it
+        does not crash) until the fix is deployed. This stops new workspace schemas being built from an incomplete
+        template. It is data integrity, not an extra block on running jobs.
       - Detection:
         - the ERROR log naming the migration, written on every start while the ledger is behind;
         - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
