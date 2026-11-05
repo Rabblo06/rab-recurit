@@ -116,6 +116,19 @@ test('runtime env: PG_DATABASE_URL is refused there (it lives in database.env on
   assertRefused(lintEnvText('runtime', 'WORKER_INVITE_AUTO_DELETE_ENABLED=true'), /WORKER_INVITE_AUTO_DELETE_ENABLED/);
 });
 
+test('BC-11 opt-ins: approval mode and deployment identity live in database.env only, with valid values', () => {
+  const noIdentity = DATABASE_OK.split('\n').filter((l) => !l.startsWith('CREWFLOW_DEPLOYMENT_')).join('\n');
+  assert.deepEqual(lintEnvText('database', noIdentity), [], 'the deployment identity is optional');
+  for (const mode of ['none', 'token']) assert.deepEqual(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=${mode}`), []);
+  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVAL_MODE=off`), /must be exactly none or token/);
+  for (const key of ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ID', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT']) {
+    assertRefused(lintEnvText('runtime', `${key}=token`), new RegExp(`${key}: belongs in database.env only`));
+  }
+  for (const key of ['CREWFLOW_MIGRATION_APPROVAL_MODE', 'CREWFLOW_DEPLOYMENT_ID']) {
+    assertRefused(lintComposeText('x.yml', `services:\n  a:\n    environment:\n      ${key}: token\n`), /commits a BC-11 opt-in/);
+  }
+});
+
 test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
     for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
