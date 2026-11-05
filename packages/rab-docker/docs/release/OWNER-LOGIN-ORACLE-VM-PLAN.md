@@ -81,11 +81,11 @@ The temporary OpenShip deployment (rab-api / rab-worker / rab-redis, Neon databa
    ```bash
    docker compose -p crewflow --env-file /etc/crewflow/compose.env -f docker-compose.image.yml [-f docker-compose.local-db.yml] config -q
    ```
-4. **Pull, then follow the runbook:** section 2 (fresh) or section 5 (transition), then section 3. Always pass `-p crewflow`, `--env-file` and the explicit `-f` list. Never run `docker compose up` in a directory that OpenShip manages.
+4. **Pull, then follow the runbook:** section 2 (fresh) or section 5 (transition), then section 3 (O3: back up first, then stop-then-start; the API migrates on start). Always pass `-p crewflow`, `--env-file` and the explicit `-f` list. Never run `docker compose up` in a directory that OpenShip manages.
 5. **Edge (decision 2), then the smoke checks:**
    - `/healthz` through the edge;
    - the Worker health;
-   - `docker inspect`: `User=1000:1000`, `ReadonlyRootfs=true`, `CapDrop=[ALL]` and no-new-privileges on rab-api, rab-worker and rab-migrate;
+   - `docker inspect`: `User=1000:1000`, `ReadonlyRootfs=true`, `CapDrop=[ALL]` and no-new-privileges on rab-api and rab-worker (O3: there is no rab-migrate);
    - `/proc/1/status`: `CapBnd: 0000000000000000` and `NoNewPrivs: 1`;
    - one PDF render on arm64.
 

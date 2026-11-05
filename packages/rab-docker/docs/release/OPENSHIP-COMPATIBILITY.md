@@ -74,7 +74,7 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 
 ## 4. How the variant behaves on OpenShip
 
-1. **Import refused.** rab-migrate's `/tmp` is a long-form `type: tmpfs` volume. OpenShip classifies that as blocking
+1. **Import refused.** rab-ops's `/tmp` (rab-migrate's before O3 removed it) is a long-form `type: tmpfs` volume. OpenShip classifies that as blocking
    ("would be created as a persistent volume on disk rather than in memory") and refuses the whole file with
    `ComposeConfigurationError`. This is deliberate: the file cannot be deployed there with its security keys silently
    dropped.
@@ -103,7 +103,7 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 | (a) Enforce mode | `CREWFLOW_RUNTIME_ISOLATION=enforce`: the API and Worker refuse to start when any declared control is missing. | **The safe default; always on in this variant.** It turns a silent weakening into an outage that cannot be missed. It is not a deployment method: on OpenShip, nothing would run. |
 | (b) Plain `docker compose` on a VM | Run `docker-compose.image.yml` with the Docker Compose CLI on a VM the operator controls. Compose applies every key. | **Recommended for staging and for the DigitalOcean production.** It matches the Infrastructure agent's topology A (one VM, self-hosted PostgreSQL 16, Redis, Caddy edge). Use a VM that OpenShip does not manage. Running a second, unmanaged stack on OpenShip's Oracle VM would compete with OpenShip's edge proxy for ports 80/443, and OpenShip does not know about the stack. |
 | (c) An OpenShip feature or setting | A supported way to pass these keys. | **Not available** at v0.9.8 or HEAD. The keys are explicitly "not modeled", and the runtime has no per-service security settings. It would need an upstream change: the parser would have to map the keys and `docker.ts` would have to send them in `HostConfig`. |
-| (d) Import guard | A long-form `type: tmpfs` mount, which OpenShip classifies as blocking. | **Included** (rab-migrate `/tmp`). It refuses the import before anything runs. It depends on OpenShip's current classification, which is why (a) stays as the runtime backstop. |
+| (d) Import guard | A long-form `type: tmpfs` mount, which OpenShip classifies as blocking. | **Included** (rab-ops `/tmp`; rab-migrate's until O3). It refuses the import before anything runs. It depends on OpenShip's current classification, which is why (a) stays as the runtime backstop. |
 
 **Recommendation: (b) plain `docker compose` on a dedicated VM**, with (a) and (d) kept as safeguards. Do not deploy
 this variant through OpenShip. The temporary OpenShip deployment stays as it is: not redeployed, not migrated, and

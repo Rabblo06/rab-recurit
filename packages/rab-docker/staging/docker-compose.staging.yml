@@ -3,7 +3,7 @@
 #
 #   docker compose --env-file /etc/crewflow-staging/compose.env \
 #     -f docker-compose.image.yml -f staging/docker-compose.staging.yml config --quiet        # render check
-#   ... then the controlled release (docs/release/OWNER-LOGIN-DEPLOYMENT.md section 3)
+#   ... then the release (docs/release/OWNER-LOGIN-DEPLOYMENT.md section 3: back up first, then `up -d --wait`)
 #
 # Runbooks: docs/release/OWNER-LOGIN-DEPLOYMENT.md and STAGING-ENVIRONMENT-RUNBOOK.md. Templates: env/*.example (the same
 # templates as production, filled with STAGING-ONLY values: no value is shared with production or with the temporary
@@ -12,8 +12,8 @@
 # What it changes, and nothing else (no runtime security key, no image, no dependency condition, no env file):
 #   - the Compose project name, so a staging stack can never be mistaken for (or collide with) a production one;
 #   - STORAGE_KEY_PREFIX=staging, so an object key copied into the wrong bucket is recognisable.
-# The env files (${CREWFLOW_SECRETS_DIR}/database.env shared by rab-api, rab-worker and rab-migrate; runtime.env for
-# rab-api and rab-worker) and the PostgreSQL CA mount now come from docker-compose.image.yml itself. The separated-mode
+# The env files (${CREWFLOW_SECRETS_DIR}/database.env and runtime.env, read by rab-api and rab-worker) and the PostgreSQL
+# CA mount come from docker-compose.image.yml itself. The separated-mode
 # per-service files (api.env / worker.env / .env.migrate) are no longer read; their templates in staging/env/ are
 # superseded and removed in the final clean-up PR (#9).
 name: crewflow-staging

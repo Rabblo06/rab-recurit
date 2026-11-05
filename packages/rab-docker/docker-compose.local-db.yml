@@ -1,5 +1,5 @@
-# OWNER-LOGIN DEPLOYMENT — OPTIONAL BUNDLED POSTGRESQL 16. An override for docker-compose.image.yml (and its staging /
-# migrate-on-start overrides) when the host runs its own database instead of a managed provider:
+# OWNER-LOGIN DEPLOYMENT — OPTIONAL BUNDLED POSTGRESQL 16. An override for docker-compose.image.yml (and its staging
+# override) when the host runs its own database instead of a managed provider:
 #
 #   docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml -f docker-compose.local-db.yml up -d --wait
 #
@@ -105,7 +105,7 @@ services:
     cpus: ${CREWFLOW_POSTGRES_CPUS:-2}
 
   # The app services reach the database on the internal network (and keep the default network for egress), and wait for
-  # it. rab-migrate exists in docker-compose.image.yml, so its dependency is declared here too.
+  # it.
   rab-api:
     networks: [default, crewflow-db]
     depends_on:
@@ -113,12 +113,6 @@ services:
         condition: service_healthy
 
   rab-worker:
-    networks: [default, crewflow-db]
-    depends_on:
-      rab-postgres:
-        condition: service_healthy
-
-  rab-migrate:
     networks: [default, crewflow-db]
     depends_on:
       rab-postgres:

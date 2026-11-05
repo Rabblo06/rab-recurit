@@ -126,6 +126,12 @@ Rotate everything after any suspected exposure and at teardown.
 
 ## 5. First install (each step is an owner-approved window)
 
+> **SUPERSEDED (O3, owner decisions C1-C5, 2026-11-05; and the owner login since #72).** Steps 3-5 and 7 below describe
+> the separated-mode release step (`rab-migrate`, `.env.migrate`, phases A/B, `crewflow_migrator`), which no longer
+> exists: the API migrates on start and there is no `rab-migrate`. For a staging install or upgrade follow
+> [`OWNER-LOGIN-DEPLOYMENT.md`](OWNER-LOGIN-DEPLOYMENT.md) section 2 (fresh install) and section 3 (back up first, then
+> stop-then-start), with `staging/docker-compose.staging.yml`. The text below is kept until this runbook is rewritten.
+
 Shortcut: `C` is the compose command, run from `/opt/crewflow-staging/release/packages/rab-docker`.
 
 ```bash

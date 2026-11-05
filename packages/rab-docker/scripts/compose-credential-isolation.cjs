@@ -14,9 +14,9 @@
  *   - the API and Worker services: no env_file entry naming .env.migrate, no environment value containing the sentinel
  *     password or the migrator login name, and none of the migration-authority names (CREWFLOW_MIGRATION_APPROVED,
  *     CREWFLOW_MIGRATION_DATABASE_URL, ALLOW_PRODUCTION_DB_COMMANDS, DATABASE_URL_UNPOOLED with a value);
- *   - the production file: rab-api and rab-worker depend on rab-migrate with service_completed_successfully, rab-migrate
- *     has restart "no", no profile, and runs deploy-prepare.js; no legacy DATABASE_URL / DATABASE_DIRECT_URL key on the
- *     runtime services.
+ *   - the production file (O3, owner decisions C1-C5: the API migrates on start): there is NO migration service, nothing
+ *     names .env.migrate, nothing depends on a rab-migrate, and the runtime services carry no migration credential or
+ *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key. The dev and QA files keep their one-off `migrate`.
  *
  * Phase B (ops, owner decision): the one-off owner operations container `rab-ops` (production file, profile "ops") reads
  * packages/rab-docker/.env.ops only. A sentinel .env.ops (ops crewflow_app URL with its own sentinel password, a migrator
@@ -44,9 +44,9 @@ const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW
 /** Compose files that define the one-off operations container, and its service name. */
 const OPS_SERVICES = { 'packages/rab-docker/docker-compose.production.yml': 'rab-ops' };
 
-/** [compose file, migration service, runtime services, production?] */
+/** [compose file, migration service (null = none, O3), runtime services, production?] */
 const FILES = [
-  ['packages/rab-docker/docker-compose.production.yml', 'rab-migrate', ['rab-api', 'rab-worker'], true],
+  ['packages/rab-docker/docker-compose.production.yml', null, ['rab-api', 'rab-worker'], true],
   ['packages/rab-docker/docker-compose.yml', 'migrate', ['server', 'worker'], false],
   ['packages/rab-docker/docker-compose.qa.yml', 'migrate', ['server', 'worker'], false],
 ];
@@ -170,10 +170,15 @@ function main() {
         check(env.HWS_RUNTIME_ENABLED === 'false', `${rel}: ${opsName} keeps HWS_RUNTIME_ENABLED "false" (hws:backfill --apply needs --hws-cutover)`);
       }
     }
-    const migrate = services[migrateName];
+    const migrate = migrateName ? services[migrateName] : undefined;
     // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
     const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml';
-    check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
+    if (migrateName) check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
+    else {
+      // O3: the API migrates on start; a migration service would be a second migrating process.
+      for (const name of ['rab-migrate', 'migrate']) check(!services[name], `${rel}: has no ${name} service (O3: the API migrates on start)`);
+      if (raw) check(Object.values(raw).every((files) => !files.some((f) => /\.env\.migrate$/.test(f))), `${rel}: no service names .env.migrate`);
+    }
     if (migrate) {
       if (ownerLogin) {
         // Owner-login deployment (owner's final decision 2026-11-04): ONE login, no .env.migrate. The owner-login contract
@@ -198,8 +203,12 @@ function main() {
       check(!values.some((v) => v.includes('crewflow_migrator')), `${rel}: ${name} carries no migrator login`);
       const authority = MIGRATION_AUTHORITY.filter((k) => String(env[k] ?? '').trim() !== '');
       check(authority.length === 0, `${rel}: ${name} holds no migration authority${authority.length ? ` (${authority.join(', ')})` : ''}`);
-      const dep = (svc.depends_on ?? {})[migrateName];
-      check(dep?.condition === 'service_completed_successfully', `${rel}: ${name} depends on ${migrateName} completing successfully`);
+      if (migrateName) {
+        const dep = (svc.depends_on ?? {})[migrateName];
+        check(dep?.condition === 'service_completed_successfully', `${rel}: ${name} depends on ${migrateName} completing successfully`);
+      } else {
+        check(!(svc.depends_on ?? {})['rab-migrate'], `${rel}: ${name} does not depend on a rab-migrate (O3)`);
+      }
       if (production) {
         const legacy = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'].filter((k) => k in env);
         check(legacy.length === 0, `${rel}: ${name} declares no legacy database name${legacy.length ? ` (${legacy.join(', ')})` : ''}`);
@@ -208,6 +217,8 @@ function main() {
     if (production && migrate) {
       check(!migrate.profiles || migrate.profiles.length === 0, `${rel}: ${migrateName} has no profile (it always runs first)`);
       check(JSON.stringify(migrate.command ?? []).includes('deploy-prepare.js'), `${rel}: ${migrateName} runs deploy-prepare.js`);
+    }
+    if (production) {
       if (ownerLogin) check(!('CREWFLOW_PROVISIONER_ENABLED' in (services['rab-worker']?.environment ?? {})), `${rel}: rab-worker sets no separated provisioner switch (in-process provisioning, owner login)`);
       else check(services['rab-worker']?.environment?.CREWFLOW_PROVISIONER_ENABLED === 'true', `${rel}: rab-worker keeps CREWFLOW_PROVISIONER_ENABLED "true" (gate G2 not passed)`);
     }

@@ -6,13 +6,13 @@ icon: "cloud-arrow-up"
 
 ## Images and processes
 
-`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds the shared application image, which the API, `rab-migrate` and `rab-ops` run. `packages/rab-docker/rab/Dockerfile.worker-bundle` builds the Worker image on top of it and adds the Worker-only packages, including the native PDF renderer. Neither image contains a browser: both builds fail if Chromium is installed, and the image gate fails if Chromium, Playwright or any library only Chromium pulled in comes back. Both builds fail if Node or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds ONE application image, which the API, the Worker and `rab-ops` run with different commands; it includes the Worker-only packages, including the native PDF renderer. The image contains no browser: the build fails if Chromium is installed, and the image gate fails if Chromium, Playwright or any library only Chromium pulled in comes back. Both builds fail if Node or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
 
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |
-| API | `api-prestart.sh` (then `main.js`) | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. Checks read-only that no migration is pending. |
+| API | `api-prestart.sh` (then `main.js`) | the one owner login | Migrates on start under the migration lock (O3, like Twenty; approval mode `none`), registers the BullMQ job schedulers, then serves. One instance, deployed stop-then-start. Never bootstraps an admin. |
 | Worker | `node packages/rab-worker/dist/main.js` (the same image as the API) | the one owner login | One non-root process (uid 1000) under the container init; workspace provisioning runs in-process. The former launcher and its provisioner child are retired (O1). |
-| Migrate (one-off release step) | `deploy-prepare.js` | `crewflow_migrator`, from `.env.migrate` only | Runs before the API and the Worker (they wait for it to exit 0). Applies migrations only for an approved release; exit 3 when migrations are pending but not approved. |
+| (no release step) | | | O3 removed the one-off `rab-migrate`: the API migrates on start, and the Worker never migrates and only consumes the job schedulers. Back up before every upgrade (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md` section 3). |
 
 Every process reads one database variable, `PG_DATABASE_URL`, holding its own credential; production refuses the legacy names (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX`) and requires TLS verify-full on a direct (non-pooled) endpoint. The image's default `CMD` is `api-prestart.sh`, which never migrates. Migrations run only in the one-off `rab-migrate` step, which takes the migration lock and checks the target, the deployment identity, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1). Full procedure: `docs/runbooks/database.md`.
 
