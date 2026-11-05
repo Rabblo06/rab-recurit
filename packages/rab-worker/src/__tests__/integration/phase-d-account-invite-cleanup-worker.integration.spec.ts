@@ -134,15 +134,25 @@ describeIfApproved('Phase D F-1 account-invite cleanup on the runtime data sourc
     expect(await status(id)).toBe('invite_expired');
   });
 
-  it('4. crewflow_app (old / per_scope Worker): the definers are not executable → today\'s path, which still sees nothing', async () => {
+  // P-class (owner-login architecture). The test used the RUNTIME connection (the app's DataSource), not the role itself:
+  // the SCHEMA ROLE crewflow_app still has no EXECUTE on the three definers (catalog; no migration granted it). The one
+  // runtime login (API and Worker alike) inherits their owner, so the API process can run the Worker's invite cleanup:
+  // OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL), reproduced green on a test-owned invite.
+  it('4. the schema role crewflow_app cannot execute the definers; the runtime login can and runs the cleanup (BC-08)', async () => {
+    const [grants] = await admin.query<[{ app: boolean; candidates: boolean; del: boolean }]>(
+      `SELECT has_function_privilege('crewflow_app', 'core.worker_expire_account_invites(integer)', 'EXECUTE') AS app,
+              has_function_privilege('crewflow_app', 'core.worker_account_invite_cleanup_candidates(integer, timestamptz, uuid)', 'EXECUTE') AS candidates,
+              has_function_privilege('crewflow_app', 'core.worker_delete_expired_invited_user(uuid)', 'EXECUTE') AS del`,
+    );
+    expect(grants).toEqual({ app: false, candidates: false, del: false });
     const [{ usable }] = await runtimeApp.query<[{ usable: boolean }]>(
       `SELECT has_function_privilege('core.worker_expire_account_invites(integer)', 'EXECUTE') AS usable`,
     );
-    expect(usable).toBe(false);
+    expect(usable).toBe(true); // BC-08 (NEEDS OWNER APPROVAL)
     const id = await seedInvited({ status: 'invited', expiresAgo: '1 minute', cleanupAgo: null });
-    const result = await runAccountInviteCleanupCycle(runtimeApp, ON); // even with the flag ON: no EXECUTE → legacy path
-    expect(result).toEqual({ expired: 0, deleted: 0, retained: 0 });
-    expect(await status(id)).toBe('invited');
+    const result = await runAccountInviteCleanupCycle(runtimeApp, ON);
+    expect(result.expired).toBeGreaterThanOrEqual(1);
+    expect(await status(id)).toBe('invite_expired');
   });
 
   it('5. retention gate OFF (default) on crewflow_worker with the definers executable: no expiry, no deletion, no audit', async () => {
