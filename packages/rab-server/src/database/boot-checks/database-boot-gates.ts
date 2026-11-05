@@ -42,7 +42,7 @@
  *                by the login or the owner roles in core / public / other schemas (owner-login-posture.ts).
  *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions and, in global mode, the dispatch-claim functions.
  *                A non-Worker process CAN execute the dispatch-claim functions with one login: recorded as a boot WARNING
- *                on every start (BC-08, DBA-01 lost — PENDING OWNER APPROVAL), not a refusal.
+ *                on every start (BC-08, DBA-01 lost — accepted by the owner 2026-11-05), not a refusal.
  *
  * Connection: a short-lived DataSource from the connection factory (src/database/postgres: createPgDataSource for the
  * process's primary endpoint (the provisioner: its privileged endpoint), one session, the process's own role, pool max 1, application_name `crewflow-<process>-boot-gates`), so
