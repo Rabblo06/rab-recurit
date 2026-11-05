@@ -238,7 +238,7 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
   // acting as it (fixture superuser + SET ROLE, a dedicated client that is closed afterwards) is still refused, and that role
   // still cannot run the recorder or the fingerprint (42501). The one runtime login inherits the definers' owner and can run
   // both (catalog), and the migrator's identity check does not refuse it (reproduced below with assertMigrationIdentity):
-  // OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL); migrateAll itself is never run as the runtime login here. Ledger writes, the registry drift columns and
+  // OWNER-LOGIN DIFFERENCE PROV-1 (ACCEPTED (owner, 2026-11-05)); migrateAll itself is never run as the runtime login here. Ledger writes, the registry drift columns and
   // the zero-rows-without-context check below still bind the runtime login (parity guard / append-only trigger / M-T2).
   it('the runtime login cannot write or rewrite the ledger or forge drift columns; the schema role crewflow_app cannot migrate or run the recorder (PROV-1 for the runtime login)', async () => {
     const ws = created[0]!;
@@ -263,7 +263,7 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     const app = new Client({ connectionString: appUrl });
     await app.connect();
     try {
-      // OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER APPROVAL), reproduced, not dropped: the migrator's application-layer
+      // OWNER-LOGIN DIFFERENCE PROV-1 (ACCEPTED (owner, 2026-11-05)), reproduced, not dropped: the migrator's application-layer
       // refusal (workspace-schema-migrator.ts assertMigrationIdentity) no longer stops the runtime login, because
       // crewflow_owner holds crewflow USAGE. Side-effect free: only the identity check runs, nothing is migrated.
       await expect(new WorkspaceSchemaMigrator(pgClientRunner(app)).assertMigrationIdentity()).resolves.toBeUndefined();

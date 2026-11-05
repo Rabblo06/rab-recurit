@@ -239,7 +239,7 @@ async function cloneDatabase(ctx: Ctx, template: string, db: string): Promise<vo
 
 export const FIXTURE_LIMITS = [
   'roles were created by the cluster superuser, not by crewflow_owner: the implicit ADMIN rows are simulated with ADMIN TRUE',
-  'crewflow / crewflow_app keep the separated harness passwords (a T2 install leaves them LOGIN with no password)',
+  'crewflow / crewflow_app keep the separated harness passwords (a T2 install leaves them NOLOGIN with no password: BC-17, owner decision 2026-11-05)',
   'the database owner is the harness superuser; crewflow_owner holds CONNECT, CREATE, TEMPORARY WITH GRANT OPTION (§5.1)',
 ];
 
@@ -463,6 +463,33 @@ function checksSummary(c: ChildResult): string {
 const dbName = (id: string) => `twa_tw_${id.toLowerCase().replace(/[^a-z0-9]/g, '')}_${RUN_ID}`;
 const ownerUrl = (ctx: Ctx, db: string) => withDb(ctx.admin, db, 'crewflow_owner', ctx.ownerPassword);
 
+/**
+ * BC-17 (owner decision 2026-11-05, MITIGATE; Agent 1 80686512 / f91f1038): after a fresh install or the transition,
+ * crewflow and crewflow_app are NOLOGIN with no password, crewflow_migrator (where it exists) likewise, and crewflow_worker
+ * keeps LOGIN but has no password. Cluster-wide facts, read from pg_authid by the fixture superuser; no password is printed.
+ */
+async function legacyLoginProblems(ctx: Ctx): Promise<string[]> {
+  return withClient(withDb(ctx.admin, 'postgres'), async (c) => {
+    const rows: Array<{ name: string; login: boolean; has_password: boolean }> = (
+      await c.query(
+        `SELECT rolname::text AS name, rolcanlogin AS login, rolpassword IS NOT NULL AS has_password FROM pg_catalog.pg_authid
+          WHERE rolname IN ('crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator') ORDER BY 1`,
+      )
+    ).rows;
+    const out: string[] = [];
+    for (const r of rows) {
+      // Booleans only (the CI log masker hid part of the earlier wording): {login, pw} where pw = a stored verifier exists.
+      if (r.name === 'crewflow_worker') {
+        if (r.has_password) out.push(`crewflow_worker{login:${r.login},pw:true}`);
+      } else if (r.login || r.has_password) {
+        out.push(`${r.name}{login:${r.login},pw:${r.has_password}}`);
+      }
+    }
+    if (!rows.some((r) => r.name === 'crewflow_app') || !rows.some((r) => r.name === 'crewflow')) out.push('crewflow / crewflow_app missing');
+    return out;
+  });
+}
+
 /** The head-state assertions every successful install must satisfy. */
 async function assertHeadState(ctx: Ctx, db: string, r: ScenarioReport, opts: { golden?: boolean } = {}): Promise<DbState> {
   const s = await readState(ctx, db);
@@ -477,6 +504,8 @@ async function assertHeadState(ctx: Ctx, db: string, r: ScenarioReport, opts: { 
   expect(r, s.lockHolders === 0, `no session holds the migration lock (got ${s.lockHolders})`);
   const reach = await reachabilityProblems(withDb(ctx.admin, db), 'crewflow_owner');
   expect(r, reach.length === 0, `crewflow_owner reaches no privileged role (${reach.join('; ') || 'clean'})`);
+  const legacy = await legacyLoginProblems(ctx);
+  expect(r, legacy.length === 0, `BC-17: legacy logins disabled (crewflow / crewflow_app / crewflow_migrator NOLOGIN, no password; crewflow_worker no password) (${legacy.join('; ') || 'clean'})`);
   if (opts.golden !== false) {
     const posture = await compareWithGolden(withDb(ctx.admin, db), GOLDEN);
     expect(
@@ -603,10 +632,14 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, wrong.exitCode === EXIT.identity && wrong.result?.serve === false, `different CREWFLOW_DEPLOYMENT_ID: exit 67, serve=false (${summary(wrong)})`);
     const missing = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test' });
     expect(r, missing.exitCode === EXIT.identity, `missing CREWFLOW_DEPLOYMENT_ID on a bound database: exit 67 (${summary(missing)})`);
-    // Agent 1 (twa/db-lifecycle 97ffa32e, pinned in owner-login.spec.ts): outside production a bound marker with NO
-    // declaration at all starts (intentional leniency); a PRODUCTION-bound marker refuses it (67), and refuses a production
-    // declaration without an id. The marker is rebound to production through the bind definer (fixture superuser, a member of
-    // every role) on this disposable twa database only, then rebound to the original id in `finally`.
+    // The child here is a NON-production process (NODE_ENV=test, DB_TARGET=local). BC-11 (owner decision 2026-11-05, Agent 1
+    // 0074cecb) changes only PRODUCTION processes: an undeclared production process skips the marker check with one loud
+    // warning and proceeds; a declared one is matched exactly (mismatch 67). Outside production the rules are unchanged
+    // (pinned by Agent 1): a test-bound marker with no declaration starts; a PRODUCTION-bound marker refuses an undeclared
+    // non-production process (67) and a non-production process may not declare production (67). The production path itself
+    // needs TLS (N1), which this disposable container does not offer: it is covered by Agent 1's unit tests
+    // (decideDeploymentIdentity 'BC-11: production, UNDECLARED …'), not here. The marker is rebound to production through the
+    // bind definer (fixture superuser, a member of every role) on this disposable twa database only, then restored in finally.
     const none = await child(head, {});
     expect(r, none.exitCode === EXIT.ok, `no deployment declaration on a TEST-bound database: starts (intentional outside production) (${summary(none)})`);
     const productionId = randomUUID();
@@ -615,9 +648,9 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['production', productionId, 'ID-2 production-bound probe (twenty-mode-check)', 'twenty-mode-check', deploymentId, hosts]));
     try {
       const noneProd = await child(head, {});
-      expect(r, noneProd.exitCode === EXIT.identity && noneProd.result?.serve === false, `no deployment declaration on a PRODUCTION-bound database: exit 67, serve=false (${summary(noneProd)})`);
+      expect(r, noneProd.exitCode === EXIT.identity && noneProd.result?.serve === false, `NON-production process, no declaration, PRODUCTION-bound marker: exit 67, serve=false (${summary(noneProd)})`);
       const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' });
-      expect(r, missingProd.exitCode === EXIT.identity && missingProd.result?.serve === false, `production declared without CREWFLOW_DEPLOYMENT_ID on a PRODUCTION-bound database: exit 67 (${summary(missingProd)})`);
+      expect(r, missingProd.exitCode === EXIT.identity && missingProd.result?.serve === false, `NON-production process declaring production without CREWFLOW_DEPLOYMENT_ID: exit 67 (${summary(missingProd)})`);
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['test', deploymentId, 'ID-2 probe restores the test binding', 'twenty-mode-check', productionId, hosts]));
     }
@@ -727,12 +760,16 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       ['CREWFLOW_UPGRADE_FAILURE_POLICY=ignore', { CREWFLOW_UPGRADE_FAILURE_POLICY: 'ignore' }],
       ['CREWFLOW_MIGRATION_APPROVAL_MODE=sometimes', { CREWFLOW_MIGRATION_APPROVAL_MODE: 'sometimes' }],
       ['CREWFLOW_MIGRATE_ON_START=maybe', { CREWFLOW_MIGRATE_ON_START: 'maybe' }],
-      ['production without an explicit approval mode', { NODE_ENV: 'production' }],
     ];
     for (const [label, extra] of cases) {
       const c = await child(empty, extra);
       expect(r, c.exitCode === EXIT.config && c.result?.serve === false, `${label}: exit 64 (${summary(c)})`);
     }
+    // BC-11 (owner decision 2026-11-05, Agent 2 d27a371a): production without an explicit approval mode is no longer a
+    // configuration refusal; the mode defaults to `none`. This disposable database has no TLS, so a production child stops
+    // later (N1/TLS, not config): asserted as "not refused at config (exit != 64)". The invalid-mode pin above stays.
+    const prodNoMode = await child(empty, { NODE_ENV: 'production' });
+    expect(r, prodNoMode.exitCode !== EXIT.config, `production without an explicit approval mode: NOT a config refusal (exit != 64) (${summary(prodNoMode)})`);
     const missing = await runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, empty), { PG_DATABASE_URL: undefined }));
     expect(r, missing.exitCode === EXIT.config, `PG_DATABASE_URL missing: exit 64 (${summary(missing)})`);
     const s = await readState(ctx, empty);
@@ -791,9 +828,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), 'nothing applied by the refused runs');
     let token: string | null = null;
     if (existsSync(DEPLOY_PREPARE)) {
-      const check = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+      // Token mode must be set on deploy-prepare's OWN environment (childEnvironment builds a clean one): since BC-11 (owner
+      // decision 2026-11-05, Agent 2 d27a371a) an unset mode defaults to `none` and applies (see BEHIND-2).
+      const check = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' }));
       token = check.lines.map((l) => /approval token for exactly this set: (\S+)/.exec(l)?.[1]).find(Boolean) ?? null;
       expect(r, check.exitCode === 3 && token !== null, `deploy-prepare check run: exit 3 and prints the token (exit ${check.exitCode}; ${check.lines.slice(-2).join(' | ').slice(0, 220)})`);
+      expect(r, JSON.stringify((await readState(ctx, db)).ledger) === JSON.stringify(before.ledger), 'deploy-prepare check run (token mode, no token) applied nothing');
     } else {
       r.failures.push('FAIL: deploy-prepare.js not built');
     }
@@ -802,9 +842,26 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
       expect(r, ok.exitCode === EXIT.ok && ok.result?.state === 'CHAIN-PARTIAL', `token mode, the right token: exit 0 from CHAIN-PARTIAL (${summary(ok)})`);
       neverLoadedGated(r, ok);
       await assertHeadState(ctx, db, r);
-      const check2 = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+      const check2 = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' }));
       expect(r, check2.exitCode === 0, `deploy-prepare check run on head: exit 0 (${check2.exitCode}; ${check2.lines.slice(-1).join('').slice(0, 160)})`);
     }
+  });
+
+  await step('BEHIND-2', 'BC-11 (owner decision 2026-11-05): deploy-prepare with NO approval mode (default none) on a NON-fresh behind database applies directly: exit 0, head state', async (r) => {
+    const db = dbName('behind2');
+    r.database = db;
+    await partial(db, FAIL_AT.slice(-13), r);
+    await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 behind2 tenant', $2)`, [randomUUID(), `twa-t5-behind2-${RUN_ID}`]));
+    const before = await readState(ctx, db);
+    if (!existsSync(DEPLOY_PREPARE)) {
+      r.failures.push('FAIL: deploy-prepare.js not built');
+      return;
+    }
+    const run = await runChild(DEPLOY_PREPARE, childEnvironment(ownerUrl(ctx, db), { CREWFLOW_MIGRATE_ON_START: undefined }));
+    const after = await readState(ctx, db);
+    expect(r, run.exitCode === 0, `deploy-prepare, no mode: exit 0 (${run.exitCode}; ${run.lines.slice(-1).join('').slice(0, 160)})`);
+    expect(r, after.ledger.length > before.ledger.length, `deploy-prepare, no mode: applied the pending migrations without a token (${before.ledger.length} -> ${after.ledger.length})`);
+    await assertHeadState(ctx, db, r);
   });
 
   await step('SHIM-1', 'the D3(b) ROW_COPY shim refuses a database that ever held tenant data; nothing applied, the data intact', async (r) => {
@@ -950,11 +1007,12 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
   log(`${r.id} ${r.status} (${separatedDb})`);
   for (const line of [...r.evidence, ...r.failures]) log(`  ${line}`);
 
-  // MIX-1: a FRESH owner-login install of a second database on a cluster whose roles are separated-layout roles. The roles
-  // are cluster-wide: a fresh install re-runs the role migrations (random passwords for crewflow / crewflow_app), which
-  // would break a separated deployment still using crewflow_app on this cluster. Expected: refused, nothing created, and
-  // crewflow_app still authenticates with the password it had.
-  const m: ScenarioReport = { id: 'MIX-1', title: 'fresh install on a cluster that still hosts separated-layout roles: refused, crewflow_app password untouched', status: 'NOT TESTED', pgMajor: major, evidence: [], failures: [] };
+  // MIX-1, revised for BC-17 (owner decision 2026-11-05, Agent 1 80686512 / f91f1038). Roles are cluster-wide, and the
+  // transition (UPG-1 above, the provider-admin SQL) has made crewflow / crewflow_app NOLOGIN with no password, so a
+  // separated deployment on this cluster can no longer log in: that is the owner-decided mitigation, asserted here as such
+  // (before: "crewflow_app still authenticates"). A FRESH owner-login install of a second database on this cluster must then
+  // never re-enable a legacy login, whatever its outcome; if it is refused, it creates nothing.
+  const m: ScenarioReport = { id: 'MIX-1', title: 'after the transition, legacy logins stay disabled cluster-wide (BC-17); a second fresh install never re-enables them', status: 'NOT TESTED', pgMajor: major, evidence: [], failures: [] };
   try {
     const appPw = process.env.CREWFLOW_APP_BOOTSTRAP_PASSWORD ?? '';
     const appLogin = async () => {
@@ -965,7 +1023,9 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
         return false;
       }
     };
-    expect(m, await appLogin(), 'before: crewflow_app authenticates with its current password');
+    expect(m, !(await appLogin()), 'before: crewflow_app can no longer authenticate (NOLOGIN after the transition, BC-17)');
+    const before = await legacyLoginProblems(ctx);
+    expect(m, before.length === 0, `before: legacy logins disabled (${before.join('; ') || 'clean'})`);
     const db = dbName('mix');
     m.database = db;
     await createEmptyDatabase(ctx, db);
@@ -973,10 +1033,13 @@ async function transition(ctx: Ctx, major: number, separatedDb: string): Promise
     await withClient(withDb(ctx.admin, db), (c) => c.query(`GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${qi(db)} TO crewflow_owner WITH GRANT OPTION`));
     const c = await runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, db)));
     m.evidence.push(`child: ${summary(c)}; reason ${(c.result?.reason ?? '').slice(0, 200)}`);
-    expect(m, c.exitCode !== EXIT.ok && c.result?.serve === false, 'the fresh install is refused');
-    const s = await readState(ctx, db);
-    expect(m, s.ledger.length === 0 && s.coreTables === 0, `nothing created (ledger ${s.ledger.length}, core tables ${s.coreTables})`);
-    expect(m, await appLogin(), 'after: crewflow_app still authenticates with the same password (no cluster-wide role was altered)');
+    if (c.exitCode !== EXIT.ok) {
+      const s = await readState(ctx, db);
+      expect(m, c.result?.serve === false && s.ledger.length === 0 && s.coreTables === 0, `refused, nothing created (ledger ${s.ledger.length}, core tables ${s.coreTables})`);
+    }
+    const after = await legacyLoginProblems(ctx);
+    expect(m, after.length === 0, `after: legacy logins still disabled (${after.join('; ') || 'clean'})`);
+    expect(m, !(await appLogin()), 'after: crewflow_app still cannot authenticate');
     m.status = m.failures.length ? 'FAIL' : 'PASS';
   } catch (e) {
     m.status = 'FAIL';
@@ -1024,7 +1087,7 @@ async function ciDatabase(ctx: Ctx, major: number): Promise<number> {
 // CLI
 // ---------------------------------------------------------------------------------------------------------------------
 
-const SCENARIO_IDS = ['TW-I1d', 'TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
+const SCENARIO_IDS = ['TW-I1d', 'TW-I1', 'S1', 'ID-2', 'RB-1', 'POST-1', 'LOCK-1', 'ID-1', 'CFG-1', 'SEAM-1', 'TPL', 'BEHIND-1', 'BEHIND-2', 'SHIM-1', 'UPF-0', 'UPF-1', 'UPF-2', 'KILL-START', 'KILL-INSIDE', 'KILL-RECORDED', 'S4', 'UPG-1'];
 
 async function main(argv: string[]): Promise<number> {
   const reportIdx = argv.indexOf('--report');

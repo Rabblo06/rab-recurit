@@ -226,7 +226,7 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     // P-class (owner-login architecture): the schema role crewflow_app is refused every one of these columns by its column
     // INSERT grant (42501). The runtime login is not bound by column grants (no INSERT parity guard): status and decided_by
     // are still refused (the INSERT policy pins status = 'PENDING' AND decided_by IS NULL; a CHECK may answer first, 23514);
-    // the others are OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL) and are only ever tried in a rolled-back
+    // the others are OWNER-LOGIN DIFFERENCE COLGRANT-1 (ACCEPTED (owner, 2026-11-05)) and are only ever tried in a rolled-back
     // transaction.
     const outcomes: Record<string, string> = {};
     for (const [col, val] of [
@@ -254,7 +254,7 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
     }
     // The runtime login's MEASURED outcome per column (PR #74 run 41939771482), asserted exactly (Agent 3 review of
     // dbbda6e3). status / decided_by are refused by the INSERT policy (42501); expires_at / created_at / origin by CHECKs
-    // (23514). id and final_arguments are ACCEPTED: OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL), only ever in a
+    // (23514). id and final_arguments are ACCEPTED: OWNER-LOGIN DIFFERENCE COLGRANT-1 (ACCEPTED (owner, 2026-11-05)), only ever in a
     // rolled-back transaction here. (final_arguments on a PENDING row is not the decision: approval writes it again and the
     // ai_action_proposal_guard keeps it unchangeable outside approval.)
     expect(outcomes).toEqual({
@@ -324,7 +324,7 @@ describeIfDb('AI tables RLS and grants (integration)', () => {
   it('T5-D1 no DELETE, no TRUNCATE for crewflow_app; FORCE RLS and exactly three per-command policies', async () => {
     // P-class (owner-login architecture): the schema role crewflow_app is refused DELETE and TRUNCATE (42501). The runtime
     // login's DELETE leaves the proposal in place (no DELETE policy: RLS filters it; the DELETE parity guard would refuse a
-    // visible row); TRUNCATE is held through the owner (catalogue AI-1, NEEDS OWNER APPROVAL), never executed here.
+    // visible row); TRUNCATE is held through the owner (catalogue AI-1, ACCEPTED (owner, 2026-11-05)), never executed here.
     for (const sql of [`DELETE FROM core.ai_action_proposal WHERE id = '${proposal.id}'`, `TRUNCATE core.ai_action_proposal`]) {
       expect({ sql, code: await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctxOfA(), [{ sql }]) }).toEqual({ sql, code: '42501' });
     }

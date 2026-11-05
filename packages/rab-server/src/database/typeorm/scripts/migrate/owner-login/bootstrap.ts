@@ -39,6 +39,12 @@ export class BootstrapRefusal extends Error {
 export interface RoleSpec {
   name: string;
   login: boolean;
+  /**
+   * BC-17 (owner decision 2026-11-05): crewflow and crewflow_app are created LOGIN (the chain's role migrations set their
+   * random, discarded passwords) and made NOLOGIN at the end of a fresh install (legacy-logins.ts). Roles are cluster-wide,
+   * so a later install on the same cluster finds them NOLOGIN: accepted (strictly less than the bootstrap shape).
+   */
+  nologinAccepted?: true;
   /** crewflow_owner's membership: INHERIT TRUE, SET TRUE for the owner roles; ADMIN only for crewflow_app; none for the worker. */
   ownerMember: 'inherit-set' | 'admin-only' | 'none';
   /** The roles this role is itself a member of (exactly). */
@@ -50,9 +56,9 @@ export const BOOTSTRAP_ROLES: readonly RoleSpec[] = [
   { name: 'rab_owner', login: false, ownerMember: 'inherit-set', memberOf: [] },
   { name: 'rab_app', login: false, ownerMember: 'inherit-set', memberOf: [] },
   { name: 'rab_secure_owner', login: false, ownerMember: 'inherit-set', memberOf: [] },
-  { name: 'crewflow', login: true, ownerMember: 'inherit-set', memberOf: [] },
+  { name: 'crewflow', login: true, nologinAccepted: true, ownerMember: 'inherit-set', memberOf: [] },
   // crewflow_owner created it, so PostgreSQL 16+ records an implicit ADMIN-only row; no INHERIT / SET (M0 §3.1).
-  { name: 'crewflow_app', login: true, ownerMember: 'admin-only', memberOf: [] },
+  { name: 'crewflow_app', login: true, nologinAccepted: true, ownerMember: 'admin-only', memberOf: [] },
   // Created by the rolemaker: no member at all, a member of exactly crewflow_app WITH INHERIT TRUE, SET FALSE.
   { name: 'crewflow_worker', login: true, ownerMember: 'none', memberOf: [{ role: 'crewflow_app', inherit: true, set: false }] },
 ];
@@ -108,7 +114,7 @@ export function roleShapeProblems(spec: RoleSpec, facts: RoleFacts, owner: strin
   attr(!facts.replication, 'has REPLICATION');
   attr(!facts.createrole, 'has CREATEROLE');
   attr(!facts.createdb, 'has CREATEDB');
-  attr(facts.login === spec.login, spec.login ? 'is NOLOGIN (must be LOGIN)' : 'is LOGIN (must be NOLOGIN)');
+  attr(facts.login === spec.login || (spec.nologinAccepted === true && !facts.login), spec.login ? 'is NOLOGIN (must be LOGIN)' : 'is LOGIN (must be NOLOGIN)');
   attr(facts.inherit, 'is NOINHERIT');
 
   const members = mergeRows(facts.members, 'member');

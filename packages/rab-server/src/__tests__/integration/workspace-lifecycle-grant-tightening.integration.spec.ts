@@ -60,7 +60,7 @@ describeIfDb('workspace lifecycle grant tightening (integration, §8A.9 Check A)
   // P-class (owner-login architecture): rab_app / crewflow_app is a SCHEMA ROLE now. It is still denied EXECUTE (42501),
   // checked through the fixture superuser's SET LOCAL ROLE. The runtime login crewflow_owner inherits the functions' owner
   // and reaches the body, which refuses the nil workspace (P0002), so nothing changes: OWNER-LOGIN DIFFERENCE PROV-1
-  // (NEEDS OWNER APPROVAL).
+  // (ACCEPTED (owner, 2026-11-05)).
   it.each(LIFECYCLE_MUTATORS)('the schema role crewflow_app is denied EXECUTE on $name (42501); the runtime login reaches the body and is refused (PROV-1)', async ({ sql }) => {
     expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', {}, [{ sql }])).toBe('42501');
     await expect(appClient.query(sql)).rejects.toMatchObject({ code: 'P0002' });

@@ -172,7 +172,7 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
     // P-class (owner-login architecture): the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501). The
     // runtime login is refused UPDATE and DELETE too: since PAY-1b (Agent 3, 4caaef2a) the grant-parity guard refuses every
     // operation crewflow_app lacked entirely PER STATEMENT (42501, measured on #72 run 41948025136), and no row changes.
-    // TRUNCATE ignores RLS: the runtime login holds it through the owner (catalogue AI-1, NEEDS OWNER APPROVAL), asserted
+    // TRUNCATE ignores RLS: the runtime login holds it through the owner (catalogue AI-1, ACCEPTED (owner, 2026-11-05)), asserted
     // from the catalog, never executed.
     it('insert-only: the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501); the runtime login is refused UPDATE / DELETE per statement (42501), no row changes', async () => {
       for (const sql of [`UPDATE core.ai_usage SET cost_usd_micros = 0`, `DELETE FROM core.ai_usage`, `TRUNCATE core.ai_usage`]) {
@@ -185,10 +185,10 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       expect(pgCode(await sqlAs(a.ceo, `DELETE FROM core.ai_usage`).catch((e) => e))).toBe('42501');
       expect(await snapshot()).toEqual(before);
       const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_usage', 'TRUNCATE') AS t`);
-      expect(t).toBe(true); // AI-1 (NEEDS OWNER APPROVAL)
+      expect(t).toBe(true); // AI-1 (ACCEPTED (owner, 2026-11-05))
     });
 
-    it('COLGRANT-1: WITH CHECK still refuses a row for another user or organisation; id / created_at are refused to the schema role crewflow_app but accepted for the runtime login (NEEDS OWNER APPROVAL; rolled back)', async () => {
+    it('COLGRANT-1: WITH CHECK still refuses a row for another user or organisation; id / created_at are refused to the schema role crewflow_app but accepted for the runtime login (ACCEPTED (owner, 2026-11-05); rolled back)', async () => {
       const cols = `organisation_id, user_id, turn_id, usage_date, kind, model, outcome`;
       const vals = (org: string, user: string) => [org, user, randomUUID(), day, 'chat', TEST_MOCK_MODEL_ID, 'completed'];
       expect(pgCode(await sqlAs(a.ceo, `INSERT INTO core.ai_usage (${cols}) VALUES ($1, $2, $3, $4::date, $5, $6, $7)`, vals(a.orgId, im.id.userId)).catch((e) => e))).toBe('42501');

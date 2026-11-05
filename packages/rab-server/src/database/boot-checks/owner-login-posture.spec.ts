@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { healthyOwnerLoginPosture } from '../../__tests__/helpers/owner-login-posture-fake';
-import { NEEDS_OWNER_APPROVAL_IDS, OWNER_LOGIN_BEHAVIOUR_CATALOGUE } from './owner-login-behaviour-catalogue';
+import { NEEDS_OWNER_APPROVAL_IDS, OWNER_LOGIN_BEHAVIOUR_CATALOGUE, PR9_TRACKED_ACCEPTED_IDS } from './owner-login-behaviour-catalogue';
 import {
   DANGEROUS_PREDEFINED_ROLES,
   OWNER_LOGIN_REACHABILITY_SQL,
@@ -109,11 +109,19 @@ describe('owner-login behaviour-change catalogue', () => {
     }
   });
 
-  it('the protections the owner did NOT accept in §2 stay needs-owner-approval (never flipped to accepted / passing)', () => {
-    // Addendum: DBA-01 (BC-08), worker_due_work + pointers (BC-10), deployment-identity rebind (BC-11), logical backup
-    // (BC-12), column-level secret grants (BC-13); plus the legacy-login passwords found during the refactor (BC-17).
-    // + Agent 5's differential findings awaiting the owner (2026-11-04): COLGRANT-1, HL-1, AI-1, PROV-1.
-    expect([...NEEDS_OWNER_APPROVAL_IDS].sort()).toEqual(['AI-1', 'BC-08', 'BC-10', 'BC-11', 'BC-12', 'BC-13', 'BC-17', 'COLGRANT-1', 'HL-1', 'PROV-1']);
+  it('nothing waits for the owner any more (decisions 2026-11-05); accepted entries carry the dated decision; BC-17 is mitigated', () => {
+    // Owner decisions 2026-11-05: BC-08, BC-10, BC-11, BC-12, BC-13, AI-1, COLGRANT-1, HL-1, PROV-1 accepted "like Twenty";
+    // BC-17 mitigated (legacy logins NOLOGIN / no password after the transition, Agent 1; crewflow_worker residual stated).
+    expect([...NEEDS_OWNER_APPROVAL_IDS]).toEqual([]);
+    const bc17 = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.find((x) => x.id === 'BC-17')!;
+    expect(bc17.status).toBe('mitigated');
+    expect(bc17.controls).toMatch(/crewflow_worker remains a LOGIN role with no password; it can authenticate only via non-password methods, which the provider's pg_hba must not grant/);
+    for (const id of ['BC-08', 'BC-10', 'BC-11', 'BC-12', 'BC-13', 'AI-1', 'COLGRANT-1', 'HL-1', 'PROV-1']) {
+      const e = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.find((x) => x.id === id)!;
+      expect({ id, status: e.status, dated: e.refs.includes('owner decision 2026-11-05 (like Twenty)') }).toEqual({ id, status: 'accepted-owner', dated: true });
+      expect(`${e.controls}`).not.toMatch(/NEEDS OWNER APPROVAL/);
+    }
+    expect(PR9_TRACKED_ACCEPTED_IDS).toContain('HL-1');
   });
 
   it('every catalogue id has its own reproducing test in the integration catalogue spec', () => {

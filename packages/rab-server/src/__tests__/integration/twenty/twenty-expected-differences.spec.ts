@@ -15,6 +15,8 @@ export function removalGateProblems(c: typeof catalogue = catalogue): string[] {
   const out: string[] = [];
   for (const d of c.differences as Diff[]) if (/NEEDS OWNER APPROVAL/.test(d.acceptance)) out.push(`${d.id}: ${d.acceptance}`);
   if (!c.migratedTests.entries.length) out.push('migratedTests is empty: the TW-D differential has not been classified');
+  // Accepted differences kept on the PR #9 removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05.
+  for (const id of (c as { removalGateKeep?: { ids: string[] } }).removalGateKeep?.ids ?? []) out.push(`KEEP-ON-GATE: ${id} (owner-accepted; kept on the PR #9 gate by coordinator decision)`);
   // Suites skipped BY NAME ("remove in PR #9"): the gate passes only once each file is gone.
   const repoRoot = join(__dirname, '../../../../../..');
   for (const f of (c as { removeInPr9?: { files: Array<{ file: string; reason: string }> } }).removeInPr9?.files ?? []) {
@@ -30,7 +32,7 @@ describe('twenty-expected-differences.json (behaviour-change catalogue)', () => 
     expect(new Set(diffs.map((d) => d.id)).size).toBe(diffs.length);
     for (const d of diffs) {
       expect(SEVERITIES).toContain(d.severity);
-      expect(d.acceptance).toMatch(/^(OWNER-ACCEPTED|NEEDS OWNER APPROVAL|doc fix)/);
+      expect(d.acceptance).toMatch(/^(OWNER-ACCEPTED|NEEDS OWNER APPROVAL|MITIGATED|doc fix)/);
       expect(d.change.length).toBeGreaterThan(20);
       expect(d.test).toMatch(/twenty-(behaviour-catalogue|injection-simulation|refusals)/);
     }
@@ -45,10 +47,12 @@ describe('twenty-expected-differences.json (behaviour-change catalogue)', () => 
     }
   });
 
-  it('the five protections the owner did NOT list in §2 are present and marked NEEDS OWNER APPROVAL (never silently accepted)', () => {
-    const needs = diffs.filter((d) => d.acceptance.startsWith('NEEDS OWNER APPROVAL')).map((d) => d.acceptance);
+  it('the five protections the owner did NOT list in §2 are present and either NEEDS OWNER APPROVAL or accepted by a DATED owner decision (never silently accepted)', () => {
+    const decided = diffs
+      .filter((d) => d.acceptance.startsWith('NEEDS OWNER APPROVAL') || /^OWNER-ACCEPTED \(owner decision \d{4}-\d{2}-\d{2}/.test(d.acceptance))
+      .map((d) => d.acceptance);
     for (const item of ['DBA-01', 'deployment identity', 'logical backup', 'column-level secret grants', 'worker_due_work']) {
-      expect(needs.some((a) => a.includes(item))).toBe(true);
+      expect({ item, present: decided.some((a) => a.includes(item)) }).toEqual({ item, present: true });
     }
   });
 

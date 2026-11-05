@@ -258,7 +258,7 @@ describeIfDb('host-label namespace, reserved labels and quarantine (C1/C2/C4/C5)
   // privileges through the owner (OWNER-LOGIN DIFFERENCE HL-1, catalogue): with no tenant context bound it sees ZERO claim /
   // quarantine rows (FORCE RLS since M-T1; the owner-only definer policy admits only rab_secure_owner) and its DELETE removes
   // nothing; the global reserved-label list (no organisation_id) is readable and its DELETE is refused by the parity guard.
-  it('HL-1: the schema role crewflow_app has no privilege on the namespace tables; the runtime login (NEEDS OWNER APPROVAL) sees no claim / quarantine row without context, reads the global reserved list, deletes nothing; quarantine rows are never deleted, even by the superuser', async () => {
+  it('HL-1: the schema role crewflow_app has no privilege on the namespace tables; the runtime login (ACCEPTED (owner, 2026-11-05)) sees no claim / quarantine row without context, reads the global reserved list, deletes nothing; quarantine rows are never deleted, even by the superuser', async () => {
     const tables = ['core.host_label_claim', 'core.released_host_label', 'core.reserved_host_label'];
     const asSchemaApp = async (sql: string): Promise<string> => {
       await admin.query('BEGIN');

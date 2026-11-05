@@ -73,7 +73,7 @@ describeIfDb('database security posture (integration)', () => {
         await admin.end();
       }
       // The runtime login crewflow_owner:
-      //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, NEEDS OWNER APPROVAL) and is refused
+      //  - reaches the provisioner-only function body (OWNER-LOGIN DIFFERENCE PROV-1, ACCEPTED (owner, 2026-11-05)) and is refused
       //    there: an unknown workspace is P0002, nothing is registered;
       //  - audit_log stays insert-only against DML: the table owner crewflow holds only SELECT/INSERT on it (42501);
       //  - core.permission / core.migrations: see REF-1 below (owner-accepted difference, its own reproduction).

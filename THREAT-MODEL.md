@@ -5447,21 +5447,61 @@ them is a control that "passed".
 | Credential-exposure impact (the one URL is the owner) | BC-16 | HIGH |
 | Direct writes to 7 pre-auth tables within one tenant (X2; owner decision 2026-11-04, below) | BC-18 | MEDIUM |
 
-**NOT listed in §2, so STOPPED for explicit owner approval.** The code records each one. Nothing claims any of them is
-acceptable.
+**Not listed in §2, then accepted by the owner on 2026-11-05 ("like Twenty").** Each one keeps its catalogue entry
+(status `accepted-owner`, dated) and its reproducing test. An accepted loss is never reported as a passing control.
 
-| Protection lost | Catalogue | Severity | How it is recorded today |
+| Protection lost | Catalogue | Severity | Recorded |
 |---|---|---|---|
-| DBA-01: the API can run the Worker-only dispatch-claim functions | BC-08 / G-08 | MEDIUM | Boot gate 8 writes a `BC-08 … PENDING OWNER APPROVAL` warning on every API and CLI start |
-| Direct access to `worker_due_work` and the dispatch pointers | BC-10 | MEDIUM | `check-rls-coverage` expects 0 rows (restrictive deny) instead of 42501 |
-| The runtime can rebind the deployment identity | BC-11 / G-06 | HIGH | Catalogue test. Mitigation depends on D6 (Agent 1). |
-| No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Catalogue test (`row_security = off` is refused) |
-| Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Catalogue test |
-| Legacy LOGIN schema roles keep their old passwords on an upgraded database | BC-17 | MEDIUM | Catalogue test. Recommended fix: `ALTER ROLE … NOLOGIN` (changes the golden). |
-| Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | PENDING OWNER APPROVAL (found by Agent 5, 2026-11-04). Catalogue test. RLS WITH CHECK still holds. |
-| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | PENDING OWNER APPROVAL (Agent 5). Catalogue test. No claim or quarantine row without context; reserved-label DELETE is parity-guarded. |
-| AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | PENDING OWNER APPROVAL (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
-| The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | PENDING OWNER APPROVAL (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. Kept as its own entry rather than folded into BC-08 (dispatch claims) or BC-15 (mitigated), so the open part stays visible. |
+| DBA-01: the API can run the Worker-only dispatch-claim functions | BC-08 / G-08 | MEDIUM | Accepted 2026-11-05. Boot gate 8 still writes a `BC-08 …` warning on every API and CLI start. |
+| Direct access to `worker_due_work` and the dispatch pointers | BC-10 | MEDIUM | Accepted 2026-11-05. `check-rls-coverage` expects 0 rows (restrictive deny). |
+| Production deployment ID and per-release approval token no longer required (see below) | BC-11 / G-06 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
+| Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
+| The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
+
+**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512 and f91f1038):** the legacy schema roles
+kept their old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on
+the transition and on fresh installs; `crewflow_migrator` too, on the transition, when the role exists. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
+authenticate only via non-password methods, which the provider's `pg_hba` must not grant. It stays LOGIN because
+migrations 1786721300000 and 1786721340000 assert its LOGIN, and `crewflow_owner` cannot administer it. Proving test:
+the PG16 lifecycle check "transition: BC-17 the old logins are disabled (crewflow, crewflow_app, crewflow_migrator
+NOLOGIN without a password; crewflow_worker LOGIN without a password)" (the goldens show `login=false` on the fresh,
+reference, interrupted and transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any
+more.
+
+- **`crewflow_worker`:** stays LOGIN without a password. Only a `trust`, `peer` or `cert` rule in the provider's
+  `pg_hba` could admit it; the provider must not grant one.
+- **Fresh install, residual (detection only):** `crewflow_owner` keeps CREATEROLE plus ADMIN on `crewflow` and
+  `crewflow_app`. Injected SQL could run `ALTER ROLE crewflow_app LOGIN PASSWORD '…'` and regain a persistent,
+  less-privileged login that survives credential rotation. The privilege-drift snapshot and the posture golden catch
+  `login=true`; nothing prevents it. A transitioned database is not exposed: there `crewflow_owner` is NOCREATEROLE.
+- **Rollback:** roles are cluster-wide. Only a fresh-cluster restore of `roles.sql` plus the dump brings LOGIN back.
+- **`crewflow_migrator` (f91f1038):** NOLOGIN PASSWORD NULL on the transition, but it keeps its memberships
+  (`rab_secure_owner` and `crewflow`, SET + INHERIT). A NOLOGIN member is inert. Removing it (REVOKE or DROP ROLE)
+  would need a separate owner decision. The transition passed the second-boot posture check with it present.
+
+**BC-11 / G-06, owner-accepted 2026-11-05 (HIGH):**
+
+> "Production no longer requires a deployment ID or a per-release approval token. A wrong or old image, or a staging
+> config pointed at the production URL, migrates production with no second check. Recovery from a mistaken upgrade is
+> restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like
+> Twenty."
+
+The production safeguards become optional and are off by default. Remaining controls:
+
+- the migration lock;
+- the identity and refusal gates;
+- the posture and semantic goldens;
+- RLS;
+- the mandatory pre-upgrade backup in the runbook;
+- the optional, opt-in deployment ID and approval token.
+
+Also accepted with BC-11 (Agent 1, 0074cecb): a production deployment that declares no deployment ID skips the marker and
+location checks. It therefore does not detect the wrong database, a restored database or a cloned database. Every boot
+writes a warning instead.
 
 ### The ten consequences PT-01's wording did not cover (M0 §6.2)
 
@@ -5471,9 +5511,10 @@ acceptable.
 3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
 4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
    sink is required.
-5. **The deployment identity and the N1 approval are effectively removed.** NEEDS OWNER APPROVAL (BC-11).
+5. **The deployment identity and the N1 approval are effectively removed.** Accepted by the owner 2026-11-05 (BC-11,
+   above).
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
-   backdoors. NEEDS OWNER APPROVAL (BC-12).
+   backdoors. Accepted by the owner 2026-11-05 (BC-12).
 7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
 8. **The integrity gate is blind to policy and function rewrites that keep FORCE on.** The semantic posture monitor
    detects them afterwards (BC-05).
@@ -5526,12 +5567,12 @@ acceptable.
 | G-03 | CRITICAL | Cross-tenant account takeover with MFA bypass | Accepted (BC-04). The monitor detects a disabled trigger. |
 | G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
 | G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
-| G-06 | HIGH | The runtime can rebind the deployment identity | NEEDS OWNER APPROVAL (BC-11) |
+| G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
 | G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Agent 1 (approval token, migrate-on-start defaults) |
-| G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | NEEDS OWNER APPROVAL (BC-08) |
+| G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
 | G-09 | MED | Pool poisoning: a session-level SET ROLE survives COMMIT | **Mitigated:** RESET ROLE on checkout and at the start of every tenant transaction, plus a `current_user = session_user` assertion |
 | G-10 | MED | The workspace registry and bound constraints are writable | **Mitigated on normal paths** by M-T2 and the grant-parity guards. The injection case is accepted. |
-| G-11 | MED | No logical backup by the app login | NEEDS OWNER APPROVAL (BC-12) |
+| G-11 | MED | No logical backup by the app login | Accepted by the owner 2026-11-05 (BC-12) |
 | G-12 | LOW | The reachability walk must count ADMIN-only memberships and predefined roles | **Done.** The MEMBER-semantics walk follows every `pg_auth_members` edge, is cross-checked with `pg_has_role(…, 'MEMBER')`, and refuses predefined and provider-admin roles. |
 | G-13 | HIGH (pre-existing) | RLS keys on a GUC the runtime can set | Unchanged. Out of scope (it needs its own design). |
 

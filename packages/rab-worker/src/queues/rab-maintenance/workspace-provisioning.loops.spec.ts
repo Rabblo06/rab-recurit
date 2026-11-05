@@ -177,3 +177,20 @@ describe('in-process provisioning configuration (opt-in 3a / 3b / 4 equivalents)
     expect(resolveInProcessProvisioningInterval({ WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5' })).toEqual({ intervalSeconds: 5, intervalMs: 5_000 });
   });
 });
+
+/**
+ * T4 follow-up (README agent's report): the root `yarn start` (CLAUDE.md's dev entry point) must not launch the superseded
+ * separate provisioner (`rab-worker:provision`). The Worker provisions in-process; under `concurrently --kill-others` the
+ * separate process exiting (not enabled → exit 0, or refused by the owner-login boot gates) stopped the whole dev stack.
+ */
+describe('root yarn start: the Worker provisions in-process; no separate provisioner process', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const rootPackage = require('../../../../../package.json') as { scripts: Record<string, string> };
+
+  it('does not run rab-worker:provision, and still starts the Worker after the server listens on :3000', () => {
+    const start = rootPackage.scripts.start!;
+    expect(start).not.toContain('rab-worker:provision');
+    expect(start).toContain('npx wait-on tcp:3000 && npx nx run rab-worker:start');
+    expect(start).toContain('npx nx run-many -t start -p rab-server rab-front');
+  });
+});

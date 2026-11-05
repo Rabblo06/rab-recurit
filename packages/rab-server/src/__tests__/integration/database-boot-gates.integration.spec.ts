@@ -66,7 +66,7 @@ describe('database boot gates (integration, migrations-only test database)', () 
   });
 
   // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner. Its boot report also carries the
-  // documented owner-login warnings: BC-08 (DBA-01 lost, PENDING OWNER APPROVAL; asserted present) and, on a database with
+  // documented owner-login warnings: BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05); asserted present) and, on a database with
   // workspace schemas the PostgreSQL golden has no template for, the semantic-posture note. Any OTHER warning still counts.
   it('the API runtime login passes every gate: crewflow_owner, PostgreSQL 16+, extensions, FORCE RLS, no pending migration', () => {
     expect(report.role).toBe('crewflow_owner');
@@ -108,7 +108,7 @@ describe('database boot gates (integration, migrations-only test database)', () 
     await expect(runDatabaseBootGates('api', options(appUrl, { env: { ...NON_PROD, PG_EXPECTED_DATABASE_NAME: report.database } }))).resolves.toBeDefined();
   });
 
-  it('identity: a declared identity cannot match an absent/unbound marker; production fails closed without a bound marker', async () => {
+  it('identity: a declared identity cannot match an absent/unbound marker; DECLARED production fails closed without a bound marker (undeclared production only warns: BC-11, owner-accepted 2026-11-05, covered by Agent 1 unit tests; it needs TLS)', async () => {
     await refusedAt(
       runDatabaseBootGates('api', options(appUrl, { env: { ...NON_PROD, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID } })),
       'identity',

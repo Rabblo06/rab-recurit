@@ -20,19 +20,23 @@
 # (existing separated database): a URL alone never works.
 #
 # LIFECYCLE: the controlled release. The API never migrates (CREWFLOW_MIGRATE_ON_START=false; read-only compatibility
-# check, then main.js). rab-migrate (deploy-prepare.js, same image, same login, approval mode token) runs to completion
-# first. It is ALWAYS in token mode: without a token it is a check run (exit 0 current, 3 pending: prints the token); an
-# apply run needs CREWFLOW_MIGRATION_APPROVED=<token>; failures exit 64-69 by kind (M0 section 7). The Worker never
-# migrates and starts after a healthy API.
+# check, then main.js). rab-migrate (deploy-prepare.js, same image, same login) runs to completion first. BC-11 (owner
+# decision 2026-11-05): approval mode none by default, so it APPLIES every pending migration (failures exit 64-69 by kind,
+# M0 section 7). Token mode is an opt-in (CREWFLOW_MIGRATION_APPROVAL_MODE=token entered identically on rab-api, rab-worker
+# and rab-migrate): then a run without a token is a check run (3 = pending) and every non-fresh apply needs
+# CREWFLOW_MIGRATION_APPROVED=<token>. Accepted risk: with the defaults a wrong image or URL migrates production; recovery
+# is the mandatory pre-upgrade backup (docs/release/OWNER-LOGIN-RECOVERY.md). The Worker never migrates and starts after a
+# healthy API.
 #
 # ENTER FOR rab-api AND rab-worker (identical values): PG_DATABASE_URL, PG_SSL_CA_CERT_PATH (mount the CA read-only),
-# PG_EXPECTED_DATABASE_NAME, CREWFLOW_DEPLOYMENT_ENVIRONMENT=production, CREWFLOW_DEPLOYMENT_ID, the connection budget
+# PG_EXPECTED_DATABASE_NAME, OPTIONALLY CREWFLOW_DEPLOYMENT_ENVIRONMENT=production + CREWFLOW_DEPLOYMENT_ID and
+# CREWFLOW_MIGRATION_APPROVAL_MODE=token (BC-11 opt-ins, the same values on all three services), the connection budget
 # (PG_POOL_MAX_CONNECTIONS / PG_EXPECTED_* — one login, so all pools share crewflow_owner's limit), REDIS_URL, APP_SECRET
 # (+ keyrings if used; CURRENT values unchanged in a transition), CORS_ORIGINS, APP_URL, ACCOUNTS_URL (https only),
 # TRUSTED_PROXY_CIDRS, EMAIL_* / RESEND_API_KEY, S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT,
 # SENTRY_DSN / APP_VERSION (optional), AUTH_GOOGLE_* / AUTH_MICROSOFT_* (if enabled), WORKSPACE_BASE_DOMAIN (owner decision).
 # ENTER FOR rab-migrate: PG_DATABASE_URL (the same value), PG_SSL_CA_CERT_PATH, PG_EXPECTED_DATABASE_NAME,
-# CREWFLOW_DEPLOYMENT_ENVIRONMENT, CREWFLOW_DEPLOYMENT_ID — nothing else.
+# and the optional CREWFLOW_DEPLOYMENT_ENVIRONMENT / CREWFLOW_DEPLOYMENT_ID / CREWFLOW_MIGRATION_APPROVAL_MODE — nothing else.
 # MUST NOT BE ENTERED ANYWHERE: DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX, PG_WORKER_DATABASE_URL,
 # CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
 # CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
@@ -90,7 +94,6 @@ services:
       S3_FORCE_PATH_STYLE: "true"
       S3_SERVER_SIDE_ENCRYPTION: NONE
       CREWFLOW_MIGRATE_ON_START: "false"
-      CREWFLOW_MIGRATION_APPROVAL_MODE: token
       CREWFLOW_UPGRADE_FAILURE_POLICY: refuse
     depends_on:
       rab-redis:

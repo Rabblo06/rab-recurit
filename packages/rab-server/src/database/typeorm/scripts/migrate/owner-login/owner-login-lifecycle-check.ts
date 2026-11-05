@@ -508,6 +508,16 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
     res.map((x) => `${x.code} ${x.result?.state} ${x.result?.reason ?? sanitise(x.out.slice(-300))}`),
   );
   check((await ledgerCount(c3)) === MIGRATIONS.length, 'concurrent: complete ledger');
+  // BC-17 (Agent 5, LOW): by now several fresh installs ran on this cluster; each later one re-ran the role migrations, which
+  // set new random passwords on roles the first install had already made NOLOGIN. Read as the superuser (pg_authid).
+  const legacy = (
+    await rows('postgres', `SELECT rolname, rolcanlogin AS login, rolpassword IS NULL AS nopw FROM pg_authid WHERE rolname IN ('crewflow', 'crewflow_app') ORDER BY 1`)
+  ).map((x) => `${x.rolname}:login=${x.login}:nopassword=${x.nopw}`);
+  check(
+    JSON.stringify(legacy) === JSON.stringify(['crewflow:login=false:nopassword=true', 'crewflow_app:login=false:nopassword=true']),
+    'BC-17: after several fresh installs on one cluster, crewflow and crewflow_app are NOLOGIN WITHOUT a password',
+    legacy,
+  );
 
   // Lock timeout on a CURRENT database, then the upgrade-failure policy.
   const f = `owl_fresh_${RUN}`;
@@ -664,7 +674,19 @@ async function transitionScenario(): Promise<void> {
   const pendingNames = MIGRATIONS.filter((m) => m.ts > cutoff).map((m) => m.name);
   log(`transition: separated build applied ${a + b1 + b2}; ${pendingNames.length} pending: ${pendingNames.join(', ')}`);
 
+  // BC-17: the separated layout's restricted migration login, with a password, as the M2 harness creates it on a disposable
+  // cluster (memberships omitted: the check is about its login ability, and the transition changes no membership).
+  await rows('postgres', `CREATE ROLE crewflow_migrator LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT PASSWORD '${randomBytes(18).toString('hex')}'`);
   await runAdminSql(db, TRANSITION_SQL, db);
+  const logins = (
+    await rows('postgres', `SELECT rolname, rolcanlogin AS login, rolpassword IS NULL AS nopw FROM pg_authid WHERE rolname IN ('crewflow', 'crewflow_app', 'crewflow_migrator', 'crewflow_worker') ORDER BY 1`)
+  ).map((x) => `${x.rolname}:login=${x.login}:nopassword=${x.nopw}`);
+  check(
+    JSON.stringify(logins) ===
+      JSON.stringify(['crewflow:login=false:nopassword=true', 'crewflow_app:login=false:nopassword=true', 'crewflow_migrator:login=false:nopassword=true', 'crewflow_worker:login=true:nopassword=true']),
+    'transition: BC-17 the old logins are disabled (crewflow, crewflow_app, crewflow_migrator NOLOGIN without a password; crewflow_worker LOGIN without a password)',
+    logins,
+  );
   const r = await inProcess(db);
   check(
     r.outcome === 'ok' && r.state === 'CHAIN-PARTIAL' && JSON.stringify([...r.applied].sort()) === JSON.stringify([...pendingNames].sort()),
