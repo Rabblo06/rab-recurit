@@ -8,10 +8,12 @@
  *     CREWFLOW_DEPLOYMENT_ENVIRONMENT=production, else local. SECURITY TRADE-OFF ST-3 (M0 §9): whoever sets the API's
  *     environment can migrate production; mitigation CREWFLOW_MIGRATION_APPROVAL_MODE=token and migrate-on-start off in
  *     production (release step).
- *   - D6: an unbound production database (absent or unbound marker) is bound on its FIRST, fresh install only; the bootstrap
- *     flag and PG_EXPECTED_DATABASE_NAME are synthesised for that run, re-derived after the lock (another replica may have
- *     bound it meanwhile). CREWFLOW_DEPLOYMENT_ID is optional on that first install (generated and logged once) and
- *     MANDATORY as soon as a marker is bound.
+ *   - D6: an unbound production database (absent or unbound marker) is bound on its FIRST, fresh install only, and only when
+ *     CREWFLOW_DEPLOYMENT_ENVIRONMENT=production is declared; the bootstrap flag and PG_EXPECTED_DATABASE_NAME are
+ *     synthesised for that run, re-derived after the lock (another replica may have bound it meanwhile). With the
+ *     environment declared, CREWFLOW_DEPLOYMENT_ID may be omitted on that first install (generated and logged once).
+ *   - BC-11 (owner decision 2026-11-05): the identity is OPTIONAL everywhere, production included. Undeclared: no marker
+ *     check (a loud warning every start), no bootstrap, no auto-bind. Declared: the exact match against a bound marker.
  *   - client_connection_check_interval = 1 s and a SIGTERM self-cancel (main entry), so a killed child never keeps the lock
  *     for the length of a statement (M0-C, VERIFIED: up to 900 s otherwise).
  *   - after the chain: auto-bind (fresh install only), then deploy-post-checks on EVERY start (C-2), with an AHEAD ledger's
@@ -46,6 +48,7 @@ import {
   isDeploymentEnvironment,
   readDeploymentMarker,
 } from '../../../../deployment-identity/deployment-identity';
+import { isProductionProcess } from '../../../../boot-checks/database-boot-gate-rules';
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import { GuardedTarget, Query, runLockedMigrations } from '../locked-migration-runner';
 import { assertMigrationApproval, readMigrationApproval } from '../migration-approval';
@@ -165,7 +168,12 @@ export function synthesiseGuardEnv(
   database: string,
   generatedId: string,
 ): { guardEnv: Record<string, string | undefined>; generatedDeploymentId: string | null } {
-  const production = env[DEPLOYMENT_ENVIRONMENT_VAR]?.trim() === 'production';
+  // Owner decision BC-11 (2026-11-05): the declaration is optional in production, so it can no longer be what makes this
+  // run a production one. Production = the API's own runtime classification (isProductionProcess('api'), exactly the rule
+  // its boot gate applies) OR a declared production identity. An undeclared production run therefore keeps DB_TARGET=
+  // production (N1, TLS, the production refusals) instead of falling back to local.
+  const declaredProduction = env[DEPLOYMENT_ENVIRONMENT_VAR]?.trim() === 'production';
+  const production = declaredProduction || isProductionProcess('api', env);
   const guardEnv: Record<string, string | undefined> = { ...env, DB_TARGET: production ? 'production' : 'local' };
   delete guardEnv.ALLOW_PRODUCTION_DB_COMMANDS;
   delete guardEnv[IDENTITY_BOOTSTRAP_VAR];
@@ -184,7 +192,9 @@ export function synthesiseGuardEnv(
   }
   guardEnv.ALLOW_PRODUCTION_DB_COMMANDS = 'true';
   let generatedDeploymentId: string | null = null;
-  if (marker !== 'bound') {
+  // BC-11: the first-install bootstrap and auto-bind happen only when the identity is DECLARED; an undeclared production
+  // install leaves the marker unbound (no bootstrap flag, no generated id) and the guard warns instead of checking.
+  if (marker !== 'bound' && declaredProduction) {
     guardEnv[IDENTITY_BOOTSTRAP_VAR] = IDENTITY_BOOTSTRAP_VALUE;
     if (!guardEnv[EXPECTED_DATABASE_NAME_VAR]?.trim()) guardEnv[EXPECTED_DATABASE_NAME_VAR] = database;
     if (!guardEnv[DEPLOYMENT_ID_VAR]?.trim()) {
@@ -256,15 +266,18 @@ export function installSigtermSelfCancel(
  * deployment environment exactly as the child derives it (synthesiseGuardEnv over the live marker state), in memory only.
  * Returns null when DB_TARGET is set explicitly or the URL's login is not crewflow_owner (the legacy path is unchanged).
  */
+/** Whether the process's one database URL names the owner login (parsed only; never connects, never logged). */
+export function urlNamesOwnerLogin(env: Record<string, string | undefined>): boolean {
+  try {
+    return decodeURIComponent(new URL(env.PG_DATABASE_URL ?? '').username) === 'crewflow_owner';
+  } catch {
+    return false;
+  }
+}
+
 export async function deriveOwnerLoginGuardEnv(env: Record<string, string | undefined>, generatedId: string = randomUUID()): Promise<Record<string, string | undefined> | null> {
   if (env.DB_TARGET?.trim()) return null;
-  let login = '';
-  try {
-    login = decodeURIComponent(new URL(env.PG_DATABASE_URL ?? '').username);
-  } catch {
-    return null;
-  }
-  if (login !== 'crewflow_owner') return null;
+  if (!urlNamesOwnerLogin(env)) return null;
   const { marker, database } = await readMarkerState(env);
   return synthesiseGuardEnv(env, marker, database, generatedId).guardEnv;
 }
@@ -436,7 +449,7 @@ async function autoBindFreshInstall(input: {
   // bind uses the process's own declaration, or production's generated id.
   const environment = (guardEnv[DEPLOYMENT_ENVIRONMENT_VAR] ?? input.env[DEPLOYMENT_ENVIRONMENT_VAR])?.trim();
   if (!environment) {
-    log('fresh install without CREWFLOW_DEPLOYMENT_ENVIRONMENT: the marker stays unbound (non-production)');
+    log('fresh install without CREWFLOW_DEPLOYMENT_ENVIRONMENT: the marker stays unbound (the identity is optional; declare it and bind with db:bind-identity to enable the check)');
     return;
   }
   if (!isDeploymentEnvironment(environment)) throw new Error(`${DEPLOYMENT_ENVIRONMENT_VAR} is not a deployment environment. Refusing.`);
