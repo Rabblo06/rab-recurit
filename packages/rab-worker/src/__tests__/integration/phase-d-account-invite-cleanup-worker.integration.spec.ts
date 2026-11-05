@@ -137,7 +137,7 @@ describeIfApproved('Phase D F-1 account-invite cleanup on the runtime data sourc
   // P-class (owner-login architecture). The test used the RUNTIME connection (the app's DataSource), not the role itself:
   // the SCHEMA ROLE crewflow_app still has no EXECUTE on the three definers (catalog; no migration granted it). The one
   // runtime login (API and Worker alike) inherits their owner, so the API process can run the Worker's invite cleanup:
-  // OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL), reproduced green on a test-owned invite.
+  // OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)), reproduced green on a test-owned invite.
   it('4. the schema role crewflow_app cannot execute the definers; the runtime login can and runs the cleanup (BC-08)', async () => {
     const [grants] = await admin.query<[{ app: boolean; candidates: boolean; del: boolean }]>(
       `SELECT has_function_privilege('crewflow_app', 'core.worker_expire_account_invites(integer)', 'EXECUTE') AS app,
@@ -148,7 +148,7 @@ describeIfApproved('Phase D F-1 account-invite cleanup on the runtime data sourc
     const [{ usable }] = await runtimeApp.query<[{ usable: boolean }]>(
       `SELECT has_function_privilege('core.worker_expire_account_invites(integer)', 'EXECUTE') AS usable`,
     );
-    expect(usable).toBe(true); // BC-08 (NEEDS OWNER APPROVAL)
+    expect(usable).toBe(true); // BC-08 (ACCEPTED (owner, 2026-11-05))
     const id = await seedInvited({ status: 'invited', expiresAgo: '1 minute', cleanupAgo: null });
     const result = await runAccountInviteCleanupCycle(runtimeApp, ON);
     expect(result.expired).toBeGreaterThanOrEqual(1);

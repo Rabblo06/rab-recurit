@@ -183,7 +183,7 @@ describeIfApproved('Phase D global dispatch claim (integration — opt-in)', () 
 
   // P-class (owner-login architecture). The schema role crewflow_app (the old API login) still cannot execute any claim or
   // release function: 42501 through the fixture superuser's SET LOCAL ROLE, rolled back. The one runtime login (API and
-  // Worker alike) CAN: OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL), reproduced green inside a
+  // Worker alike) CAN: OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)), reproduced green inside a
   // transaction that is always rolled back, so no pointer is leased.
   it('5. the schema role crewflow_app cannot execute any claim or release function (42501); the runtime login can (BC-08, rolled back)', async () => {
     const asSchemaApp = (fn: (m: EntityManager) => Promise<unknown>) =>

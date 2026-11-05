@@ -411,14 +411,14 @@ describeIfDb('AI skills (integration)', () => {
       }
       // P-class (owner-login architecture): the schema role crewflow_app is refused TRUNCATE (42501). The runtime login holds
       // TRUNCATE through the owner (no TRUNCATE parity guard on ai_skill; TRUNCATE ignores RLS, so it would empty EVERY tenant):
-      // OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL). Asserted from the catalog, never executed: a real TRUNCATE takes
+      // OWNER-LOGIN DIFFERENCE AI-1 (ACCEPTED (owner, 2026-11-05)). Asserted from the catalog, never executed: a real TRUNCATE takes
       // ACCESS EXCLUSIVE on the shared CI database (Agent 3 review note).
       expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.ceo.organisationId, workspaceId: org.ceo.workspaceId, userId: org.ceo.userId }, [{ sql: `TRUNCATE core.ai_skill` }])).toBe('42501');
       const [{ t }] = await kit.owner.query(`SELECT has_table_privilege('crewflow_owner', 'core.ai_skill', 'TRUNCATE') AS t`);
       expect(t).toBe(true);
       const rollback = new Error('rollback');
       // A client-chosen id: refused to the schema role crewflow_app by its column INSERT grant (42501). The runtime login is
-      // not refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (NEEDS OWNER APPROVAL), rolled back.
+      // not refused (no INSERT parity guard): OWNER-LOGIN DIFFERENCE COLGRANT-1 (ACCEPTED (owner, 2026-11-05)), rolled back.
       const withId = `INSERT INTO core.ai_skill (id, organisation_id, name, label, description, content, created_by, updated_by, reason) VALUES (gen_random_uuid(), $1, 'with-id', 'L', 'D', 'C', $2, $2, 'id probe')`;
       expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', org.ceo, [{ sql: withId, params: [org.orgId, org.ceo.userId] }])).toBe('42501');
       await expect(

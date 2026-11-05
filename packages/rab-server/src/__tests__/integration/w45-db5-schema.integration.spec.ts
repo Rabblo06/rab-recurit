@@ -145,15 +145,15 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     });
 
     // P-class (owner-login architecture). Secret READ: the schema role crewflow_app is still refused (42501). The runtime
-    // login crewflow_owner is NOT: catalogue BC-13 (column-level secret grants lost), PENDING OWNER APPROVAL — asserted as a
+    // login crewflow_owner is NOT: catalogue BC-13 (column-level secret grants lost), ACCEPTED (owner, 2026-11-05) — asserted as a
     // recorded difference, never as a passed control. Every MFA column WRITE below is still refused for the runtime login
     // (guard trigger, 42501): that control holds.
-    it('MFA secret: schema role crewflow_app cannot read it (42501); the runtime login can (BC-13, PENDING OWNER APPROVAL); no runtime MFA column write (guard trigger, 42501)', async () => {
+    it('MFA secret: schema role crewflow_app cannot read it (42501); the runtime login can (BC-13, ACCEPTED (owner, 2026-11-05)); no runtime MFA column write (guard trigger, 42501)', async () => {
       await asSchemaApp({ org: a.org, uid: a.user }, async (c) => {
         expect(await spq(c, 'SELECT totp_secret_encrypted FROM core."user" WHERE id = $1', [a.user])).toBe('42501');
       });
       await asApp({ org: a.org, uid: a.user }, async (c) => {
-        // OWNER-LOGIN DIFFERENCE BC-13 (PENDING OWNER APPROVAL): the secret column is readable by the runtime login.
+        // OWNER-LOGIN DIFFERENCE BC-13 (ACCEPTED (owner, 2026-11-05)): the secret column is readable by the runtime login.
         expect(await spq(c, 'SELECT totp_secret_encrypted FROM core."user" WHERE id = $1', [a.user])).toBe('ACCEPTED');
       }, false);
       for (const sql of [
@@ -246,7 +246,7 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
       const hashes = codes.map((c) => sha(`pepper:${c}`));
       await asApp({ org: a.org, uid: a.user }, async (c) => {
         expect((await c.query('SELECT core.mfa_replace_recovery_codes($1, $2) AS n', [a.user, hashes])).rows[0].n).toBe(10);
-        // OWNER-LOGIN DIFFERENCE BC-13 (column-level secret grants lost; HIGH, PENDING OWNER APPROVAL, never accepted): the
+        // OWNER-LOGIN DIFFERENCE BC-13 (column-level secret grants lost; HIGH, ACCEPTED (owner, 2026-11-05)): the
         // runtime login can read the recovery-code hashes. The schema role crewflow_app is still refused (42501, below).
         expect(await spq(c, 'SELECT code_hash FROM core.user_mfa_recovery_code')).toBe('ACCEPTED');
         expect((await c.query('SELECT core.mfa_consume_recovery_code($1, $2) AS ok', [a.user, hashes[0]])).rows[0].ok).toBe(true);
@@ -350,14 +350,14 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     });
 
     // P-class (owner-login architecture): the schema role crewflow_app still has no table privilege (42501). The runtime
-    // login crewflow_owner is NOT refused: catalogue MFA-RC / BC-13 (PENDING OWNER APPROVAL), asserted as a recorded difference.
+    // login crewflow_owner is NOT refused: catalogue MFA-RC / BC-13 (ACCEPTED (owner, 2026-11-05)), asserted as a recorded difference.
     it('schema role crewflow_app has no table privilege on login_handoff (42501); the runtime login is not refused (MFA-RC / BC-13); a probe role subject to the policy sees zero rows with no context', async () => {
       await asSchemaApp({ org: ws.org }, async (c) => {
         expect(await spq(c, 'SELECT 1 FROM core.login_handoff')).toBe('42501');
         expect(await spq(c, `DELETE FROM core.login_handoff`)).toBe('42501');
       });
       await asApp({ org: ws.org }, async (c) => {
-        // OWNER-LOGIN DIFFERENCE MFA-RC / BC-13 (PENDING OWNER APPROVAL); rolled back.
+        // OWNER-LOGIN DIFFERENCE MFA-RC / BC-13 (ACCEPTED (owner, 2026-11-05)); rolled back.
         expect(await spq(c, 'SELECT 1 FROM core.login_handoff')).toBe('ACCEPTED');
       }, false);
       await create(session, hex64());

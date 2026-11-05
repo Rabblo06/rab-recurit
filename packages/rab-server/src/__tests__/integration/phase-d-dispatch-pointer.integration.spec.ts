@@ -195,7 +195,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
       expect(await asSchemaRole(role, 'SELECT count(*) FROM core.worker_dispatch_pointer', [], a.org)).toBe('42501');
     });
 
-    // The one runtime login holds table privileges through the owner (catalogue BC-10, NEEDS OWNER APPROVAL), but the pointer
+    // The one runtime login holds table privileges through the owner (catalogue BC-10, ACCEPTED (owner, 2026-11-05)), but the pointer
     // policies still fail it closed: the definer policy admits only current_user = rab_secure_owner and the RESTRICTIVE deny
     // binds members of crewflow. It sees zero rows, cannot insert (42501) and changes nothing (rolled back). Only an injected
     // SET ROLE rab_secure_owner gets past this (G-03, owner-accepted).
@@ -221,7 +221,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
 
     // P-class (owner-login architecture): the boundary between the SCHEMA ROLES is unchanged: only crewflow_worker may claim
     // or release, and the claim body is executable by none of them. The one runtime login inherits the definers' owner and
-    // can do all of it, the body included: catalogue BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL); asserted in rolled-back
+    // can do all of it, the body included: catalogue BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)); asserted in rolled-back
     // transactions so no pointer is leased.
     it('only the schema role crewflow_worker may claim or release; the claim body is executable by no schema role; the runtime login can (BC-08)', async () => {
       const claimSql = (q: 'email' | 'push' | 'realtime' | 'statement') =>
@@ -234,12 +234,12 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
       }
       expect(await asSchemaRole('crewflow_worker', impl)).toBe('42501');
       expect(await asSchemaRole('crewflow_worker', claimSql('email'))).toBe('ACCEPTED');
-      // OWNER-LOGIN DIFFERENCE BC-08 (NEEDS OWNER APPROVAL), rolled back.
+      // OWNER-LOGIN DIFFERENCE BC-08 (ACCEPTED (owner, 2026-11-05)), rolled back.
       expect(await runtimeRolledBack(worker, () => worker.query(impl))).toBe('ACCEPTED');
       expect(await runtimeRolledBack(worker, () => claim(worker, 'email', 1))).toBe('ACCEPTED');
     });
 
-    it('the schema roles crewflow_app and crewflow_worker share no membership either way (the one runtime login is both: BC-08, NEEDS OWNER APPROVAL)', async () => {
+    it('the schema roles crewflow_app and crewflow_worker share no membership either way (the one runtime login is both: BC-08, ACCEPTED (owner, 2026-11-05))', async () => {
       const { rows } = await admin.query(
         `SELECT pg_has_role('crewflow_app', 'crewflow_worker', 'USAGE') AS app_has_worker, pg_has_role('crewflow_worker', 'crewflow_app', 'SET') AS worker_set_app,
                 pg_has_role('crewflow_worker', 'crewflow', 'USAGE') AS worker_crewflow, pg_has_role('crewflow_worker', 'rab_secure_owner', 'USAGE') AS worker_secure`,
@@ -637,7 +637,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     });
 
     // P-class (owner-login architecture): the schema role crewflow_app (the old API login) cannot execute any claim or the
-    // release, even inside a tenant context (42501). The one runtime login can: catalogue BC-08 (NEEDS OWNER APPROVAL),
+    // release, even inside a tenant context (42501). The one runtime login can: catalogue BC-08 (ACCEPTED (owner, 2026-11-05)),
     // asserted inside rolled-back transactions so nothing is leased.
     it('the schema role crewflow_app cannot execute any claim or the release, even inside a tenant context (42501); the runtime login can (BC-08)', async () => {
       const fn = { email: 'worker_claim_email_dispatch', push: 'worker_claim_push_dispatch', realtime: 'worker_claim_realtime_publish', statement: 'worker_claim_statement_dispatch' };
