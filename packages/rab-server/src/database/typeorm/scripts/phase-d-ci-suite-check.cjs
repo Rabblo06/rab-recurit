@@ -26,12 +26,14 @@ const SUITES = {
       'phase-d-f2-pointer-identity.integration.spec.ts',
       'phase-d-invite-redemption-without-cleanup.integration.spec.ts',
       'phase-d-r4-secure-owner-regression.integration.spec.ts',
-      'worker-identity-boot-gates.integration.spec.ts',
     ],
     // Whole-file skips that are reviewed and expected in CI, with the reason.
     skippedFiles: {
       // Opt-in benchmark (PHASE_D_EXPLAIN=true): EXPLAIN ANALYZE over 500k synthetic pointers. Not a correctness gate.
       'phase-d-dispatch-pointer-explain.integration.spec.ts': 'PHASE_D_EXPLAIN benchmark (500k rows), opt-in only',
+      // Owner-login architecture: no crewflow_worker LOGIN exists; superseded by owner-login-guards (Agent 3 ruling,
+      // 2026-11-05), skipped by name and on the PR #9 removal gate (twenty-expected-differences.json removeInPr9).
+      'worker-identity-boot-gates.integration.spec.ts': 'SUPERSEDED by owner-login-guards; remove in PR #9',
     },
     // Individual pending tests allowed inside an otherwise running suite: file -> max count.
     pendingAllowed: {},

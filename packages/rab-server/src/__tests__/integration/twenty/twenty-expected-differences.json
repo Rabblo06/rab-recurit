@@ -616,5 +616,30 @@
         "ask": "add (needs-owner-approval): the runtime login holds table privileges on the host-label namespace tables; RLS / triggers / parity guards keep the observable effect nil."
       }
     ]
+  },
+  "removeInPr9": {
+    "$comment": "Suites skipped BY NAME under the owner login. The PR #9 removal gate fails while any of these files still exists (removalGateProblems).",
+    "files": [
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-resilience.integration.spec.ts",
+        "reason": "LEGACY separate provisioner (no crewflow login under the owner login)"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-optin.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/workspace-provisioner-entrypoint.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-worker/src/__tests__/integration/provisioner-db-connection-loss.integration.spec.ts",
+        "reason": "LEGACY separate provisioner"
+      },
+      {
+        "file": "packages/rab-server/src/__tests__/integration/worker-identity-boot-gates.integration.spec.ts",
+        "reason": "SUPERSEDED by owner-login-guards (Agent 3 ruling 2026-11-05)"
+      }
+    ]
   }
 }

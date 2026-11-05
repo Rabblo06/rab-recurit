@@ -2,6 +2,9 @@
  * T7: the behaviour-change catalogue is well-formed, and the gate for the final removal PR (#9) is computable.
  * Structural only (no database). The gate itself is enforced in PR #9's CI by `TWENTY_REMOVAL_GATE=enforce`.
  */
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import catalogue from './twenty-expected-differences.json';
 
 type Diff = { id: string; severity: string; acceptance: string; change: string; test: string };
@@ -12,6 +15,11 @@ export function removalGateProblems(c: typeof catalogue = catalogue): string[] {
   const out: string[] = [];
   for (const d of c.differences as Diff[]) if (/NEEDS OWNER APPROVAL/.test(d.acceptance)) out.push(`${d.id}: ${d.acceptance}`);
   if (!c.migratedTests.entries.length) out.push('migratedTests is empty: the TW-D differential has not been classified');
+  // Suites skipped BY NAME ("remove in PR #9"): the gate passes only once each file is gone.
+  const repoRoot = join(__dirname, '../../../../../..');
+  for (const f of (c as { removeInPr9?: { files: Array<{ file: string; reason: string }> } }).removeInPr9?.files ?? []) {
+    if (existsSync(join(repoRoot, f.file))) out.push(`REMOVE-IN-PR9: ${f.file} still exists (${f.reason})`);
+  }
   return out;
 }
 
@@ -46,6 +54,10 @@ describe('twenty-expected-differences.json (behaviour-change catalogue)', () => 
 
   it('the PR #9 removal gate reports what still blocks it (enforced only when TWENTY_REMOVAL_GATE=enforce)', () => {
     const problems = removalGateProblems();
+    // The suites skipped by name are on the gate: every listed file is reported while it still exists.
+    for (const f of (catalogue as { removeInPr9?: { files: Array<{ file: string }> } }).removeInPr9?.files ?? []) {
+      if (existsSync(join(__dirname, '../../../../../..', f.file))) expect(problems.some((l) => l.includes(f.file))).toBe(true);
+    }
     if (process.env.TWENTY_REMOVAL_GATE === 'enforce') expect(problems).toEqual([]);
     else expect(Array.isArray(problems)).toBe(true);
   });
