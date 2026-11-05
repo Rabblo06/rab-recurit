@@ -74,8 +74,11 @@ describe('database target guard (pure resolution)', () => {
     expectRefused(env, /present in packages\/rab-server\/\.env/, { DB_TARGET: 'production' });
   });
 
-  it('7. B3: production needs the declared deployment identity (CREWFLOW_DEPLOYMENT_ENVIRONMENT=production + CREWFLOW_DEPLOYMENT_ID)', () => {
-    expectRefused(PROD_ENV({ app: NEON_POOLED }, {}), /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production and CREWFLOW_DEPLOYMENT_ID/);
+  it('7. BC-11: the production declaration is optional; a partial or wrong one is refused', () => {
+    // Owner decision BC-11 (2026-11-05): no declaration = no marker check (a warning, live stage); pure stage resolves.
+    const undeclared = run(PROD_ENV({ app: NEON_DIRECT }, {}));
+    expect(undeclared.classification).toBe('PRODUCTION');
+    expect(undeclared.declared).toBeNull();
     expectRefused(PROD_ENV({ app: NEON_POOLED }, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }), /must be set together/);
     expectRefused(PROD_ENV({ app: NEON_POOLED }, { ...DECLARED_PROD, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'staging' }), /must declare production/);
     expectRefused(PROD_ENV({ app: NEON_POOLED }, { ...DECLARED_PROD, CREWFLOW_DEPLOYMENT_ID: 'x' }), /must be a uuid/);
@@ -229,7 +232,7 @@ describe('database target guard (pure resolution)', () => {
   it('16. no refusal message contains a credential, including for a malformed URL', () => {
     expectRefused({ DB_TARGET: 'local', DATABASE_URL: `postgres://u:${SECRET}@[bad/db` }, /is not a parseable postgres URL/);
     expectRefused({ DB_TARGET: 'local', DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
-    expectRefused(PROD_ENV({ app: OTHER_NEON_DIRECT }, {}), /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+    expectRefused(PROD_ENV({ app: OTHER_NEON_DIRECT }, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }), /must be set together/);
   });
 
   it('17b. final review F4: an UNLISTED single-label host is REMOTE for DB_TARGET=local|test; the compose services stay local', () => {

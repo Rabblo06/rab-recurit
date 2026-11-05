@@ -32,7 +32,8 @@
  *   7. unlock, exit 0. A failure exits with the startup exit code of its kind (deployPrepareFailureExitCode: 64 config,
  *      65 behind / not approved, 66 migration failed, 67 identity, 68 post-check, 69 lock timeout); 3 for "pending but not
  *      approved" on a check run. The owner login (crewflow_owner) takes the owner-login lifecycle of the locked runner; the
- *      release step always uses the F5 token (CREWFLOW_MIGRATION_APPROVAL_MODE=token semantics).
+ *      release step follows CREWFLOW_MIGRATION_APPROVAL_MODE (BC-11, 2026-11-05):
+ *      none (default) applies without a token, token is the F5 flow above. The legacy CF-41 login always uses the F5 flow.
  * Deliberately does NOT import dotenv: production authority comes only from the deployment environment.
  */
 import { assertFlushableNamespace } from './migrate/entity-cache-flush';
@@ -46,8 +47,8 @@ import {
   readMigrationApproval,
 } from './migrate/migration-approval';
 import { MigrationIdentityError, MigrationIdentityFacts } from '../core/migration-identity';
-import { deriveOwnerLoginGuardEnv, outcomeOf } from './migrate/owner-login/migrate-on-start';
-import { STARTUP_EXIT_CODES } from '../../owner-login/runtime-db-config';
+import { deriveOwnerLoginGuardEnv, outcomeOf, urlNamesOwnerLogin } from './migrate/owner-login/migrate-on-start';
+import { readMigrationApprovalMode, STARTUP_EXIT_CODES } from '../../owner-login/runtime-db-config';
 import { runCacheFlush } from './cache-flush';
 
 export const EXIT_PENDING_NOT_APPROVED = 3;
@@ -100,7 +101,16 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
   const postChecks = deps.postChecks ?? deployPostCheckProblems;
   // F5: any non-empty value is an apply run; whether it approves anything is decided after the lock (assertMigrationApproval).
   const approval = readMigrationApproval(env);
-  const approved = approval !== null;
+  // Owner decision BC-11 (2026-11-05): the release step follows CREWFLOW_MIGRATION_APPROVAL_MODE (default none). Owner login,
+  // mode none: an apply run without a token (N1 still gates every existing database). Mode token: exactly the F5 flow below
+  // (no token = check run, exit 3). The legacy CF-41 login keeps the F5 flow in every mode until PR #9.
+  const approvalMode = readMigrationApprovalMode(env);
+  const ownerLogin = urlNamesOwnerLogin(env);
+  const directApply = ownerLogin && approvalMode === 'none';
+  if (directApply && approval !== null) {
+    log(`WARNING: ${MIGRATION_APPROVAL_VAR} is set but CREWFLOW_MIGRATION_APPROVAL_MODE is none: it is ignored (set the mode to token to require it).`);
+  }
+  const approved = directApply || approval !== null;
   const phase = env.CREWFLOW_MIGRATION_PHASE?.trim();
   // Same as the rab-migrate wrapper: phase A never receives the bootstrap passwords, so the run stops at the role split.
   if (phase === 'A') {
@@ -112,12 +122,14 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
   if (flush && !env.REDIS_URL?.trim()) throw new Error(`cache flush "${flush}" requested but REDIS_URL is not set. Refusing before any migration.`);
 
   log(
-    approved
-      ? `apply run: ${MIGRATION_APPROVAL_VAR} is set; it must be the token of the set pending after the lock`
-      : `check run (${MIGRATION_APPROVAL_VAR} not set): nothing will be applied`,
+    directApply
+      ? 'apply run: owner login, CREWFLOW_MIGRATION_APPROVAL_MODE=none (no per-release token; N1 still applies to an existing database)'
+      : approved
+        ? `apply run: ${MIGRATION_APPROVAL_VAR} is set; it must be the token of the set pending after the lock`
+        : `check run (${MIGRATION_APPROVAL_VAR} not set): nothing will be applied`,
   );
   // Owner login without DB_TARGET: the release step derives its target authority from the deployment environment, like
-  // the migrate-on-start child (ST-3), re-derived after the lock; every apply still needs the F5 token (always token mode).
+  // the migrate-on-start child (ST-3), re-derived after the lock; the approval follows CREWFLOW_MIGRATION_APPROVAL_MODE.
   const derived = await (deps.deriveGuardEnv ?? deriveOwnerLoginGuardEnv)(env);
   if (derived) log(`owner login without DB_TARGET: target ${derived.DB_TARGET} derived from CREWFLOW_DEPLOYMENT_ENVIRONMENT (in memory)`);
   const result = await runner({
@@ -126,10 +138,11 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
     ...(derived ? { refreshGuardEnv: async () => (await (deps.deriveGuardEnv ?? deriveOwnerLoginGuardEnv)(env)) ?? derived } : {}),
     log,
     mode: approved ? 'apply' : 'check',
+    ...(ownerLogin ? { approvalMode } : {}),
     requireMigrationIdentity: true,
     extraIdentityCheck: (facts) => assertMigrationPhase(phase, facts),
     approvePending:
-      approval === null
+      approval === null || directApply
         ? undefined
         : (pending) => {
             assertMigrationApproval(approval, pending);

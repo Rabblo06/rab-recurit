@@ -859,9 +859,9 @@ rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
 rls|workspace_schema_migration|enable=true|force=true
 rls|workspace_schema_registry|enable=true|force=true
-role|crewflow_app|super=false|bypassrls=false|login=true|member_of=
+role|crewflow_app|super=false|bypassrls=false|login=false|member_of=
 role|crewflow_worker|super=false|bypassrls=false|login=true|inherit=true|createrole=false|createdb=false|replication=false|member_of=crewflow_app:inherit=true:set=false:admin=false|members=0
-role|crewflow|super=false|bypassrls=false|login=true|member_of=
+role|crewflow|super=false|bypassrls=false|login=false|member_of=
 role|rab_secure_owner|super=false|bypassrls=false|login=false|member_of=
 schema|core|crewflow_app|usage=true|create=false
 schema|core|crewflow|usage=true|create=false
