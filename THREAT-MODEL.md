@@ -5627,6 +5627,24 @@ writes a warning instead.
       - Recommended follow-up: add both, failing CI when an API entrypoint can reach one of the PDF packages or when a
         started API process has one in `require.cache`. Until then a vulnerability in those packages is reachable from
         the API only through code that imports them, which is not proven absent.
+    - **Stop signal during the migrate step (O3 fix T8a-TMP; LOW): owner-accepted 2026-11-05.** The read-only rab-api
+      has no writable path, so `api-prestart.sh` takes the failed migration's name back from the migrate child through
+      a command substitution instead of a temp file. A POSIX shell runs its trap only after a command substitution
+      returns, so a `docker compose stop rab-api` that arrives while migrations are being applied is handled when the
+      child ends, or becomes Docker's SIGKILL after `stop_grace_period` (35 s). Every other prestart step still reacts
+      immediately.
+      - Measured (O3 container test T10, PG16, with a transactional test migration): both a stop and a direct SIGKILL
+        mid-migration left the database consistent. The session ended, the advisory lock was released, there was no
+        ledger row, the change was rolled back, and the next documented start applied it (outcome ok).
+      - Residual: 8 migrations in the chain set `transaction = false` (several use `CREATE INDEX CONCURRENTLY`):
+        1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000 and
+        1786721430000. A kill inside one of them is not rolled back. For example, an interrupted concurrent build
+        can leave an INVALID index, and its re-run depends on that migration's own idempotence. This was already true
+        before the change (the stop then reached the child immediately and interrupted it the same way); the grace
+        period only changes when the kill lands. NOT measured by T10. Operators must not stop rab-api during the
+        migrate step; the deployment guide's backup step is the recovery path.
+      - Stricter alternatives, declined by the owner: a /tmp tmpfs on rab-api (breaks the H6 "API has no writable path"
+        rule), or a larger prestart rework.
 
     Design changes recorded with this decision (not risks):
 

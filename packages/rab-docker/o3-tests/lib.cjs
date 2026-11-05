@@ -12,10 +12,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const RD = path.resolve(__dirname, '..'); // packages/rab-docker
-// --api-tmp-workaround (TEST-ONLY, labelled in the results): adds o3-tests/docker-compose.o3t-api-tmp.yml (a /tmp tmpfs on
-// rab-api) so the C3 path past the defect T8a found can still be measured. Off by default: the shipped files only.
-const API_TMP_WORKAROUND = process.argv.includes('--api-tmp-workaround');
-const FILES = ['-f', 'docker-compose.image.yml', '-f', 'docker-compose.local-db.yml', '-f', 'o3-tests/docker-compose.o3t.yml', ...(API_TMP_WORKAROUND ? ['-f', 'o3-tests/docker-compose.o3t-api-tmp.yml'] : [])];
+// The temporary rab-api /tmp overlay and worker-fix layer used to measure past defects T8a-TMP / T8a-WORKER were removed
+// once those were fixed (o3/fix-continue 14aac368): these tests run against the shipped compose files only.
+const API_TMP_WORKAROUND = false;
+const FILES = ['-f', 'docker-compose.image.yml', '-f', 'docker-compose.local-db.yml', '-f', 'o3-tests/docker-compose.o3t.yml'];
 
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const b64 = (n) => crypto.randomBytes(n).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, Math.ceil((n * 4) / 3) - 2);
