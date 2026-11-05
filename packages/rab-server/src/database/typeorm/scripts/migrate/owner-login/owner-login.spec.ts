@@ -18,7 +18,7 @@ import {
 import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, OWNER_LOGIN, RoleFacts, roleShapeProblems } from './bootstrap';
 import { CatalogFacts, classifyDatabase, decideFreshInstall } from './fresh-install';
-import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
+import { blockingPostCheckProblems, codeMigrationNames, deriveOwnerLoginGuardEnv, migrateChildConfigRefusal, outcomeOf, readTestSeams, synthesiseGuardEnv } from './migrate-on-start';
 import { deployPrepareFailureExitCode } from '../../deploy-prepare';
 import { Migration } from 'typeorm/migration/Migration';
 
@@ -35,6 +35,7 @@ import {
   shimQueryRunner,
 } from './row-copy-shim';
 import { assessUpgradeFailure, parseUpgradeFailurePolicy } from './upgrade-failure-policy';
+import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { assertDeploymentIdentity, MARKER_PRESENT_SQL, MARKER_READ_SQL } from '../../../../deployment-identity/deployment-identity';
 
 const spec = (name: string) => BOOTSTRAP_ROLES.find((r) => r.name === name)!;
@@ -643,5 +644,20 @@ describe('install-state move (database/owner-login/install-state.ts): fresh-inst
       return [];
     }, 'EMPTY');
     expect(seen).toEqual([OWNER_LOGIN]);
+  });
+});
+
+describe('O3 (Agent 2): the migrate child and DISABLE_DB_MIGRATIONS / the result-line policy', () => {
+  it('DISABLE_DB_MIGRATIONS=true: the child refuses (configuration, exit 64) with an actionable message; otherwise it runs', () => {
+    expect(migrateChildConfigRefusal({ disableDbMigrations: true })).toMatch(/^DISABLE_DB_MIGRATIONS=true: .* migrate child refuses to run\. Unset it .*Refusing\.$/);
+    expect(migrateChildConfigRefusal({ disableDbMigrations: false })).toBeNull();
+    expect(migrateChildConfigRefusal({})).toBeNull();
+    expect(STARTUP_EXIT_CODES.config).toBe(64);
+  });
+
+  it('the result line carries policy "continue" EXACTLY for the default and the deprecated alias (the prestart relay vetoes any other string)', () => {
+    for (const env of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
+      expect(parseUpgradeFailurePolicy(env)).toBe('continue');
+    }
   });
 });
