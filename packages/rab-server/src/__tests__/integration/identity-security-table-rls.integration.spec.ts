@@ -316,7 +316,13 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       const loginRoles = await adminDataSource.manager.query<Array<{ rolname: string }>>(
         `SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname IN ('crewflow', 'crewflow_app')`,
       );
-      expect(loginRoles.map((r) => r.rolname).sort()).toEqual(['crewflow', 'crewflow_app']);
+      const [{ ownerLogin }] = await adminDataSource.manager.query<Array<{ ownerLogin: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner' AND rolcanlogin) AS "ownerLogin"`,
+      );
+      // BC-17 (owner decision 2026-11-05, mitigated; Agent 1 80686512 / f91f1038): on an owner-login database crewflow and
+      // crewflow_app are NOLOGIN, so neither can log in at all (stricter than before). A separated-layout database keeps the
+      // original expectation: both are login roles there.
+      expect(loginRoles.map((r) => r.rolname).sort()).toEqual(ownerLogin ? [] : ['crewflow', 'crewflow_app']);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {
