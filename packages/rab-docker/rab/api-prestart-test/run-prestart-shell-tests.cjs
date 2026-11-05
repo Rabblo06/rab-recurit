@@ -216,7 +216,10 @@ for (const [name, value] of [
   ['CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS', '301'], ['CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS', '5s'],
 ]) {
   r = run(`cfg-bad-${name}-${value}`, { ...BASE, [name]: value });
-  check(`8b ${name}=${value} -> refused (64), value not echoed, nothing ran`, r.code === 64 && r.out.includes(name) && !r.out.includes(`=${value}`) && !line(r.out, 'main') && !migrated(r.out), r.out);
+  // The deprecated-alias refusal names the allowed values of the new name ("CREWFLOW_UPGRADE_FAILURE=continue|refuse"): that
+  // documented hint is taken out before the no-echo check, which otherwise stays exactly as strict for every case.
+  const echoed = r.out.split('CREWFLOW_UPGRADE_FAILURE=continue|refuse').join('').includes(`=${value}`);
+  check(`8b ${name}=${value} -> refused (64), value not echoed, nothing ran`, r.code === 64 && r.out.includes(name) && !echoed && !line(r.out, 'main') && !migrated(r.out), r.out);
 }
 // Owner decision BC-11 (2026-11-05): the approval token is optional and off by default, production included.
 r = run('cfg-prod-approval-default', { ...BASE, CREWFLOW_MIGRATE_ON_START: 'true' }, { ctl: { 'migrate-seq': '0' } });

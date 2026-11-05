@@ -110,7 +110,7 @@ crewflow_runtime_db_config() {
     refuse) UPGRADE_ALIAS=refuse ;;
     continue-if-compatible) UPGRADE_ALIAS=continue ;;
     '') UPGRADE_ALIAS="" ;;
-    *) refuse "CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible; set CREWFLOW_UPGRADE_FAILURE (continue or refuse) instead. Refusing to start." ;;
+    *) refuse "CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible; use CREWFLOW_UPGRADE_FAILURE=continue|refuse instead. Refusing to start." ;;
   esac
   if [ -n "$UPGRADE_POLICY" ] && [ -n "$UPGRADE_ALIAS" ] && [ "$UPGRADE_POLICY" != "$UPGRADE_ALIAS" ]; then
     refuse "CREWFLOW_UPGRADE_FAILURE and the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY disagree; remove CREWFLOW_UPGRADE_FAILURE_POLICY. Refusing to start."

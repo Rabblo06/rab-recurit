@@ -167,7 +167,7 @@ export function readUpgradeFailurePolicy(env: Env): UpgradeFailurePolicy {
       : undefined;
   if (legacy !== undefined && aliased === undefined) {
     throw new RuntimeDbConfigError(
-      `${UPGRADE_FAILURE_POLICY_VAR} is deprecated and must be exactly one of: ${Object.keys(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).join(', ')}; set ${UPGRADE_FAILURE_VAR} (continue or refuse) instead. Refusing to start.`,
+      `${UPGRADE_FAILURE_POLICY_VAR} is deprecated and must be exactly one of: ${Object.keys(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).join(', ')}; use ${UPGRADE_FAILURE_VAR}=continue|refuse instead. Refusing to start.`,
     );
   }
   if (current !== undefined && aliased !== undefined && current !== aliased) {
