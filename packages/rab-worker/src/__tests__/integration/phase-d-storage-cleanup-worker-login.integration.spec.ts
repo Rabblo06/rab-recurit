@@ -57,7 +57,7 @@ describeIfWorkerLogin('Phase D: storage cleanup on the crewflow_worker login, gl
 
   // Owner-login architecture. Under the one login the operator CLI runs as crewflow_owner by design (Agent 3's CLI gate
   // expects the owner): a CLI-style run on the Worker's credential is no longer refused. OWNER-LOGIN DIFFERENCE BC-02 / BC-08
-  // (BC-02 one login for every process, behaviour change; BC-08 DBA-01 lost, NEEDS OWNER APPROVAL), reproduced green. The SCHEMA ROLE crewflow_worker keeps the
+  // (BC-02 one login for every process, behaviour change; BC-08 DBA-01 lost, ACCEPTED (owner, 2026-11-05)), reproduced green. The SCHEMA ROLE crewflow_worker keeps the
   // refusal below (a connection acting as it is refused by the command).
   it('BC-02 / BC-08: a CLI-style run on the one runtime credential runs (the operator command and the Worker share crewflow_owner)', async () => {
     await command.run([], { lockWaitSeconds: 0 }); // resolves (measured on #72)

@@ -566,7 +566,7 @@
       },
       {
         "bc": "BC-17",
-        "note": "needs-owner-approval: legacy LOGIN schema roles keep their old passwords on an upgraded database. Becomes mitigated in both catalogues once Agent 1 lands the owner-decided NOLOGIN-after-transition change (2026-11-05)."
+        "note": "mitigated (owner decision 2026-11-05; Agent 1 80686512 / f91f1038): after a fresh install or the transition, crewflow and crewflow_app are NOLOGIN with no password, crewflow_migrator (where it exists) NOLOGIN with no password, crewflow_worker keeps LOGIN without a password. Asserted by twenty-mode-check assertHeadState (every successful install) and MIX-1."
       }
     ],
     "missingFromBc": [

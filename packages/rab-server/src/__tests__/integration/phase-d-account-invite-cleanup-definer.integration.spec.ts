@@ -71,7 +71,7 @@ describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; n
 
   // P-class (owner-login architecture): the schema role crewflow_app (the old API login) still cannot reach any of the three
   // definers (42501; fixture superuser + SET LOCAL ROLE, rolled back). The one runtime login inherits their owner and can:
-  // catalogue BC-08 (DBA-01 lost, NEEDS OWNER APPROVAL), asserted inside a rolled-back transaction so nothing expires or is
+  // catalogue BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)), asserted inside a rolled-back transaction so nothing expires or is
   // deleted.
   it('the schema role crewflow_app cannot reach any of the three definers (42501); the runtime login can (BC-08, rolled back)', async () => {
     const calls = [

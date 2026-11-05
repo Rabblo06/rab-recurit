@@ -115,7 +115,7 @@ describeIfDb('bootstrap-admin as the crewflow identity (integration, P2)', () =>
     expect(await admin.query(`SELECT user_id FROM core.platform_admin`)).toHaveLength(0);
   });
 
-  // OWNER-LOGIN DIFFERENCE BC-11 (deployment identity; HIGH, NEEDS OWNER APPROVAL): the bootstrap command no longer refuses
+  // OWNER-LOGIN DIFFERENCE BC-11 (deployment identity; HIGH, ACCEPTED (owner, 2026-11-05)): the bootstrap command no longer refuses
   // the runtime login, because crewflow_owner IS the deployment's bootstrap identity. Reproduced green below: every
   // functional bootstrap guarantee (one-time, idempotent, CLOSED after revocation, existing account) holds on that login.
   it('BC-11: fresh database (runtime login): creates exactly one INVITED admin (no password), its operational CEO identity, a queued activation email and the audit entry', async () => {

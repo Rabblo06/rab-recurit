@@ -71,7 +71,7 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       const ctx = { organisationId: org.id, workspaceId: null, userId: admin.userId };
       // P-class (owner-login architecture): the column grant still refuses the SCHEMA ROLE crewflow_app (42501). The runtime
       // login is NOT refused an INSERT that sets the marker (organisation_ai_setting has no INSERT parity guard):
-      // OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL), asserted inside a rolled-back transaction only.
+      // OWNER-LOGIN DIFFERENCE AI-1 (ACCEPTED (owner, 2026-11-05)), asserted inside a rolled-back transaction only.
       expect(await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', ctx, [{ sql: `INSERT INTO core.organisation_ai_setting (organisation_id, enabled, synthetic_data) VALUES ($1, false, true)`, params: [org.id] }])).toBe('42501');
       const rollback = new Error('rollback');
       await expect(
@@ -93,7 +93,7 @@ describeIfDb('AI Part A: dev real-provider gate, synthetic marker, cost meter (i
       const org = await kit.factory.createOrganisation('ai-synth-fn');
       const ceo = await kit.factory.createCeo(org, { permissions: 'production', platformAdmin: true });
       // The schema role crewflow_app has no EXECUTE (42501). The runtime login inherits the function owner and reaches the body,
-      // which still refuses on this disposable test database (55000): OWNER-LOGIN DIFFERENCE AI-1 (NEEDS OWNER APPROVAL).
+      // which still refuses on this disposable test database (55000): OWNER-LOGIN DIFFERENCE AI-1 (ACCEPTED (owner, 2026-11-05)).
       expect(
         await sqlStateAsSchemaRole(kit.owner, 'crewflow_app', { organisationId: org.id, userId: ceo.userId }, [{ sql: `SELECT core.ai_dev_mark_organisation_synthetic($1)`, params: [org.id] }]),
       ).toBe('42501');

@@ -25,7 +25,7 @@ const describeIfApproved = RUN ? describe : describe.skip;
  * (TEST_DATABASE_URL and TEST_DATABASE_WORKER_URL are both the owner login in CI). The D5 EXECUTE boundary is a property
  * of the SCHEMA ROLES, so the BEFORE/AFTER expectations are checked as crewflow_worker / crewflow_app / crewflow through the
  * fixture superuser's `SET LOCAL ROLE` (rolled back). The runtime login itself can run all three functions (it inherits
- * their owner): catalogue BC-08 (DBA-01 separation lost), NEEDS OWNER APPROVAL. PHASE_D_D5=before only in CI.
+ * their owner): catalogue BC-08 (DBA-01 separation lost), ACCEPTED (owner, 2026-11-05). PHASE_D_D5=before only in CI.
  */
 describeIfApproved(`Phase D D5 due-work EXECUTE cutover under one login (${MODE ?? 'off'}; integration)`, () => {
   let runtime: Client;
@@ -67,7 +67,7 @@ describeIfApproved(`Phase D D5 due-work EXECUTE cutover under one login (${MODE 
     for (const sql of calls) expect(await asSchemaRole('crewflow', sql)).toBe(MODE === 'after' ? '42501' : 'ACCEPTED');
   });
 
-  it('OWNER-LOGIN DIFFERENCE BC-08 (NEEDS OWNER APPROVAL): the one runtime login (API and Worker alike) can run all three', async () => {
+  it('OWNER-LOGIN DIFFERENCE BC-08 (ACCEPTED (owner, 2026-11-05)): the one runtime login (API and Worker alike) can run all three', async () => {
     const [{ u }] = (await runtime.query(`SELECT current_user AS u`)).rows;
     expect(u).toBe('crewflow_owner');
     for (const sql of calls) expect(await sqlstateOf(runtime.query(sql))).toBe('ACCEPTED');

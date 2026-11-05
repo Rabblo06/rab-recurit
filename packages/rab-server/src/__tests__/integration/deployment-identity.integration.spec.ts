@@ -133,7 +133,7 @@ describe('deployment identity marker (integration, migration DeploymentIdentity1
     // owner, which keeps only SELECT/INSERT/UPDATE (singleton) and SELECT/INSERT (history): DELETE / TRUNCATE everywhere and
     // UPDATE on the history stay refused by privilege, direct INSERTs by the owner-only policies (CURRENT_USER must be
     // rab_secure_owner), and a direct UPDATE of the singleton matches no row. bind() itself is reachable:
-    // OWNER-LOGIN DIFFERENCE BC-11 / G-06 (HIGH, NEEDS OWNER APPROVAL), asserted only inside this rolled-back transaction.
+    // OWNER-LOGIN DIFFERENCE BC-11 / G-06 (HIGH, ACCEPTED (owner, 2026-11-05)), asserted only inside this rolled-back transaction.
     await inRolledBackTx(async (c) => {
       expect((await c.query('SELECT current_user::text AS u, session_user::text AS s')).rows[0]).toEqual({ u: 'crewflow_owner', s: 'crewflow_owner' });
       const outcome: Record<string, string> = {};
@@ -151,7 +151,7 @@ describe('deployment identity marker (integration, migration DeploymentIdentity1
         ),
       );
       expect((await c.query('SELECT * FROM core.deployment_identity_check()')).rows).toEqual([]);
-      // BC-11 (NEEDS OWNER APPROVAL): the runtime login passes the bind gate. Rolled back with the transaction.
+      // BC-11 (ACCEPTED (owner, 2026-11-05)): the runtime login passes the bind gate. Rolled back with the transaction.
       await c.query('SAVEPOINT b');
       const bound = await c.query(bind, ['test', ID_A, REASON, 'test', null, [BIND_HOST]]).then(
         () => 'ACCEPTED',
