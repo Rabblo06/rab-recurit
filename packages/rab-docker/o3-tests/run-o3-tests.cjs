@@ -16,7 +16,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { Ctx, RD, hex, b64, sleep } = require('./lib.cjs');
+const { Ctx, RD, API_TMP_WORKAROUND, hex, b64, sleep } = require('./lib.cjs');
 
 const argv = process.argv.slice(2);
 const MAJOR = argv[0];
@@ -171,6 +171,14 @@ async function step(id, title, fn) {
     r.status = 'FAIL';
     r.checks.push({ ok: false, what: `threw: ${ctx.redact(e && e.message ? e.message : String(e))}` });
     ctx.note(`  FAIL threw: ${e && e.message ? e.message : e}`);
+    // Failure evidence: the last container logs of both processes (redacted), so a failed step can be diagnosed afterwards.
+    for (const svc of ['rab-api', 'rab-worker']) {
+      try {
+        ctx.evidence(`${id}-failure-${svc}.log`, ctx.run('docker', ['logs', '--tail', '400', ctx.container(svc)]).out);
+      } catch {
+        /* the container may not exist */
+      }
+    }
   }
   ctx.note(`=== ${id} ${r.status}`);
   fs.writeFileSync(path.join(OUT, 'RESULTS.json'), JSON.stringify(results, null, 2));
@@ -291,7 +299,7 @@ async function workerOn(db, timeoutMs = 240_000) {
 }
 
 async function main() {
-  ctx.note(`project ${ctx.project}; PostgreSQL image ${process.env.O3T_PG_IMAGE}; image ${process.env.O3T_IMAGE}; marker workaround: ${MARKER ? 'ON' : 'off'}`);
+  ctx.note(`project ${ctx.project}; PostgreSQL image ${process.env.O3T_PG_IMAGE}; image ${process.env.O3T_IMAGE}; marker workaround: ${MARKER ? 'ON' : 'off'}; rab-api /tmp workaround: ${API_TMP_WORKAROUND ? 'ON (TEST-ONLY, defect T8a-TMP)' : 'off (shipped files only)'}`);
   writeSecrets();
 
   // ---------------------------------------------------------------------------------------------------------- 1
@@ -377,8 +385,9 @@ async function main() {
       const chromium = exec(svc, ['sh', '-c', 'for p in /usr/lib/chromium /usr/bin/chromium /usr/bin/chromium-browser /app/node_modules/playwright /app/node_modules/playwright-core /app/node_modules/puppeteer; do test -e "$p" && echo "PRESENT $p"; done; ls /usr/lib | grep -i chrom; true']).stdout.trim();
       check(chromium === '', `${svc}: no Chromium / browser driver (${chromium || 'none found'})`);
     }
-    const role = ctx.psql("SELECT rolsuper || '|' || rolbypassrls || '|' || rolreplication || '|' || rolcanlogin FROM pg_roles WHERE rolname = 'crewflow_owner'");
-    check(role === 'f|f|f|t', `crewflow_owner: NOSUPERUSER, NOBYPASSRLS, NOREPLICATION, LOGIN (${role})`);
+    // (boolean || text concatenates the boolean's text form: 'false'/'true')
+    const role = ctx.psql("SELECT rolsuper::text || '|' || rolbypassrls::text || '|' || rolreplication::text || '|' || rolcanlogin::text FROM pg_roles WHERE rolname = 'crewflow_owner'");
+    check(role === 'false|false|false|true', `crewflow_owner: NOSUPERUSER, NOBYPASSRLS, NOREPLICATION, LOGIN (${role})`);
     const notForced = ctx.psql(`SELECT coalesce(string_agg(c.relname, ',' ORDER BY c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = 'core' AND c.relkind = 'r' AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'organisation_id' AND NOT a.attisdropped)
          AND NOT (c.relrowsecurity AND c.relforcerowsecurity)`);
@@ -476,11 +485,14 @@ async function main() {
     setImage(process.env.O3T_IMAGE_BROKEN);
     const since = new Date().toISOString();
     const dep = deploy();
-    check(dep.code === 0, `the documented deploy of the broken release returns 0 (API healthy degraded, Worker started) (${dep.code})`);
-    await ctx.waitHealthy('rab-api', 60_000);
     const al = ctx.logs('rab-api', since);
     ctx.evidence('T8a-api.log', al);
+    ctx.evidence('T8a-deploy.log', ctx.redact(dep.out));
+    check(dep.code === 0, `the documented deploy of the broken release returns 0 (API healthy degraded, Worker started) (${dep.code})`);
+    await ctx.waitHealthy('rab-api', 60_000);
     check(new RegExp(`ERROR[^\\n]*${PROBE}|${PROBE}[^\\n]*ERROR`).test(al), `the API logs an ERROR naming ${PROBE}`);
+    // The failed migration's name must reach main.js (CREWFLOW_UPGRADE_INCOMPLETE): "unknown" makes gate 7 refuse.
+    check(al.includes(`the upgrade FAILED at ${PROBE} and`), `api-prestart hands main.js the failed migration's name (not "unknown")`);
     check(/"outcome":"degradedContinue"/.test(al) && /"exitCode":70/.test(al), 'the migrate child: outcome degradedContinue, exit 70');
     const hz = ctx.healthz();
     check(hz.code === 0 && /"upgradeFailed"\s*:\s*true/.test(hz.body), `/healthz serves with upgradeFailed:true (${hz.body.slice(0, 200)})`);
@@ -510,7 +522,9 @@ async function main() {
     await ctx.waitFor('the token-mode refusal', () => /"exitCode":65|exit 65/.test(ctx.logs('rab-api', since)), 300_000, 5000);
     const al = ctx.logs('rab-api', since);
     ctx.evidence('T9-api.log', al);
-    check(/"exitCode":65/.test(al) || /exit 65/.test(al), 'the migrate child refuses with exit 65 (no approval token)');
+    check(/"exitCode":65/.test(al) || /exit 65/.test(al), 'the migrate child refuses with exit 65');
+    // The refusal must be the TOKEN rule, not the N1 production approval list (which runs first and also exits 65).
+    check(/CREWFLOW_MIGRATION_APPROVAL_MODE=token needs CREWFLOW_MIGRATION_APPROVED/.test(al) && !/UnapprovedProductionMigrationError/.test(al), 'the refusal is the token rule (no CREWFLOW_MIGRATION_APPROVED), not the N1 approval list');
     check(!ctx.healthStatus('rab-api').startsWith('healthy|'), 'the API does not serve');
     check(!ctx.ledger().includes(PROBE), 'nothing applied');
     const env = inspect('rab-api', '{{range .Config.Env}}{{println .}}{{end}}');
@@ -639,7 +653,7 @@ main()
   })
   .finally(async () => {
     await cleanup();
-    const lines = [`# O3 real-container tests, PostgreSQL ${MAJOR}`, '', '| test | status | checks |', '|---|---|---|'];
+    const lines = [`# O3 real-container tests, PostgreSQL ${MAJOR}`, '', `rab-api /tmp workaround: ${API_TMP_WORKAROUND ? 'ON (TEST-ONLY overlay o3-tests/docker-compose.o3t-api-tmp.yml, defect T8a-TMP)' : 'off (shipped compose files only)'}`, '', '| test | status | checks |', '|---|---|---|'];
     for (const r of results) lines.push(`| ${r.id} ${r.title} | ${r.status} | ${r.checks.filter((c) => c.ok).length}/${r.checks.length} |`);
     fs.writeFileSync(path.join(OUT, 'SUMMARY.md'), `${lines.join('\n')}\n`);
     fs.writeFileSync(path.join(OUT, 'RESULTS.json'), JSON.stringify(results, null, 2));
