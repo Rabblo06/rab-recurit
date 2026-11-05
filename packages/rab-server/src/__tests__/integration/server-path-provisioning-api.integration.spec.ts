@@ -244,8 +244,11 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
       // Kill the API's own backend once it is blocked inside the template (an outage seen from the API's side).
       let killed = false;
       for (let i = 0; i < 200 && !killed; i++) {
+        // The API's own backend: its CONFIGURED runtime login (crewflow_app on a separated fixture, crewflow_owner on an
+        // owner-login database) — never a hard-coded role name.
         const rows = await admin.query(
-          `SELECT pid FROM pg_stat_activity WHERE usename = 'crewflow_app' AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
+          `SELECT pid FROM pg_stat_activity WHERE usename = $1 AND wait_event_type = 'Lock' AND query LIKE '%provision_workspace%'`,
+          [new URL(process.env.TEST_DATABASE_URL!).username],
         );
         if (rows.length) {
           await admin.query('SELECT pg_terminate_backend($1)', [rows[0].pid]);
