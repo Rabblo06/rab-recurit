@@ -508,6 +508,16 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
     res.map((x) => `${x.code} ${x.result?.state} ${x.result?.reason ?? sanitise(x.out.slice(-300))}`),
   );
   check((await ledgerCount(c3)) === MIGRATIONS.length, 'concurrent: complete ledger');
+  // BC-17 (Agent 5, LOW): by now several fresh installs ran on this cluster; each later one re-ran the role migrations, which
+  // set new random passwords on roles the first install had already made NOLOGIN. Read as the superuser (pg_authid).
+  const legacy = (
+    await rows('postgres', `SELECT rolname, rolcanlogin AS login, rolpassword IS NULL AS nopw FROM pg_authid WHERE rolname IN ('crewflow', 'crewflow_app') ORDER BY 1`)
+  ).map((x) => `${x.rolname}:login=${x.login}:nopassword=${x.nopw}`);
+  check(
+    JSON.stringify(legacy) === JSON.stringify(['crewflow:login=false:nopassword=true', 'crewflow_app:login=false:nopassword=true']),
+    'BC-17: after several fresh installs on one cluster, crewflow and crewflow_app are NOLOGIN WITHOUT a password',
+    legacy,
+  );
 
   // Lock timeout on a CURRENT database, then the upgrade-failure policy.
   const f = `owl_fresh_${RUN}`;
