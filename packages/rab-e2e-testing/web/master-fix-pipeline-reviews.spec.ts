@@ -203,8 +203,28 @@ test.describe('Venue Offers pipeline', () => {
       await page.mouse.move(vp.w / 2, vp.h / 2);
       await page.mouse.wheel(0, 3000);
       // 4. A poll adds cards to the long column (Phase C1: 15 s ±20 % interval, so at most 18 s).
+      // The page must never get wider than the window, not even for one frame while the poll moves cards: every frame
+      // until the poll has settled is sampled. AnimatePresence popLayout takes a leaving card out of flow as position:
+      // absolute; before `.pipeline-column-body` was positioned such a card escaped the board's clipping and widened the
+      // page for ~100 ms, so the single end-of-test check below passed or failed on timing alone (CI, 2026-11-06).
+      await page.evaluate(() => {
+        const w = window as unknown as { __maxPageOverflow: number; __stopOverflowSampler: boolean };
+        w.__maxPageOverflow = 0;
+        w.__stopOverflowSampler = false;
+        const sample = () => {
+          w.__maxPageOverflow = Math.max(w.__maxPageOverflow, document.documentElement.scrollWidth - window.innerWidth);
+          if (!w.__stopOverflowSampler) requestAnimationFrame(sample);
+        };
+        requestAnimationFrame(sample);
+      });
       state.pipeline = board(8);
       await expect(page.locator('.pipeline-column[data-stage="clocked_in"] .pipeline-card')).toHaveCount(17, { timeout: 22_000 });
+      await page.waitForTimeout(600); // the leaving cards' exit (0.15 s) and the layout spring have finished
+      expect(await page.evaluate(() => {
+        const w = window as unknown as { __maxPageOverflow: number; __stopOverflowSampler: boolean };
+        w.__stopOverflowSampler = true;
+        return w.__maxPageOverflow;
+      })).toBe(0);
       await expect(page.locator('.pipeline-column[data-stage="clocked_in"] h2 .pipeline-count')).toHaveText('17');
       await page.screenshot({ path: path.join(SHOTS, `pipeline-${vp.w}-after-scroll-and-poll.png`) });
 
