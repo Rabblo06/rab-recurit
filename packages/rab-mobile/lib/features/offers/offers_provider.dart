@@ -152,7 +152,10 @@ class OffersProvider extends ChangeNotifier {
       await load(silent: true);
     } on ApiException catch (e) {
       errorOfferId = offerId;
-      errorMessage = e.userMessage;
+      errorMessage = responseFailureMessage(e);
+      // The offer changed on the server (deadline passed, expired, already
+      // answered): re-read it so the card shows the server's state.
+      if (e.statusCode == 409) await load(silent: true);
     } catch (e) {
       errorOfferId = offerId;
       errorMessage = userMessageFor(e);
@@ -161,6 +164,20 @@ class OffersProvider extends ChangeNotifier {
       busyAction = null;
       if (!_disposed) notifyListeners();
     }
+  }
+
+  /// A 409 `CONFIRMATION_DEADLINE_PASSED` always shows the server's own
+  /// message (ACCEPT / ACCEPT_REPLACEMENT wording); anything else goes through
+  /// the normal user-facing filter.
+  @visibleForTesting
+  static String responseFailureMessage(ApiException e) {
+    final message = e.message.trim();
+    if (e.statusCode == 409 &&
+        e.code == confirmationDeadlinePassedCode &&
+        message.isNotEmpty) {
+      return message;
+    }
+    return e.userMessage;
   }
 
   @override

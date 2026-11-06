@@ -13,6 +13,7 @@ import 'confirmed_staff.dart';
 import 'review_staff_report_screen.dart';
 import 'sent_shift.dart';
 import 'venue_manager_provider.dart';
+import 'vm_offer_status.dart';
 
 /// Venue Manager "Sent shift" (one sent request) and "Confirmed staff" (its
 /// confirmed seats) screens, plus the small row pieces they share with Event
@@ -493,7 +494,7 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
         // was later cancelled. Never shown as "Confirmed".
         o.status == 'manager_confirmed' && r.hasAttendance
             ? 'No longer booked'
-            : _offerLabel(o.status),
+            : vmOfferLabel(o, _offerLabel),
       ));
     }
     rows.sort((a, b) => a.$1.compareTo(b.$1));

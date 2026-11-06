@@ -60,8 +60,20 @@
  *   GET  /__fixture/clock                              virtual now
  *   GET  /__fixture/scenes                             scene names + default times
  *   POST /__fixture/reset                              legacy dataset on the REAL clock (original behaviour)
- *   POST /__fixture/confirm/:offerId|latest            staff_accepted -> manager_confirmed (two-step shifts only)
+ *   POST /__fixture/confirm/:offerId|latest            staff_accepted -> manager_confirmed, as the sending Internal Manager
+ *                                                      (TEST-ONLY control; refused 409 CONFIRMATION_DEADLINE_PASSED at or
+ *                                                      after the approval deadline, like POST /offers/:id/confirm)
  *   GET  /__fixture/state                              dump state (debugging)
+ *
+ * ── MANAGER CONFIRMATION (owner rule 2026-11-06, @rab/shared constants/offer-confirmation.ts) ─────────────────────────
+ * The system NEVER confirms an offer: an accept leaves it `staff_accepted` ("Awaiting manager confirmation") until the
+ * sending Internal Manager confirms (here: /__fixture/confirm). Every fixture offer is STANDARD, so its approval
+ * deadline is the assignment start - 30 min. At the deadline the simulated Worker withdraws a still-unconfirmed
+ * acceptance (offer manager_rejected with rejection_reason confirmation_deadline_passed, assignment rejected), writes
+ * the staff `offer_rejected` and Venue Manager `manager_confirmation_timeout` notifications only while the assignment
+ * has not ended, and pushes `offer.rejected`. An accept at or after the deadline is refused (409, the offer stays
+ * pending). Offer rows carry approvalDeadlineAt / awaitingManagerConfirmation / closedReason (+ canAccept on
+ * /offers/mine, canConfirm on /offers).
  *
  * ── HONESTY NOTES ────────────────────────────────────────────────────────────────────────────────────────────
  *  - QR: clock-in/out REQUIRE a non-empty `qrToken` (as the DTO does) but the fixture does NOT validate it — any
@@ -100,6 +112,25 @@ const SENT_VISIBLE_HOURS = 5;
 const MISSING_CLOCK_OUT_GRACE_MINUTES = 30;
 const NO_SHOW_GRACE_MINUTES = 30;
 const OFFER_EXPIRY_HOURS = 48;
+// @rab/shared constants/offer-confirmation.ts (frozen contract; mirrored, not imported).
+const MANAGER_CONFIRMATION_LEAD_MINUTES = 30;
+const CLOSED_DEADLINE = 'confirmation_deadline_passed';
+const CLOSED_CANCELLED = 'shift_cancelled';
+const DEADLINE_CODE = 'CONFIRMATION_DEADLINE_PASSED';
+const DEADLINE_MESSAGES = {
+  CONFIRM: 'The manager-confirmation deadline has passed, so this acceptance can no longer be confirmed.',
+  ACCEPT: 'This shift starts too soon for a manager to confirm it, so it can no longer be accepted.',
+};
+const DEADLINE_NOTIFICATION = {
+  STAFF: {
+    type: 'offer_rejected', title: 'Shift offer withdrawn',
+    message: 'Your shift offer was withdrawn because final manager confirmation was not received before the approval deadline.',
+  },
+  VENUE_MANAGER: {
+    type: 'manager_confirmation_timeout', title: 'Confirmation deadline passed',
+    message: 'The manager-confirmation deadline has passed. The pending staff assignment has been withdrawn and may require replacement.',
+  },
+};
 const POST_SHIFT_COMPLETE_MS = 3600000;
 const POST_SHIFT_EXPIRED_MS = 2 * 3600000;
 const HOUR = 3600000;
@@ -233,6 +264,9 @@ const timeOf = (a) => {
   return { startsAt: a.startsAt || sh.startsAt, endsAt: a.endsAt || sh.endsAt };
 };
 const breakOf = (a) => (a.breakMinutes != null ? a.breakMinutes : shiftById(a.shiftId).breakMinutes);
+/** Approval deadline of a STANDARD offer (every fixture offer): the assignment's own start - 30 min. */
+const approvalDeadlineOf = (o) => addMin(timeOf(assignmentById(o.assignmentId)).startsAt, -MANAGER_CONFIRMATION_LEAD_MINUTES);
+const deadlineError = (message) => httpError(409, { statusCode: 409, code: DEADLINE_CODE, message });
 const notify = (persona, n) => state.notifications[persona].unshift({ id: newId(), readAt: null, ...n });
 const personaForProfile = (profileId) => Object.keys(state.personaProfile).find((k) => state.personaProfile[k] === profileId) || null;
 
@@ -280,7 +314,7 @@ function addShift(o) {
       respondedAt: s.offer === 'pending' ? null : s.respondedAt || addMin(sentAt, 120),
       staffAcceptedAt: ['staff_accepted', 'manager_confirmed'].includes(s.offer) ? s.respondedAt || addMin(sentAt, 120) : null,
       managerConfirmedAt: s.offer === 'manager_confirmed' ? s.confirmedAt || s.respondedAt || addMin(sentAt, 150) : null,
-      declineReason: null, estimatedPayPence: payForMinutes(sh.payRatePence, minutes),
+      declineReason: null, managerRejectedAt: null, rejectionReason: null, estimatedPayPence: payForMinutes(sh.payRatePence, minutes),
     });
     if (s.att) {
       const att = {
@@ -518,7 +552,8 @@ function buildStory(scene) {
   // Submitted Tue 10:16 by Riley (Leah's Friday acknowledged), approved by Jordan Hale 11:05 (offers sent).
   const sent = T(20, 11, 5);
   const seat = (k, offer, assignment, respondedAt, att, reviewedAt) => ({
-    person: P[k], offer, assignment, sentAt: sent, respondedAt, confirmedAt: respondedAt,
+    // Jordan Hale (the sending Internal Manager) confirms each acceptance a few minutes after it; the system never does.
+    person: P[k], offer, assignment, sentAt: sent, respondedAt, confirmedAt: respondedAt ? addMin(respondedAt, 4) : null,
     offerId: STORY.offer(k), assignmentId: STORY.assignment(k), attendanceId: STORY.attendance(k), att, reviewedAt,
   });
   const inAt = { priya: T(23, 11, 52), grace: T(23, 11, 55), isla: T(23, 11, 56), leah: T(23, 11, 58) };
@@ -564,7 +599,7 @@ function buildStory(scene) {
   s.notifications.vm = [{ id: newId(), type: 'shift_request_approved', title: 'Shift request approved', message: `Your request for ${label} was approved and offers are being sent.`, readAt: offerScene ? null : T(20, 11, 20), createdAt: sent }];
   s.notifications.priya = [{ id: newId(), type: 'offer_sent', title: 'New shift offer', message: label, readAt: offerScene ? null : accepted.priya, createdAt: sent }];
   if (!offerScene) {
-    notify('priya', { type: 'offer_confirmed', title: 'Shift confirmed', message: 'Your shift offer has been confirmed.', createdAt: accepted.priya, readAt: T(20, 11, 42) });
+    notify('priya', { type: 'offer_confirmed', title: 'Shift confirmed', message: 'Your shift offer has been confirmed.', createdAt: addMin(accepted.priya, 4), readAt: T(20, 11, 46) });
     notify('priya', { type: 'shift_reminder_24h', title: 'Shift tomorrow', message: `${label} starts tomorrow at 12:00.`, createdAt: T(22, 12), readAt: T(22, 18) });
     notify('priya', { type: 'shift_reminder_2h', title: 'Shift starts soon', message: `${label} starts at 12:00. Scan the shift QR code when you arrive.`, createdAt: T(23, 10), readAt: null });
   }
@@ -645,9 +680,13 @@ function performClockOut(att, when, method) {
   return att;
 }
 
-/** applyOfferConfirmation: offer manager_confirmed, seat confirmed, filled_count claimed, shift status rolled. */
+/**
+ * applyOfferConfirmation (the sending Internal Manager's manual confirm; the system never calls it): offer
+ * manager_confirmed, seat confirmed, filled_count claimed, shift status rolled. Refused at or after the deadline.
+ */
 function confirmOffer(o, when) {
   const sh = shiftById(o.shiftId);
+  if (when.getTime() >= approvalDeadlineOf(o).getTime()) throw deadlineError(DEADLINE_MESSAGES.CONFIRM);
   if (sh.filledCount >= sh.requiredCount) throw httpError(409, 'SHIFT_FULL: This shift is now full. Another offer may already be confirmed.');
   o.status = 'manager_confirmed';
   o.managerConfirmedAt = when;
@@ -661,7 +700,10 @@ function confirmOffer(o, when) {
   }
 }
 
-/** OfferService.staffAccept. A shift from an approved Venue Manager request (requestedBy set) auto-confirms. */
+/**
+ * OfferService.staffAccept: pending -> staff_accepted, never confirmed (no automatic confirmation, owner rule
+ * 2026-11-06). Refused at or after the approval deadline; the offer then stays pending until it expires.
+ */
 function acceptOffer(offerId, when) {
   const o = state.offers.find((x) => x.id === offerId);
   const sh = shiftById(o.shiftId);
@@ -673,12 +715,36 @@ function acceptOffer(offerId, when) {
     o.respondedAt = when;
     throw httpError(409, 'This offer has expired.');
   }
+  if (when.getTime() >= approvalDeadlineOf(o).getTime()) throw deadlineError(DEADLINE_MESSAGES.ACCEPT);
   o.status = 'staff_accepted';
   o.respondedAt = when;
   o.staffAcceptedAt = when;
   assignmentById(o.assignmentId).status = 'staff_accepted';
-  if (sh.requestedBy != null) confirmOffer(o, when);
   return o;
+}
+
+/**
+ * withdraw-unconfirmed-offer (simulated Worker): an acceptance still unconfirmed at its approval deadline is withdrawn,
+ * exactly once. No attendance or payroll consequence, no replacement request. Notifications only while the assignment
+ * has not ended (owner Q4); the Venue Manager only for a shift in their venues (owner Q9).
+ */
+function withdrawUnconfirmed(o, when) {
+  const a = assignmentById(o.assignmentId);
+  const sh = shiftById(o.shiftId);
+  o.status = 'manager_rejected';
+  o.managerRejectedAt = when;
+  o.rejectionReason = CLOSED_DEADLINE;
+  a.status = 'rejected';
+  if (when >= timeOf(a).endsAt) return;
+  const persona = personaForProfile(o.staffProfileId);
+  if (persona) {
+    notify(persona, { ...DEADLINE_NOTIFICATION.STAFF, createdAt: when });
+    pushEvent(persona, 'offer.rejected', o.id);
+  }
+  if (inScope(sh)) {
+    notify('vm', { ...DEADLINE_NOTIFICATION.VENUE_MANAGER, createdAt: when });
+    pushEvent('vm', 'offer.rejected', o.id);
+  }
 }
 
 // ------------------------------------------- simulated worker jobs -------
@@ -693,6 +759,7 @@ function tick() {
       o.status = 'expired';
       o.respondedAt = o.expiresAt;
     }
+    if (o.status === 'staff_accepted' && now >= approvalDeadlineOf(o)) withdrawUnconfirmed(o, now);
   }
   for (const sh of state.shifts) {
     if (['draft', 'pending_manager_approval', 'declined', 'cancelled'].includes(sh.status)) continue;
@@ -763,6 +830,8 @@ function presentation(o, serverNow) {
     st = 'cancelled';
   } else if (['expired', 'declined', 'withdrawn', 'manager_rejected'].includes(o.status)) {
     st = o.status === 'withdrawn' ? 'cancelled' : o.status === 'manager_rejected' ? 'rejected' : o.status;
+  } else if (o.status === 'staff_accepted' && now >= approvalDeadlineOf(o).getTime()) {
+    st = 'rejected'; // past the deadline, before the Worker has withdrawn it
   } else if (a.status === 'confirmed' && o.status === 'manager_confirmed') {
     st = now >= t.endsAt.getTime() ? 'ended' : 'confirmed';
   } else if (['no_show', 'completed'].includes(a.status)) {
@@ -774,9 +843,27 @@ function presentation(o, serverNow) {
   const homeLabel = st === 'live' ? 'Live Shift'
     : ['clockedOut', 'complete', 'expired'].includes(st) ? { clockedOut: 'Clocked Out', complete: 'Complete', expired: 'Expired' }[st]
       : isToday ? "Today's Shift" : 'Next Shift';
-  return { state: st, homeLabel, isToday, serverNow: iso(serverNow), nextTransitionAt: iso(nextTransitionAt), clockInAt: iso(clockInAt), clockOutAt: iso(clockOutAt), timezone: TZ };
+  return {
+    state: st, homeLabel, isToday, serverNow: iso(serverNow), nextTransitionAt: iso(nextTransitionAt), clockInAt: iso(clockInAt), clockOutAt: iso(clockOutAt), timezone: TZ,
+    closedReason: closedReasonOf(o, serverNow), canAccept: canAcceptOf(o, serverNow),
+  };
 }
 
+/** `closedReason` (OFFER_CLOSED_REASON), on the fixture's virtual clock. */
+function closedReasonOf(o, now) {
+  if (shiftById(o.shiftId).status === 'cancelled') return CLOSED_CANCELLED;
+  if (o.status === 'manager_rejected' && o.rejectionReason === CLOSED_DEADLINE) return CLOSED_DEADLINE;
+  if (o.status === 'staff_accepted' && now >= approvalDeadlineOf(o)) return CLOSED_DEADLINE;
+  return null;
+}
+
+/** `canAccept` (/offers/mine only): pending, seat still offered, not expired, shift not cancelled, before the deadline. */
+function canAcceptOf(o, now) {
+  return o.status === 'pending' && assignmentById(o.assignmentId).status === 'offered' && o.expiresAt > now
+    && shiftById(o.shiftId).status !== 'cancelled' && now < approvalDeadlineOf(o);
+}
+
+/** OfferSummary. [withPresentation] = the staff read (`/offers/mine`); otherwise the manager read (`GET /offers`). */
 function offerJson(o, withPresentation) {
   const sh = shiftById(o.shiftId);
   const a = assignmentById(o.assignmentId);
@@ -786,10 +873,14 @@ function offerJson(o, withPresentation) {
   return {
     id: o.id, status: o.status, sentAt: iso(o.sentAt), expiresAt: iso(o.expiresAt), respondedAt: iso(o.respondedAt),
     declineReason: o.declineReason, staffAcceptedAt: iso(o.staffAcceptedAt), managerConfirmedAt: iso(o.managerConfirmedAt),
-    managerRejectedAt: null, rejectionReason: null, estimatedPayPence: o.estimatedPayPence, shiftId: sh.id,
+    managerRejectedAt: iso(o.managerRejectedAt), rejectionReason: o.rejectionReason || null, estimatedPayPence: o.estimatedPayPence, shiftId: sh.id,
     startsAt: iso(t.startsAt), endsAt: iso(t.endsAt), venueName: venue.name, roleName: roleById(sh.jobRoleId).name,
     staffProfileId: p.id, staffName: fullName(p), payRatePence: a.payRatePence, venueAddress: venue.address, shiftNotes: sh.notes || null,
-    ...(withPresentation ? { presentation: presentation(o, clock.now()) } : {}),
+    approvalDeadlineAt: iso(approvalDeadlineOf(o)),
+    awaitingManagerConfirmation: o.status === 'staff_accepted' && clock.now() < approvalDeadlineOf(o),
+    closedReason: closedReasonOf(o, clock.now()),
+    // canConfirm: the Venue Manager persona never sent an offer and holds no offer.confirm.
+    ...(withPresentation ? { canAccept: canAcceptOf(o, clock.now()), presentation: presentation(o, clock.now()) } : { canConfirm: false }),
   };
 }
 
@@ -1671,7 +1762,12 @@ const server = http.createServer(async (req, res) => {
         const target = fm[1] === 'latest' ? state.offers.find((o) => o.status === 'staff_accepted') : state.offers.find((o) => o.id === fm[1]);
         if (!target) return notFound(res);
         if (target.status !== 'staff_accepted') return send(res, 409, { message: `Offer is ${target.status}, not staff_accepted` });
-        confirmOffer(target, clock.now());
+        try {
+          confirmOffer(target, clock.now());
+        } catch (e) {
+          if (e.status) return send(res, e.status, e.body);
+          throw e;
+        }
         return send(res, 200, { ok: true, offerId: target.id, pushedTo: [...sseClients].filter((c) => c.persona === personaForProfile(target.staffProfileId)).length });
       }
       return notFound(res);

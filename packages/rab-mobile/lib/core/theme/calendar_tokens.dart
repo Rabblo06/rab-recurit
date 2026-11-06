@@ -17,13 +17,17 @@ abstract final class CalendarTokens {
 enum CalendarStatus {
   confirmed('Confirmed', CalendarTokens.blue),
   open('Open offer', CalendarTokens.mint),
-  awaiting('Awaiting confirmation', CalendarTokens.mint),
+  awaiting('Awaiting manager confirmation', CalendarTokens.mint),
   live('Live', CalendarTokens.green),
   clockedOut('Clocked Out', CalendarTokens.muted),
   complete('Complete', CalendarTokens.muted),
   ended('Ended', CalendarTokens.muted),
   declined('Declined', CalendarTokens.muted),
   rejected('Not confirmed', CalendarTokens.muted),
+
+  /// Withdrawn at the approval deadline (owner decision Q8: stays visible in
+  /// the staff calendar with a "Withdrawn" chip).
+  withdrawn('Withdrawn', CalendarTokens.muted),
   expired('Expired', CalendarTokens.muted),
   cancelled('Cancelled', CalendarTokens.muted),
   openRequest('Open request', CalendarTokens.mint),
