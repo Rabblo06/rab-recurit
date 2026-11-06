@@ -36,6 +36,10 @@
  *   - notification delivery (owner decision 2026-11-06): WORKER_FAST_PUBLISH_NOTIFY=true and
  *     WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 committed, byte-identical, on rab-api AND rab-worker (the API registers the
  *     email scheduler with its own value; notify() runs in both processes), and never re-entered in an env file;
+ *   - the Phase D switches (owner decision 2026-11-06): timer triggers on for all four kinds and the safety-sweep
+ *     intervals (offer expiry 300 s, manager confirmation 120 s, late clock-in 300 s), committed, byte-identical, on rab-api
+ *     AND rab-worker, never re-entered in an env file; the shift monitor keeps its 300 s and the combined shift scan stays
+ *     off (neither may be changed by an env file);
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
  *     network only, and the app services wait for it.
@@ -113,6 +117,8 @@ const COMMITTED_KEYS = Object.freeze([
   'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION',
   'WORKER_SCHEDULER', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
   'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
+  'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS',
+  'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
 ]);
 /**
  * Notification delivery (owner decision 2026-11-06), committed on rab-api AND rab-worker with exactly these rendered values:
@@ -126,6 +132,30 @@ const COMMITTED_KEYS = Object.freeze([
  * compose-owner-login.test.cjs re-reads the TypeScript source and fails when 30 leaves the code's bounds.
  */
 const NOTIFICATION_DELIVERY = Object.freeze({ WORKER_FAST_PUBLISH_NOTIFY: 'true', WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30' });
+/**
+ * Phase D switches (owner decision 2026-11-06), committed on rab-api AND rab-worker with exactly these rendered values:
+ *  - WORKER_TIMER_TRIGGERS=on with all four kinds LISTED (offer-expiry, manager-confirmation, no-show, late-clock-in), so a
+ *    kind added to the code later is never switched on by an unset list. The API arms the offer triggers and the Worker
+ *    consumes them and arms no-show / late clock-in, so both carry the same values. No-show and late clock-in touch
+ *    attendance and payroll: the owner decided them explicitly (THREAT-MODEL, evidence: the 336-decision shadow run).
+ *  - the scans stay as safety sweeps: offer expiry 300 s (code default 60, bounds 10-300), manager confirmation 120 s
+ *    (60, 10-300), late clock-in 300 s (120, 30-600). As for the email sweep, the API registers each BullMQ scheduler
+ *    with ITS value and the consume-only Worker never compares intervals, hence one value, identical on both.
+ * compose-owner-login.test.cjs re-reads the TypeScript source and fails when a value leaves the code's bounds or kinds.
+ */
+const PHASE_D_SWITCHES = Object.freeze({
+  WORKER_TIMER_TRIGGERS: 'on',
+  WORKER_TIMER_TRIGGER_KINDS: 'offer-expiry,manager-confirmation,no-show,late-clock-in',
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300',
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120',
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300',
+});
+/**
+ * Owner decision 2026-11-06: values that stay at the code default in production. They are not committed; neither the
+ * compose files nor an env file may set them to anything else. The shift monitor (300 s) also sends the clock-in reminders
+ * and arms the no-show / late clock-in triggers; the combined shift scan (D-Q4a) stays off until it is measured.
+ */
+const PHASE_D_UNCHANGED = Object.freeze({ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
@@ -343,6 +373,13 @@ function checkModel(model, combo) {
     for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
       if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-06, committed on rab-api and rab-worker)`);
     }
+    // Owner decision 2026-11-06: the Phase D switches, the same committed values on both services.
+    for (const [key, want] of Object.entries(PHASE_D_SWITCHES)) {
+      if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-06, Phase D switches, committed on rab-api and rab-worker)`);
+    }
+    for (const [key, keep] of Object.entries(PHASE_D_UNCHANGED)) {
+      if (key in e && String(e[key]) !== keep) p(`${name}: ${key} is "${e[key]}"; the owner decision 2026-11-06 keeps it at ${keep} (leave it unset)`);
+    }
   }
 
   // rab-api: the lifecycle.
@@ -450,6 +487,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
+    if (Object.hasOwn(PHASE_D_UNCHANGED, key) && value !== PHASE_D_UNCHANGED[key]) problems.push(`${key}: the owner decision 2026-11-06 keeps it at ${PHASE_D_UNCHANGED[key]} in production (leave it unset)`);
     if (/^CREWFLOW_AUDIT_SINK/.test(key) && kind !== 'runtime') problems.push(`${key}: belongs in runtime.env (rab-api and rab-worker both start the audit sink)`);
     if (kind === 'runtime' && key === AUDIT_SINK_KEY) {
       if (!AUDIT_SINK_MODES.includes(value)) problems.push(`${key}: must be exactly none, stdout or file (security-audit-sink.ts)`);
@@ -629,7 +667,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

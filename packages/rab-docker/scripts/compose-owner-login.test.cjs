@@ -211,6 +211,82 @@ test('notification delivery: the committed values are valid for the code (bounds
   assert.match(vars, /@Transform\(\(\{ value \}\) => value === 'true'\)\s*@IsBoolean\(\)\s*WORKER_FAST_PUBLISH_NOTIFY: boolean = false;/);
 });
 
+const PHASE_D_KEYS = ['WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS', 'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS'];
+
+test('Phase D switches (owner decision 2026-11-06): committed in compose, never re-entered in an env file', () => {
+  assert.deepEqual({ ...gate.PHASE_D_SWITCHES }, {
+    WORKER_TIMER_TRIGGERS: 'on',
+    WORKER_TIMER_TRIGGER_KINDS: 'offer-expiry,manager-confirmation,no-show,late-clock-in',
+    WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300',
+    WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120',
+    WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300',
+  });
+  for (const key of PHASE_D_KEYS) {
+    // Every value, including the committed one and "off": an env-file copy would either duplicate or silently undo it.
+    for (const value of ['on', 'off', 'shadow', 'offer-expiry', '60', '120', '300']) {
+      assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+${key}=${value}`), new RegExp(`${key}: committed in the compose files`));
+      assertRefused(lintEnvText('database', `${DATABASE_OK}
+${key}=${value}`), new RegExp(`${key}: committed in the compose files`));
+    }
+  }
+});
+
+test('Phase D (owner decision 2026-11-06): the shift monitor keeps 300 s and the combined shift scan stays off', () => {
+  assert.deepEqual({ ...gate.PHASE_D_UNCHANGED }, { WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
+  for (const value of ['combined', 'Combined', 'COMBINED']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+WORKER_SHIFT_SCAN_MODE=${value}`), /WORKER_SHIFT_SCAN_MODE: the owner decision 2026-11-06 keeps it at separate/);
+  }
+  for (const value of ['30', '120', '299', '600']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+WORKER_SHIFT_MONITOR_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: the owner decision 2026-11-06 keeps it at 300/);
+  }
+  // The code defaults themselves are accepted (they change nothing).
+  assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+WORKER_SHIFT_SCAN_MODE=separate
+WORKER_SHIFT_MONITOR_INTERVAL_SECONDS=300`), []);
+});
+
+test('Phase D switches: the committed values are valid for the code (bounds, modes and kinds read from the TypeScript source)', () => {
+  const src = (rel) => fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine', rel), 'utf8');
+  const intervals = src('core-modules/environment/worker-scan-intervals.ts');
+  const setting = (key, job) => {
+    const m = new RegExp(`${key}:\\s*s\\('${job}',\\s*([\\d_]+),\\s*([\\d_]+),\\s*([\\d_]+)\\)`).exec(intervals);
+    assert.ok(m, `${key} not found in worker-scan-intervals.ts`);
+    return m.slice(1).map((x) => Number(x.replace(/_/g, '')));
+  };
+  // [key, BullMQ job name, code default that stays unchanged for development and tests]
+  for (const [key, job, codeDefault] of [
+    ['WORKER_OFFER_EXPIRY_INTERVAL_SECONDS', 'offer-expiry', 60],
+    ['WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'manager-confirmation-timeout', 60],
+    ['WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS', 'late-clock-in', 120],
+  ]) {
+    const [def, min, max] = setting(key, job);
+    const committed = Number(gate.PHASE_D_SWITCHES[key]);
+    assert.ok(Number.isInteger(committed) && committed >= min && committed <= max, `${key}=${committed} must lie within the code bounds ${min}-${max}`);
+    assert.equal(def, codeDefault, `${key}: the code default stays ${codeDefault}`);
+  }
+  // The shift monitor is NOT changed: the kept value is the code default.
+  assert.equal(setting('WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'shift-monitor')[0], Number(gate.PHASE_D_UNCHANGED.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS));
+  const vars = src('core-modules/environment/environment-variables.ts');
+  assert.match(vars, /@IsIn\(\['off', 'shadow', 'on'\][^)]*\)\s*WORKER_TIMER_TRIGGERS: 'off' \| 'shadow' \| 'on' = 'off';/);
+  assert.match(vars, /WORKER_SHIFT_SCAN_MODE: 'separate' \| 'combined' = 'separate';/);
+  // The committed kinds are EXACTLY the code's kinds: a kind added later fails here, so switching it on is a new decision.
+  const contract = src('worker-shared/timer-trigger.contract.ts');
+  const kinds = /export const TIMER_TRIGGER_KINDS = \[([^\]]*)\] as const;/.exec(contract);
+  assert.ok(kinds, 'TIMER_TRIGGER_KINDS not found in timer-trigger.contract.ts');
+  const codeKinds = kinds[1].split(',').map((k) => k.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.deepEqual(gate.PHASE_D_SWITCHES.WORKER_TIMER_TRIGGER_KINDS.split(','), codeKinds);
+});
+
+test('Phase D switches: the gate and the image-compose verifier enforce the same values', () => {
+  const verifier = require('../staging/verify-image-compose.cjs');
+  assert.deepEqual({ ...verifier.PHASE_D_SWITCHES }, { ...gate.PHASE_D_SWITCHES });
+  assert.deepEqual({ ...verifier.PHASE_D_UNCHANGED }, { ...gate.PHASE_D_UNCHANGED });
+  assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
+});
+
 test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
     for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {

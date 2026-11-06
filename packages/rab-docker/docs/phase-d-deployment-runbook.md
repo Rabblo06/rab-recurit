@@ -45,13 +45,25 @@ credential at any point in this procedure.
 | `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. Owner rule (2026-11-06) for that day: push's immediate send is `WORKER_FAST_PUBLISH_NOTIFY` (already `true`), and `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` goes to 30 s on the API and the Worker (`docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Notification delivery"). |
 | `WORKER_FAST_PUBLISH_NOTIFY` | `false` | **Production: `true`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. |
 | `WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS` | `2` | **Production: `30`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. The API registers the scheduler with its own value. |
+| `WORKER_TIMER_TRIGGERS` | `off` | **Production: `on`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. Evidence: the D-Q4b shadow run on main 85332cc6 (336 decisions, 0 wrong / early / missed for all four kinds). No-show and late clock-in touch attendance and payroll: decided explicitly by the owner (THREAT-MODEL). |
+| `WORKER_TIMER_TRIGGER_KINDS` | unset (= all four) | **Production: `offer-expiry,manager-confirmation,no-show,late-clock-in`**, listed explicitly on both services, so a kind added to the code later is never switched on by an unset list (the gate test fails until the list is decided again). |
+| `WORKER_OFFER_EXPIRY_INTERVAL_SECONDS` | `60` | **Production: `300`** (bounds 10–300) on both services: the scan is the safety sweep behind the trigger. A lost trigger is caught within 5 min; staff also get a lazy expiry when they touch the offer. |
+| `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` | `60` | **Production: `120`** (bounds 10–300) on both services. A standard withdrawal is due at start − 30 min, so a lost trigger costs at most 2 min of that notice. |
+| `WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS` | `120` | **Production: `300`** (bounds 30–600) on both services. Even a lost trigger lands the late flag before the 30-minute no-show. |
+| `WORKER_SHIFT_MONITOR_INTERVAL_SECONDS` | `300` | **Unchanged** (owner decision 2026-11-06): it also sends the clock-in reminders and arms the no-show / late clock-in triggers (horizon two intervals). Not committed; the gate refuses any other value in the compose files and env files. |
+| `WORKER_SHIFT_SCAN_MODE` | `separate` | **Production: `separate`** (unset). The D-Q4a combined scan stays off (owner decision 2026-11-06) until it is measured; the gate refuses `combined` in the compose files and env files. |
 | `WORKER_INVITE_AUTO_DELETE_ENABLED` | `false` | **Production refuses to boot with `true`** until the owner approves a retention policy (enforced in `packages/rab-server/src/engine/core-modules/environment/env.validation.ts`). |
 | `WORKER_DISPATCH_RECONCILE_SECONDS` | `900` | Boot refuses values outside 60–900. A longer interval needs evidence and a separate approval. |
 
 Defaults are defined in `packages/rab-server/src/engine/core-modules/environment/environment-variables.ts`. The
 production compose files (`packages/rab-docker/docker-compose.image.yml` and `docker-compose.production.yml`) set none of
-the claim and wake-up variables above, so the code defaults apply. They commit only the two notification-delivery values
-(fast publish on, the email sweep at 30 s). They do not set `WORKER_SCHEDULER`: production runs `bullmq` by default (O3).
+the claim and wake-up variables above, so the code defaults apply. They commit the two notification-delivery values
+(fast publish on, the email sweep at 30 s) and the Phase D switches (timer triggers on for all four kinds; the offer-expiry,
+manager-confirmation and late-clock-in sweeps at 300 / 120 / 300 s), each with the same value on rab-api and rab-worker:
+the API registers every BullMQ scheduler with its own value and the consume-only Worker checks only that each scheduler
+exists, never its interval. `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs` enforce all of them,
+and `runtime.env` / `database.env` may not re-enter them. They do not set `WORKER_SCHEDULER`: production runs `bullmq` by
+default (O3).
 
 O1 (one image): the Worker bundle launcher that used to pre-check these is retired; the Worker runs
 `node packages/rab-worker/dist/main.js` directly. The Worker's own start-up refuses `WORKER_DISPATCH_MODE=event` without
@@ -163,6 +175,12 @@ application login and never by hand.
 - It has never been executed anywhere.
 - Its cutover is a separate approval (§11). At that time it gets a new id greater than every applied migration and is
   moved into `core/migrations/`.
+- **OBSOLETE under the one-owner-login design (recorded 2026-11-06, owner decision: keep it EXCLUDED).** Its cutover gate
+  requires every Worker to authenticate as `crewflow_worker`. Under owner-login the Worker connects as `crewflow_owner`,
+  and `crewflow_worker` has zero members and no password
+  (`packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/bootstrap.ts`, `legacy-logins.ts`; BC-17), so the gate can
+  never hold. The file itself is not edited or moved. Whether to retire it or keep it for a possible return to separated
+  logins is a later owner decision; until then it must not be applied anywhere.
 
 ### 4.2 Verification after applying
 
@@ -533,7 +551,7 @@ exactly-once**.
 
 | Path | Guarantee | Why |
 |---|---|---|
-| Email (SMTP) | At-least-once | A timeout after the SMTP DATA phase is retried and can resend. |
+| Email (SMTP) | At-least-once | A timeout or a dropped connection after the SMTP DATA phase is retried and can resend. Confirmed by the 2026-11-06 fault-injection run (config/phase-d-switches PR): a connection dropped after the complete message, and a server that never answers after it, each produced a second, identical email. The D-Q5b paths (a failed SENT write after a confirmed send, a Worker killed mid-send) end `DELIVERY_UNCERTAIN` with one email. |
 | Push, provider timeout | At-least-once | Timeouts are retried. |
 | Realtime publish | At-least-once | A publish can be repeated; the gateway deduplicates. |
 | Push, interrupted call | At-most-once | Recorded as `DELIVERY_UNCERTAIN` and not retried. |
@@ -577,11 +595,12 @@ Environment-independent decisions:
   (§5.2).
 
 - [ ] Event mode (`WORKER_DISPATCH_MODE=event`), with its OD-2 prerequisites (§5.4).
-- [ ] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: gated, outside the migration glob.
+- [x] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: **decided 2026-11-06: keep EXCLUDED, OBSOLETE under
+  owner-login** (§4.1). Its gate (every Worker authenticates as `crewflow_worker`) cannot hold with one owner login.
 - [ ] `REALTIME_ENABLED` / `PUSH_ENABLED` in production.
 - [ ] Invite auto-delete retention policy (`WORKER_INVITE_AUTO_DELETE_ENABLED`): grace period, eligibility, audit
   wording, rollback and monitoring. Production refuses `true` until then.
-- [ ] SMTP post-DATA duplicate policy (§10).
+- [ ] SMTP post-DATA duplicate policy (§10). Reproduced on 2026-11-06 (fault injection, config/phase-d-switches PR): still open.
 - [x] F2 SQL fix: physical pointer identity, migration 1786721350000 (§6), owner-approved 2026-11-01 (option C).
 - [ ] Managed PostgreSQL without a superuser: whether the `crewflow_worker` shape check may accept exactly the creating login's automatic membership (`admin=true, inherit=false, set=false`) (§3.1). Security review first.
 - [ ] F3: a database-side switch (and in-definer audit) for the invite-cleanup definers. Today the flag and the audit

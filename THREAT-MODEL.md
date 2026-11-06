@@ -6043,6 +6043,93 @@ stay off, and their sweeps keep the 2 s default.
   interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
   DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.
 
+## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
+
+Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
+`WORKER_TIMER_TRIGGER_KINDS=offer-expiry,manager-confirmation,no-show,late-clock-in`,
+`WORKER_OFFER_EXPIRY_INTERVAL_SECONDS=300`, `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS=120` and
+`WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS=300`, committed on rab-api and rab-worker in `docker-compose.image.yml` and
+`docker-compose.production.yml`, enforced by `scripts/compose-owner-login.cjs` (`PHASE_D_SWITCHES`, `PHASE_D_UNCHANGED`)
+and `staging/verify-image-compose.cjs`. The shift monitor stays at 300 s and the D-Q4a combined scan stays off
+(`WORKER_SHIFT_SCAN_MODE` unset = separate); the gate refuses any other value for either. No code default, migration, role,
+grant, RLS, posture, payroll calculation, staffing or permission change; the D-Q4b controls above apply as written.
+
+- **OWNER DECISION (recorded here because it touches attendance and payroll):** no-show and late clock-in triggers are
+  `on` in production. With `on`, the Worker runs the scan's own per-candidate compare-and-set (`flagNoShowCandidate`,
+  `flagLateClockInCandidate`: same `worker_event` key, notifications and audit) at the due time instead of at the next
+  scan. A provisional no-show feeds attendance and, through it, payroll review; a late flag is attendance evidence. The
+  windows and outcomes are unchanged; only WHEN inside the window changes (plan §2.3 A2). OD-3 asked for "on one kind at a
+  time, each separately approved": the owner approved all four together on this evidence. **Evidence:** the D-Q4b shadow
+  run on main 85332cc6 (scratchpad `shadow-run/RESULTS.md`, 4 h 15 min, real clock-ins with the real roster QR): 336
+  decisions, 0 wrong, 0 early, 0 missed for every kind; no-show 12/12 would-act and 42/42 correct no-ops (on time, late,
+  check-in only, cancelled after arming); late clock-in 30/30 and 24/24; offer expiry 24/24 and 102/102; manager
+  confirmation 36/36 and 66/66 under the #82 withdrawal rule; trigger lateness p95 ≤ 558 ms. Not reachable through the
+  API and covered only by the integration specs: a reschedule after arming (`stale`).
+- **Asset:** the timed transitions on another person's records (offer, shift assignment, attendance flag) and the
+  notifications / audit rows they write. **Actor:** the API and Worker acting on committed rows; anyone able to stall or
+  wipe Redis, or to configure one service differently from the other.
+- **Interval (both services):** the API registers every BullMQ scheduler with its own value and the consume-only Worker
+  verifies scheduler ids, never intervals, so the gate requires the same values on both (a Worker-only value could not
+  reach the runtime unnoticed by CI). The kind list is explicit: an unset list means every kind the code knows, so a kind
+  added later would switch itself on; a gate test compares the committed list with `TIMER_TRIGGER_KINDS` and fails first.
+- **Residual (accepted by the owner):** a lost trigger (Redis wipe, publish failure) is caught by the slower safety
+  sweep: offer expiry up to 5 min late (was 1 min), the start − 30 min withdrawal up to 2 min late (was 1 min) — that is
+  notice the staff member loses, late clock-in up to 5 min late (was 2 min; still before the 30-minute no-show), no-show
+  unchanged (shift monitor, 5 min). Triggers add database work (one READ ONLY decision plus the action per trigger); no
+  load reduction is claimed. Production Redis is AOF, `noeviction`, ACL-only and internal (gate-enforced; the Worker
+  refuses any other eviction policy), which is what keeps delayed trigger jobs from being evicted.
+- **Smoke on the final config (disposable `psw-` stack, image `shd-adolphus:85332cc6`, code-identical to main ce7fc76e):**
+  the Worker started consume-only with `WORKER_TIMER_TRIGGERS=on` and all four kinds; the API registered 17 schedulers,
+  read back from Redis with `every` = offer-expiry 300 s, manager-confirmation-timeout 120 s, late-clock-in 300 s,
+  shift-monitor 300 s, email-dispatch 30 s; a confirmed shift had its offer-expiry and manager-confirmation triggers armed
+  in `bull:crewflow-timer-triggers:delayed` at send / accept (the manager-confirmation trigger then fired at start − 30
+  and returned `noop` for the confirmed offer), and its no-show / late clock-in triggers were armed by the shift monitor.
+
+**D-Q5b email cap (owner: "test first, then on").** D-Q5b (#52, merged 2026-11-04) has **no switch**: the cumulative cap
+and the no-resend-after-a-confirmed-send rule are unconditional code in every image built since e8bb1343, including the
+published ones, so this change neither adds nor can add a D-Q5b flag. Fault injection on the disposable stack, SMTP driver
+against a sink that fails on command (every email produced by the real API, delivered by the real Worker):
+
+| Case | Fault | Outcome | Emails received |
+|---|---|---|---|
+| a | 451 at RCPT twice, then accept | SENT, attempt count 3 | 1 |
+| b1 | 451 at RCPT on every attempt | FAILED at count 5 (the cap); no later attempt | 0 |
+| b2 | 550 at RCPT | FAILED at count 1, not retried | 0 |
+| b3 | 451 twice, then the BullMQ job deleted from Redis | FAILED `DELIVERY_UNCERTAIN` at the 5 min stale-RETRY rule (the provider-call marker stays set on RETRY under SMTP, OD-6 §5.6.1); not retried | 0 |
+| c1b | the provider answers 250 while PostgreSQL is down, so the SENT write fails | "PROVIDER SUCCEEDED … left PROCESSING"; after the 10 min lease FAILED `DELIVERY_UNCERTAIN`; never re-sent | 1 |
+| c2 | the Worker process SIGKILLed while the sink holds the complete message | after the lease FAILED `DELIVERY_UNCERTAIN`; the redelivered job did not claim the row; never re-sent | 1 |
+| c3 | the connection dropped after the complete message (no reply) | `ECONNECTION`, RETRY, re-sent, SENT | **2 (duplicate)** |
+| c4 | no reply after the complete message (client deadline) | `ETIMEDOUT`, RETRY, re-sent, SENT | **2 (duplicate)** |
+
+Every D-Q5b path passed. Criterion (c) of the owner's test failed for c3 and c4: they are **not** D-Q5b paths but the
+pre-existing SMTP at-least-once behaviour already listed as open ("SMTP post-DATA duplicate policy",
+`packages/rab-docker/docs/phase-d-deployment-runbook.md` §10/§11; OD-6 "no default change"). Finding (not fixed here; a
+delivery-policy decision for the owner):
+
+- **Severity:** Low (integrity / user-visible; the duplicate goes to the same recipient with the same content, so no data
+  crosses a tenant or a person, but a second copy of a password-reset or invitation link is a second copy of the secret).
+- **Actor → action → consequence:** a network fault or an SMTP provider that accepts the message but drops or stalls the
+  connection before its final reply → the Worker classifies the error as retryable and BullMQ re-sends → the recipient gets
+  the email twice.
+- **Where:** `packages/rab-worker/src/queues/rab-email/email-send.processor.ts:74` (`classifyEmailSendError` falls through
+  to retryable for `ECONNECTION` / `ETIMEDOUT` with no reply code) and `:661` (`isFinal` only for permanent or capped
+  errors); documented as at-least-once at `packages/rab-server/src/engine/core-modules/email/drivers/smtp.driver.ts:33`.
+- **Root cause:** a failure after the DATA terminator is ambiguous (the provider may already have accepted the message),
+  but it is treated like a failure before the provider had the message.
+- **Fix options (owner decision; none applied):** treat a no-reply failure after the DATA terminator as ambiguous, leave the
+  row PROCESSING with its marker (the OD-5 path) so lease recovery ends it `DELIVERY_UNCERTAIN` (at-most-once, manual
+  review), or keep at-least-once (status quo).
+- **Regression test:** the psw fault sink's `drop_after_data` and `hang_after_data` modes (cases c3 and c4) must deliver
+  exactly one message; a worker integration spec against the existing SMTP sink helper should pin the chosen policy.
+
+**Migration 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`): OBSOLETE under the one-owner-login design** (owner decision
+2026-11-06: keep it excluded; the file is not edited or moved). Its cutover gate requires every Worker to authenticate as
+`crewflow_worker`; under owner-login every service connects as `crewflow_owner`, and `crewflow_worker` has zero members and
+no password (`packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/bootstrap.ts`, `legacy-logins.ts`;
+verified on the psw stack: members 0, `rolpassword` NULL, only `crewflow_owner` sessions, ledger 254 without it). The gate
+can therefore never hold, and the migration must not be applied anywhere. Retiring the file or keeping it for a possible
+return to separated logins is a later owner decision.
+
 ## FIX — a running shift stayed `in_progress` for ever after its last open seat was closed by an offer close (branch fix/shift-completion-after-withdrawal, 2026-11-06, not merged)
 
 **Security finding (§5.8).** Found by the timer-trigger shadow run (12 of 12 shifts with a pending STANDBY acceptance).
