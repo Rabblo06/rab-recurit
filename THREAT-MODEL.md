@@ -6020,3 +6020,25 @@ harness's reading of them.
   every hostile, unicode and one-row document is byte-identical in any order). The harness CMap reader also no longer
   shifts the entries after an empty `<>` destination (`helpers/pdf-layout.ts`, `pdf-harness.unit.spec.ts`), which had
   turned one missing "Z" into "%W[", "JPDF-1.4", "/MavaScript" and a dropped "Missing clock-outs".
+
+## CONFIG — notification fast publish on and the email sweep at 30 s in production (branch config/dispatch-sweeps, 2026-11-06, not merged)
+
+Owner decision 2026-11-06. Configuration only: `WORKER_FAST_PUBLISH_NOTIFY=true` and
+`WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30`, committed on rab-api and rab-worker in `docker-compose.image.yml` and
+`docker-compose.production.yml`, enforced by `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`. No
+code default, migration, role, grant, RLS, posture, payroll, attendance, staffing or permission change. Push and realtime
+stay off, and their sweeps keep the 2 s default.
+
+- **Asset:** delivery of another person's notification email (the D-Q3a path above, now switched on in production).
+  **Actor:** the API and Worker processes acting on a committed business change.
+- **Controls unchanged:** the D-Q3a controls apply as written there. Nothing is published before commit, a rollback
+  publishes nothing, the job carries only the committed row's id and organisation, the consumer re-reads the row under
+  that organisation's RLS context, and the dispatcher stays the safety net.
+- **Interval:** the API registers the email scheduler with its own value. The consume-only Worker verifies that the
+  scheduler exists, not its interval, so the gate requires the same value on both services. A different Worker value could
+  not reach the runtime unnoticed by CI.
+- **Residual (user-visible, accepted by the owner):** rows with no fast path (the Worker's report emails, rows written by
+  SQL) and rows whose fast publish failed now wait up to 30 s instead of up to 2 s. That includes a password-reset email
+  whose after-commit publish failed while the Worker can still reach Redis. A Redis outage stops both paths at any
+  interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
+  DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.

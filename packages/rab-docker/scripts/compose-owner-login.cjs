@@ -33,6 +33,9 @@
  *     wait for the schema itself (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy API and Redis, runs
  *     main.js as 1000:1000 with tmpfs and a jobs-only health check, stop grace >= 45 s; WORKER_SCHEDULER is never
  *     committed (production defaults to bullmq); Redis AOF + noeviction + ACL, never published;
+ *   - notification delivery (owner decision 2026-11-06): WORKER_FAST_PUBLISH_NOTIFY=true and
+ *     WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 committed, byte-identical, on rab-api AND rab-worker (the API registers the
+ *     email scheduler with its own value; notify() runs in both processes), and never re-entered in an env file;
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
  *     network only, and the app services wait for it.
@@ -109,7 +112,20 @@ const COMMITTED_KEYS = Object.freeze([
   'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'CREWFLOW_RUNTIME_ISOLATION', 'AI_ENABLED',
   'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX', 'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION',
   'WORKER_SCHEDULER', 'HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'CREWFLOW_INSTANCE_HEALTH_FILE',
+  'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
 ]);
+/**
+ * Notification delivery (owner decision 2026-11-06), committed on rab-api AND rab-worker with exactly these rendered values:
+ *  - WORKER_FAST_PUBLISH_NOTIFY=true: notify()'s email (and, once PUSH_ENABLED=true, push) rows are published right after
+ *    the transaction commits (NotifyFastPublishService); the dispatcher stays the safety net. Read wherever notify() runs,
+ *    so both processes.
+ *  - WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 (code default 2, bounds 1-60): the API's register-schedulers step sets the
+ *    BullMQ scheduler's `every` from ITS value; the consume-only Worker's read-only verify checks only that the scheduler
+ *    exists, never its interval, so a different Worker value would go unnoticed. Hence one value, identical on both.
+ * The code defaults (false / 2 s) stay for development and tests. Push and realtime sweeps are not committed (2 s default).
+ * compose-owner-login.test.cjs re-reads the TypeScript source and fails when 30 leaves the code's bounds.
+ */
+const NOTIFICATION_DELIVERY = Object.freeze({ WORKER_FAST_PUBLISH_NOTIFY: 'true', WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30' });
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
@@ -323,6 +339,10 @@ function checkModel(model, combo) {
     if (!String(e.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${name}: does not read runtime.env (APP_SECRET missing)`);
     // BC-07: the sink must reach both services, as a production-accepted value.
     if (!AUDIT_SINK_PRODUCTION_MODES.includes(String(e[AUDIT_SINK_KEY] ?? ''))) p(`${name}: ${AUDIT_SINK_KEY} is "${e[AUDIT_SINK_KEY] ?? ''}", expected stdout (BC-07, from runtime.env)`);
+    // Owner decision 2026-11-06: notification delivery, the same committed values on both services.
+    for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
+      if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-06, committed on rab-api and rab-worker)`);
+    }
   }
 
   // rab-api: the lifecycle.
@@ -609,7 +629,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

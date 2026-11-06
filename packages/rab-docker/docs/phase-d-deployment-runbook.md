@@ -42,13 +42,16 @@ credential at any point in this procedure.
 | `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. |
 | `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). |
 | `REALTIME_ENABLED` | `false` | Enabling it in production is a separate decision. |
-| `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. |
+| `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. Owner rule (2026-11-06) for that day: push's immediate send is `WORKER_FAST_PUBLISH_NOTIFY` (already `true`), and `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` goes to 30 s on the API and the Worker (`docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Notification delivery"). |
+| `WORKER_FAST_PUBLISH_NOTIFY` | `false` | **Production: `true`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. |
+| `WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS` | `2` | **Production: `30`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. The API registers the scheduler with its own value. |
 | `WORKER_INVITE_AUTO_DELETE_ENABLED` | `false` | **Production refuses to boot with `true`** until the owner approves a retention policy (enforced in `packages/rab-server/src/engine/core-modules/environment/env.validation.ts`). |
 | `WORKER_DISPATCH_RECONCILE_SECONDS` | `900` | Boot refuses values outside 60–900. A longer interval needs evidence and a separate approval. |
 
 Defaults are defined in `packages/rab-server/src/engine/core-modules/environment/environment-variables.ts`. The
-production compose file (`packages/rab-docker/docker-compose.production.yml`) sets none of the Phase D dispatch
-variables, so the code defaults apply. It pins `WORKER_SCHEDULER: interval`.
+production compose files (`packages/rab-docker/docker-compose.image.yml` and `docker-compose.production.yml`) set none of
+the claim and wake-up variables above, so the code defaults apply. They commit only the two notification-delivery values
+(fast publish on, the email sweep at 30 s). They do not set `WORKER_SCHEDULER`: production runs `bullmq` by default (O3).
 
 O1 (one image): the Worker bundle launcher that used to pre-check these is retired; the Worker runs
 `node packages/rab-worker/dist/main.js` directly. The Worker's own start-up refuses `WORKER_DISPATCH_MODE=event` without
