@@ -131,11 +131,27 @@ export interface ManagerOfferConfirmationFields extends OfferConfirmationDeadlin
 }
 
 /**
+ * Staff reads only (`GET /offers/mine`): on the row AND on its `presentation` object. Never present on manager reads.
+ * Additive contract change (2026-11-06, after 6ee07bb3).
+ */
+export interface StaffOfferAcceptFields {
+  /**
+   * The offer could be accepted right now, judged by the server on the database clock: status pending, assignment still
+   * offered, not expired (`expires_at`), shift not cancelled, and strictly before the approval deadline (STANDARD:
+   * assignment start - 30 min; REPLACEMENT / STANDBY: assignment end). Display only: POST /offers/:id/accept stays the
+   * authority and answers 409 (CONFIRMATION_DEADLINE_PASSED, or the existing expiry / already-responded errors).
+   */
+  canAccept: boolean;
+}
+
+/**
  * Added to the staff `presentation` object. `presentation.state` keeps its existing value set: a staff_accepted offer past
  * its deadline already presents as `rejected` (so old app builds show "Not confirmed", never "Awaiting").
  */
 export interface StaffShiftPresentationConfirmationFields {
   closedReason: OfferClosedReasonType | null;
+  /** Same value as the row's `canAccept` (`StaffOfferAcceptFields`); present on `GET /offers/mine` only. */
+  canAccept?: boolean;
 }
 
 /** Added to the venue-offer pipeline `summary`. Rows stay in the `rejected` lane / `closed` group. */
