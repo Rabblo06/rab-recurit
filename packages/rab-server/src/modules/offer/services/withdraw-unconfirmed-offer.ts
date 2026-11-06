@@ -18,6 +18,7 @@ import { NotificationService } from '../../notification/services/notification.se
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { assignmentTimeSql, confirmationDeadlineSql } from '../../scheduling/utils/assignment-time';
+import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 import { resolveResponsibleManager } from '../../scheduling/utils/resolve-responsible-manager';
 
 export interface WithdrawUnconfirmedOfferDeps {
@@ -37,6 +38,8 @@ export interface WithdrawnOffer {
   deadlineAt: Date;
   /** Whether staff, the responsible manager and the venue's Venue Managers were notified (see NOTIFY_SQL). */
   notified: boolean;
+  /** Whether this withdrawal closed the last open seat of an `in_progress` shift, so the shift moved to `completed`. */
+  shiftCompleted: boolean;
 }
 
 /**
@@ -57,8 +60,9 @@ const NOTIFY_GRACE = `interval '1 hour'`;
  *
  * Terminal state (owner decision Q7, option A — no new status, no new transition): offer `staff_accepted →
  * manager_rejected` with `rejected_by = NULL` and `rejection_reason = 'confirmation_deadline_passed'`; assignment
- * `staff_accepted → rejected`. History is kept. `staff_accepted` never held a seat, so there is no capacity or shift
- * status to undo; `rejected` is outside every attendance, no-show, late, reminder and payroll query. `manager_rejected`
+ * `staff_accepted → rejected`. History is kept. `staff_accepted` never held a seat, so there is no capacity to undo
+ * (it did hold the shift open: see "Shift completion" below); `rejected` is outside every attendance, no-show, late,
+ * reminder and payroll query. `manager_rejected`
  * is terminal, so a later confirmation is impossible (`assertTransition` throws), and it is not a trigger of the
  * automatic replacement-request job (that fires only on declined/expired) — no automatic re-allocation (Q10).
  *
@@ -67,8 +71,15 @@ const NOTIFY_GRACE = `interval '1 hour'`;
  * `clock_timestamp() < deadline`; manager reject; pipeline cancel; the shift-cancellation follow-up; another Worker; the
  * API lazy path). Exactly one wins; the others match zero rows. A Worker that runs late still applies the ORIGINAL
  * deadline (it is recomputed from the assignment, never from the processing time). A cancelled shift is skipped: the
- * cancellation follow-up closes those with the truthful reason. Lock order offer → assignment, never `shift`, so it
- * cannot deadlock with confirm (shift → offer → assignment).
+ * cancellation follow-up closes those with the truthful reason. Lock order shift → offer → assignment: the shift row
+ * lock is taken FIRST (`lockShiftRow`), the same order as the manager confirm and the staff accept, so it cannot deadlock
+ * with either of them.
+ *
+ * Shift completion: once the acceptance is withdrawn, the shift roll-up (`completeShiftIfSettled`, the same function a
+ * clock-out runs) is re-evaluated under that shift lock. An unconfirmed acceptance holds the shift `in_progress` (it is
+ * an open seat), so without this a running shift whose confirmed staff had all clocked out stayed `in_progress` for ever
+ * once its last standby / replacement / late standard acceptance was withdrawn here. No new rule: the shift completes
+ * only if it is `in_progress` and no seat is still open — exactly the condition a clock-out applies.
  *
  * Side effects run only for the CAS winner, in the same transaction (a rollback discards all of them): audit
  * `offer.rejected_by_worker` (actor NULL — a system action, never a fabricated manager), the notifications (staff,
@@ -82,6 +93,15 @@ export async function withdrawUnconfirmedOffer(
   offerId: string,
   source: WithdrawalSource,
 ): Promise<WithdrawnOffer | null> {
+  // Shift row lock FIRST (lock order shift → offer → assignment, as confirm and accept). The shift of an offer never
+  // changes, so this plain read of it is safe; a missing / foreign offer reads nothing and nothing is locked.
+  const [target] = await manager.query<Array<{ shift_id: string }>>(
+    `SELECT sa.shift_id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1 AND o.organisation_id = $2`,
+    [offerId, organisationId],
+  );
+  if (!target) return null;
+  await lockShiftRow(manager, organisationId, target.shift_id);
+
   const deadline = confirmationDeadlineSql('o', 'sa', 's');
   const end = assignmentTimeSql('sa', 's').end;
   const [rows] = (await manager.query(
@@ -106,6 +126,8 @@ export async function withdrawUnconfirmedOffer(
   assertTransition(OFFER_TRANSITIONS, OfferStatus.STAFF_ACCEPTED, OfferStatus.MANAGER_REJECTED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus.STAFF_ACCEPTED, ShiftAssignmentStatus.REJECTED);
   await manager.query(`UPDATE shift_assignment SET status = 'rejected' WHERE id = $1 AND status = 'staff_accepted'`, [row.shift_assignment_id]);
+  // The same roll-up a clock-out runs: if this was the last open seat of a running shift, the shift completes now.
+  const shiftCompleted = await completeShiftIfSettled(manager, organisationId, row.shift_id);
 
   const deadlineAt = new Date(row.deadline_at);
   await deps.auditService.record(manager, { organisationId, userId: '' }, AuditAction.OFFER_REJECTED_BY_WORKER, {
@@ -165,5 +187,5 @@ export async function withdrawUnconfirmedOffer(
     (m) => offerAudience(m, row.id),
   );
 
-  return { offerId: row.id, shiftAssignmentId: row.shift_assignment_id, shiftId: row.shift_id, deadlineAt, notified: row.notify };
+  return { offerId: row.id, shiftAssignmentId: row.shift_assignment_id, shiftId: row.shift_id, deadlineAt, notified: row.notify, shiftCompleted };
 }
