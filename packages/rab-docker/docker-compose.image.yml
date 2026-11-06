@@ -161,6 +161,20 @@ services:
       # Committed (scripts/compose-owner-login.cjs and staging/verify-image-compose.cjs enforce both, on both services).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      # Phase D switches (owner decision 2026-11-06), the SAME values on rab-api and rab-worker. Timer triggers ON for all
+      # four kinds (shadow run: 0 wrong / early / missed over 336 decisions). The kinds are listed explicitly so a future
+      # kind is never switched on by default. No-show and late clock-in touch attendance and payroll: owner decision, see
+      # THREAT-MODEL. The scans stay as safety sweeps at these intervals (within worker-scan-intervals.ts bounds): offer
+      # expiry 300 s (10-300), manager confirmation 120 s (10-300), late clock-in 300 s (30-600). The shift monitor stays at
+      # its 300 s default (it also sends the reminders and arms the no-show/late triggers), so it is not set here. The API
+      # registers each BullMQ scheduler with ITS value and the Worker only consumes them, so both carry the same values.
+      # WORKER_SHIFT_SCAN_MODE (combined scan, D-Q4a) stays unset = separate (owner decision). Committed; the gate and the
+      # verifier enforce every value on both services.
+      WORKER_TIMER_TRIGGERS: "on"
+      WORKER_TIMER_TRIGGER_KINDS: "offer-expiry,manager-confirmation,no-show,late-clock-in"
+      WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
+      WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
+      WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
 
     depends_on:
       rab-redis:
@@ -250,6 +264,12 @@ services:
       # Notification delivery (owner decision 2026-11-06): identical to rab-api (see its comment there).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      # Phase D switches (owner decision 2026-11-06): identical to rab-api (see its comment there).
+      WORKER_TIMER_TRIGGERS: "on"
+      WORKER_TIMER_TRIGGER_KINDS: "offer-expiry,manager-confirmation,no-show,late-clock-in"
+      WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
+      WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
+      WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
       # What the retired launcher gave the jobs child (H1-M1): HOME a path the process can neither write nor create (Node
       # searches $HOME/.node_modules), temp and XDG caches in its own 0700 tmpfs, and the per-instance heartbeat file.
       HOME: /nonexistent
