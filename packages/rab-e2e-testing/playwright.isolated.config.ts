@@ -16,7 +16,7 @@ const ISOLATED_API_URL = 'http://127.0.0.1:3996/rest/v1'; // unused port: 3999 i
 
 export default defineConfig({
   testDir: './web',
-  testMatch: /(availability-and-manager-lifecycle|dev-loopback-cookie-host|master-fix-pipeline-reviews|motion-system|crewflow-new-ui|crewflow-new-ui-motion|settings-nav-highlight|crewflow-ui-corrections|dashboard-number-animation)\.spec\.ts/,
+  testMatch: /(availability-and-manager-lifecycle|dev-loopback-cookie-host|master-fix-pipeline-reviews|motion-system|crewflow-new-ui|crewflow-new-ui-motion|settings-nav-highlight|crewflow-ui-corrections|dashboard-number-animation|no-autoconfirm-deadline)\.spec\.ts/,
   globalSetup: './isolated-warmup.ts',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,

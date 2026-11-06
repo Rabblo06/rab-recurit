@@ -49,3 +49,10 @@ it('a refused or failed load shows an unavailable state, not a fake empty lifecy
   mount();
   expect(await screen.findByText('Timeline unavailable')).toBeInTheDocument();
 });
+
+it('a withdrawal at the manager-confirmation deadline reads "Not confirmed in time" (server step offer_confirmation_deadline)', async () => {
+  mock.get.mockResolvedValue({ data: { items: [item('1', 'offer_confirmation_deadline', 'offer.rejected_by_worker', { actor: null })], nextCursor: null } });
+  mount();
+  expect(await screen.findByText('Not confirmed in time')).toBeInTheDocument();
+  expect(screen.queryByText('offer rejected by worker')).toBeNull();
+});

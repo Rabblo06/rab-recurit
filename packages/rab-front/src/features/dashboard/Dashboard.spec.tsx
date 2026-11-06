@@ -126,6 +126,39 @@ describe('Dashboard', () => {
     expect(within(list).getByText(/^3$/)).toBeInTheDocument(); // 3 of 7 tasks done
   });
 
+  it('readiness: acceptances withdrawn at the confirmation deadline are named from summary.withdrawnAtDeadline, never as confirmed', async () => {
+    act(() => applyIdentityFromServer({ userId: 'u1', sessionId: 's1' }));
+    const start = new Date(Date.now() + 3_600_000);
+    const end = new Date(Date.now() + 6 * 3_600_000);
+    serve((url) => {
+      if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [{ id: 'sh1', venueId: 'v1', startsAt: start.toISOString(), endsAt: end.toISOString(), requiredCount: 4, filledCount: 2, status: 'partially_filled', createdBy: 'u1', requestedBy: 'vm1' }] } });
+      if (url === '/shifts/sh1/pipeline') return Promise.resolve({ data: {
+        shift: { id: 'sh1', venueName: 'Venue One', roleName: 'Role', startsAt: start.toISOString(), endsAt: end.toISOString() },
+        summary: { required: 4, filled: 2, offered: 0, waiting: 0, accepted: 1, confirmed: 2, rejected: 1, withdrawnAtDeadline: 1, clockedIn: 0, pendingReview: 0, clockedOut: 0 },
+        report: { ready: false, finalisedAt: null },
+      } });
+      return undefined;
+    });
+    mount();
+    const list = (await screen.findByText('Shift checklist')).closest('.dash-checklist') as HTMLElement;
+    const confirmed = within(list).getByText('Staff confirmed').parentElement as HTMLElement;
+    expect(confirmed).toHaveTextContent('1 accepted, awaiting confirmation · 1 not confirmed in time');
+    expect(confirmed).toHaveTextContent('(to do)');
+  });
+
+  it('recent offers: a withdrawal at the confirmation deadline reads "Not confirmed in time", never "manager rejected"', async () => {
+    serve((url, params) => (url === '/offers' && params.limit === 6
+      ? Promise.resolve({ data: { total: 2, data: [
+        { id: 'o1', status: 'manager_rejected', closedReason: 'confirmation_deadline_passed', sentAt: new Date().toISOString(), staffName: 'Dara Withdrawn', venueName: 'Venue One', startsAt: new Date().toISOString() },
+        { id: 'o2', status: 'manager_rejected', sentAt: new Date().toISOString(), staffName: 'Finn Rejected', venueName: 'Venue One', startsAt: new Date().toISOString() },
+      ] } })
+      : undefined));
+    mount();
+    const recent = (await screen.findByText('Dara Withdrawn')).closest('tr') as HTMLElement;
+    expect(within(recent).getByText('Not confirmed in time')).toBeInTheDocument();
+    expect(within((screen.getByText('Finn Rejected')).closest('tr') as HTMLElement).getByText('manager rejected')).toBeInTheDocument();
+  });
+
   describe('shift readiness: which details the caller may see, and why a load failed', () => {
     const start = new Date(Date.now() + 3_600_000);
     const end = new Date(Date.now() + 6 * 3_600_000);
