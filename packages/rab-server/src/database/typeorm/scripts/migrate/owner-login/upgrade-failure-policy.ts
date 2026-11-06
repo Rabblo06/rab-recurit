@@ -16,7 +16,7 @@
  * start: deployment-identity (fail closed on identity). The others are diagnostics of the degraded state:
  *   ledger-compatible     schema-compatibility.ts for process 'api': after a failed upgrade it normally reports the pending
  *                         migrations (the API's boot gate 7 is relaxed for that by api-prestart's signal, Agent 2).
- *   no-partial-migration  the failed migration (if any) is not one of the seven `transaction = false` migrations, which can
+ *   no-partial-migration  the failed migration (if any) is not one of the `transaction = false` migrations, which can
  *                         leave partial DDL without a ledger row.
  *   post-checks           deploy-post-checks.ts deployPostCheckProblems(): secure-owner invariants, RLS enabled on every
  *                         tenant table, the login owns nothing, schema compatibility (function + READY workspaces).
@@ -39,9 +39,12 @@ export function parseUpgradeFailurePolicy(env: Record<string, string | undefined
   return readUpgradeFailurePolicy(env);
 }
 
-/** The seven `transaction = false` migrations (M0: the runner comment said six). */
+/**
+ * The `transaction = false` migrations (M0: the runner comment said six). + the index fix (2026-11-06): 1786721440000 and
+ * 1786721450000 (CREATE INDEX CONCURRENTLY; a failed build leaves an INVALID index that their re-run drops).
+ */
 export const NON_TRANSACTIONAL_MIGRATIONS: readonly number[] = [
-  1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
+  1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000, 1786721440000, 1786721450000,
 ];
 
 /** Called by the API and the Worker; the owner login reaches each through its role memberships. */
