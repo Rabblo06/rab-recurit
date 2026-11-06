@@ -27,8 +27,9 @@
  *   6. Unlock, release, destroy. A holder that dies at any point (signal, crash, pg_terminate_backend) loses its session:
  *      PostgreSQL rolls back the open migration transaction and frees the lock together; earlier migrations of that run
  *      stay committed with their ledger rows, so a re-run continues from exactly there. (A `transaction = false` migration
- *      that dies mid-way can leave partial DDL without a ledger row; each of the seven is written to be re-run safely:
- *      1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000.)
+ *      that dies mid-way can leave partial DDL without a ledger row; each of them is written to be re-run safely:
+ *      1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
+ *      1786721440000, 1786721450000.)
  *
  * Owner-login architecture (owner decision 2026-11-04, PR 3): the path is chosen by the SESSION LOGIN, never by an
  * environment switch.
