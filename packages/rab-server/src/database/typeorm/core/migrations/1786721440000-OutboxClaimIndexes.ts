@@ -3,21 +3,22 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 /**
  * Index fix IDX-A (owner-approved 2026-11-06; docs/plans/index-fix/current/PROPOSAL.md §3): the per-scope dispatch claims.
  *
- * The email, push and realtime claims (rab-worker email-dispatch.job.ts, push-dispatch.job.ts, core/database/realtime-event.ts)
- * run once per organisation (realtime: per organisation AND per workspace) on every sweep. Their SQL has no organisation
+ * The email and push claims (rab-worker email-dispatch.job.ts, push-dispatch.job.ts) run once per organisation on every
+ * sweep. Their SQL has no organisation
  * predicate: RLS adds `organisation_id = core.current_org()` (FORCE; the owner login is bound by it). The only status indexes
  * were `(status, created_at) WHERE status IN ('PENDING','RETRY')`, which cannot serve the claim's
  * `PENDING OR QUEUED(stale) OR PROCESSING(lease) OR RETRY(stale)` predicate together with the tenant filter, so EXPLAIN as
  * crewflow_owner showed a Seq Scan of the WHOLE outbox for every organisation (~95 ms per organisation at 200k rows: ~19 s
- * per email sweep, longer than the 2 s push interval) and, for realtime, a 80k-row tenant BitmapAnd per scope.
+ * per email sweep, longer than the 2 s push interval).
  *
  * Each index leads with organisation_id (the RLS Index Cond; current_org() is STABLE SQL and inlines), then created_at (the
  * claim's ORDER BY, so LIMIT stops early). The partial predicate is the union of the statuses every arm of the claim's OR
  * names; the index holds only in-flight rows (terminal rows leave it). Measured (PG16 + PG18, 200k rows, as crewflow_owner):
- * the email and push claims become an ordered Index Scan (~95 ms → ~0.3 ms per organisation). The REALTIME claim's first
- * arm nests `status IN ('pending', 'retry')`, which PostgreSQL's predicate prover does not see through, so for realtime the
- * index is only used as a bitmap together with the tenant condition (no measured time gain); an ordered scan needs the claim
- * SQL to also state `status IN ('pending', 'retry', 'processing')` — a separate, owner-gated change.
+ * the email and push claims become an ordered Index Scan (~95 ms → ~0.3 ms per organisation).
+ * The realtime claim is deliberately NOT indexed here (owner decision 2026-11-06, deferred): its first arm nests
+ * `status IN ('pending', 'retry')`, which PostgreSQL's predicate prover does not see through, so a
+ * `(organisation_id, created_at)` partial index was only usable as a bitmap (no measured gain). It needs the claim SQL to
+ * also state `status IN ('pending', 'retry', 'processing')` first — a separate, owner-gated change.
  * WORKER_CLAIM_MODE=global needs nothing extra: its scan is core.worker_dispatch_pointer, and its per-scope step adds
  * `AND id = ANY($ids)` (PK); its per_scope reconciliation sweep uses these indexes.
  *
@@ -37,12 +38,8 @@ const INDEXES: ReadonlyArray<{ name: string; definition: string }> = Object.free
     name: 'push_delivery_claim_idx',
     definition: `ON core.push_delivery (organisation_id, created_at) WHERE status IN ('PENDING', 'PROCESSING', 'RETRY')`,
   },
-  {
-    name: 'realtime_event_claim_scope_idx',
-    definition: `ON core.realtime_event (organisation_id, created_at) WHERE status IN ('pending', 'retry', 'processing')`,
-  },
 ]);
-/** Owner of core.email_outbox / push_delivery / realtime_event. */
+/** Owner of core.email_outbox / core.push_delivery. */
 const TABLE_OWNER = 'crewflow';
 
 export class OutboxClaimIndexes1786721440000 implements MigrationInterface {

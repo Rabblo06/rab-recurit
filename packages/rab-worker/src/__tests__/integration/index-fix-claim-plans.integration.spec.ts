@@ -14,6 +14,8 @@ import { Client } from 'pg';
  * actor_type, search_path core). crewflow_owner is not BYPASSRLS and every table here is FORCE RLS, so the plans carry the
  * production RLS predicates. The definer-internal token delete is planned as its owner, rab_secure_owner.
  *
+ * The realtime claim is not covered: its index was deferred (owner decision 2026-11-06; it needs a claim-SQL change first).
+ *
  * Asserted on SHAPE only (the expected index, no sequential scan of the big table); timings are printed, never asserted,
  * except one generous bound on the replaced_by referential-check time (≈ 30× headroom over the indexed cost; without the
  * index the same delete takes seconds). Before the index fix every one of these failed: Seq Scan on the outbox for every
@@ -43,11 +45,6 @@ const PUSH_PREDICATE = `WHERE status = 'PENDING'
           ORDER BY created_at
           LIMIT $1
           FOR UPDATE SKIP LOCKED`;
-const REALTIME_PREDICATE = `WHERE (status IN ('pending', 'retry') AND (next_retry_at IS NULL OR next_retry_at <= now()))
-          OR (status = 'processing' AND lease_expires_at < now())
-       ORDER BY created_at
-       LIMIT $3
-       FOR UPDATE SKIP LOCKED`;
 
 /** The Worker's constants (email-dispatch.job.ts / push-dispatch.job.ts): PROCESSING lease 10 min, RETRY stale 5 min. */
 const expand = (sql: string) => sql.replace('${PROCESSING_LEASE_MINUTES}', '10').replace('${RETRY_STALE_MINUTES}', '5');
@@ -55,17 +52,12 @@ const EMAIL_CLAIM = `SELECT id, organisation_id, status, infrastructure_attempt_
   FROM core.email_outbox ${expand(EMAIL_PREDICATE)}`;
 const PUSH_CLAIM = `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at, dispatch_generation, queued_at
   FROM core.push_delivery ${expand(PUSH_PREDICATE)}`;
-const REALTIME_CLAIM = `WITH claimable AS MATERIALIZED (SELECT id FROM core.realtime_event ${REALTIME_PREDICATE.replace('$3', '$1')})
-  UPDATE core.realtime_event SET status = 'processing', claimed_at = now(), claim_token = gen_random_uuid(),
-         lease_expires_at = now() + interval '60 seconds', updated_at = now()
-   WHERE id IN (SELECT id FROM claimable) RETURNING id`;
 
 /** An Index Scan, Index Only Scan or Bitmap Index Scan on the index: which one the planner picks depends on how many rows are claimable. */
 const usesIndex = (name: string) => new RegExp(`(Index Scan( Backward)? using|Index Only Scan using|Bitmap Index Scan on) ${name}( |$)`, 'm');
 const squash = (s: string) => s.replace(/\s+/g, ' ').trim();
 const source = (rel: string) => squash(readFileSync(join(__dirname, '..', '..', rel), 'utf8'));
 const org = (n: number) => `1d000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
-const ws = (n: number) => `1e000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
 
 describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXPLAIN regression)', () => {
   let admin: Client;
@@ -108,7 +100,6 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
     );
     // org(g): 40 % of the rows in organisation 1 (the skewed tenant), the rest spread over 2..ORGS.
     const orgOf = `('1d000000-0000-4000-8000-' || lpad(to_hex(CASE WHEN g % 5 < 2 THEN 1 ELSE 2 + g % ${ORGS - 1} END), 12, '0'))::uuid`;
-    const wsOf = `('1e000000-0000-4000-8000-' || lpad(to_hex(CASE WHEN g % 5 < 2 THEN 1 ELSE 2 + g % ${ORGS - 1} END), 12, '0'))::uuid`;
     const ago = `now() - make_interval(mins => g % 100000)`;
     await admin.query(
       `INSERT INTO core.email_outbox (organisation_id, job_type, status, recipient_email, rendered_subject, created_at, updated_at, sent_at, queued_at, processing_at)
@@ -124,16 +115,6 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
        SELECT ${orgOf}, gen_random_uuid(), gen_random_uuid(),
               CASE g % 200 WHEN 0 THEN 'PENDING' WHEN 1 THEN 'RETRY' WHEN 2 THEN 'PROCESSING' ELSE 'ACCEPTED' END,
               ${ago}, ${ago}, CASE WHEN g % 200 > 2 THEN ${ago} END, CASE WHEN g % 200 = 2 THEN ${ago} END
-         FROM generate_series(1, $1) g`,
-      [ROWS],
-    );
-    await admin.query(
-      `INSERT INTO core.realtime_event (organisation_id, workspace_id, event_key, event_type, entity_type, entity_id, status, processed_at,
-                                        claimed_at, claim_token, lease_expires_at, created_at, updated_at)
-       SELECT ${orgOf}, CASE WHEN g % 10 < 3 THEN NULL ELSE ${wsOf} END, 'idx-fix-' || g, 'shift.updated', 'shift', gen_random_uuid(),
-              CASE g % 200 WHEN 0 THEN 'pending' WHEN 1 THEN 'retry' WHEN 2 THEN 'processing' ELSE 'completed' END,
-              CASE WHEN g % 200 > 2 THEN ${ago} END, CASE WHEN g % 200 = 2 THEN now() - interval '10 minutes' END,
-              CASE WHEN g % 200 = 2 THEN gen_random_uuid() END, CASE WHEN g % 200 = 2 THEN now() - interval '5 minutes' END, ${ago}, ${ago}
          FROM generate_series(1, $1) g`,
       [ROWS],
     );
@@ -154,7 +135,7 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
          FROM idx_tok t LEFT JOIN idx_tok n ON n.g = t.g + 1`,
     );
     await admin.query(`SET LOCAL session_replication_role = origin`);
-    for (const t of ['email_outbox', 'push_delivery', 'realtime_event', 'refresh_token']) await admin.query(`ANALYZE core.${t}`);
+    for (const t of ['email_outbox', 'push_delivery', 'refresh_token']) await admin.query(`ANALYZE core.${t}`);
   });
 
   afterAll(async () => {
@@ -165,17 +146,16 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
   it('the copied claim predicates still occur verbatim in the Worker source', () => {
     expect(source('queues/rab-email/email-dispatch.job.ts')).toContain(squash(EMAIL_PREDICATE));
     expect(source('queues/rab-push/push-dispatch.job.ts')).toContain(squash(PUSH_PREDICATE));
-    expect(source('core/database/realtime-event.ts')).toContain(squash(REALTIME_PREDICATE));
   });
 
   it('the new indexes exist and are VALID', async () => {
     const { rows } = await admin.query(
       `SELECT c.relname, i.indisvalid AND i.indisready AS ok FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
         WHERE c.relnamespace = 'core'::regnamespace AND c.relname = ANY($1) ORDER BY 1`,
-      [['email_outbox_claim_idx', 'push_delivery_claim_idx', 'realtime_event_claim_scope_idx', 'refresh_token_replaced_by_idx', 'login_history_user_id_idx']],
+      [['email_outbox_claim_idx', 'push_delivery_claim_idx', 'refresh_token_replaced_by_idx', 'login_history_user_id_idx']],
     );
     expect(rows).toEqual(
-      ['email_outbox_claim_idx', 'login_history_user_id_idx', 'push_delivery_claim_idx', 'realtime_event_claim_scope_idx', 'refresh_token_replaced_by_idx'].map((relname) => ({ relname, ok: true })),
+      ['email_outbox_claim_idx', 'login_history_user_id_idx', 'push_delivery_claim_idx', 'refresh_token_replaced_by_idx'].map((relname) => ({ relname, ok: true })),
     );
   });
 
@@ -201,27 +181,6 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
     await admin.query('ROLLBACK TO SAVEPOINT ctx');
     expect(plan).toMatch(usesIndex('push_delivery_claim_idx'));
     expect(plan).not.toMatch(/Seq Scan on push_delivery/);
-  });
-
-  // Realtime: PostgreSQL cannot prove the partial predicate from this claim's OR (its first arm nests `status IN (…)`),
-  // so realtime_event_claim_scope_idx is used as a bitmap (with the tenant condition) rather than as an ordered scan, and
-  // a small scope may still pick realtime_event_org_idx. Asserted: no sequential scan anywhere; the skewed tenant's scopes
-  // use the new index instead of the 40 %-of-the-table tenant bitmap. (The ordered scan needs the claim SQL to state
-  // `status IN ('pending', 'retry', 'processing')` as well: a follow-up, not part of this change.)
-  it.each([
-    ['organisation scope', 1, false, true],
-    ['workspace scope', 1, true, true],
-    ['small workspace scope', 7, true, false],
-  ])('realtime claim (%s): no sequential scan; the skewed tenant uses realtime_event_claim_scope_idx', async (_label, n, withWs, skewed) => {
-    await admin.query('SAVEPOINT ctx');
-    await asRuntime(org(n), withWs ? ws(n) : null);
-    const plan = await explain(`realtime claim org ${n} ws ${withWs}`, REALTIME_CLAIM, [25]);
-    await admin.query('ROLLBACK TO SAVEPOINT ctx');
-    expect(plan).not.toMatch(/Seq Scan on realtime_event/);
-    if (skewed) {
-      expect(plan).toMatch(usesIndex('realtime_event_claim_scope_idx'));
-      expect(plan).not.toMatch(/realtime_event_org_idx/);
-    }
   });
 
   it('token cleanup (worker_cleanup_auth_tokens delete, as rab_secure_owner): the replaced_by referential check is an index probe', async () => {

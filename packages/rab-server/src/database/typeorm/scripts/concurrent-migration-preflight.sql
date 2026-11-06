@@ -36,14 +36,14 @@ SELECT blocked.pid AS blocked_pid, left(blocked.query, 120) AS blocked_query,
 \echo '== 4. Locks held or awaited on the tables the concurrent-index migrations touch'
 -- venue_manager_staff composite-FK migrations: staff_profile, manager_profile, venue_manager_staff.
 -- Index fix (OutboxClaimIndexes1786721440000, RefreshTokenReplacedByIndex1786721450000): email_outbox, push_delivery,
--- realtime_event, refresh_token, login_history. A long transaction holding ANY lock on one of these makes the concurrent
+-- refresh_token, login_history. A long transaction holding ANY lock on one of these makes the concurrent
 -- build wait (sections 1 and 2 show it).
 SELECT a.pid, a.state, l.relation::regclass AS relation, l.mode, l.granted,
        now() - a.query_start AS query_age, left(a.query, 120) AS query
   FROM pg_locks l
   JOIN pg_stat_activity a ON a.pid = l.pid
  WHERE l.relation IN ('core.staff_profile'::regclass, 'core.manager_profile'::regclass, 'core.venue_manager_staff'::regclass,
-                      'core.email_outbox'::regclass, 'core.push_delivery'::regclass, 'core.realtime_event'::regclass,
+                      'core.email_outbox'::regclass, 'core.push_delivery'::regclass,
                       'core.refresh_token'::regclass, 'core.login_history'::regclass)
    AND a.pid <> pg_backend_pid()
  ORDER BY l.granted, query_age DESC NULLS LAST;
@@ -51,7 +51,7 @@ SELECT a.pid, a.state, l.relation::regclass AS relation, l.mode, l.granted,
 \echo '== 4b. Size of the tables the index fix builds on (a concurrent build reads the whole table twice)'
 SELECT c.oid::regclass AS relation, pg_size_pretty(pg_table_size(c.oid)) AS table_size, c.reltuples::bigint AS estimated_rows
   FROM pg_class c
- WHERE c.oid IN ('core.email_outbox'::regclass, 'core.push_delivery'::regclass, 'core.realtime_event'::regclass,
+ WHERE c.oid IN ('core.email_outbox'::regclass, 'core.push_delivery'::regclass,
                  'core.refresh_token'::regclass, 'core.login_history'::regclass)
  ORDER BY pg_table_size(c.oid) DESC;
 
