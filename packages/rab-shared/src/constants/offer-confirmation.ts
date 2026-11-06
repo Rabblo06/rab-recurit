@@ -52,6 +52,12 @@ export const CONFIRMATION_DEADLINE_MESSAGES = {
   /** The same for a REPLACEMENT / STANDBY offer whose booked window has ended. */
   ACCEPT_REPLACEMENT:
     'This shift has ended, so this offer can no longer be accepted.',
+  /**
+   * POST /offers/:id/reject on an offer ALREADY withdrawn at its deadline (nothing changes). A reject after the deadline
+   * but before the Worker has run is still accepted (a terminal, unconfirmed outcome either way).
+   */
+  REJECT:
+    'The manager-confirmation deadline has passed, so this acceptance has already been withdrawn.',
   /** Any STANDARD send (new shift, send offers, VM-request approval, pipeline replace, replacement-request approval). */
   SEND: 'This shift starts in less than 30 minutes, so an offer could not be confirmed in time.',
 } as const;

@@ -123,14 +123,19 @@ export async function applyOfferConfirmation(
     [confirmedBy, offer.id, ctx.organisationId],
   )) as [Array<{ id: string }>, number];
   if (confirmedRows.length === 0) {
-    const [state] = await manager.query<Array<{ status: string; past: boolean }>>(
+    // Why zero rows: still awaiting but past the deadline, or withdrawn at the deadline by a concurrent Worker / lazy
+    // path (whose CAS won the row lock first) — both are the deadline 409; anything else is the generic conflict.
+    const [state] = await manager.query<Array<{ status: string; past: boolean; withdrawn_at_deadline: boolean }>>(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-      `SELECT o.status, clock_timestamp() >= ${deadline} AS past
+      `SELECT o.status, clock_timestamp() >= ${deadline} AS past,
+              (o.status = 'manager_rejected' AND o.rejected_by IS NULL AND o.rejection_reason = $2) AS withdrawn_at_deadline
          FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
         WHERE o.id = $1`,
-      [offer.id],
+      [offer.id, OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED],
     );
-    if (state && state.status === OfferStatus.STAFF_ACCEPTED && state.past) throw new ConfirmationDeadlinePassedException(offer.id, deadlineMessage);
+    if (state && ((state.status === OfferStatus.STAFF_ACCEPTED && state.past) || state.withdrawn_at_deadline)) {
+      throw new ConfirmationDeadlinePassedException(offer.id, deadlineMessage);
+    }
     throw new ConflictException('This offer was already confirmed or is no longer awaiting confirmation.');
   }
   // The generic post-end action window (end + SHIFT_ACTION_WINDOW_HOURS) is always looser than the deadline now; kept as

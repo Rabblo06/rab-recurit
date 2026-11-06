@@ -1,4 +1,4 @@
-import { assertTransition, NotificationType, OFFER_TRANSITIONS, OfferStatus, ReplacementRequestStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftAssignmentStatusType, ShiftStatus } from '@rab/shared';
+import { assertTransition, NotificationType, OFFER_CLOSED_REASON, OFFER_TRANSITIONS, OfferStatus, ReplacementRequestStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftAssignmentStatusType, ShiftStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -156,7 +156,7 @@ export async function runShiftCancellationFollowupCycle(
             await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_WITHDRAWN_BY_WORKER, {
               entityType: 'offer',
               entityId: offer.id,
-              metadata: { reason: 'shift_cancelled', shiftId: shift.id },
+              metadata: { reason: OFFER_CLOSED_REASON.SHIFT_CANCELLED, shiftId: shift.id },
               actorUserId: null,
             });
             offerClosed = true;
@@ -176,7 +176,7 @@ export async function runShiftCancellationFollowupCycle(
             await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_REJECTED_BY_WORKER, {
               entityType: 'offer',
               entityId: offer.id,
-              metadata: { reason: 'shift_cancelled', shiftId: shift.id },
+              metadata: { reason: OFFER_CLOSED_REASON.SHIFT_CANCELLED, shiftId: shift.id },
               actorUserId: null,
             });
             offerClosed = true;

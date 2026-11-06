@@ -8,6 +8,7 @@ import {
   CONFIRMATION_DEADLINE_MESSAGES,
   CONFIRMATION_DEADLINE_PASSED,
   MANAGER_CONFIRMATION_LEAD_MINUTES,
+  OFFER_CLOSED_REASON,
   OfferClosedReasonType,
   OFFER_TRANSITIONS,
   OfferStatus,
@@ -288,6 +289,11 @@ function toOfferSummary(r: Record<string, unknown>, audience: { kind: 'manager';
     ...(viewerUserId !== undefined ? { canConfirm: awaitingManagerConfirmation && r.offer_created_by === viewerUserId } : {}),
     ...(canAccept !== undefined ? { canAccept } : {}),
   };
+}
+
+/** The persisted marker of a withdrawal at the manager-confirmation deadline (withdraw-unconfirmed-offer.ts). */
+function isWithdrawnAtDeadline(offer: JobOffer): boolean {
+  return offer.status === OfferStatus.MANAGER_REJECTED && offer.rejectedBy == null && offer.rejectionReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED;
 }
 
 /** Every recipient was refused only because the deadline passed: answer with the coded 409 itself (rolls the whole action back). */
@@ -1669,6 +1675,9 @@ export class OfferService {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);
+      // Owner rule 2026-11-06: an acceptance already withdrawn at its deadline cannot be rejected again — the coded 409,
+      // nothing changes. Past the deadline but not yet withdrawn, a manual reject is still a valid manager decision.
+      if (isWithdrawnAtDeadline(offer)) throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.REJECT });
       assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
@@ -1683,6 +1692,9 @@ export class OfferService {
         [OfferStatus.MANAGER_REJECTED, now, ctx.userId, dto.reason, offer.id, offer.status],
       )) as [unknown, number];
       if (rejectedCount === 0) {
+        // Lost the row to a concurrent deadline withdrawal: the same coded 409.
+        const current = await manager.findOne(JobOffer, { where: { id: offer.id } });
+        if (current && isWithdrawnAtDeadline(current)) throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.REJECT });
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.REJECTED });

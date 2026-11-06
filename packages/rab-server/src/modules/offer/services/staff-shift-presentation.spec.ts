@@ -116,3 +116,32 @@ describe('staff shift display lifecycle (persisted worker milestones)', () => {
     ).toBe('expired');
   });
 });
+
+describe('manager-confirmation deadline (owner rule 2026-11-06)', () => {
+  const awaiting = {
+    ...base,
+    offerStatus: 'staff_accepted',
+    assignmentStatus: 'staff_accepted',
+    shiftStatus: 'offered',
+    attendanceStatus: null,
+    clockInAt: null,
+    clockOutAt: null,
+    startsAt: new Date('2026-12-01T10:00:00Z'),
+    endsAt: new Date('2026-12-01T18:00:00Z'),
+    serverNow: new Date('2026-12-01T09:20:00Z'),
+  };
+  it('an awaiting acceptance before its deadline stays pending with no closed reason', () => {
+    expect(resolve({ ...awaiting, closedReason: null })).toMatchObject({ state: 'pending', closedReason: null });
+  });
+  it('past its deadline (before the Worker ran) it is already presented as rejected — never "awaiting"', () => {
+    expect(resolve({ ...awaiting, closedReason: 'confirmation_deadline_passed' })).toMatchObject({ state: 'rejected', closedReason: 'confirmation_deadline_passed' });
+  });
+  it('a deadline withdrawal (manager_rejected) is rejected with its reason; canAccept passes through only when given', () => {
+    const withdrawn = resolve({ ...awaiting, offerStatus: 'manager_rejected', assignmentStatus: 'rejected', closedReason: 'confirmation_deadline_passed', canAccept: false });
+    expect(withdrawn).toMatchObject({ state: 'rejected', closedReason: 'confirmation_deadline_passed', canAccept: false });
+    expect(resolve({ ...awaiting })).not.toHaveProperty('canAccept');
+  });
+  it('a cancelled shift still reads cancelled', () => {
+    expect(resolve({ ...awaiting, shiftStatus: 'cancelled', closedReason: 'shift_cancelled' }).state).toBe('cancelled');
+  });
+});

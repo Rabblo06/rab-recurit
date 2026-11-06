@@ -141,8 +141,8 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
         status: ShiftStatus.OPEN,
         createdBy: fx.managerA.userId,
         // A real ManagerVenue-request-approve flow is a whole separate feature; setting `requestedBy` directly here
-        // reproduces its ONE relevant effect (`staffAccept`'s existing `autoConfirm` branch) without reimplementing
-        // Venue-Manager-request submission just to reach it — see offer.service.ts's own doc comment on that branch.
+        // reproduces a request-born shift. Since the owner rule of 2026-11-06 it no longer changes the accept flow (no
+        // auto-confirm): `autoConfirm` is kept as the option name only to mark the shifts that USED to auto-confirm.
         requestedBy: opts?.autoConfirm ? fx.managerA.userId : undefined,
         workspaceId: fx.managerA.workspaceId!,
       }),
@@ -462,18 +462,21 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
   // G. Capacity — last vacancy and multi-vacancy
   // ===================================================================
   describe('G. capacity concurrency', () => {
-    it('G35/G36: one vacancy, five staff accepting an auto-confirm shift simultaneously — exactly one seat, four safe SHIFT_FULL conflicts', async () => {
+    it('G35/G36: one vacancy on a VM-requested shift, five simultaneous accepts — all five wait for the manager (no seat); five concurrent confirms claim exactly one seat', async () => {
       const fx = await seedNormalFixture('lastVacancy');
       const shift = await seedOpenShift(fx, { requiredCount: 1, autoConfirm: true });
       const staffMembers = await Promise.all(Array.from({ length: 5 }, (_, i) => factory.createStaff(fx.organisation, { owner: fx.managerA, label: `lv${i}` })));
       const offers: JobOffer[] = [];
       for (const s of staffMembers) offers.push(await offerService.send(ctxOf(fx.managerA), shift.id, { staffProfileId: s.profileId! }));
 
+      // Owner rule 2026-11-06: accepting never confirms, so every accept succeeds and no seat is claimed.
       const results = await raceAndReport(staffMembers.map((s, i) => () => offerService.staffAccept(staffCtxOf(fx, s), offers[i]!.id)));
-      const succeeded = results.filter((r) => r.ok);
-      expect(succeeded).toHaveLength(1);
-      for (const failed of results.filter((r) => !r.ok)) expect(failed.error).toBeInstanceOf(ConflictException);
+      expect(results.filter((r) => r.ok)).toHaveLength(5);
+      expect((await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(Shift, { id: shift.id }))).filledCount).toBe(0);
 
+      const confirms = await raceAndReport(offers.map((o) => () => offerService.managerConfirm(ctxOf(fx.managerA), o.id)));
+      expect(confirms.filter((r) => r.ok)).toHaveLength(1);
+      for (const failed of confirms.filter((r) => !r.ok)) expect(failed.error).toBeInstanceOf(ConflictException);
       const finalShift = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
       expect(finalShift.filledCount).toBe(1);
       expect(finalShift.status).toBe(ShiftStatus.FULLY_FILLED);
@@ -481,15 +484,14 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
         m.count(ShiftAssignment, { where: { shiftId: shift.id, status: ShiftAssignmentStatus.CONFIRMED } }),
       );
       expect(confirmedCount).toBe(1);
-      // The 4 losing attempts must have rolled back their own claim entirely (never a stranded offer=STAFF_ACCEPTED
-      // with assignment=OFFERED forever) — each loser's offer/assignment is back at PENDING/OFFERED, still usable.
-      const pendingCount = await withContext(ctxOf(fx.managerA), (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.status = 'pending'`, [shift.id]),
+      // The 4 losing confirms rolled back entirely: those acceptances are still awaiting the manager, never stranded.
+      const awaiting = await withContext(ctxOf(fx.managerA), (m) =>
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.status = 'staff_accepted' AND sa.status = 'staff_accepted'`, [shift.id]),
       );
-      expect(Number(pendingCount[0]!.count)).toBe(4);
+      expect(Number(awaiting[0]!.count)).toBe(4);
     });
 
-    it('G37/G38: three vacancies, five simultaneous accepts — exactly three seats, filledCount/status consistent', async () => {
+    it('G37/G38: three vacancies on a VM-requested shift, five accepts then five concurrent confirms — exactly three seats, filledCount/status consistent', async () => {
       const fx = await seedNormalFixture('multiVacancy');
       const shift = await seedOpenShift(fx, { requiredCount: 3, autoConfirm: true });
       const staffMembers = await Promise.all(Array.from({ length: 5 }, (_, i) => factory.createStaff(fx.organisation, { owner: fx.managerA, label: `mv${i}` })));
@@ -497,8 +499,10 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       for (const s of staffMembers) offers.push(await offerService.send(ctxOf(fx.managerA), shift.id, { staffProfileId: s.profileId! }));
 
       const results = await raceAndReport(staffMembers.map((s, i) => () => offerService.staffAccept(staffCtxOf(fx, s), offers[i]!.id)));
-      expect(results.filter((r) => r.ok)).toHaveLength(3);
-      expect(results.filter((r) => !r.ok)).toHaveLength(2);
+      expect(results.filter((r) => r.ok)).toHaveLength(5);
+      const confirms = await raceAndReport(offers.map((o) => () => offerService.managerConfirm(ctxOf(fx.managerA), o.id)));
+      expect(confirms.filter((r) => r.ok)).toHaveLength(3);
+      expect(confirms.filter((r) => !r.ok)).toHaveLength(2);
 
       const finalShift = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
       expect(finalShift.filledCount).toBe(3);
