@@ -135,6 +135,8 @@
 .pipeline-tag.is-reviewed { background: var(--status-success-bg); color: var(--feedback-success); }
 .pipeline-tag.is-awaiting { background: var(--status-warning-bg); color: var(--feedback-warning); }
 .pipeline-tag.is-kind { background: var(--status-info-bg); color: var(--feedback-info); }
+.pipeline-tag.is-deadline { background: var(--status-neutral-bg); color: var(--font-secondary); margin: 0 6px 0 0; }
+.pipeline-lane-note { flex: none; margin: -4px 2px 8px; font-size: 11px; color: var(--font-tertiary); }
 .pipeline-card-state > .pipeline-tag:first-child { margin-left: 0; }
 .pipeline-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; }
 .pipeline-venue-chip { min-width: 0; font-size: 10.5px; color: var(--font-secondary); background: var(--bg-tertiary); border-radius: 5px; padding: 3px 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
