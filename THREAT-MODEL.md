@@ -6130,6 +6130,61 @@ verified on the psw stack: members 0, `rolpassword` NULL, only `crewflow_owner` 
 can therefore never hold, and the migration must not be applied anywhere. Retiring the file or keeping it for a possible
 return to separated logins is a later owner decision.
 
+## EMAIL — SMTP delivery aligned with Twenty CRM: at-least-once, never exactly-once (branch fix/email-smtp-twenty-style, 2026-11-06, not merged)
+
+Owner decision 2026-11-06: Twenty CRM-style email delivery. Compared against Twenty's source (twentyhq/twenty
+`cea08324`: `engine/core-modules/email/drivers/smtp.driver.ts`, `email-sender.job.ts`, `email.service.ts`,
+`constants/email-send-retry-backoff.constant.ts`, `message-queue/message-queue-worker-config.constant.ts`). No migration,
+column, role, grant, RLS policy, posture, queue option, backoff, lease or business-rule change (invitations, password
+resets, shift confirmations and payroll notifications send exactly what they sent before). **Asset:** another person's
+email (whether it arrives, how often, and what of it reaches logs). **Actor:** the Worker, without a request; an SMTP
+server or network that fails at any stage; a database fault during revalidation.
+
+- **Delivery guarantee: AT-LEAST-ONCE. Exactly-once is not claimed and is not achievable over SMTP** (it has no
+  deduplication; `SmtpDriver.ambiguousDeliverySafeToRetry = false`). `sendMail()` is awaited and the server's 250 after
+  DATA is success (SENT); any failure propagates to the existing outbox + BullMQ retry path.
+- **Classification (unchanged, verified against Twenty):** SMTP 5xx except 503 and local validation/config errors →
+  permanent: FAILED on that attempt (`UnrecoverableError`), never retried. 4xx, 503, network and timeout errors and
+  anything unrecognised → retryable: RETRY, BullMQ retries (5 attempts, exponential 5 s with jitter 0.5: 2.5-5 / 5-10 /
+  10-20 / 20-40 s), bounded by the row's CUMULATIVE cap of 5 (D-Q5b) across every generation; FAILED at the cap with
+  `last_error_code`, `failed_at` and an `email.delivery_failed` audit row. Twenty retries every error, 5xx included, 3
+  times; Crewflow keeps permanent rejections out of the retry loop.
+- **Changed — no address in logs (owner requirement 3):** nodemailer appends the server reply to its error message and
+  SMTP replies echo the refused mailbox. A retryable attempt now throws `EmailSendAttemptError` (outbox id, code, reply
+  code, sanitized reply) instead of the provider's error object, so the Worker's `failed` log line, BullMQ's
+  `failedReason` and the job stacktrace kept in Redis (30 days) carry no address. The sanitizer (also used for
+  `last_error_message_sanitized`) bounds the input first (2 000 characters), removes the row's own recipient exactly
+  (case-insensitive, any form: quoted or apostrophe local parts), removes keyword-labelled credentials with their
+  separator and `Bearer`/`Basic` scheme, then replaces every other token containing `@` with `[address]`, and stores at
+  most 500 characters. Twenty logs the recipient on every send and failure; Crewflow does not.
+- **Changed — no unbounded retry (owner requirement 11):** revalidation (target user, invite/reset token, member and
+  organisation invitations) ran inside the claim's transaction, so a database error there rolled the counted claim back:
+  the row stayed QUEUED/RETRY at its old count and BullMQ + the dispatcher's stale rules re-presented it for ever, never
+  FAILED. Revalidation now runs in its own transaction after the claim commits; such an error is a counted failed
+  attempt (RETRY, FAILED at 5). The provider-call marker is still written, fenced, before the provider is contacted, and
+  the claim now clears any marker left by an earlier attempt, so the marker always describes the current attempt: a
+  crash between claim and marker is a safe lease recovery (nothing sent), never a false `DELIVERY_UNCERTAIN`. Claim fencing (`processing_token`), the
+  organisation-bound tenant context and FORCE RLS are unchanged. Residual: an error in the claim statement itself still
+  cannot be counted (nothing committed); it fails the job, is logged, and the stale-QUEUED rule re-presents the row with
+  no generation ceiling, so it never reaches FAILED (nothing is ever sent). A ceiling (e.g. FAILED
+  `DISPATCH_GENERATIONS_EXHAUSTED` after N generations) is a retention/limit rule left to the owner, not chosen here.
+- **Remaining duplicate-delivery risk (accepted, owner requirement 5):** (1) the connection drops or times out after
+  the DATA terminator, before the server's reply: retried, so the recipient may get the email twice (reproduced: sink
+  `drop_after_data` → 2 messages). (2) A provider that accepts but answers 4xx/timeout. (3) An operator replay of a
+  DELIVERY_UNCERTAIN row with the allow-uncertain flag. A duplicate is the same content to the same recipient (no tenant
+  or person boundary is crossed), but a duplicate password-reset or invitation email is a second copy of the same link.
+- **Crewflow stricter than Twenty (kept; owner decision pending, not changed here):** Twenty re-runs a stalled email job
+  once (`maxStalledCount: 1`) and has no outbox, so a Worker crash mid-send resends, and a job lost from Redis is an email
+  lost. Crewflow never resends once the provider call may have started and the outcome was lost: Worker crash mid-send,
+  a provider-confirmed send whose SENT write failed (OD-5), or (OD-6) a RETRY row with the marker whose BullMQ job was
+  lost from Redis → FAILED `DELIVERY_UNCERTAIN`, manual review. Risk of keeping it: an email that never went out waits for
+  an operator; risk of Twenty parity: a duplicate.
+- **Tests:** `email-send.smtp-delivery.spec.ts` (unit, transactional fake: success, 451, 550, post-DATA loss, duplicate
+  delivery, crash, exhaustion, the revalidation-fault regression, redaction) and
+  `email-smtp-twenty-delivery.integration.spec.ts` (real PostgreSQL, Redis/BullMQ with the production job options, the
+  real SmtpDriver against a per-recipient fault sink, a real Worker process SIGKILLed mid-SMTP; asserts no address in any
+  log line, BullMQ failure reason, stacktrace or stored error).
+
 ## FIX — a running shift stayed `in_progress` for ever after its last open seat was closed by an offer close (branch fix/shift-completion-after-withdrawal, 2026-11-06, not merged)
 
 **Security finding (§5.8).** Found by the timer-trigger shadow run (12 of 12 shifts with a pending STANDBY acceptance).
