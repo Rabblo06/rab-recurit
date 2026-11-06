@@ -194,10 +194,13 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
 
     const outcome = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
       const row = await manager.findOne(EmailOutbox, { where: { id: emailOutboxId } });
-      // Not visible (yet): a producer can fast-publish from INSIDE its still-open transaction (AccountLifecycleService), so this
-      // worker may run before that commit. Completing here would strand the row as QUEUED until the dispatcher's 2-minute
-      // stale-QUEUED recovery (BullMQ dedupes the same jobId), so throw instead: BullMQ retries with its 5 s backoff, by which
-      // time the row is committed. A row that genuinely never appears just exhausts its attempts — nothing is sent either way.
+      // Not visible (yet): the safety net. Producers fast-publish only after their transaction commits
+      // (EmailOutboxService.publishAfterCommit, or tryFastPublish called after the transaction), but any producer that
+      // publishes before its commit, now or in future, lets this worker run first. Completing here would strand the row
+      // as QUEUED until the dispatcher's 2-minute stale-QUEUED recovery (BullMQ dedupes the same jobId), so throw instead:
+      // BullMQ retries with its 5 s backoff, by which time the row is committed. This throw comes before the claim, so it
+      // never counts toward the row's cumulative attempt cap. A row that genuinely never appears (its transaction rolled
+      // back) just exhausts its attempts — nothing is sent either way.
       if (!row) throw new Error(`email outbox row ${emailOutboxId} is not visible yet — retrying`);
 
       if (row.status === EmailOutboxStatus.SENT) return { skip: true as const };
@@ -637,8 +640,10 @@ async function revalidateOrganisationInvitation(manager: EntityManager, row: Ema
  *
  * D-Q5b (OC-1): final when the error is permanent or this attempt's CUMULATIVE count (from the claim) reached the row's
  * cap — no longer when the current BullMQ job ran out of its own attempts. If a job's BullMQ attempts run out first
- * (attempts spent before any claim, e.g. a row not yet visible), the row stays RETRY and the dispatcher's stale-RETRY
- * recovery republishes it until the cumulative cap is reached.
+ * (attempts spent before any claim), the row keeps the open status it had and the dispatcher's matching stale rule
+ * republishes it under a new generation until the cumulative cap is reached: a row that was never claimed (e.g. not yet
+ * visible on a fresh row) is PENDING or QUEUED and comes back through the stale-QUEUED rule; a row an earlier attempt
+ * left RETRY comes back through the stale-RETRY rule.
  */
 async function handleSendFailure(
   deps: EmailSendProcessorDeps,

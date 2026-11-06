@@ -3,6 +3,15 @@ import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { EmailOutbox } from '../../../modules/identity/entities';
+import { AfterCommitPublisher } from '../after-commit/after-commit-publisher';
+
+/** Bound on fast publishes held for ONE transaction (account emails write one row each; beyond it the dispatcher publishes). */
+export const EMAIL_FAST_PUBLISH_MAX_PER_TRANSACTION = 200;
+/** Process-wide bound on deferred fast publishes in flight (each is also bounded by the producer's `boundedPublish`, 3 s). */
+export const EMAIL_FAST_PUBLISH_MAX_IN_FLIGHT = 500;
+
+/** The publish a caller hands in (`EmailQueueService.publish`): the row's own committed ids, never client input. */
+export type EmailFastPublish = (emailOutboxId: string, organisationId: string) => Promise<void>;
 
 /**
  * F1 (Wave 1 lane S, migration EmailOutboxSecretBodyScrub1786719710000): job types whose rendered body ALWAYS carries a
@@ -71,6 +80,17 @@ export interface EnqueueEmailParams {
 @Injectable()
 export class EmailOutboxService {
   private readonly logger = new Logger(EmailOutboxService.name);
+  /**
+   * The engine after-commit mechanism (#35, D-Q4b) for `publishAfterCommit`: a fast publish registered inside a
+   * transaction fires only after its OUTERMOST commit and is discarded by any rollback on it.
+   */
+  private readonly afterCommit = new AfterCommitPublisher({
+    maxPerTransaction: EMAIL_FAST_PUBLISH_MAX_PER_TRANSACTION,
+    maxInFlight: EMAIL_FAST_PUBLISH_MAX_IN_FLIGHT,
+    // Unreachable in practice (the task is tryFastPublish, which never rejects); kept so a future change cannot throw silently.
+    failureMessage: (name) => `fast publish failed (${name}); the dispatcher will publish the row`,
+    logger: this.logger,
+  });
 
   async enqueue(manager: EntityManager, params: EnqueueEmailParams): Promise<EmailOutbox> {
     const row = manager.create(EmailOutbox, {
@@ -104,12 +124,41 @@ export class EmailOutboxService {
    * PENDING regardless, and the dispatcher's own poll loop is the real
    * backstop that makes this optional rather than load-bearing. See
    * `email-dispatch.job.ts`'s own doc comment for the other half of this.
+   *
+   * A caller still INSIDE the transaction that wrote the row uses `publishAfterCommit` instead.
    */
-  async tryFastPublish(publish: (emailOutboxId: string, organisationId: string) => Promise<void>, row: Pick<EmailOutbox, 'id' | 'organisationId'>): Promise<void> {
+  async tryFastPublish(publish: EmailFastPublish, row: Pick<EmailOutbox, 'id' | 'organisationId'>): Promise<void> {
     try {
       await publish(row.id, row.organisationId);
     } catch (error) {
       this.logger.warn(`Fast-path publish failed for outbox row ${row.id} — the dispatcher's poll loop will pick it up.`, error as Error);
     }
+  }
+
+  /**
+   * The fast path for a row written in `manager`'s STILL-OPEN transaction (the caller wrote it with `enqueue(manager, …)`
+   * and has not committed yet). Publishing right away would let the Worker run the job before COMMIT, find no row, and
+   * spend a BullMQ retry on "not visible yet" (seen in the 2026-11-04 staging soak). So:
+   *
+   *  - Inside an open transaction: registered through `AfterCommitPublisher` and run only after the OUTERMOST commit
+   *    (a savepoint release is not a commit); ANY rollback on that transaction discards it, so nothing is ever published
+   *    for a row that does not exist. Beyond the per-transaction bound it is not registered and the dispatcher publishes
+   *    the row on its next pass, exactly as when a fast publish fails.
+   *  - No open transaction (no QueryRunner, released, or not in a transaction): the row is already committed, so it is
+   *    published now — today's behaviour.
+   *
+   * Never throws, never awaits Redis, never touches the database: the caller's transaction, its result and its timing do
+   * not depend on it (the commit broadcast does not wait for the publish either). The job is the same
+   * `email-outbox.<id>.attempt.0` the dispatcher adds, and the processor's "not visible yet" retry stays as the safety net.
+   */
+  publishAfterCommit(manager: EntityManager, publish: EmailFastPublish, row: Pick<EmailOutbox, 'id' | 'organisationId'>): void {
+    // Copied now: the task must publish the ids of the row this transaction wrote, whatever later happens to `row`.
+    const target = { id: row.id, organisationId: row.organisationId };
+    const runner = manager.queryRunner;
+    if (!runner || runner.isReleased || !runner.isTransactionActive) {
+      void this.tryFastPublish(publish, target);
+      return;
+    }
+    this.afterCommit.defer(manager, () => this.tryFastPublish(publish, target));
   }
 }

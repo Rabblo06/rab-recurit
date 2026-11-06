@@ -67,9 +67,14 @@ export class AccountLifecycleService {
     return this.env.get('EMAIL_DELIVERY_ENABLED') === true;
   }
 
-  /** Publishes to BullMQ right after the caller's transaction commits — see `EmailOutboxService.tryFastPublish`'s own doc comment for why this is best-effort only. */
-  private schedulePublish(row: { id: string; organisationId: string }): void {
-    void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+  /**
+   * The best-effort fast publish of a row this service just wrote in the CALLER's transaction (`manager`): it runs only after
+   * that transaction's outermost commit and is dropped if it rolls back (`EmailOutboxService.publishAfterCommit`), so the
+   * Worker never picks the job up before the row is visible. With no open transaction the row is already committed and it
+   * is published at once. The dispatcher stays the backstop either way.
+   */
+  private schedulePublish(manager: EntityManager, row: { id: string; organisationId: string }): void {
+    this.emailOutbox.publishAfterCommit(manager, (id, orgId) => this.emailQueue.publish(id, orgId), row);
   }
 
   /**
@@ -147,7 +152,7 @@ export class AccountLifecycleService {
       rendered,
       createdBy: actorUserId ?? undefined,
     });
-    this.schedulePublish(outboxRow);
+    this.schedulePublish(manager, outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.INVITE_EMAIL_QUEUED, {
       targetUserId: params.userId,
@@ -191,7 +196,7 @@ export class AccountLifecycleService {
       rendered,
       createdBy: ctx.userId,
     });
-    this.schedulePublish(outboxRow);
+    this.schedulePublish(manager, outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.ADMIN_PASSWORD_RESET, { targetUserId: params.targetUserId });
   }
@@ -216,7 +221,7 @@ export class AccountLifecycleService {
       rendered,
       createdBy: ctx.userId,
     });
-    this.schedulePublish(outboxRow);
+    this.schedulePublish(manager, outboxRow);
 
     await this.auditService.record(manager, ctx, AuditAction.STAFF_SUSPENSION_NOTICE_SENT, { targetUserId: params.userId });
   }
