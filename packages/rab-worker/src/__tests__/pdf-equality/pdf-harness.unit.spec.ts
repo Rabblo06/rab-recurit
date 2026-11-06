@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-import { layoutLines, TextRun } from '../helpers/pdf-layout';
+import { layoutLines, parseCMapToUnicode, TextRun } from '../helpers/pdf-layout';
 import { acceptOneExtraPage, checkAgainstDocument, checkAgainstInput, compareExtractions, Finding, countValue, forcedBreakOccurrences, lineBreakProblems, markerFieldCount, permutedOccurrences } from './checker';
 import { DOCUMENT_FILES, DOCUMENT_SPECS, DocumentExpectation, DocumentKind } from './documents';
 import { Continuation, overlappingRuns, pageContinuations, PdfExtraction } from './extract';
@@ -81,6 +81,31 @@ describe('right-to-left runs read in logical order (pdf-layout logicalOrder)', (
     const [l] = layoutLines(line([[0, words[2]!], [20, ' '], [25, words[1]!], [40, ' '], [45, words[0]!]]));
     expect(l!.text).toBe(reversed);
     expect(l!.text).not.toBe('محمد عبد الله');
+  });
+});
+
+describe('ToUnicode CMaps with an empty destination (pdf-layout parseCMapToUnicode)', () => {
+  // pdfkit writes "<>" for a glyph it was given without code points (the fontkit glyph-cache bug, runtime/glyph-cache.ts).
+  // The parser used to skip it, so every later entry of the array moved one code down: "Z" vanished AND "%" read as "Z",
+  // "J" as "%", "M" as "J" (the 2026-11-06 CI report). An empty entry maps its own code to no text, nothing else.
+  it('keeps an empty array entry in place: only its own code reads as nothing', () => {
+    const map = parseCMapToUnicode(['1 beginbfrange', '<0052> <0056> [<005d> <> <0025> <004a> <004d>]', 'endbfrange'].join('\n'));
+    expect([...map]).toEqual([
+      [0x52, ']'],
+      [0x53, ''],
+      [0x54, '%'],
+      [0x55, 'J'],
+      [0x56, 'M'],
+    ]);
+  });
+
+  it('an empty range destination and an empty bfchar destination map to no text', () => {
+    const map = parseCMapToUnicode(['1 beginbfrange', '<0001> <0002> <>', 'endbfrange', '1 beginbfchar', '<0003> <>', 'endbfchar'].join('\n'));
+    expect([...map].sort((a, b) => a[0] - b[0])).toEqual([
+      [1, ''],
+      [2, ''],
+      [3, ''],
+    ]);
   });
 });
 

@@ -5830,3 +5830,42 @@ No migration, role, grant, RLS or posture change; no money or worked-minutes val
 - **Operators on v0.4.0:**
   - Do NOT mark production disposable.
   - Deploy the release carrying this fix. On a test database the old images keep working (it carries the marker).
+
+## FIX — native PDF output depended on what the render thread printed before (fontkit glyph cache; branch fix/pdf-native-determinism, 2026-11-06)
+
+**Security finding (§5.8).** Found as the intermittent `pdf-equality` CI failure on hostile fixtures (PR #78 run
+42055102259, PR #80 run 42206763876; both passed on re-run). The PDF bytes differed between runs, not only the
+harness's reading of them.
+
+- **Severity:** HIGH (integrity of generated attendance and payroll documents, silently; triggered across tenants; no
+  disclosure of content).
+- **Actor → action → consequence:** any user whose text reaches a native PDF (a staff name, venue, note or approver
+  with "Ż", "Å", "Ö", "é", ...) → the Worker renders that document on a pool thread that has not yet laid out the plain
+  base letter in that weight → every LATER document on that thread, for any tenant, until the thread is recycled
+  (200 renders or idle), lays that letter out with no code points. MEASURED on the harness fixtures: after the unicode
+  roster, an ordinary one-staff final timesheet PRINTED its status "Approved" as "pproved", the review "Attendance" as
+  "ttendance" and the footer workspace "Adolphus Events" as "dolphus Events" (glyphs not drawn), and its text layer lost
+  every regular capital "A" ("SW1A 1AA" reads "SW1 1"); after the unicode statement, the hostile timesheet broke its
+  note one glyph late ("<<" split over two lines) and lost "Z" from the text layer (ToUnicode `<>`); 16 of the 132
+  ordered pairs of the hostile, unicode and one-row documents differed. Which document corrupts which later one depends
+  only on pool scheduling, hence the intermittent CI failures. Digits are no composite's component in Liberation Sans,
+  so hours, times and amounts were not observed to change; "." and "-" are components, so a dropped decimal point or
+  hyphen cannot be ruled out.
+- **Where:** `packages/rab-worker/src/queues/rab-reports/native/runtime/render-thread.ts` (font objects kept for the
+  thread's lifetime, no isolation between renders). Mechanism in the pinned dependencies: fontkit 2.0.4
+  `TTFFont.getGlyph(glyph, characters = [])` (`dist/main.cjs:12708`) caches a glyph by id with the code points of its
+  FIRST request; its TrueType subsetter fetches composite components with none (`main.cjs:12180`); textkit 7.0.1 maps
+  glyphs to string indices by `glyph.codePoints.length` (`textkit.js:1046-1077`); pdfkit 0.20.1 writes ToUnicode from
+  them (`pdfkit.js:3482`). Every Latin letter, `<`, `>`, `-`, `.`, `;`, `'`, `"` is a composite component in Liberation
+  Sans.
+- **Root cause:** per-thread mutable font state shared between renders; a render was not a function of its input.
+- **Fix:** the render thread empties fontkit's glyph cache in every parsed font object before every render
+  (`runtime/glyph-cache.ts`), so each render starts from the same state. Fail closed: a fontkit whose font objects lack
+  the resettable cache refuses to start the thread (primary font) or the render (a font found later).
+- **Regression tests (fail on every run without the fix):** `runtime/glyph-cache.spec.ts` (the poisoning, the reset, fail
+  closed); `runtime/render-pool.spec.ts` "render isolation" (a "Łucja Żak" render first on a thread, then the same
+  request must equal a fresh thread's bytes and keep "Z" in the text layer); harness
+  `pdf-native-determinism.spec.ts` (hostile documents after the unicode documents on one thread equal a fresh thread;
+  every hostile, unicode and one-row document is byte-identical in any order). The harness CMap reader also no longer
+  shifts the entries after an empty `<>` destination (`helpers/pdf-layout.ts`, `pdf-harness.unit.spec.ts`), which had
+  turned one missing "Z" into "%W[", "JPDF-1.4", "/MavaScript" and a dropped "Missing clock-outs".
