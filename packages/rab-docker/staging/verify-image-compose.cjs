@@ -52,13 +52,30 @@ const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_EN
   'S3_FORCE_PATH_STYLE', 'S3_SERVER_SIDE_ENCRYPTION', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKSPACE_PROVISIONER_INTERVAL_SECONDS',
   'PG_POOL_MAX_CONNECTIONS', 'WORKER_SCHEDULER', 'CREWFLOW_MIGRATE_ON_START', 'CREWFLOW_MIGRATION_APPROVAL_MODE',
   'CREWFLOW_UPGRADE_FAILURE_POLICY', 'CREWFLOW_UPGRADE_FAILURE', 'DISABLE_DB_MIGRATIONS', 'DISABLE_CRON_JOBS_REGISTRATION',
-  'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS'];
+  'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
+  'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS',
+  'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
+  'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'WORKER_SHIFT_SCAN_MODE'];
 /**
  * Notification delivery (owner decision 2026-11-06): committed on rab-api AND rab-worker with exactly these values, in both
  * compose files (PINNED_ENV alone would accept the two files drifting together). The API registers the email scheduler with
  * its own interval and the consume-only Worker never compares intervals, so the two services must agree.
  */
 const NOTIFICATION_DELIVERY = Object.freeze({ WORKER_FAST_PUBLISH_NOTIFY: 'true', WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30' });
+/**
+ * Phase D switches (owner decision 2026-11-06): timer triggers on for all four (listed) kinds and the safety-sweep
+ * intervals, committed on rab-api AND rab-worker with exactly these values in both compose files, for the same reason as
+ * the email sweep. The shift monitor and the combined-scan mode stay at the code default: never committed otherwise.
+ * Mirrors PHASE_D_SWITCHES / PHASE_D_UNCHANGED in scripts/compose-owner-login.cjs (a test asserts the two agree).
+ */
+const PHASE_D_SWITCHES = Object.freeze({
+  WORKER_TIMER_TRIGGERS: 'on',
+  WORKER_TIMER_TRIGGER_KINDS: 'offer-expiry,manager-confirmation,no-show,late-clock-in',
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300',
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120',
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300',
+});
+const PHASE_D_UNCHANGED = Object.freeze({ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
 const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_DATABASE_URL', 'CREWFLOW_MIGRATION_PHASE',
   'ALLOW_PRODUCTION_DB_COMMANDS', 'DATABASE_URL_UNPOOLED', 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
   'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'CREWFLOW_MIGRATOR_PASSWORD',
@@ -185,6 +202,13 @@ function checkVariant(variant, production, variantFiles = variant) {
     for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
       if (String(envOf(services[name])[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" (owner decision 2026-11-06)`);
     }
+    for (const [key, want] of Object.entries(PHASE_D_SWITCHES)) {
+      if (String(envOf(services[name])[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" (owner decision 2026-11-06, Phase D switches)`);
+    }
+    for (const [key, keep] of Object.entries(PHASE_D_UNCHANGED)) {
+      const env = envOf(services[name]);
+      if (key in env && String(env[key]) !== keep) fail(`${name}: ${key} is committed as "${env[key]}"; the owner decision 2026-11-06 keeps ${keep} (leave it unset)`);
+    }
     if ('WORKER_SCHEDULER' in envOf(services[name])) fail(`${name}: commits WORKER_SCHEDULER (production runs bullmq; interval is refused)`);
     if ('CREWFLOW_UPGRADE_FAILURE_POLICY' in envOf(services[name])) fail(`${name}: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY (O3 C3)`);
   }
@@ -292,6 +316,9 @@ function checkDeployment(merged, production, envFileKeys = {}) {
     if (name === 'rab-api' && !['none', 'token'].includes(String(envOf(a).CREWFLOW_MIGRATION_APPROVAL_MODE ?? ''))) fail('rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token in the deployed model');
     for (const [key, want] of Object.entries(NOTIFICATION_DELIVERY)) {
       if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-06)`);
+    }
+    for (const [key, want] of Object.entries(PHASE_D_SWITCHES)) {
+      if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-06, Phase D switches)`);
     }
     if (envOf(a).CREWFLOW_RUNTIME_ISOLATION !== 'enforce') fail(`${name}: CREWFLOW_RUNTIME_ISOLATION is not "enforce" in the deployed model`);
     const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
@@ -500,4 +527,4 @@ if (require.main === module) {
   console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

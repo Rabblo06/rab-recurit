@@ -196,6 +196,36 @@ send is this same `WORKER_FAST_PUBLISH_NOTIFY` flag, which is already `true`. It
 (`NOTIFICATION_DELIVERY` in `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`) in the same change.
 `PUSH_ENABLED=true` and a real `PUSH_PROVIDER` go in `runtime.env` (production refuses `PUSH_PROVIDER=FAKE` with push on).
 
+**Phase D switches (owner decision 2026-11-06): committed configuration.** Like notification delivery: in both compose
+files, on rab-api AND rab-worker, with the same value on both. The gate (`PHASE_D_SWITCHES` in
+`scripts/compose-owner-login.cjs`) and the verifier (`staging/verify-image-compose.cjs`) enforce every value, and
+`runtime.env` / `database.env` may not re-enter them. The code defaults are unchanged (triggers off, the historical scan
+intervals), so development and tests behave as before.
+
+| Variable | Production value | Code default | Why |
+|---|---|---|---|
+| `WORKER_TIMER_TRIGGERS` | `on` | `off` | Delayed-job triggers make each of the four transitions happen at its due time instead of up to one scan interval later. The Worker runs the scan's own per-candidate compare-and-set (same `worker_event` key, notifications and audit). The API arms the offer triggers; the Worker consumes them and arms no-show / late clock-in, so both carry it. Evidence: the shadow run on main 85332cc6, 336 decisions, 0 wrong / early / missed. |
+| `WORKER_TIMER_TRIGGER_KINDS` | `offer-expiry,manager-confirmation,no-show,late-clock-in` | unset (= every kind) | All four, decided by the owner; **no-show and late clock-in touch attendance and payroll** (THREAT-MODEL). Listed explicitly so a kind added to the code later is not switched on silently (a gate test compares the list with the code's kinds). |
+| `WORKER_OFFER_EXPIRY_INTERVAL_SECONDS` | `300` | `60` (bounds 10–300) | The scan stays as a safety sweep behind the trigger. As for the email sweep, the API registers the BullMQ scheduler with ITS value and the Worker never compares intervals, so both carry the same value. |
+| `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` | `120` | `60` (bounds 10–300) | Safety sweep for the start − 30 min withdrawal; a lost trigger costs at most 2 min of the staff member's notice. |
+| `WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS` | `300` | `120` (bounds 30–600) | Safety sweep; even a lost trigger lands the late flag before the 30-minute no-show. |
+| `WORKER_SHIFT_MONITOR_INTERVAL_SECONDS` | not set (300 s, unchanged) | `300` | It also sends the clock-in reminders and arms the no-show / late clock-in triggers (horizon two intervals). The gate refuses any other value in the compose files and env files. |
+| `WORKER_SHIFT_SCAN_MODE` | not set (`separate`) | `separate` | The D-Q4a combined scan stays off until it is measured. The gate refuses `combined`. |
+
+What changes: an unanswered offer expires, an unconfirmed acceptance is withdrawn at start − 30 min, and a late clock-in
+or provisional no-show is flagged at its due time (shadow run: p95 lateness ≤ 0.56 s; a stalled host delays it, the
+earlier soak saw up to 105 s) instead of up to one scan interval later. If a
+trigger is lost (a Redis loss, a failed publish), the safety sweep catches it within the new interval: up to 5 min for
+offer expiry and late clock-in, 2 min for the manager-confirmation withdrawal, 5 min for no-show (shift monitor). Rollback:
+`WORKER_TIMER_TRIGGERS: "off"` on both services in both compose files (and the gate), then redeploy. With `off` the Worker
+creates no trigger consumer, so leftover trigger jobs stay unconsumed in Redis; the scans never stopped and do the work. The scans then keep the committed (slower) intervals: whether to
+restore the code defaults with the rollback is an owner decision.
+
+**Migration 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) is OBSOLETE under this design** (owner decision
+2026-11-06: keep it excluded). It stays in `core/gated-migrations/`, outside the migration glob, and must never be
+applied: its cutover gate needs every Worker to authenticate as `crewflow_worker`, which has no members and no password
+under the owner login (see `docs/phase-d-deployment-runbook.md` §4.1).
+
 **The Worker runs with `init: true`.** Its watchdog SIGKILLs a stalled process, and the kernel ignores that signal for PID 1, so the Worker refuses to start as PID 1. Docker's init must be PID 1; every compose file that runs the Worker sets it, and the gate fails CI otherwise.
 
 **Failure semantics:**

@@ -97,6 +97,14 @@ services:
       # When PUSH_ENABLED is turned on, also set WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" on both (owner rule).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      # Phase D switches (owner decision 2026-11-06), identical on rab-api and rab-worker: see docker-compose.image.yml.
+      # Timer triggers on for all four kinds; safety sweeps offer expiry 300 s, manager confirmation 120 s, late clock-in
+      # 300 s; the shift monitor keeps 300 s (not set); the combined scan stays off (WORKER_SHIFT_SCAN_MODE not set).
+      WORKER_TIMER_TRIGGERS: "on"
+      WORKER_TIMER_TRIGGER_KINDS: "offer-expiry,manager-confirmation,no-show,late-clock-in"
+      WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
+      WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
+      WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
     depends_on:
       rab-redis:
         condition: service_healthy
@@ -165,6 +173,12 @@ services:
       # Notification delivery (owner decision 2026-11-06): identical to rab-api.
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      # Phase D switches (owner decision 2026-11-06): identical to rab-api.
+      WORKER_TIMER_TRIGGERS: "on"
+      WORKER_TIMER_TRIGGER_KINDS: "offer-expiry,manager-confirmation,no-show,late-clock-in"
+      WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
+      WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
+      WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
       HOME: /nonexistent
       TMPDIR: /tmp/crewflow-jobs
       XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config

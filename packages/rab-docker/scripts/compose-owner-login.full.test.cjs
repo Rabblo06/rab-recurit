@@ -169,6 +169,40 @@ test('notification delivery (owner decision 2026-11-06): fast publish on and the
   }
 });
 
+test('Phase D switches (owner decision 2026-11-06): triggers on for all four kinds and the safety sweeps, identical on both services', { skip }, () => {
+  for (const c of COMBOS) {
+    for (const svc of APP) {
+      const env = fresh(c.name).services[svc].environment;
+      assert.equal(env.WORKER_TIMER_TRIGGERS, 'on', `${c.name} ${svc}`);
+      assert.equal(env.WORKER_TIMER_TRIGGER_KINDS, 'offer-expiry,manager-confirmation,no-show,late-clock-in', `${c.name} ${svc}`);
+      assert.equal(env.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS, '300', `${c.name} ${svc}`);
+      assert.equal(env.WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS, '120', `${c.name} ${svc}`);
+      assert.equal(env.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS, '300', `${c.name} ${svc}`);
+      // Unchanged by the owner: the shift monitor keeps its 300 s default and the combined scan stays off (not committed).
+      assert.equal(env.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS, undefined, `${c.name} ${svc}`);
+      assert.equal(env.WORKER_SHIFT_SCAN_MODE, undefined, `${c.name} ${svc}`);
+    }
+  }
+  for (const svc of APP) {
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.WORKER_TIMER_TRIGGERS; }), new RegExp(`${svc}: WORKER_TIMER_TRIGGERS is "", expected "on"`));
+    for (const mode of ['off', 'shadow']) {
+      assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_TIMER_TRIGGERS = mode; }), new RegExp(`${svc}: WORKER_TIMER_TRIGGERS is "${mode}", expected "on"`));
+    }
+    // An unset kind list means "every kind the code knows", including any added later: the list stays explicit.
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.WORKER_TIMER_TRIGGER_KINDS; }), new RegExp(`${svc}: WORKER_TIMER_TRIGGER_KINDS is "", expected`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_TIMER_TRIGGER_KINDS = 'offer-expiry'; }), new RegExp(`${svc}: WORKER_TIMER_TRIGGER_KINDS is "offer-expiry", expected`));
+    for (const [key, other] of [['WORKER_OFFER_EXPIRY_INTERVAL_SECONDS', '60'], ['WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', '300'], ['WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS', '120']]) {
+      assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment[key]; }), new RegExp(`${svc}: ${key} is "", expected`));
+      // A Worker value that differs from the API's would never be noticed at runtime (the Worker's verify checks ids only).
+      assertRefused(problemsAfter(DEF, (s) => { s[svc].environment[key] = other; }), new RegExp(`${svc}: ${key} is "${other}", expected`));
+    }
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }), new RegExp(`${svc}: WORKER_SHIFT_SCAN_MODE is "combined"; the owner decision 2026-11-06 keeps it at separate`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS = '600'; }), new RegExp(`${svc}: WORKER_SHIFT_MONITOR_INTERVAL_SECONDS is "600"; the owner decision 2026-11-06 keeps it at 300`));
+  }
+  // The code defaults written out explicitly change nothing and are accepted.
+  assert.deepEqual(problemsAfter(DEF, (s) => { for (const svc of APP) Object.assign(s[svc].environment, { WORKER_SHIFT_SCAN_MODE: 'separate', WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300' }); }), []);
+});
+
 test('O3 C5: exactly one API, stop-then-start', { skip }, () => {
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].deploy = { replicas: 2 }; }), /rab-api: 2 replicas/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].scale = 3; }), /rab-api: 3 replicas/);
