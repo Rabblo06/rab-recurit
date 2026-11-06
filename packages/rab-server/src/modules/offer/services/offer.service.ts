@@ -591,6 +591,7 @@ export class OfferService {
     // Replacement / standby offers keep their own window (Q1b) and are not refused here.
     if (offerKind === OfferKind.STANDARD) {
       const [{ past }] = await manager.query<Array<{ past: boolean }>>(
+        // sql-injection-reviewed: interpolates a module-level numeric constant from @rab/shared; the start is a bound $1 parameter.
         `SELECT clock_timestamp() >= ($1::timestamptz - make_interval(mins => ${MANAGER_CONFIRMATION_LEAD_MINUTES})) AS past`,
         [time.startsAt],
       );

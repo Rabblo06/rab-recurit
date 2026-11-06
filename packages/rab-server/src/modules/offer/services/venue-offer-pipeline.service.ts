@@ -96,6 +96,7 @@ export class VenueOfferPipelineService {
       // created_at DESC, id DESC)`. Without `entity_type` only the `organisation_id` prefix was usable, so every card walked
       // the organisation's whole index range (measured ~15 ms per card at 500k audit rows; 0.01 ms with it — Phase C1).
       const rows = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT sa.period AS "period", o.id AS "offerId", sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS name,
         u.avatar_file_id AS "avatarFileId", o.status AS "offerStatus", sa.status AS "assignmentStatus", a.status AS "attendanceStatus",
         o.sent_at AS "sentAt", o.responded_at AS "respondedAt", o.staff_accepted_at AS "acceptedAt", o.decline_reason AS "declineReason",
