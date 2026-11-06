@@ -878,6 +878,24 @@ describe('pool behaviour', () => {
     expect((await a.probe()).clockNowMs).toBe(Date.parse(AT));
   }, 60_000);
 
+  it('render isolation: what a thread rendered before never changes a later render (fontkit glyph cache, glyph-cache.ts)', async () => {
+    // "Ż", "Ź", "Ž" are composites of "Z" in Liberation Sans: embedding one used to cache the plain "Z" glyph with NO
+    // code points (the subsetter asks for components that way), so every later "Z" in that weight, in that thread, was
+    // laid out with shifted string indices (a line broke one glyph late) and left out of the ToUnicode map (<>).
+    // Regular weight only: the test document's title is bold, and the thread's warm-up has no "Z".
+    const note = `ZW[a b] %PDF-1.4 endobj << /JavaScript >> ${'Zara Zed Zoe '.repeat(24)}`;
+    const fresh = await pool({ size: 1 }).render(text([note])); // a thread that never saw the composites
+    expect(printedCharacters(fresh).has('Z')).toBe(true);
+    const p = pool({ size: 1 });
+    await p.render(text(['Łucja Żak · Źródło · Žofie'])); // another tenant's document, first on this thread
+    const after = await p.render(text([note]));
+    expect(printedCharacters(after).has('Z')).toBe(true);
+    expect(after.equals(fresh)).toBe(true);
+    // Rendering the same request again on the same thread changes nothing either.
+    expect((await p.render(text([note]))).equals(fresh)).toBe(true);
+    expect(p.stats()).toMatchObject({ spawned: 1, completed: 3, failed: 0 });
+  }, 60_000);
+
   it('image bytes cross into the thread and reach the layout as a Buffer', async () => {
     // The production QR path: qrcode's PNG (QrImageService uses the same library and options).
     const png = await QRCode.toBuffer('SHIFT-QR-TEST', {

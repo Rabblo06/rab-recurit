@@ -52,6 +52,8 @@ interface ThreadState {
   coverage: GlyphCoverage;
   coverageFamilies: string[];
   registeredFamilies: () => string[];
+  /** Empties fontkit's glyph cache in every font object parsed so far (glyph-cache.ts). Throws (fail closed) if it cannot. */
+  resetFontState: () => void;
 }
 
 let state: ThreadState | undefined;
@@ -76,6 +78,7 @@ async function init(breakdown: ThreadInitBreakdown): Promise<ThreadState> {
     require('./render-protocol') as typeof import('./render-protocol');
   const coverageModule =
     require('./glyph-coverage') as typeof import('./glyph-coverage');
+  const glyphCache = require('./glyph-cache') as typeof import('./glyph-cache');
   // ESM-only package, loaded by Node's require(esm) (Node >= 22.12; the Worker image runs Node 24).
   const reactPdf =
     require('@react-pdf/renderer') as typeof import('@react-pdf/renderer');
@@ -124,6 +127,10 @@ async function init(breakdown: ThreadInitBreakdown): Promise<ThreadState> {
   };
 
   const primary = await parseFamily(fonts.PRIMARY_FONT_FAMILY);
+  // Render isolation (glyph-cache.ts): refuse to start unless every render can begin from an empty glyph cache.
+  for (const font of primary)
+    if (!glyphCache.hasGlyphCache(font))
+      throw new glyphCache.GlyphCacheUnsupportedError();
   // F1: the replacement marker must really print, in every weight of the primary font (no fallback involved).
   const markerCp = coverageModule.REPLACEMENT_MARKER.codePointAt(0)!;
   for (const font of primary) {
@@ -168,6 +175,22 @@ async function init(breakdown: ThreadInitBreakdown): Promise<ThreadState> {
     ),
     coverageFamilies: [...fonts.FONT_FAMILY_STACK],
     registeredFamilies: () => reactPdf.Font.getRegisteredFontFamilies(),
+    // Every vendored weight react-pdf has parsed so far: the primary at start, the fallback once anything loaded it
+    // (the glyph-coverage guard, or react-pdf's own asset pass, which loads every family of a text's font stack).
+    resetFontState: () =>
+      glyphCache.resetGlyphCaches(
+        loaded
+          .map(
+            (f) =>
+              (
+                reactPdf.Font.getFont({
+                  fontFamily: f.family,
+                  fontWeight: f.weight,
+                }) as unknown as { data?: unknown } | undefined
+              )?.data,
+          )
+          .filter((data) => data !== undefined && data !== null),
+      ),
   };
 }
 
@@ -201,6 +224,8 @@ async function render(s: ThreadState, msg: RenderJobMessage): Promise<void> {
     const { value, substitutions } = await s.coverage.substitute(msg.viewModel);
     const t1 = performance.now();
 
+    // Render isolation: this render must not depend on what earlier renders (any tenant's) left in the font objects.
+    s.resetFontState();
     setRenderClock(msg.generatedAtMs);
     const meta: NativeDocumentMeta = {
       creationDate: new Date(msg.generatedAtMs),

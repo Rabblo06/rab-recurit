@@ -369,7 +369,11 @@ interface FontModel {
   singleByte: boolean;
 }
 
-function parseCMapToUnicode(cmap: string): Map<number, string> {
+/**
+ * A ToUnicode CMap's code → text map. A destination may be EMPTY (`<>`: the glyph maps to no text, e.g. pdfkit for a
+ * glyph it was handed without code points); it is kept as "" in place, so the entries after it keep their codes.
+ */
+export function parseCMapToUnicode(cmap: string): Map<number, string> {
   const map = new Map<number, string>();
   const utf16 = (hex: string) => {
     let s = '';
@@ -381,17 +385,17 @@ function parseCMapToUnicode(cmap: string): Map<number, string> {
     for (const pair of block[1]!.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]*)>/g)) map.set(parseInt(pair[1]!, 16), utf16(pair[2]!));
   }
   for (const block of cmap.matchAll(/beginbfrange([^]*?)endbfrange/g)) {
-    for (const r of block[1]!.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])/g)) {
+    for (const r of block[1]!.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]*>|\[[^\]]*\])/g)) {
       const lo = parseInt(r[1]!, 16);
       const hi = parseInt(r[2]!, 16);
       if (hi - lo > 65535) continue;
       if (r[3]!.startsWith('[')) {
-        const items = [...r[3]!.matchAll(/<([0-9A-Fa-f]+)>/g)].map((x) => utf16(x[1]!));
+        const items = [...r[3]!.matchAll(/<([0-9A-Fa-f]*)>/g)].map((x) => utf16(x[1]!));
         for (let c = lo; c <= hi; c++) map.set(c, items[c - lo] ?? '');
       } else {
         const base = utf16(r[3]!.slice(1, -1));
         const last = base.charCodeAt(base.length - 1);
-        for (let c = lo; c <= hi; c++) map.set(c, base.slice(0, -1) + String.fromCharCode(last + (c - lo)));
+        for (let c = lo; c <= hi; c++) map.set(c, base === '' ? '' : base.slice(0, -1) + String.fromCharCode(last + (c - lo)));
       }
     }
   }
