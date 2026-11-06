@@ -149,6 +149,26 @@ test('BC-07: the audit sink reaches rab-api and rab-worker from runtime.env as s
   }
 });
 
+test('notification delivery (owner decision 2026-11-06): fast publish on and the 30 s email sweep, identical on both services', { skip }, () => {
+  for (const c of COMBOS) {
+    for (const svc of APP) {
+      const env = fresh(c.name).services[svc].environment;
+      assert.equal(env.WORKER_FAST_PUBLISH_NOTIFY, 'true', `${c.name} ${svc}`);
+      assert.equal(env.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS, '30', `${c.name} ${svc}`);
+      // Push and realtime keep the 2 s code default: not committed (owner decision 3).
+      assert.equal(env.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS, undefined, `${c.name} ${svc}`);
+      assert.equal(env.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS, undefined, `${c.name} ${svc}`);
+    }
+  }
+  for (const svc of APP) {
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.WORKER_FAST_PUBLISH_NOTIFY; }), new RegExp(`${svc}: WORKER_FAST_PUBLISH_NOTIFY is "", expected "true"`));
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_FAST_PUBLISH_NOTIFY = 'false'; }), new RegExp(`${svc}: WORKER_FAST_PUBLISH_NOTIFY is "false", expected "true"`));
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS; }), new RegExp(`${svc}: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS is "", expected "30"`));
+    // A Worker value that differs from the API's would never be noticed at runtime (the Worker's verify checks presence only).
+    assertRefused(problemsAfter(DEF, (s) => { s[svc].environment.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS = '2'; }), new RegExp(`${svc}: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS is "2", expected "30"`));
+  }
+});
+
 test('O3 C5: exactly one API, stop-then-start', { skip }, () => {
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].deploy = { replicas: 2 }; }), /rab-api: 2 replicas/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].scale = 3; }), /rab-api: 3 replicas/);

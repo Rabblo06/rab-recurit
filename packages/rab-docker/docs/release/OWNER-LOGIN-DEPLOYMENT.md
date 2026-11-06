@@ -173,6 +173,29 @@ PT-01 pointers:
 | `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` | rab-worker | 0–3600 | **0, committed** (O3) | The Worker starts after a healthy API, so it does not wait for the schema itself. Not settable in `runtime.env`. |
 | `CREWFLOW_UPGRADE_FAILURE` | rab-api | `continue` \| `refuse` | `continue` (C3) | What a failed UPGRADE does: `continue` logs an ERROR, sets `/healthz` `upgradeFailed: true` and serves the partly-upgraded schema; `refuse` keeps the API down. A first install never serves either way. |
 
+**Notification delivery (owner decision 2026-11-06): committed configuration.** These values are part of the compose files
+(`docker-compose.image.yml` and `docker-compose.production.yml`), on rab-api AND rab-worker, with the same value on both.
+Never set them in `runtime.env` or `database.env`: the gate refuses them there, and a compose `environment:` value would
+win anyway. The code defaults (`false`, 2 s) are unchanged, so development and tests behave as before.
+
+| Variable | Production value | Code default | Why on both services |
+|---|---|---|---|
+| `WORKER_FAST_PUBLISH_NOTIFY` | `true` | `false` | The email (and, with push on, push) rows that `NotificationService.notify()` writes are published right after the transaction commits, never before. The dispatcher stays the safety net: a failed or skipped fast publish leaves the row PENDING for the next sweep. `notify()` runs in the API and in Worker jobs, and each process reads its own value. |
+| `WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS` | `30` | `2` (bounds 1–60) | O3 C2: the API's start-up registration (`register-schedulers.js`) sets the BullMQ scheduler's `every` from the **API's** value. The Worker only consumes it (`DISABLE_CRON_JOBS_REGISTRATION=true`), and its read-only verify checks that the scheduler exists, **not its interval**. A different Worker value would therefore go unnoticed, so both carry the same value. The first API start with the new value updates the same scheduler id in place. |
+| `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` | not set (2 s) | `2` | Push is off (`PUSH_ENABLED` unset = false), so the push sweep is not scheduled. |
+| `WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS` | not set (2 s) | `2` | Realtime is off (`REALTIME_ENABLED` unset = false). It has no immediate path, so its sweep interval is the live-update latency. |
+
+What changes: a notification email (offer sent, accepted and so on) no longer waits for the sweep. Rows with no fast path
+(the Worker's report emails, rows written by SQL, and rows whose fast publish failed) wait up to 30 s instead of up to 2 s.
+The auth and account emails (password reset, invite, welcome and so on) already publish after commit (PR #80), so the
+interval does not affect them while that publish works. If it fails, they also wait up to 30 s.
+
+**Owner rule for later (2026-11-06; NOT applied now).** When `PUSH_ENABLED` is turned on in production, push's immediate
+send is this same `WORKER_FAST_PUBLISH_NOTIFY` flag, which is already `true`. Its sweep then goes to 30 s: commit
+`WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"` on rab-api and rab-worker in both compose files, and extend the gate
+(`NOTIFICATION_DELIVERY` in `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`) in the same change.
+`PUSH_ENABLED=true` and a real `PUSH_PROVIDER` go in `runtime.env` (production refuses `PUSH_PROVIDER=FAKE` with push on).
+
 **The Worker runs with `init: true`.** Its watchdog SIGKILLs a stalled process, and the kernel ignores that signal for PID 1, so the Worker refuses to start as PID 1. Docker's init must be PID 1; every compose file that runs the Worker sets it, and the gate fails CI otherwise.
 
 **Failure semantics:**

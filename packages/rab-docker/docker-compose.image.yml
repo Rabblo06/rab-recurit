@@ -152,6 +152,15 @@ services:
       # registers the BullMQ job schedulers itself (C2: DISABLE_CRON_JOBS_REGISTRATION unset).
       CREWFLOW_MIGRATE_ON_START: "true"
       CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
+      # Notification delivery (owner decision 2026-11-06), the SAME two values on rab-api and rab-worker. Fast publish: the
+      # email (and, once PUSH_ENABLED=true, push) rows NotificationService.notify() writes are published right after the
+      # transaction commits; the dispatcher stays the safety net. The email sweep runs every 30 s (code default 2 s, bounds
+      # 1-60): the API registers the BullMQ scheduler with ITS value; the Worker only consumes it, and is set identically.
+      # Push and realtime sweeps keep the 2 s default (not set here). When PUSH_ENABLED is turned on, set
+      # WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" here on both services (owner rule; its immediate send is this flag).
+      # Committed (scripts/compose-owner-login.cjs and staging/verify-image-compose.cjs enforce both, on both services).
+      WORKER_FAST_PUBLISH_NOTIFY: "true"
+      WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
 
     depends_on:
       rab-redis:
@@ -238,6 +247,9 @@ services:
       DISABLE_DB_MIGRATIONS: "true"
       DISABLE_CRON_JOBS_REGISTRATION: "true"
       CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: "0"
+      # Notification delivery (owner decision 2026-11-06): identical to rab-api (see its comment there).
+      WORKER_FAST_PUBLISH_NOTIFY: "true"
+      WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
       # What the retired launcher gave the jobs child (H1-M1): HOME a path the process can neither write nor create (Node
       # searches $HOME/.node_modules), temp and XDG caches in its own 0700 tmpfs, and the per-instance heartbeat file.
       HOME: /nonexistent

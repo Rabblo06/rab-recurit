@@ -186,6 +186,31 @@ CREWFLOW_UPGRADE_FAILURE=${v}`), []);
   }
 });
 
+test('notification delivery (owner decision 2026-11-06): committed in compose, never re-entered in an env file', () => {
+  for (const key of ['WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS']) {
+    for (const value of ['true', 'false', '2', '30']) {
+      assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+${key}=${value}`), new RegExp(`${key}: committed in the compose files`));
+      assertRefused(lintEnvText('database', `${DATABASE_OK}
+${key}=${value}`), new RegExp(`${key}: committed in the compose files`));
+    }
+  }
+  assert.deepEqual({ ...gate.NOTIFICATION_DELIVERY }, { WORKER_FAST_PUBLISH_NOTIFY: 'true', WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30' });
+});
+
+test('notification delivery: the committed values are valid for the code (bounds and switch read from the TypeScript source)', () => {
+  const intervals = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/worker-scan-intervals.ts'), 'utf8');
+  const m = /WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS:\s*s\('email-dispatch',\s*(\d+),\s*(\d+),\s*(\d+)\)/.exec(intervals);
+  assert.ok(m, 'email-dispatch interval setting not found in worker-scan-intervals.ts');
+  const [, def, min, max] = m.map(Number);
+  const committed = Number(gate.NOTIFICATION_DELIVERY.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS);
+  assert.ok(committed >= min && committed <= max, `30 s must lie within the code bounds ${min}-${max}`);
+  // The code defaults stay as they are (development and tests keep 2 s and false); production commits its own values.
+  assert.equal(def, 2);
+  const vars = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/environment-variables.ts'), 'utf8');
+  assert.match(vars, /@Transform\(\(\{ value \}\) => value === 'true'\)\s*@IsBoolean\(\)\s*WORKER_FAST_PUBLISH_NOTIFY: boolean = false;/);
+});
+
 test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
     for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
