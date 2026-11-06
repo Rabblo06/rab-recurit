@@ -22,7 +22,7 @@ import { EntityManager } from 'typeorm';
  * declined_shift_assignment_id UNIQUE` + `ON CONFLICT DO NOTHING`.
  *
  * Deliberately NOT a `PROCESSING`/lease-based claim for the jobs this
- * module currently serves (late clock-in, manager-confirmation-timeout,
+ * module currently serves (late clock-in, manager-confirmation-deadline,
  * shift reminders, no-show, missing-clock-out): every one of them does its
  * entire unit of work — reload the row, revalidate the business condition,
  * notify, audit, mark complete/cancelled — inside the SAME `runScopedForOrg`
@@ -43,7 +43,7 @@ export interface WorkerEventClaimParams {
   organisationId: string;
   /** Null for a genuinely org-wide event; the RLS policy treats NULL as "matches any workspace in the org," never as "exempt from tenant isolation." */
   workspaceId: string | null;
-  /** Stable and deterministic per logical occurrence — include a version/timestamp component wherever the same entity can legitimately re-trigger the same event type (e.g. `manager-confirmation-timeout:{offerId}:{deadlineIso}`). */
+  /** Stable and deterministic per logical occurrence — include a version/timestamp component wherever the same entity can legitimately re-trigger the same event type (e.g. `manager-confirmation-deadline:{offerId}:{deadlineIso}`). */
   eventKey: string;
   eventType: string;
   entityType: string;

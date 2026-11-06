@@ -33,13 +33,10 @@ export const SHIFT_ASSIGNMENT_TRANSITIONS: TransitionTable<ShiftAssignmentStatus
     ShiftAssignmentStatus.WITHDRAWN,
     ShiftAssignmentStatus.CANCELLED,
   ],
-  // Mirrors OFFER_TRANSITIONS' STAFF_ACCEPTED edge. Reached either by an
-  // Internal Manager's explicit confirm action (offers on a directly-
-  // created shift), or immediately server-side within `staffAccept` itself
-  // for offers on a Venue-Manager-request-originated shift (`Shift.requestedBy
-  // IS NOT NULL`) — see OfferService.staffAccept's own doc comment. Either
-  // way the edge itself, and the seat-claiming logic it gates, stays the
-  // same; only who/what triggers it differs.
+  // Mirrors OFFER_TRANSITIONS' STAFF_ACCEPTED edge. `confirmed` is reached ONLY by an Internal Manager's explicit
+  // confirm action, before the offer's manager-confirmation deadline (owner rule 2026-11-06: the system never
+  // confirms). `rejected` is a manager's reject, or the automatic withdrawal at the deadline (offer → manager_rejected
+  // with rejected_by NULL and reason confirmation_deadline_passed). `cancelled` is a booking cancellation.
   [ShiftAssignmentStatus.STAFF_ACCEPTED]: [ShiftAssignmentStatus.CONFIRMED, ShiftAssignmentStatus.REJECTED, ShiftAssignmentStatus.CANCELLED],
   [ShiftAssignmentStatus.CONFIRMED]: [ShiftAssignmentStatus.CANCELLED, ShiftAssignmentStatus.NO_SHOW, ShiftAssignmentStatus.COMPLETED],
   [ShiftAssignmentStatus.DECLINED]: [],

@@ -1804,28 +1804,10 @@ export class EnvironmentVariables {
   @Min(0)
   LATE_CLOCK_IN_GRACE_MINUTES: number = 10;
 
-  /**
-   * How long a `STAFF_ACCEPTED` offer can wait for a manager's confirm/reject
-   * before the worker automatically closes it out. NOT a duplicate of an
-   * offer's own `expiresAt`/`expiresInHours` (that governs the STAFF's
-   * response window, already enforced by the existing offer-expiry job) —
-   * this is the separate manager-side half of the same two-step
-   * confirmation flow. Never auto-CONFIRMS (a seat is only ever claimed by
-   * an actual manager action or an auto-confirm shift's own accept) — PHASE
-   * 7 made this atomically auto-REJECT (`STAFF_ACCEPTED -> MANAGER_REJECTED`,
-   * the same edge a manager's own manual reject already used, `rejected_by`
-   * left NULL to distinguish a system timeout from a real person) once the
-   * deadline (`staff_accepted_at + this duration`) passes, replacing an
-   * earlier notify-only-forever implementation that never resolved the
-   * offer at all. See `queues/rab-offers/offer-expiry.job.ts`'s
-   * `runManagerConfirmationTimeoutCycle` and `claim-manager-confirmation-
-   * timeout.ts`'s own doc comment for the exact atomic claim.
-   */
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  MANAGER_CONFIRMATION_TIMEOUT_MINUTES: number = 60;
+  // MANAGER_CONFIRMATION_TIMEOUT_MINUTES was removed (owner decision Q12, 2026-11-06): the system never confirms an
+  // offer, and the manager-confirmation deadline is the fixed rule `MANAGER_CONFIRMATION_LEAD_MINUTES` in @rab/shared
+  // (standard: assignment start − 30 min; replacement/standby: window end), not a tunable. A deployment that still sets
+  // the variable keeps booting: unknown keys are ignored by this validation.
 
   /**
    * Member-invitation rate limits (`InvitationRateLimitService`, atomic Redis token buckets on the bounded

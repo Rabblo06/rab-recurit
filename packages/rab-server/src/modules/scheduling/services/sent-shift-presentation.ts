@@ -29,6 +29,8 @@ export function sentShiftPresentation(status: string, required: number, counts: 
     // Every recipient's latest offer is terminal without acceptance: name the real outcome (never "Expired" unless the
     // request is genuinely expired, which is handled above). A mix with nothing dominant stays "No active offers".
     : counts.sent > 0 && (counts.withdrawn ?? 0) === counts.sent ? 'Offers withdrawn'
+    // Withdrawn at the manager-confirmation deadline (owner rule 2026-11-06) is not a rejection by anyone.
+    : counts.sent > 0 && (counts.notConfirmedInTime ?? 0) === counts.sent ? 'Offers not confirmed in time'
     : counts.sent > 0 && (counts.rejected ?? 0) === counts.sent ? 'Offers rejected'
     : counts.sent > 0 ? 'No active offers'
     : 'Approved — awaiting offers';

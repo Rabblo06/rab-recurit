@@ -1,10 +1,10 @@
 import { UserStatus } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
-import { ManagerProfile } from '@rab/server/modules/manager/entities/manager-profile.entity';
-import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
-import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
-import { User } from '@rab/server/modules/identity/entities/index';
+import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
+import { Shift } from '../entities/shift.entity';
+import { ShiftAssignment } from '../entities/shift-assignment.entity';
+import { User } from '../../identity/entities/index';
 
 export interface ResolvedManager {
   userId: string;

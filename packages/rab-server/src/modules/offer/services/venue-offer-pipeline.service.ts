@@ -1,9 +1,12 @@
-import { defaultAssignmentTime, effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
+import { confirmationProjectionSql, defaultAssignmentTime, effectiveAssignmentTime } from '../../scheduling/utils/assignment-time';
 import {
   PermissionFlag,
   PermissionFlagType,
   EmploymentStatus,
   UserStatus,
+  CONFIRMATION_DEADLINE_LABELS,
+  MANAGER_CONFIRMATION_LEAD_MS,
+  OFFER_CLOSED_REASON,
 } from '@rab/shared';
 import {
   ConflictException,
@@ -101,8 +104,12 @@ export class VenueOfferPipelineService {
         sa.attendance_reviewed_at AS "attendanceReviewedAt",
         sa.checked_in_at AS "checkedInAt", sa.check_in_source AS "checkInSource", a.clock_in_method AS "clockInMethod",
         (SELECT max(n.read_at) FROM core.notification n WHERE n.organisation_id=o.organisation_id AND n.user_id=sp.user_id AND n.type='offer_sent' AND n.related_entity_id=o.id) AS "notificationReadAt",
-        cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt"
+        cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt",
+        deadline.approval_deadline_at AS "approvalDeadlineAt", deadline.awaiting_manager_confirmation AS "awaitingManagerConfirmation",
+        deadline.closed_reason AS "closedReason"
         FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
+        JOIN shift s ON s.id=sa.shift_id
+        CROSS JOIN LATERAL (SELECT ${confirmationProjectionSql('o', 'sa', 's')}) deadline
         JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
         LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
         LEFT JOIN LATERAL (SELECT metadata, created_at FROM core.audit_log al WHERE al.organisation_id=o.organisation_id AND al.entity_type='offer' AND al.entity_id=o.id AND al.action='offer.withdrawn' AND al.metadata->>'source'='manager_pipeline_cancellation' ORDER BY al.created_at DESC, al.id DESC LIMIT 1) cancellation ON true
@@ -139,7 +146,9 @@ export class VenueOfferPipelineService {
           canManagerCancel: mayCancel && canCancelVenueOffer(input),
           terminalSource: row.cancelledAt
             ? 'Cancelled by Internal Manager'
-            : row.offerStatus === 'declined'
+            : row.closedReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED && shift.status !== 'cancelled'
+              ? CONFIRMATION_DEADLINE_LABELS.PIPELINE_TERMINAL_SOURCE
+              : row.offerStatus === 'declined'
               ? 'Declined by staff'
               : row.offerStatus === 'expired'
                 ? 'Offer expired'
@@ -158,6 +167,9 @@ export class VenueOfferPipelineService {
         PIPELINE_STAGES.map((stage) => [stage, staff.filter((r: any) => r.stage === stage).length]),
       ) as Record<(typeof PIPELINE_STAGES)[number], number>;
       const count = (stage: (typeof PIPELINE_STAGES)[number]) => stageCounts[stage];
+      const withdrawnAtDeadline = staff.filter(
+        (r: any) => r.stage === 'rejected' && r.closedReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED,
+      ).length;
       // Seats (summary-only, never lanes): a filled seat is a confirmed/completed booking, whatever lane it is in now.
       // A provisional (unreviewed) no-show is still a booked seat: missing punches never unfill it (owner rule
       // 2026-10-21). A manager-confirmed no-show frees the seat (see shift-vacancy.ts).
@@ -202,6 +214,7 @@ export class VenueOfferPipelineService {
           confirmed: filled,
           accepted: count('staff_accepted'),
           rejected: count('rejected'),
+          notConfirmedInTime: withdrawnAtDeadline,
         }),
         // Every staff counter IS its lane's card count (one lane per person), so the header always reconciles with the
         // board; required / filled / open are seat metrics.
@@ -225,6 +238,8 @@ export class VenueOfferPipelineService {
           rejected: count('rejected'),
           cancelled: count('cancelled'),
           deleted: count('deleted'),
+          // Rows withdrawn at the manager-confirmation deadline (they stay in the rejected lane / closed group).
+          withdrawnAtDeadline,
         },
         stageCounts,
         stages: PIPELINE_STAGES,
@@ -240,7 +255,7 @@ export class VenueOfferPipelineService {
         },
         replacementPlaces:
           !['cancelled', 'completed'].includes(shift.status) &&
-          serverNow < shift.startsAt &&
+          serverNow.getTime() < defaultAssignmentTime(shift).startsAt.getTime() - MANAGER_CONFIRMATION_LEAD_MS &&
           (await this.permissions.userHasPermissionTx(
             manager,
             ctx,
