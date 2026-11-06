@@ -28,6 +28,7 @@ SentShift shift(
   String? submittedAt,
   String startsAt = '2025-04-26T18:00:00',
   String endsAt = '2025-04-27T02:00:00',
+  String statusLabel = 'server label',
 }) => SentShift.fromJson({
   'id': 'shift-1',
   'status': status,
@@ -39,7 +40,7 @@ SentShift shift(
   'venueName': 'The Riverside Hotel',
   'roleName': 'Bartender',
   'offerCounts': {..._zero, ...counts},
-  'statusLabel': 'server label',
+  'statusLabel': statusLabel,
   'filters': filters,
   'counters': {'sent': sent, 'accepted': accepted, 'confirmed': confirmed},
 });
@@ -257,5 +258,88 @@ void main() {
     expect(find.text('Not sent yet'), findsOneWidget);
     expect(find.text('Pending approval'), findsOneWidget);
     expect(find.textContaining('Sent '), findsNothing);
+  });
+
+  group('withdrawn at the manager-confirmation deadline', () {
+    test('every latest offer withdrawn at the deadline (count present)', () {
+      final row = shift(
+        'offered',
+        sent: true,
+        // A SUBSET of rejected, never added to it.
+        counts: {'sent': 2, 'rejected': 2, 'withdrawnAtDeadline': 2},
+      );
+      expect(row.withdrawnAtDeadline, 2);
+      final look = sentShiftLook(row);
+      expect(look.label, 'Offers not confirmed in time');
+      expect(look.pillText, const Color(0xFF555555));
+      expect(row.sentSummary, 'Sent to 2 staff · 2 not confirmed in time');
+    });
+    test('some withdrawn at the deadline, some rejected by a manager', () {
+      final row = shift(
+        'offered',
+        sent: true,
+        counts: {'sent': 3, 'rejected': 3, 'withdrawnAtDeadline': 1},
+      );
+      expect(sentShiftLook(row).label, 'Offers rejected');
+      expect(row.sentSummary, 'Sent to 3 staff · 1 not confirmed in time');
+    });
+    test('count absent: the server statusLabel is still honoured', () {
+      final row = shift(
+        'offered',
+        sent: true,
+        counts: {'sent': 2, 'rejected': 2},
+        statusLabel: 'Offers not confirmed in time',
+      );
+      expect(row.withdrawnAtDeadline, 0);
+      expect(sentShiftLook(row).label, 'Offers not confirmed in time');
+      expect(row.sentSummary, 'Sent to 2 staff');
+    });
+    test('count and label absent (older server): previous reading', () {
+      final row = SentShift.fromJson({
+        'id': 'shift-1',
+        'status': 'offered',
+        'requiredCount': 2,
+        'startsAt': '2025-04-26T18:00:00',
+        'endsAt': '2025-04-27T02:00:00',
+        'venueName': 'The Riverside Hotel',
+        'roleName': 'Bartender',
+        'statusLabel': 'Offers rejected',
+        'offerCounts': {'sent': 2, 'rejected': 2},
+      });
+      expect(row.withdrawnAtDeadline, 0);
+      expect(sentShiftLook(row).label, 'Offers rejected');
+      expect(row.sentSummary, 'Sent to 2 staff');
+    });
+    testWidgets('the card shows the withdrawn count and label', (tester) async {
+      final provider = VenueManagerProvider(ApiClient(), 'user-1');
+      addTearDown(provider.dispose);
+      await tester.pumpWidget(
+        ChangeNotifierProvider.value(
+          value: provider,
+          child: MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: SentShiftCard(
+                  shift: shift(
+                    'offered',
+                    sent: true,
+                    counts: {
+                      'sent': 2,
+                      'rejected': 2,
+                      'withdrawnAtDeadline': 2,
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Offers not confirmed in time'), findsOneWidget);
+      expect(
+        find.text('Sent to 2 staff · 2 not confirmed in time'),
+        findsOneWidget,
+      );
+    });
   });
 }
