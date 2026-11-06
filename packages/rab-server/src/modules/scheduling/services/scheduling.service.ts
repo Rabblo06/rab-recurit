@@ -641,7 +641,7 @@ export class SchedulingService {
         data: page.data.map((r: any) => {
           const offerCounts: Record<string, number> = {
             sent: r.sent, pending: r.pending, accepted: r.accepted, confirmed: r.confirmed, noShow: r.no_show, cancelled: r.cancelled,
-            declined: r.declined, expired: r.expired, withdrawn: r.withdrawn, rejected: r.rejected, notConfirmedInTime: r.not_confirmed_in_time,
+            declined: r.declined, expired: r.expired, withdrawn: r.withdrawn, rejected: r.rejected, withdrawnAtDeadline: r.not_confirmed_in_time,
           };
           const { sent: _s, pending: _p, accepted: _a, confirmed: _c, no_show: _n, cancelled: _x, declined: _d, expired: _e, withdrawn: _w, rejected: _r, not_confirmed_in_time: _nc,
             terminal: _t, is_expired, view_total: _v, keyset_ts: _k, ...row } = r;
