@@ -930,6 +930,8 @@ function sentShiftPresentation(status, required, counts, actionExpired) {
         : accepted ? 'Staff responses received' : counts.pending > 0 ? 'Offers sent'
           : counts.declined > 0 ? 'Staff declined' : counts.cancelled > 0 ? 'Staff cancelled'
             : counts.sent > 0 && counts.withdrawn === counts.sent ? 'Offers withdrawn'
+              // Withdrawn at the manager-confirmation deadline is not a rejection by anyone (owner rule 2026-11-06).
+              : counts.sent > 0 && counts.withdrawnAtDeadline === counts.sent ? 'Offers not confirmed in time'
               : counts.sent > 0 && counts.rejected === counts.sent ? 'Offers rejected'
                 : counts.sent > 0 ? 'No active offers' : 'Approved — awaiting offers';
   return { statusLabel, filters, actionExpired: expired, counters: { sent: counts.sent > 0, accepted, confirmed } };
@@ -941,7 +943,8 @@ function sentShiftRow(sh, now) {
   for (const o of state.offers.filter((x) => x.shiftId === sh.id).sort((a, b) => b.sentAt - a.sentAt)) {
     if (!latest.has(o.staffProfileId)) latest.set(o.staffProfileId, o);
   }
-  const c = { sent: 0, pending: 0, accepted: 0, confirmed: 0, noShow: 0, cancelled: 0, declined: 0, expired: 0, withdrawn: 0, rejected: 0 };
+  // withdrawnAtDeadline is a SUBSET of rejected (server sent-shift offerCounts), never added to it.
+  const c = { sent: 0, pending: 0, accepted: 0, confirmed: 0, noShow: 0, cancelled: 0, declined: 0, expired: 0, withdrawn: 0, rejected: 0, withdrawnAtDeadline: 0 };
   for (const o of latest.values()) {
     const as = assignmentById(o.assignmentId).status;
     c.sent += 1;
@@ -954,6 +957,7 @@ function sentShiftRow(sh, now) {
     if (o.status === 'expired') c.expired += 1;
     if (o.status === 'withdrawn') c.withdrawn += 1;
     if (o.status === 'manager_rejected') c.rejected += 1;
+    if (o.status === 'manager_rejected' && o.rejectionReason === CLOSED_DEADLINE) c.withdrawnAtDeadline += 1;
   }
   const terminal = ['cancelled', 'completed', 'declined'].includes(sh.status);
   const actionExpiresAt = new Date(sh.endsAt.getTime() + ACTION_WINDOW_HOURS * HOUR);

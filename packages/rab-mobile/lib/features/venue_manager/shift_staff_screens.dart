@@ -386,22 +386,16 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
   }
 
   List<Widget> _content(SentShift s) {
-    final sent = s.count('sent');
     final r = roster;
     final p = context.read<VenueManagerProvider>();
     final responses = r == null ? const <(String, String)>[] : _responses(p, r);
     return [
-      _SentSummaryCard(shift: s, sent: sent),
+      _SentSummaryCard(shift: s),
       const SizedBox(height: 12),
       Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Flexible(
-            child: Text(
-              sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
-              style: ScheduleType.caption,
-            ),
-          ),
+          Flexible(child: Text(s.sentSummary, style: ScheduleType.caption)),
           if (s.submittedAt != null) ...[
             const SizedBox(width: 12),
             Flexible(
@@ -514,9 +508,8 @@ String _offerLabel(String status) => switch (status) {
 };
 
 class _SentSummaryCard extends StatelessWidget {
-  const _SentSummaryCard({required this.shift, required this.sent});
+  const _SentSummaryCard({required this.shift});
   final SentShift shift;
-  final int sent;
   @override
   Widget build(BuildContext context) {
     final style = ShiftVisualStyle.forShift(shift.id);
@@ -587,9 +580,7 @@ class _SentSummaryCard extends StatelessWidget {
           const SizedBox(height: 12),
           Divider(height: 1, color: style.divider),
           const SizedBox(height: 10),
-          ShiftCardFooterLine(
-            text: sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
-          ),
+          ShiftCardFooterLine(text: shift.sentSummary),
         ],
       ),
     );
