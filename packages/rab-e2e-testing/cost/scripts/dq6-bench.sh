@@ -11,6 +11,19 @@
 #                                                                           in its own heavy-run.sh window
 #   OUT=<dir> bash scripts/dq6-bench.sh report                              results tables (lib/dq6-report.js)
 #
+# Realistic journeys (k6, the realistic-load-test method; README "D-Q6 realistic journeys"), after `setup`:
+#   OUT=<dir> COST_TAG=<tag> bash scripts/dq6-bench.sh k6prep               VM teams (k6/seed-teams.sql) + the dataset template
+#   OUT=<dir> COST_TAG=<tag> bash scripts/dq6-bench.sh k6smoke              2-org functional run (consumes data: k6arm restores)
+#   OUT=<dir> COST_TAG=<tag> bash scripts/dq6-bench.sh k6arm <mode> <rep>   restore the dataset, mode config, idle + k6 window
+#   OUT=<dir> COST_TAG=<tag> bash scripts/dq6-bench.sh k6abab "<modes>" <reps>  every mode per repetition, NOT wrapped:
+#                                                                           run the whole k6abab inside ONE heavy-run window
+# Modes (per_scope claims, poll, realtime + push OFF, and main's production delivery settings in EVERY mode:
+# WORKER_FAST_PUBLISH_NOTIFY=true + WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30 on the API and the Worker, PR #84):
+#   baseline  every Phase D flag off
+#   combined  + WORKER_SHIFT_SCAN_MODE=combined (D-Q4a, Worker)
+#   triggers  + WORKER_TIMER_TRIGGERS=on (D-Q4b, API + Worker; WORKER_TIMER_TRIGGER_KINDS unset = all four kinds, as the
+#             timer shadow run)
+#
 # Arms (Worker as crewflow_app for per_scope, as crewflow_worker for global; dispatch mode poll, the production default):
 #   per_scope          WORKER_CLAIM_MODE=per_scope                         (the production default; D0-comparable)
 #   global             WORKER_CLAIM_MODE=global                            (Phase D)
@@ -102,7 +115,10 @@ mem_guard() { # [where]: refuse to start a window on a VM already short of memor
 record_mode() { # what the containers actually run with (env keys from docker inspect, login roles from pg_stat_activity)
   local L="$1"
   { echo "label=$L"
-    docker inspect -f '{{.Name}} {{range .Config.Env}}{{if or (eq (index (split . "=") 0) "WORKER_CLAIM_MODE") (eq (index (split . "=") 0) "WORKER_DISPATCH_MODE") (eq (index (split . "=") 0) "WORKER_SHIFT_SCAN_MODE") (eq (index (split . "=") 0) "WORKER_TIMER_TRIGGERS") (eq (index (split . "=") 0) "REALTIME_ENABLED") (eq (index (split . "=") 0) "PUSH_ENABLED")}}{{.}} {{end}}{{end}}' costaudit-api costaudit-worker
+    # WORKER_* and the two flags only (configuration, never a URL or a secret).
+    for c in costaudit-api costaudit-worker; do
+      echo "$c $(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" | grep -E '^(WORKER_[A-Z0-9_]+|REALTIME_ENABLED|PUSH_ENABLED)=' | sort | tr '\n' ' ')"
+    done
     q "select usename, application_name, count(*) from pg_stat_activity where datname='rab' group by 1,2 order by 1,2"
   } > "$OUT/mode-$L.txt" 2>&1 || true
 }
@@ -248,6 +264,138 @@ do_arm() {
   stamp "arm $L: done"
 }
 
+
+# ---- D-Q6 realistic journeys (k6) -------------------------------------------------------------------------------------
+# One dataset for every mode: k6prep copies the seeded database into the template rab_dq6seed; every k6arm drops `rab`,
+# re-creates it from that template and restores the database-level state CREATE DATABASE does not copy (owner, ACL, the
+# disposable marker), then verifies it against the record taken from the original (fail closed). Redis runs without
+# persistence, so a stop/start empties it (no BullMQ job of an earlier arm survives).
+K6_ORGS="${DQ6_K6_ORGS:-8}"
+K6_WARM_S="${DQ6_K6_WARM_S:-60}"
+K6_WIN_S="${DQ6_K6_WIN_S:-240}"
+K6_TAIL_S="${DQ6_K6_TAIL_S:-20}"
+K6_IDLE_S="${DQ6_K6_IDLE_S:-180}"
+for v in "$K6_ORGS" "$K6_WARM_S" "$K6_WIN_S" "$K6_TAIL_S" "$K6_IDLE_S"; do case "$v" in '' | *[!0-9]*) die "DQ6_K6_* must be whole numbers" ;; esac; done
+TEMPLATE_DB=rab_dq6seed
+TEMPLATE_MARK="crewflow-cost disposable measurement TEMPLATE (dq6 k6)"
+DB_MARK="crewflow-cost disposable measurement database"
+# Superuser psql on the maintenance database of the disposable cluster (CREATE/DROP DATABASE cannot run inside `rab`).
+qpg() { docker exec -i costaudit-pg psql -X -v ON_ERROR_STOP=1 -U rab -d postgres -Atq -c "$1"; }
+db_marker() { qpg "select coalesce(shobj_description(oid, 'pg_database'), '') from pg_database where datname = '$1'"; }
+db_state() { # what CREATE DATABASE ... TEMPLATE does not carry over, for `rab`
+  qpg "select 'owner=' || pg_get_userbyid(datdba) || ' acl=' || coalesce(datacl::text, '') || ' settings=' || (select count(*) from pg_db_role_setting s where s.setdatabase = d.oid) || ' marker=' || coalesce(shobj_description(oid, 'pg_database'), '') from pg_database d where datname = 'rab'"
+}
+stop_app() {
+  hdocker_try stop costaudit-worker costaudit-api
+  qpg "select count(pg_terminate_backend(pid)) from pg_stat_activity where datname in ('rab', '$TEMPLATE_DB') and pid <> pg_backend_pid()" > /dev/null
+}
+
+do_k6prep() {
+  [ "$(db_marker rab)" = "$DB_MARK" ] || die "k6prep: costaudit-pg 'rab' does not carry the disposable marker"
+  [ -z "$(qpg "select 1 from pg_database where datname = '$TEMPLATE_DB'")" ] || die "k6prep: $TEMPLATE_DB already exists (one template per stack; re-create the stack)"
+  [ "$(q "select count(*) from core.organisation where slug like 'costaudit-%'")" -ge "$K6_ORGS" ] || die "k6prep: run setup first"
+  psql_su < "$COST_DIR/k6/seed-teams.sql" > "$OUT/k6-seed-teams.txt"
+  stamp "k6prep: $(tr '\n' ' ' < "$OUT/k6-seed-teams.txt")"
+  q "vacuum analyze core.venue_manager_staff" > /dev/null
+  db_state > "$OUT/k6-dbstate.txt"
+  case "$(cat "$OUT/k6-dbstate.txt")" in *" settings=0 "*) ;; *) die "k6prep: database-level settings exist on rab; the restore does not carry them (refusing)" ;; esac
+  stop_app
+  local t=$SECONDS
+  qpg "CREATE DATABASE $TEMPLATE_DB TEMPLATE rab STRATEGY FILE_COPY"
+  qpg "COMMENT ON DATABASE $TEMPLATE_DB IS '$TEMPLATE_MARK'"
+  stamp "k6prep: template $TEMPLATE_DB created in $((SECONDS - t)) s ($(qpg "select pg_size_pretty(pg_database_size('$TEMPLATE_DB'))")); $(cat "$OUT/k6-dbstate.txt")"
+  # At most five long-running containers while k6 runs (pg, redis, api, worker + the k6p- generator): MinIO serves only
+  # the seed's history backfill (done) and the 24 h storage-cleanup scan, so it is stopped for the k6 phase. Worker and
+  # API error lines are counted per window (a storage call would show there). minio-init has exited; it is removed.
+  hdocker_try rm -f costaudit-minio-init
+  hdocker stop costaudit-minio
+  set_k6_mode baseline
+  ensure_flags off
+}
+
+restore_dataset() {
+  [ "$(db_marker "$TEMPLATE_DB")" = "$TEMPLATE_MARK" ] || die "restore: template $TEMPLATE_DB missing or unmarked (run k6prep)"
+  [ "$(db_marker rab)" = "$DB_MARK" ] || die "restore: 'rab' does not carry the disposable marker; refusing to drop it"
+  local want owner acl t=$SECONDS
+  want="$(cat "$OUT/k6-dbstate.txt")"
+  owner="$(echo "$want" | sed -n 's/^owner=\([^ ]*\) .*/\1/p')"
+  acl="$(echo "$want" | sed -n 's/.* acl=\([^ ]*\) settings=.*/\1/p')"
+  [ -n "$owner" ] && [ -n "$acl" ] || die "restore: cannot read k6-dbstate.txt"
+  stop_app
+  qpg "DROP DATABASE rab WITH (FORCE)"
+  qpg "CREATE DATABASE rab TEMPLATE $TEMPLATE_DB OWNER \"$owner\" STRATEGY FILE_COPY"
+  qpg "COMMENT ON DATABASE rab IS '$DB_MARK'"
+  # Disposable cluster, superuser: the ACL is copied back verbatim (GRANTs issued now would record another grantor).
+  qpg "UPDATE pg_catalog.pg_database SET datacl = '$acl'::aclitem[] WHERE datname = 'rab'"
+  [ "$(db_state)" = "$want" ] || die "restore: database state differs after the restore: got '$(db_state)', want '$want'"
+  hdocker stop costaudit-redis
+  hdocker start costaudit-redis
+  for _ in $(seq 1 30); do [ "$(redis_cli PING 2>/dev/null | tr -d '\r')" = PONG ] && break; sleep 1; done
+  [ "$(redis_cli DBSIZE | tr -d '\r')" = 0 ] || die "restore: Redis is not empty after its restart"
+  stamp "restore: rab re-created from $TEMPLATE_DB in $((SECONDS - t)) s, Redis emptied"
+}
+
+set_k6_mode() { # baseline | combined | triggers  -> worker-env/base.env (Worker) + worker-env/api.env (API)
+  unset COST_WORKER_CLAIM_MODE COST_WORKER_DISPATCH_MODE COST_WORKER_DB_USER COST_WORKER_DB_PW
+  # main's production delivery settings (PR #84, docker-compose.production.yml), the same in every mode.
+  printf 'WORKER_FAST_PUBLISH_NOTIFY=true\nWORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30\n' > "$OUT/worker-env/base.env"
+  cp "$OUT/worker-env/base.env" "$OUT/worker-env/api.env"
+  case "$1" in
+    baseline) ;;
+    combined)
+      image_knows_combined || die "mode combined: crewflow-cost/worker:$COST_TAG has no WORKER_SHIFT_SCAN_MODE"
+      echo "WORKER_SHIFT_SCAN_MODE=combined" >> "$OUT/worker-env/base.env" ;;
+    triggers)
+      echo "WORKER_TIMER_TRIGGERS=on" >> "$OUT/worker-env/base.env"
+      echo "WORKER_TIMER_TRIGGERS=on" >> "$OUT/worker-env/api.env" ;;
+    *) die "unknown k6 mode '$1' (baseline | combined | triggers)" ;;
+  esac
+  export COST_API_ENV_FILE
+  COST_API_ENV_FILE="$(hostpath "$OUT/worker-env/api.env")"
+}
+
+k6_window() { # label [orgs]
+  local L="$1" orgs="${2:-$K6_ORGS}" gen t0 at now since
+  clock_guard "$L"; mem_guard "$L"
+  since="$(date -u +%FT%TZ)"
+  rm -f "$OUT/dq6-$L.gen-window.json"
+  node_env "$COST_DIR/lib/k6-run.js" "$L" --orgs "$orgs" --warm "$K6_WARM_S" --win "$K6_WIN_S" --tail "$K6_TAIL_S" > "$OUT/dq6-$L.log" 2>&1 &
+  gen=$!
+  for _ in $(seq 1 300); do [ -f "$OUT/dq6-$L.k6-ready" ] && break; kill -0 "$gen" 2>/dev/null || break; sleep 1; done
+  if [ ! -f "$OUT/dq6-$L.k6-ready" ]; then wait "$gen" || true; die "k6 $L never became ready: $(tail -3 "$OUT/dq6-$L.k6.log" 2>/dev/null | tr '\n' ' ') $(tail -2 "$OUT/dq6-$L.log" | tr '\n' ' ')"; fi
+  t0="$(cat "$OUT/dq6-$L.k6-ready")"; at=$(( t0 / 1000 + K6_WARM_S )); now=$(date +%s)
+  [ "$at" -le "$now" ] || sleep $(( at - now ))
+  host_snapshot "$L start"; bash "$M" idle "$L" "$K6_WIN_S"; host_snapshot "$L end"
+  wait "$gen" || stamp "k6 $L: generator exited non-zero (dq6-$L.log)"
+  {
+    for c in costaudit-worker costaudit-api; do echo "$c ERROR lines since $since: $(docker logs --since "$since" "$c" 2>&1 | grep -c ' ERROR ')"; done
+    docker logs --since "$since" costaudit-worker 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g; s#(postgres(ql)?|redis)://[^ ]+#<url>#g' | grep ' ERROR ' | cut -c1-240 | sort | uniq -c | sort -rn | head -10
+  } > "$OUT/dq6-$L.app-errors.txt" || true
+  stamp "k6 $L: $(tail -1 "$OUT/dq6-$L.log" | cut -c1-300)"
+}
+
+do_k6arm() {
+  local mode="$1" rep="$2" L used
+  case "$rep" in '' | *[!0-9]*) die "rep must be a number" ;; esac
+  L="$mode-r$rep"
+  used="$(cd "$OUT" && { ls -d "idle-$L-"* "dq6-$L-"* 2>/dev/null || true; } | head -3 | tr '\n' ' ')"
+  [ -z "$used" ] || die "k6arm $L already has results ($used...): rerun with a new repetition number"
+  stamp "k6arm $L: start (orgs $K6_ORGS, idle ${K6_IDLE_S}s, k6 warm ${K6_WARM_S}s + window ${K6_WIN_S}s)"
+  restore_dataset
+  set_k6_mode "$mode"
+  ensure_flags off; record_mode "$L-k6"
+  IDLE_S="$K6_IDLE_S" idle_window "$L-k6idle"
+  k6_window "$L-k6"
+  clock_guard "the end of $L"
+  stamp "k6arm $L: done"
+}
+
+do_k6smoke() { # functional check of the journeys on the current dataset: 2 organisations, short window, no verdict
+  local L="smoke-$(date -u +%H%M%S)"
+  set_k6_mode baseline; ensure_flags off
+  K6_WARM_S=20 K6_WIN_S=90 K6_TAIL_S=5 k6_window "$L" 2
+}
+
 case "$cmd" in
   setup) do_setup "${1:-200}" ;;
   arm) do_arm "${1:?arm}" "${2:?rep}" ;;
@@ -257,6 +405,16 @@ case "$cmd" in
       for a in $arms; do
         bash "$HEAVY" "$HLABEL" bash "$HERE/dq6-bench.sh" arm "$a" "$r" || stamp "arm $a r$r exited non-zero"
       done
+    done ;;
+  k6prep) do_k6prep ;;
+  k6smoke) do_k6smoke ;;
+  k6arm) do_k6arm "${1:?mode}" "${2:?rep}" ;;
+  k6abab)
+    # NOT wrapped in heavy-run per arm (unlike abab): the caller holds ONE exclusive heavy-run window for all of it, so
+    # every mode of a repetition sees the same host conditions back to back.
+    modes="${1:?modes, e.g. \"baseline combined triggers\"}"; reps="${2:-2}"
+    for r in $(seq 1 "$reps"); do
+      for a in $modes; do do_k6arm "$a" "$r"; done
     done ;;
   *) die "unknown command $cmd" ;;
 esac

@@ -283,6 +283,54 @@ window and scenario (after its drain) and at the end of each arm, `arm` refuses 
 within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. A margin shorter than the longest window or scenario (computed from
 `DQ6_IDLE_S` and the fixed caps; about 22 min with the defaults) is refused, so roster PDF renders can never enter a window silently. Usable budget: about 4 h 15 min.
 
+### D-Q6 realistic journeys (k6, 2026-11-06)
+
+The same driver, dataset and report, with API traffic from people instead of rows inserted by SQL. It applies the
+[realistic-load-test](https://github.com/arjaythedev/realistic-load-test) method (reviewed before use; only two small k6
+helpers are adapted, MIT notice in `k6/lib.js`): one k6 virtual user is one person with the app open, sessions with human
+pauses, the client's own polls running while the person reads, real ids taken from earlier responses, test accounts.
+
+```bash
+OUT=/c/rab-ai-wt/cost-work/results/k6-<sha8>
+bash scripts/run.sh --commit <sha> --only build,stack --keep --no-heavy-run --out "$OUT"   # inside ONE heavy-run window
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh setup 200      # the D-Q6 seed (200 organisations) + history
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh k6prep         # Venue Manager teams + the dataset template
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh k6smoke        # 2 organisations, 90 s: functional check, no verdict
+OUT=$OUT COST_TAG=<sha8> bash scripts/dq6-bench.sh k6abab "baseline combined triggers" 2
+OUT=$OUT bash scripts/dq6-bench.sh report                         # dq6-results.md: the k6 section at the end
+```
+
+- **Journeys** (`k6/journeys.js`): Staff (mobile: start, 30 s reconcile poll, 60 s bell, accept a pending offer, history,
+  payslips/statements), Venue Manager (mobile: full refresh, 30 s Sent Shifts poll, submit a staff request from the team,
+  sent-shift detail, attendance report), Internal Manager (web: the dashboard's request set, approvals → approve,
+  accepted offers → confirm before the start − 30 min deadline, Venue Offers 30 s poll, pipeline 15 s poll + send one
+  offer, calendar, payroll READS). Every path and interval is from the client code; session lengths, think times and
+  action probabilities are labelled ASSUMED in `k6/profile.js`, with the seed shape they rest on. All choices come from a
+  seeded PRNG, so every arm replays the same traffic shape.
+- **Safety**: synthetic `*.example.test` accounts of the harness seed; the script refuses any host but
+  `costaudit-api:3000`; no payroll write, no clock-in, no delete; `EMAIL_DRIVER=LOGGER`, push and realtime off. 409 (a
+  booking conflict the server refuses by design) is declared per call and counted separately; 429 and 5xx always count as
+  errors.
+- **Identical datasets**: `k6prep` copies the seeded database into the template `rab_dq6seed`; every `k6arm` drops `rab`,
+  re-creates it from the template, restores and verifies the database-level state (owner, ACL, marker; refused if
+  database-level settings exist) and restarts Redis (no persistence: empty). The arm's writes never reach the next arm.
+- **Modes** (configuration only, one image): `baseline`, `combined` (D-Q4a), `triggers` (D-Q4b `on`, all four kinds), each
+  with main's production delivery settings (`WORKER_FAST_PUBLISH_NOTIFY=true`, email sweep 30 s, API and Worker). The API
+  takes its share through `COST_API_ENV_FILE` (`<out>/worker-env/api.env`).
+- **One arm** = restore → mode → drain → idle window `<mode>-r<rep>-k6idle` (`DQ6_K6_IDLE_S`, 180) → k6 window
+  `<mode>-r<rep>-k6`: k6 logs every account in first, warms up `DQ6_K6_WARM_S` (60), then `measure.sh idle` records the
+  resources for `DQ6_K6_WIN_S` (240) while only requests inside that window are reported. `DQ6_K6_ORGS` (8) organisations
+  are active (5 people each); the other seeded organisations only cost the Worker's sweeps, as in D-Q6.
+- **Generator**: `lib/k6-run.js` runs `k6/main.js` in `crewflow-cost/k6:<content hash>`, built FROM the official
+  `grafana/k6@sha256:3e4186ae…` (v2.3.0) with usage reporting off; container `k6p-<label>`, `--cpus=1 --memory=384m`, on
+  `crewflow-cost-net`, no mounts; it samples every queue each 10 s (outbox rows, due work, BullMQ wait/active/delayed per
+  queue, Worker backends). MinIO is stopped for the k6 phase (five long-running containers at most); API/Worker ERROR
+  lines are counted per window.
+- **Report** (`lib/dq6-report.js`, unchanged for D-Q6 directories): resources idle vs journeys and Δ, latency
+  p50/p95/p99 per journey, throughput, error rate, 409s, per-user rate per persona, p95 of the window's first vs second
+  half (stability), queue backlog, top statements, error lines. The same memory rule excludes swapping windows; a k6
+  window whose generator did not cover it, or that exited non-zero, is INVALID.
+
 ## Phases (`scripts/run.sh`)
 
 | Phase | What happens | Script |
@@ -372,7 +420,8 @@ A projection is never labelled MEASURED.
   `comparison.md`/`comparison.json`): Δ% per metric, noise bands from code-identical control metrics, and the
   roster-stage SQL per email by query fingerprint (from `shift-cycle.pgss-raw.csv`, idle-O20 background subtracted).
 - `scripts/dq6-bench.sh` (D-Q6 architecture benchmark driver), `lib/dq6-load.js` (load generator, burst drain and
-  recovery probe), `lib/dq6-report.js` (D-Q6 results tables).
+  recovery probe), `lib/dq6-report.js` (D-Q6 results tables, including the k6 section), `lib/k6-run.js` (k6 generator +
+  queue sampler), `k6/` (journeys, profile, adapted helpers, Dockerfile FROM the pinned grafana/k6, `seed-teams.sql`).
 - `scripts/tree-snapshot.sh` (read-only worktree snapshot for `--tree`), `scripts/compare-images.sh` (dist file-by-file
   comparison of two image pairs), `lib/worker-env.sh` (per-phase worker configuration), `lib/analyze-boot.js` (boot /
   restart / replicas summaries), `init/empty.env` (default, empty worker env file).

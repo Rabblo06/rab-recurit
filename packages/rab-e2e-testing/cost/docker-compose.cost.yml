@@ -153,6 +153,10 @@ services:
   api:
     image: crewflow-cost/server:${COST_TAG:?}
     container_name: costaudit-api
+    # D-Q6 realistic journeys (scripts/dq6-bench.sh k6arm): the API's share of a mode (fast publish, email interval, timer
+    # triggers), written to <out>/worker-env/api.env. Default: empty. `environment:` below still wins for its own keys.
+    env_file:
+      - ${COST_API_ENV_FILE:-./init/empty.env}
     environment:
       <<: *app-env
       PORT: '3000'

@@ -1,4 +1,5 @@
 // node lib/dq6-report.js  ->  $COST_OUT/dq6-results.md + dq6-results.json
+// (also the realistic-journeys windows of `dq6-bench.sh k6arm`: idle-<mode>-r<rep>-{k6idle,k6}/ and dq6-<mode>-r<rep>-k6.*)
 // Collects every D-Q6 window of one results directory (scripts/dq6-bench.sh): idle-<arm>-r<rep>-{idle-off,idle-on,loaded}/
 // summary.json (measure.sh idle + analyze-idle.js) and dq6-<arm>-r<rep>-{loaded,burst,rworker,rredis}.json (dq6-load.js).
 // Every number is MEASURED in that directory; "mean" and "spread" are DERIVED across repetitions
@@ -8,16 +9,23 @@ const path = require('path');
 const { OUT } = require('./lib');
 
 const read = (f) => (fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null);
-const ARM_ORDER = ['per_scope', 'global', 'per_scope_combined', 'global_combined'];
+const ARM_ORDER = ['per_scope', 'global', 'per_scope_combined', 'global_combined', 'baseline', 'combined', 'triggers'];
 const runs = new Map(); // `${arm}|${rep}` -> { arm, rep, windows: {}, scen: {} }
 for (const d of fs.readdirSync(OUT)) {
-  let m = /^idle-(.+)-r(\d+)-(idle-off|idle-on|loaded)$/.exec(d);
+  let m = /^idle-(.+)-r(\d+)-(idle-off|idle-on|loaded|k6idle|k6)$/.exec(d);
   if (m) {
     const s = read(path.join(OUT, d, 'summary.json'));
     if (!s) continue;
     const k = `${m[1]}|${m[2]}`;
     if (!runs.has(k)) runs.set(k, { arm: m[1], rep: Number(m[2]), windows: {}, scen: {} });
     runs.get(k).windows[m[3]] = s;
+    continue;
+  }
+  m = /^dq6-(.+)-r(\d+)-k6\.k6\.json$/.exec(d);
+  if (m) {
+    const k = `${m[1]}|${m[2]}`;
+    if (!runs.has(k)) runs.set(k, { arm: m[1], rep: Number(m[2]), windows: {}, scen: {} });
+    runs.get(k).k6 = read(path.join(OUT, d));
     continue;
   }
   m = /^dq6-(.+)-r(\d+)-(loaded|burst|rworker|rredis)\.json$/.exec(d);
@@ -29,6 +37,8 @@ for (const d of fs.readdirSync(OUT)) {
 }
 const list = [...runs.values()].sort((a, b) => ARM_ORDER.indexOf(a.arm) - ARM_ORDER.indexOf(b.arm) || a.rep - b.rep);
 const arms = [...new Set(list.map((r) => r.arm))];
+// The D-Q6 architecture arms (dq6-bench.sh arm); the k6 modes (k6arm) have their own section at the end.
+const hasDq6 = list.some((r) => ['per_scope', 'global', 'per_scope_combined', 'global_combined'].includes(r.arm));
 
 const r1 = (x, d = 1) => (x == null || Number.isNaN(x) ? null : +Number(x).toFixed(d));
 const workerRssMiB = (s) => {
@@ -162,7 +172,7 @@ const memVerdict = (label) => {
   return { row, why };
 };
 for (const r of list) {
-  for (const w of ['idle-off', 'idle-on', 'loaded', 'burst', 'rworker', 'rredis']) {
+  for (const w of ['idle-off', 'idle-on', 'loaded', 'burst', 'rworker', 'rredis', 'k6idle', 'k6']) {
     const has = w in r.windows || w in r.scen;
     if (!has) continue;
     const label = `${r.arm}-r${r.rep}-${w}`;
@@ -217,6 +227,7 @@ for (const r of list) {
 }
 if (invalidLoaded.length) md.push('**Loaded windows excluded as INVALID** (the load did not cover the whole resource window):', '', ...invalidLoaded.map((x) => `- ${x}`), '');
 for (const w of ['idle-off', 'idle-on', 'loaded']) {
+  if (!hasDq6) continue; // a k6-only results directory has none of these windows
   md.push(`## ${w === 'idle-off' ? 'Idle, realtime + push OFF (production default)' : w === 'idle-on' ? 'Idle, realtime + push ON' : 'Loaded (steady notifications, realtime + push ON)'}`, '');
   md.push(`| Metric | ${list.map((r) => `${r.arm} r${r.rep}`).join(' | ')} | ${arms.map((a) => `${a} mean (spread)`).join(' | ')} |`);
   md.push(`|---|${list.map(() => '---').join('|')}|${arms.map(() => '---').join('|')}|`);
@@ -228,6 +239,7 @@ for (const w of ['idle-off', 'idle-on', 'loaded']) {
   md.push('');
 }
 
+if (hasDq6) {
 md.push('## Loaded: delivery (steady load)', '');
 md.push('| Run | Offered | Email latency ms p50/p95/p99/max | Push | Realtime | Max non-terminal rows | Max BullMQ wait+active | Max Worker DB backends all / non-idle (pool proxy) | Drain after load stop (email/push/rt) | Duplicates email / realtime (detector coverage) | Non-terminal at end | Failed rows | Worker error lines | Jain (email, per-org mean latency) | Per-org p95 email min/median/max |');
 md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
@@ -240,6 +252,8 @@ for (const r of list) {
 }
 md.push('');
 
+}
+if (hasDq6) {
 md.push('## Burst (all notifications inserted at once; throughput and fairness)', '');
 md.push('| Run | Notifications × organisations | Email drained after insert | Email rows/s | Max Worker DB backends all / non-idle | Push drained | Realtime drained | Per-org email completion min/median/max | Jain (email) | Duplicates email / realtime (detector coverage) | Non-terminal | Worker error lines | CPU-s pg / worker / redis | PG transactions (incl. harness) |');
 md.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
@@ -254,6 +268,8 @@ for (const r of list) {
 }
 md.push('');
 
+}
+if (hasDq6) {
 md.push('## Recovery (load running; service stopped 30 s, then started)', '');
 md.push('| Run | Stopped | Stop took | Back ready after start | Rows created during outage (email) | First delivery after start (email / push / rt) | Backlog cleared after start (email / push / rt) | Stuck at cap (e/p/rt) | Max latency email | Duplicates email / realtime (detector coverage) | Worker after | Worker error lines |');
 md.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
@@ -266,12 +282,103 @@ for (const r of list) {
   }
 }
 md.push('');
+}
 const errs = new Set();
 for (const r of list) for (const s of Object.values(r.scen)) for (const e of (s && s.workerLogErrorSamples) || []) errs.add(e);
 if (errs.size) {
   md.push('## Worker log error samples (deduplicated, ids and URLs redacted)', '');
   for (const e of [...errs].slice(0, 30)) md.push(`- \`${e.replace(/`/g, "'")}\``);
   md.push('');
+}
+// ---- D-Q6 realistic journeys (k6): scripts/dq6-bench.sh k6arm -> idle-<mode>-r<rep>-{k6idle,k6}/ + dq6-<mode>-r<rep>-k6.* ----
+// Same memory rule as above (applied in the loop over windows). A k6 window is valid only if the generator's recorded
+// steady state covers the whole resource window and k6 exited 0; its latency rows come from k6 (MEASURED, requests
+// inside the window only), its resource rows from measure.sh idle (MEASURED). "Δ" = k6 window − the same run's idle
+// window (DERIVED: the journeys' own cost on top of the mode's idle cost).
+const k6runs = list.filter((r) => r.k6 || r.windows.k6 || r.windows.k6idle || (r.memExcluded && (r.memExcluded.k6 || r.memExcluded.k6idle)));
+if (k6runs.length) {
+  for (const r of k6runs) {
+    if (!r.windows.k6) continue;
+    const label = `${r.arm}-r${r.rep}-k6`;
+    const gw = read(path.join(OUT, `dq6-${label}.gen-window.json`));
+    const rdT = (f) => { const p = path.join(OUT, `idle-${label}`, f); return fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8').trim()) * 1000 : null; };
+    const ts = rdT('t-start');
+    const te = rdT('t-end');
+    // 2 s tolerance: the window edges are host-clock seconds, the generator's are the k6 container's milliseconds.
+    const why = !gw || gw.start == null ? 'no generator window record' : gw.exitCode !== 0 ? `k6 exited ${gw.exitCode}` : !r.k6 ? 'no k6 result' : ts == null || te == null ? 'no window timestamps'
+      : gw.start > ts + 2000 ? `generator started ${((gw.start - ts) / 1000).toFixed(1)} s after the window` : gw.end < te - 2000 ? `generator stopped ${((te - gw.end) / 1000).toFixed(1)} s before the window ended` : null;
+    if (why) { r.k6Invalid = why; delete r.windows.k6; }
+  }
+  const ok = (r) => r.k6 && !r.k6Invalid && !(r.memExcluded && r.memExcluded.k6);
+  const invalid = k6runs.filter((r) => r.k6Invalid).map((r) => `- ${r.arm} r${r.rep}: ${r.k6Invalid}`);
+  md.push('# D-Q6 realistic journeys (k6)', '');
+  if (invalid.length) md.push('**k6 windows excluded as INVALID:**', '', ...invalid, '');
+  const any = k6runs.find((r) => r.k6);
+  if (any) {
+    const m = any.k6.meta;
+    md.push(`Traffic: ${m.vus} virtual users (one person each) from ${m.orgs} active organisations (orgs ${m.orgFrom}–${m.orgFrom + m.orgs - 1}); per organisation ${m.profile.perOrg.im} Internal Manager (web), ${m.profile.perOrg.vm} Venue Manager and ${m.profile.perOrg.staff} staff (mobile). Warm-up ${m.warmS} s, measured window ${m.winS} s, seeded PRNG ${m.seed} (the same traffic shape in every run). Image ${any.k6.image ? `${any.k6.image.tag} (${any.k6.image.id}) FROM ${any.k6.image.base}` : '—'}. Profile and sources: k6/profile.js.`, '');
+  }
+  const cols = k6runs.map((r) => `${r.arm} r${r.rep}`);
+  md.push('## k6: resources, idle window vs journeys window (MEASURED; Δ DERIVED)', '');
+  md.push(`| Metric | ${cols.map((c) => `${c} idle / k6 / Δ`).join(' | ')} |`, `|---|${cols.map(() => '---').join('|')}|`);
+  for (const [k, name] of METRICS) {
+    md.push(`| ${name} | ${k6runs.map((r) => {
+      const a = windowMetrics(r.windows.k6idle);
+      const b = windowMetrics(r.windows.k6);
+      const av = a ? a[k] : null;
+      const bv = b ? b[k] : null;
+      return `${fmt(av)} / ${fmt(bv)} / ${av == null || bv == null ? '—' : fmt(r1(bv - av, 2))}`;
+    }).join(' | ')} |`);
+  }
+  md.push('');
+  const lat = (s) => (!s || !s.n ? '—' : `${s.p50} / ${s.p95} / ${s.p99} (${s.n})`);
+  const okRuns = k6runs.filter(ok);
+  md.push('## k6: API latency per journey, ms p50 / p95 / p99 (n requests in the window), MEASURED', '');
+  md.push(`| Journey | ${okRuns.map((r) => `${r.arm} r${r.rep}`).join(' | ')} |`, `|---|${okRuns.map(() => '---').join('|')}|`);
+  const journeys = any ? Object.keys(any.k6.journeys) : [];
+  for (const j of ['(all)', ...journeys]) md.push(`| ${j} | ${okRuns.map((r) => lat(j === '(all)' ? r.k6.overall : r.k6.journeys[j])).join(' | ')} |`);
+  md.push('');
+  md.push('## k6: throughput, errors, per-user rate and p95 stability (MEASURED)', '');
+  md.push('| Run | Requests | req/s | Errors % (unexpected status or no response) | 409 conflicts (expected) | p95 first / second half (Δ %) | Per-user req/s staff / VM / IM | Iterations (sessions) |');
+  md.push('|---|---|---|---|---|---|---|---|');
+  for (const r of okRuns) {
+    const k = r.k6;
+    const a = k.halves.a.p95, b = k.halves.b.p95;
+    const d = a && b ? Math.round((Math.abs(b - a) / ((a + b) / 2)) * 100) : null;
+    md.push(`| ${r.arm} r${r.rep} | ${k.overall.n} | ${k.overall.rps} | ${(k.overall.errorRate * 100).toFixed(2)} | ${k.conflicts409} | ${a} / ${b} (${d == null ? '—' : d} %) | ${['staff', 'vm', 'im'].map((p) => k.personas[p].perUserRps ?? '—').join(' / ')} | ${k.iterations} |`);
+  }
+  md.push('');
+  md.push('## k6: queue backlog during the journeys window (max of 10 s samples, MEASURED)', '');
+  md.push('| Run | Email non-terminal | Push | Realtime | Due work rows / due now | BullMQ wait+active per queue (max) | BullMQ delayed per queue (max) | Worker DB backends all / non-idle |');
+  md.push('|---|---|---|---|---|---|---|---|');
+  for (const r of okRuns) {
+    const label = `${r.arm}-r${r.rep}-k6`;
+    const gf = path.join(OUT, `dq6-${label}.gen.jsonl`);
+    const t = r.k6.timing;
+    const rowsD = fs.existsSync(gf) ? fs.readFileSync(gf, 'utf8').split('\n').filter((x) => x.trim()).map((x) => JSON.parse(x)).filter((e) => e.kind === 'depth' && e.t >= t.windowStart && e.t <= t.windowEnd) : [];
+    const mx = (k) => (rowsD.length ? Math.max(...rowsD.map((e) => e[k] ?? 0)) : null);
+    const q = {};
+    const dq = {};
+    for (const e of rowsD) for (const [name, v] of Object.entries(e.bull || {})) { q[name] = Math.max(q[name] || 0, v.wait + v.active); dq[name] = Math.max(dq[name] || 0, v.delayed); }
+    const show = (o) => Object.entries(o).filter(([, v]) => v > 0).map(([n, v]) => `${n} ${v}`).join(', ') || '0';
+    md.push(`| ${r.arm} r${r.rep} | ${fmt(mx('email'))} | ${fmt(mx('push'))} | ${fmt(mx('realtime'))} | ${fmt(mx('dueWork'))} / ${fmt(mx('dueNow'))} | ${show(q)} | ${show(dq)} | ${fmt(mx('workerBackends'))} / ${fmt(mx('workerBackendsNonIdle'))} |`);
+  }
+  md.push('');
+  md.push('## k6: top statements in the journeys window (runtime roles, calls/min, MEASURED)', '');
+  for (const r of okRuns) {
+    const s = r.windows.k6;
+    if (!s) continue;
+    md.push(`**${r.arm} r${r.rep}** (${fmt(s.sql.topLevelCallsPerMin)} statements/min in total)`, '');
+    for (const x of s.sql.top15TopLevel.slice(0, 8)) md.push(`- ${x.callsPerMin}/min ${x.role}: \`${x.query.replace(/`/g, "'").slice(0, 140)}\``);
+    md.push('');
+  }
+  md.push('## k6: application ERROR log lines in the journeys window', '');
+  for (const r of k6runs) {
+    const fe = path.join(OUT, `dq6-${r.arm}-r${r.rep}-k6.app-errors.txt`);
+    if (fs.existsSync(fe)) md.push(`- ${r.arm} r${r.rep}: ${fs.readFileSync(fe, 'utf8').split('\n').slice(0, 2).join('; ')}`);
+  }
+  md.push('');
+  json.k6 = k6runs.map((r) => ({ arm: r.arm, rep: r.rep, invalid: r.k6Invalid || null, memExcluded: r.memExcluded || null, idle: windowMetrics(r.windows.k6idle), loaded: windowMetrics(r.windows.k6), k6: r.k6 || null }));
 }
 json.vmMemory = vmRows;
 json.excludedForMemory = excludedMem;
