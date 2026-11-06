@@ -92,10 +92,10 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
     return { organisationId: fx.organisation.id, workspaceId: fx.managerA.workspaceId, userId: staff.userId, role: 'staff' };
   }
 
-  async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
+  async function withContext<T>(ctx: { organisationId: string | null; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
       await manager.query(`SELECT set_config('search_path', 'core', true)`);
-      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId ?? '']);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
       await manager.query(`SELECT set_config('rab.role', '', true)`);
