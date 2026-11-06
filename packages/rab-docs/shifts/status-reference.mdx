@@ -25,9 +25,9 @@ icon: "list-check"
 | Status | Web console | Staff app | Meaning |
 | --- | --- | --- | --- |
 | `pending` | Pending | PENDING | Waiting for the staff member. |
-| `staff_accepted` | Awaiting Confirmation | Waiting for manager confirmation | Accepted; waiting for a manager. |
+| `staff_accepted` | Awaiting Confirmation | Awaiting manager confirmation | Accepted; waiting for a manager. Crewflow never confirms automatically. |
 | `manager_confirmed` | Confirmed | CONFIRMED | The person is on the shift. |
-| `manager_rejected` | Rejected | — | A manager turned the acceptance down. |
+| `manager_rejected` | Rejected, or **Not confirmed in time** | Withdrawn (when not confirmed in time) | A manager turned the acceptance down, or no manager confirmed it before the approval deadline. |
 | `declined` | Declined | Declined | The staff member said no. |
 | `expired` | Expired | Expired | Nobody answered in time. |
 | `withdrawn` | Withdrawn | — | A manager withdrew it, or the shift was cancelled. |

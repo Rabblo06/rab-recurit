@@ -21,6 +21,7 @@ import { reportHtmlFor } from '../helpers/report-html';
 import { runPayrollPeriodAttentionCycle } from '../../queues/rab-reports/payroll-period-attention.job';
 import { OFFICIAL_CALENDAR_2026 } from '@rab/server/modules/payroll/constants/official-calendar-2026';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -125,10 +126,13 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     });
     const shiftId = shift.body.id as string;
     expect((await http().post(`/rest/v1/shifts/${shiftId}/publish`).set(auth(tokens.a))).status).toBe(201);
-    const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokens.a)).send({ staffProfileId: s.profileId });
-    expect(offer.status).toBe(201);
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokens.staff[i]!))).status).toBe(201);
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokens.a))).status).toBe(201);
+    // Booked before the approval deadline (owner rule 2026-11-06), then moved back to the shift's window — fixture only.
+    await bookBeforeDeadline(adminDataSource, shiftId, async () => {
+      const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokens.a)).send({ staffProfileId: s.profileId });
+      expect(offer.status).toBe(201);
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokens.staff[i]!))).status).toBe(201);
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokens.a))).status).toBe(201);
+    });
     // Check In (arrival) is required before Clock In for bookings made after 1786719450000.
     expect((await http().post('/rest/v1/attendance/check-in').set(auth(tokens.staff[i]!)).send({ shiftId })).status).toBe(200);
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokens.staff[i]!)).send({ shiftId, qrToken: await signQr(shiftId) })).status).toBe(201);

@@ -33,7 +33,6 @@ function harness(opts: { mode?: 'off' | 'shadow' | 'on'; rows?: Row[]; enabled?:
     enabled: opts.enabled ?? (() => true),
     runScoped: runScoped as never,
     actions: { 'offer-expiry': action, 'manager-confirmation': action, 'no-show': action, 'late-clock-in': action },
-    managerConfirmationTimeoutMinutes: 60,
     lateClockInGraceMinutes: 10,
     recordOutcome: (k, o) => outcomes.push([k, o]),
     logger: { log: (m) => logs.push(m), warn: (m) => logs.push(m) },
@@ -132,17 +131,20 @@ describe('handleTimerTrigger (D-Q4b consumer)', () => {
 
 describe('decideTimerTrigger: due time per kind, from the row (never the payload)', () => {
   const payload = (dueAtEpochMs: number) => ({ organisationId: ORG, workspaceId: WS, subjectId: SUBJECT, dueAtEpochMs });
-  const settings = { managerConfirmationTimeoutMinutes: 60, lateClockInGraceMinutes: 10 };
+  const settings = { lateClockInGraceMinutes: 10 };
   const run = (rows: Row[], kind: TimerTriggerKind, due: number) => decideTimerTrigger(harness({ rows }).manager as never, kind, payload(due), settings);
 
-  it('manager-confirmation: staff_accepted_at + MANAGER_CONFIRMATION_TIMEOUT_MINUTES; standby and other statuses are no-ops', async () => {
-    const accepted = DUE - 60 * 60_000;
-    const row = offerRow({ status: 'staff_accepted', staff_accepted_at: new Date(accepted) });
+  it('manager-confirmation: due at the database-computed approval DEADLINE (owner rule 2026-11-06); every kind incl. standby; other statuses and cancelled shifts are no-ops', async () => {
+    const row = { status: 'staff_accepted', shift_status: 'offered', deadline_at: new Date(DUE), db_now: new Date(DUE + 1_000) };
     await expect(run([row], 'manager-confirmation', DUE)).resolves.toMatchObject({ outcome: 'due', dueAtEpochMs: DUE });
-    await expect(run([{ ...row, offer_kind: 'standby' }], 'manager-confirmation', DUE)).resolves.toEqual({ outcome: 'noop' });
+    // A standby acceptance is withdrawn at its own deadline too (it is never confirmed by the system).
+    await expect(run([{ ...row }], 'manager-confirmation', DUE)).resolves.toMatchObject({ outcome: 'due' });
     await expect(run([{ ...row, status: 'manager_confirmed' }], 'manager-confirmation', DUE)).resolves.toEqual({ outcome: 'noop' });
-    // Re-accepted later (a new staff_accepted_at) → the old trigger is stale.
-    await expect(run([{ ...row, staff_accepted_at: new Date(accepted + 5_000) }], 'manager-confirmation', DUE)).resolves.toMatchObject({ outcome: 'stale' });
+    await expect(run([{ ...row, shift_status: 'cancelled' }], 'manager-confirmation', DUE)).resolves.toEqual({ outcome: 'noop' });
+    // The deadline moved (the window was re-timed) → the old trigger is stale.
+    await expect(run([{ ...row, deadline_at: new Date(DUE + 5_000) }], 'manager-confirmation', DUE)).resolves.toMatchObject({ outcome: 'stale' });
+    // Early → re-delay is decided by the handler; here just 'early'.
+    await expect(run([{ ...row, db_now: new Date(DUE - 1_000) }], 'manager-confirmation', DUE)).resolves.toMatchObject({ outcome: 'early' });
   });
 
   const assignment = (over: Row = {}): Row => ({

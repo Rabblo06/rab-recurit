@@ -23,7 +23,10 @@ CalendarStatus calendarStatus(
       'complete' => CalendarStatus.complete,
       'ended' => CalendarStatus.ended,
       'declined' => CalendarStatus.declined,
-      'rejected' => CalendarStatus.rejected,
+      'rejected' =>
+        offer.withdrawnAtDeadline
+            ? CalendarStatus.withdrawn
+            : CalendarStatus.rejected,
       'expired' => CalendarStatus.expired,
       'cancelled' => CalendarStatus.cancelled,
       _ => CalendarStatus.other,
@@ -35,15 +38,22 @@ CalendarStatus calendarStatus(
     'manager_confirmed' => CalendarStatus.confirmed,
     'staff_accepted' => CalendarStatus.awaiting,
     'pending' => CalendarStatus.open,
+    'manager_rejected' when offer.withdrawnAtDeadline =>
+      CalendarStatus.withdrawn,
     _ => CalendarStatus.other,
   };
 }
 
-bool calendarIncludes(OfferSummary offer) => const {
-  'pending',
-  'staff_accepted',
-  'manager_confirmed',
-}.contains(offer.status);
+/// Open, accepted and confirmed shifts, plus acceptances withdrawn at the
+/// approval deadline (owner decision Q8: shown with a "Withdrawn" chip; other
+/// rejections stay out, and History remains payroll-approved work only).
+bool calendarIncludes(OfferSummary offer) =>
+    const {
+      'pending',
+      'staff_accepted',
+      'manager_confirmed',
+    }.contains(offer.status) ||
+    (offer.status == 'manager_rejected' && offer.withdrawnAtDeadline);
 
 class CalendarItem {
   const CalendarItem({

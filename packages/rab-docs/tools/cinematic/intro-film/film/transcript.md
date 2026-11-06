@@ -18,7 +18,7 @@ On Tuesday, Riley needs four waiting staff for a wedding reception on Friday. Ri
 
 ## Offers and confirmation
 
-Approval sends each person their own offer, with the venue, the time, and their estimated pay. Priya opens hers and accepts. Because this shift came from an approved request, she's booked straight away. It's different when the manager creates a shift directly. Then, accepting holds the place until the manager confirms it. Either way, the manager can follow every person on the staffing board in Venue Offers.
+Approval sends each person their own offer, with the venue, the time, and their estimated pay. Priya opens hers and accepts. Approving the request didn't book her: the manager still confirms her place. It's the same when the manager creates a shift directly. If nobody confirms in time, the offer is withdrawn. Either way, the manager can follow every person on the staffing board in Venue Offers.
 
 ## Shift day
 

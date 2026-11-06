@@ -1,4 +1,4 @@
-import { POST_SHIFT_COMPLETE_MS, POST_SHIFT_EXPIRED_MS } from '@rab/shared';
+import { OFFER_CLOSED_REASON, OfferClosedReasonType, POST_SHIFT_COMPLETE_MS, POST_SHIFT_EXPIRED_MS } from '@rab/shared';
 
 /** Read-only projection. Never changes Offer, Assignment, Attendance or payroll. */
 export function resolveStaffShiftPresentation(input: {
@@ -14,6 +14,10 @@ export function resolveStaffShiftPresentation(input: {
   endsAt: Date;
   serverNow: Date;
   timezone: string;
+  /** From `confirmationProjectionSql` (database clock). Omitted by callers with no deadline context: treated as null. */
+  closedReason?: OfferClosedReasonType | null;
+  /** Staff reads only: passed through unchanged (display only). */
+  canAccept?: boolean;
 }) {
   const { serverNow, clockInAt, clockOutAt } = input;
   const now = serverNow.getTime();
@@ -47,6 +51,13 @@ export function resolveStaffShiftPresentation(input: {
     ['cancelled', 'withdrawn'].includes(input.assignmentStatus)
   ) {
     state = 'cancelled';
+  } else if (
+    input.offerStatus === 'staff_accepted' &&
+    input.closedReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED
+  ) {
+    // Past its manager-confirmation deadline but not yet withdrawn by the Worker: it can never be confirmed, so it is
+    // already presented as closed (state value set unchanged, so old app builds show "Not confirmed", never "Awaiting").
+    state = 'rejected';
   } else if (
     ['expired', 'declined', 'withdrawn', 'manager_rejected'].includes(
       input.offerStatus,
@@ -101,5 +112,7 @@ export function resolveStaffShiftPresentation(input: {
     clockInAt: clockInAt ?? null,
     clockOutAt: clockOutAt ?? null,
     timezone: input.timezone,
+    closedReason: input.closedReason ?? null,
+    ...(input.canAccept !== undefined ? { canAccept: input.canAccept } : {}),
   };
 }

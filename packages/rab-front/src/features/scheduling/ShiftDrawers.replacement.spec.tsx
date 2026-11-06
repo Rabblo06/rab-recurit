@@ -161,3 +161,27 @@ it('normal mode is unchanged: open-send-offer with { shift } is still the plain 
   expect(mock.get).not.toHaveBeenCalledWith(expect.stringContaining('replacement-context'));
   expect(toast.success).not.toHaveBeenCalledWith('Replacement offer sent successfully.');
 });
+
+it('a standard send the server refuses at the confirmation deadline lists the server reason per recipient', async () => {
+  const SEND = 'This shift starts in less than 30 minutes, so an offer could not be confirmed in time.';
+  mock.post.mockResolvedValue({ data: { batchId: 'b1', results: [{ staffProfileId: 'Alpha', ok: false, message: SEND }] } });
+  mount();
+  const shift = { id: 'shift-9', venueId: 'venue-1', jobRoleId: 'role-1', startsAt: '2026-10-20T10:00:00Z', endsAt: '2026-10-20T18:00:00Z', requiredCount: 3, filledCount: 0, status: 'open' };
+  act(() => { document.dispatchEvent(new CustomEvent('open-send-offer', { detail: { shift } })); });
+  await pickAlpha();
+  await userEvent.click(await screen.findByRole('button', { name: /^Send offer$/ }));
+  expect(await screen.findByText(`✗ Alpha Staff — ${SEND}`)).toBeInTheDocument();
+  expect(toast.success).not.toHaveBeenCalled();
+});
+
+it('a whole-request 409 CONFIRMATION_DEADLINE_PASSED on a standard send shows the server reason in the drawer', async () => {
+  const SEND = 'This shift starts in less than 30 minutes, so an offer could not be confirmed in time.';
+  mock.post.mockRejectedValue({ response: { status: 409, data: { statusCode: 409, code: 'CONFIRMATION_DEADLINE_PASSED', message: SEND } } });
+  mount();
+  const shift = { id: 'shift-9', venueId: 'venue-1', jobRoleId: 'role-1', startsAt: '2026-10-20T10:00:00Z', endsAt: '2026-10-20T18:00:00Z', requiredCount: 3, filledCount: 0, status: 'open' };
+  act(() => { document.dispatchEvent(new CustomEvent('open-send-offer', { detail: { shift } })); });
+  await pickAlpha();
+  await userEvent.click(await screen.findByRole('button', { name: /^Send offer$/ }));
+  expect(await screen.findByText(SEND)).toBeInTheDocument();
+  expect(toast.success).not.toHaveBeenCalled();
+});

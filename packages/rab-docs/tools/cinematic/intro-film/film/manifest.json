@@ -251,7 +251,7 @@
       "start": 110.338,
       "end": 116.925,
       "seconds": 6.587,
-      "text": "Priya opens hers and accepts. Because this shift came from an approved request, she's booked straight away.",
+      "text": "Priya opens hers and accepts. Approving the request didn't book her: the manager still confirms her place.",
       "chapter": "Offers and confirmation",
       "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-accept.wav"
     },
@@ -260,7 +260,7 @@
       "start": 118.425,
       "end": 125.967,
       "seconds": 7.542,
-      "text": "It's different when the manager creates a shift directly. Then, accepting holds the place until the manager confirms it.",
+      "text": "It's the same when the manager creates a shift directly. If nobody confirms in time, the offer is withdrawn.",
       "chapter": "Offers and confirmation",
       "file": "C:\\Rab-recruit\\packages\\rab-docs\\tools\\narration\\build\\crewflow-introduction\\c5-branch.wav"
     },

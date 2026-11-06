@@ -21,7 +21,7 @@ flowchart LR
 | Job | How often | What it does |
 | --- | --- | --- |
 | **Offer expiry** | Every minute | Expires pending offers past their deadline and tells the sender. |
-| **Manager confirmation timeout** | Every minute | Confirms acceptances left unanswered for 60 minutes and tells the manager. |
+| **Manager confirmation deadline** | Every minute | Withdraws acceptances no manager confirmed before the approval deadline (30 minutes before the start for a standard offer, the end of the booked window for a replacement or standby offer) and tells the staff member, the responsible manager and that venue's venue managers. It never confirms an offer, and it never finds a replacement itself. |
 | **Replacement staff** | Every 2 minutes | After a decline or expiry, finds up to five suitable people and tells the manager. It never sends offers itself. |
 | **Shift cancellation follow-up** | Every minute | Withdraws, rejects and cancels everything attached to a cancelled shift, and notifies people. |
 | **Shift monitor** | Every 5 minutes | Sends 24-hour, 2-hour and 30-minute reminders, "clock-in is open", detects no-shows, and records post-shift milestones. |

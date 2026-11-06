@@ -15,6 +15,7 @@ import { AttendanceQrService } from '../../modules/attendance/services/attendanc
 import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -122,10 +123,13 @@ describeIfDb('payroll approval (integration)', () => {
     expect(shift.status).toBe(201);
     const shiftId = shift.body.id as string;
     expect((await http().post(`/rest/v1/shifts/${shiftId}/publish`).set(auth(tokenA))).status).toBe(201);
-    const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenA)).send({ staffProfileId: s.profileId });
-    expect({ status: offer.status, body: offer.body }).toMatchObject({ status: 201 });
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(token))).status).toBe(201);
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenA))).status).toBe(201);
+    // Booked before the approval deadline (owner rule 2026-11-06), then moved back to the shift's window — fixture only.
+    await bookBeforeDeadline(adminDataSource, shiftId, async () => {
+      const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenA)).send({ staffProfileId: s.profileId });
+      expect({ status: offer.status, body: offer.body }).toMatchObject({ status: 201 });
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(token))).status).toBe(201);
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenA))).status).toBe(201);
+    });
     // Check In (arrival) is required before Clock In for bookings made after 1786719450000.
     expect((await http().post('/rest/v1/attendance/check-in').set(auth(token)).send({ shiftId })).status).toBe(200);
     const inRes = await http().post('/rest/v1/attendance/clock-in').set(auth(token)).send({ shiftId, qrToken: await signQr(shiftId) });

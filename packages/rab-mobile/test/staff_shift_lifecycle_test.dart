@@ -56,7 +56,8 @@ void main() {
   setUp(() => stubSecureStorageChannel({}));
   tearDown(clearSecureStorageChannel);
   for (final sample in <(String, String, int)>[
-    ('pending', 'Pending', 1),
+    // A staff_accepted offer waits for a manager (never confirmed automatically).
+    ('pending', 'Awaiting manager confirmation', 1),
     ('confirmed', 'Confirmed', 1),
     ('live', '00:00:01', 1),
     ('live', '01:01:01', 3661),

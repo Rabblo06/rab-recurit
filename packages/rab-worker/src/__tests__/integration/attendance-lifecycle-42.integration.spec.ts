@@ -347,21 +347,25 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   });
 
   // ======================================================================
-  // C. Staff accepts -> assignment CONFIRMED (no second approval)
+  // C. Staff accepts -> waits for the Internal Manager -> manager confirms (owner rule 2026-11-06: no auto-confirm)
   // ======================================================================
   it('Step 09 — Staff 2 accepts the offer', async () => {
     expect([200, 201]).toContain((await post(s2Token, `/offers/${offerS2}/accept`)).status);
   });
 
-  it('Step 10 — the assignment is CONFIRMED immediately: a Venue-Manager-requested shift needs NO second manager approval', async () => {
-    const rows = await tenantContext.runInTenantContext(imContext(), (m) =>
-      m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
-    );
-    expect(rows[0]).toEqual({ assignment_status: 'confirmed', offer_status: 'manager_confirmed' });
+  it('Step 10 — the acceptance WAITS for the Internal Manager (never auto-confirmed, even on a VM-requested shift), who then confirms it', async () => {
+    const statusOf = async () =>
+      (await tenantContext.runInTenantContext(imContext(), (m) =>
+        m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
+      ))[0];
+    expect(await statusOf()).toEqual({ assignment_status: 'staff_accepted', offer_status: 'staff_accepted' });
+    expect([200, 201]).toContain((await post(imToken, `/offers/${offerS2}/confirm`)).status);
+    expect(await statusOf()).toEqual({ assignment_status: 'confirmed', offer_status: 'manager_confirmed' });
   });
 
-  it('Step 11 — Staff 3 accepts and is confirmed the same way', async () => {
+  it('Step 11 — Staff 3 accepts and the Internal Manager confirms the same way', async () => {
     expect([200, 201]).toContain((await post(s3Token, `/offers/${offerS3}/accept`)).status);
+    expect([200, 201]).toContain((await post(imToken, `/offers/${offerS3}/confirm`)).status);
     const rows = await tenantContext.runInTenantContext(imContext(), (m) =>
       m.query(`SELECT sa.status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS3]),
     );

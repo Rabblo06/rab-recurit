@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { IconSearch } from '@tabler/icons-react';
-import { EmploymentStatus, UserStatus } from '@rab/shared';
+import { CONFIRMATION_DEADLINE_MESSAGES, EmploymentStatus, UserStatus } from '@rab/shared';
 import { api } from '../../shared/api';
 import PageHeader from '../../shared/components/PageHeader';
 import { TableSkeleton } from '../../shared/components/LoadingState';
@@ -10,6 +10,7 @@ import { timeAgo } from '../../shared/lib/timeAgo';
 import './staff-selection.css';
 import { AvailabilityAcknowledgement, readAvailabilityConflict, useAvailabilityConflictGate } from './AvailabilityConflictDialog';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { confirmationDeadlineMessage, isConfirmationDeadlineError } from '../../shared/lib/offerConfirmation';
 
 export interface RequestedStaff {
   staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available?: boolean; startsAt?: string; endsAt?: string; breakMinutes?: number | null;
@@ -130,7 +131,10 @@ export default function StaffSelectionPage({ shiftId, requiredCount, initialStaf
       {selectedUnavailable && <p className="staff-selection-notice feedback-warning" role="status">A selected staff member is unavailable for this shift. Uncheck them and choose a replacement.</p>}
       {notice && <p className="staff-selection-notice feedback-warning" role="status">{notice}</p>}
       {availabilityGate.dialog}
-      {save.isError && !readAvailabilityConflict(save.error) && <p className="staff-selection-notice error" role="alert">{getApiErrorMessage(save.error, {
+      {save.isError && !readAvailabilityConflict(save.error) && <p className="staff-selection-notice error" role="alert">{
+        // A send refused because the shift starts too soon for a manager to confirm the offer: the server's own reason,
+        // not the generic "someone else changed this selection" text every other 409 here gets.
+        isConfirmationDeadlineError(save.error) ? confirmationDeadlineMessage(save.error, CONFIRMATION_DEADLINE_MESSAGES.SEND) : getApiErrorMessage(save.error, {
         fallback: 'Could not save this selection. Staff eligibility or the request may have changed. Cancel and reopen the request to reload it.',
         messages: { conflict: 'Someone else changed this selection. Cancel and reopen the request to load the latest selection, then try again.' },
       })}</p>}

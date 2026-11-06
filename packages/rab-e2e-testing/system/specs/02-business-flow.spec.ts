@@ -58,9 +58,12 @@ test.describe.serial('S2 Manager A business flow in workspace A', () => {
     const s = loadState();
     m ??= await managerFor('A');
     staff ??= await staffMobile(s.A.staffEmail!);
+    // Owner rule 2026-11-06: a standard offer is sent, accepted and confirmed only before start − 30 min. Book 3 h ahead,
+    // then move the shift and its seat to the attendance window used below (start 5 min ago) — a fixture step.
     const startsAt = new Date(Date.now() - 5 * 60_000);
     const endsAt = new Date(startsAt.getTime() + 6 * 3600_000);
-    const shift = expectStatus(await m.post('/rest/v1/shifts', { venueId: s.A.venueId, jobRoleId: s.A.jobRoleId, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: 1, breakMinutes: 0 }), 201, 'create shift').body;
+    const bookStart = new Date(Date.now() + 3 * 3600_000);
+    const shift = expectStatus(await m.post('/rest/v1/shifts', { venueId: s.A.venueId, jobRoleId: s.A.jobRoleId, startsAt: bookStart.toISOString(), endsAt: new Date(bookStart.getTime() + 6 * 3600_000).toISOString(), requiredCount: 1, breakMinutes: 0 }), 201, 'create shift').body;
     expectStatus(await m.post(`/rest/v1/shifts/${shift.id}/publish`), 201, 'publish');
     let staffProfileId = s.A.staffProfileId!;
     let offer = await m.post(`/rest/v1/shifts/${shift.id}/offers`, { staffProfileId });
@@ -75,7 +78,9 @@ test.describe.serial('S2 Manager A business flow in workspace A', () => {
     expect(mine.some((o) => o.id === offer.body.id || o.offerId === offer.body.id)).toBe(true);
     expectStatus(await staff.post(`/rest/v1/offers/${offer.body.id}/accept`), 201, 'staff accept');
     const confirmed = await m.post(`/rest/v1/offers/${offer.body.id}/confirm`);
-    expect([201, 409]).toContain(confirmed.status);
+    expect(confirmed.status).toBe(201); // nothing auto-confirms on accept: the manager's confirm always books
+    await sql(`update ${tbl(s.A, 'shift')} set starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3 where id = $1`, [shift.id, startsAt, endsAt]);
+    await sql(`update ${tbl(s.A, 'shift_assignment')} set period = tstzrange($2, $3, '[)') where shift_id = $1`, [shift.id, startsAt, endsAt]);
     const seat = await sql(`select status, check_in_required from ${tbl(s.A, 'shift_assignment')} where shift_id = $1`, [shift.id]);
     expect(seat[0]).toMatchObject({ status: 'confirmed' });
     updateState((st) => {

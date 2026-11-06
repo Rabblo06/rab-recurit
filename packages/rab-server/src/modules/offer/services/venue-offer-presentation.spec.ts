@@ -132,3 +132,18 @@ describe('Venue Offer presentation', () => {
     ).toBe('clocked_out');
   });
 });
+
+describe('manager-confirmation deadline (owner rule 2026-11-06)', () => {
+  it('a staff_accepted card past its deadline is in the rejected lane (closed group), before and after the Worker withdraws it', () => {
+    const accepted = { ...base, offerStatus: 'staff_accepted', assignmentStatus: 'staff_accepted' };
+    expect(resolveVenueOfferKanbanStage({ ...accepted, closedReason: null })).toBe('staff_accepted');
+    expect(resolveVenueOfferKanbanStage({ ...accepted, closedReason: 'confirmation_deadline_passed' })).toBe('rejected');
+    expect(resolveVenueOfferKanbanStage({ ...base, offerStatus: 'manager_rejected', assignmentStatus: 'rejected', closedReason: 'confirmation_deadline_passed' })).toBe('rejected');
+    expect(PIPELINE_STAGE_GROUPS.closed).toContain('rejected');
+  });
+  it('the table status never calls a deadline withdrawal "staff rejected"', () => {
+    expect(resolveVenueOfferStatus({ status: 'offered', required: 2, confirmed: 0, accepted: 0, rejected: 1, notConfirmedInTime: 1 })).toBe('1 not confirmed in time');
+    expect(resolveVenueOfferStatus({ status: 'offered', required: 3, confirmed: 0, accepted: 0, rejected: 2, notConfirmedInTime: 1 })).toBe('1 staff rejected');
+    expect(resolveVenueOfferStatus({ status: 'offered', required: 2, confirmed: 0, accepted: 0, rejected: 1 })).toBe('1 staff rejected');
+  });
+});

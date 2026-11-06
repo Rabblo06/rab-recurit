@@ -60,8 +60,8 @@ The timing column is an estimate.
 | S11 | Request and approve | c4-approve | Phone → web handoff | intro-web-approve: pending row → Shift Approval drawer → Approve → board | The ShiftCard arcs from the phone and lands on the "Pending approval" row. ♪ whoosh, then ♪ click on Approve. Kinetic "Approved". |
 | CC4 | Offers and confirmation | gap | Card | none | "05 · Offers and confirmation" |
 | S12 | Offers and confirmation | c5-offers | [D], then phone | Staff Offers list | The ShiftCard splits into four OfferCards (values copied from the fixture). Priya's card flies into the phone. |
-| S13 | Offers and confirmation | c5-accept | Phone hero | Offer details → Accept → CONFIRMED | StateChip changes Offered → Confirmed. ♪ click. |
-| S14 | Offers and confirmation | c5-branch | [D] "Two ways to fill a shift", plus a web inset | intro-web-confirm (Daniel Okafor, Awaiting Confirmation) | Lane A: Accept → Confirmed. Lane B: Accept → Accepted (reserved) → Manager confirms → Confirmed. No timeout numbers. |
+| S13 | Offers and confirmation | c5-accept | Phone hero | Offer details → Accept → Awaiting manager confirmation; the manager confirms off-camera → Next Shift | StateChip changes Offered → Confirmed only after the manager's confirm (owner rule 2026-11-06: the system never confirms). ♪ click. |
+| S14 | Offers and confirmation | c5-branch | [D] "Two ways to fill a shift", plus a web inset | intro-web-confirm (Daniel Okafor, Awaiting Confirmation) | Owner rule 2026-11-06: there are no longer two ways — every acceptance waits for the manager. The diagram must show one lane: Accept → Accepted (awaiting manager) → Manager confirms → Confirmed, or withdrawn if not confirmed in time. No timeout numbers. |
 | S15 | Offers and confirmation | c5-board | Web stage, full | intro-web-board | none |
 | CC5 | Shift day | gap | Card | none | "06 · Shift day" |
 | S16 | Shift day | c6-ready | Phone hero | Staff confirmed shift with notes, then the clock screen | Eyebrow "Friday". |
@@ -91,7 +91,7 @@ The timing column is an estimate.
 4. Phone → web handoff, ♪ whoosh.
 5. c4-approve as real web footage with close-ups.
 6. The OfferCard travels to the phone.
-7. c5-accept: Accept → CONFIRMED.
+7. c5-accept: Accept → Awaiting manager confirmation → (manager confirms) → Confirmed.
 
 The proof uses the full film's narration clips, captions in the band and three accents.
 

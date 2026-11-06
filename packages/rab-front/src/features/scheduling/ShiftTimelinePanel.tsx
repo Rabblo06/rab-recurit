@@ -7,6 +7,7 @@ import { api } from '../../shared/api';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import RightSidePanel from '../../shared/components/RightSidePanel';
 import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
+import { CONFIRMATION_DEADLINE_LABELS, TIMELINE_STEP_OFFER_CONFIRMATION_DEADLINE } from '@rab/shared';
 
 /** `GET /rest/v1/timeline/shifts/:id` item — a read model over the immutable audit log (no client-side state). */
 export interface TimelineItem {
@@ -33,6 +34,8 @@ const STEPS: Record<string, { title: string; Icon: typeof IconBolt; bg: string; 
   offer_rejected: { title: 'Acceptance rejected', Icon: IconBan, bg: '#fdded9', color: '#d93025' },
   offer_withdrawn: { title: 'Offer withdrawn', Icon: IconBan, bg: '#f1f1f1', color: '#666666' },
   offer_expired: { title: 'Offer expired', Icon: IconBan, bg: '#f1f1f1', color: '#666666' },
+  // An accepted offer no manager confirmed before its approval deadline, withdrawn by the system (never confirmed by it).
+  [TIMELINE_STEP_OFFER_CONFIRMATION_DEADLINE]: { title: CONFIRMATION_DEADLINE_LABELS.MANAGER_STATE, Icon: IconBan, bg: '#f1f1f1', color: '#666666' },
   check_in: { title: 'Checked in', Icon: IconMapPin, bg: '#f1e6fd', color: '#7d3bc8' },
   clock_in: { title: 'Clocked in', Icon: IconLogin, bg: '#d9f0de', color: '#2a8e44' },
   clock_out: { title: 'Clocked out', Icon: IconLogout, bg: '#f1f1f1', color: '#666666' },
