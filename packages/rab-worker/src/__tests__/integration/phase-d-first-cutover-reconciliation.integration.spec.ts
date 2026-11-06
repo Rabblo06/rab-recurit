@@ -23,6 +23,7 @@ import { dispatchPushScope, runPushDispatchCycle } from '../../queues/rab-push/p
 import { publishRealtimeScope, runRealtimeOutboxPublishCycle } from '../../queues/rab-realtime/publish-outbox.job';
 import { dispatchStatementScope, runShiftStatementDispatchCycle } from '../../queues/rab-reports/shift-statement.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -231,9 +232,12 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
       tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, async (m) =>
         attendanceQr.sign(await m.findOneByOrFail(Shift, { id: shiftId })));
     expect((await http().post(`/rest/v1/shifts/${shiftId}/publish`).set(auth(tokenM))).status).toBe(201);
-    const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenM)).send({ staffProfileId: staff.profileId });
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokenS))).status).toBe(201);
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenM))).status).toBe(201);
+    // Booked before the approval deadline (owner rule 2026-11-06), then moved back to the shift's window — fixture only.
+    await bookBeforeDeadline(admin, shiftId, async () => {
+      const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenM)).send({ staffProfileId: staff.profileId });
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokenS))).status).toBe(201);
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenM))).status).toBe(201);
+    });
     expect((await http().post('/rest/v1/attendance/check-in').set(auth(tokenS)).send({ shiftId })).status).toBe(200);
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokenS)).send({ shiftId, qrToken: await signQr() })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokenS)).send({ qrToken: await signQr() });
