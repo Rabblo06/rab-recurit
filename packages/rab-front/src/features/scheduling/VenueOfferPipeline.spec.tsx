@@ -752,3 +752,71 @@ describe('preserved behaviour', () => {
     click.mockRestore();
   });
 });
+
+describe('manager-confirmation deadline (no automatic confirmation)', () => {
+  const DEADLINE = '2030-01-01T17:30:00Z';
+  const shown = (iso: string) =>
+    new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }).format(new Date(iso));
+
+  it('an accepted card shows the server approval deadline in local time with its zone', async () => {
+    board.staff = [card({ stage: 'staff_accepted', offerStatus: 'staff_accepted', assignmentStatus: 'staff_accepted', acceptedAt: '2030-01-01T13:00:00Z', approvalDeadlineAt: DEADLINE, awaitingManagerConfirmation: true, closedReason: null })];
+    board.stageCounts = { staff_accepted: 1 };
+    mount();
+    await screen.findByRole('heading', { name: 'Example venue' });
+    const note = within(lane('Staff accepted')).getByText(/^Accepted /);
+    expect(note).toHaveTextContent(`confirm by ${shown(DEADLINE)}`);
+    expect(note.textContent).toMatch(/[A-Z]{3}|GMT|UTC/);
+  });
+
+  it('without the deadline fields (older API) the accepted card keeps today\'s text', async () => {
+    board.staff = [card({ stage: 'staff_accepted', offerStatus: 'staff_accepted', acceptedAt: '2030-01-01T13:00:00Z' })];
+    board.stageCounts = { staff_accepted: 1 };
+    mount();
+    await screen.findByRole('heading', { name: 'Example venue' });
+    expect(within(lane('Staff accepted')).getByText(/^Accepted /)).toHaveTextContent('awaiting confirmation');
+  });
+
+  it('a withdrawn-at-deadline card stays in Rejected with the server reason, the "Not confirmed in time" tag and never the raw code', async () => {
+    board.staff = [
+      card({ stage: 'rejected', offerStatus: 'manager_rejected', assignmentStatus: 'rejected', respondedAt: '2030-01-01T17:30:00Z', terminalSource: 'Not confirmed before the approval deadline', rejectionReason: 'confirmation_deadline_passed', closedReason: 'confirmation_deadline_passed', approvalDeadlineAt: DEADLINE, awaitingManagerConfirmation: false }),
+      card({ staffProfileId: 'b', offerId: 'b', name: 'Bea Declined', stage: 'rejected', offerStatus: 'declined', terminalSource: 'Declined by staff', declineReason: 'Unavailable' }),
+    ];
+    board.stageCounts = { rejected: 2 };
+    board.summary = { required: 2, filled: 0, open: 2, rejected: 2, withdrawnAtDeadline: 1 };
+    mount(undefined, '/venue-offers/shift?tab=closed');
+    await screen.findByRole('heading', { name: 'Example venue' });
+    const rejected = lane('Rejected');
+    expect(within(rejected).getByText('Not confirmed before the approval deadline')).toBeTruthy();
+    expect(within(rejected).getByText('Not confirmed in time')).toHaveClass('pipeline-tag');
+    expect(within(rejected).queryByText('confirmation_deadline_passed')).toBeNull();
+    // The other closed card is unchanged.
+    expect(within(rejected).getByText('Declined by staff')).toBeTruthy();
+    expect(within(rejected).getByText('Unavailable')).toBeTruthy();
+    // summary.withdrawnAtDeadline is shown on the lane, and is never a lane of its own.
+    expect(within(rejected).getByText('1 not confirmed in time')).toBeTruthy();
+    expect(within(rejected).getByRole('heading')).toHaveTextContent('Rejected2');
+    expect(screen.queryByRole('region', { name: /withdrawn/i })).toBeNull();
+    expect(tab(/^Closed/)).toHaveTextContent('Closed2');
+  });
+
+  it('a withdrawal whose terminalSource is missing still says why', async () => {
+    board.staff = [card({ stage: 'rejected', offerStatus: 'manager_rejected', terminalSource: null, rejectionReason: 'confirmation_deadline_passed', closedReason: 'confirmation_deadline_passed' })];
+    board.stageCounts = { rejected: 1 };
+    mount(undefined, '/venue-offers/shift?tab=closed');
+    await screen.findByRole('heading', { name: 'Example venue' });
+    expect(within(lane('Rejected')).getByText('Not confirmed before the approval deadline')).toBeTruthy();
+    expect(within(lane('Rejected')).queryByText('confirmation_deadline_passed')).toBeNull();
+  });
+
+  it('the replacement Send offer action stays available next to a withdrawn card', async () => {
+    board.staff = [card({ stage: 'rejected', offerStatus: 'manager_rejected', terminalSource: 'Not confirmed before the approval deadline', closedReason: 'confirmation_deadline_passed' })];
+    board.stageCounts = { rejected: 1 };
+    board.summary = { required: 2, filled: 0, open: 2, rejected: 1, withdrawnAtDeadline: 1 };
+    board.replacement = { vacancy: 2, confirmedNoShows: 0, provisionalNoShows: 0, nextOfferKind: 'replacement', canSend: true };
+    mount();
+    await screen.findByRole('heading', { name: 'Example venue' });
+    const send = screen.getAllByRole('button', { name: /Send offer/ });
+    expect(send.length).toBeGreaterThan(0);
+    send.forEach((b) => expect(b).toBeEnabled());
+  });
+});

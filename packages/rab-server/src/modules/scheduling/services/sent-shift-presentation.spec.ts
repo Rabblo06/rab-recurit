@@ -56,3 +56,9 @@ describe('terminal offer outcomes are named, never relabelled as Expired', () =>
     expect(p.filters).not.toContain('expired');
   });
 });
+
+it('every offer withdrawn at the manager-confirmation deadline reads "Offers not confirmed in time" (owner rule 2026-11-06)', () => {
+  expect(view('offered', 2, { ...zero, sent: 2, rejected: 2, withdrawnAtDeadline: 2 }).statusLabel).toBe('Offers not confirmed in time');
+  expect(view('offered', 2, { ...zero, sent: 2, rejected: 2, withdrawnAtDeadline: 1 }).statusLabel).toBe('Offers rejected');
+  expect(view('offered', 2, { ...zero, sent: 2, rejected: 2, withdrawnAtDeadline: 2 }).filters).toEqual(['manager_rejected']);
+});

@@ -115,12 +115,18 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
       attendanceQr.sign(await m.findOneByOrFail(Shift, { id: shiftId })));
   }
 
-  /** A real VM-requested shift (pipeline-visible), offered/accepted/confirmed through the API for the given staff. */
+  /**
+   * A real VM-requested shift (pipeline-visible), offered/accepted/confirmed through the API for the given staff. Booked
+   * 3 h ahead (owner rule 2026-11-06: a standard offer can only be sent/accepted/confirmed before start − 30 min), then the
+   * shift and its seats are moved to the requested window in SQL — a FIXTURE step, never a production bypass.
+   */
   async function bookShift(staffIdx: number[], opts: { startOffsetMin?: number; durationMin?: number; venueId?: string } = {}) {
     const startsAt = new Date(Date.now() + (opts.startOffsetMin ?? -5) * MIN);
     const endsAt = new Date(startsAt.getTime() + (opts.durationMin ?? 8 * 60) * MIN);
+    const bookAt = new Date(Date.now() + 3 * 60 * MIN);
+    const bookEnd = new Date(bookAt.getTime() + (opts.durationMin ?? 8 * 60) * MIN);
     const created = await http().post('/rest/v1/shifts').set(auth(tokenA))
-      .send({ venueId: opts.venueId ?? venue1, jobRoleId, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), requiredCount: staffIdx.length });
+      .send({ venueId: opts.venueId ?? venue1, jobRoleId, startsAt: bookAt.toISOString(), endsAt: bookEnd.toISOString(), requiredCount: staffIdx.length });
     expect(created.status).toBe(201);
     const shiftId = created.body.id as string;
     expect((await http().post(`/rest/v1/shifts/${shiftId}/publish`).set(auth(tokenA))).status).toBe(201);
@@ -129,9 +135,14 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
       expect({ status: offer.status, body: offer.body }).toMatchObject({ status: 201 });
       expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(staffTokens[i]!))).status).toBe(201);
       const confirmed = await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenA));
-      expect([201, 409]).toContain(confirmed.status); // 409 only when the shift auto-confirmed on accept
+      expect(confirmed.status).toBe(201); // nothing auto-confirms on accept any more: the manager's confirm always books
     }
     await adminDataSource.query(`UPDATE core.shift SET requested_by = $2 WHERE id = $1`, [shiftId, vm.userId]);
+    await adminDataSource.query(
+      `UPDATE core.shift SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3 WHERE id = $1`,
+      [shiftId, startsAt, endsAt],
+    );
+    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
     const seats = await adminDataSource.query(`SELECT status, check_in_required FROM core.shift_assignment WHERE shift_id = $1`, [shiftId]);
     expect(seats.every((r: any) => r.status === 'confirmed' && r.check_in_required === true)).toBe(true);
     return shiftId;

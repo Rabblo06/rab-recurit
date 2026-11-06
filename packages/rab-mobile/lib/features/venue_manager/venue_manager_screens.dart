@@ -1,3 +1,6 @@
+import 'dart:async';
+import '../../core/models/notification_item.dart';
+import '../../core/models/offer.dart';
 import '../../core/theme/money.dart';
 import '../../core/widgets/schedule_calendar.dart';
 import '../../core/widgets/schedule_record_card.dart';
@@ -35,6 +38,7 @@ import 'shift_staff_screens.dart';
 import 'staff_qr_screen.dart';
 import 'venue_manager_provider.dart';
 import 'venue_teams_screen.dart';
+import 'vm_offer_status.dart';
 
 String eventTime(VenueEvent e) =>
     '${DateFormat('HH:mm').format(e.start)} – ${DateFormat('HH:mm').format(e.end)}';
@@ -58,6 +62,19 @@ String offerStatus(String status) => switch (status) {
   'manager_rejected' => 'Manager rejected',
   _ => status,
 };
+
+/// Venue Manager notification destinations, within the VM's own venue-scoped
+/// lists. `manager_confirmation_timeout` (an unconfirmed acceptance was
+/// withdrawn at its deadline) refreshes and opens Sent Shifts, where the
+/// shift's true counts show. Other types only mark read.
+VoidCallback? vmNotificationTarget(BuildContext context, NotificationItem n) {
+  if (n.type != ConfirmationDeadlineCopy.managerNotificationType) return null;
+  return () {
+    unawaited(context.read<VenueManagerProvider>().refresh(silent: true));
+    vmPush(context, const VenueSentShiftsScreen());
+  };
+}
+
 void vmPush(BuildContext context, Widget page) =>
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => page));
 
@@ -240,8 +257,10 @@ class _VenueManagerHomeState extends State<VenueManagerHome> {
                   : 'evening',
               initials: initials(user.fullName),
               unread: context.watch<NotificationsProvider>().unreadCount,
-              onNotifications: () =>
-                  vmPush(context, const NotificationsScreen()),
+              onNotifications: () => vmPush(
+                context,
+                const NotificationsScreen(targetFor: vmNotificationTarget),
+              ),
               onProfile: widget.onProfile,
             ),
             const SizedBox(height: 16),
@@ -821,12 +840,16 @@ class VenueOffersScreen extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                offerStatus(o.status),
+                                vmOfferLabel(o, offerStatus),
                                 style: ScheduleTokens.label.copyWith(
                                   color: ScheduleTokens.ink,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
+                              if (vmConfirmationDue(o) case final due?) ...[
+                                const SizedBox(height: 4),
+                                Text(due, style: ScheduleTokens.label),
+                              ],
                               const SizedBox(height: 12),
                               Text(o.staffName, style: ScheduleTokens.heading),
                               Text(o.roleName, style: ScheduleTokens.body),

@@ -34,7 +34,7 @@ Email job IDs are `email-outbox.{id}.attempt.N`, so a re-dispatched outbox row c
 | Email dispatch / push dispatch | 2 s | Move committed outbox rows onto BullMQ. |
 | Realtime outbox publish | 2 s | Publish committed realtime events to Redis Pub/Sub. |
 | Offer expiry | 60 s | `pending → expired` past `expires_at`. |
-| Manager confirmation timeout | 60 s | Auto-confirm `staff_accepted` offers older than `MANAGER_CONFIRMATION_TIMEOUT_MINUTES`. |
+| Manager confirmation deadline | 60 s (`WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS`) | Withdraw `staff_accepted` offers past their approval deadline (standard: assignment start − 30 min; replacement/standby: assignment end; computed by the database clock). Never confirms. Offer → `manager_rejected` with no rejecting manager; notifies staff, the responsible manager and that venue's venue managers, except for withdrawals processed long after the assignment ended, which are audited but not notified. |
 | Shift cancellation follow-up | 60 s | Withdraw, reject and cancel everything attached to a cancelled shift. |
 | Replacement staff | 2 min | Create a `replacement_request` with up to five ranked candidates. Never sends offers. |
 | Late clock-in | 2 min | Notify after `LATE_CLOCK_IN_GRACE_MINUTES`. |
@@ -54,7 +54,7 @@ INSERT INTO core.worker_event (event_key, …) VALUES ($1, …)
 ON CONFLICT (event_key) DO NOTHING;   -- 0 rows → another worker already did it
 ```
 
-`event_key` is unique, so retries and concurrent workers cannot send a reminder twice or expire an offer twice. Timed work such as the confirmation timeout uses leased `core.worker_due_work` pointers, and report generation is serialised with advisory locks. Notifications for a suspended organisation are silenced at the single `NotificationService.notify()` choke point.
+`event_key` is unique, so retries and concurrent workers cannot send a reminder twice or expire an offer twice. Timed work such as the confirmation deadline uses leased `core.worker_due_work` pointers, and report generation is serialised with advisory locks. Notifications for a suspended organisation are silenced at the single `NotificationService.notify()` choke point.
 
 ## Workspace provisioner
 

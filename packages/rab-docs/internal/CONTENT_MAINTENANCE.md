@@ -30,7 +30,7 @@ The documentation describes the real system. It drifts the moment a label, rule 
 
 These appear on several pages. Search the docs before changing them in code:
 
-`48 hours` (offer expiry) · `60 minutes` (confirmation window) · `15 minutes` (clock-in opens; pipeline cancel cut-off) · `2 hours` (clock window after end) · `10 minutes` (late) · `30 minutes` (no-show; missing clock-out; web idle) · `24 hours` (invitation validity; web session) · `90 days` (mobile session; biometric re-auth) · `7 days` (mobile idle; invite clean-up) · `200` / `50` / `100` metres (geofence) · `10 MB` / `20 MB` (uploads) · `10–128 characters` (passwords).
+`48 hours` (offer expiry) · `15 minutes` (clock-in opens; pipeline cancel cut-off) · `2 hours` (clock window after end) · `10 minutes` (late) · `30 minutes` (manager-confirmation deadline before a standard offer's start; no-show; missing clock-out; web idle) · `24 hours` (invitation validity; web session) · `90 days` (mobile session; biometric re-auth) · `7 days` (mobile idle; invite clean-up) · `200` / `50` / `100` metres (geofence) · `10 MB` / `20 MB` (uploads) · `10–128 characters` (passwords).
 
 ## Review checklist for a docs pull request
 

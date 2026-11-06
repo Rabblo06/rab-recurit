@@ -26,15 +26,15 @@ Each offer shows the role, venue, address, date and time, the hourly rate and th
     Tap it to see **Job Details**: role, venue, address, pay, date, time and any **NOTE** from your manager.
   </Step>
   <Step title="Tap Accept">
-    The offer now shows **Waiting for manager confirmation**.
+    The offer now shows **Awaiting manager confirmation**.
   </Step>
   <Step title="Wait for confirmation">
-    A manager confirms you, usually within an hour. Then the offer shows **CONFIRMED** and the shift appears in **Upcoming Shift** and your **Calendar**.
+    Your manager must confirm you before the approval deadline (30 minutes before your start). Then the offer shows **CONFIRMED** and the shift appears in **Upcoming Shift** and your **Calendar**. If no manager confirms in time, the offer shows **Withdrawn** and you are told "Shift offer withdrawn".
   </Step>
 </Steps>
 
 <PhoneShots shots={[
-  { src: '/images/mobile/offers-waiting.webp', alt: 'Offer card showing Waiting for manager confirmation', caption: 'Waiting for confirmation' },
+  { src: '/images/mobile/offers-waiting.webp', alt: 'Offer card showing Awaiting manager confirmation', caption: 'Waiting for confirmation' },
   { src: '/images/mobile/offers-confirmed.webp', alt: 'Confirmed list showing a confirmed shift', caption: 'Confirmed' },
 ]} />
 
@@ -47,12 +47,13 @@ Open the offer and tap **Decline**. You are not asked for a reason. The offer di
 | You see | Meaning |
 | --- | --- |
 | **PENDING** | Waiting for your answer. |
-| **Waiting for manager confirmation** | You accepted; a manager has not confirmed yet. |
+| **Awaiting manager confirmation** | You accepted; a manager has not confirmed yet. |
 | **CONFIRMED** | You are on the shift. |
 | **Expired** | You did not answer in time (48 hours by default). |
 | **Declined** | You said no. |
 | **Cancelled** | The shift was cancelled. |
+| **Withdrawn** | No manager confirmed your acceptance before the approval deadline. You are not booked, and nothing counts against you. |
 
 <Tip>
-  Offers expire. Answer as soon as you can — you cannot accept an expired offer.
+  Offers expire. Answer as soon as you can — you cannot accept an expired offer, or a standard offer less than 30 minutes before its start.
 </Tip>

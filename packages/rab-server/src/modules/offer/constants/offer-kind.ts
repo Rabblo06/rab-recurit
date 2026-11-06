@@ -6,8 +6,11 @@
  *                    ORIGINAL shift has at least one vacant seat (e.g. a manager-confirmed no-show freed one).
  *  - `standby`     — sent from the replacement form while the shift has NO vacant seat (e.g. the original staff member
  *                    is only provisionally absent). A standby offer can be accepted, but it is approved into an
- *                    assignment only if a real vacancy exists at approval time (409 otherwise), it never auto-confirms
- *                    and the manager-confirmation timeout never confirms it.
+ *                    assignment only if a real vacancy exists at approval time (409 otherwise).
+ *
+ * No kind is ever confirmed by the system (owner rule 2026-11-06). Replacement and standby offers keep their own window:
+ * their manager-confirmation deadline is the END of the booked window (owner decision Q1b), a standard offer's is its
+ * start − 30 min (`confirmationDeadlineSql`); an unconfirmed acceptance is withdrawn at that deadline.
  *
  * Kept in the server (not `@rab/shared`) on purpose: no client branches on it for authorisation; clients only render it.
  */

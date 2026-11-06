@@ -1,5 +1,6 @@
 // Phase A pa-intervals
 import { validate } from './env.validation';
+import { EnvironmentVariables } from './environment-variables';
 import { WORKER_SCAN_INTERVAL_KEYS, WORKER_SCAN_INTERVAL_SETTINGS } from './worker-scan-intervals';
 
 /**
@@ -45,6 +46,13 @@ describe('worker scan interval environment variables (Phase A)', () => {
     expect(env.PUSH_ENABLED).toBe(false);
     expect(env.WORKER_SCHEDULER).toBe('interval');
     expect(env.WORKER_SCHEDULER_RECONCILE_SECONDS).toBe(60);
+  });
+
+  it('owner rule 2026-11-06: MANAGER_CONFIRMATION_TIMEOUT_MINUTES no longer exists; a deployment still setting it boots, and nothing reads it', () => {
+    expect(new EnvironmentVariables()).not.toHaveProperty('MANAGER_CONFIRMATION_TIMEOUT_MINUTES'); // no longer a declared setting
+    const env = validate({ ...base, MANAGER_CONFIRMATION_TIMEOUT_MINUTES: '60' }) as unknown as Record<string, unknown>; // still boots
+    // The Worker scan cadence of the (now deadline) job is unchanged.
+    expect(env.WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS).toBe(60);
   });
 
   it.each(Object.entries(WORKER_SCAN_INTERVAL_SETTINGS))('%s accepts its inclusive bounds', (key, s) => {

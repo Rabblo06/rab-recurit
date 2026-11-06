@@ -1,5 +1,5 @@
 import { NO_SHOW_GRACE_MINUTES } from '@rab/server/modules/attendance/services/no-show-policy';
-import { assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
+import { assignmentTimeSql, confirmationDeadlineSql } from '@rab/server/modules/scheduling/utils/assignment-time';
 import {
   parseTimerTriggerPayload,
   TIMER_TRIGGER_EARLY_REDELAY_MAX_MS,
@@ -50,7 +50,6 @@ export interface TimerTriggerHandlerDeps {
   /** runScopedForOrg(tenantContext, organisationId, workspaceId, fn). */
   runScoped: <T>(organisationId: string, workspaceId: string, fn: (manager: EntityManager) => Promise<T>) => Promise<T>;
   actions: Readonly<Record<TimerTriggerKind, TimerTriggerAction>>;
-  managerConfirmationTimeoutMinutes: number;
   lateClockInGraceMinutes: number;
   recordOutcome: (kind: TimerTriggerKind, outcome: TimerTriggerOutcome) => void;
   logger: { log(message: string): void; warn(message: string): void };
@@ -77,28 +76,34 @@ export async function decideTimerTrigger(
   manager: EntityManager,
   kind: TimerTriggerKind,
   payload: TimerTriggerJobData,
-  settings: { managerConfirmationTimeoutMinutes: number; lateClockInGraceMinutes: number },
+  settings: { lateClockInGraceMinutes: number },
 ): Promise<TimerTriggerDecision> {
   await manager.query('SET TRANSACTION READ ONLY');
   let dueAt: number | null;
   let dbNow: number | null;
-  if (kind === 'offer-expiry' || kind === 'manager-confirmation') {
-    const [row] = await manager.query<Array<{ status: string; offer_kind: string | null; expires_at: Date; staff_accepted_at: Date | null; db_now: Date }>>(
-      `SELECT status, offer_kind, expires_at, staff_accepted_at, now() AS db_now FROM job_offer WHERE id = $1`,
+  if (kind === 'offer-expiry') {
+    const [row] = await manager.query<Array<{ status: string; expires_at: Date; db_now: Date }>>(
+      `SELECT status, expires_at, now() AS db_now FROM job_offer WHERE id = $1`,
       [payload.subjectId],
     );
     if (!row) return { outcome: 'noop' };
     dbNow = epoch(row.db_now);
-    if (kind === 'offer-expiry') {
-      if (row.status !== 'pending') return { outcome: 'noop' };
-      dueAt = epoch(row.expires_at);
-    } else {
-      // Same eligibility as the cycle's isStillAwaitingConfirmation (status, not standby); the cycle re-checks everything.
-      if (row.status !== 'staff_accepted' || row.offer_kind === 'standby') return { outcome: 'noop' };
-      const accepted = epoch(row.staff_accepted_at);
-      if (accepted === null) return { outcome: 'noop' };
-      dueAt = accepted + settings.managerConfirmationTimeoutMinutes * 60_000;
-    }
+    if (row.status !== 'pending') return { outcome: 'noop' };
+    dueAt = epoch(row.expires_at);
+  } else if (kind === 'manager-confirmation') {
+    // Due at the manager-confirmation DEADLINE (owner rule 2026-11-06), the same SQL the API armed the trigger with, so
+    // the stale check below holds. Every kind (standby included) is eligible: the cycle withdraws, it never confirms.
+    const [row] = await manager.query<Array<{ status: string; shift_status: string; deadline_at: Date; db_now: Date }>>(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+      `SELECT o.status, s.status AS shift_status, ${confirmationDeadlineSql('o', 'sa', 's')} AS deadline_at, now() AS db_now
+         FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+        WHERE o.id = $1`,
+      [payload.subjectId],
+    );
+    if (!row) return { outcome: 'noop' };
+    dbNow = epoch(row.db_now);
+    if (row.status !== 'staff_accepted' || row.shift_status === 'cancelled') return { outcome: 'noop' };
+    dueAt = epoch(row.deadline_at);
   } else {
     const t = assignmentTimeSql();
     const eventKey = `${kind}:${payload.subjectId}`;
@@ -152,7 +157,6 @@ export async function handleTimerTrigger(job: TimerTriggerJobLike, token: string
 
   const decision = await deps.runScoped(payload.organisationId, payload.workspaceId, (manager) =>
     decideTimerTrigger(manager, kind, payload, {
-      managerConfirmationTimeoutMinutes: deps.managerConfirmationTimeoutMinutes,
       lateClockInGraceMinutes: deps.lateClockInGraceMinutes,
     }),
   );

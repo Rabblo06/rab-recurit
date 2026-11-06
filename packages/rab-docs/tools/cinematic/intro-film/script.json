@@ -100,13 +100,13 @@
     {
       "id": "c5-accept",
       "chapter": "Offers and confirmation",
-      "text": "Priya opens hers and accepts. Because this shift came from an approved request, she's booked straight away.",
+      "text": "Priya opens hers and accepts. Approving the request didn't book her: the manager still confirms her place.",
       "pauseAfter": 0.7
     },
     {
       "id": "c5-branch",
       "chapter": "Offers and confirmation",
-      "text": "It's different when the manager creates a shift directly. Then, accepting holds the place until the manager confirms it.",
+      "text": "It's the same when the manager creates a shift directly. If nobody confirms in time, the offer is withdrawn.",
       "pauseAfter": 0.6
     },
     {

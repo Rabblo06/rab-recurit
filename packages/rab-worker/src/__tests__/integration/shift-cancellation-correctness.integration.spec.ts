@@ -44,7 +44,7 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { isLockUnavailable } from '../helpers/legacy-discovery-lock';
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { runAttendanceMonitorCycle } from '../../queues/rab-shifts/attendance-monitor.job';
-import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
+import { runConfirmationDeadlineBackstopScan, runManagerConfirmationDeadlineCycle, runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet.job';
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
@@ -416,58 +416,74 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       expect(assignment.status).not.toBe(ShiftAssignmentStatus.NO_SHOW);
     });
 
-    it('C16: a cancelled shift produces no manager-confirmation-timeout resolution', async () => {
+    /** FIXTURE (tests only): put the assignment's start 20 min ahead, i.e. its approval deadline 10 min in the past. */
+    async function pastDeadline(fx: { owner: TestIdentity }, offer: JobOffer): Promise<void> {
+      await withContext(ctxOf(fx.owner), async (m) => {
+        await m.query(
+          `UPDATE core.shift_assignment SET period = tstzrange(now() + interval '20 minutes', now() + interval '8 hours', '[)') WHERE id = $1`,
+          [offer.shiftAssignmentId],
+        );
+        await m.query(
+          `UPDATE core.shift s SET starts_at = now() + interval '20 minutes', default_starts_at = now() + interval '20 minutes'
+             FROM core.shift_assignment sa WHERE sa.id = $1 AND s.id = sa.shift_id`,
+          [offer.shiftAssignmentId],
+        );
+      });
+    }
+    const runDeadline = async () => {
+      await runManagerConfirmationDeadlineCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService);
+      await runConfirmationDeadlineBackstopScan(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService);
+    };
+
+    it('C16: a cancelled shift produces no manager-confirmation-deadline resolution (the cancellation follow-up owns it)', async () => {
       const fx = await seedOrgFixture('timeoutC16');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const shift = await seedOpenShift(fx);
       const offer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: staff.profileId! });
       await offerService.staffAccept(ctxOf(staff), offer.id);
-      // Backdate staffAcceptedAt past the 60-minute timeout threshold, then cancel the shift.
-      await withContext(ctxOf(fx.owner), (m) => m.update(JobOffer, offer.id, { staffAcceptedAt: new Date(Date.now() - 90 * 60 * 1000) }));
+      await pastDeadline(fx, offer);
       await schedulingService.cancel(ctxOf(fx.owner), shift.id);
 
-      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, 60);
-      // PHASE 7.1 — the timeout worker auto-CONFIRMS (reusing the same
-      // `applyOfferConfirmation` seat-claiming core a real Manager's confirm
-      // click uses), never auto-rejects. Pass A's shift-cancelled check must
-      // reject this candidate outright — the timeout path must never fire,
-      // confirm, or claim a seat once cancellation-followup has already (or
-      // will) reconcile it.
+      await runDeadline();
+      // Owner rule 2026-11-06: the deadline worker WITHDRAWS (never confirms) — and skips a cancelled shift entirely, so the
+      // cancellation follow-up closes it with the truthful reason.
       const rows = await withContext(ctxOf(fx.owner), (m) =>
-        m.query<Array<{ count: string }>>(
-          `SELECT count(*) FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1 AND metadata->>'source' = 'manager_confirmation_timeout'`,
+        m.query<Array<{ action: string; reason: string | null }>>(
+          `SELECT action, metadata->>'reason' AS reason FROM core.audit_log WHERE entity_id = $1 AND action IN ('offer.confirmed', 'offer.rejected_by_worker')`,
           [offer.id],
         ),
       );
-      expect(Number(rows[0]!.count)).toBe(0);
+      expect(rows).toHaveLength(0);
+      expect((await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }))).status).toBe(OfferStatus.STAFF_ACCEPTED);
       const finalShift = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
       expect(finalShift.filledCount).toBe(0); // never claims a seat on a cancelled shift
       const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'offer', relatedEntityId: offer.id } }));
-      // staffAccept itself may have notified the manager once ("offer accepted") — the escalation type specifically must not appear.
       expect(notifications.filter((n) => n.type === ('manager_confirmation_timeout' as never))).toHaveLength(0);
+      await runShiftCancellationFollowupCycle(adminDataSource, tenantContext, notificationService, auditService);
+      const closed = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
+      expect(closed.status).toBe(OfferStatus.MANAGER_REJECTED);
+      expect(closed.rejectionReason).toBe('This shift was cancelled.');
     });
 
-    it('C16b: same setup, NOT cancelled, DOES auto-confirm to MANAGER_CONFIRMED (control)', async () => {
+    it('C16b: same setup, NOT cancelled, is WITHDRAWN at the deadline — never confirmed, no seat (control)', async () => {
       const fx = await seedOrgFixture('timeoutC16b');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const shift = await seedOpenShift(fx);
       const offer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: staff.profileId! });
       await offerService.staffAccept(ctxOf(staff), offer.id);
-      await withContext(ctxOf(fx.owner), (m) => m.update(JobOffer, offer.id, { staffAcceptedAt: new Date(Date.now() - 90 * 60 * 1000) }));
+      await pastDeadline(fx, offer);
 
-      await runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, 60);
+      await runDeadline();
       const finalOffer = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
-      expect(finalOffer.status).toBe(OfferStatus.MANAGER_CONFIRMED); // PHASE 7.1 — the offer is now actually auto-confirmed, not rejected or just flagged
-      expect(finalOffer.confirmedBy).toBeFalsy(); // a SYSTEM confirmation, never a fabricated Manager identity
+      expect(finalOffer.status).toBe(OfferStatus.MANAGER_REJECTED);
+      expect(finalOffer.rejectionReason).toBe('confirmation_deadline_passed');
+      expect(finalOffer.confirmedBy).toBeFalsy();
       const finalShift = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
-      expect(finalShift.filledCount).toBe(1); // the seat WAS genuinely claimed
+      expect(finalShift.filledCount).toBe(0); // no seat: the system never books anyone
       const rows = await withContext(ctxOf(fx.owner), (m) =>
-        m.query<Array<{ count: string }>>(
-          `SELECT count(*) FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1 AND metadata->>'source' = 'manager_confirmation_timeout'`,
-          [offer.id],
-        ),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [offer.id]),
       );
-      expect(Number(rows[0]!.count)).toBe(1);
+      expect(Number(rows[0]!.count)).toBe(0);
     });
   });
 

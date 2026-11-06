@@ -109,10 +109,10 @@ export const WORKER_PROCESSORS = [
  *  - `AttendanceModule` — the shared Shift-QR signing and QR-image services
  *    used by the pre-shift report (imported, never re-implemented here).
  *  - `RealtimeEventModule` — `RealtimeEventService`, needed by
- *    `applyOfferConfirmation()` via `offer-expiry.job.ts`'s manager-
- *    confirmation-timeout cycle (Stage 5) so the SAME shared confirm path a
- *    real Manager's click uses also raises `offer.confirmed` when the
- *    worker auto-confirms on timeout — never a second notification path.
+ *    `withdrawUnconfirmedOffer()` via `offer-expiry.job.ts`'s manager-
+ *    confirmation-deadline cycle, so the SAME shared withdrawal the API's
+ *    lazy path uses raises `offer.rejected` (the Worker never confirms an
+ *    offer — owner rule 2026-11-06).
  *  - `StorageReconcileCommand` — the existing, already-safe storage
  *    reconciliation logic, reused on a schedule (see storage-cleanup.job.ts).
  *

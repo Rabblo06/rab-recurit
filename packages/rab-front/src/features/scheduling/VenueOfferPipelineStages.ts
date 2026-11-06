@@ -58,8 +58,12 @@ const ALIASES: Record<string, string> = {
   noshow: 'no_show',
 };
 
-/** Seat metrics that live in the legacy `summary` beside the lane counters — never lanes. */
-const SEAT_KEYS = new Set(['required', 'filled', 'open']);
+/**
+ * Metrics that live in the legacy `summary` beside the lane counters — never lanes: the seat metrics, and
+ * `withdrawnAtDeadline` (how many of the Rejected lane's cards were withdrawn because no manager confirmed them before
+ * the approval deadline; those cards stay in the Rejected lane).
+ */
+const SEAT_KEYS = new Set(['required', 'filled', 'open', 'withdrawn_at_deadline']);
 
 /** `'STAFF ACCEPTED'`, `'staff_accepted'`, `'staffAccepted'`, `'Staff-Accepted'` → `'staff_accepted'`. */
 export function normaliseStage(raw: string | null | undefined): string {

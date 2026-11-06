@@ -9,7 +9,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { PayrollService } from '../../payroll/services/payroll.service';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { StaffService } from '../../staff/services/staff.service';
-import { TIMELINE_METADATA_KEYS, TIMELINE_MONEY_KEYS, TIMELINE_STEPS } from '../constants/timeline-steps';
+import { TIMELINE_METADATA_KEYS, TIMELINE_MONEY_KEYS, timelineStepFor } from '../constants/timeline-steps';
 import { TimelineQueryDto } from '../dto/timeline-query.dto';
 
 export interface TimelineItem {
@@ -291,7 +291,7 @@ export class TimelineService {
       return {
         id: r.id as string,
         action,
-        step: TIMELINE_STEPS[action] ?? null,
+        step: timelineStepFor(action, r.metadata),
         entityType: (r.entity_type as string) ?? null,
         entityId: (r.entity_id as string) ?? null,
         actor: r.actor_first_name ? { fullName: `${r.actor_first_name} ${r.actor_last_name}` } : null,

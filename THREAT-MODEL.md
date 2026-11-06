@@ -43,6 +43,7 @@ Earlier statements that have since been superseded (do not rely on the older wor
 | "Multi-factor authentication is not available" | TOTP plus recovery codes for every web user. Enforcement flags default off, and mobile is exempt | "Wave 4 Lane MFA" |
 | Organisation settings (name, slug, logo, sign-in methods) changed by holders of `settings.edit` on `/rest/v1/workspace…` ("Settings", P1C.1B) | Platform administrators only, on `/rest/v1/admin/organisations/:id/settings…`; the tenant routes were removed (404); the tenant reads them (`settings.view`: CEO, Manager) | "Wave 6 E2E fixes" W6X-1 (owner decision 2026-10-23) |
 | A platform admin creates an organisation (name + CEO names) and invites its CEO (P2.9B, `POST /admin/organisations`) | Email-only CEO invitation from Settings → Members → Add; the organisation is created when the CEO accepts with their own details; the old route is gone (404) | "Wave 6 E2E fixes" W6X-6 (owner correction 2026-10-23) |
+| Replacement/standby acceptances "still follow the existing manager-confirmation timeout (system auto-confirm …)" ("Replacement & standby offers", trade-off (1)); `applyOfferConfirmation` "shared by the manager click, auto-confirm and the timeout worker"; Phase 7.1 "timeout = system auto-confirm"; Venue-Manager-request "auto-confirm on accept" | The system never confirms. One writer, one caller (the sender's manual confirm), before the approval deadline (standard: start − 30 min; replacement/standby: window end); unconfirmed acceptances are withdrawn at the deadline | "No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min" (owner rule 2026-11-06) |
 
 Heading levels: every feature entry is `##`, and its sub-threats are `###`. The one entry that had been written as `#`
 ("Staff same-shift Teams read") was demoted to `##` in this pass. Its text is unchanged.
@@ -1301,7 +1302,7 @@ Migration `1786719400000-OfferKind`: `job_offer.offer_kind text NOT NULL DEFAULT
   - *Duplicate sends / retries.* Per-recipient "already offered this shift" (shift row lock serialises concurrent submits); worker retries go through the existing `worker_event` claim + offer-status CAS. Tests: R5 (two concurrent submits → one offer, one notification), W2 (timeout cycle run 3× incl. 2 concurrent → one confirmation, one audit, one notification, one seat).
   - *Erasing the absent person's record.* The no-show assignment is never updated, deleted or re-statused; the replacement is a separate assignment + offer on the same shift id. Tests: R4, R7, W2.
   - *Paying unworked time.* A replacement sent after the shift started is booked from the database time of sending, re-anchored to the approval time if later; attendance (and pay) still come only from their own check-in/clock-in. Test: R7 (period starts after the original start, no attendance row at booking).
-- **Security trade-offs (for owner veto):** (1) Replacement/standby acceptances on a directly-created shift still follow the existing manager-confirmation timeout (system auto-confirm after the configured minutes) — standby is excluded; (2) the manager may send more replacement offers than vacancies (as for ordinary sends) — capacity is enforced at approval, losers stay `staff_accepted` until rejected/expired; (3) sending is allowed until the original shift's scheduled end (stricter than the generic end + 5 h offer window), with no minimum remaining time beyond the break length.
+- **Security trade-offs (for owner veto):** (1) ~~Replacement/standby acceptances on a directly-created shift still follow the existing manager-confirmation timeout (system auto-confirm after the configured minutes) — standby is excluded;~~ **SUPERSEDED 2026-11-06** (owner rule: no automatic confirmation; see the entry "No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min"); (2) the manager may send more replacement offers than vacancies (as for ordinary sends) — capacity is enforced at approval, losers stay `staff_accepted` until rejected/expired; (3) sending is allowed until the original shift's scheduled end (stricter than the generic end + 5 h offer window), with no minimum remaining time beyond the break length.
 - **Residual:** `reopen-no-show` (attendance module) does not yet check whether a replacement has taken that seat — reopening after a replacement was booked can leave occupied > required for that shift (no double pay without real attendance, but the seat count is over). `job_offer.offer_kind` has no staff-own second RLS predicate (pre-existing table posture).
 - **Amendment (same day):** reopening a confirmed no-show is refused (409 `SEAT_TAKEN_BY_REPLACEMENT`) once a replacement holds the freed seat — decided under the shift row lock with agent R's `loadShiftVacancy`, so concurrent replacement approvals and reopens serialise (test: `manual-attendance` › Reopen no-show is refused once a replacement holds the freed seat…).
 
@@ -5830,6 +5831,156 @@ No migration, role, grant, RLS or posture change; no money or worked-minutes val
 - **Operators on v0.4.0:**
   - Do NOT mark production disposable.
   - Deploy the release carrying this fix. On a test database the old images keep working (it carries the marker).
+
+## No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min (branch feat/no-autoconfirm, 2026-11-06, not merged)
+
+Owner business-rule change (2026-11-06). Plan and binding owner decisions: Q1–Q15 in the PR description and in
+`rab-workforce-architecture.md` A13 / §1.1 / §8.4. No migration. No new table, status, transition, permission or
+notification type.
+
+**What changed**
+- The system never confirms an offer. Two automatic paths are removed:
+  - the staff-accept auto-confirm on Venue-Manager-requested shifts (`OfferService.staffAccept`);
+  - the Worker's manager-confirmation timeout auto-confirm (`runManagerConfirmationTimeoutCycle`, Phase 7.1).
+- `applyOfferConfirmation` is the only writer of `manager_confirmed`. It has one caller, `OfferService.confirmOne`, and
+  takes a required human `confirmedBy`. A static spec pins both facts: `apply-offer-confirmation-callers.spec.ts`.
+- **Approval deadline** (one SQL expression, `confirmationDeadlineSql`, evaluated by PostgreSQL):
+  - a STANDARD offer: assignment start − 30 min;
+  - a REPLACEMENT/STANDBY offer: the end of its booked window (Q1b).
+- Enforcement points:
+  - The confirm CAS requires `clock_timestamp() < deadline`. Otherwise the API returns 409
+    `CONFIRMATION_DEADLINE_PASSED` and then withdraws lazily.
+  - At the deadline the Worker withdraws through the shared CAS (`withdrawUnconfirmedOffer`), which requires
+    `clock_timestamp() >= deadline`. The result: offer `manager_rejected`, `rejected_by` NULL, reason
+    `confirmation_deadline_passed`; assignment `rejected`.
+  - A STANDARD send or accept after the recipient's deadline is a 409 with the same code (Q1a, Q2).
+- `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` is removed (Q12).
+- Notifications are sent once, in the withdrawal's own transaction:
+  - the staff member gets `offer_rejected`;
+  - the responsible manager and the Venue Managers of that venue get `manager_confirmation_timeout` (Q9).
+
+Who can call this? — Confirm (`POST /offers/:id/confirm`, `/offers/batches/:id/confirm-all`):
+`PermissionGuard(offer.confirm)` → `assertOfferOwned` (the sender only, 404 otherwise) → the org-scoped CAS → `job_offer` RLS.
+The audited Admin Inspect path is unchanged; there is no new bypass (Q6). Nobody can call the withdrawal. The Worker
+reaches it from its due-work pointer, from its backstop scan and from the optional timer trigger. The API reaches it
+only after the offer's own sender has had a confirm refused at the deadline.
+
+Whose data is involved? — The staff member's booking (whether they are booked, and therefore paid), the venue's staffing,
+and the sender's pipeline. Every withdrawal is audited (`offer.rejected_by_worker`, actor NULL, `metadata.reason`
+`confirmation_deadline_passed`, `deadlineAt`, `processedLagMs`, `notified`). History is kept: the offer and assignment rows
+are never deleted.
+
+What if that identity is compromised? — A compromised manager account can confirm only its own offers, only before the
+deadline, as before. It cannot extend a deadline. No request field carries one: the confirm action reads no body, and the
+deadline is recomputed from `shift_assignment.period` by the database. A compromised staff account can at most accept
+before the deadline; that never books anyone.
+
+What if it's malicious? — A Venue Manager has no `offer.confirm` → 403, a categorical lack of permission, on an offer they
+may see. Another workspace's or organisation's manager → 404. A forged Worker pointer naming another organisation's offer
+is read under that pointer's own organisation context (SET LOCAL + FORCE RLS), finds nothing, and is completed as a no-op.
+
+What if the request is tampered with? — No client-supplied status, deadline or organisation is read. The deadline is
+judged by `clock_timestamp()` on the database, never a device clock. Projections (`approvalDeadlineAt`,
+`awaitingManagerConfirmation`, `canConfirm`, `canAccept`, `closedReason`) are computed in SQL. They are display only: every
+mutation re-checks them in its CAS.
+
+What if two callers race? — Every competitor claims the `job_offer` row FIRST with `status = 'staff_accepted'`:
+- confirm (`< deadline`);
+- the withdrawal (`>= deadline`);
+- manager reject;
+- pipeline cancel;
+- the shift-cancellation follow-up;
+- two Workers (SKIP LOCKED pointer + `worker_event` `manager-confirmation-deadline:{offerId}:{deadlineIso}`);
+- the API lazy path.
+
+Exactly one wins and the others match zero rows. The withdrawal locks offer → assignment and never locks `shift`, so it
+cannot deadlock with confirm (shift → offer → assignment). The withdrawal skips a cancelled shift: the cancellation
+follow-up closes those with the truthful reason.
+
+What if the DB returns data written by a lower-trust actor? — The only values read are the offer's own status, kind and the
+assignment's period, written by the manager at send. No staff-written value feeds the deadline.
+
+What if a third party (email/push/storage provider) is compromised? — Unchanged: the notification outbox rows are created
+exactly once (CAS-gated); provider delivery stays at-least-once (existing entries).
+
+What happens when authorisation fails? — 403 (no `offer.confirm`) / 404 (not the sender, other workspace or
+organisation). A refused foreign confirm never triggers the lazy withdrawal, which runs only after the owner's own refused
+confirm.
+
+What happens when the operation fails halfway? — The withdrawal, its audit, notifications and realtime envelope are one
+transaction. A rollback leaves the offer `staff_accepted`. Retries:
+- the pointer reschedules with bounded backoff (60 s × 2^attempt, at most 15 min; the old fixed-60 s-forever loop is gone);
+- the backstop scan retries on its next tick.
+
+Manual confirms are refused from the deadline onward whether or not the Worker has run.
+
+**Abuse cases (tests):**
+- **AC1** — a late confirm is a 409 with the code; the acceptance is withdrawn, never booked; one audit, the exact
+  notification. `offer-confirmation-deadline` AC1; worker `manager-confirmation-deadline-correctness` C2.
+- **AC2** — a Venue Manager gets 403 and staff cannot confirm. AC2.
+- **AC3** — other organisations and workspaces get 404 (AC3; worker C4), including a forged pointer (X1).
+- **AC4** — smuggled body fields change nothing. AC4.
+- **AC5** — late accept and late send are refused. AC5; worker S1, S2.
+- **Races:** R1a, R1b, R2, R3, R4, R5.
+- **Zero automatic confirms:** Z1 (no `manager_confirmed` without a human `confirmed_by` in any suite organisation), Z3,
+  Z4, and the static T-Z2 pin.
+- **No penalty, no pay:** A1–A4.
+- **No double booking:** DB1.
+- **No tenant context → zero rows:** X4.
+
+**Superseded:** this entry supersedes the 2026-10-21 "Replacement & standby offers" entry's trade-off (1)
+("Replacement/standby acceptances … still follow the existing manager-confirmation timeout (system auto-confirm …)").
+That trade-off is withdrawn. Replacement and standby are never confirmed by the system; they keep their window and are
+withdrawn at its end. That entry's control text ("shared by the manager click, auto-confirm and the timeout worker",
+"Standby … gets no manager-confirmation-timeout pointer") is also superseded: there is one caller, and every kind now
+gets a deadline pointer that withdraws.
+
+```
+SECURITY TRADE-OFF (Q11 — presented to the owner for veto; implemented as planned unless vetoed)
+Decision:   The deadline is judged at the row-claiming CAS statement (clock_timestamp()), not at COMMIT.
+Reason:     PostgreSQL offers no commit-timestamp predicate; a deferred constraint trigger could re-check at commit
+            but adds a per-schema migration and still races the clock by microseconds.
+Risk:       A confirm whose CAS runs at deadline−ε can commit at deadline+δ (δ = the rest of the confirm transaction,
+            normally milliseconds). The seat claim and booking are then valid although committed just after the deadline.
+Mitigation: The CAS holds the job_offer row lock, so the withdrawal cannot interleave (test R1a); the window is the
+            remaining statements of one transaction; audit records manager_confirmed_at = clock_timestamp() at the CAS.
+Reversal:   Optional migration A (plan §4) as a DEFERRABLE INITIALLY DEFERRED constraint trigger re-checking clock_timestamp().
+```
+
+```
+SECURITY TRADE-OFF (coordinator default for the Q4 / Q1b conflict — open to owner veto)
+Decision:   Notifications for a withdrawal are sent only while the assignment has not ended OR within 1 hour of the
+            deadline (withdraw-unconfirmed-offer.ts NOTIFY_GRACE). Otherwise the withdrawal is audited (notified=false) and
+            silent.
+Reason:     Q4 says "notify only where the assignment has not yet ended", but a replacement/standby deadline IS its window
+            end, so that test alone would never notify them. The extra hour covers normal Worker cadence and short outages.
+Risk:       After a Worker outage of more than 1 hour that outlasts a replacement/standby window, nobody is told the
+            acceptance was withdrawn (state, audit and realtime refresh still happen).
+Mitigation: Realtime offer.rejected still reaches staff, the sender and the venue's Venue Managers; projections show
+            closedReason; the audit row records notified=false for operational follow-up.
+Reversal:   Change NOTIFY_GRACE / the predicate (one SQL line) once the owner rules.
+```
+
+```
+SECURITY TRADE-OFF (no migration, per the owner's instruction)
+Decision:   No database-level backstop: no trigger refusing a late → manager_confirmed write, and no
+            "confirmed_by IS NOT NULL" CHECK (plan §4 options A and C).
+Reason:     The owner ruled that no migration file is written or run without separate approval.
+Risk:       A future code path that writes manager_confirmed directly, bypassing applyOfferConfirmation, would not be
+            stopped by the database.
+Mitigation: The static spec pins the single writer and its single caller; the T-Z1 suite check finds any system
+            confirmation; code review of `SET status = 'manager_confirmed'` (grep-pinned).
+Reversal:   Owner-approved migrations A and C (exact SQL in the plan §4).
+```
+
+**Residual:**
+- (1) The deadline cannot move today, because published-shift times are not editable. A future feature that edits
+  `shift_assignment.period` of an awaiting offer must re-arm the pointer. This is documented on `confirmationDeadlineSql`,
+  and the backstop scan catches a missed re-arm.
+- (2) Pre-deploy `staff_accepted` offers past their deadline are withdrawn on the first tick after deploy (Q4). Those
+  whose assignment ended long ago close silently.
+- (3) Rollout order: the Worker must be deployed BEFORE or WITH the API. An old Worker with the new API would still
+  auto-confirm offers the new API refuses.
 
 ## FIX — native PDF output depended on what the render thread printed before (fontkit glyph cache; branch fix/pdf-native-determinism, 2026-11-06)
 

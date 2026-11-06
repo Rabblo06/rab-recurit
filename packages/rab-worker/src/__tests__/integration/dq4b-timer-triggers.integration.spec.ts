@@ -43,7 +43,7 @@ import { createConsumerWorkers } from '../../core/scheduler/bullmq-scheduler';
 import { buildHandlerRegistry } from '../../core/scheduler/processor-explorer';
 import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
 import { WorkerJobDependencies } from '../../core/scheduler/worker-dependencies';
-import { runManagerConfirmationTimeoutCycle, runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
+import { runManagerConfirmationDeadlineCycle, runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { discoverShiftMonitorInWorkspace, runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { armShiftTimerTriggers, redisTimerTriggerOutcomeRecorder } from '../../queues/rab-timer-triggers/timer-trigger-arming';
@@ -97,7 +97,6 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       enabled: () => true,
       runScoped: (org, ws, fn) => runScopedForOrg(tenantContext, org, ws, fn),
       actions: buildTimerTriggerActions(deps),
-      managerConfirmationTimeoutMinutes: env.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES'),
       lateClockInGraceMinutes: env.get('LATE_CLOCK_IN_GRACE_MINUTES'),
       recordOutcome: (k, o) => outcomes.push([k, o]),
       logger: { log: () => undefined, warn: () => undefined },
@@ -145,6 +144,27 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
   }
 
   const offerOf = (fx: Fx, id: string) => withManager(fx, (m) => m.findOneByOrFail(JobOffer, { id }));
+
+  /** The offer's manager-confirmation deadline as the database computes it (standard: assignment start − 30 min). */
+  const deadlineOf = async (fx: Fx, offerId: string): Promise<number> =>
+    withManager(fx, async (m) => {
+      const [row] = await m.query(
+        `SELECT lower(sa.period) - interval '30 minutes' AS d FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
+        [offerId],
+      );
+      return new Date(row.d).getTime();
+    });
+  /** FIXTURE (tests only): move the accepted offer's assignment so its deadline is ~1 min in the past (start in 29 min, whole seconds). */
+  async function deadlinePassed(fx: Fx, offerId: string): Promise<TimerTriggerJobData> {
+    const start = new Date(Math.floor(Date.now() / 1000) * 1000 + 29 * 60_000);
+    await withManager(fx, async (m) => {
+      await m.query(
+        `UPDATE core.shift_assignment sa SET period = tstzrange($2, $3, '[)') FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+        [offerId, start, new Date(start.getTime() + 8 * 3600_000)],
+      );
+    });
+    return { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offerId, dueAtEpochMs: await deadlineOf(fx, offerId) };
+  }
   const sideEffects = async (fx: Fx, entityId: string) =>
     withManager(fx, async (m) => {
       const [a] = await m.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id::text = $1 AND action = 'offer.expired_by_worker'`, [entityId]);
@@ -212,12 +232,11 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     expect(await jobsFor(subjectId)).toEqual([]);
   });
 
-  it('PRODUCER: staff acceptance arms manager-confirmation at staff_accepted_at + MANAGER_CONFIRMATION_TIMEOUT_MINUTES', async () => {
+  it('PRODUCER: staff acceptance arms manager-confirmation at the approval DEADLINE (assignment start − 30 min, owner rule 2026-11-06)', async () => {
     const fx = await seedFx('dq4bAccept');
     const { offer, staff } = await sendOffer(fx);
     await offerService.staffAccept(ctxOf(staff, 'staff'), offer.id);
-    const accepted = await offerOf(fx, offer.id);
-    const due = accepted.staffAcceptedAt!.getTime() + env.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES') * 60_000;
+    const due = await deadlineOf(fx, offer.id);
     const job = await until(async () => (await jobsFor(offer.id)).find((j) => j.name === 'manager-confirmation-trigger'));
     expect(job?.id).toBe(`manager-confirmation.${offer.id}.${due}`);
   });
@@ -311,7 +330,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     await down.onModuleDestroy();
   });
 
-  it('CANCELLED (withdrawn offer / manager rejection): the old trigger fires and does nothing — no expiry, no auto-confirm', async () => {
+  it('CANCELLED (withdrawn offer / manager rejection): the old trigger fires and does nothing — no expiry, no withdrawal', async () => {
     const fx = await seedFx('dq4bCancelOffer');
     // offer-expiry: withdrawn after arming, then its deadline passes.
     const { offer } = await sendOffer(fx);
@@ -324,12 +343,11 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     const second = await sendOffer(fx);
     await offerService.staffAccept(ctxOf(second.staff, 'staff'), second.offer.id);
     await offerService.managerReject(ctxOf(fx.manager), second.offer.id, {});
-    const timeout = env.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES');
-    const acceptedAt = new Date(Math.floor(Date.now() / 1000) * 1000 - (timeout + 1) * 60_000);
-    await withManager(fx, (m) => m.update(JobOffer, second.offer.id, { staffAcceptedAt: acceptedAt }));
-    const wake = { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: second.offer.id, dueAtEpochMs: acceptedAt.getTime() + timeout * 60_000 };
+    const wake = await deadlinePassed(fx, second.offer.id);
     await expect(fire('manager-confirmation', wake)).resolves.toEqual({ outcome: 'noop' });
-    expect((await offerOf(fx, second.offer.id)).status).toBe(OfferStatus.MANAGER_REJECTED);
+    const rejected = await offerOf(fx, second.offer.id);
+    expect(rejected.status).toBe(OfferStatus.MANAGER_REJECTED);
+    expect(rejected.rejectedBy).toBe(fx.manager.userId); // the manager's own rejection, never overwritten by the deadline
   });
 
   it('BULK SEND: a recipient whose SAVEPOINT rolls back does not drop the triggers of the recipients around it', async () => {
@@ -633,21 +651,25 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       );
     });
 
-    it('MANAGER-CONFIRMATION wake on: runs the existing due-work claim; auto-confirms once like the scan', async () => {
+    it('MANAGER-CONFIRMATION wake on: runs the deadline due-work claim; WITHDRAWS once like the scan, never confirms', async () => {
       const fx = await seedFx('dq4bWake');
       const { offer, staff } = await sendOffer(fx);
       await offerService.staffAccept(ctxOf(staff, 'staff'), offer.id);
-      const timeout = env.get('MANAGER_CONFIRMATION_TIMEOUT_MINUTES');
-      const acceptedAt = new Date(Math.floor(Date.now() / 1000) * 1000 - (timeout + 1) * 60_000);
-      await withManager(fx, (m) => m.update(JobOffer, offer.id, { staffAcceptedAt: acceptedAt }));
-      const payload = { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offer.id, dueAtEpochMs: acceptedAt.getTime() + timeout * 60_000 };
+      const payload = await deadlinePassed(fx, offer.id);
+      // FIXTURE: re-aim the pointer at the moved deadline (what a period-editing feature must do).
+      await withManager(fx, (m) =>
+        m.query(`UPDATE core.worker_due_work SET due_at = $2 WHERE job_type = 'manager_confirmation_timeout' AND subject_id = $1`, [offer.id, new Date(payload.dueAtEpochMs)]),
+      );
       await expect(fire('manager-confirmation', payload, 'shadow')).resolves.toEqual({ outcome: 'would-act' });
       expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.STAFF_ACCEPTED);
       await expect(fire('manager-confirmation', payload)).resolves.toEqual({ outcome: 'acted' });
-      expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.MANAGER_CONFIRMED);
+      const withdrawn = await offerOf(fx, offer.id);
+      expect(withdrawn.status).toBe(OfferStatus.MANAGER_REJECTED);
+      expect(withdrawn.rejectionReason).toBe('confirmation_deadline_passed');
+      expect(withdrawn.confirmedBy ?? null).toBeNull();
       await expect(fire('manager-confirmation', payload)).resolves.toEqual({ outcome: 'noop' });
-      const again = await runManagerConfirmationTimeoutCycle(dataSource, tenantContext, notificationService, auditService, realtimeEventService, timeout);
-      expect(again.confirmed).toBe(0);
+      const again = await runManagerConfirmationDeadlineCycle(dataSource, tenantContext, notificationService, auditService, realtimeEventService);
+      expect(again.withdrawn).toBe(0);
     });
   });
 });
