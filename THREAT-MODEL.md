@@ -6184,3 +6184,53 @@ server or network that fails at any stage; a database fault during revalidation.
   `email-smtp-twenty-delivery.integration.spec.ts` (real PostgreSQL, Redis/BullMQ with the production job options, the
   real SmtpDriver against a per-recipient fault sink, a real Worker process SIGKILLed mid-SMTP; asserts no address in any
   log line, BullMQ failure reason, stacktrace or stored error).
+
+## FIX — a running shift stayed `in_progress` for ever after its last open seat was closed by an offer close (branch fix/shift-completion-after-withdrawal, 2026-11-06, not merged)
+
+**Security finding (§5.8).** Found by the timer-trigger shadow run (12 of 12 shifts with a pending STANDBY acceptance).
+
+- **Severity:** LOW (integrity of the canonical shift status and of every view derived from it; no money, attendance,
+  payroll, permission or cross-tenant effect).
+- **Actor → action → consequence:** the Worker (deadline withdrawal, owner rule #82), a manager (reject, withdraw) or a
+  staff member (decline) closes the last open seat of a running shift AFTER every confirmed staff member clocked out →
+  nothing re-runs the completion roll-up → the shift stays `in_progress` for ever: web Shifts lists it as in progress
+  and keeps its "Cancel shift" action (a completed shift cannot be cancelled; an `in_progress` one can, and a cancelled
+  shift drops out of the final-timesheet scan unless already finalised); Sent Shifts reads "Confirmed", then "Expired"
+  after end + 5 h, never "Completed"; the Venue Manager app keeps it "Live" in the calendar and leaves it out of History.
+  Not affected (verified): worked minutes and pay (snapshotted on the attendance at clock-out), the final timesheet
+  (generated once every booked seat has clocked out or is a no-show, independent of the shift status), finalise and
+  payroll_record creation (attendance-driven), the no-show and late scans (confirmed seats only), the action window
+  (time-driven), dashboard counts (offer-driven).
+- **Where:** the roll-up ran only in `AttendanceService.performClockOut` and `recordAttendance`
+  (`attendance.service.ts:709-724` and `:1520-1530` at ce7fc76e). `withdraw-unconfirmed-offer.ts` (and
+  `OfferService.managerReject` / `decline` / `withdraw`) moved the last open seat (`staff_accepted` / `offered`) to a
+  closed state without re-evaluating it; the withdrawal's doc comment assumed "no capacity or shift status to undo".
+  Second defect in the same roll-up: its count ran without a lock, so a clock-out and a withdrawal (or two last
+  clock-outs) committing together each saw the other's seat still open and neither completed the shift.
+- **Root cause:** the completion condition was evaluated at only one of the transitions that can make it true.
+- **Fix (no business rule changed):** one roll-up, `scheduling/utils/complete-shift-if-settled.ts` (the same condition:
+  `in_progress` and no seat `offered` / `staff_accepted` / `confirmed`; `assertTransition(in_progress → completed)`;
+  compare-and-set; returns true once), run by clock-out, recorded attendance, the deadline withdrawal (Worker pointer,
+  backstop scan, timer trigger and the API lazy path all call `withdrawUnconfirmedOffer`), manager reject, staff decline
+  and sender withdraw, in the same tenant transaction (SET LOCAL + FORCE RLS; explicit `organisation_id` filter). The
+  count runs under the shift row lock (`FOR UPDATE`). Offer closes take that lock FIRST (shift → offer → assignment, the
+  confirm/accept order); clock-out takes it LAST (after its own attendance and assignment rows), so it holds it only for
+  the final statements.
+- **SECURITY TRADE-OFF:** every clock-out now briefly takes the shift row lock (before: only the last one). A roster
+  clocking out at the same instant queues on it for the final statements only. A clock-out (attendance → assignment →
+  shift) can deadlock with a request that takes the shift lock and then the SAME seat's assignment lock (a duplicate
+  clock-in or a manager on-behalf clock-in for that staff member, or the manager's attendance review of that seat, at the
+  same moment); PostgreSQL aborts one of them (40P01) and the client retries. This existed before for the last clock-out.
+  The alternative (shift lock first in every clock-out) holds the lock for the whole clock-out and needs the on-behalf
+  path reordered.
+- **Not fixed here (owner questions):** an expired pending offer leaves its seat `offered` (there is no assignment edge
+  for expiry), so a running shift with an expired offer on it never completes, at the clock-out either; a shift where
+  nobody clocked in (all no-shows) never completes (the 2026-10-17 open decision); the 12 shifts already stuck on the
+  shadow-run stack (disposable, not repaired).
+- **Regression tests:** `shift-completion-after-withdrawal.integration.spec.ts` (fail without the fix): S1 the soak
+  scenario, completes exactly once, attendance unchanged, no payroll, no seat; S2 twelve shifts; P1 replacement through
+  the API lazy path; P2 standard at start − 30; P3–P5 reject, decline, withdraw; R1 a withdrawal holding its transaction
+  while the last clock-out runs (the clock-out waits, then completes); R2 clock-out and withdrawal fired together; R3 two
+  last clock-outs together; A1 no completion while a seat is still clocked in; A2 no completion of a shift that never
+  started; A3 another tenant's context and no context complete nothing; A4 a body with `status` / `organisationId` is a
+  400.

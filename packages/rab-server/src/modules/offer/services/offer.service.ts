@@ -58,6 +58,7 @@ import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
 import { applyOfferConfirmation, ConfirmationDeadlinePassedException } from './apply-offer-confirmation';
 import { withdrawUnconfirmedOffer } from './withdraw-unconfirmed-offer';
+import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
@@ -1243,6 +1244,8 @@ export class OfferService {
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.WITHDRAWN);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       // WHERE status = :priorStatus (the status we just read and validated
       // via assertTransition) — a concurrent duplicate request (double-tap,
@@ -1256,6 +1259,8 @@ export class OfferService {
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.WITHDRAWN });
+      // A pending offer is an open seat: withdrawing the last one on a running shift completes it (the clock-out roll-up).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_WITHDRAWN, {
         entityType: 'offer',
@@ -1492,6 +1497,8 @@ export class OfferService {
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.DECLINED);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       // WHERE status = :priorStatus — see staffAccept's identical guard.
       const [, declinedCount] = (await manager.query(
@@ -1502,6 +1509,8 @@ export class OfferService {
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.DECLINED });
+      // A pending offer is an open seat: declining the last one on a running shift completes it (the clock-out roll-up).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_DECLINED, {
         entityType: 'offer',
@@ -1683,6 +1692,8 @@ export class OfferService {
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.REJECTED);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       const now = new Date();
       // WHERE status = :priorStatus — see staffAccept's identical guard
@@ -1699,6 +1710,9 @@ export class OfferService {
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.REJECTED });
+      // An unconfirmed acceptance is an open seat: rejecting the last one on a running shift completes it (the clock-out
+      // roll-up, the same one the deadline withdrawal runs).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_REJECTED, {
         entityType: 'offer',

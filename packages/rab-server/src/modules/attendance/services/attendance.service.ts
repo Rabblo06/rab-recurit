@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { effectiveAssignmentBreakMinutes } from '../../scheduling/utils/assignment-time';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { effectiveAssignmentTime, assignmentTimeSql, ScheduledWindow } from '../../scheduling/utils/assignment-time';
+import { completeShiftIfSettled } from '../../scheduling/utils/complete-shift-if-settled';
 import {
   assertSafePence,
   assertTransition,
@@ -709,20 +710,6 @@ export class AttendanceService {
     assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.COMPLETED);
     await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.COMPLETED });
 
-    // Shift-level rollup: the shift only completes once every sibling
-    // assignment has reached a terminal state — a shift with requiredCount
-    // > 1 doesn't complete just because the first staff member clocked out.
-    const openSiblings = await manager.count(ShiftAssignment, {
-      where: {
-        shiftId: shift.id,
-        status: In([ShiftAssignmentStatus.OFFERED, ShiftAssignmentStatus.STAFF_ACCEPTED, ShiftAssignmentStatus.CONFIRMED]),
-      },
-    });
-    if (openSiblings === 0 && shift.status === ShiftStatus.IN_PROGRESS) {
-      assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.COMPLETED);
-      await manager.update(Shift, shift.id, { status: ShiftStatus.COMPLETED });
-    }
-
     const action =
       method === 'manual'
         ? AuditAction.STAFF_CLOCKED_OUT
@@ -741,6 +728,13 @@ export class AttendanceService {
       },
     });
     await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
+
+    // Shift-level roll-up (the shared `completeShiftIfSettled`): the shift completes only once no seat on it is still
+    // open, so a shift with requiredCount > 1 doesn't complete just because the first staff member clocked out. Last in
+    // this transaction on purpose: it takes the shift row lock, which serialises it against a concurrent clock-out or
+    // offer withdrawal on the same shift (each would otherwise see the other's seat still open), and holding that lock
+    // for only the final statements keeps a whole roster clocking out at once from queueing behind each other's work.
+    await completeShiftIfSettled(manager, ctx.organisationId!, shift.id);
 
     return this.loadSummary(manager, attendance.id);
   }
@@ -1519,15 +1513,9 @@ export class AttendanceService {
         throw error;
       }
 
-      // Same shift roll-up as a staff clock-out: the shift completes only once no sibling seat is still open.
-      const openSiblings = await manager.count(ShiftAssignment, {
-        where: { shiftId: shift.id, status: In([ShiftAssignmentStatus.OFFERED, ShiftAssignmentStatus.STAFF_ACCEPTED, ShiftAssignmentStatus.CONFIRMED]) },
-      });
-      const freshShift = await manager.findOneByOrFail(Shift, { id: shift.id });
-      if (openSiblings === 0 && freshShift.status === ShiftStatus.IN_PROGRESS) {
-        assertTransition(SHIFT_TRANSITIONS, freshShift.status, ShiftStatus.COMPLETED);
-        await manager.update(Shift, shift.id, { status: ShiftStatus.COMPLETED });
-      }
+      // Same shift roll-up as a staff clock-out: the shift completes only once no sibling seat is still open (this
+      // transaction already holds the shift row lock, taken above).
+      await completeShiftIfSettled(manager, ctx.organisationId!, shift.id);
 
       const corrections = [
         { field: 'clockInAt', oldValue: '', newValue: reqIn.toISOString() },
