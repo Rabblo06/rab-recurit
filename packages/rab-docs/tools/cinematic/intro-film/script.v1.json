@@ -25,8 +25,8 @@
     { "id": "c4-approve", "chapter": "Request and approve", "text": "In Venue Offers, the manager checks the request, can change who's on it, and approves.", "pauseAfter": 1.0 },
 
     { "id": "c5-offers", "chapter": "Offers and confirmation", "text": "Approval sends each person their own offer, with the venue, the time, and their estimated pay.", "pauseAfter": 0.4 },
-    { "id": "c5-accept", "chapter": "Offers and confirmation", "text": "Priya opens hers and accepts. Because this shift came from an approved request, accepting books her straight away.", "pauseAfter": 0.5 },
-    { "id": "c5-branch", "chapter": "Offers and confirmation", "text": "When a manager creates a shift directly, accepting reserves the place until the manager confirms it.", "pauseAfter": 0.4 },
+    { "id": "c5-accept", "chapter": "Offers and confirmation", "text": "Priya opens hers and accepts. Approving the request didn't book her: the manager still confirms her place.", "pauseAfter": 0.5 },
+    { "id": "c5-branch", "chapter": "Offers and confirmation", "text": "It's the same when a manager creates a shift directly. If nobody confirms in time, the offer is withdrawn.", "pauseAfter": 0.4 },
     { "id": "c5-board", "chapter": "Offers and confirmation", "text": "Either way, the manager can follow every person on the live staffing board.", "pauseAfter": 1.0 },
 
     { "id": "c6-ready", "chapter": "Shift day", "text": "On Friday, Priya's confirmed shift is in her app, with the notes for the day. Clock-in opens shortly before the start.", "pauseAfter": 0.4 },

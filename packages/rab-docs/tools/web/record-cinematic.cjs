@@ -796,7 +796,7 @@ const story = {
     // Riley's team before the manager adds Isla on screen (the "Build the team" scene).
     s.vmTeams['mg-riley'] = [['st-alex', 30], ['st-priya', 30], ['st-sam', 21], ['st-maya', 14], ['st-grace', 6], ['st-leah', 4]];
   },
-  /** Approved, with Priya's acceptance already booked (approved requests confirm on Accept); the others still deciding. */
+  /** Approved; Priya accepted and her manager then confirmed her (nothing confirms on Accept — owner rule 2026-11-06); the others still deciding. */
   offered(s) {
     story.request(s);
     const sh = s.shifts.find((x) => x.id === STORY_SHIFT);
@@ -806,7 +806,7 @@ const story = {
     const sentAt = Z('2026-10-20T10:35:00Z');
     STORY_STAFF.forEach((id, i) => s.offers.push({ id: `of-story-${i + 1}`, shiftId: STORY_SHIFT, staffProfileId: id, status: i === 0 ? 'manager_confirmed' : 'pending', offerBatchId: 'b-story', sentAt,
       expiresAt: Z('2026-10-22T10:35:00Z'), respondedAt: i === 0 ? Z('2026-10-20T10:41:00Z') : null, staffAcceptedAt: i === 0 ? Z('2026-10-20T10:41:00Z') : null,
-      managerConfirmedAt: i === 0 ? Z('2026-10-20T10:41:00Z') : null, managerRejectedAt: null, rejectionReason: null, declineReason: null, withdrawnReason: null, cancelledAt: null,
+      managerConfirmedAt: i === 0 ? Z('2026-10-20T10:46:00Z') : null, managerRejectedAt: null, rejectionReason: null, declineReason: null, withdrawnReason: null, cancelledAt: null,
       notificationReadAt: i === 2 ? Z('2026-10-20T10:50:00Z') : null }));
     sh.filledCount = 1;
   },
