@@ -162,7 +162,7 @@ export class ShiftCompletionRepair {
    * `actorUserId` (an ACTIVE platform admin, resolved by the caller). An id found in no workspace (in `organisationId`
    * when given) is `not_found` and nothing happens.
    */
-  async apply(shiftIds: readonly string[], actor: { userId: string; changeRef?: string }, opts: { organisationId?: string } = {}): Promise<RepairResult[]> {
+  async applyCompletion(shiftIds: readonly string[], actor: { userId: string; changeRef?: string }, opts: { organisationId?: string } = {}): Promise<RepairResult[]> {
     await this.assertRestrictedSession();
     if (!actor.userId) throw new Error('refused: --apply needs a platform-admin actor');
     this.skippedWorkspaces = 0;

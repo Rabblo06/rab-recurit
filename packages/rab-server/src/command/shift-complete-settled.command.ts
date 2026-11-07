@@ -111,7 +111,7 @@ export class ShiftCompleteSettledCommand extends CommandRunner {
       process.exitCode = 1;
       return;
     }
-    const results = await repair.apply(ids, { userId: actorUserId, changeRef: options.changeRef }, { organisationId: options.organisation });
+    const results = await repair.applyCompletion(ids, { userId: actorUserId, changeRef: options.changeRef }, { organisationId: options.organisation });
     for (const r of results) {
       // eslint-disable-next-line no-console
       console.log(`[shift:complete-settled] shift=${r.shiftId} organisation=${r.organisationId ?? '-'} result=${r.outcome}`);

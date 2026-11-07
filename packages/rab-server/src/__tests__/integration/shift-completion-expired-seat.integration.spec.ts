@@ -357,7 +357,7 @@ describeIfDb('shift completion: an expired offer closes its seat; the one-off re
       const b = await stuckShift('fseC3b');
       const admin = await factory.createInternalManager(await factory.createOrganisation('fseC3admin'), { permissions: 'production', platformAdmin: true });
       const repair = new ShiftCompletionRepair(dataSource, tenantContext, auditService);
-      expect(await repair.apply([b.shiftId], { userId: admin.userId }, { organisationId: a.org.id })).toEqual([{ shiftId: b.shiftId, outcome: 'not_found' }]);
+      expect(await repair.applyCompletion([b.shiftId], { userId: admin.userId }, { organisationId: a.org.id })).toEqual([{ shiftId: b.shiftId, outcome: 'not_found' }]);
       expect(await shiftStatus(b.shiftId)).toBe('in_progress');
       expect(await adminDataSource.query(`SELECT 1 FROM core.audit_log WHERE entity_id = $1 AND action = 'shift.completed_by_repair'`, [b.shiftId])).toHaveLength(0);
     });
