@@ -6164,26 +6164,48 @@ server or network that fails at any stage; a database fault during revalidation.
   attempt (RETRY, FAILED at 5). The provider-call marker is still written, fenced, before the provider is contacted, and
   the claim now clears any marker left by an earlier attempt, so the marker always describes the current attempt: a
   crash between claim and marker is a safe lease recovery (nothing sent), never a false `DELIVERY_UNCERTAIN`. Claim fencing (`processing_token`), the
-  organisation-bound tenant context and FORCE RLS are unchanged. Residual: an error in the claim statement itself still
-  cannot be counted (nothing committed); it fails the job, is logged, and the stale-QUEUED rule re-presents the row with
-  no generation ceiling, so it never reaches FAILED (nothing is ever sent). A ceiling (e.g. FAILED
-  `DISPATCH_GENERATIONS_EXHAUSTED` after N generations) is a retention/limit rule left to the owner, not chosen here.
+  organisation-bound tenant context and FORCE RLS are unchanged.
+- **Changed — re-queue cap (owner decision 2026-11-07, "CAP IT"):** an error in the claim statement itself cannot be
+  counted (nothing commits), so the stale-QUEUED rule used to re-present the row for ever. The dispatcher now fails a
+  stale QUEUED row that it has already re-queued 20 times (`dispatch_generation >= 20`, the existing column; no
+  migration): FAILED `DISPATCH_GENERATIONS_EXHAUSTED`, `failed_at`, an `email.delivery_failed` audit row with the
+  generation count; it is listed by the platform-admin outbox operations view (which selects `last_error_code` and
+  `dispatch_generation`) and never re-queued. Nothing was sent by those re-queues. A re-queue whose publication fails
+  (Redis down) gives its generation back (fenced on `status = 'QUEUED'` and the generation it was given), so a Redis
+  outage does not spend the budget. RETRY and PROCESSING recoveries are not capped by this rule; they follow a counted
+  claim and stay bounded by the cumulative attempt cap of 5. Residual: a Worker whose email backlog keeps one row waiting
+  in Redis for roughly 50 minutes (20 stale-QUEUED cycles of about 2.5 minutes while the dispatcher keeps running) would
+  also reach the cap and end FAILED without an attempt; it is visible and replayable. An operator replay of such a row
+  (`core.replay_failed_email`) bumps the generation again, so the row gets exactly one more real try before the cap
+  applies again.
 - **Remaining duplicate-delivery risk (accepted, owner requirement 5):** (1) the connection drops or times out after
   the DATA terminator, before the server's reply: retried, so the recipient may get the email twice (reproduced: sink
-  `drop_after_data` → 2 messages). (2) A provider that accepts but answers 4xx/timeout. (3) An operator replay of a
-  DELIVERY_UNCERTAIN row with the allow-uncertain flag. A duplicate is the same content to the same recipient (no tenant
+  `drop_after_data` → 2 messages). (2) A provider that accepts but answers 4xx/timeout. (3) Since Decision 1(a): a
+  RETRY row whose last failure was ambiguous (no reply after DATA, recorded as retryable) and whose BullMQ job was then
+  lost from Redis is re-presented by the dispatcher, exactly as BullMQ itself would have retried it. (4) An operator
+  replay of a DELIVERY_UNCERTAIN row with the allow-uncertain flag. A duplicate is the same content to the same recipient (no tenant
   or person boundary is crossed), but a duplicate password-reset or invitation email is a second copy of the same link.
-- **Crewflow stricter than Twenty (kept; owner decision pending, not changed here):** Twenty re-runs a stalled email job
-  once (`maxStalledCount: 1`) and has no outbox, so a Worker crash mid-send resends, and a job lost from Redis is an email
-  lost. Crewflow never resends once the provider call may have started and the outcome was lost: Worker crash mid-send,
-  a provider-confirmed send whose SENT write failed (OD-5), or (OD-6) a RETRY row with the marker whose BullMQ job was
-  lost from Redis → FAILED `DELIVERY_UNCERTAIN`, manual review. Risk of keeping it: an email that never went out waits for
-  an operator; risk of Twenty parity: a duplicate.
+- **Changed — recorded refusals re-presented, true mid-send loss kept uncertain (owner decision 2026-11-07, "SPLIT",
+  replacing OD-6's "no change"):** (a) a RETRY row (and a QUEUED row recovered from one) carries a RECORDED outcome:
+  the processor classified that failure as retryable and BullMQ would have re-sent it. If its BullMQ job is lost (Redis
+  data loss, a removed job) the dispatcher now re-presents it automatically under a new generation, within the
+  cumulative cap of 5, even though the provider-call marker of that earlier attempt is still set. Before, it ended
+  FAILED `DELIVERY_UNCERTAIN` (fault case b3: 451 twice, job lost, never sent). (b) A PROCESSING row with the marker is
+  still FAILED `DELIVERY_UNCERTAIN` on SMTP (no resend): this attempt reached the provider and its outcome was lost
+  (Worker crash or loss mid-send). Because the claim clears an earlier attempt's marker, the marker on a PROCESSING row
+  always belongs to the attempt in flight; a crash between the claim and that attempt's own marker leaves none and is
+  re-presented safely. (c) Unchanged OD-5: when the provider confirmed the send and SENT could not be written, the row
+  stays PROCESSING with its marker and ends `DELIVERY_UNCERTAIN`; never re-sent. Twenty, by comparison, re-runs a
+  stalled email job once (`maxStalledCount: 1`) so a crash mid-send resends, and has no outbox, so a job lost from Redis
+  is an email lost.
 - **Tests:** `email-send.smtp-delivery.spec.ts` (unit, transactional fake: success, 451, 550, post-DATA loss, duplicate
   delivery, crash, exhaustion, the revalidation-fault regression, redaction) and
   `email-smtp-twenty-delivery.integration.spec.ts` (real PostgreSQL, Redis/BullMQ with the production job options, the
-  real SmtpDriver against a per-recipient fault sink, a real Worker process SIGKILLed mid-SMTP; asserts no address in any
-  log line, BullMQ failure reason, stacktrace or stored error).
+  real SmtpDriver against a per-recipient fault sink, a real Worker process SIGKILLed mid-SMTP; b3 now sends exactly one
+  message after the lost job; a claim refused by a trigger ends FAILED `DISPATCH_GENERATIONS_EXHAUSTED` after 20 re-queues
+  and is never re-queued; asserts no address in any log line, BullMQ failure reason, stacktrace or stored error).
+  Dispatcher unit cases in `email-dispatch.job.spec.ts`; the OD-5 case stays covered by
+  `dq5b-email-cumulative-attempts.integration.spec.ts`.
 
 ## FIX — a running shift stayed `in_progress` for ever after its last open seat was closed by an offer close (branch fix/shift-completion-after-withdrawal, 2026-11-06, not merged)
 

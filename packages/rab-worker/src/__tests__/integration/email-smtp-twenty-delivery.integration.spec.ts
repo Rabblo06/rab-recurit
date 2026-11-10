@@ -25,7 +25,7 @@ import { bullmqWorkerOptionsOf } from '@rab/server/engine/worker-shared/queue-re
 import { EmailOutbox, Organisation } from '@rab/server/modules/identity/entities/index';
 import { EmailOutboxJobType, EmailOutboxStatus } from '@rab/shared';
 
-import { runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
+import { MAX_DISPATCH_GENERATIONS, runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
@@ -87,8 +87,10 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     exhaust: addr('exhaust'),
     dup: addr('dup'),
     crash: addr('crash'),
+    b3: addr('b3'),
+    claimloop: addr('claimloop'),
   };
-  const rows: Record<keyof typeof ADDR, EmailOutbox | undefined> = { ok: undefined, temp: undefined, perm: undefined, drop: undefined, exhaust: undefined, dup: undefined, crash: undefined };
+  const rows: Record<keyof typeof ADDR, EmailOutbox | undefined> = { ok: undefined, temp: undefined, perm: undefined, drop: undefined, exhaust: undefined, dup: undefined, crash: undefined, b3: undefined, claimloop: undefined };
   const jobIdOf = (id: string, generation = 0) => `email-outbox.${id}.attempt.${generation}`;
 
   beforeAll(async () => {
@@ -336,6 +338,108 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     expect(after).toMatchObject({ status: EmailOutboxStatus.FAILED, lastErrorCode: 'DELIVERY_UNCERTAIN' });
     expect((await auditActionsOf(row.id)).map((a) => a.action)).toEqual(['email.delivery_uncertain']);
     expect(sink.transmissionsTo(ADDR.crash)).toHaveLength(1);
+  });
+
+  it('Decision 1(a), case b3: 451 twice, then the BullMQ job is lost from Redis → the dispatcher re-presents it automatically → SENT, exactly one message', async () => {
+    const row = await seedRow(ADDR.b3);
+    rows.b3 = row;
+    sink.setFault(ADDR.b3, 'tempfail', 2);
+    // Two real attempts, each refused 451 (what BullMQ's first two runs do); then the job vanishes from Redis.
+    const attempt = (n: number) => ({ id: jobIdOf(row.id), data: { emailOutboxId: row.id, organisationId: org.id }, attemptsMade: n, opts: { attempts: 5 } }) as unknown as Job;
+    for (const n of [0, 1]) await expect(processor(attempt(n))).rejects.toThrow(/\(EENVELOPE 451\), will retry/);
+    const retrying = await rowOf(row.id);
+    expect(retrying).toMatchObject({ status: EmailOutboxStatus.RETRY, infrastructureAttemptCount: 2, lastErrorCode: 'EENVELOPE' });
+    expect(retrying.providerCallStartedAt).toBeInstanceOf(Date); // the older attempt's marker is still set (OD-6 used to read it as "uncertain")
+
+    // No BullMQ redelivery ever comes. After the 5-minute stale-RETRY rule the dispatcher re-queues it on the REAL queue.
+    await tenantContext.runInTenantContext(ctx, (m) => m.query(`UPDATE core.email_outbox SET updated_at = now() - interval '6 minutes' WHERE id = $1`, [row.id]));
+    const republished: number[] = [];
+    const result = await runEmailDispatchCycle(
+      adminDataSource,
+      tenantContext,
+      async () => undefined,
+      async (id, organisationId, generation) => {
+        if (id !== row.id) return;
+        republished.push(generation);
+        await queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId: id, organisationId }, { ...EMAIL_QUEUE_JOB_OPTIONS, jobId: jobIdOf(id, generation) });
+      },
+      emailService.ambiguousDeliverySafeToRetry,
+    );
+    expect(emailService.ambiguousDeliverySafeToRetry).toBe(false); // SMTP: no dedup, and still re-presented
+    expect(republished).toEqual([1]);
+    expect((await rowOf(row.id)).lastErrorCode).not.toBe('DELIVERY_UNCERTAIN');
+    expect(result.deliveryUncertain).toBe(0);
+    const job = await settledJob(row.id, 1);
+    expect(await job.getState()).toBe('completed');
+    const sent = await rowOf(row.id);
+    expect(sent).toMatchObject({ status: EmailOutboxStatus.SENT, infrastructureAttemptCount: 3, dispatchGeneration: 1 });
+    expect(sink.rejections.filter((r) => r.to === ADDR.b3).map((r) => r.code)).toEqual([451, 451]);
+    expect(sink.transmissionsTo(ADDR.b3)).toEqual([{ to: [ADDR.b3], outcome: 'accepted' }]); // exactly one message
+  });
+
+  it('Decision 2: a claim statement that keeps failing → re-queued 20 times, then FAILED DISPATCH_GENERATIONS_EXHAUSTED (audited), never re-queued, nothing sent', async () => {
+    const row = await seedRow(ADDR.claimloop);
+    rows.claimloop = row;
+    // A REAL failure of the claim statement itself: a trigger on this one row refuses the move to PROCESSING (test-only,
+    // created and dropped by the cluster superuser fixture connection).
+    const fn = `etw_refuse_claim_${run.replace(/[^a-z0-9]/g, '')}`;
+    await adminDataSource.query(
+      `CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+         IF NEW.status = 'PROCESSING' THEN RAISE EXCEPTION 'etw: claim refused' USING ERRCODE = 'P0001'; END IF; RETURN NEW; END $f$`,
+    );
+    await adminDataSource.query(
+      `CREATE TRIGGER ${fn} BEFORE UPDATE ON core.email_outbox FOR EACH ROW WHEN (NEW.id = '${row.id}'::uuid) EXECUTE FUNCTION public.${fn}()`,
+    );
+    try {
+      const job = (generation: number) => ({ id: jobIdOf(row.id, generation), data: { emailOutboxId: row.id, organisationId: org.id }, attemptsMade: 0, opts: { attempts: 5 } }) as unknown as Job;
+      await expect(processor(job(0))).rejects.toThrow(/claim refused/); // the first-attempt job
+      const generations: number[] = [];
+      for (let cycle = 0; cycle < MAX_DISPATCH_GENERATIONS + 3; cycle += 1) {
+        // The row is still QUEUED and nothing was counted; make it stale for the 2-minute stale-QUEUED rule.
+        await tenantContext.runInTenantContext(ctx, (m) =>
+          m.query(`UPDATE core.email_outbox SET queued_at = now() - interval '3 minutes' WHERE id = $1 AND status IN ('PENDING','QUEUED')`, [row.id]),
+        );
+        let requeued: number | undefined;
+        await runEmailDispatchCycle(
+          adminDataSource,
+          tenantContext,
+          async (id) => {
+            if (id === row.id) requeued = 0;
+          },
+          async (id, _org, generation) => {
+            if (id === row.id) requeued = generation;
+          },
+          emailService.ambiguousDeliverySafeToRetry,
+        );
+        if (requeued === undefined) break;
+        if (requeued > 0) generations.push(requeued);
+        await expect(processor(job(requeued))).rejects.toThrow(/claim refused/); // the re-queued job fails at the claim again
+      }
+      expect(generations).toEqual(Array.from({ length: MAX_DISPATCH_GENERATIONS }, (_, i) => i + 1)); // 20 re-queues, no 21st
+      const failed = await rowOf(row.id);
+      expect(failed).toMatchObject({ status: EmailOutboxStatus.FAILED, lastErrorCode: 'DISPATCH_GENERATIONS_EXHAUSTED', infrastructureAttemptCount: 0, dispatchGeneration: 20 });
+      expect(failed.failedAt).toBeInstanceOf(Date);
+      const audits = await auditActionsOf(row.id);
+      expect(audits.map((a) => a.action)).toEqual(['email.delivery_failed']);
+      expect(audits[0]!.metadata).toMatchObject({ errorCode: 'DISPATCH_GENERATIONS_EXHAUSTED', generations: 20 });
+      // Visible where admins look: the outbox operations view lists FAILED rows with their code (outbox-operations.service).
+      const [listed] = await tenantContext.runInTenantContext(ctx, (m) =>
+        m.query<Array<{ last_error_code: string; dispatch_generation: number }>>(
+          `SELECT last_error_code, dispatch_generation FROM core.email_outbox WHERE status = 'FAILED' AND id = $1`,
+          [row.id],
+        ),
+      );
+      expect(listed).toEqual({ last_error_code: 'DISPATCH_GENERATIONS_EXHAUSTED', dispatch_generation: 20 });
+      // Never re-queued: later cycles, however stale it looks, do not touch it.
+      await tenantContext.runInTenantContext(ctx, (m) => m.query(`UPDATE core.email_outbox SET updated_at = now() - interval '1 hour' WHERE id = $1`, [row.id]));
+      const { publish, republish } = dispatchSpies();
+      await runEmailDispatchCycle(adminDataSource, tenantContext, publish, republish, emailService.ambiguousDeliverySafeToRetry);
+      expect([...publish.mock.calls, ...republish.mock.calls].some((c) => (c as unknown[])[0] === row.id)).toBe(false);
+      expect(sink.transmissionsTo(ADDR.claimloop)).toHaveLength(0);
+    } finally {
+      await adminDataSource.query(`DROP TRIGGER IF EXISTS ${fn} ON core.email_outbox`);
+      await adminDataSource.query(`DROP FUNCTION IF EXISTS public.${fn}()`);
+    }
   });
 
   it('no recipient address in any Worker log line, BullMQ failure reason / stacktrace, or stored error message', async () => {
