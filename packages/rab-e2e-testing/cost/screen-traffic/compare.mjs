@@ -42,7 +42,7 @@ for (const w of ['mix-visible', 'mix-hidden']) {
   out.push(`| **total** | | ${fmt(tb.requestsPerMin)} → ${fmt(ta.requestsPerMin)} | ${dpct(tb.requestsPerMin, ta.requestsPerMin)} | ${fmt(tb.requestsPerMinPerUser, 2)} → ${fmt(ta.requestsPerMinPerUser, 2)} | ${fmt(tb.downBytesPerHour / 1e6)} → ${fmt(ta.downBytesPerHour / 1e6)} | ${dpct(tb.downBytesPerHour, ta.downBytesPerHour)} | ${tb.status.r429} → ${ta.status.r429} | ${fmt(tb.apiSql.statementsPerMin)} → ${fmt(ta.apiSql.statementsPerMin)} | ${dpct(tb.apiSql.statementsPerMin, ta.apiSql.statementsPerMin)} |`, '');
   const sb = b.server, sa = a.server;
   out.push('Server (M; "minus control" D):', '', '| Metric | Before | After | Δ |', '|---|---:|---:|---:|');
-  out.push(row('DB statements/min, top-level (crewflow_app+crewflow)', sb.sqlStatementsPerMin.topLevelCallsPerMin, sa.sqlStatementsPerMin.topLevelCallsPerMin, 0));
+  out.push(row('DB statements/min, top-level (runtime login)', sb.sqlStatementsPerMin.topLevelCallsPerMin, sa.sqlStatementsPerMin.topLevelCallsPerMin, 0));
   out.push(row('… minus the no-load control (D)', sb.sqlStatementsPerMin.topLevelCallsPerMin - (ib?.sql.topLevelCallsPerMin ?? 0), sa.sqlStatementsPerMin.topLevelCallsPerMin - (ia?.sql.topLevelCallsPerMin ?? 0), 0));
   out.push(row('DB statements/min nested in SECURITY DEFINER', sb.sqlStatementsPerMin.nestedInsideDefinerFunctionsPerMin, sa.sqlStatementsPerMin.nestedInsideDefinerFunctionsPerMin, 0));
   out.push(row('DB execution ms/min', sb.sqlStatementsPerMin.topLevelExecMsPerMin, sa.sqlStatementsPerMin.topLevelExecMsPerMin, 0));

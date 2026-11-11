@@ -2,7 +2,18 @@
 # Wave 6 lane E2E — the whole system run on a DISPOSABLE stack, end to end.
 #
 #   E2E_ENV_FILE=<operator env file, outside the repo> E2E_OUT=<output dir, outside the repo> [E2E_MODE=parity|devlike] \
-#     bash packages/rab-e2e-testing/system/run-system.sh [up|console|functional|perf|down|all]
+#     bash packages/rab-e2e-testing/system/run-system.sh [up|console|functional|perf|idle <label> <seconds>|down|all]
+#
+# The database lifecycle is production's (Phase X P0-H; docker-compose.e2e.yml header): a fresh cluster whose only init is
+# pg_stat_statements plus the committed 01-crewflow-owner.sql, ONE crewflow_owner login for every process, the server
+# migrates on start and registers the BullMQ schedulers, the worker only consumes them, bootstrap-admin runs after the
+# server is healthy. E2E_POSTGRES_IMAGE picks the PostgreSQL major (default postgres:16-alpine; postgres:18-alpine works).
+#
+# `idle <label> <seconds>` is a measurement window on a running stack (no HTTP from this script): it resets
+# pg_stat_statements, waits, and writes $E2E_OUT/idle-<label>/ (pgss.tsv every role, summary.txt with the crewflow_owner
+# statement counts per minute and their families from ../cost/lib/sql-families.js). Idle crewflow_owner SQL is the
+# Worker's scans plus the server's own health-check ping (one `SELECT 1` per Docker health probe); the family table names
+# both, so the Worker-scan share is read off directly.
 #
 # E2E_MODE (see lib/env.ts):
 #   parity  (default) production's committed runtime flags: HWS OFF, one console host (no workspace host routing, origin
@@ -38,26 +49,44 @@ export E2E_RUN_ID="${E2E_RUN_ID:-w6}"
 C=(docker compose -p "$PROJECT" --env-file "$E2E_ENV_FILE" "${FILES[@]}")
 set -a; . "$E2E_ENV_FILE"; set +a
 step() { echo "[$(date -u +%H:%M:%S)] [$E2E_MODE] $*" | tee -a "$E2E_OUT/logs/steps.log"; }
-wait_healthy() { for _ in $(seq 1 90); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$PROJECT-$1-1" 2>/dev/null)" = healthy ] && return 0; sleep 2; done; return 1; }
+wait_healthy() { # service [timeout_s, default 180]
+  local n=$(( ${2:-180} / 2 ))
+  for _ in $(seq 1 "$n"); do [ "$(docker inspect -f '{{.State.Health.Status}}' "$PROJECT-$1-1" 2>/dev/null)" = healthy ] && return 0; sleep 2; done
+  echo "$PROJECT-$1-1 not healthy after ${2:-180}s" >&2; return 1
+}
+# Superuser psql INSIDE this project's postgres container (local socket): evidence and pg_stat_statements only, never an
+# app login and never another cluster.
+q() { docker exec -i "$PROJECT-postgres-1" psql -X -v ON_ERROR_STOP=1 -U rab -d rab_e2e -Atq "$@"; }
+redact() { sed -E 's#(postgres(ql)?|redis)://[^ "]+#<url>#g'; }
 
 up() {
-  step "up: postgres + redis"
+  [ "${#E2E_CREWFLOW_OWNER_PASSWORD}" -ge 24 ] || { echo "E2E_CREWFLOW_OWNER_PASSWORD must be at least 24 characters (01-crewflow-owner.sql refuses shorter)"; exit 64; }
+  step "up: postgres (${E2E_POSTGRES_IMAGE:-postgres:16-alpine}) + redis; init = pg_stat_statements + 01-crewflow-owner.sql"
   "${C[@]}" up -d postgres redis >/dev/null 2>&1; wait_healthy postgres; wait_healthy redis
-  step "migrate phase A as rab_owner (expected to stop at the role split)"
+  step "postgres: $(q -c 'show server_version') ; logins: $(q -c "select string_agg(rolname, ',' order by rolname) from pg_roles where rolcanlogin")"
+  step "up: server (api-prestart.sh: migrates on start, registers the BullMQ schedulers) then worker (consume-only)"
   local t0=$SECONDS
-  CREWFLOW_MIGRATION_PHASE=A CREWFLOW_MIGRATION_DATABASE_URL="postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab_e2e" \
-    "${C[@]}" --profile ops run --rm migrate >"$E2E_OUT/logs/migrate-A.log" 2>&1 || true
-  step "phase A done in $((SECONDS - t0)) s: $(grep -c 'refuses to run as' "$E2E_OUT/logs/migrate-A.log") role-split refusal(s)"
-  t0=$SECONDS
-  CREWFLOW_MIGRATION_PHASE=B CREWFLOW_MIGRATION_DATABASE_URL="postgres://rab:${E2E_PG_SUPERUSER_PASSWORD}@postgres:5432/rab_e2e" \
-    "${C[@]}" --profile ops run --rm migrate 2>&1 | sed "s/${E2E_PG_SUPERUSER_PASSWORD}/***/g" >"$E2E_OUT/logs/migrate-B.log"
-  step "phase B (superuser) done in $((SECONDS - t0)) s; migrations: $(PGPASSWORD=$E2E_PG_SUPERUSER_PASSWORD psql -h 127.0.0.1 -p "$PG_PORT" -U rab -d rab_e2e -tAc 'select count(*) from core.migrations')"
-  step "bootstrap-admin as crewflow"
+  # compose starts the worker only once the server is healthy (depends_on service_healthy), so this returns after both.
+  "${C[@]}" up -d server worker >/dev/null 2>&1 || { docker logs "$PROJECT-server-1" 2>&1 | redact | tail -40; exit 1; }
+  wait_healthy server 600; wait_healthy worker 300
+  docker logs "$PROJECT-server-1" 2>&1 | redact >"$E2E_OUT/logs/server-start.log"
+  step "server + worker healthy in $((SECONDS - t0)) s; migrations: $(q -c 'select count(*) from core.migrations'); schedulers: $(grep -ciE 'register-schedulers|job scheduler' "$E2E_OUT/logs/server-start.log") log line(s)"
+  step "bootstrap-admin as crewflow_owner (one-off, after the server is healthy)"
   BOOTSTRAP_ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-w6.admin@crewflow-e2e.test}" BOOTSTRAP_ADMIN_FIRST_NAME=Wave BOOTSTRAP_ADMIN_LAST_NAME=Admin \
-    "${C[@]}" --profile ops run --rm bootstrap >"$E2E_OUT/logs/bootstrap.log" 2>&1
-  step "up: server + worker"
-  "${C[@]}" up -d server worker >/dev/null 2>&1; wait_healthy server; wait_healthy worker
-  step "stack healthy; HWS_RUNTIME_ENABLED=$(docker exec "$PROJECT-server-1" printenv HWS_RUNTIME_ENABLED)"
+    "${C[@]}" --profile ops run --rm --no-deps bootstrap 2>&1 | redact >"$E2E_OUT/logs/bootstrap.log"
+  step "stack healthy; HWS_RUNTIME_ENABLED=$(docker exec "$PROJECT-server-1" printenv HWS_RUNTIME_ENABLED); app sessions by login: $(q -c "select string_agg(usename || '=' || n, ',') from (select usename, count(*) n from pg_stat_activity where datname = 'rab_e2e' and usename <> 'rab' group by 1 order by 1) x")"
+}
+
+idle() {
+  local label="${1:?usage: idle <label> <seconds>}" secs="${2:?usage: idle <label> <seconds>}" R
+  R="$E2E_OUT/idle-$label"; mkdir -p "$R"
+  step "idle $label: ${secs}s window, pg_stat_statements reset (no HTTP from this script)"
+  sleep 3
+  q -c 'select pg_stat_statements_reset()' >/dev/null
+  date -u +%s >"$R/t-start"; sleep "$secs"; date -u +%s >"$R/t-end"
+  # Every role (the harness's own `rab` rows included, so nothing is hidden); the summary counts crewflow_owner only.
+  q -F $'\t' -c "select r.rolname, s.toplevel, s.calls, s.rows, round(s.total_exec_time::numeric, 3), regexp_replace(left(s.query, 400), E'[\\n\\r\\t ]+', ' ', 'g') from pg_stat_statements s join pg_roles r on r.oid = s.userid join pg_database d on d.oid = s.dbid where d.datname = 'rab_e2e' order by s.calls desc" >"$R/pgss.tsv"
+  node "$ROOT/packages/rab-e2e-testing/cost/lib/sql-families.js" "$R/pgss.tsv" "$(( $(cat "$R/t-end") - $(cat "$R/t-start") ))" crewflow_owner | tee "$R/summary.txt"
 }
 
 console() {
@@ -99,10 +128,11 @@ down() {
 
 case "${1:-all}" in
   up) up ;;
+  idle) shift; idle "$@" ;;
   console) console ;;
   functional) functional ;;
   perf) perf ;;
   down) down ;;
   all) up; functional; [ "$E2E_MODE" = devlike ] && perf || true ;;
-  *) echo "usage: $0 [up|console|functional|perf|down|all]"; exit 64 ;;
+  *) echo "usage: $0 [up|console|functional|perf|idle <label> <seconds>|down|all]"; exit 64 ;;
 esac

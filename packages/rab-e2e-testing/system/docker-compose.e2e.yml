@@ -8,22 +8,38 @@ name: crewflow-e2e
 # a host-run Vite (system/vite.e2e.config.ts, port 5300) that proxies /rest same-origin with the Host preserved, so
 # http://<label>.localhost:5300 is a workspace host.
 #
+# OWNER-LOGIN LIFECYCLE (the production one: packages/rab-docker/docker-compose.image.yml + docker-compose.local-db.yml;
+# Phase X P0-H). ONE database login, crewflow_owner, for the server, the worker and the bootstrap one-off; ONE PG_DATABASE_URL.
+#   - postgres: a fresh, disposable cluster. Its only init steps are pg_stat_statements (init/00-pgss.sql, measurement) and
+#     the committed one-time provider-admin SQL, packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql, which
+#     reads the crewflow_owner password from /run/secrets/crewflow-owner-password (a compose secret fed from
+#     E2E_CREWFLOW_OWNER_PASSWORD, never a command line). transition-from-separated.sql and 01-roles.sql are never mounted.
+#   - server: the image's own start, ./api-prestart.sh with CREWFLOW_MIGRATE_ON_START=true: the migration child (lock,
+#     classifier, whole chain, post-checks; a first-install failure never serves), then the BullMQ job-scheduler
+#     registration (WORKER_SCHEDULER=bullmq), then main.js.
+#   - worker: consume-only, never migrates (DISABLE_DB_MIGRATIONS=true, DISABLE_CRON_JOBS_REGISTRATION=true,
+#     CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy server.
+#   - bootstrap: the first platform admin, a one-off of the same image on the same owner login, AFTER the server is healthy
+#     (packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md section 2 step 6), DB_TARGET=local on that run only.
+# There is no migrate service, no rab_owner / crewflow / crewflow_app / crewflow_worker login and no role password.
+# Not production, on purpose (disposable): NODE_ENV development (no TLS verify-full, deployment identity or https origins);
+# the image's default pg_hba, so the `rab` superuser may log in over loopback for the specs' read-only evidence queries and
+# pg_stat_statements (production's local-db/pg_hba.conf rejects that); LOGGER email; LOCAL storage.
+#
 # Images are REUSED, never built here: rab-server:latest and rab-worker:latest (built from the branch head by the dev
-# rollout), or the exact images named by E2E_SERVER_IMAGE / E2E_WORKER_IMAGE (e.g. a release candidate's tags). Secrets come from an operator env file outside the repo (letters/digits only):
-#   E2E_PG_SUPERUSER_PASSWORD  the `rab` superuser (initdb; phase-B migration identity only)
-#   E2E_CREWFLOW_PASSWORD      becomes `crewflow` (migration 1786682000000): migrate, bootstrap-admin
-#   E2E_CREWFLOW_APP_PASSWORD  becomes `crewflow_app` (migration 1786687000000): api + jobs child
-#   E2E_APP_SECRET             application secret (32+ chars)
+# rollout), or the exact images named by E2E_SERVER_IMAGE / E2E_WORKER_IMAGE (e.g. a release candidate; O1: the same image
+# for both). E2E_POSTGRES_IMAGE picks the PostgreSQL major (default postgres:16-alpine; postgres:18-alpine works too, PGDATA
+# is pinned below). Secrets come from an operator env file outside the repo (letters/digits only):
+#   E2E_PG_SUPERUSER_PASSWORD     the `rab` superuser (initdb; evidence queries and pg_stat_statements only, never an app login)
+#   E2E_CREWFLOW_OWNER_PASSWORD   crewflow_owner, the ONE application login (at least 24 characters: openssl rand -hex 32)
+#   E2E_APP_SECRET                application secret (32+ chars)
 #
 #   C="docker compose --env-file <scratchpad>/e2e.env -f packages/rab-e2e-testing/system/docker-compose.e2e.yml"
 #   $C up -d postgres redis
-#   CREWFLOW_MIGRATION_PHASE=A CREWFLOW_MIGRATION_DATABASE_URL=postgres://rab_owner:rab_owner_dev_only@postgres:5432/rab_e2e \
-#     $C --profile ops run --rm migrate            # expected to stop at the role split (exit 1)
-#   CREWFLOW_MIGRATION_PHASE=B CREWFLOW_MIGRATION_DATABASE_URL=postgres://rab:<superuser>@postgres:5432/rab_e2e \
-#     $C --profile ops run --rm migrate
-#   BOOTSTRAP_ADMIN_EMAIL=... $C --profile ops run --rm bootstrap      # as `crewflow`, never the superuser
-#   $C up -d server worker
-# Teardown: `$C --profile ops down -v` (removes ONLY this project's containers and volumes).
+#   $C up -d server worker                                      # the server migrates on start; the worker follows it
+#   BOOTSTRAP_ADMIN_EMAIL=... $C --profile ops run --rm --no-deps bootstrap      # as crewflow_owner, never the superuser
+# run-system.sh `up` does exactly this. Teardown: `$C --profile ops down -v` (removes ONLY this project's containers and
+# volumes).
 
 x-app-env: &app-env
   NODE_ENV: development
@@ -31,6 +47,9 @@ x-app-env: &app-env
   # No DB_TARGET here: it is command authority, and the API, the Worker service and its children refuse to start with it
   # (security review L-4, never-in-runtime-env.ts). The one-off CLI services below set it themselves.
   REDIS_URL: redis://redis:6379
+  # O3 C2 (production's scheduler mode): the server registers the BullMQ job schedulers in api-prestart.sh; the worker only
+  # consumes them. The same value on both; the code default outside production is `interval`.
+  WORKER_SCHEDULER: bullmq
   APP_SECRET: ${E2E_APP_SECRET:?set E2E_APP_SECRET}
   HWS_RUNTIME_ENABLED: 'true'
   WORKSPACE_BASE_DOMAIN: localhost:5300
@@ -56,25 +75,52 @@ x-app-env: &app-env
 
 services:
   postgres:
-    image: postgres:16-alpine
-    command: ['postgres', '-c', 'max_locks_per_transaction=256', '-c', 'shared_buffers=256MB', '-c', 'max_connections=200']
+    image: ${E2E_POSTGRES_IMAGE:-postgres:16-alpine}
+    command:
+      - postgres
+      - -c
+      - max_locks_per_transaction=256
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=200
+      - -c
+      - password_encryption=scram-sha-256
+      # Statement counts for measurement windows (run-system.sh `idle`), filtered on crewflow_owner, the one app login.
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
     environment:
       POSTGRES_USER: rab
       POSTGRES_PASSWORD: ${E2E_PG_SUPERUSER_PASSWORD:?set E2E_PG_SUPERUSER_PASSWORD}
       POSTGRES_DB: rab_e2e
       POSTGRES_INITDB_ARGS: --data-checksums
+      # Pinned so the same volume path works on postgres:16 and postgres:18 (18 moved its default PGDATA).
+      PGDATA: /var/lib/postgresql/data
+    secrets:
+      - crewflow-owner-password
     ports:
       - '127.0.0.1:15470:5432'
     volumes:
       - e2e-postgres-data:/var/lib/postgresql/data
-      - ../../rab-docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      # File by file: the owner-login directory also holds transition-from-separated.sql, which must never run on a fresh
+      # cluster.
+      - ./init/00-pgss.sql:/docker-entrypoint-initdb.d/00-pgss.sql:ro
+      - ../../rab-docker/postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
     mem_limit: 1536m
     shm_size: 256m
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U rab -d rab_e2e']
+      # Ready AND the one-time owner step completed: a half-initialised volume without crewflow_owner stays unhealthy, as
+      # docker-compose.local-db.yml checks it.
+      test:
+        - CMD-SHELL
+        - "pg_isready -U rab -d rab_e2e && psql -X -U rab -d rab_e2e -Atc \"select 1 from pg_roles where rolname = 'crewflow_owner' and rolcanlogin\" | grep -qx 1"
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   redis:
     image: redis:7-alpine
@@ -94,11 +140,16 @@ services:
     image: ${E2E_SERVER_IMAGE:-rab-server:latest}
     environment:
       <<: *app-env
-      # Phase B: one PG_DATABASE_URL per process (the restricted runtime login here).
-      PG_DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      # The ONE application login (owner-login architecture), identical on the server, the worker and bootstrap.
+      PG_DATABASE_URL: postgres://crewflow_owner:${E2E_CREWFLOW_OWNER_PASSWORD:?set E2E_CREWFLOW_OWNER_PASSWORD}@postgres:5432/rab_e2e
+      # O3 C1: the server migrates on start (approval mode none, the production default), under the migration lock.
+      CREWFLOW_MIGRATE_ON_START: 'true'
+      CREWFLOW_MIGRATION_APPROVAL_MODE: none
     volumes:
       - e2e-local-storage:/app/storage
-    command: node packages/rab-server/dist/main.js
+    # The image's default command, stated as production states it: env refusals, the migration child, the scheduler
+    # registration, then main.js.
+    command: ['./api-prestart.sh']
     ports:
       - '127.0.0.1:3300:3000'
     mem_limit: 1280m
@@ -112,7 +163,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      # A fresh install applies the whole chain before main.js listens.
+      start_period: 600s
 
   worker:
     image: ${E2E_WORKER_IMAGE:-rab-worker:latest}
@@ -121,11 +173,13 @@ services:
       # O1 (one image): the SAME image as `server` (E2E_WORKER_IMAGE may name the same digest), run as the Worker command,
       # ONE process as uid 1000 under compose's init; workspace provisioning runs in-process. PG_DATABASE_URL is also the
       # session-lock connection (direct).
-      # KNOWN GAP (pre-existing since #72, not changed here): this stack still logs in as crewflow_app; the runtime now
-      # requires the owner login (crewflow_owner).
-      # Phase D: still crewflow_app (WORKER_CLAIM_MODE / WORKER_DISPATCH_MODE unset = per_scope / poll). A global-claim
-      # e2e run swaps this value for the operator-created crewflow_worker login (same name) and sets WORKER_CLAIM_MODE=global.
-      PG_DATABASE_URL: postgres://crewflow_app:${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_e2e
+      # The same ONE owner login as the server. WORKER_CLAIM_MODE / WORKER_DISPATCH_MODE unset = per_scope / poll, as in
+      # production.
+      PG_DATABASE_URL: postgres://crewflow_owner:${E2E_CREWFLOW_OWNER_PASSWORD:?set E2E_CREWFLOW_OWNER_PASSWORD}@postgres:5432/rab_e2e
+      # O3 C1/C2: never migrates, only consumes the schedulers the server registered, starts after a healthy server.
+      DISABLE_DB_MIGRATIONS: 'true'
+      DISABLE_CRON_JOBS_REGISTRATION: 'true'
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
       # Phase B (B5): the Worker runtime pool size, as in production.
       PG_POOL_MAX_CONNECTIONS: '12'
       # In-process provisioning interval. 5 s keeps the cadence these specs time against (05-resilience expects a
@@ -167,43 +221,16 @@ services:
       server:
         condition: service_healthy
 
-  # Disposable two-phase first build, driven explicitly by run-system.sh (phase A as rab_owner, phase B as the bootstrap
-  # superuser) BEFORE `up server worker`, so it keeps the `ops` profile here instead of the depends_on step production uses.
-  # Phase B P7: the migration login reaches the locked runner only as its own PG_DATABASE_URL.
-  migrate:
-    profiles: ['ops']
-    image: ${E2E_SERVER_IMAGE:-rab-server:latest}
-    environment:
-      NODE_ENV: development
-      RAB_RUNTIME_ENV: development
-      DB_TARGET: local
-      CREWFLOW_MIGRATION_PHASE: ${CREWFLOW_MIGRATION_PHASE:-}
-      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
-      CREWFLOW_BOOTSTRAP_PASSWORD: ${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}
-      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${E2E_CREWFLOW_APP_PASSWORD:?set E2E_CREWFLOW_APP_PASSWORD}
-    restart: 'no'
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        url="$${CREWFLOW_MIGRATION_DATABASE_URL:-}"
-        [ -n "$$url" ] || { echo "migrate: REFUSED - no migration URL" >&2; exit 64; }
-        if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD; fi
-        echo "migrate: phase $${CREWFLOW_MIGRATION_PHASE:-?}"
-        unset CREWFLOW_MIGRATION_DATABASE_URL
-        exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
-
+  # The first platform admin: a one-off of the server image on the same owner login, run by run-system.sh AFTER the server
+  # is healthy (`run --rm --no-deps bootstrap`). DB_TARGET=local is command authority for this one run only; the server and
+  # the worker refuse it in their own environment.
   bootstrap:
     profiles: ['ops']
     image: ${E2E_SERVER_IMAGE:-rab-server:latest}
     environment:
       <<: *app-env
       DB_TARGET: local
-      PG_DATABASE_URL: postgres://crewflow:${E2E_CREWFLOW_PASSWORD:?set E2E_CREWFLOW_PASSWORD}@postgres:5432/rab_e2e
+      PG_DATABASE_URL: postgres://crewflow_owner:${E2E_CREWFLOW_OWNER_PASSWORD:?set E2E_CREWFLOW_OWNER_PASSWORD}@postgres:5432/rab_e2e
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
       BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
@@ -214,6 +241,12 @@ services:
       redis:
         condition: service_healthy
     command: ['node', 'packages/rab-server/dist/command/main.js', 'bootstrap-admin']
+
+secrets:
+  # The crewflow_owner password for 01-crewflow-owner.sql, mounted at /run/secrets/crewflow-owner-password (the file the SQL
+  # reads by default), from the operator env file; never on a command line.
+  crewflow-owner-password:
+    environment: E2E_CREWFLOW_OWNER_PASSWORD
 
 volumes:
   e2e-postgres-data:

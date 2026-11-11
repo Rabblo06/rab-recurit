@@ -8,6 +8,10 @@
 // C1 (2026-10-31): the API page maximum is now 200 (limit > 200 = 400). The three probes that asked for 500/1000 rows ask
 // for 200 (the web callers walk pages of 200 instead). Their metric names changed accordingly, so they are not
 // comparable with pre-C1 runs of this probe; the screen-traffic measurement does not use this file.
+// Phase X P0-H (ST-08): the measurement set of the T and J work adds the staff list, the payroll month read model and
+// records, the staff app's payslips and the venue manager app's `/shifts/sent`, AFTER the original entries (so the
+// dashboard index slice below is unchanged). The pgss cross-check counts crewflow_owner, the one login of the
+// owner-login stack (the Worker is paused for it, as before).
 //   node lib/endpoints.js <label>      (env N=10 samples per endpoint)
 const crypto = require('crypto');
 const { loginWeb, loginMobile, call, requestLog, psql, secrets, median, pct, writeJson, harnessDocker, sleep } = require('./lib');
@@ -35,6 +39,8 @@ function signQr(shiftId, venueId, ver, startsAt, endsAt) {
   const started = new Date(Date.now() - 2000).toISOString();
   const mgr = await loginWeb('manager1@org01.example.test');
   const staff = await loginMobile('staff01@org01.example.test');
+  // A refused venue-manager login does not abort the phase: its probe then records the 401 it gets.
+  const venueMgr = await loginMobile('venuemanager1@org01.example.test', 'venue_manager_app').catch((e) => ({ loginError: String(e.message).slice(0, 200) }));
   const now = Date.now();
   const org = psql(`select id from core.organisation where slug='costaudit-01'`);
   const avatarId = psql(`select avatar_file_id from core."user" where email='staff02@org01.example.test'`);
@@ -72,6 +78,13 @@ function signQr(shiftId, venueId, ver, startsAt, endsAt) {
     ['GET /files/:id own avatar (mobile)', staff, `/rest/v1/files/${ownAvatarId}`],
     ['GET /files/:id staff avatar (web manager)', mgr, `/rest/v1/files/${avatarId}`],
     ['GET /healthz (no auth)', {}, '/healthz'],
+    // ST-08 additions (appended: the dashboard slice above stays index-stable).
+    ['GET /staff?limit=50', mgr, '/rest/v1/staff?limit=50'],
+    ['GET /payroll/period?month=current', mgr, `/rest/v1/payroll/period?month=${new Date(now).toISOString().slice(0, 7)}`],
+    ['GET /payroll/period?month=previous', mgr, `/rest/v1/payroll/period?month=${new Date(startOfDay(now) - 28 * DAY).toISOString().slice(0, 7)}`],
+    ['GET /payroll/records?limit=50', mgr, '/rest/v1/payroll/records?limit=50'],
+    ['GET /payroll/me/payslips (mobile)', staff, '/rest/v1/payroll/me/payslips'],
+    ['GET /shifts/sent (venue manager mobile)', venueMgr, '/rest/v1/shifts/sent'],
   ];
   // The dashboard's distinct requests (react-query dedupes shared keys): 15 always + the pipeline when pipelineFired.
   const DASH_ALWAYS = reads.slice(1, 17).map((r) => r[0]).filter((n) => n !== 'GET /shifts/:id/pipeline');
@@ -141,10 +154,10 @@ function signQr(shiftId, venueId, ver, startsAt, endsAt) {
     await sleep(500);
     psql('select pg_stat_statements_reset()');
     for (let i = 0; i < 20; i++) await call(mgr, 'GET', '/rest/v1/dashboard/summary');
-    const tl = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid='crewflow_app'::regrole and toplevel`));
-    const all = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid='crewflow_app'::regrole`));
-    const nested = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid='rab_secure_owner'::regrole`));
-    pgss = { endpoint: 'GET /dashboard/summary', requests: 20, crewflowAppToplevelPerRequest: tl / 20, crewflowAppAllPerRequest: all / 20, nestedDefinerPerRequest: nested / 20 };
+    const tl = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('crewflow_owner') and toplevel`));
+    const all = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('crewflow_owner')`));
+    const nested = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('rab_secure_owner')`));
+    pgss = { endpoint: 'GET /dashboard/summary', requests: 20, role: 'crewflow_owner', ownerToplevelPerRequest: tl / 20, ownerAllPerRequest: all / 20, nestedDefinerPerRequest: nested / 20 };
   } finally {
     harnessDocker('unpause', 'costaudit-worker');
   }

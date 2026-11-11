@@ -20,15 +20,21 @@ committed, and fixes three gaps in it:
   e2e stack or any remote database.
 - **Database guard.** Every SQL step runs inside `costaudit-pg`. Before writing, every script checks the database
   comment `crewflow-cost disposable measurement database`.
-- **Migrations** use the repo's guarded runner (`setup-db.js`, `DB_TARGET=local`):
-  - phase A runs as `rab_owner` and stops at the role split, as expected;
-  - phase B runs as the bootstrap superuser.
-
-  This is the same sequence as `packages/rab-e2e-testing/system/docker-compose.e2e.yml`.
-- **Runtime roles.** The API and the Worker connect as `crewflow_app`. O1 (one image): the Worker is one process that
-  provisions in-process; the separate provisioner child and its `crewflow` login are retired, so the provisioner rows of
-  earlier reports describe the old shape. (The stack still uses the separated logins; the runtime now requires the owner
-  login, a known gap since #72.)
+- **Database lifecycle = production's (owner-login architecture, Phase X P0-H).** `costaudit-pg` starts empty; its init
+  is `init/00-pgss.sql`, the committed provider-admin SQL
+  `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql` (the one bind mount outside this folder that
+  `lib/check-compose.js` allows; the password comes from the compose secret fed by `CREWFLOW_OWNER_PW`) and
+  `init/02-cost-marker.sql`. The API migrates on start (`./api-prestart.sh`, `CREWFLOW_MIGRATE_ON_START=true`: the migration
+  child under the lock, then the BullMQ scheduler registration); the Worker is consume-only (`DISABLE_DB_MIGRATIONS`,
+  `DISABLE_CRON_JOBS_REGISTRATION`, `WORKER_SCHEDULER=bullmq`) and starts after a healthy API. There is no migrate service.
+  This is the same lifecycle as `packages/rab-e2e-testing/system/docker-compose.e2e.yml`.
+- **One login.** The API, the Worker (every claim mode) and the `tool` container use ONE `PG_DATABASE_URL`, as
+  `crewflow_owner`; every `pg_stat_statements` filter counts that role (statements inside SECURITY DEFINER functions run as
+  `rab_secure_owner` and are reported as nested). The API and the Worker therefore share a role: an idle window's
+  statements are split per Worker scan, framing and the API's health ping by `lib/sql-families.js` (`families` in each
+  `idle-*/summary.json`). Result directories from before P0-H (separated `crewflow_app` / `crewflow` / `crewflow_worker`
+  logins) still re-analyse to their old numbers. A secrets file from before P0-H gets `CREWFLOW_OWNER_PW` added by
+  `scripts/gen-secrets.sh` (run.sh calls it on every run).
 - **Secrets** live in `$COST_SECRETS`, outside the repo. The default is `C:/rab-ai-wt/cost-secrets/cost.env`.
   `scripts/gen-secrets.sh` generates random values on first use. Scripts never print them.
 - **Images** are `crewflow-cost/server:<tag>`, `crewflow-cost/worker:<tag>` (O1: one build, both tags) and
@@ -236,8 +242,8 @@ OUT=$OUT bash scripts/dq6-bench.sh report                                       
 
 | Arm | Configuration |
 |---|---|
-| `per_scope` | `WORKER_CLAIM_MODE=per_scope`, Worker as `crewflow_app` (production default) |
-| `global` | `WORKER_CLAIM_MODE=global`, Worker as `crewflow_worker` (Phase D) |
+| `per_scope` | `WORKER_CLAIM_MODE=per_scope` (production default), Worker as `crewflow_owner` |
+| `global` | `WORKER_CLAIM_MODE=global` (Phase D), Worker as `crewflow_owner` (one login since P0-H) |
 | `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
 
 Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. A label is never reused: `arm` refuses an
@@ -288,7 +294,7 @@ within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. A margin shorter than the long
 | Phase | What happens | Script |
 |---|---|---|
 | build | Builds the server and worker images from `git archive <commit>`, or from a tree snapshot (`--tree`) | `scripts/build-images.sh` |
-| stack | Fresh Postgres (`pg_stat_statements`, `track=all`, `track_io_timing`), Redis (password), MinIO (SSE-S3 bucket). Runs migration phases A and B, then starts the API and worker. | `scripts/stack.sh` |
+| stack | Fresh Postgres (`pg_stat_statements`, `track=all`, `track_io_timing`; `crewflow_owner` from `01-crewflow-owner.sql`), Redis (password), MinIO (SSE-S3 bucket). Starts the API, which migrates on start and registers the schedulers, then the consume-only worker. | `scripts/stack.sh` |
 | idle0 | Waits for drain, then an idle window with 0 organisations | `scripts/measure.sh drain`, `measure.sh idle` |
 | seed5 | Stops the worker, seeds orgs 1–5, backfills processed history, restarts the worker | `seed/seed.js`, `seed/backfill-reports.js` |
 | idle5 | Waits for drain (≤ 5 rows written by the runtime role in 60 s), then an idle window at O=5 | `measure.sh drain`, `measure.sh idle` |
@@ -297,7 +303,7 @@ within 180 + `DQ6_CLOCK_MARGIN_MIN` (45) minutes. A margin shorter than the long
 | idle20 | Waits for drain, then an idle window at O=20 | `measure.sh drain`, `measure.sh idle` |
 | idleflags, provisioner, bootprobe, replicas | Phase A measurement (section above) | `measure.sh worker-up / idle / boot-probe / replicas`, `lib/analyze-boot.js` |
 | storage | Pauses the worker and runs `storage:reconcile` (report-only CLI) with the S3 trace on | `measure.sh storage-cli`, `lib/storage-ops.js` |
-| endpoints | SQL per request, latency and bytes for 29 endpoints. Also runs the web-dashboard load and a `pg_stat_statements` cross-check. | `lib/endpoints.js` |
+| endpoints | SQL per request, latency and bytes for 35 endpoints (since P0-H also the staff list, the payroll month and records, the staff app's payslips and the venue manager app's `/shifts/sent`). Also runs the web-dashboard load and a `pg_stat_statements` cross-check as `crewflow_owner`. | `lib/endpoints.js` |
 | load | autocannon over 8 scenarios, with the worker paused | `lib/loadtest.js`, `tools/` |
 | pdf | 10 renders each of the roster and the final timesheet, using the real renderer at `--cpus=1` | `lib/pdf-bench.js` |
 | emails | 200 forgot-password emails through the API and worker, measuring Redis bytes per completed job | `lib/emails-bullmq.js` |
@@ -348,7 +354,7 @@ A projection is never labelled MEASURED.
 
 | Metric | How it is measured |
 |---|---|
-| Idle SQL/min | `pg_stat_statements` delta over the idle window, worker only, no HTTP. Reported in three forms. **(a)** The old audit's definition: every statement executed as `crewflow_app`/`crewflow`, nested or not. **(b)** `toplevel=true` only, meaning statements the worker actually sent. **(c)** Statements nested inside SECURITY DEFINER functions, which run as `rab_secure_owner`. |
+| Idle SQL/min | `pg_stat_statements` delta over the idle window, worker only, no HTTP. Reported in three forms. **(a)** The old audit's definition: every statement executed as the runtime login (`crewflow_owner` since P0-H; `crewflow_app`/`crewflow` before), nested or not. **(b)** `toplevel=true` only, meaning statements the worker actually sent. **(c)** Statements nested inside SECURITY DEFINER functions, which run as `rab_secure_owner`. |
 | Fitted formula | Least squares over O = 0, 5, 20 (DERIVED). W = O in this seed. |
 | DB / worker / Redis CPU | cgroup v2 `cpu.stat` `usage_usec` delta ÷ window, as % of one core. Also `docker stats` samples every 15 s. |
 | Worker memory | cgroup `memory.current` plus per-process `VmRSS`. **Indicative only**, because the VM swaps. |
@@ -403,8 +409,9 @@ The results directory receives:
 - **Network.** Traffic stays on loopback and the Docker network, with no TLS and no VPC round trips. CPU per request
   carries over to production; wall-clock latency does not.
 - **Runtime mode.** `NODE_ENV=development`, because production mode refuses the LOGGER email driver and loopback
-  URLs. The caches are off, at their defaults. `HWS_RUNTIME_ENABLED=false` and `WORKER_SCHEDULER=interval`, as in the
-  old audit.
+  URLs. The caches are off, at their defaults. `HWS_RUNTIME_ENABLED=false`, and since P0-H `WORKER_SCHEDULER=bullmq`
+  (production's mode; the old audit and every run before P0-H used `interval`, so idle numbers across that line are not
+  like for like).
 - **Postgres** has no CPU limit, so its CPU % is measured, not capped.
 - **Shared host.** The dev stack and other agents' containers keep running, so CPU contention from them is possible.
   heavy-run keeps heavy test suites out of each window, but not light activity. The contention is recorded, not

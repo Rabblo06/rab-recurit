@@ -45,7 +45,7 @@ worker_up() {
   esac
 }
 
-# Read-only Redis view of BullMQ repeat/job-scheduler state (interval mode should have none; a duplicate would show here).
+# Read-only Redis view of BullMQ repeat/job-scheduler state (the api registers one per scan; a duplicate would show here).
 redis_sched_keys() {
   local k
   echo "dbsize $(redis_cli DBSIZE | tr -d '\r')"
@@ -94,8 +94,8 @@ case "${1:?usage}" in
     for i in $(seq 1 30); do
       q "select pg_stat_statements_reset()" >/dev/null
       sleep 60
-      w=$(q "select coalesce(sum(rows),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ('crewflow_app','crewflow_worker')) and (query ilike 'insert%' or query ilike 'update%' or query ilike 'delete%' or query ilike 'with%insert%' or query ilike 'with%update%')")
-      t=$(q "select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ('crewflow_app','crewflow','crewflow_worker'))")
+      w=$(q "select coalesce(sum(rows),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname = 'crewflow_owner') and (query ilike 'insert%' or query ilike 'update%' or query ilike 'delete%' or query ilike 'with%insert%' or query ilike 'with%update%')")
+      t=$(q "select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname = 'crewflow_owner')")
       echo "$(date -u +%H:%M:%SZ) window=$i rowsWritten=$w topLevelStatements=$t" | tee -a "$OUT/drain-${2:-last}.log" >&2
       if [ "$w" -le 5 ]; then drained=1; break; fi
     done

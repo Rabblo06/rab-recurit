@@ -63,10 +63,10 @@ function runAc(cfg) {
       const cpuPct = Object.fromEntries(Object.keys(cpu0).map((k) => [k, +(((cpu1[k] - cpu0[k]) / 1e6 / secs) * 100).toFixed(1)]));
       let pgss = null;
       if (s.pgss) {
-        const [calls, ms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid in ('crewflow_app'::regrole) and toplevel`).split('|').map(Number);
+        const [calls, ms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid = to_regrole('crewflow_owner') and toplevel`).split('|').map(Number);
         const [ncalls, nms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid='rab_secure_owner'::regrole`).split('|').map(Number);
         pgss = { toplevelStatements: calls, toplevelExecMs: ms, statementsPerRequest: +(calls / ac.requests).toFixed(2), dbExecMsPerRequest_toplevel: +(ms / ac.requests).toFixed(3), nestedDefinerStatementsPerRequest: +(ncalls / ac.requests).toFixed(2), nestedExecMs: nms,
-          topStatementsByTime: psql(`select round(total_exec_time::numeric,1)||'ms|'||calls||'|'||left(regexp_replace(query,'\\s+',' ','g'),140) from pg_stat_statements where userid='crewflow_app'::regrole and toplevel order by total_exec_time desc limit 5`).split('\n') };
+          topStatementsByTime: psql(`select round(total_exec_time::numeric,1)||'ms|'||calls||'|'||left(regexp_replace(query,'\\s+',' ','g'),140) from pg_stat_statements where userid=to_regrole('crewflow_owner') and toplevel order by total_exec_time desc limit 5`).split('\n') };
       }
       const row = {
         scenario: s.name, connections: s.c, durationS: DUR, workerPaused: true, ...ac,

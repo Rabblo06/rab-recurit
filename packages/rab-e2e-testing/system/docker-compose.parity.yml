@@ -11,7 +11,8 @@
 #   on at a 5 s interval, API pool 9 / Worker pool 12; and what production does NOT set stays unset here:
 #   WORKSPACE_BASE_DOMAIN, workspace host routing, subdomain origin trust and the login handoff (one console host).
 # Not production: NODE_ENV/RAB_RUNTIME_ENV development (production authority needs TLS verify-full, a bound deployment
-# identity and https origins), LOGGER email sink, LOCAL storage, the `rab` superuser as the migration login.
+# identity and https origins), LOGGER email sink, LOCAL storage. The database lifecycle is production's (the base file):
+# ONE crewflow_owner login, the server migrates on start and registers the schedulers, the worker only consumes them.
 
 x-parity-env: &parity-env
   HWS_RUNTIME_ENABLED: 'false'
