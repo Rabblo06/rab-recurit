@@ -5,7 +5,10 @@
 #                      (one identical PG_DATABASE_URL on rab-api / rab-worker, no second identity, no token, the H1-H6
 #                      keys, the O3 lifecycle: the API migrates on start, no rab-migrate, one API, the Worker never
 #                      migrates and only consumes the job schedulers; the bundled database), plus
-#                      `docker compose config` of every supported combination. ci-security.yaml's deployment-config job
+#                      `docker compose config` of every supported combination, and the ONE-IMAGE check
+#                      (scripts/compose-one-image.cjs, owner decision 2026-11-11 "deploy exactly like Twenty"): every
+#                      deploy compose gives rab-api and rab-worker the SAME image variable (CREWFLOW_IMAGE_TAG, a digest),
+#                      no build, and the Worker starts after a healthy API (restart: true). ci-security.yaml's deployment-config job
 #                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
 # transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
@@ -16,10 +19,12 @@ on:
     paths:
       - packages/rab-docker/docker-compose*.yml
       - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
       - packages/rab-docker/env/**
       - packages/rab-docker/local-db/**
       - packages/rab-docker/postgres-init/owner-login/**
       - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/scripts/compose-one-image*.cjs
       - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
@@ -28,10 +33,12 @@ on:
     paths:
       - packages/rab-docker/docker-compose*.yml
       - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
       - packages/rab-docker/env/**
       - packages/rab-docker/local-db/**
       - packages/rab-docker/postgres-init/owner-login/**
       - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/scripts/compose-one-image*.cjs
       - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
@@ -69,7 +76,7 @@ jobs:
           : > "$t/secrets/runtime.env"
           z="$(printf '%064d' 0)"
           {
-            echo "CREWFLOW_IMAGE_DIGEST=sha256:$z"
+            echo "CREWFLOW_IMAGE_TAG=sha256:$z"
             echo "CREWFLOW_REDIS_IMAGE=redis@sha256:$z"
             echo "CREWFLOW_POSTGRES_IMAGE=postgres@sha256:$z"
             echo "CREWFLOW_SECRETS_DIR=$t/secrets"
@@ -86,7 +93,7 @@ jobs:
             docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
           done
           # Fail closed: a missing required interpolation value must refuse to render.
-          for var in CREWFLOW_IMAGE_DIGEST CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
+          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
             grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
             if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
               echo "::error::docker-compose.image.yml rendered without $var"
@@ -97,3 +104,7 @@ jobs:
         run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs packages/rab-docker/scripts/compose-owner-login.full.test.cjs
       - name: Owner-login gate (full)
         run: node packages/rab-docker/scripts/compose-owner-login.cjs
+      - name: One image, API first, Worker after (self-tests, then every deploy compose)
+        run: |
+          node --test packages/rab-docker/scripts/compose-one-image.test.cjs
+          node packages/rab-docker/scripts/compose-one-image.cjs

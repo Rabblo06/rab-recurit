@@ -1,5 +1,13 @@
 # Isolated staging environment runbook (owner decision R4)
 
+> **OUTDATED for deploying (2026-11-11).** Production now deploys exactly like Twenty: one image variable,
+> `CREWFLOW_IMAGE_TAG` (a `sha256:` digest), and one command. **Deploy the API and Worker together, from the same image
+> tag, with `docker compose pull && docker compose up -d`. The API starts first and migrates; the Worker starts when the
+> API is healthy. Never update the API alone while an older Worker keeps running. Take a provider snapshot/restore point
+> before each production deploy.** Rollback: `CREWFLOW_IMAGE_TAG=<previous digest>`, then the same command. Any
+> per-service `up -d --no-deps rab-api` / `rab-worker`, `rab-migrate` or `CREWFLOW_IMAGE_DIGEST` step below is superseded;
+> follow `OWNER-LOGIN-DEPLOYMENT.md` section 3.
+
 > **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; they are removed in the final clean-up PR (#9). Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5).
 
 Status: **PLAN, 2026-11-03. Nothing is provisioned.** This runbook creates no host, database, bucket, DNS record or secret.
@@ -85,7 +93,7 @@ sudo docker image inspect adhin007/adolphus@sha256:<image-index-digest> --format
 sudo docker logout
 ```
 
-The digest comes from the release record (commit, the index digest, scanner results, SBOM); it is `CREWFLOW_IMAGE_DIGEST`. R1/R2: nothing is
+The digest comes from the release record (commit, the index digest, scanner results, SBOM); it is `CREWFLOW_IMAGE_TAG` (named `CREWFLOW_IMAGE_DIGEST` until 2026-11-11). R1/R2: nothing is
 published yet, so this step is BLOCKED until the owner approves a release.
 
 ## 4. Secrets (staging-only, generated fresh)

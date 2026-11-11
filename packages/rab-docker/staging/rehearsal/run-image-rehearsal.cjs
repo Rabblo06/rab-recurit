@@ -106,7 +106,7 @@ const ENV = {
   ...BASE_ENV,
   ...SECRETS,
   CREWFLOW_IMAGE_REPOSITORY: imageRepo,
-  CREWFLOW_IMAGE_DIGEST: imageDigest,
+  CREWFLOW_IMAGE_TAG: imageDigest,
   CREWFLOW_REDIS_IMAGE: process.env.S_REDIS_IMAGE,
   CREWFLOW_REDIS_CONF: path.resolve(process.env.S_REDIS_CONF).replace(/\\/g, '/'),
   CREWFLOW_SECRETS_DIR: SECRETS_DIR.replace(/\\/g, '/'),

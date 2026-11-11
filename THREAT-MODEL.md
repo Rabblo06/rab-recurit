@@ -5979,8 +5979,11 @@ Reversal:   Owner-approved migrations A and C (exact SQL in the plan §4).
   and the backstop scan catches a missed re-arm.
 - (2) Pre-deploy `staff_accepted` offers past their deadline are withdrawn on the first tick after deploy (Q4). Those
   whose assignment ended long ago close silently.
-- (3) Rollout order: the Worker must be deployed BEFORE or WITH the API. An old Worker with the new API would still
-  auto-confirm offers the new API refuses.
+- (3) Rollout order (superseded 2026-11-11 by "deploy exactly like Twenty", below): Deploy the API and Worker together,
+  from the same image tag, with `docker compose pull && docker compose up -d`. The API starts first and migrates; the
+  Worker starts when the API is healthy. Never update the API alone while an older Worker keeps running (an old Worker
+  with the new API would still auto-confirm offers the new API refuses). Take a provider snapshot/restore point before
+  each production deploy.
 
 ## FIX — native PDF output depended on what the render thread printed before (fontkit glyph cache; branch fix/pdf-native-determinism, 2026-11-06)
 
@@ -6299,3 +6302,49 @@ completes) stays open and unchanged.
   not-settled one, reports a made-up one, audited once, idempotent; C3 another tenant's id under `--organisation` is
   `not_found` and untouched; C4 no actor / non-admin actor / bad ids file / both modes refused; C5 a superuser session is
   refused.
+
+## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, not merged)
+
+**What changed.** Production deploys like Twenty's `packages/twenty-docker`: `docker compose pull && docker compose up -d`
+updates rab-api and rab-worker together from ONE variable, `CREWFLOW_IMAGE_TAG`. The API starts first, migrates
+(check-first, `CREWFLOW_MIGRATE_ON_START=true`), registers the BullMQ job schedulers and becomes healthy; the Worker
+`depends_on: rab-api: {condition: service_healthy, restart: true}` (and a healthy rab-redis), so Compose stops the old
+Worker before it replaces the API and starts the new Worker only after the new API is healthy. rab-api's stop window is
+40 s. `docker-compose.production.yml` no longer builds: it pulls the published, gated image, like `docker-compose.image.yml`;
+building from source moved to `docker-compose.local-build.yml` (LOCAL/DEV ONLY, its own project name `rab-local-build`).
+
+**Threat addressed: a new API beside an old Worker (version skew).** Actor: the operator (no attacker needed). Action: an
+API-only update, or Compose ordering that leaves the old Worker running while the new API migrates. Consequence: old
+Worker code runs against a newer schema and newer rules (the #82 example: an old Worker would still auto-confirm offers the
+new API refuses). Controls: (1) one image variable for every application service, so there is no API-only tag to set;
+(2) `restart: true`, so the old Worker is stopped before the API is replaced; (3) the API is the only migrator and
+scheduler registrar; (4) `scripts/compose-one-image.cjs` fails CI when any deploy compose file (image, production,
+local-db and staging overlays, staging rehearsal) gives rab-api and rab-worker different image references, names any image
+variable other than `CREWFLOW_IMAGE_TAG`/`CREWFLOW_IMAGE_REPOSITORY`, has a `build:` section, or drops the
+healthy-API/restart dependency; `compose-owner-login.cjs` enforces the same plus the 40 s stop window and refuses
+`CREWFLOW_IMAGE_DIGEST` (the old name) and any per-role `*_IMAGE_TAG` in `compose.env`.
+
+**Threat addressed: a server running an image that never passed the gate.** The former build-based production file let a
+host build whatever commit it had checked out, skipping the image security gate, SBOM and provenance. Every deploy file
+now pulls `<repository>@${CREWFLOW_IMAGE_TAG}`; the compose check refuses `build:` in any of them.
+
+**Security trade-off (owner decision A, 2026-11-11), kept strict:** the variable is NAMED like Twenty's `TAG`, but it
+accepts ONLY a `sha256:<64 hex>` digest. A tag can be moved on the registry by anyone with push access; a digest cannot.
+The `@` in the compose image reference makes Docker reject a plain tag, and the env lint refuses one with a message.
+
+**Residual.**
+- Twenty-style deploys are stop-then-start: during the API's migration window neither the API nor the Worker serves
+  (unchanged from O3 C5). Jobs due in that window run when the Worker starts.
+- `restart: true` needs Docker Compose 2.17 or later (the runbook already requires 2.24+). An older Compose ignores the key
+  and could leave the old Worker running until the API is healthy; the compose checks cannot see the host's Compose
+  version.
+- OpenShip: it imports `docker-compose.production.yml` and drops the `depends_on` conditions (OPENSHIP-COMPATIBILITY.md),
+  so it cannot honour API-first/Worker-after; it was already unsupported. With this change the file also requires
+  `CREWFLOW_IMAGE_TAG`, so an OpenShip import without that value fails to render instead of building from source.
+- An operator can still bypass the one command by hand (`docker compose up -d --no-deps rab-api`). The runbook forbids it;
+  nothing technical can stop a root operator.
+- Regression tests: `scripts/compose-one-image.test.cjs` (13 denial cases, 1 rendered denial, 1 pass), `compose-owner-login*.test.cjs`
+  (renamed variable, plain tag, per-role tag, missing `restart: true`, a 35 s API stop window), and the real-container
+  deploy-order tests (`packages/rab-docker/deploy-order-tests/`, PostgreSQL 16 and 18, all four cases pass on both:
+  fresh deploy API-healthy-then-Worker; new digest with the old Worker stopped before the new API started; rollback with
+  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI.

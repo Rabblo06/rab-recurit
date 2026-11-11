@@ -410,7 +410,7 @@ function renderModels(variantPath = VARIANT) {
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
     const env = {
       ...base,
-      CREWFLOW_IMAGE_DIGEST: SENTINEL_DIGEST,
+      CREWFLOW_IMAGE_TAG: SENTINEL_DIGEST,
       CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0c'.repeat(32)}`,
       CREWFLOW_SECRETS_DIR: secrets.split(path.sep).join('/'),
       CREWFLOW_PG_CA_FILE: '/etc/crewflow/pg-ca.crt',
@@ -445,7 +445,7 @@ function environmentMode(argv) {
     }
   }
   const allowed = [DEFAULT_APP_REPOSITORY, ...many('--allow-repository')];
-  for (const k of ['CREWFLOW_IMAGE_DIGEST']) {
+  for (const k of ['CREWFLOW_IMAGE_TAG']) {
     if (!DIGEST.test(String(env[k] ?? ''))) return { problems: [`${k} is not sha256:<64 hex>`], lines: [] };
   }
   // The env_file checks below need a Compose that reports env_file under --no-env-resolution (v5 does; v2.38/v2.39

@@ -42,17 +42,23 @@ const OPS_SENTINEL_PASSWORD = 'SENTINEL-OPS-APP-PW-7c21de'; // gitleaks:allow (s
 const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}@db-direct.example:5432/rab?sslmode=verify-full`;
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 /** Compose files that define the one-off operations container, and its service name. */
-const OPS_SERVICES = { 'packages/rab-docker/docker-compose.production.yml': 'rab-ops' };
+const OPS_SERVICES = {
+  'packages/rab-docker/docker-compose.production.yml': 'rab-ops',
+  'packages/rab-docker/docker-compose.local-build.yml': 'rab-ops',
+};
 
 /** [compose file, migration service (null = none, O3), runtime services, production?] */
 const FILES = [
   ['packages/rab-docker/docker-compose.production.yml', null, ['rab-api', 'rab-worker'], true],
+  // LOCAL/DEV ONLY build-from-source copy of the production contract (owner decision 2026-11-11): same credential rules.
+  ['packages/rab-docker/docker-compose.local-build.yml', null, ['rab-api', 'rab-worker'], true],
   ['packages/rab-docker/docker-compose.yml', 'migrate', ['server', 'worker'], false],
   ['packages/rab-docker/docker-compose.qa.yml', 'migrate', ['server', 'worker'], false],
 ];
 
 // Dummy values for every `${VAR:?}` the files require (never real secrets).
 const DUMMY_ENV = {
+  CREWFLOW_IMAGE_TAG: `sha256:${'0'.repeat(64)}`,
   DEVDB_SUPERUSER_PASSWORD: 'dummy',
   DEVDB_URL: 'postgres://crewflow_app:dummy-app@devdb:5432/rab',
   CREWFLOW_BOOTSTRAP_PASSWORD: 'dummy',
@@ -172,7 +178,7 @@ function main() {
     }
     const migrate = migrateName ? services[migrateName] : undefined;
     // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
-    const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml';
+    const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml' || rel === 'packages/rab-docker/docker-compose.local-build.yml';
     if (migrateName) check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
     else {
       // O3: the API migrates on start; a migration service would be a second migrating process.

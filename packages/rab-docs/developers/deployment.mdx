@@ -69,7 +69,7 @@ A push to `main` may redeploy production if the hosting platform's auto-deploy i
 
 - `<full commit sha>`
 
-There is no `latest`, prefix, version or per-architecture tag, and the push refuses a tag that already exists. Releases up to v0.4.0 were two images tagged `api-<sha>` / `worker-<sha>`. The compose files take the one digest as `CREWFLOW_IMAGE_DIGEST`. Deploy by index digest (`docker.io/adhin007/adolphus@sha256:...`) from the release manifest; the tags are labels, not references. See `packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md` section 8.
+There is no `latest`, prefix, version or per-architecture tag, and the push refuses a tag that already exists. Releases up to v0.4.0 were two images tagged `api-<sha>` / `worker-<sha>`. The compose files take the one digest as `CREWFLOW_IMAGE_TAG` (named like Twenty's `TAG`, but it accepts only a `sha256:` digest; a plain tag is refused). Deploy by index digest (`docker.io/adhin007/adolphus@sha256:...`) from the release manifest; the tags are labels, not references. See `packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md` section 8.
 
 It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
 

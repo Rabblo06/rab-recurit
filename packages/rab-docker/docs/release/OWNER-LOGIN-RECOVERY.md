@@ -18,6 +18,13 @@ Release procedure, transition and approval token: [`OWNER-LOGIN-DEPLOYMENT.md`](
 1. Restore the backup or PITR point taken **before** the upgrade.
 2. Deploy the previous image digest, with its previous configuration.
 
+**How an image rollback runs (owner decision 2026-11-11, like Twenty):** set `CREWFLOW_IMAGE_TAG=<previous digest>` in
+`compose.env`, then run the same one command as a deploy, `docker compose pull && docker compose up -d`. The API and the
+Worker go back together, from the same digest: Compose stops the Worker, replaces the API, and starts the Worker once the
+API is healthy. Never roll back the API alone while a newer Worker keeps running. Without a restore this is safe only
+between owner-login releases whose pending sets were reviewed as expand-only (`OWNER-LOGIN-DEPLOYMENT.md` §3.6a): the
+older API then logs that the schema is AHEAD and serves.
+
 R2 proved this (section 5). Do not start an old image on an upgraded database and hope. In production that **fails closed** (section 3); in development it runs with warnings, which proves nothing about production.
 
 **The legacy logins are disabled after the transition (BC-17, Agent 1).** Once `transition-from-separated.sql` has run, `crewflow` and `crewflow_app` become **NOLOGIN with PASSWORD NULL**; `crewflow_worker` stays LOGIN (two existing migrations assert it) but gets **PASSWORD NULL**, so it has no password to authenticate with; `crewflow_migrator` (if your deployment has it) becomes NOLOGIN with PASSWORD NULL at the transition (Agent 1, f91f1038): it keeps its role memberships but cannot log in, and a fresh owner-login install never creates it. A fresh owner-login install ends in the same state. The old image cannot connect even before any owner-login migration applies.
@@ -127,7 +134,7 @@ Restore into a **fresh** cluster or volume. That is the proven path, and the **o
 ### 4.4 Image-only rollback from a one-image release (O2) to the two-image v0.4.0
 
 O1/O2 changed only the image layout and the tag. One image now runs every application service, under ONE tag (the full
-commit) and ONE compose variable, `CREWFLOW_IMAGE_DIGEST`. Neither O1 nor O2 adds a migration. The last two-image
+commit) and ONE compose variable, `CREWFLOW_IMAGE_TAG` (named `CREWFLOW_IMAGE_DIGEST` until 2026-11-11). Neither O1 nor O2 adds a migration. The last two-image
 release is **v0.4.0** (git tag `rab/v0.4.0`, commit `e1b1132a075fd6b821562eaaf0921eeee8243617`, publish-image run
 42030739036, both attested):
 
@@ -146,12 +153,12 @@ If the count is larger than v0.4.0's, list the extra rows and confirm each was r
 
 **Procedure (NOT TESTED as a whole; each step uses v0.4.0's own committed files and checks):**
 1. **Use v0.4.0's compose files, not the current ones.** The current `docker-compose.image.yml` reads only
-   `CREWFLOW_IMAGE_DIGEST` and would start the API image as the Worker as well. Check out the release tag beside the
+   `CREWFLOW_IMAGE_TAG` and would start the API image as the Worker as well. Check out the release tag beside the
    current tree:
    ```bash
    git -C <repo> worktree add /opt/crewflow-v0.4.0 rab/v0.4.0     # or: git archive rab/v0.4.0 packages/rab-docker | tar -x
    ```
-2. **Write a v0.4.0 compose env file.** Copy the current `compose.env`. Remove `CREWFLOW_IMAGE_DIGEST` and
+2. **Write a v0.4.0 compose env file.** Copy the current `compose.env`. Remove `CREWFLOW_IMAGE_TAG` and
    `CREWFLOW_IMAGE_REPOSITORY`, and set the two retired variables, which v0.4.0 reads:
    ```
    CREWFLOW_API_IMAGE_DIGEST=sha256:1120f03a223be14fcd635bcd32734c34dd2aec3213084d47894b727af7c230fa
@@ -174,7 +181,7 @@ If the count is larger than v0.4.0's, list the extra rows and confirm each was r
    - there is no unknown-`app_version` or "ledger AHEAD" refusal;
    - run the functional smoke from `OWNER-LOGIN-DEPLOYMENT.md` §5.8.
 7. **Return to the current release** later the usual way. Use the current tree's compose files and `compose.env` with
-   `CREWFLOW_IMAGE_DIGEST`, and delete the v0.4.0 env file.
+   `CREWFLOW_IMAGE_TAG`, and delete the v0.4.0 env file.
 
 No data is restored or lost by this procedure; it changes only which images run.
 
