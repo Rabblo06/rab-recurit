@@ -2,17 +2,23 @@
 # (owner's final decision, 2026-11-04: ONE schema-owning login, crewflow_owner, for the API, the Worker and the release
 # step; no mode switch). Runbook: packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md.
 #
-#   docker compose --env-file /etc/crewflow/compose.env -f docker-compose.image.yml up -d --wait --wait-timeout 1200
+# DEPLOY = ONE COMMAND, like Twenty (owner decision 2026-11-11), with COMPOSE_FILE / COMPOSE_ENV_FILES (or -f/--env-file):
+#   docker compose pull && docker compose up -d
+# It updates rab-api and rab-worker together, from the same image variable. The API starts first, migrates and becomes
+# healthy; the Worker starts after it (and Compose stops the old Worker before replacing the API: restart: true).
+# Rollback: CREWFLOW_IMAGE_TAG=<previous digest>, then the same command. Both go back together.
 #   + -f docker-compose.local-db.yml           bundled PostgreSQL 16 (its init is Agent 1's crewflow_owner SQL)
 #   + -f staging/docker-compose.staging.yml    the isolated staging project
 #
 # Every application service runs a prebuilt image by IMMUTABLE DIGEST. Nothing is built on the host: this file has no
 # `build:` section anywhere, so a host can never rebuild the release from whatever commit it happens to have checked out.
 #
-#   rab-api, rab-worker, rab-ops  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_DIGEST}
+#   rab-api, rab-worker, rab-ops  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_TAG}
 #   rab-redis                     ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
-# CREWFLOW_IMAGE_DIGEST is the multi-platform INDEX digest (amd64 + arm64) of the approved release, never a tag; compose
-# refuses to render without it. O1/O2: the API and the Worker are ONE image (rab/Dockerfile), chosen by command, published
+# CREWFLOW_IMAGE_TAG is the multi-platform INDEX digest (amd64 + arm64, sha256:<64 hex>) of the approved release, never a
+# tag (the variable is named like Twenty's TAG; the `@` form and compose-owner-login.cjs refuse a plain tag); compose
+# refuses to render without it. CREWFLOW_IMAGE_DIGEST (its name until 2026-11-11) is retired and refused in compose.env.
+# O1/O2: the API and the Worker are ONE image (rab/Dockerfile), chosen by command, published
 # under ONE tag (the full commit). The former CREWFLOW_API_IMAGE_DIGEST / CREWFLOW_WORKER_IMAGE_DIGEST pair is retired
 # (scripts/compose-owner-login.cjs refuses it in compose.env); rolling back to a two-digest release such as v0.4.0 uses
 # that release's own compose files (docs/release/OWNER-LOGIN-RECOVERY.md section 4.4).
@@ -31,9 +37,11 @@
 # healthy; a failed UPGRADE logs an ERROR and the API starts degraded, C3), then registers the BullMQ job schedulers (C2).
 # The Worker NEVER migrates (DISABLE_DB_MIGRATIONS=true) and never registers schedulers (DISABLE_CRON_JOBS_REGISTRATION=
 # true, consume only); it starts only after a healthy API and a healthy Redis, so it does not wait for the schema itself
-# (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0). ONE rab-api, deployed STOP-THEN-START (C5): `docker compose up -d` recreates the
-# API container (the old one stops, then the new one starts and migrates); never scale rab-api, never run a second stack
-# (blue-green) against the same database. The deployment id (CREWFLOW_DEPLOYMENT_*) stays an optional database.env entry.
+# (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0). ONE rab-api, deployed STOP-THEN-START (C5): `docker compose up -d` stops the old
+# Worker, replaces the API container (the old one stops, then the new one starts and migrates), then starts the new Worker
+# once the API is healthy; never scale rab-api, never run a second stack (blue-green) against the same database. Never
+# update the API alone while an older Worker keeps running. The deployment id (CREWFLOW_DEPLOYMENT_*) stays an optional
+# database.env entry.
 # Accepted risk: every start of a new image applies what it ships; recovery is the MANDATORY pre-upgrade backup
 # (docs/release/OWNER-LOGIN-DEPLOYMENT.md section 3, OWNER-LOGIN-RECOVERY.md).
 #
@@ -113,7 +121,7 @@ services:
   # rab-api — the HTTP API. Migrates on start (O3 C1), registers the job schedulers (C2), then main.js. ONE instance (C5).
   # ---------------------------------------------------------------------------
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
     # The image's default command, stated explicitly (api-prestart.sh: env refusals, the runtime-isolation check, the
     # migration child under the migration lock, the scheduler registration, then main.js).
@@ -198,7 +206,7 @@ services:
     # The migration child is a second Node process in this container on start. NOT MEASURED; tune after a fresh-install run.
     mem_limit: ${CREWFLOW_API_MEM_LIMIT:-1024m}
     cpus: ${CREWFLOW_API_CPUS:-2}
-    stop_grace_period: 35s
+    stop_grace_period: 40s
 
   # ---------------------------------------------------------------------------
   # rab-worker — background jobs, ONE process as uid/gid 1000 on the same crewflow_owner login (DBA-01, the API/Worker
@@ -208,7 +216,7 @@ services:
   # (it consumes them) and starts only after a healthy API and a healthy Redis (O3 C1/C2).
   # ---------------------------------------------------------------------------
   rab-worker:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
@@ -292,9 +300,11 @@ services:
       rab-redis:
         condition: service_healthy
       # A healthy API means it ran the migrations (or started degraded after a failed upgrade, C3) and registered the job
-      # schedulers.
+      # schedulers. restart: true: Compose stops this Worker BEFORE it replaces rab-api, so an old Worker never runs beside
+      # a new API (owner decision 2026-11-11).
       rab-api:
         condition: service_healthy
+        restart: true
 
     restart: unless-stopped
 
@@ -303,7 +313,7 @@ services:
   # owner approval. Do not run it against an owner-login deployment.
   # ---------------------------------------------------------------------------
   rab-ops:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_DIGEST:?CREWFLOW_IMAGE_DIGEST must be the release image index digest (sha256:<64 hex>)}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
     profiles: ["ops"]
     env_file:
       - .env.ops

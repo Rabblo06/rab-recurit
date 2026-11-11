@@ -1,5 +1,15 @@
-# Production stack, BUILD-BASED (the file OpenShip imports), on the OWNER LOGIN (owner's final decision 2026-11-04: ONE
-# schema-owning login, crewflow_owner, for the API and the Worker; no mode switch).
+# Production stack, IMAGE-BASED like Twenty's packages/twenty-docker (owner decision 2026-11-11), on the OWNER LOGIN
+# (owner's final decision 2026-11-04: ONE schema-owning login, crewflow_owner, for the API and the Worker; no mode switch).
+#
+# DEPLOY = ONE COMMAND (owner decision 2026-11-11, "deploy exactly like Twenty"):
+#   docker compose pull && docker compose up -d
+# rab-api, rab-worker and rab-ops all run ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_TAG}: ONE variable, the release's
+# multi-platform INDEX digest (sha256:<64 hex>) from the gated publish-image run. A plain tag is refused (the `@` form only
+# accepts a digest, and scripts/compose-owner-login.cjs refuses anything else in compose.env). This file never builds:
+# the server always runs an image that passed the image security gate. Building from source is docker-compose.local-build.yml
+# (LOCAL/DEV ONLY). The API starts first, migrates, registers the job schedulers and becomes healthy; the Worker starts only
+# after that (depends_on rab-api: service_healthy, restart: true — Compose stops the old Worker BEFORE it replaces the API,
+# so an old Worker never runs beside a new API). Rollback: CREWFLOW_IMAGE_TAG=<previous digest>, then the same command.
 #
 # !!! OPENSHIP CANNOT RUN THIS STACK SAFELY (M0 D11) !!!
 # OpenShip drops `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on`
@@ -11,8 +21,8 @@
 # OpenShip deployment from this file: before this version merges, the owner must disable that auto-deploy or accept that
 # the temporary deployment stops (its database has no crewflow_owner). NEEDS OWNER APPROVAL.
 #
-# This file mirrors docker-compose.image.yml's runtime contract (same services, commands, isolation keys, environment
-# keys) with `build:` instead of digests, for local reference builds. Where the two differ, docker-compose.image.yml wins.
+# This file mirrors docker-compose.image.yml's runtime contract (same image variable, services, commands, isolation keys,
+# environment keys) with per-service environment instead of env_file. Where the two differ, docker-compose.image.yml wins.
 #
 # ONE DATABASE CREDENTIAL. rab-api and rab-worker each take PG_DATABASE_URL = crewflow_owner at the provider's DIRECT
 # host, sslmode=verify-full — the SAME value on both (entered per service on a platform without env_file).
@@ -74,9 +84,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    build:
-      context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
     command: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
@@ -125,15 +133,13 @@ services:
     pids_limit: 256
     mem_limit: ${CREWFLOW_API_MEM_LIMIT:-1024m}
     cpus: ${CREWFLOW_API_CPUS:-2}
-    stop_grace_period: 35s
+    stop_grace_period: 40s
 
   # rab-worker — background jobs, ONE process as uid/gid 1000 (no root launcher, no per-child credentials, in-process
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
-    # O1: the same image as rab-api (rab/Dockerfile, its last stage `rab`), a different command.
-    build:
-      context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
+    # O1: the SAME image variable as rab-api (one release, one digest), a different command.
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
     # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
@@ -193,16 +199,17 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
+      # API first, Worker after (like Twenty). restart: true makes Compose stop this Worker before it replaces rab-api, so
+      # an old Worker never runs beside a new API.
       rab-api:
         condition: service_healthy
+        restart: true
     restart: unless-stopped
 
   # rab-ops — SUPERSEDED (separated mode), kept unchanged and never started by `up` until the final clean-up PR (#9, owner
   # approval). Do not run it against an owner-login deployment.
   rab-ops:
-    build:
-      context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
     profiles: ["ops"]
     env_file:
       - .env.ops

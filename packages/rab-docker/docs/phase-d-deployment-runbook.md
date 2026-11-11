@@ -1,5 +1,12 @@
 # Phase D deployment runbook — Worker identity and global dispatch claims
 
+> **OUTDATED for deploying (2026-11-11).** This runbook predates the owner login and the one-image release. Production now
+> deploys exactly like Twenty: **Deploy the API and Worker together, from the same image tag, with `docker compose pull &&
+> docker compose up -d`. The API starts first and migrates; the Worker starts when the API is healthy. Never update the
+> API alone while an older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
+> Rollback: `CREWFLOW_IMAGE_TAG=<previous digest>`, then the same command. Any step below that deploys or restarts the
+> API or the Worker on its own is superseded; follow `release/OWNER-LOGIN-DEPLOYMENT.md` section 3.
+
 Status: prepared 2026-11-01. Nothing in this document has been run against staging or production. All evidence quoted
 below comes from disposable rehearsal databases and stacks (2026-11-01); the detailed evidence lives in internal reports
 that are not in the repository.

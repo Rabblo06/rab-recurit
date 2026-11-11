@@ -53,7 +53,7 @@ result holds at v0.9.8 and HEAD for every row.
 | `volumes`: `type: tmpfs` (long form) | rab-migrate | **REJECTED** (blocking) | `packages/core/src/compose-spec.ts:240-255`; enforced at `prepare.service.ts:1310-1316` and `modules/migration/migrate.service.ts:109` | **The variant cannot be imported** (§4). |
 | `healthcheck` | rab-redis, rab-api, rab-worker | HONOURED | `compose-parser.ts:569-570`, `docker.ts:805-835`, `6377`, `6496` | — |
 | `restart` (incl. `"no"`) | all | HONOURED | `compose-parser.ts:250-253`, `docker.ts:281-286`, `527-532` | — |
-| `stop_grace_period` | rab-api, rab-worker | HONOURED (`StopTimeout`, whole seconds) | `compose-parser.ts:615-640`, `docker.ts:838-860`, `6378` | The 35 s / 55 s drains are kept. |
+| `stop_grace_period` | rab-api, rab-worker | HONOURED (`StopTimeout`, whole seconds) | `compose-parser.ts:615-640`, `docker.ts:838-860`, `6378` | The drains are kept (rab-api 40 s since 2026-11-11, rab-worker 45 s). |
 | `mem_limit`, `cpus` | rab-redis, rab-api, rab-worker | HONOURED (`Memory`, `NanoCpus`) | `compose-parser.ts:572`, `877-900`; `adapters/src/runtime/resource-limits.ts:29-48`; `docker.ts:6502` | — |
 | `depends_on` with `condition:` | rab-api, rab-worker | **PARTIAL**: names only; `service_healthy` and `service_completed_successfully` are discarded without a warning; a dependency only has to be *running* | `compose-parser.ts:399-403` (`parseDependsOn` keeps the keys), `deploy.service.ts:290-306` / `293-309` ("Every service that must be RUNNING before this one is created"), `2732` / `2740` (a dependency that failed blocks its dependents) | rab-api could start while rab-migrate is still running. The application gates still hold: `api-prestart.sh` refuses pending migrations and the Worker refuses them too. |
 | `env_file` | rab-migrate, rab-ops | **DROPPED (silent)**: not parsed and not in the unsupported list | `compose-parser.ts` (no `env_file` handling; table at `683-730` does not list it) | rab-migrate would start without its credential and refuse (no `PG_DATABASE_URL`): fail closed, but not reported at import. |
@@ -91,7 +91,7 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
    **Dependency:** this needs release images containing the H6 enforce mode (commit 09286aef, in this branch's base). An image built
    before it ignores the variable and starts with a WARNING line, which is the current production file's behaviour
    ("warn").
-3. **The production file (`docker-compose.production.yml`, build-based, default "warn") on OpenShip.** The same seven
+3. **The production file (`docker-compose.production.yml`, build-based until 2026-11-11 and image-based since — it now pulls `adhin007/adolphus@${CREWFLOW_IMAGE_TAG}` and never builds — default "warn") on OpenShip.** The same seven
    keys are dropped with warnings. The API and Worker start, and log one WARNING line naming each missing control.
    That is the documented H6 posture for the temporary deployment: it is reported, not refused. It is not changed
    here.

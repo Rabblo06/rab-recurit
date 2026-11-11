@@ -32,7 +32,8 @@ registers. Run ONE API and deploy stop-then-start (C5). The pre-upgrade backup i
 
 The former separated logins (`crewflow_app`, `crewflow`, `crewflow_worker`, `crewflow_migrator`) remain **schema roles**
 that historical migrations and definers need. They are no longer runtime logins. O1/O2: ONE hardened image runs the
-API and the Worker (different commands), published under one tag and deployed by one digest (`CREWFLOW_IMAGE_DIGEST`).
+API and the Worker (different commands), published under one tag and deployed by one digest (`CREWFLOW_IMAGE_TAG`, named like Twenty's `TAG` but accepting only a
+`sha256:` digest; `CREWFLOW_IMAGE_DIGEST` was its name until 2026-11-11 and is now refused).
 Design source: the M0 decision document
 `TWENTY_MODE_M0_DECISION_2026-11-04.md` ("M0") and the owner-login addendum. The repository's root `docs/` is
 git-ignored, so neither is committed.
@@ -42,7 +43,8 @@ git-ignored, so neither is committed.
 | `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis` (O3: no `rab-migrate`). The API migrates on start (approval mode `none` by default, `token` an opt-in of `compose.env`), registers the job schedulers, then serves; the Worker never migrates and only consumes the schedulers. | O3 |
 | `docker-compose.local-db.yml` | Optional bundled PostgreSQL 16. Its one init file is Agent 1's `postgres-init/owner-login/01-crewflow-owner.sql`. | now |
 | `staging/docker-compose.staging.yml` (in place) | Project name and storage prefix only. The env files now come from the base file. | after #61/#62 |
-| `docker-compose.production.yml` (in place) | The build-based OpenShip file, reshaped to one URL. **OpenShip cannot run the owner-login Worker safely** (section 6). | after #61/#62 |
+| `docker-compose.production.yml` (in place) | Image-based like Twenty (2026-11-11): the same `CREWFLOW_IMAGE_TAG` digest for rab-api and rab-worker, per-service environment instead of env files. Never builds. **OpenShip cannot run the owner-login Worker safely** (section 6). | 2026-11-11 |
+| `docker-compose.local-build.yml` | **LOCAL/DEV ONLY.** The former build-based production file; never run it on a server (a server only runs the gated image). | 2026-11-11 |
 | `env/database.env.example` | **Shared** database file: `PG_DATABASE_URL` and the optional deployment identity. Read by rab-api and rab-worker. | now |
 | `env/runtime.env.example` | Runtime secrets for rab-api and rab-worker, and the optional `CREWFLOW_UPGRADE_FAILURE=refuse` opt-in (C3). | now |
 | `env/compose.env.example` | Interpolation values: digests, paths and limits. No secret. | now |
@@ -58,6 +60,18 @@ I="-f docker-compose.image.yml"
 L="-f docker-compose.local-db.yml"             # bundled database only
 P="docker compose --env-file /etc/crewflow/compose.env $I"        # production (the API migrates on start, O3)
 ```
+
+**The deploy command is the same as Twenty's** (owner decision 2026-11-11). Set the compose files and the env file once
+for the operator's shell (for example in `/etc/profile.d/crewflow.sh`, root-only), so the bare command uses them:
+
+```bash
+export COMPOSE_FILE=docker-compose.image.yml            # bundled database: docker-compose.image.yml:docker-compose.local-db.yml
+export COMPOSE_ENV_FILES=/etc/crewflow/compose.env
+cd /opt/crewflow/packages/rab-docker && docker compose pull && docker compose up -d
+```
+
+`$P pull && $P [$L] up -d` is the same command with the flags spelled out. It updates rab-api and rab-worker together
+from the one `CREWFLOW_IMAGE_TAG`; there is no API-only or Worker-only deploy.
 
 ---
 
@@ -240,7 +254,11 @@ under the owner login (see `docs/phase-d-deployment-runbook.md` §4.1).
 
 ---
 
-## 3. Production release (upgrade: back up, then stop-then-start)
+## 3. Production release (upgrade: back up, then one command)
+
+> **Deploy the API and Worker together, from the same image tag, with `docker compose pull && docker compose up -d`.
+> The API starts first and migrates; the Worker starts when the API is healthy. Never update the API alone while an
+> older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
 
 Production runs `docker-compose.image.yml` (plus `$L` for a bundled database). **O3 (owner decisions C1-C5, 2026-11-05,
 "EXACTLY LIKE TWENTY"; G-07 accepted):** there is no release step and no `rab-migrate`. On start, the API
@@ -276,7 +294,7 @@ login. Set it explicitly in `runtime.env`; it is never committed in a compose fi
   production). `CREWFLOW_AUDIT_SINK_FILE` is development-only.
 
 **3.1 Inputs.**
-- The release's ONE **index digest** (`CREWFLOW_IMAGE_DIGEST`) from the gated release (`publish-image.yaml` → `publish-gated.sh`, tag `<full commit>`; the `release` environment needs reviewer approval). Never a tag.
+- The release's ONE **index digest**, set as `CREWFLOW_IMAGE_TAG=sha256:<64 hex>` in `compose.env`, from the gated release (`publish-image.yaml` → `publish-gated.sh`, tag `<full commit>`; the `release` environment needs reviewer approval). Never a tag.
 - Check that the revision label equals the release SHA:
   ```bash
   docker buildx imagetools inspect <repo>@sha256:<digest>
@@ -313,14 +331,24 @@ login. Set it explicitly in `runtime.env`; it is never committed in a compose fi
   Use `0600` and keep a copy off the host, or snapshot the volume with the stack stopped. Test restores periodically.
 - Check that the backup is non-empty and record where it is. **No backup, no upgrade.**
 
-**3.4 Deploy: stop, then start (C5: one API, never rolling or blue-green).** Stop the old version completely, Worker first (it drains its 30 s jobs), so no old process runs against a schema that is being migrated. Then start the new one:
+**3.4 Deploy: one command, like Twenty (C5: one API, never rolling or blue-green).**
+
+> **Deploy the API and Worker together, from the same image tag, with `docker compose pull && docker compose up -d`.
+> The API starts first and migrates; the Worker starts when the API is healthy. Never update the API alone while an
+> older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
+
 ```bash
-$P stop rab-worker rab-api
-$P [$L] up -d --wait --wait-timeout 1200
+docker compose pull && docker compose up -d          # = $P pull && $P [$L] up -d
 ```
-- `up` recreates rab-api: the old container is already stopped, and the new one starts and migrates under the lock.
-- The Worker starts only after the new API is healthy.
-- Compose returns non-zero when a service does not become healthy.
+What Compose does, in this order (proved in real containers on PostgreSQL 16 and 18, `deploy-order-tests/`):
+- it stops the old Worker first (`depends_on: rab-api: restart: true`; the Worker drains its jobs within its 45 s stop
+  window), then stops the old API (40 s stop window), so no old process runs against a schema that is being migrated;
+- the new API starts, migrates under the lock, registers the job schedulers and becomes healthy;
+- only then does the new Worker start, on the same digest.
+
+Add `--wait --wait-timeout 1200` to the `up` to make the command itself return non-zero when a service does not become
+healthy; otherwise check with 3.5. Never `up -d rab-api` (or `--no-deps rab-api`) on its own: that would update the API
+alone while an older Worker keeps running.
 - Failure semantics: section 2 (a first-install failure never serves; a failed upgrade serves degraded with `upgradeFailed: true` unless `CREWFLOW_UPGRADE_FAILURE=refuse`).
 - **Never** `up --scale rab-api=2`. **Never** start a second stack against the same database. Two versions race for the migration lock, a waiter can block for up to 600 s, and old processes would see intermediate schemas (M0-F S2).
 
@@ -332,10 +360,10 @@ $P [$L] up -d --wait --wait-timeout 1200
 - The Worker log shows `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all <n> enabled Crewflow schedulers present`. A MISSING scheduler is an ERROR: restart the API, which registers them again.
 
 **3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
-- **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): put the old digest back (`compose.env.<old-sha>`) and deploy it as in 3.4. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
+- **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): set `CREWFLOW_IMAGE_TAG=<previous digest>` in `compose.env` (it is in `compose.env.<old-sha>`; an old copy that still says `CREWFLOW_IMAGE_DIGEST=` needs the name changed), then the same one command, `docker compose pull && docker compose up -d`. The API and the Worker go back together. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
   - Back to a release from before O3 (e.g. the two-image v0.4.0): use that release's own compose files ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.4).
 - **(b) Contracting release, or a failed apply you will not fix forward:**
-  1. `$P stop rab-worker rab-api`.
+  1. `$P stop rab-worker rab-api` (both together; the restore needs no application session).
   2. Restore the 3.3 backup or PITR point. Every write since that point is lost.
   3. Run the old digest as in (a).
 
@@ -439,7 +467,7 @@ The file's own verification queries must pass before anything else happens. **Af
 **5.4 Host configuration (new files beside the old ones):**
 - `database.env`: the `crewflow_owner` URL and the same CA. If the separated deployment declared `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`, keep the **same** values (they are optional, BC-11). For the token safety net during the transition, set `CREWFLOW_MIGRATION_APPROVAL_MODE=token` in `compose.env` (3, step 1).
 - `runtime.env`: the **current** `APP_SECRET`, keyrings, S3, email and OAuth values, **unchanged**. Changing APP_SECRET breaks every session and every stored encrypted secret.
-- `compose.env`: the owner-login release digest (`CREWFLOW_IMAGE_DIGEST`).
+- `compose.env`: the owner-login release digest (`CREWFLOW_IMAGE_TAG=sha256:<64 hex>`).
 - **Keep** the old separated files (`.env.migrate`, the per-service env files or platform entries) untouched, `0600`, until the rollback window closes.
 - Lint all three new files.
 

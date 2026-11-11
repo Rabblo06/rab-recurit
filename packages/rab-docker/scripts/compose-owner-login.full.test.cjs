@@ -224,6 +224,9 @@ test('the Worker: never migrates, consume-only, no schema wait, waits for a heal
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].healthcheck.test = ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']; }), /not jobs-only/);
   assertRefused(problemsAfter(DEF, (s) => { delete s['rab-worker'].depends_on['rab-api']; }), /does not wait for a healthy rab-api/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].stop_grace_period = '30s'; }), /stop_grace_period below 45s/);
+  // Owner decision 2026-11-11 (deploy exactly like Twenty): the old Worker stops before the API is replaced; the API drains 40 s.
+  for (const c of ['default', 'local-db', 'staging']) assertRefused(problemsAfter(c, (s) => { delete s['rab-worker'].depends_on['rab-api'].restart; }), /depends_on rab-api needs restart: true/);
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-api'].stop_grace_period = '35s'; }), /rab-api: stop_grace_period below 40s/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].environment.HOME = '/tmp/crewflow-jobs'; }), /HOME must be \/nonexistent/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].environment.NODE_OPTIONS = '--inspect'; }), /NODE_OPTIONS/);
 });

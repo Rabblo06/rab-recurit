@@ -78,7 +78,7 @@ const INIT_SQL = 'postgres-init/owner-login/01-crewflow-owner.sql';
 const OWNER_LOGIN = 'crewflow_owner';
 const MIN_FRESH_INSTALL_START_PERIOD_S = 600;
 const MIN_WORKER_STOP_GRACE_S = 45;
-const MIN_API_STOP_GRACE_S = 30;
+const MIN_API_STOP_GRACE_S = 40; // owner decision 2026-11-11 (deploy exactly like Twenty)
 
 // Synthetic markers the check plants (not credentials).
 const SENTINEL_OWNER_PW = 'SENTINEL-OWNER-LOGIN-PW-5b8e31'; // gitleaks:allow
@@ -420,6 +420,9 @@ function checkModel(model, combo) {
   if (!wTest.some((t) => t.endsWith('worker-bundle-health.cjs'))) p('rab-worker: health check is not the per-instance heartbeat check');
   if (!wTest.includes('CREWFLOW_PROVISIONER_ENABLED=false')) p('rab-worker: health check is not jobs-only (CREWFLOW_PROVISIONER_ENABLED=false on the check command)');
   if (worker.depends_on?.['rab-api']?.condition !== 'service_healthy') p('rab-worker: does not wait for a healthy rab-api (the schema must be current first)');
+  // Owner decision 2026-11-11: Compose stops the old Worker BEFORE it replaces rab-api, so an old Worker never runs beside a
+  // new API (`docker compose pull && docker compose up -d` updates both together).
+  if (worker.depends_on?.['rab-api']?.restart !== true) p('rab-worker: depends_on rab-api needs restart: true (an old Worker must never run beside a new API)');
   if (worker.depends_on?.['rab-redis']?.condition !== 'service_healthy') p('rab-worker: does not wait for a healthy rab-redis');
   if (!(durationSeconds(worker.stop_grace_period) >= MIN_WORKER_STOP_GRACE_S)) p(`rab-worker: stop_grace_period below ${MIN_WORKER_STOP_GRACE_S}s`);
 
@@ -507,10 +510,16 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (key !== 'CREWFLOW_SECRETS_DIR' && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
       if (/:\/\/[^/\s]*@/.test(value)) problems.push(`${key}: a URL with credentials in the interpolation file`);
       if (/_IMAGE$/.test(key) && !template && !DIGEST_REF.test(value)) problems.push(`${key}: not pinned by digest (repository@sha256:<64 hex>)`);
+      // Owner decision 2026-11-11: ONE image variable, named like Twenty's TAG, that accepts ONLY a digest (a tag can be moved
+      // on the registry; a digest cannot). A plain tag is refused here and by the `@` form in the compose files.
+      if (key === 'CREWFLOW_IMAGE_TAG' && !template && !/^sha256:[0-9a-f]{64}$/.test(value)) problems.push(`${key}: not a sha256:<64 hex> digest (a plain tag is refused; use the release's index digest)`);
       if (/_IMAGE_DIGEST$/.test(key) && !template && !/^sha256:[0-9a-f]{64}$/.test(value)) problems.push(`${key}: not a sha256:<64 hex> digest`);
-      // O2 (one image, one tag): the per-role image variables are retired. docker-compose.image.yml no longer reads them, so
-      // one left in compose.env would be silently ignored while CREWFLOW_IMAGE_DIGEST decides what runs.
-      if (/^CREWFLOW_(API|WORKER)_IMAGE_(DIGEST|REPOSITORY)$/.test(key)) problems.push(`${key}: retired (O2: one image); set CREWFLOW_IMAGE_${key.endsWith('DIGEST') ? 'DIGEST' : 'REPOSITORY'} instead`);
+      // The previous name of the one variable: the compose files no longer read it, so one left in compose.env would be
+      // silently ignored while CREWFLOW_IMAGE_TAG decides what runs.
+      if (key === 'CREWFLOW_IMAGE_DIGEST') problems.push(`${key}: renamed (2026-11-11); set CREWFLOW_IMAGE_TAG=<the same sha256 digest> instead`);
+      // O2 (one image, one variable): the per-role image variables are retired, and so is any per-role TAG variable — there is
+      // no API-only or Worker-only deploy path.
+      if (/^CREWFLOW_(API|WORKER|OPS)_IMAGE_(DIGEST|REPOSITORY|TAG)$/.test(key)) problems.push(`${key}: retired (O2: one image); set CREWFLOW_IMAGE_${key.endsWith('REPOSITORY') ? 'REPOSITORY' : 'TAG'} instead`);
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
@@ -585,7 +594,7 @@ function renderModels(combos = COMBOS, extraComposeEnv = []) {
     const fwd = (p) => p.split(path.sep).join('/');
     const composeEnv = path.join(tmp, 'compose.env');
     fs.writeFileSync(composeEnv, [
-      `CREWFLOW_IMAGE_DIGEST=sha256:${'0'.repeat(64)}`,
+      `CREWFLOW_IMAGE_TAG=sha256:${'0'.repeat(64)}`,
       `CREWFLOW_REDIS_IMAGE=redis@sha256:${'2'.repeat(64)}`,
       `CREWFLOW_POSTGRES_IMAGE=postgres@sha256:${'3'.repeat(64)}`,
       `CREWFLOW_SECRETS_DIR=${fwd(secrets)}`,

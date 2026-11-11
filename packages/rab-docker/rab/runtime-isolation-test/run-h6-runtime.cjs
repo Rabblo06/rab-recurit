@@ -74,6 +74,9 @@ const ENV = {
   H6_MIGRATION_URL: MIGRATION_URL,
   H6_BOOTSTRAP_CREWFLOW: SECRETS.H6_CREWFLOW_PASSWORD,
   H6_BOOTSTRAP_APP: SECRETS.H6_APP_PASSWORD,
+  // The production file pulls <repo>@${CREWFLOW_IMAGE_TAG} since 2026-11-11 (it never builds). The override replaces the
+  // image with H6_APP_IMAGE / H6_WORKER_IMAGE, but Compose interpolates the base first: a placeholder digest lets it render.
+  CREWFLOW_IMAGE_TAG: `sha256:${'0'.repeat(64)}`,
   MSYS_NO_PATHCONV: '1',
 };
 const redact = (s) => Object.values(SECRETS).reduce((acc, v) => acc.split(v).join('<redacted>'), String(s ?? ''));
