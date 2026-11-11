@@ -318,6 +318,16 @@ login. Set it explicitly in `runtime.env`; it is never committed in a compose fi
 
    The release is rollback-safe only if every pending migration only **adds** (tables, nullable or defaulted columns, indexes, functions, policies) and drops, renames, retypes or narrows nothing the previous image uses. Otherwise rollback is a restore (3.6b). Get the owner's go-ahead.
 
+**3.2a Supported upgrade window (Phase X U-1).** The API's migrate step upgrades an existing database only when its ledger
+is at or past a supported release: R254 (rab/v0.4.0, cd7c7e32, 4c38aa1a) or R256 (0e0a6edd, main). A partial upgrade (a
+failed or interrupted earlier start) resumes. Anything older or unrecognised is refused with exit 65
+(`UnsupportedUpgradeStartError`, "Upgrades are supported only from R254, R256 or later"), nothing is applied, and the API
+stays down (restart loop) until you roll back the image: upgrade such a database with a release of the floor first, or,
+for a separated-layout database, follow OWNER-LOGIN-RECOVERY.md (transition-from-separated.sql). There is no override.
+The old manual pre-step "update the N1 list before upgrading an existing database" is GONE for owner-login deployments.
+After an upgrade that applied migrations the API bumps the entity-cache epochs once (log: "entity-cache epoch bumped"); a
+Redis problem there is only a WARNING.
+
 **3.3 BACK UP FIRST: MANDATORY before every upgrade, before 3.4.** The API applies on start, so the backup must exist **before** the new image starts. The app login cannot take a logical backup (FORCE-RLS tables dump empty), so the cluster superuser or the provider takes it.
 - **Managed provider:**
   - take a provider snapshot or branch, OR
