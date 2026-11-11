@@ -1,0 +1,96 @@
+name: upgrade-with-data
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit to test as NEW (default: the dispatched ref)'
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-with-data-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['16', '18']
+    env:
+      # R254 (rab/v0.4.0 = cd7c7e32 = 4c38aa1a migration set): the published cd7c7e32 image.
+      PREV_IMAGE: docker.io/adhin007/adolphus@sha256:075b536c462fa16b80421d0bba0d12c3409b4aa6e321051758d1d649ed40281b
+      # RED CONTROL (review note 2): the published Phase D image 0e0a6edd, which still has N1 on the owner-login path; it
+      # must REFUSE the seeded R254 database (65), proving the suite can fail. Keep it pinned to a pre-U-1a image.
+      CONTROL_IMAGE: docker.io/adhin007/adolphus@sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7
+      DOT_PROJECT_PREFIX: dou
+      REGISTRY_IMAGE: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+      PG16_IMAGE: postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
+      PG18_IMAGE: postgres@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+      REDIS_IMAGE: redis@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+      REPO: 127.0.0.1:5055/adolphus
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Local registry (127.0.0.1 only, tmpfs)
+        run: docker run -d --name deploy-order-registry -p 127.0.0.1:5055:5000 --tmpfs /var/lib/registry "$REGISTRY_IMAGE"
+      - name: Build NEW from this commit (local only, never pushed to a public registry)
+        run: docker build -f packages/rab-docker/rab/Dockerfile -t dou-new .
+      - name: Push PREV and NEW to the local registry, build the probes FROM NEW's digest, push them; export the digests
+        run: |
+          set -euo pipefail
+          docker pull "$PREV_IMAGE"
+          docker pull "$CONTROL_IMAGE"
+          # The digest is read back from the local registry itself: a re-pushed image can get a different manifest digest
+          # than its Docker Hub one (seen locally: cd7c7e32 is sha256:075b536c… on Hub, sha256:562f0039… after the re-push).
+          push() {
+            docker tag "$1" "$REPO:$2" >/dev/null && docker push -q "$REPO:$2" >/dev/null
+            curl -fsSI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "http://${REPO%%/*}/v2/${REPO#*/}/manifests/$2" | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p'
+          }
+          prev="$(push "$PREV_IMAGE" prev)"
+          control="$(push "$CONTROL_IMAGE" control)"
+          new="$(push dou-new new)"
+          # build file generated on stdin with FROM pinned by digest (no unpinned Dockerfile is tracked; image gate)
+          node packages/rab-docker/deploy-order-tests/probe/build-probe-images.cjs "$REPO@$new" dou:probe
+          {
+            echo "DOT_PREV_DIGEST=$prev"
+            echo "DOT_CONTROL_DIGEST=$control"
+            echo "DOT_NEW_DIGEST=$new"
+            echo "DOT_PROBE_FAIL_DIGEST=$(push dou:probe-DotProbeFail probe-fail)"
+            echo "DOT_PROBE_PARTIAL_DIGEST=$(push dou:probe-DotProbePartial probe-partial)"
+          } >> "$GITHUB_ENV"
+      - name: Upgrade-with-data cases U1-U7 on PostgreSQL ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          pg_var="PG${{ matrix.pg }}_IMAGE"
+          DOT_REPOSITORY="$REPO" DOT_PG_IMAGE="${!pg_var}" DOT_REDIS_IMAGE="$REDIS_IMAGE" DOT_REGISTRY_CONTAINER=deploy-order-registry \
+            node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs "${{ matrix.pg }}" "$RUNNER_TEMP/dou-pg${{ matrix.pg }}"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/dou-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: upgrade-with-data-pg${{ matrix.pg }}
+          # Secrets live under secrets-*/ and are NOT uploaded; evidence is redacted by the driver.
+          path: |
+            ${{ runner.temp }}/dou-pg${{ matrix.pg }}/RESULTS.json
+            ${{ runner.temp }}/dou-pg${{ matrix.pg }}/SUMMARY.md
+            ${{ runner.temp }}/dou-pg${{ matrix.pg }}/run.log
+            ${{ runner.temp }}/dou-pg${{ matrix.pg }}/evidence/
+          if-no-files-found: warn
+      - name: Cleanup (this job's own projects and registry only)
+        if: always()
+        run: |
+          for c in u1 u2 u3 u4 u6 u7; do docker compose -p "$DOT_PROJECT_PREFIX-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans >/dev/null 2>&1 || true; done
+          docker rm -f deploy-order-registry >/dev/null 2>&1 || true
