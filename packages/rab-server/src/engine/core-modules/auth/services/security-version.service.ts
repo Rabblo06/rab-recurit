@@ -76,6 +76,14 @@ export class SecurityVersionService {
    *
    * `platformAdminVersion` is `0` when the user has never been granted platform-admin at all (no
    * row exists) — distinct from a real version number, same reasoning as `rolePermissionVersion`.
+   *
+   * `permissionOverrideFingerprint` (Phase X SC-03): `core.user_permission_override` has no version column, no timestamp
+   * and no service writer, yet its rows decide effective permissions (an override beats every role). A version can only
+   * be as good as the writer that remembers to bump it, so this term is derived from the rows THEMSELVES: their count plus
+   * an md5 over `(permission_id, effect)` in a fixed order, read in this same statement (the AI access fingerprint's
+   * override term, `ai-access.service.ts`). Any INSERT, UPDATE of `effect` or DELETE by any path (a future service, operator
+   * SQL, a migration) changes it, with nothing to remember. Its format is `<count>-<md5 | 0>` (no `.` or `:`, so it
+   * can sit in a cache key). Read under RLS like every other term.
    */
   async readVector(
     manager: EntityManager,
@@ -89,6 +97,7 @@ export class SecurityVersionService {
         workspace_membership_version: string | null;
         platform_admin_version: string;
         organisation_version: string | null;
+        permission_override_fingerprint: string | null;
       }>
     >(
       `SELECT
@@ -100,7 +109,9 @@ export class SecurityVersionService {
          ) AS role_permission_version,
          (SELECT security_version FROM core.workspace_membership WHERE user_id = $2 AND workspace_id = $4) AS workspace_membership_version,
          COALESCE((SELECT security_version FROM core.platform_admin WHERE user_id = $2), 0) AS platform_admin_version,
-         (SELECT security_version FROM core.organisation WHERE id = $3) AS organisation_version`,
+         (SELECT security_version FROM core.organisation WHERE id = $3) AS organisation_version,
+         (SELECT count(*)::text || '-' || coalesce(md5(string_agg(o.permission_id::text || o.effect, ',' ORDER BY o.permission_id)), '0')
+            FROM core.user_permission_override o WHERE o.user_id = $2) AS permission_override_fingerprint`,
       [params.sessionId, params.userId, params.organisationId, params.workspaceId],
     );
     return {
@@ -113,6 +124,9 @@ export class SecurityVersionService {
           : null,
       platformAdminVersion: Number(row?.platform_admin_version ?? 0),
       organisationVersion: row?.organisation_version !== null && row?.organisation_version !== undefined ? Number(row.organisation_version) : null,
+      // An aggregate always returns one row, so a missing value only means "no row came back at all": fail closed to a
+      // value no real fingerprint has ('x'), which can never equal a previously cached one.
+      permissionOverrideFingerprint: row?.permission_override_fingerprint ?? 'x',
     };
   }
 }
@@ -129,4 +143,6 @@ export interface SecurityVersionVector {
   workspaceMembershipVersion: number | null;
   platformAdminVersion: number;
   organisationVersion: number | null;
+  /** SC-03: `<count>-<md5 of (permission_id, effect) | 0>` over the user's `user_permission_override` rows; 'x' = unreadable. */
+  permissionOverrideFingerprint: string;
 }

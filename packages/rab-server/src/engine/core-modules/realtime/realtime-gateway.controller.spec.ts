@@ -3,7 +3,7 @@ import { HttpException, HttpStatus, MessageEvent } from '@nestjs/common';
 import { RealtimeConnectionRegistryService } from './realtime-connection-registry.service';
 import { REALTIME_CAP_RETRY_AFTER_SECONDS, RealtimeGatewayController, realtimeKeepaliveMs } from './realtime-gateway.controller';
 
-const VECTOR = { sessionVersion: 1, userVersion: 1, rolePermissionVersion: 1, workspaceMembershipVersion: 1, platformAdminVersion: 1, organisationVersion: 1 };
+const VECTOR = { sessionVersion: 1, userVersion: 1, rolePermissionVersion: 1, workspaceMembershipVersion: 1, platformAdminVersion: 1, organisationVersion: 1, permissionOverrideFingerprint: '0-0' };
 
 function controllerWith(env: Record<string, unknown>, registry: Partial<RealtimeConnectionRegistryService> = new RealtimeConnectionRegistryService()) {
   const tenantContext = { runInTenantContext: jest.fn(async (_ctx: unknown, fn: (m: unknown) => unknown) => fn({})) };

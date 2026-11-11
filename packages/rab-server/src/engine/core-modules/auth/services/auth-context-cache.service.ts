@@ -102,6 +102,8 @@ export class AuthContextCacheService {
       v.workspaceMembershipVersion ?? 'x',
       v.platformAdminVersion,
       v.organisationVersion ?? 'x',
+      // SC-03: overrides have no version column; their content fingerprint makes any override change a new key.
+      v.permissionOverrideFingerprint,
     ].join('.');
     return `crewflow:${env}:authctx:${params.organisationId}:${sidHash}:${params.workspaceId ?? 'none'}:${versionPart}`;
   }
