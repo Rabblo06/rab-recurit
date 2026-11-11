@@ -10,8 +10,10 @@
 # server is healthy. E2E_POSTGRES_IMAGE picks the PostgreSQL major (default postgres:16-alpine; postgres:18-alpine works).
 #
 # `idle <label> <seconds>` is a measurement window on a running stack (no HTTP from this script): it resets
-# pg_stat_statements, waits, and writes $E2E_OUT/idle-<label>/ (pgss.tsv every role, summary.txt with the crewflow_owner
-# statement counts per minute and their families from ../cost/lib/sql-families.js). Idle crewflow_owner SQL is the
+# pg_stat_statements, waits, and writes $E2E_OUT/idle-<label>/ (pgss.tsv every role, summary.txt with the application's
+# statement counts per minute and their families from ../cost/lib/sql-families.js). crewflow_owner is the only application
+# login, so every non-superuser row came from its sessions (statements run after SET ROLE, such as the in-process
+# provisioner's as `crewflow`, are recorded under that role: topLevelByRole shows the split). Idle application SQL is the
 # Worker's scans plus the server's own health-check ping (one `SELECT 1` per Docker health probe); the family table names
 # both, so the Worker-scan share is read off directly.
 #
@@ -84,9 +86,9 @@ idle() {
   sleep 3
   q -c 'select pg_stat_statements_reset()' >/dev/null
   date -u +%s >"$R/t-start"; sleep "$secs"; date -u +%s >"$R/t-end"
-  # Every role (the harness's own `rab` rows included, so nothing is hidden); the summary counts crewflow_owner only.
+  # Every role (the harness's own `rab` rows included, so nothing is hidden); the summary leaves out only `rab`.
   q -F $'\t' -c "select r.rolname, s.toplevel, s.calls, s.rows, round(s.total_exec_time::numeric, 3), regexp_replace(left(s.query, 400), E'[\\n\\r\\t ]+', ' ', 'g') from pg_stat_statements s join pg_roles r on r.oid = s.userid join pg_database d on d.oid = s.dbid where d.datname = 'rab_e2e' order by s.calls desc" >"$R/pgss.tsv"
-  node "$ROOT/packages/rab-e2e-testing/cost/lib/sql-families.js" "$R/pgss.tsv" "$(( $(cat "$R/t-end") - $(cat "$R/t-start") ))" crewflow_owner | tee "$R/summary.txt"
+  node "$ROOT/packages/rab-e2e-testing/cost/lib/sql-families.js" "$R/pgss.tsv" "$(( $(cat "$R/t-end") - $(cat "$R/t-start") ))" | tee "$R/summary.txt"
 }
 
 console() {

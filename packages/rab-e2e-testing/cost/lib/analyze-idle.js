@@ -75,8 +75,8 @@ const out = {
     allIncludingNestedPerMin: perMin(sum(app, 'calls')),
     topLevelExecMsPerMin: perMin(sum(runtime, 'ms')),
     top15TopLevel: top(runtime),
-    // Per Worker scan (and framing, and the API's health ping) for the one login; see lib/sql-families.js.
-    families: familySummary(app, secs, 'crewflow_owner'),
+    // Per Worker scan (and framing, and the API's health ping); see lib/sql-families.js.
+    families: familySummary(app, secs),
     top15All: top(app),
   },
   cpuFromCgroupPctOfOneCore: cpuPct,

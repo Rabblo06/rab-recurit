@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { family, summarize } = require('../../cost/lib/sql-families.js') as {
   family: (q: string) => string;
-  summarize: (rows: Row[], seconds: number, role?: string) => any;
+  summarize: (rows: Row[], seconds: number, harnessRoles?: string[]) => any;
 };
 
 interface Row {
@@ -36,7 +36,10 @@ const ROWS: Row[] = [
   { role: 'crewflow_owner', toplevel: true, calls: 20, ms: 1, query: 'SELECT id, organisation_id, workspace_id FROM attendance WHERE workspace_id IS NOT NULL' },
   { role: 'crewflow_owner', toplevel: true, calls: 20, ms: 1, query: 'SELECT s.id AS shift_id FROM shift s LEFT JOIN shift_report sr ON sr.shift_id = s.id' },
   { role: 'crewflow_owner', toplevel: true, calls: 4, ms: 9, query: 'SELECT * FROM core.worker_claim_due_work($1, $2, $3)' },
-  { role: 'crewflow_owner', toplevel: true, calls: 48, ms: 1, query: 'SELECT 1' },
+  // The API's health ping, as pg_stat_statements normalises it.
+  { role: 'crewflow_owner', toplevel: true, calls: 48, ms: 1, query: 'SELECT $1' },
+  // The in-process provisioner runs on a crewflow_owner session after SET ROLE: recorded under `crewflow`.
+  { role: 'crewflow', toplevel: true, calls: 24, ms: 1, query: 'SELECT workspace_id FROM core.worker_list_pending_workspace_schemas($1)' },
   { role: 'crewflow_owner', toplevel: true, calls: 2, ms: 1, query: 'SELECT something_new FROM some_new_table' },
   // The harness's own reset/dump: never counted.
   { role: 'rab', toplevel: true, calls: 1, ms: 1, query: 'select pg_stat_statements_reset()' },
@@ -47,6 +50,8 @@ test('each Worker scan, the framing and the API health ping get their own family
   expect(family('SET TRANSACTION READ ONLY')).toBe('framing');
   expect(family('SELECT set_config($6, $1, $7), set_config($8, $2, $9)')).toBe('framing');
   expect(family('SELECT 1')).toBe('api-health-ping');
+  expect(family('SELECT $1')).toBe('api-health-ping');
+  expect(family('SELECT workspace_id FROM core.worker_list_pending_workspace_schemas($1)')).toBe('provisioner');
   expect(family('SELECT id FROM payroll_record WHERE status IN ($1)')).toBe('statement-dispatch');
   expect(family('SELECT id FROM core.email_outbox')).toBe('email-outbox');
   expect(family('SELECT * FROM core.worker_claim_due_work($1, $2, $3)')).toBe('timer-triggers');
@@ -54,10 +59,13 @@ test('each Worker scan, the framing and the API health ping get their own family
   expect(family('SELECT something_new FROM some_new_table')).toBe('other');
 });
 
-test('summary counts crewflow_owner top-level only; nested definer rows and the harness are separate', () => {
+test('summary counts the application top-level rows (SET ROLE included); nested definer rows and the harness are separate', () => {
   const s = summarize(ROWS, 240);
-  const top = ROWS.filter((r) => r.role === 'crewflow_owner').reduce((n, r) => n + r.calls, 0);
+  const top = ROWS.filter((r) => r.toplevel && r.role !== 'rab').reduce((n, r) => n + r.calls, 0);
   expect(s.topLevelCalls).toBe(top);
+  expect(s.topLevelByRole.crewflow.calls).toBe(24);
+  expect(s.topLevelByRole.rab).toBeUndefined();
+  expect(s.families.provisioner.calls).toBe(24);
   expect(s.topLevelPerMin).toBe(+(top / 4).toFixed(1));
   expect(s.nestedDefinerPerMin).toBe(34); // 136 / 4 min, rab_secure_owner only (the harness's `rab` row excluded)
   expect(s.apiHealthPingPerMin).toBe(12);
@@ -65,12 +73,10 @@ test('summary counts crewflow_owner top-level only; nested definer rows and the 
   expect(s.families['statement-dispatch'].calls).toBe(960);
   expect(s.families.framing.calls).toBe(3197 + 1656 + 1656 + 1520 + 1496);
   // A statement no rule knows is listed, never folded silently into a scan.
-  expect(s.unclassified).toEqual([{ calls: 2, query: 'SELECT something_new FROM some_new_table' }]);
+  expect(s.unclassified).toEqual([{ role: 'crewflow_owner', calls: 2, query: 'SELECT something_new FROM some_new_table' }]);
 });
 
-test('another role is reported on its own (a pre-owner-login result directory)', () => {
-  const s = summarize(ROWS.map((r) => (r.role === 'crewflow_owner' ? { ...r, role: 'crewflow_app' } : r)), 240, 'crewflow_app');
-  expect(s.role).toBe('crewflow_app');
-  expect(s.families['statement-dispatch'].calls).toBe(960);
-  expect(summarize(ROWS, 240, 'crewflow_app').topLevelCalls).toBe(0);
+test('the harness roles are configurable (a cluster whose superuser has another name)', () => {
+  const rows = [...ROWS, { role: 'ci_bootstrap', toplevel: true, calls: 7, ms: 1, query: 'select pg_stat_statements_reset()' }];
+  expect(summarize(rows, 240, ['rab', 'ci_bootstrap']).topLevelCalls).toBe(summarize(ROWS, 240).topLevelCalls);
 });

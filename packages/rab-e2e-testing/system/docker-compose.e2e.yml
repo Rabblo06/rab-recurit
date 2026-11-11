@@ -86,7 +86,7 @@ services:
       - max_connections=200
       - -c
       - password_encryption=scram-sha-256
-      # Statement counts for measurement windows (run-system.sh `idle`), filtered on crewflow_owner, the one app login.
+      # Statement counts for measurement windows (run-system.sh `idle`): the rows of crewflow_owner sessions, the one app login.
       - -c
       - shared_preload_libraries=pg_stat_statements
       - -c
