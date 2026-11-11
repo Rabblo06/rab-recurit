@@ -36,7 +36,9 @@
  * packages/rab-docker/docs/release/OWNER-LOGIN-RECOVERY.md.
  *
  * Adding a release: append a manifest whose names are the previous release's names plus the new ones (never edit an
- * existing entry), add its id to SUPPORTED_UPGRADE_FROM only by owner decision, and keep the spec green.
+ * existing entry) AND add its id to SUPPORTED_UPGRADE_FROM in the same change: every release at or after the oldest
+ * supported one must be listed, or every database of that release is refused (exit 65). The spec fails the day one is
+ * forgotten. Only MOVING THE FLOOR (dropping the oldest supported release) is an owner decision.
  *
  * Pure; importing this module has no side effects.
  */
@@ -168,8 +170,27 @@ export const RELEASE_MANIFESTS: readonly ReleaseManifest[] = Object.freeze([
   },
 ]);
 
-/** Owner decision P1-2 (2026-11-11): upgrades are supported from R254 and later. */
+/**
+ * Owner decision P1-2 (2026-11-11): upgrades are supported from R254 and later. The first entry is the floor (moved only by
+ * owner decision); every newer manifest MUST also be listed here (release-floor.spec.ts enforces it).
+ */
 export const SUPPORTED_UPGRADE_FROM: readonly string[] = Object.freeze(['R254', 'R256']);
+
+/**
+ * Pure: the problems with a supported list (empty = consistent). Its first entry is the floor; every manifest from the
+ * floor on must be listed, in manifest order, and nothing else. Used by the spec so a newer manifest added without its
+ * supported entry fails CI instead of refusing that release's databases in production.
+ */
+export function supportedListProblems(manifests: readonly ReleaseManifest[], supported: readonly string[]): string[] {
+  const floor = manifests.findIndex((m) => m.id === supported[0]);
+  if (floor < 0) return [`the floor ${supported[0] ?? '<none>'} is not a recorded release`];
+  const want = manifests.slice(floor).map((m) => m.id);
+  const missing = want.filter((id) => !supported.includes(id));
+  const extra = supported.filter((id) => !want.includes(id));
+  const problems = [...missing.map((id) => `${id} is newer than the floor but not supported`), ...extra.map((id) => `${id} is not a release at or after the floor`)];
+  if (!problems.length && want.join(',') !== supported.join(',')) problems.push('not in manifest order');
+  return problems;
+}
 
 /** Targets the floor does not restrict: the same set N1 never restricted. Anything else (an unknown target too) is checked. */
 const UNRESTRICTED_TARGETS: ReadonlySet<DbTarget> = new Set<DbTarget>(['local', 'test']);

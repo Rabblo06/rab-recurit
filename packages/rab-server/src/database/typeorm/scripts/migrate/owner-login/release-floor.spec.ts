@@ -17,6 +17,7 @@ import {
   ReleaseManifest,
   RELEASE_MANIFESTS,
   SUPPORTED_UPGRADE_FROM,
+  supportedListProblems,
   UnsupportedUpgradeStartError,
 } from './release-floor';
 import { NON_TRANSACTIONAL_MIGRATIONS } from './upgrade-failure-policy';
@@ -51,6 +52,18 @@ describe('the frozen release manifests', () => {
     // Today (Phase X U-1) main has exactly R256. A later migration keeps this prefix test green; it does not need a manifest
     // until it is published in a release.
     expect(RELEASE_MANIFESTS[RELEASE_MANIFESTS.length - 1]!.names.length).toBeLessThanOrEqual(CODE.length);
+  });
+
+  it('every manifest at or after the oldest supported release is supported (a newer manifest added without its entry would refuse its databases)', () => {
+    // Review note (PR #93): SUPPORTED_UPGRADE_FROM is an exact list. The floor (its oldest entry) moves only by owner decision;
+    // everything newer than it must be listed, in manifest order.
+    expect(supportedListProblems(RELEASE_MANIFESTS, SUPPORTED_UPGRADE_FROM)).toEqual([]);
+    // The check itself can fail: a newer R258 manifest without its supported entry is reported.
+    const r258: ReleaseManifest = { ...byId('R256'), id: 'R258' };
+    expect(supportedListProblems([...RELEASE_MANIFESTS, r258], SUPPORTED_UPGRADE_FROM)).toEqual(['R258 is newer than the floor but not supported']);
+    expect(supportedListProblems([...RELEASE_MANIFESTS, r258], [...SUPPORTED_UPGRADE_FROM, 'R258'])).toEqual([]);
+    expect(supportedListProblems(RELEASE_MANIFESTS, ['R256'])).toEqual([]); // moving the floor up (owner decision) stays consistent
+    expect(supportedListProblems(RELEASE_MANIFESTS, ['R999'])).toEqual(['the floor R999 is not a recorded release']);
   });
 
   it('the supported upgrade window is R254 and later (owner decision P1-2) and names only recorded releases', () => {
