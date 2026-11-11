@@ -6398,3 +6398,32 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   F5 token mode, N1 on the legacy and CLI paths.
 - **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
   U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).
+
+## SC-05 — `/auth/capabilities` answers from the request's resolved permission set (branch phase-x/c-fix-2-capabilities, 2026-11-11, PR #99)
+
+Phase X Stage 0 finding SC-05 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env or
+cache change.
+
+- **Asset:** availability of the API connection pool (9 connections); correctness of permission display hints.
+  **Actor:** any signed-in client (the VM app refresh, `usePayroll`, `VenueOfferPipeline`) and an Admin Inspect session.
+- **Before:** 18 concurrent `userHasPermission` calls, each its own tenant transaction: 19 transactions and 115 SQL
+  statements per call (measured), enough for one client to occupy the whole pool.
+- **Control:** `PermissionsService.displayHints` answers from `request.authContext.security.effectivePermissions`, the
+  set every `PermissionGuard` of the same request authorises from (same REPEATABLE READ snapshot, built once per request,
+  never stored across requests). It is used ONLY when the snapshot describes exactly this identity: same user,
+  organisation and workspace, and no Admin Inspect. Otherwise (Admin Inspect, where `security` is still the ADMIN's
+  snapshot, or any mismatch, or no snapshot) the TARGET's set is read live in ONE tenant transaction with ONE query
+  (`effectivePermissionsTx`: role grants visible under RLS, minus `revoke` overrides, plus `grant` overrides, the same
+  precedence as `userHasPermissionTx`). It never falls back to another identity's set and never defaults to `true`; a
+  failed read errors the request.
+- **Not an authorisation decision:** these are display hints; every action keeps its own route guard and service-layer
+  re-check. A missing permission is `false`, never a 403/404 (the endpoint has no route permission). Unauthenticated: 401.
+  A non-admin sending someone else's inspect header gets only their own hints (the guard ignores the header).
+- **Freshness:** unchanged: a grant or revoke is visible on the next request (proven with an override revoke, the route
+  guard agreeing).
+- **Tests:** `sc05-capabilities.integration.spec.ts` (response identical to one `userHasPermission` per flag for role,
+  few-grant, override-grant, override-revoke, venue-manager, platform-admin and inspected identities;
+  `effectivePermissionsTx` ≡ per-flag `userHasPermissionTx` for all 46 flags; 1 transaction / 0 tenant transactions;
+  inspect: one effective-set query for the target; next-request revoke; 401; inspect-header disclosure);
+  `permissions.service.spec.ts` (routing: snapshot of this identity → 0 transactions; inspect / mismatched user,
+  organisation or workspace / no snapshot → one live read; a failed read propagates).
