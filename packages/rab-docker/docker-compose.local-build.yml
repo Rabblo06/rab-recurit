@@ -101,6 +101,9 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, J1a), identical on rab-api and rab-worker: 30 s (code
+      # default 5 s): see docker-compose.image.yml.
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
     depends_on:
       rab-redis:
         condition: service_healthy
@@ -175,6 +178,8 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, J1a): identical to rab-api.
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
       HOME: /nonexistent
       TMPDIR: /tmp/crewflow-jobs
       XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config

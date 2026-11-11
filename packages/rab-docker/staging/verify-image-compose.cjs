@@ -55,7 +55,7 @@ const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_EN
   'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
   'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS',
   'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
-  'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'WORKER_SHIFT_SCAN_MODE'];
+  'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS', 'WORKER_SHIFT_SCAN_MODE', 'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS'];
 /**
  * Notification delivery (owner decision 2026-11-06): committed on rab-api AND rab-worker with exactly these values, in both
  * compose files (PINNED_ENV alone would accept the two files drifting together). The API registers the email scheduler with
@@ -76,6 +76,12 @@ const PHASE_D_SWITCHES = Object.freeze({
   WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300',
 });
 const PHASE_D_UNCHANGED = Object.freeze({ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
+/**
+ * Pay-statement dispatch sweep (owner decision 2026-11-11, Phase X J1a): 30 s, committed on rab-api AND rab-worker with
+ * exactly this value in both compose files, for the same reason as the email sweep. Mirrors STATEMENT_DISPATCH in
+ * scripts/compose-owner-login.cjs (a test asserts the two agree).
+ */
+const STATEMENT_DISPATCH = Object.freeze({ WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: '30' });
 /**
  * Phase X J2 (S0-J SJ-03): once PUSH_ENABLED / REALTIME_ENABLED is on, the sweep rule applies. Push: 30 s committed on
  * rab-api AND rab-worker (owner rule 2026-11-06). Realtime: no owner value yet, so only "identical on both" (`value: null`).
@@ -288,6 +294,9 @@ function checkVariant(variant, production, variantFiles = variant) {
       const env = envOf(services[name]);
       if (key in env && String(env[key]) !== keep) fail(`${name}: ${key} is committed as "${env[key]}"; the owner decision 2026-11-06 keeps ${keep} (leave it unset)`);
     }
+    for (const [key, want] of Object.entries(STATEMENT_DISPATCH)) {
+      if (String(envOf(services[name])[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" (owner decision 2026-11-11, pay-statement sweep)`);
+    }
     if ('WORKER_SCHEDULER' in envOf(services[name])) fail(`${name}: commits WORKER_SCHEDULER (production runs bullmq; interval is refused)`);
     if (name === 'rab-api') for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']))) fail(pr);
     if ('CREWFLOW_UPGRADE_FAILURE_POLICY' in envOf(services[name])) fail(`${name}: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY (O3 C3)`);
@@ -400,6 +409,9 @@ function checkDeployment(merged, production, envFileKeys = {}) {
     }
     for (const [key, want] of Object.entries(PHASE_D_SWITCHES)) {
       if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-06, Phase D switches)`);
+    }
+    for (const [key, want] of Object.entries(STATEMENT_DISPATCH)) {
+      if (String(envOf(a)[key] ?? '') !== want) fail(`${name}: ${key} is not "${want}" in the deployed model (owner decision 2026-11-11, pay-statement sweep)`);
     }
     if (envOf(a).CREWFLOW_RUNTIME_ISOLATION !== 'enforce') fail(`${name}: CREWFLOW_RUNTIME_ISOLATION is not "enforce" in the deployed model`);
     const deps = (s) => Object.fromEntries(Object.entries(s.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
@@ -605,4 +617,4 @@ if (require.main === module) {
   console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

@@ -18,10 +18,16 @@
  *     for the length of a statement (M0-C, VERIFIED: up to 900 s otherwise).
  *   - after the chain: auto-bind (fresh install only), then deploy-post-checks on EVERY start (C-2), with an AHEAD ledger's
  *     provision-function-ahead / workspace-ahead findings as warnings (C-1: the image rollback stays healthy).
+ *   - Phase X U-1 (SU-04, owner decision P1-5 2026-11-11): after a run that APPLIED at least one migration and whose
+ *     post-checks passed, with the lock still held, the allow-listed `entitycache` epoch bump (cache-flush.ts /
+ *     entity-cache-flush.ts: one INCR per cached entity, deletes nothing, touches no other key family: never bull:*,
+ *     throttler keys or rab:* heartbeats). WARNING ONLY: a missing REDIS_URL, an unreachable Redis or a failed bump is
+ *     logged and the start continues (cached entries then expire on their own TTL, at most 300 s).
  *   - on failure: upgrade-failure-policy.ts decides, on a fresh session of the same login, whether the API may start anyway.
  *     Owner decision C3 (2026-11-05, "exactly like Twenty"): CREWFLOW_UPGRADE_FAILURE=continue (the default) turns a failed
  *     UPGRADE MIGRATION into an ERROR line naming it and exit 70 (deployment identity still checked); configuration (64),
- *     approval / N1 (65), identity (67), post-check (68) and lock timeout (69) stay fail-closed, and a first-install
+ *     approval / N1 / the upgrade floor (65), identity (67), post-check (68) and lock timeout (69) stay fail-closed, and a
+ *     first-install
  *     failure never serves. refuse keeps the failure code.
  *
  * One machine-readable line on stdout at the end, never a secret:
@@ -58,6 +64,7 @@ import { assertMigrationApproval, readMigrationApproval } from '../migration-app
 import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './fresh-install';
 import { assessUpgradeFailure, UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
+import { runCacheFlush } from '../../cache-flush';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
 
@@ -145,9 +152,10 @@ export function outcomeOf(error: unknown): StartupOutcome {
   ) {
     return 'identity';
   }
-  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError'].includes(name)) return 'behind';
+  if (name === 'MigrationSessionDatabaseError') return 'identity';
+  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError'].includes(name)) return 'behind';
   if (error instanceof Error && /needs the per-release approval|not a proven fresh install|APPROVAL_MODE=token needs/.test(error.message)) return 'behind';
-  if (name === 'PostCheckFailure') return 'postCheck';
+  if (['PostCheckFailure', 'MigrationsStillPendingError'].includes(name)) return 'postCheck';
   return 'migrationFailed';
 }
 
@@ -227,6 +235,50 @@ export interface MigrateOnStartDeps {
   postureCheck?: (query: Query) => Promise<string[]>;
   /** Receives the migration session pid (the main entry's SIGTERM self-cancel). */
   onSession?: (pid: number) => void;
+  /** Test seam: the allow-listed entity-cache epoch bump (default: cache-flush.ts runCacheFlush). */
+  cacheFlush?: (namespace: string, env: Record<string, string | undefined>) => Promise<void>;
+}
+
+/** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
+export const ENTITY_CACHE_BUMP_TIMEOUT_MS = 15_000;
+
+/**
+ * SU-04 (owner decision P1-5): the allow-listed `entitycache` epoch bump after an applying run. Never throws: every failure
+ * is a WARNING and the start continues. Returns what happened (for the log and the specs).
+ */
+export async function bumpEntityCacheAfterUpgrade(input: {
+  applied: readonly string[];
+  env: Record<string, string | undefined>;
+  log: (line: string) => void;
+  flush?: (namespace: string, env: Record<string, string | undefined>) => Promise<void>;
+  timeoutMs?: number;
+}): Promise<'skipped-nothing-applied' | 'skipped-no-redis' | 'bumped' | 'warning'> {
+  if (input.applied.length === 0) return 'skipped-nothing-applied';
+  if (!input.env.REDIS_URL?.trim()) {
+    input.log('WARNING: REDIS_URL is not set: the entity-cache epoch was NOT bumped after the upgrade (cached entries expire within 300 s)');
+    return 'skipped-no-redis';
+  }
+  const flush = input.flush ?? runCacheFlush;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      flush('entitycache', input.env),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(`timed out after ${input.timeoutMs ?? ENTITY_CACHE_BUMP_TIMEOUT_MS} ms`), { name: 'Timeout' })), input.timeoutMs ?? ENTITY_CACHE_BUMP_TIMEOUT_MS);
+      }),
+    ]);
+    input.log(`entity-cache epoch bumped after ${input.applied.length} applied migration(s) (allow-listed namespace entitycache only)`);
+    return 'bumped';
+  } catch (error) {
+    const what = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
+    input.log(
+      `WARNING: the entity-cache epoch bump after the upgrade failed (${what.replace(/postgres(ql)?:\/\/\S+/gi, '<url>').replace(/rediss?:\/\/\S+/gi, '<url>').slice(0, 200)}); ` +
+        'continuing the start (cached entries expire within 300 s)',
+    );
+    return 'warning';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function withLoginClient<T>(env: Record<string, string | undefined>, fn: (query: Query) => Promise<T>): Promise<T> {
@@ -359,6 +411,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
         if (blocking.length) throw new PostCheckFailure(blocking);
         log(`post-checks passed (${done.length} applied)`);
+        await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
       },
     });
     applied = run.applied;
