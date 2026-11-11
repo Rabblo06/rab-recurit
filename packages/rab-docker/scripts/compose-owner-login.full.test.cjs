@@ -169,6 +169,25 @@ test('notification delivery (owner decision 2026-11-06): fast publish on and the
   }
 });
 
+test('pay-statement sweep (owner decision 2026-11-11, J1a): 30 s, identical on both services', { skip }, () => {
+  for (const c of COMBOS) {
+    for (const svc of APP) {
+      assert.equal(fresh(c.name).services[svc].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS, '30', `${c.name} ${svc}`);
+    }
+  }
+  const KEY = 'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS';
+  for (const svc of APP) {
+    // Missing = the 5 s code default on that service.
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment[KEY]; }), new RegExp(`${svc}: ${KEY} is "", expected "30"`));
+    for (const other of ['5', '60', '300']) {
+      assertRefused(problemsAfter(DEF, (s) => { s[svc].environment[KEY] = other; }), new RegExp(`${svc}: ${KEY} is "${other}", expected "30"`));
+    }
+  }
+  // A Worker value that differs from the API's would never be noticed at runtime (the Worker's verify checks presence only).
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].environment[KEY] = '60'; }), new RegExp(`${KEY} differs between rab-api and rab-worker`));
+  assertRefused(problemsAfter(DEF, (s) => { delete s['rab-api'].environment[KEY]; }), new RegExp(`${KEY} differs between rab-api and rab-worker`));
+});
+
 test('Phase D switches (owner decision 2026-11-06): triggers on for all four kinds and the safety sweeps, identical on both services', { skip }, () => {
   for (const c of COMBOS) {
     for (const svc of APP) {

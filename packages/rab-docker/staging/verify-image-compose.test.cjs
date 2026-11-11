@@ -28,7 +28,7 @@ const fresh = () => {
 /** Applies `mutate` to a fresh copy of the rendered models and returns the verifier's problems. */
 const problemsAfter = (mutate) => {
   const m = fresh();
-  mutate(m.variant, m.variantFiles);
+  mutate(m.variant, m.variantFiles, m.production);
   return checkVariant(m.variant, m.production, m.variantFiles);
 };
 const assertRefused = (problems, pattern) => {
@@ -108,6 +108,12 @@ const weakenings = [
   ['the late clock-in sweep removed from the API', (v) => { delete v.services['rab-api'].environment.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS; }, /rab-api: WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS is not "300"|rab-api\.environment\.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS differs/],
   ['the combined shift scan committed', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }, /rab-worker: WORKER_SHIFT_SCAN_MODE is committed as "combined"/],
   ['a slower shift monitor committed', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS = '600'; }, /rab-api: WORKER_SHIFT_MONITOR_INTERVAL_SECONDS is committed as "600"/],
+  // Owner decision 2026-11-11 (J1a): the 30 s pay-statement sweep on both services, in both files.
+  ['the pay-statement sweep removed from the API (5 s code default)', (v) => { delete v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the pay-statement sweep removed from the Worker', (v) => { delete v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the API registers a 5 s pay-statement sweep', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the Worker disagrees with the API on the pay-statement sweep', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '60'; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['both files drift together to 5 s', (v, _f, p) => { for (const m of [v, p]) for (const n of ['rab-api', 'rab-worker']) m.services[n].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
   ['the deprecated upgrade policy committed (O3 C3)', (v) => { v.services['rab-api'].environment.CREWFLOW_UPGRADE_FAILURE_POLICY = 'refuse'; }, /rab-api: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY/],
   ['a provisioner URL on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_PROVISIONER_DATABASE_URL = 'postgresql://crewflow:x@h/rab'; }, /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/],
   ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
@@ -197,6 +203,8 @@ const otherWeakenings = [
   ['an override sets the API email sweep back to 2 s', (v) => { v.services['rab-api'].environment.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS = '2'; }, /rab-api: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the timer triggers off on the Worker', (v) => { v.services['rab-worker'].environment.WORKER_TIMER_TRIGGERS = 'off'; }, /rab-worker: WORKER_TIMER_TRIGGERS is not "on" in the deployed model/],
   ['an override sets the API offer-expiry sweep back to 60 s', (v) => { v.services['rab-api'].environment.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS = '60'; }, /rab-api: WORKER_OFFER_EXPIRY_INTERVAL_SECONDS is not "300" in the deployed model/],
+  ['an override sets the API pay-statement sweep back to 5 s', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
+  ['an override removes the Worker pay-statement sweep', (v) => { delete v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the combined shift scan on', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }, /rab-worker\.environment\.WORKER_SHIFT_SCAN_MODE is overridden in the deployed model/],
   ['an override adds a rab-migrate (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present in the deployed model/],
   ['rab-worker on another image (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-worker: image differs from rab-api's in the deployed model/],
