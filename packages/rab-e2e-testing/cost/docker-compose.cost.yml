@@ -80,9 +80,9 @@ x-scan-env: &scan-env
   WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300'
   WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120'
   WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300'
-  # Production does not set it today (code default 5 s); PR #92 proposes 30. Pass COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
+  # Production sets 30 s (PR #92, merged 2026-11-11). Pass COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
   # to measure another value (both services get it).
-  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: ${COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:-5}
+  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: ${COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:-30}
   # Same switches on both (Phase A acceptance: flags on = api AND worker). Default false/false = code defaults = production
   # compose. Only `measure.sh flags-up` recreates them with both on.
   REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}

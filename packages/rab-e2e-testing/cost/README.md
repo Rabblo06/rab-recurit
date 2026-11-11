@@ -33,8 +33,8 @@ committed, and fixes three gaps in it:
   is on BOTH services (`x-scan-env` in the compose file), with production's values from
   `packages/rab-docker/docker-compose.image.yml`: email sweep 30 s with fast publish, the four timer-trigger kinds on,
   offer expiry 300 s, manager confirmation 120 s, late clock-in 300 s, provisioner 5 s (Worker), API health check every
-  10 s. A key production does not set stays at the code default (shift-statement dispatch 5 s today;
-  `COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` measures another value, e.g. the 30 s of PR #92). The per-phase env file
+  10 s. A key production does not set stays at the code default. Shift-statement dispatch is 30 s, as in
+  production since PR #92 (`COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` measures another value, e.g. 5 for the old cadence). The per-phase env file
   (`COST_WORKER_ENV_FILE`: `--worker-env-file`, `--prov-configs`, the dq6 arms) reaches the API too, and a key compose sets
   on either service is refused in it. `system/lib/production-parity.selftest.ts` fails CI when a harness value drifts from
   production (deliberate differences must be listed there with a reason; none today).
