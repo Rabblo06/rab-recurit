@@ -55,8 +55,11 @@ describe('Dashboard', () => {
     serve((url) => (url === '/dashboard/summary' || url === '/profile' ? undefined : new Promise(() => {})));
     mount();
     expect(screen.getByText('Dashboard')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('12')).toBeInTheDocument());
-    expect(screen.getByText('Managers')).toBeInTheDocument();
+    // Scoped to the counts box: the dashboard's date strip can also show "12" (e.g. tomorrow on the 11th of a month), which
+    // used to satisfy this wait before the summary had loaded.
+    const counts = (await screen.findByText('Staff')).closest('dl') as HTMLElement;
+    await waitFor(() => expect(within(counts).getByText('12')).toBeInTheDocument());
+    expect(within(counts).getByText('Managers')).toBeInTheDocument();
   });
 
   it('offer stages use the server COUNT (`total` of a status-filtered list), not a downloaded page', async () => {
@@ -285,7 +288,9 @@ describe('Dashboard', () => {
     who = 'u2';
     act(() => applyIdentityFromServer({ userId: 'u2', sessionId: 's2' }));
     // The very next paint after the switch shows nothing of u1 …
-    expect(screen.queryByText('12')).toBeNull();
+    // (Scoped to the counts box: a "12" in the date strip is a date, not u1's figure.)
+    const countsAfterSwitch = document.querySelector('.dash-counts') as HTMLElement | null;
+    expect(countsAfterSwitch === null || within(countsAfterSwitch).queryByText('12') === null).toBe(true);
     // … and u2's own figure loads fresh (requested again, counted up from 0, never from 12).
     await waitFor(() => expect(staff().querySelector('dd [data-value]')).toHaveAttribute('data-value', '3'));
     expect(mockApi.get.mock.calls.filter(([u]) => u === '/dashboard/summary').length).toBeGreaterThanOrEqual(2);
