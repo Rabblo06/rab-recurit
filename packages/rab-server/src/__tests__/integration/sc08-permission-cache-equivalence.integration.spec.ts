@@ -140,10 +140,10 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     await overrides(overrideRevoke.userId, org.id, 'revoke', [PermissionFlag.STAFF_VIEW, PermissionFlag.OFFER_SEND]);
     // A custom role in ANOTHER workspace (foreignWsOwner's), held by a staff member of roleGrant's workspace: role RLS hides
     // it in the holder's own workspace, so it must grant nothing there, in every mode.
-    const foreignFlags = [PermissionFlag.AUDIT_VIEW, PermissionFlag.PAYROLL_MARK_PAID];
+    const foreignFlags = [PermissionFlag.STAFF_VIEW, PermissionFlag.VENUE_VIEW]; // member roles may carry only staff.view, venue.view, schedule.view
     const [customRole] = await owner.query(
       `INSERT INTO core.role (organisation_id, workspace_id, key, name, is_system) VALUES ($1, $2, $3, 'SC-08 foreign custom', false) RETURNING id`,
-      [org.id, foreignWsOwner.workspaceId, `sc08-foreign-${randomUUID().slice(0, 8)}`],
+      [org.id, foreignWsOwner.workspaceId, `custom_sc08_${randomUUID().slice(0, 8)}`],
     );
     await owner.query(`INSERT INTO core.role_permission (organisation_id, role_id, permission_id) SELECT $1, $2, id FROM core.permission WHERE key = ANY($3)`, [org.id, customRole.id, foreignFlags]);
     await owner.query(`INSERT INTO core.user_role (organisation_id, user_id, role_id) VALUES ($1, $2, $3)`, [org.id, foreignRoleHolder.userId, customRole.id]);
