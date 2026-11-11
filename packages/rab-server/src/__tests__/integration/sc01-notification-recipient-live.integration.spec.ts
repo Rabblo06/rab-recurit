@@ -250,7 +250,7 @@ describeIfDb('SC-01 notification recipient is live; user display writers clear t
       const vm = await newVenueManager('sc01-vm-delete');
       await cachedDisplay(vm.userId);
       const before = await epochOf(vm.userId);
-      expect((await http().delete(`/rest/v1/venue-managers/${vm.profileId}`).set(as(managerToken)).send({ currentPassword: manager.password })).status).toBe(204);
+      expect((await http().delete(`/rest/v1/venue-managers/${vm.profileId}`).set(as(managerToken)).send({ currentPassword: manager.password })).status).toBe(200);
       expect(await epochOf(vm.userId)).toBe(before + 1);
       expect(await cachedDisplay(vm.userId)).toBeNull();
     });
