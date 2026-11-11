@@ -402,7 +402,8 @@ async function main() {
     evidence('U4-api.log', al);
     const res = migrateResult(al).pop() || {};
     check(res.exitCode === 70 && res.serve === true && res.failedMigration === 'DotProbeFail1786799990001', `migrate result: exit ${res.exitCode}, serve ${res.serve}, failed ${res.failedMigration}`);
-    check(JSON.stringify(res.applied) === JSON.stringify(NEWER), `the two real migrations were applied before the probe failed (${JSON.stringify(res.applied)})`);
+    // (The result line's `applied` lists only a SUCCESSFUL run's work; after a failure it is empty, so the ledger decides.)
+    check(u4.psql(`SELECT count(*) FROM core.migrations WHERE name IN ('${NEWER[0]}', '${NEWER[1]}')`) === '2', 'the two real migrations were applied (and recorded) before the probe failed');
     check(/upgrade floor passed/.test(al), 'the floor admitted R254 (no N1 patch needed, unlike the O3 harness)');
     const hz = u4.healthz();
     check(/"upgradeFailed":\s*true/.test(hz.body), `/healthz upgradeFailed:true (${hz.body.slice(0, 120)})`);
