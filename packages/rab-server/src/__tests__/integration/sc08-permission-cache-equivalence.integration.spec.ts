@@ -17,6 +17,8 @@ import { hasTxPermissionMemo } from '../../engine/core-modules/permissions/tx-pe
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '../../modules/identity/entities';
+import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
+import { ManagerType } from '@rab/shared';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -109,7 +111,11 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
       [userId, organisationId, effect, keys],
     );
 
-  const shapes: Array<{ name: string; identity: TestIdentity; sid?: string; check?: (a: Answers) => void }> = [];
+  type Shape = { name: string; identity: TestIdentity; sid?: string; check?: (a: Answers, snapshot: AuthSecuritySnapshot) => void };
+  const shapes: Shape[] = [];
+  const granted = (a: Answers) => Object.keys(a).filter((k) => a[k]).sort();
+  /** The production `manager` role's flags: what the role-grant, suspended and platform-admin managers must hold, exactly. */
+  const MANAGER_FLAGS = [...new Set(ROLE_DEFS[ManagerType.INTERNAL]!.permissions as readonly string[])].filter((f) => (ALL_FLAGS as string[]).includes(f)).sort();
   let admin: TestIdentity;
   let inspectedTarget: TestIdentity;
 
@@ -147,18 +153,45 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     );
     await owner.query(`INSERT INTO core.role_permission (organisation_id, role_id, permission_id) SELECT $1, $2, id FROM core.permission WHERE key = ANY($3)`, [org.id, customRole.id, foreignFlags]);
     await owner.query(`INSERT INTO core.user_role (organisation_id, user_id, role_id) VALUES ($1, $2, $3)`, [org.id, foreignRoleHolder.userId, customRole.id]);
+    // ...and a custom role of the holder's OWN workspace (roleGrant's), which must grant there, in every mode.
+    const [ownRole] = await owner.query(
+      `INSERT INTO core.role (organisation_id, workspace_id, key, name, is_system) VALUES ($1, $2, $3, 'SC-08 own custom', false) RETURNING id`,
+      [org.id, roleGrant.workspaceId, `custom_sc08_own_${randomUUID().slice(0, 8)}`],
+    );
+    await owner.query(`INSERT INTO core.role_permission (organisation_id, role_id, permission_id) SELECT $1, $2, id FROM core.permission WHERE key = $3`, [org.id, ownRole.id, PermissionFlag.SCHEDULE_VIEW]);
+    await owner.query(`INSERT INTO core.user_role (organisation_id, user_id, role_id) VALUES ($1, $2, $3)`, [org.id, foreignRoleHolder.userId, ownRole.id]);
     await factory.grantPlatformAdmin(platformAdmin.userId);
 
     admin = platformAdmin;
     inspectedTarget = overrideGrant;
     shapes.push(
-      { name: 'role grant', identity: roleGrant, check: (a) => expect(Object.values(a).some(Boolean)).toBe(true) },
-      { name: 'no grant', identity: noGrant, check: (a) => expect(Object.values(a).some(Boolean)).toBe(false) },
+      { name: 'role grant', identity: roleGrant, check: (a) => expect(granted(a)).toEqual(MANAGER_FLAGS) },
+      { name: 'no grant', identity: noGrant, check: (a) => expect(granted(a)).toEqual([]) },
       { name: 'override grant', identity: overrideGrant, check: (a) => expect([a[PermissionFlag.PAYROLL_APPROVE], a[PermissionFlag.MANAGER_MANAGE]]).toEqual([true, true]) },
-      { name: 'override revoke', identity: overrideRevoke, check: (a) => expect([a[PermissionFlag.STAFF_VIEW], a[PermissionFlag.OFFER_SEND]]).toEqual([false, false]) },
-      { name: 'custom role of another workspace', identity: foreignRoleHolder, check: (a) => expect(foreignFlags.map((f) => a[f])).toEqual([false, false]) },
-      { name: 'suspended workspace membership', identity: suspended },
-      { name: 'platform admin', identity: platformAdmin },
+      { name: 'override revoke', identity: overrideRevoke, check: (a) => expect(granted(a)).toEqual(MANAGER_FLAGS.filter((f) => f !== PermissionFlag.STAFF_VIEW && f !== PermissionFlag.OFFER_SEND)) },
+      {
+        name: 'custom roles: another workspace grants nothing, the own workspace grants',
+        identity: foreignRoleHolder,
+        check: (a) => expect([a[PermissionFlag.STAFF_VIEW], a[PermissionFlag.VENUE_VIEW], a[PermissionFlag.SCHEDULE_VIEW]]).toEqual([false, false, true]),
+      },
+      {
+        // Membership suspended: no resolved workspace; the system `manager` role (no workspace) still resolves.
+        name: 'suspended workspace membership',
+        identity: suspended,
+        check: (a, s) => {
+          expect(s.workspaceId).toBeNull();
+          expect(granted(a)).toEqual(MANAGER_FLAGS);
+        },
+      },
+      {
+        // Platform admin adds no permission flags of its own; the role still decides.
+        name: 'platform admin',
+        identity: platformAdmin,
+        check: (a, s) => {
+          expect(s.isPlatformAdmin).toBe(true);
+          expect(granted(a)).toEqual(MANAGER_FLAGS);
+        },
+      },
     );
     // Every session is issued while all memberships are active; the suspension comes after, as in real life.
     for (const shape of shapes) shape.sid = await seedSession(shape.identity);
@@ -176,7 +209,7 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
   });
 
   it.each([0, 1, 2, 3, 4, 5, 6])('identity shape #%i: cache off ≡ cache on cold ≡ cache on warm ≡ per-flag ≡ transaction-local', async (i) => {
-    const { name, identity, check, sid } = shapes[i]! as { name: string; identity: TestIdentity; sid: string; check?: (a: Answers) => void };
+    const { name, identity, check, sid } = shapes[i]! as Shape & { sid: string };
     const off = await snapshotIn('off', identity, sid);
     expect([name, off]).not.toEqual([name, null]);
     const cold = await snapshotIn('cold', identity, sid);
@@ -191,7 +224,59 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     expect([name, service.perFlag]).toEqual([name, expected]);
     expect([name, service.txLocal]).toEqual([name, expected]);
     expect([name, service.effective]).toEqual([name, expected]);
-    check?.(expected);
+    check?.(expected, off!);
+  });
+
+  it('negative control: a divergent entry under the CURRENT key is served warm, so the comparison above can fail', async () => {
+    const identity = shapes[0]!.identity;
+    const sid = await seedSession(identity);
+    const off = await snapshotIn('off', identity, sid);
+    await snapshotIn('cold', identity, sid);
+    const prefix = `crewflow:${env.get('NODE_ENV')}:authctx:${identity.organisationId}:${createHash('sha256').update(sid).digest('hex')}:`;
+    const [key] = await redis.client.keys(`${prefix}*`);
+    expect(key).toBeDefined();
+    const enabled = jest.spyOn(cache, 'isEnabled').mockReturnValue(true);
+    try {
+      // A correctly signed entry for the current key, but with different permissions (what a missed version bump leaves).
+      await cache.set(key!, {
+        accountStatus: off!.accountStatus, mustResetPassword: off!.mustResetPassword, roles: off!.roles, isPlatformAdmin: off!.isPlatformAdmin,
+        maintenanceModeEnabled: off!.maintenanceModeEnabled, organisationSuspended: off!.organisationSuspended, effectivePermissions: [PermissionFlag.AUDIT_VIEW],
+      });
+    } finally {
+      enabled.mockRestore();
+    }
+    const warm = await snapshotIn('warm', identity, sid);
+    expect(fromSnapshot(warm)).not.toEqual(fromSnapshot(off));
+    expect(granted(fromSnapshot(warm)!)).toEqual([PermissionFlag.AUDIT_VIEW]);
+  });
+
+  // BLOCKER A-1 for AUTH_CONTEXT_CACHE_ENABLED (docs/plans/phase-x1/SC-08.md): the vector's role term is SUM(permission_version)
+  // and nothing on core.user_role forces a bump, so swapping one held role for another of the SAME version without
+  // bumpUser leaves the key unchanged and the warm entry keeps the old role's permissions. `test.failing` passes while the
+  // gap exists; once it is closed this starts failing and must become a normal test.
+  test.failing('A-1 (known gap): a role swap of equal permission_version without bumpUser is reflected warm', async () => {
+    const holder = await factory.createStaff({ id: shapes[0]!.identity.organisationId }, { owner: shapes[0]!.identity, label: 'sc08-a1' });
+    const role = async (flag: string) => {
+      const [r] = await owner.query(
+        `INSERT INTO core.role (organisation_id, workspace_id, key, name, is_system) VALUES ($1, $2, $3, $4, false) RETURNING id, permission_version`,
+        [holder.organisationId, holder.workspaceId, `custom_sc08_a1_${randomUUID().slice(0, 8)}`, `SC-08 A-1 ${flag} ${randomUUID().slice(0, 8)}`],
+      );
+      await owner.query(`INSERT INTO core.role_permission (organisation_id, role_id, permission_id) SELECT $1, $2, id FROM core.permission WHERE key = $3`, [holder.organisationId, r.id, flag]);
+      return r as { id: string; permission_version: string };
+    };
+    const r1 = await role(PermissionFlag.SCHEDULE_VIEW);
+    const r2 = await role(PermissionFlag.VENUE_VIEW);
+    expect(String(r1.permission_version)).toBe(String(r2.permission_version));
+    await owner.query(`INSERT INTO core.user_role (organisation_id, user_id, role_id) VALUES ($1, $2, $3)`, [holder.organisationId, holder.userId, r1.id]);
+    const sid = await seedSession(holder);
+    await snapshotIn('cold', holder, sid);
+    // The swap by a writer that skips bumpUser (operator SQL): same SUM, same key.
+    await owner.query(`DELETE FROM core.user_role WHERE user_id = $1 AND role_id = $2`, [holder.userId, r1.id]);
+    await owner.query(`INSERT INTO core.user_role (organisation_id, user_id, role_id) VALUES ($1, $2, $3)`, [holder.organisationId, holder.userId, r2.id]);
+    const off = await snapshotIn('off', holder, sid);
+    expect(granted(fromSnapshot(off)!)).toContain(PermissionFlag.VENUE_VIEW);
+    const warm = await snapshotIn('warm', holder, sid);
+    expect(fromSnapshot(warm)).toEqual(fromSnapshot(off)); // fails today: the warm entry still has schedule.view, not venue.view
   });
 
   it('Admin Inspect: the inspected target is answered from ITS set in every path, never the admin set', async () => {
@@ -207,5 +292,10 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     expect(service.effective).toEqual(targetOwn);
     const hints = await permissions.displayHints({ ...inspected, security: (await snapshotIn('off', admin, adminSid))! }, ALL_FLAGS);
     expect(hints).toEqual(targetOwn);
+    // ...and with the admin's snapshot coming from a WARM auth-context cache entry.
+    await snapshotIn('cold', admin, adminSid);
+    const warmAdmin = (await snapshotIn('warm', admin, adminSid))!;
+    expect(fromSnapshot(warmAdmin)).toEqual(adminOwn);
+    expect(await permissions.displayHints({ ...inspected, security: warmAdmin }, ALL_FLAGS)).toEqual(targetOwn);
   });
 });
