@@ -6261,3 +6261,41 @@ server or network that fails at any stage; a database fault during revalidation.
   last clock-outs together; A1 no completion while a seat is still clocked in; A2 no completion of a shift that never
   started; A3 another tenant's context and no context complete nothing; A4 a body with `status` / `organisationId` is a
   400.
+
+## FOLLOW-UP — an expired offer closes its seat for shift completion; one-off repair command `shift:complete-settled` (branch fix/shift-completion-expired-seat, 2026-11-06, not merged)
+
+Owner decisions 2026-11-06 on the entry above: Q1 YES, Q3 YES (one-off, read first), Q2 (a shift nobody clocked into never
+completes) stays open and unchanged.
+
+- **Q1 (rule, decided by the owner):** an `offered` seat whose offer is `expired` (every offer on it) counts as closed for
+  completion. Only how the roll-up READS the seat changes (`openSeatSql` in `complete-shift-if-settled.ts`): no new state or
+  transition, the seat row is never written, and a `pending` offer past its `expires_at` but not yet swept still holds the
+  shift open (the persisted expiry counts). `claimExpiredOffer` (the ONE pending → expired claim: Worker scan, timer
+  trigger, the staff accept's lazy expiry) now takes the shift row lock first (shift → offer, the confirm / accept /
+  withdrawal order) and re-runs the roll-up after its CAS, so an expiry racing a clock-out cannot leave the shift
+  running. A shift that never started is still never completed.
+- **Q3 (one-off repair):** `shift:complete-settled` (`command/shift-complete-settled.command.ts`,
+  `modules/scheduling/services/shift-completion-repair.ts`). Never automatic (no job, schedule or endpoint).
+  - **Asset:** the canonical status of other tenants' shifts. **Actor:** an operator with CLI access to the production
+    database (DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS + deployment identity + the boot gates: the restricted owner login).
+  - `--list` (default) is READ-ONLY: a READ ONLY transaction per workspace in that tenant's context (SET LOCAL + FORCE
+    RLS), enumerated from the trusted registry (`core.worker_list_workspaces`), the same predicate as the roll-up.
+  - `--apply --ids <file>` completes ONLY the listed ids (UUIDs only, at most 5000, the whole file refused on one bad
+    line), each located in the registry, then completed by `completeShiftIfSettled` itself in its tenant transaction
+    (lock, predicate re-checked, `assertTransition`, CAS): a not-settled id is refused, an id in no (or another, with
+    `--organisation`) tenant is `not_found`, a repeat is `already_completed` with no second audit row. Each completion
+    writes `shift.completed_by_repair` in the same transaction; the actor must be an ACTIVE platform admin resolved from
+    `--actor-email` through the pre-auth lookup (as `outbox:replay`), so no anonymous apply; `--change-ref` is recorded.
+  - Layer 2 in the body: refuses a SUPERUSER / BYPASSRLS session even when the body is reached without `main.ts`.
+  - **SECURITY TRADE-OFF:** the listing prints venue names and shift times of every tenant to the operator console (the
+    owner reviews them before any apply). The alternative (ids only) makes the review blind. Ids, not names, are what
+    `--apply` accepts.
+- **Regression tests:** `shift-completion-expired-seat.integration.spec.ts`: E1 the soak's expired-only shifts (never
+  started) stay `offered` and their seats stay `offered`; E2 the last open seat expiring after the clock-out completes the
+  shift; E3 an already-expired seat does not hold the clock-out; E4 the lazy expiry on a late accept completes it; E5 an
+  expiry holding its transaction while the last clock-out runs (the clock-out waits, then completes); E6 both fired
+  together; E7 an unswept past-expiry offer still holds the shift open; C1 `--list` lists both tenants' stuck shifts and
+  changes nothing (shift, seat and audit snapshot equal); C2 `--apply` completes only the listed settled id, refuses a
+  not-settled one, reports a made-up one, audited once, idempotent; C3 another tenant's id under `--organisation` is
+  `not_found` and untouched; C4 no actor / non-admin actor / bad ids file / both modes refused; C5 a superuser session is
+  refused.
