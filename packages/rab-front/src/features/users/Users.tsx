@@ -7,6 +7,7 @@ import {
 } from '@tabler/icons-react';
 import { useArchiveRestore } from '../../shared/hooks/useArchiveRestore';
 import { api } from '../../shared/api';
+import { jobRolesQuery } from '../../shared/queries/navQueries';
 import { lastAnsweredAt, pollingOptions, settlingInterval } from '../../shared/lib/polling';
 import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
@@ -355,10 +356,7 @@ function SelectAllCheckbox({ ids, selected, onToggleAll, label }: { ids: string[
 function StaffTab({ selected, onToggle, onSelectAllVisible, onVisible, onTotal }: SelectionProps & { onTotal: (n: number | null) => void }) {
   const retryUnlessPermanent = useRetryUnlessPermanent();
   const qc = useQueryClient();
-  const { data: jobRoles = [] } = useQuery({
-    queryKey: ['job-roles'],
-    queryFn: async () => { const { data } = await api.get<Array<{ id: string; name: string }>>('/job-roles'); return data; },
-  });
+  const { data: jobRoles = [] } = useQuery(jobRolesQuery());
 
   const config: TableToolbarConfig = {
     ...STAFF_TABLE_CONFIG,

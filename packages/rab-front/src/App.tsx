@@ -1,5 +1,6 @@
 import { MotionConfig } from 'framer-motion';
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
+import { lazyWithPreload } from './shared/lib/lazyWithPreload';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { MutationCache, QueryClient, QueryClientProvider, useQuery, useQueryClient, type Mutation } from '@tanstack/react-query';
 import { api, broadcastLogout, withAuthLock } from './shared/api';
@@ -19,6 +20,43 @@ import WorkspaceHostGate from './features/workspace-host/WorkspaceHostGate';
 import StepUpHost from './features/auth/stepup/StepUpHost';
 import { getApiErrorCode } from './shared/lib/apiError';
 import { isSilentError, notifyApiError } from './shared/lib/mutationFeedback';
+// Console pages (inside Layout) live in the shell's registry so the shell can preload them (idle after sign-in, and on nav
+// hover/focus). The auth and onboarding pages below stay here; every lazy page retries a failed chunk once and recovers
+// from a chunk a newer deploy removed (lazyWithPreload).
+import {
+  AiChatPage,
+  Users,
+  UserProfile,
+  Shifts,
+  Offers,
+  VenueOffers,
+  VenueOfferPipeline,
+  Calendar,
+  Payroll,
+  Venues,
+  AuditLog,
+  HelpCenter,
+  Support,
+  SettingsLayout,
+  ProfilePage,
+  ExperiencePage,
+  AccountPage,
+  SecurityPage,
+  AiSettingsPage,
+  WorkspaceGeneralPage,
+  SecurityAuthenticationPage,
+  WorkspaceDomainsPage,
+  MyWorkspaceGeneralPage,
+  MyWorkspaceDomainsPage,
+  MembersPage,
+  WorkspaceRolesPage,
+  RoleEditorLayout,
+  RoleEditorMain,
+  SelectObjectStep,
+  ObjectPermissionsStep,
+  InitialManagerPage,
+  AdminPanelPage,
+} from './shell/consolePages';
 
 // P2.0 (bundle-size finding: a single 1.3MB production chunk, `vite build`'s own warning) — every
 // route below this point is reachable only after a route change, never on first paint, so there is
@@ -30,49 +68,17 @@ import { isSilentError, notifyApiError } from './shared/lib/mutationFeedback';
 // not a page — splitting it would only add a chunk boundary with no payload worth deferring) and
 // `NotFound` (already tiny). See the measured before/after at this change's own commit for the
 // actual chunk-size result; this comment does not claim a number so it can't drift from one.
-const ForgotPassword = lazy(() => import('./features/auth/ForgotPassword'));
-const AiChatPage = lazy(() => import('./features/ai/AiChatPage'));
-const ResetPassword = lazy(() => import('./features/auth/ResetPassword'));
-const ConfirmEmailChange = lazy(() => import('./features/auth/ConfirmEmailChange'));
-const ActivateAccount = lazy(() => import('./features/auth/ActivateAccount'));
-const AcceptInvitation = lazy(() => import('./features/auth/AcceptInvitation'));
-const SetPassword = lazy(() => import('./features/auth/SetPassword'));
-const OAuthCallbackComplete = lazy(() => import('./features/auth/OAuthCallbackComplete'));
-const LoginHandoffLanding = lazy(() => import('./features/auth/LoginHandoffLanding'));
-const CreateWorkspaceScreen = lazy(() => import('./features/onboarding/CreateWorkspaceScreen'));
-const CreateProfileScreen = lazy(() => import('./features/onboarding/CreateProfileScreen'));
-const WorkspacePreparationScreen = lazy(() => import('./features/onboarding/WorkspacePreparationScreen'));
-const Users = lazy(() => import('./features/users/Users'));
-const UserProfile = lazy(() => import('./features/users/UserProfile'));
-const Shifts = lazy(() => import('./features/scheduling/Shifts'));
-const Offers = lazy(() => import('./features/offers/Offers'));
-const VenueOffers = lazy(() => import('./features/scheduling/VenueOffers'));
-const VenueOfferPipeline = lazy(() => import('./features/scheduling/VenueOfferPipeline'));
-const Calendar = lazy(() => import('./features/scheduling/Calendar'));
-const Payroll = lazy(() => import('./features/payroll/Payroll'));
-const Venues = lazy(() => import('./features/venues/Venues'));
-const AuditLog = lazy(() => import('./features/audit/AuditLog'));
-const HelpCenter = lazy(() => import('./features/help/HelpCenter'));
-const Support = lazy(() => import('./features/help/Support'));
-const SettingsLayout = lazy(() => import('./features/settings/layout/SettingsLayout'));
-const ProfilePage = lazy(() => import('./features/settings/profile/ProfilePage'));
-const ExperiencePage = lazy(() => import('./features/settings/experience/ExperiencePage'));
-const AccountPage = lazy(() => import('./features/settings/account/AccountPage'));
-const SecurityPage = lazy(() => import('./features/settings/security/SecurityPage'));
-const AiSettingsPage = lazy(() => import('./features/settings/ai/AiSettingsPage'));
-const WorkspaceGeneralPage = lazy(() => import('./features/settings/workspace/WorkspaceGeneralPage'));
-const SecurityAuthenticationPage = lazy(() => import('./features/settings/workspace/SecurityAuthenticationPage'));
-const WorkspaceDomainsPage = lazy(() => import('./features/settings/domains/WorkspaceDomainsPage'));
-const MyWorkspaceGeneralPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceGeneralPage'));
-const MyWorkspaceDomainsPage = lazy(() => import('./features/settings/myworkspace/MyWorkspaceDomainsPage'));
-const MembersPage = lazy(() => import('./features/settings/members/MembersPage'));
-const WorkspaceRolesPage = lazy(() => import('./features/settings/roles/WorkspaceRolesPage'));
-const RoleEditorLayout = lazy(() => import('./features/settings/roles/RoleEditorLayout'));
-const RoleEditorMain = lazy(() => import('./features/settings/roles/RoleEditorMain'));
-const SelectObjectStep = lazy(() => import('./features/settings/roles/RoleObjectSteps').then((m) => ({ default: m.SelectObjectStep })));
-const ObjectPermissionsStep = lazy(() => import('./features/settings/roles/RoleObjectSteps').then((m) => ({ default: m.ObjectPermissionsStep })));
-const InitialManagerPage = lazy(() => import('./features/settings/workspace/InitialManagerPage'));
-const AdminPanelPage = lazy(() => import('./features/settings/admin-panel/AdminPanelPage'));
+const ForgotPassword = lazyWithPreload(() => import('./features/auth/ForgotPassword'));
+const ResetPassword = lazyWithPreload(() => import('./features/auth/ResetPassword'));
+const ConfirmEmailChange = lazyWithPreload(() => import('./features/auth/ConfirmEmailChange'));
+const ActivateAccount = lazyWithPreload(() => import('./features/auth/ActivateAccount'));
+const AcceptInvitation = lazyWithPreload(() => import('./features/auth/AcceptInvitation'));
+const SetPassword = lazyWithPreload(() => import('./features/auth/SetPassword'));
+const OAuthCallbackComplete = lazyWithPreload(() => import('./features/auth/OAuthCallbackComplete'));
+const LoginHandoffLanding = lazyWithPreload(() => import('./features/auth/LoginHandoffLanding'));
+const CreateWorkspaceScreen = lazyWithPreload(() => import('./features/onboarding/CreateWorkspaceScreen'));
+const CreateProfileScreen = lazyWithPreload(() => import('./features/onboarding/CreateProfileScreen'));
+const WorkspacePreparationScreen = lazyWithPreload(() => import('./features/onboarding/WorkspacePreparationScreen'));
 
 /**
  * `meta.errorFeedback` for a mutation that shows its own failure WITHOUT a hook-level `onError` (an inline message read

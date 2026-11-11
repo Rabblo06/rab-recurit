@@ -1,4 +1,7 @@
+import { Suspense } from 'react';
 import PageHeader from '../../../shared/components/PageHeader';
+import { DelayedFallback, SettingsPageSkeleton } from '../../../shared/components/RouteFallback';
+import { settingsContentKey } from './settingsContentKey';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../../../shared/api';
@@ -58,7 +61,9 @@ export default function SettingsLayout() {
       <div className="settings-shell-content">
         {/* The Admin panel draws its own page header ("Admin panel", mockup v2), so the generic heading is skipped there. */}
         {!location.pathname.includes('/profile') && !location.pathname.includes('/members') && !location.pathname.includes('/roles') && !location.pathname.startsWith('/settings/admin') && <div className="settings-page-heading"><h2>{crumb?.[1] ?? (location.pathname.endsWith('/security') ? 'Security' : 'Settings')}</h2><p>{location.pathname === '/settings/security' ? 'Manage how you sign in and keep your account secure.' : `Manage your ${crumb?.[0] === 'User' ? 'personal' : 'workspace'} preferences.`}</p></div>}
-        <Outlet />
+        <Suspense key={settingsContentKey(location.pathname)} fallback={<DelayedFallback><SettingsPageSkeleton /></DelayedFallback>}>
+          <Outlet />
+        </Suspense>
       </div>
       </div>
     </div>

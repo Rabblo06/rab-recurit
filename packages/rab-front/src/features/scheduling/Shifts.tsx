@@ -7,6 +7,8 @@ import {
 } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { fetchAllPages } from '../../shared/table-toolbar/pagination';
+import { jobRolesQuery } from '../../shared/queries/navQueries';
+import { authMeQuery, venuesWithArchivedQuery } from './schedulingQueries';
 import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
@@ -103,21 +105,11 @@ const REQUEST_STATUSES = ['pending_manager_approval', 'declined'];
 
 export default function Shifts() {
   const qc = useQueryClient();
-  const { data: me } = useQuery({
-    queryKey: ['auth-me'],
-    queryFn: async () => { const { data } = await api.get<{ roles: string[] }>('/auth/me'); return data; },
-    staleTime: 5 * 60 * 1000,
-  });
+  const { data: me } = useQuery(authMeQuery);
   const isVenueManager = me?.roles.includes('venue_manager') ?? false;
-  const { data: venues = [] } = useQuery({
-    queryKey: ['venues', 'with-archived'],
-    // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
-    queryFn: () => fetchAllPages<Venue>('/venues', { includeArchived: true }),
-  });
-  const { data: jobRoles = [] } = useQuery({
-    queryKey: ['job-roles'],
-    queryFn: async () => { const { data } = await api.get<JobRole[]>('/job-roles'); return data; },
-  });
+  // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
+  const { data: venues = [] } = useQuery(venuesWithArchivedQuery<Venue>());
+  const { data: jobRoles = [] } = useQuery(jobRolesQuery<JobRole>());
 
   const config: TableToolbarConfig = {
     ...SHIFTS_TABLE_CONFIG,

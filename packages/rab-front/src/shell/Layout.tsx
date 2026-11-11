@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion, useReducedMotion } from 'framer-motion';
 import { api } from '../shared/api';
 import { PageSlotsProvider } from '../shared/page-slots';
+import { DelayedFallback, PageSkeleton } from '../shared/components/RouteFallback';
+import { preloadMainPages, preloadNavTarget, whenIdle } from './consolePages';
 import { spring, usePrefersReducedMotion } from '../shared/motion';
 import WelcomeOverlay from '../features/onboarding/WelcomeOverlay';
 import type { WelcomeRole } from '../features/onboarding/WelcomeOverlay';
@@ -88,8 +90,11 @@ function SidebarLink({ item, badge }: { item: NavEntry; badge?: number }) {
   // Framer's MotionConfig does not stop shared-layout moves (and paints one frame at the old row), so reduced motion
   // renders a plain, non-shared highlight instead.
   const reduce = usePrefersReducedMotion();
+  const qc = useQueryClient();
+  // Hover or keyboard focus = intent: fetch the page's code (and its fixed-key data) before the click.
+  const intent = () => preloadNavTarget(to, qc);
   return (
-    <NavLink to={to} end={to === '/'} title={label} aria-label={label} className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'}>
+    <NavLink to={to} end={to === '/'} title={label} aria-label={label} className={({ isActive }) => isActive ? 'nav-item active' : 'nav-item'} onMouseEnter={intent} onFocus={intent}>
       {({ isActive }) => <>
         {/* One shared highlight that slides between items (navigation is never delayed for it). */}
         {isActive && (reduce
@@ -124,8 +129,21 @@ export default function Layout() {
   return <AiChatProvider workspaceId={workspace?.id}><LayoutContent /></AiChatProvider>;
 }
 
+/**
+ * The Suspense key for the content area: the top-level section (`users`, `settings`, ...). Moving to ANOTHER section mounts
+ * a new boundary, so React commits the navigation at once (nav highlight and header update) and shows the skeleton while
+ * the page's code loads, instead of keeping the old page on screen (React Router runs navigations as transitions). Moving
+ * within a section (a list to its detail) keeps the boundary, so the current page stays until the next one is ready.
+ */
+function contentSection(pathname: string): string {
+  return pathname.split('/')[1] ?? '';
+}
+
 function LayoutContent() {
   const location = useLocation();
+  const queryClient = useQueryClient();
+  // Code only, one page at a time, once the browser is idle after sign-in (skipped with data saver).
+  useEffect(() => whenIdle(() => { void preloadMainPages(); }), []);
   const navigate = useNavigate();
   const chat = useAiChat();
   const mode = navigationMode(location.pathname);
@@ -349,7 +367,7 @@ function LayoutContent() {
         <button type="button" className="sidebar-search-field" aria-label="Search workspace" title="Search workspace (/)" onClick={openSearch}>
           <IconSearch size={15} stroke={1.7}/><span>Search</span><kbd>/</kbd>
         </button>
-        <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode} showAi={aiEligible}/>
+        <NavigationModes mode={mode} expanded={!collapsed || mobile} onSelect={selectMode} onIntent={(m) => { if (m === 'settings') preloadNavTarget('/settings/profile', queryClient); }} showAi={aiEligible}/>
 
         <motion.div className="sidebar-mode-content" key={mode} initial={reducedMotion || previousMode.current === mode ? false : { opacity: 0, x: modeDirection * (document.documentElement.dir === 'rtl' ? -8 : 8) }} animate={{ opacity: 1, x: 0 }} transition={{ duration: reducedMotion ? 0 : .18, ease: [.2, .8, .2, 1] }}>
         {mode === 'ai' ? <AiChatNavigation /> : mode === 'settings' ? <SettingsSidebar compact isPlatformAdmin={!!me?.isPlatformAdmin} isPlatformAdminOnly={isPlatformAdminOnly} showAi={aiEligible && !!me?.roles.includes('ceo')} onLogoutClick={() => setShowLogout(true)}/> : !isPlatformAdminOnly && (
@@ -426,7 +444,9 @@ function LayoutContent() {
             className="workspace-route-content"
             style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
           >
-            <Outlet/>
+            <Suspense key={contentSection(location.pathname)} fallback={<DelayedFallback><PageSkeleton/></DelayedFallback>}>
+              <Outlet/>
+            </Suspense>
           </div>
       </div>
 

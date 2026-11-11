@@ -376,6 +376,9 @@ services:
       # Previous value, for rollback: VITE_API_URL: http://127.0.0.1:3000/rest/v1 (and drop VITE_API_PROXY_TARGET).
       VITE_API_URL: /rest/v1
       VITE_API_PROXY_TARGET: http://server:3000
+      # The repo is bind-mounted from Windows, where file events do not reach the container: poll for changes here only
+      # (vite.config.ts keeps polling off by default; it costs ~30 % of a CPU core while idle).
+      VITE_WATCH_POLLING: "true"
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
     # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
