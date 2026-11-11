@@ -40,6 +40,8 @@
  *     intervals (offer expiry 300 s, manager confirmation 120 s, late clock-in 300 s), committed, byte-identical, on rab-api
  *     AND rab-worker, never re-entered in an env file; the shift monitor keeps its 300 s and the combined shift scan stays
  *     off (neither may be changed by an env file);
+ *   - the pay-statement dispatch sweep (owner decision 2026-11-11, Phase X J1a): WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
+ *     =30 committed, byte-identical, on rab-api AND rab-worker, never re-entered in an env file;
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
  *     network only, and the app services wait for it.
@@ -119,6 +121,7 @@ const COMMITTED_KEYS = Object.freeze([
   'WORKER_FAST_PUBLISH_NOTIFY', 'WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS',
   'WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS',
   'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS',
+  'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS',
 ]);
 /**
  * Notification delivery (owner decision 2026-11-06), committed on rab-api AND rab-worker with exactly these rendered values:
@@ -156,6 +159,17 @@ const PHASE_D_SWITCHES = Object.freeze({
  * and arms the no-show / late clock-in triggers; the combined shift scan (D-Q4a) stays off until it is measured.
  */
 const PHASE_D_UNCHANGED = Object.freeze({ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
+/**
+ * Pay-statement dispatch (owner decision 2026-11-11, Phase X J1a), committed on rab-api AND rab-worker with exactly this
+ * rendered value: the sweep that discovers approved pay records whose statement is pending runs every 30 s (code default
+ * 5 s, bounds 1-300) instead of every 5 s per workspace. A statement is then generated 0-30 s after approval; the 10-minute
+ * lease recovery and the failed-retry backoff each gain at most 25 s. Payroll rules, core.payroll_record_guard, the
+ * generation fence and the consumer are untouched. As for the email sweep, the API registers the BullMQ scheduler with ITS
+ * value and the consume-only Worker never compares intervals, hence one value, identical on both. The code default stays
+ * for development and tests. compose-owner-login.test.cjs re-reads the TypeScript source and fails when 30 leaves the
+ * code's bounds.
+ */
+const STATEMENT_DISPATCH = Object.freeze({ WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: '30' });
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
@@ -380,6 +394,16 @@ function checkModel(model, combo) {
     for (const [key, keep] of Object.entries(PHASE_D_UNCHANGED)) {
       if (key in e && String(e[key]) !== keep) p(`${name}: ${key} is "${e[key]}"; the owner decision 2026-11-06 keeps it at ${keep} (leave it unset)`);
     }
+    // Owner decision 2026-11-11 (J1a): the pay-statement sweep, the same committed value on both services.
+    for (const [key, want] of Object.entries(STATEMENT_DISPATCH)) {
+      if (String(e[key] ?? '') !== want) p(`${name}: ${key} is "${e[key] ?? ''}", expected "${want}" (owner decision 2026-11-11, pay-statement sweep, committed on rab-api and rab-worker)`);
+    }
+  }
+  // The rule is "identical on both"; the per-service pin above implies it, and this names the drift directly.
+  for (const key of Object.keys(STATEMENT_DISPATCH)) {
+    const a = envOf(services['rab-api'])[key];
+    const w = envOf(services['rab-worker'])[key];
+    if (services['rab-api'] && services['rab-worker'] && String(a ?? '') !== String(w ?? '')) p(`${key} differs between rab-api and rab-worker (one identical value: the API registers the scheduler, the Worker never compares)`);
   }
 
   // rab-api: the lifecycle.
@@ -676,7 +700,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
