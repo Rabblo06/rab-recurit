@@ -95,7 +95,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     return {
       mode,
       enabled: () => true,
-      runScoped: (org, ws, fn) => runScopedForOrg(tenantContext, org, ws, fn),
+      runScoped: (org, ws, fn, options) => runScopedForOrg(tenantContext, org, ws, fn, options),
       actions: buildTimerTriggerActions(deps),
       lateClockInGraceMinutes: env.get('LATE_CLOCK_IN_GRACE_MINUTES'),
       recordOutcome: (k, o) => outcomes.push([k, o]),

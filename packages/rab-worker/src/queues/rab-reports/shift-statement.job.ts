@@ -95,14 +95,17 @@ export async function dispatchStatementScope(
 ): Promise<ShiftStatementDispatchResult> {
   const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
   if (ids.length === 0) return result;
-  const candidates = await tenantContext.runInTenantContext(workerCtx(organisationId, workspaceId), async (m) => {
-    await m.query('SET TRANSACTION READ ONLY');
-    return m.query<Candidate[]>(
-      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
-      [[...ids]],
-    );
-  });
+  // T-1 / ST-02: READ ONLY from the binding SELECT on (same round trip), not a separate SET TRANSACTION READ ONLY.
+  const candidates = await tenantContext.runInTenantContext(
+    workerCtx(organisationId, workspaceId),
+    (m) =>
+      m.query<Candidate[]>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
+        `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
+        [[...ids]],
+      ),
+    { readOnly: true },
+  );
   await claimAndPublishCandidates(tenantContext, candidates, publish, result);
   return result;
 }

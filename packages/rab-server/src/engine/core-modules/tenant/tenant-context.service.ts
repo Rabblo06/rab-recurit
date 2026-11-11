@@ -68,6 +68,35 @@ export class TenantSessionRoleError extends Error {
 export interface TenantContextOptions {
   /** Route this read to the read replica when it is validated and fresh. Register-listed reads only. */
   useReplica?: boolean;
+  /**
+   * T-1 / ST-02: make this transaction READ ONLY from the binding SELECT on, in the same round trip
+   * (`set_config('transaction_read_only', 'on', true)`, the documented equivalent of SET TRANSACTION READ ONLY; read-write
+   * to read-only may happen at any point in a transaction). Any later INSERT/UPDATE/DELETE fails with 25006. For the
+   * Worker's hot read-only scans; such a caller no longer sends its own `SET TRANSACTION READ ONLY` (that is the round trip
+   * this removes). Admin Inspect (CF-02) and `useReplica` keep their own first-statement `SET TRANSACTION READ ONLY`.
+   */
+  readOnly?: boolean;
+}
+
+/** What bindGucs folds into its one SELECT besides the identity GUCs (T-1). Absent = not bound there. */
+export interface BindExtras {
+  /** ST-01: a schema already known BEFORE the bind ('core', or a schema validated before this transaction opened). */
+  searchPath?: string;
+  /** ST-02: switch the transaction to READ ONLY in the same SELECT. */
+  readOnly?: boolean;
+}
+
+/**
+ * T-1: the one binding statement. The GUC names and the `'on'` literal are constants; every request-derived value is a
+ * bound parameter ($1-$5, and $6 = the search_path when it is folded in). Exported for the exact-text tests.
+ */
+export function bindGucsSql(extras: BindExtras = {}): string {
+  return (
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), ` +
+    (extras.searchPath !== undefined ? `set_config('search_path', $6, true), ` : '') +
+    (extras.readOnly ? `set_config('transaction_read_only', 'on', true), ` : '') +
+    `current_user::text AS cu, session_user::text AS su`
+  );
 }
 
 @Injectable()
@@ -89,15 +118,21 @@ export class TenantContextService {
     options?: TenantContextOptions,
   ): Promise<T> {
     if (options?.useReplica) return this.runRoutedRead(ctx, (manager) => fn(manager));
+    const readOnly = options?.readOnly === true;
     return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
+      // ST-05: this stage times the in-transaction binding only. The pool checkout (with its RESET ROLE) and TypeORM's
+      // START TRANSACTION run before it, and COMMIT after the callback; none of them is inside it.
       await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
-        await this.bindGucs(manager, ctx);
-        const schema =
-          this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId
-            ? await this.schemaResolver.resolve(manager, ctx.workspaceId)
-            : 'core';
-        await this.bindSearchPath(manager, schema);
+        if (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId) {
+          // HWS on with a workspace: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own
+          // statement after resolve().
+          await this.bindGucs(manager, ctx, { readOnly });
+          await this.bindSearchPath(manager, await this.schemaResolver.resolve(manager, ctx.workspaceId));
+        } else {
+          // ST-01: the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
+          await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
+        }
       });
       return fn(manager);
     }));
@@ -129,15 +164,20 @@ export class TenantContextService {
   ): Promise<T> {
     if (!ctx.workspaceId) throw new WorkspaceRoutingError('missing-context');
     if (options?.useReplica) return this.runRoutedRead(ctx, fn);
+    const readOnly = options?.readOnly === true;
     return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
       const schema = await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
-        await this.bindGucs(manager, ctx);
-        const resolved = this.environment.get('HWS_RUNTIME_ENABLED')
-          ? await this.schemaResolver.resolve(manager, ctx.workspaceId)
-          : 'core';
-        await this.bindSearchPath(manager, resolved);
-        return resolved;
+        if (this.environment.get('HWS_RUNTIME_ENABLED')) {
+          // HWS on: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own statement.
+          await this.bindGucs(manager, ctx, { readOnly });
+          const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
+          await this.bindSearchPath(manager, resolved);
+          return resolved;
+        }
+        // ST-01: HWS off, the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
+        await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
+        return 'core';
       });
       return fn(manager, schema);
     }));
@@ -178,9 +218,15 @@ export class TenantContextService {
     return dataSource.transaction(async (manager) => {
       const bound = await timeStage('tenant_context_setup', async () => {
         await manager.query('SET TRANSACTION READ ONLY');
+        // ST-01: a schema known before the bind (resolved and validated on the primary already, or 'core') is folded into
+        // the binding SELECT; one resolved here (HWS on with a workspace, on the primary) needs the GUCs first.
+        const known = schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? null : 'core');
+        if (known !== null) {
+          await this.bindGucs(manager, ctx, { searchPath: known });
+          return known;
+        }
         await this.bindGucs(manager, ctx);
-        const resolved =
-          schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? await this.schemaResolver.resolve(manager, ctx.workspaceId) : 'core');
+        const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
         await this.bindSearchPath(manager, resolved);
         return resolved;
       });
@@ -242,7 +288,11 @@ export class TenantContextService {
     if (ctx.inspectedBy) await manager.query('SET TRANSACTION READ ONLY');
   }
 
-  private async bindGucs(manager: EntityManager, ctx: AuthContext): Promise<void> {
+  private async bindGucs(
+    manager: EntityManager,
+    ctx: Pick<AuthContext, 'organisationId' | 'workspaceId' | 'userId' | 'role' | 'actorType'>,
+    extras: BindExtras = {},
+  ): Promise<void> {
     // Owner-login pool safety (G-09): a session-level SET ROLE / set_config('role', …, false) left behind by an earlier
     // request on this pooled connection must not carry into this tenant transaction. RESET ROLE (session level, inside the
     // transaction: it persists on COMMIT, reverts on ROLLBACK — allowed in READ ONLY transactions, never DISCARD ALL), then
@@ -250,10 +300,14 @@ export class TenantContextService {
     await manager.query(RESET_ROLE_SQL);
     // Reset the optional read-only roster capability and the org-admin Assigned Staff scope (VenueManagerService) on every
     // transaction; only the service method that needs one binds it, after this.
-    const rows: Array<{ cu: string; su: string }> = await manager.query(
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), current_user::text AS cu, session_user::text AS su`,
-      [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''],
-    );
+    // T-1: when the schema is already known (ST-01) search_path is set in this same SELECT, and when the caller asked for a
+    // read-only transaction (ST-02) so is transaction_read_only; both transaction-local, like the identity GUCs. The
+    // search_path value is a bound parameter AND a single validated identifier ('core', or a workspaceSchemaName() result
+    // that matched the registry): binding stops SQL injection but not a comma-separated list, so nothing else is passed.
+    // RESET ROLE above stays its own statement (both layers kept, G-09).
+    const params: string[] = [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''];
+    if (extras.searchPath !== undefined) params.push(extras.searchPath);
+    const rows: Array<{ cu: string; su: string }> = await manager.query(bindGucsSql(extras), params);
     const identity = rows?.[0];
     if (!identity || identity.cu !== identity.su) throw new TenantSessionRoleError(String(identity?.cu), String(identity?.su));
   }

@@ -26,7 +26,7 @@ function harness(opts: { mode?: 'off' | 'shadow' | 'on'; rows?: Row[]; enabled?:
   };
   const outcomes: Array<[TimerTriggerKind, TimerTriggerOutcome]> = [];
   const action = jest.fn(async () => opts.acted ?? true);
-  const runScoped = jest.fn(async (_org: string, _ws: string, fn: (m: never) => Promise<unknown>) => fn(manager as never));
+  const runScoped = jest.fn(async (_org: string, _ws: string, fn: (m: never) => Promise<unknown>, _options?: { readOnly?: boolean }) => fn(manager as never));
   const logs: string[] = [];
   const deps: TimerTriggerHandlerDeps = {
     mode: opts.mode ?? 'on',
@@ -75,11 +75,14 @@ describe('handleTimerTrigger (D-Q4b consumer)', () => {
     }
   });
 
-  it('the decision runs bound to the PAYLOAD organisation/workspace, READ ONLY first', async () => {
+  it('the decision runs bound to the PAYLOAD organisation/workspace, in a READ ONLY transaction (T-1: the option, not a statement)', async () => {
     const h = harness({ rows: [offerRow()] });
     await handleTimerTrigger(job(), 't', h.deps);
-    expect(h.runScoped).toHaveBeenCalledWith(ORG, WS, expect.any(Function));
-    expect(h.queries[0]).toBe('SET TRANSACTION READ ONLY');
+    // ST-02: read-only is folded into the tenant binding SELECT (25006 on any write is proven in
+    // tenant-context-framing.integration.spec.ts and dq4b-timer-triggers.integration.spec.ts); no separate statement.
+    expect(h.runScoped).toHaveBeenCalledWith(ORG, WS, expect.any(Function), { readOnly: true });
+    expect(h.queries).not.toContain('SET TRANSACTION READ ONLY');
+    expect(h.queries.every((q) => /^\s*SELECT/i.test(q))).toBe(true);
   });
 
   it('SHADOW: a due subject is counted `would-act` and logged; the action (any write) never runs', async () => {
