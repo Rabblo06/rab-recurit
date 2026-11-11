@@ -6046,6 +6046,21 @@ stay off, and their sweeps keep the 2 s default.
   interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
   DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.
 
+## CONFIG — production refuses global claims and event dispatch at env validation (branch phase-x/sj05-refuse-global-claims, 2026-11-11, not merged)
+
+Phase X SJ-05, owner decision 2026-11-11 (P1-10). Before: only the compose gate (`compose-owner-login.cjs`
+FORBIDDEN_NAMES) refused `WORKER_CLAIM_MODE` / `WORKER_DISPATCH_MODE`; a Worker started outside the gated compose path
+booted in global mode (the boot gate accepts the owner login under `global`). Not an exposure (global mode keeps FORCE
+RLS, the definers and lease fencing), but a governance gap.
+
+- **Control:** `productionConfigurationProblems` refuses `WORKER_CLAIM_MODE=global` and `WORKER_DISPATCH_MODE=event` when
+  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers). The approval is
+  the code constant `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false` (the `WORKER_INVITE_AUTO_DELETE` pattern): enabling
+  global claims in production is a reviewed code change that records the owner's J5 decision, never a setting.
+  Development and test are unchanged (CI's Phase D suites run global mode). A gate test re-reads the source so the two
+  layers cannot drift apart.
+- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision).
+
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
 Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
