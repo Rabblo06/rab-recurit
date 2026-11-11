@@ -5516,8 +5516,15 @@ writes a warning instead.
 3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
 4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
    sink is required.
-5. **The deployment identity and the N1 approval are effectively removed.** Accepted by the owner 2026-11-05 (BC-11,
-   above).
+5. **The deployment identity is effectively removable; the N1 approval list no longer gates the owner-login path.**
+   Accepted by the owner 2026-11-05 (BC-11, above). Phase X U-1 (owner decision 2026-11-11): on the owner-login path
+   (the migrate-on-start child and the owner-login release step) N1 is REPLACED by the upgrade floor
+   (`scripts/migrate/owner-login/release-floor.ts`): an existing production database may be upgraded only when its
+   `core.migrations` ledger contains every migration of a supported release (R254 = rab/v0.4.0 = cd7c7e32 = 4c38aa1a, or
+   R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
+   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
+   `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
+   until the clean-up PR retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
 7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
@@ -5567,10 +5574,15 @@ writes a warning instead.
     accepted, like Twenty. Nothing claims it is a passing control.
 
     - **G-07 (HIGH): unreviewed DDL at start-up in production.**
-      - The API migrates on start, with no approval list and no `rab-migrate` release step. A new image's DDL reaches
-        production when the API starts.
+      - The API migrates on start, with no per-migration approval list and no `rab-migrate` release step. A new image's
+        DDL reaches production when the API starts.
       - Controls kept: the migration lock; the check-first classifier; the refusals (identity, wrong or unknown ledger,
-        version, roles); FORCE RLS; the mandatory backup before each upgrade (runbook).
+        version, roles); the UPGRADE FLOOR (Phase X U-1, 2026-11-11: a non-fresh production database upgrades only from
+        a supported release, R254 or later, a resumed partial upgrade included; older or unknown histories refuse with
+        exit 65 and nothing applied); FORCE RLS; the mandatory backup before each upgrade (runbook).
+      - After an upgrade that applied migrations, the child bumps the allow-listed `entitycache` epochs (one INCR per
+        cached entity; never `bull:*`, throttler keys or `rab:*`). A Redis failure there is a WARNING only: stale entity
+        projections then live until their TTL (at most 300 s).
     - **C3 (HIGH): serving after a failed upgrade, with a partly-applied schema.**
       - The default `CREWFLOW_UPGRADE_FAILURE=continue` logs an ERROR naming the failed migration and keeps starting.
       - A first-install failure still exits non-zero (an empty or bootstrap-partial database never serves).
@@ -5637,9 +5649,10 @@ writes a warning instead.
       - Measured (O3 container test T10, PG16, with a transactional test migration): both a stop and a direct SIGKILL
         mid-migration left the database consistent. The session ended, the advisory lock was released, there was no
         ledger row, the change was rolled back, and the next documented start applied it (outcome ok).
-      - Residual: 8 migrations in the chain set `transaction = false` (several use `CREATE INDEX CONCURRENTLY`):
-        1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000 and
-        1786721430000. A kill inside one of them is not rolled back. For example, an interrupted concurrent build
+      - Residual: 10 migrations in the chain set `transaction = false` (several use `CREATE INDEX CONCURRENTLY`):
+        1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
+        1786721430000, 1786721440000 and 1786721450000 (`NON_TRANSACTIONAL_MIGRATIONS`, checked against the migration
+        sources by `release-floor.spec.ts`). A kill inside one of them is not rolled back. For example, an interrupted concurrent build
         can leave an INVALID index, and its re-run depends on that migration's own idempotence. This was already true
         before the change (the stop then reached the child immediately and interrupted it the same way); the grace
         period only changes when the kill lands. NOT measured by T10. Operators must not stop rab-api during the
@@ -6046,6 +6059,26 @@ stay off, and their sweeps keep the 2 s default.
   interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
   DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.
 
+## CONFIG — pay-statement sweep at 30 s in production (branch phase-x/j1a-statement-30s, 2026-11-11, not merged)
+
+Owner decision 2026-11-11 (Phase X Part 1, J1a / P1-7). Configuration only:
+`WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=30` (code default 5, bounds 1–300), committed on rab-api and rab-worker
+in `docker-compose.image.yml`, `docker-compose.production.yml` and `docker-compose.local-build.yml`, enforced by
+`scripts/compose-owner-login.cjs` (`STATEMENT_DISPATCH`) and `staging/verify-image-compose.cjs`. No code default,
+migration, role, grant, RLS, posture, payroll calculation or approval rule change; `core.payroll_record_guard`, the
+dispatcher's compare-and-set to `queued` (generation + 1), the consumer's generation / `statement_file_id IS NULL` /
+still-approved checks and the UNIQUE `worker_event` `shift-statement:<id>` are untouched.
+
+- **Asset:** generation of another person's pay statement (a payroll document). **Actor:** the Worker acting on a
+  committed approval; anyone able to configure one service differently from the other.
+- **Interval (both services):** the API registers the scheduler with its own value and the consume-only Worker verifies
+  scheduler ids, never intervals, so the gate requires the same value on both and refuses it in any env file.
+- **Residual (payroll-adjacent latency, accepted by the owner):** a statement is generated 0–30 s after approval (was
+  0–5 s). Lease recovery (10 min) and the failed-retry backoff (1 min × attempts) each gain at most 25 s. A slower sweep
+  never changes which statement is generated or how many: the guards above decide that, not the interval.
+- **Rollback:** remove the value on both services in the three compose files and the gate (the API re-registers the
+  scheduler at 5 s on its next start).
+
 ## CONFIG — production refuses global claims and event dispatch at env validation (branch phase-x/sj05-refuse-global-claims, 2026-11-11, not merged)
 
 Phase X SJ-05, owner decision 2026-11-11 (P1-10). Before: only the compose gate (`compose-owner-login.cjs`
@@ -6370,3 +6403,20 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   deploy-order tests (`packages/rab-docker/deploy-order-tests/`, PostgreSQL 16 and 18, all four cases pass on both:
   fresh deploy API-healthy-then-Worker; new digest with the old Worker stopped before the new API started; rollback with
   the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI.
+
+## UPGRADE — the upgrade floor replaces N1 on the owner-login path (Phase X U-1, PR #93, 2026-11-11)
+
+- **Actor → action → consequence (before):** an operator deploys any new image to a production database that holds a
+  tenant row → N1 refuses every pending migration after 1786719300000 → exit 65, restart loop, Worker never started: a full
+  outage until rollback (SU-01). **After:** the floor admits R254/R256 histories and resumes; refuses older/unknown.
+- **New risk (MEDIUM, accepted by the owner's P1-1/P1-3):** any migration merged into a release now reaches production
+  without a per-name approval; the review is the PR review. A wrong manifest fails CLOSED (exit 65; the image rollback
+  restores service; data untouched); the opposite error (admitting an unsupported history) is covered by the unknown /
+  older refusal tests (unit + integration). A spec fails if a newer release manifest is added without being supported.
+- **Stricter outcomes:** a wrong database (`MigrationSessionDatabaseError`, exit 67) and "still pending after the run"
+  (`MigrationsStillPendingError`, exit 68) used to count as migration failures that could serve under `continue`; they now
+  never serve.
+- **Not changed:** C3, the lock, the classifier, FOREIGN refusal, the ROW_COPY refusal on a non-fresh database (backstop),
+  F5 token mode, N1 on the legacy and CLI paths.
+- **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
+  U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).

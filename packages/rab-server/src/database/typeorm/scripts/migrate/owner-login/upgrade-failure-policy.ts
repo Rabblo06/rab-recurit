@@ -41,10 +41,15 @@ export function parseUpgradeFailurePolicy(env: Record<string, string | undefined
 
 /**
  * The `transaction = false` migrations (M0: the runner comment said six). + the index fix (2026-11-06): 1786721440000 and
- * 1786721450000 (CREATE INDEX CONCURRENTLY; a failed build leaves an INVALID index that their re-run drops).
+ * 1786721450000 (CREATE INDEX CONCURRENTLY; a failed build leaves an INVALID index that their re-run drops). + Phase X U-1
+ * (SU-03 / XD-04, 2026-11-11): 1786721430000 WorkspaceGrantParityGuards, which commits one transaction per workspace schema
+ * and so may keep part of its work after a failure; it was missing, so its failure was reported as "rolled back with its
+ * ledger row". Diagnostics only (the no-partial-migration check): the serve decision of C3 is unchanged. The spec derives
+ * this list from the migration sources and compares.
  */
 export const NON_TRANSACTIONAL_MIGRATIONS: readonly number[] = [
-  1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000, 1786721440000, 1786721450000,
+  1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000, 1786721430000, 1786721440000,
+  1786721450000,
 ];
 
 /** Called by the API and the Worker; the owner login reaches each through its role memberships. */

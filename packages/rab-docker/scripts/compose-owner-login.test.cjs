@@ -280,8 +280,30 @@ test('Phase D switches: the committed values are valid for the code (bounds, mod
   assert.deepEqual(gate.PHASE_D_SWITCHES.WORKER_TIMER_TRIGGER_KINDS.split(','), codeKinds);
 });
 
+test('pay-statement sweep (owner decision 2026-11-11, J1a): committed in compose, never re-entered in an env file', () => {
+  assert.deepEqual({ ...gate.STATEMENT_DISPATCH }, { WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: '30' });
+  // Every value, the committed one and the 5 s code default included: an env-file copy would duplicate or silently undo it.
+  for (const value of ['1', '5', '30', '300']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: committed in the compose files/);
+    assertRefused(lintEnvText('database', `${DATABASE_OK}
+WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: committed in the compose files/);
+  }
+});
+
+test('pay-statement sweep: 30 s is valid for the code (bounds read from the TypeScript source; the 5 s default stays)', () => {
+  const intervals = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/worker-scan-intervals.ts'), 'utf8');
+  const m = /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:\s*s\('shift-statement-dispatch',\s*([\d_]+),\s*([\d_]+),\s*([\d_]+)\)/.exec(intervals);
+  assert.ok(m, 'shift-statement-dispatch interval setting not found in worker-scan-intervals.ts');
+  const [def, min, max] = m.slice(1).map((x) => Number(x.replace(/_/g, '')));
+  const committed = Number(gate.STATEMENT_DISPATCH.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS);
+  assert.ok(Number.isInteger(committed) && committed >= min && committed <= max, `30 s must lie within the code bounds ${min}-${max}`);
+  assert.equal(def, 5, 'development and tests keep the 5 s code default');
+});
+
 test('Phase D switches: the gate and the image-compose verifier enforce the same values', () => {
   const verifier = require('../staging/verify-image-compose.cjs');
+  assert.deepEqual({ ...verifier.STATEMENT_DISPATCH }, { ...gate.STATEMENT_DISPATCH });
   assert.deepEqual({ ...verifier.PHASE_D_SWITCHES }, { ...gate.PHASE_D_SWITCHES });
   assert.deepEqual({ ...verifier.PHASE_D_UNCHANGED }, { ...gate.PHASE_D_UNCHANGED });
   assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
