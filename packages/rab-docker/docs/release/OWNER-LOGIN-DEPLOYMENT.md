@@ -209,6 +209,13 @@ send is this same `WORKER_FAST_PUBLISH_NOTIFY` flag, which is already `true`. It
 `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"` on rab-api and rab-worker in both compose files, and extend the gate
 (`NOTIFICATION_DELIVERY` in `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`) in the same change.
 `PUSH_ENABLED=true` and a real `PUSH_PROVIDER` go in `runtime.env` (production refuses `PUSH_PROVIDER=FAKE` with push on).
+**Enforced since Phase X J2:** with `PUSH_ENABLED=true` (in `runtime.env` or a compose value) both gates refuse the
+deployment until `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"` is committed on rab-api AND rab-worker:
+`scripts/compose-owner-login.cjs` (CI, and `--lint-env-file runtime <file>`, which renders the committed compose with that
+file's switches) and `staging/verify-image-compose.cjs --environment` (the operator preflight, which reads the switch from
+the env files). With `REALTIME_ENABLED=true` they require the realtime sweep interval to be identical on both services; its
+value is a separate owner decision, not pinned. Neither interval may be set in an env file, and a switch that differs
+between the two services is refused.
 
 **Phase D switches (owner decision 2026-11-06): committed configuration.** Like notification delivery: in both compose
 files, on rab-api AND rab-worker, with the same value on both. The gate (`PHASE_D_SWITCHES` in
