@@ -329,6 +329,7 @@ export async function dispatchEmailScope(
         generationsExhaustedCount = generationsExhausted.length;
         if (generationsExhausted.length > 0) {
           await manager.query(
+            // sql-injection-reviewed: interpolates the module-level numeric constant MAX_DISPATCH_GENERATIONS only; the ids are the bound $1 parameter.
             `UPDATE core.email_outbox
               SET status = 'FAILED', failed_at = now(), last_error_code = 'DISPATCH_GENERATIONS_EXHAUSTED',
                   last_error_message_sanitized = 'Re-queued ${MAX_DISPATCH_GENERATIONS} times without any attempt being recorded (the claim never succeeded); not re-queued again. Nothing was sent by these re-queues.'
