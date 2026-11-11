@@ -8,8 +8,11 @@ import { AuthContext } from '../tenant/auth-context.interface';
  * query per identity instead of two per flag. It is a memo of the same transaction's own reads, never a cache:
  *
  *  - **Never shared across transactions.** Stored per `QueryRunner` (TypeORM creates one per transaction and never reuses
- *    a released one), only while that runner has an open transaction, and dropped on its commit or ANY rollback (a
- *    savepoint rollback included: a role write undone by a savepoint must not survive in the memo).
+ *    a released one), only while that runner has an open transaction. Dropped on: TypeORM's commit and rollback events
+ *    (its own nested transactions, i.e. savepoints, included); AND every statement on that runner whose SQL starts with
+ *    ROLLBACK, RELEASE, COMMIT, ABORT or END, so a RAW `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` sent through
+ *    `manager.query` (which fires no transaction event) also drops it. Over-forgetting is deliberate: a dropped memo
+ *    only costs one re-read; a kept one after an undone authority write would be a stale answer.
  *  - **Keyed by identity**, not by transaction alone: (user, organisation, workspace, actor type, inspected-by). A custom
  *    role is visible only in its own workspace (role RLS), so a set is never reused for another workspace or user.
  *  - **Filled only when the transaction's bound tenant matches the key.** The fill statement also returns the bound
@@ -67,8 +70,16 @@ export function storeTxPermissions(runner: QueryRunner, identity: string, set: P
   memo.set(runner, byIdentity);
 }
 
-/** Commit / rollback (savepoints included) and ORM writes to the authority tables drop the transaction's memo. */
+/** Raw SQL that ends or unwinds (part of) a transaction: `ROLLBACK [TO SAVEPOINT]`, `RELEASE [SAVEPOINT]`, `COMMIT`, `ABORT`, `END`. */
+const TRANSACTION_CONTROL = /^\s*(?:ROLLBACK|RELEASE|COMMIT|ABORT|END)\b/i;
+
+/** Commit / rollback (savepoints included), raw transaction control and ORM writes to the authority tables drop the memo. */
 const subscriber = {
+  // Raw transaction control through manager.query (e.g. `ROLLBACK TO SAVEPOINT x`) fires no transaction event; drop the
+  // memo on any such statement, whether it succeeded or failed.
+  afterQuery: (event: { queryRunner?: QueryRunner; query?: string }) => {
+    if (event.queryRunner && typeof event.query === 'string' && TRANSACTION_CONTROL.test(event.query)) forgetTxPermissions(event.queryRunner);
+  },
   afterTransactionCommit: (event: { queryRunner: QueryRunner }) => forgetTxPermissions(event.queryRunner),
   afterTransactionRollback: (event: { queryRunner: QueryRunner }) => forgetTxPermissions(event.queryRunner),
   afterInsert: (event: AuthorityWriteEvent) => forgetOnAuthorityWrite(event),

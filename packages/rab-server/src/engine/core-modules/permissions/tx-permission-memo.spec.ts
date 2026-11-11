@@ -149,6 +149,24 @@ describe('C5 transaction-local permission set', () => {
     expect(hasTxPermissionMemo(runner)).toBe(false);
   });
 
+  it('raw transaction control on the runner (ROLLBACK / RELEASE / COMMIT / ABORT / END, any case, success or failure) drops it', async () => {
+    const ds = primary();
+    const { manager, runner } = txManager(ds, ['staff.view'], BOUND);
+    const svc = service(ds);
+    await svc.userHasPermissionTx(manager, ctx, 'staff.view');
+    const subscriber = (ds.subscribers as unknown as Array<Record<string, (e: unknown) => void>>)[0]!;
+    for (const sql of ['SAVEPOINT sp1', 'SELECT 1', 'INSERT INTO core.shift DEFAULT VALUES']) {
+      subscriber.afterQuery!({ queryRunner: runner, query: sql, success: true });
+      expect(hasTxPermissionMemo(runner)).toBe(true);
+    }
+    for (const sql of ['ROLLBACK TO SAVEPOINT sp1', '  rollback to savepoint sp1', 'RELEASE SAVEPOINT sp1', 'release sp1', 'COMMIT', 'ROLLBACK', 'ABORT', 'END']) {
+      await svc.userHasPermissionTx(manager, ctx, 'staff.view');
+      expect(hasTxPermissionMemo(runner)).toBe(true);
+      subscriber.afterQuery!({ queryRunner: runner, query: sql, success: sql !== 'ABORT' });
+      expect([sql, hasTxPermissionMemo(runner)]).toEqual([sql, false]);
+    }
+  });
+
   it('a filled set that ends with its transaction is never read again (runner no longer active)', async () => {
     const ds = primary();
     const { manager, runner } = txManager(ds, ['staff.view'], BOUND);
