@@ -15,6 +15,8 @@ import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from './ema
  * outage) do not all hit the provider again in the same second. D-Q1: read from the queue registry (values unchanged:
  * 5 attempts, exponential 5 s, jitter 0.5, 7 d completed, 30 d failed — pinned by queue-registry.spec.ts).
  */
+const LIVE_JOB_STATES: ReadonlySet<string> = new Set(['waiting', 'delayed', 'active', 'prioritized', 'waiting-children']);
+
 export const EMAIL_QUEUE_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(EMAIL_QUEUE_NAME) as OutboxJobOptions);
 
 /**
@@ -94,6 +96,19 @@ export class EmailQueueService implements OnModuleDestroy {
       jobId: `email-outbox.${emailOutboxId}.attempt.${generation}`,
     });
     await boundedPublish(this.connection, 'email-outbox publish', () => enqueueRegisteredJob(this.queue, job));
+  }
+
+  /**
+   * email-twenty Decision 2: whether the job of a row's CURRENT generation is still live in BullMQ (waiting, delayed, active,
+   * prioritized, waiting-children). The dispatcher asks before failing a row at its re-queue cap, so a row that is only waiting
+   * in a backlog is never failed. Bounded like a publish: throws QueuePublishUnavailableError when Redis cannot answer.
+   */
+  async isLive(emailOutboxId: string, generation: number): Promise<boolean> {
+    return boundedPublish(this.connection, 'email-outbox liveness probe', async () => {
+      const job = await this.queue.getJob(`email-outbox.${emailOutboxId}.attempt.${generation}`);
+      if (!job) return false;
+      return LIVE_JOB_STATES.has(await job.getState());
+    });
   }
 
   async onModuleDestroy(): Promise<void> {

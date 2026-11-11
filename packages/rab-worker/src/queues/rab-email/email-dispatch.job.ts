@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { QueuePublishUnavailableError } from '@rab/server/engine/worker-shared/queue-producer-connection';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
@@ -21,6 +22,22 @@ const PROCESSING_LEASE_MINUTES = 10;
 // data loss, a job manually removed, a `jobId` collision) — the row itself
 // is the only thing still alive to notice that.
 const RETRY_STALE_MINUTES = 5;
+/**
+ * Owner decision 2026-11-07 ("CAP IT", email-twenty Decision 2): a row the dispatcher has already re-queued this many times
+ * (`dispatch_generation`) and that is STILL stale QUEUED is FAILED `DISPATCH_GENERATIONS_EXHAUSTED`, never re-queued. Stale
+ * QUEUED with no progress is the signature of an attempt that never gets counted (the claim statement itself failing, so
+ * `infrastructure_attempt_count` and the cap of 5 never move); RETRY and PROCESSING recoveries follow a counted claim and stay
+ * bounded by that cap. A re-queue whose publication fails (Redis down) gives its generation back (see the publish loop), so an
+ * outage does not consume this budget. Before failing a row at the cap the dispatcher asks BullMQ whether the job of its
+ * CURRENT generation is still live (waiting / delayed / active / prioritized): a row that is only waiting in a backlog is
+ * left alone (its `queued_at` refreshed), never failed; an unanswerable probe also leaves it alone for this cycle. The budget
+ * is the row's lifetime `dispatch_generation` (RETRY/PROCESSING recoveries and operator replays bump it too): a replayed
+ * row that already used it gets one real try, then is failed at its next stale cycle with no live job.
+ */
+export const MAX_DISPATCH_GENERATIONS = 20;
+
+/** Whether the BullMQ job of a row's CURRENT generation is still live (waiting, delayed, active, prioritized). */
+export type IsEmailJobLive = (emailOutboxId: string, generation: number) => Promise<boolean>;
 
 interface ClaimedRow {
   id: string;
@@ -48,6 +65,8 @@ export interface EmailDispatchResult {
    * blindly resent.
    */
   deliveryUncertain: number;
+  /** Stale QUEUED rows already re-queued MAX_DISPATCH_GENERATIONS times: FAILED `DISPATCH_GENERATIONS_EXHAUSTED`, never re-queued. */
+  generationsExhausted: number;
 }
 
 /**
@@ -83,12 +102,15 @@ export interface EmailDispatchResult {
  *     BullMQ job's terminal state (completed, retained for up to 7 days; or
  *     failed-and-removed) can no longer block the new attempt from ever
  *     running, because the new attempt gets a genuinely new job identity.
- *   - Republishing itself is only done when it's SAFE: if `provider_call_
- *     started_at` is set (the provider was actually contacted, the outcome
- *     is ambiguous) AND the configured driver cannot safely retry an
- *     ambiguous delivery (SMTP), the row is marked FAILED with
- *     `last_error_code = 'DELIVERY_UNCERTAIN'` instead — surfaced for a
- *     human/operator, never silently resent, never silently dropped.
+ *   - Republishing itself is only done when it's SAFE: if a PROCESSING row
+ *     has `provider_call_started_at` set (this attempt contacted the
+ *     provider and its outcome was lost) AND the configured driver cannot
+ *     safely retry an ambiguous delivery (SMTP), the row is marked FAILED
+ *     with `last_error_code = 'DELIVERY_UNCERTAIN'` instead — surfaced for a
+ *     human/operator, never silently resent, never silently dropped. A
+ *     RETRY row has a recorded outcome and is re-presented (owner decision
+ *     2026-11-07); a stale QUEUED row re-queued MAX_DISPATCH_GENERATIONS
+ *     times is FAILED `DISPATCH_GENERATIONS_EXHAUSTED`.
  *
  * The one thing recovery must never do is let a recreated BullMQ job reset
  * the attempt count that governs `max_infrastructure_attempts`: a row that
@@ -109,6 +131,7 @@ export async function runEmailDispatchCycle(
     generation: number,
   ) => Promise<void>,
   ambiguousDeliverySafeToRetry: boolean,
+  isJobLive?: IsEmailJobLive,
 ): Promise<EmailDispatchResult> {
   const total: EmailDispatchResult = {
     claimed: 0,
@@ -116,6 +139,7 @@ export async function runEmailDispatchCycle(
     recovered: 0,
     failedExhausted: 0,
     deliveryUncertain: 0,
+    generationsExhausted: 0,
   };
   for await (const organisationId of organisationIds(dataSource)) {
     const scope = await dispatchEmailScope(
@@ -125,12 +149,14 @@ export async function runEmailDispatchCycle(
       publish,
       republish,
       ambiguousDeliverySafeToRetry,
+      isJobLive,
     );
     total.claimed += scope.claimed;
     total.published += scope.published;
     total.recovered += scope.recovered;
     total.failedExhausted += scope.failedExhausted;
     total.deliveryUncertain += scope.deliveryUncertain;
+    total.generationsExhausted += scope.generationsExhausted;
   }
   return total;
 }
@@ -171,6 +197,7 @@ export async function dispatchEmailScope(
     generation: number,
   ) => Promise<void>,
   ambiguousDeliverySafeToRetry: boolean,
+  isJobLive?: IsEmailJobLive,
 ): Promise<EmailDispatchResult> {
   const total: EmailDispatchResult = {
     claimed: 0,
@@ -178,6 +205,7 @@ export async function dispatchEmailScope(
     recovered: 0,
     failedExhausted: 0,
     deliveryUncertain: 0,
+    generationsExhausted: 0,
   };
   if (ids !== undefined && ids.length === 0) return total;
   {
@@ -187,6 +215,7 @@ export async function dispatchEmailScope(
       async (manager) => {
         let exhaustedCount = 0;
         let uncertainCount = 0;
+        let generationsExhaustedCount = 0;
         // SELECT-then-UPDATE (no RETURNING), same documented reason as the
         // cleanup job: `manager.query()` returns a `[rows, rowCount]` TUPLE
         // for UPDATE, not the bare rows array a SELECT returns.
@@ -212,8 +241,10 @@ export async function dispatchEmailScope(
           return {
             toPublish: [] as ClaimedRow[],
             recoveredGenerations: new Map<string, number>(),
+            bumpedIds: new Set<string>(),
             exhaustedCount: 0,
             uncertainCount: 0,
+            generationsExhaustedCount: 0,
           };
 
         // Exhausted rows (already at/over their attempt budget while stuck)
@@ -276,19 +307,75 @@ export async function dispatchEmailScope(
           (row) => row.status !== 'PENDING',
         );
 
-        // Of those with a prior attempt: an ambiguous one (the provider was
-        // actually contacted) is only safe to retry if the CONFIGURED driver
-        // can dedupe it server-side. One never contacted at all is always
-        // safe — nothing could have been sent.
-        const safeToRecover = hadPriorAttempt.filter(
-          (row) =>
-            !row.provider_call_started_at || ambiguousDeliverySafeToRetry,
+        // Of those with a prior attempt: an AMBIGUOUS one is only safe to retry
+        // if the CONFIGURED driver can dedupe it server-side.
+        //
+        // Owner decision 2026-11-07 ("SPLIT", email-twenty Decision 1, replacing OD-6's "no change"): ambiguous means a
+        // PROCESSING row with the provider-call marker: THIS attempt reached the provider and its outcome was lost (a crash
+        // mid-send, or OD-5: the provider confirmed and SENT could not be written). Since email-twenty the claim clears an
+        // earlier attempt's marker, so on a PROCESSING row the marker always belongs to the attempt in flight; a crash before
+        // that attempt's own marker leaves none (safe). A RETRY row (and a QUEUED row recovered from one) carries a RECORDED
+        // outcome: the processor classified that failure as retryable and BullMQ would have re-sent it. So a lost job is
+        // re-presented automatically, within the cumulative cap, even though an older marker is still set. Before, it ended
+        // DELIVERY_UNCERTAIN (fault-injection case b3: 451 twice, job lost from Redis, never sent).
+        const lostMidSend = (row: ClaimedRow) =>
+          row.status === 'PROCESSING' && Boolean(row.provider_call_started_at);
+        const recoverable = hadPriorAttempt.filter(
+          (row) => !lostMidSend(row) || ambiguousDeliverySafeToRetry,
         );
         const uncertain = hadPriorAttempt.filter(
-          (row) =>
-            row.provider_call_started_at && !ambiguousDeliverySafeToRetry,
+          (row) => lostMidSend(row) && !ambiguousDeliverySafeToRetry,
         );
         uncertainCount = uncertain.length + exhaustedUncertain.length;
+
+        // Decision 2: a stale QUEUED row already re-queued MAX_DISPATCH_GENERATIONS times is failed, never re-queued again —
+        // unless the job of its current generation is still live in BullMQ (a backlog, not a loop): then it is only touched.
+        const atCap = recoverable.filter(
+          (row) =>
+            row.status === 'QUEUED' &&
+            Number(row.dispatch_generation ?? 0) >= MAX_DISPATCH_GENERATIONS,
+        );
+        const stillLive: ClaimedRow[] = [];
+        for (const row of atCap) {
+          if (!isJobLive) continue;
+          let live = true; // an unanswerable probe never fails a row
+          try {
+            live = await isJobLive(row.id, Number(row.dispatch_generation ?? 0));
+          } catch {
+            live = true;
+          }
+          if (live) stillLive.push(row);
+        }
+        const generationsExhausted = atCap.filter((row) => !stillLive.includes(row));
+        if (stillLive.length > 0) {
+          await manager.query(
+            `UPDATE core.email_outbox SET queued_at = now() WHERE id = ANY($1::uuid[]) AND status = 'QUEUED'`,
+            [stillLive.map((row) => row.id)],
+          );
+        }
+        const safeToRecover = recoverable.filter(
+          (row) => !atCap.includes(row),
+        );
+        generationsExhaustedCount = generationsExhausted.length;
+        if (generationsExhausted.length > 0) {
+          await manager.query(
+            // sql-injection-reviewed: interpolates the module-level numeric constant MAX_DISPATCH_GENERATIONS only; the ids are the bound $1 parameter.
+            `UPDATE core.email_outbox
+              SET status = 'FAILED', failed_at = now(), last_error_code = 'DISPATCH_GENERATIONS_EXHAUSTED',
+                  last_error_message_sanitized = 'Re-queued ${MAX_DISPATCH_GENERATIONS} times without delivery and no job is live for it; not re-queued again (replay to retry).'
+            WHERE id = ANY($1::uuid[]) AND status = 'QUEUED'`,
+            [generationsExhausted.map((row) => row.id)],
+          );
+          for (const row of generationsExhausted) {
+            await writeAuditRow(
+              manager,
+              row.organisation_id,
+              row.id,
+              'email.delivery_failed',
+              { errorCode: 'DISPATCH_GENERATIONS_EXHAUSTED', generations: Number(row.dispatch_generation ?? 0) },
+            );
+          }
+        }
 
         if (exhaustedUncertain.length > 0) {
           // Its own reason text: the driver may well be able to dedupe (Resend) — the row stops because the cumulative
@@ -338,6 +425,8 @@ export async function dispatchEmailScope(
         }
 
         let recoveredGenerations = new Map<string, number>();
+        /** Rows whose generation THIS cycle bumped (a re-queue): only these give it back if their publication fails. */
+        let bumpedIds = new Set<string>();
         if (safeToRecover.length > 0) {
           // Bump dispatch_generation atomically — Postgres serializes concurrent
           // UPDATEs on the same row via its own row lock, so two racing
@@ -354,6 +443,7 @@ export async function dispatchEmailScope(
           recoveredGenerations = new Map(
             rows.map((r) => [r.id, r.dispatch_generation]),
           );
+          bumpedIds = new Set(rows.map((r) => r.id));
         }
 
         // Wave 5 lane OPS (defensive): a PENDING row with dispatch_generation > 0 already had an earlier attempt (an operator
@@ -369,12 +459,14 @@ export async function dispatchEmailScope(
         return {
           toPublish: [...firstAttempt, ...safeToRecover],
           recoveredGenerations,
+          bumpedIds,
           exhaustedCount,
           uncertainCount,
+          generationsExhaustedCount,
         };
       },
     );
-    const { toPublish, recoveredGenerations, exhaustedCount, uncertainCount } =
+    const { toPublish, recoveredGenerations, bumpedIds, exhaustedCount, uncertainCount, generationsExhaustedCount } =
       claim;
 
     let published = 0;
@@ -398,14 +490,32 @@ export async function dispatchEmailScope(
           `email dispatch: failed to publish outbox row ${row.id}:`,
           error,
         );
+        // Decision 2: a re-queue that never reached Redis is not a re-queue. Give its generation back (only if nothing moved
+        // the row since), so a Redis outage does not spend MAX_DISPATCH_GENERATIONS. Best effort: a failure here only means
+        // this one cycle counts.
+        const generation = recoveredGenerations.get(row.id);
+        // Only an outage (Redis down / the bounded publish timed out). A deterministic refusal keeps the bump, so the cap
+        // still converges on it.
+        if (generation !== undefined && bumpedIds.has(row.id) && error instanceof QueuePublishUnavailableError) {
+          await tenant
+            .runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, (manager) =>
+              manager.query(
+                `UPDATE core.email_outbox SET dispatch_generation = dispatch_generation - 1
+                  WHERE id = $1 AND status = 'QUEUED' AND dispatch_generation = $2`,
+                [row.id, generation],
+              ),
+            )
+            .catch(() => undefined);
+        }
       }
     }
 
-    total.claimed += toPublish.length + exhaustedCount + uncertainCount;
+    total.claimed += toPublish.length + exhaustedCount + uncertainCount + generationsExhaustedCount;
     total.published += published;
     total.recovered += recovered;
     total.failedExhausted += exhaustedCount;
     total.deliveryUncertain += uncertainCount;
+    total.generationsExhausted += generationsExhaustedCount;
   }
   return total;
 }

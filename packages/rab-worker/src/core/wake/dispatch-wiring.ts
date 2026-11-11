@@ -67,8 +67,9 @@ export function buildDispatchBindings(
             (id, orgId) => emailQueue.publish(id, orgId),
             (id, orgId, generation) => emailQueue.republish(id, orgId, generation),
             emailService.ambiguousDeliverySafeToRetry,
+            (id, generation) => emailQueue.isLive(id, generation),
           );
-          if (r.claimed) logger.log(`email dispatch (global): claimed=${r.claimed} published=${r.published} recovered=${r.recovered} deliveryUncertain=${r.deliveryUncertain}`);
+          if (r.claimed) logger.log(`email dispatch (global): claimed=${r.claimed} published=${r.published} recovered=${r.recovered} deliveryUncertain=${r.deliveryUncertain} generationsExhausted=${r.generationsExhausted}`);
           return r.claimed;
         };
         break;
