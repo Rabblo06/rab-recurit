@@ -389,3 +389,13 @@ test('bundled database: internal network only, and every app service waits for i
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
   }
 });
+
+test('SJ-05: the gate and production env validation refuse the same claim / dispatch switches (two layers, one rule)', () => {
+  // The gate refuses the names in every compose and env file.
+  for (const name of ['WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE']) assert.ok(forbiddenReason(name), name);
+  // Env validation refuses global claims and event dispatch in production (re-read from the TypeScript source).
+  const validation = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/env.validation.ts'), 'utf8');
+  assert.match(validation, /export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;/);
+  assert.match(validation, /env\.WORKER_CLAIM_MODE === 'global'/);
+  assert.match(validation, /env\.WORKER_DISPATCH_MODE === 'event'/);
+});
