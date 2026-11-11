@@ -46,7 +46,7 @@ credential at any point in this procedure.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. **Production refuses `global` at env validation** (Phase X SJ-05, owner decision 2026-11-11) until the J3 benchmark and the owner's J5 decision; that decision is recorded by flipping `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED` in `env.validation.ts` in a reviewed change (never an environment variable). The compose gate refuses the name as before. |
+| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. **Production refuses `global` at env validation** (Phase X SJ-05, owner decision 2026-11-11) until the J3 benchmark and the owner's J5 decision; that decision is recorded by flipping `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED` in `env.validation.ts` in a reviewed change (never an environment variable). Staging also runs `NODE_ENV=production`, so the §5.2 staging rehearsal needs that change first; it then applies to staging and production together. The compose gate refuses the name as before. |
 | `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). Production refuses `event` at env validation too (SJ-05). |
 | `REALTIME_ENABLED` | `false` | Enabling it in production is a separate decision. |
 | `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. Owner rule (2026-11-06) for that day: push's immediate send is `WORKER_FAST_PUBLISH_NOTIFY` (already `true`), and `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` goes to 30 s on the API and the Worker (`docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Notification delivery"). |

@@ -6054,12 +6054,19 @@ booted in global mode (the boot gate accepts the owner login under `global`). No
 RLS, the definers and lease fencing), but a governance gap.
 
 - **Control:** `productionConfigurationProblems` refuses `WORKER_CLAIM_MODE=global` and `WORKER_DISPATCH_MODE=event` when
-  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers). The approval is
+  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers, and the CLI, whose own production
+  marker is `DB_TARGET`; no CLI command runs dispatch claims). The approval is
   the code constant `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false` (the `WORKER_INVITE_AUTO_DELETE` pattern): enabling
   global claims in production is a reviewed code change that records the owner's J5 decision, never a setting.
   Development and test are unchanged (CI's Phase D suites run global mode). A gate test re-reads the source so the two
   layers cannot drift apart.
-- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision).
+- **Staging:** staging runs `NODE_ENV=production`, so it is refused there too. The runbook's staging rehearsal of global
+  activation and rollback (phase-d-deployment-runbook §5.2) therefore needs the J5 change (the constant flipped in a reviewed
+  PR) FIRST, and that change then applies to staging and production at the same time. Rehearse on staging before any
+  production deploy of that release.
+- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision). Unlike the invite rule,
+  the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
+  compose gate remains the other).
 
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
