@@ -16,7 +16,7 @@ import { SmtpDriver } from '@rab/server/engine/core-modules/email/drivers/smtp.d
 import { EmailDriverFactory } from '@rab/server/engine/core-modules/email/email-driver.factory';
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from '@rab/server/engine/core-modules/email/email-queue.constants';
-import { EMAIL_QUEUE_JOB_OPTIONS } from '@rab/server/engine/core-modules/email/email-queue.service';
+import { EMAIL_QUEUE_JOB_OPTIONS, EmailQueueService } from '@rab/server/engine/core-modules/email/email-queue.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
@@ -92,6 +92,26 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
   };
   const rows: Record<keyof typeof ADDR, EmailOutbox | undefined> = { ok: undefined, temp: undefined, perm: undefined, drop: undefined, exhaust: undefined, dup: undefined, crash: undefined, b3: undefined, claimloop: undefined };
   const jobIdOf = (id: string, generation = 0) => `email-outbox.${id}.attempt.${generation}`;
+  const REFUSE_CLAIM_PREFIX = 'etw_refuse_claim_';
+  /** Drops every refuse-claim trigger/function this spec can create, including any a killed earlier run left behind. */
+  async function dropRefuseClaimTriggers(): Promise<void> {
+    const triggers = await adminDataSource.query<Array<{ tgname: string }>>(
+      `SELECT tgname FROM pg_trigger WHERE tgrelid = 'core.email_outbox'::regclass AND NOT tgisinternal AND tgname LIKE $1`,
+      [`${REFUSE_CLAIM_PREFIX}%`],
+    );
+    for (const { tgname } of triggers) {
+      if (!/^etw_refuse_claim_[a-z0-9]+$/.test(tgname)) continue;
+      await adminDataSource.query(`DROP TRIGGER IF EXISTS ${tgname} ON core.email_outbox`);
+    }
+    const functions = await adminDataSource.query<Array<{ proname: string }>>(
+      `SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE $1`,
+      [`${REFUSE_CLAIM_PREFIX}%`],
+    );
+    for (const { proname } of functions) {
+      if (!/^etw_refuse_claim_[a-z0-9]+$/.test(proname)) continue;
+      await adminDataSource.query(`DROP FUNCTION IF EXISTS public.${proname}()`);
+    }
+  }
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -104,6 +124,7 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     auditService = moduleRef.get(AuditService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    await dropRefuseClaimTriggers(); // a killed earlier run must not leave its trigger on core.email_outbox
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: moduleRef.get(PasswordHashingService) });
     org = await factory.createOrganisation('etw');
     owner = await factory.createInternalManager(org);
@@ -162,6 +183,10 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     await connection?.quit();
     await sink.stop();
     for (const spy of consoleSpies) spy.mockRestore();
+    await dropRefuseClaimTriggers();
+    expect(
+      await adminDataSource.query(`SELECT 1 FROM pg_trigger WHERE tgrelid = 'core.email_outbox'::regclass AND tgname LIKE 'etw_refuse_claim_%'`),
+    ).toEqual([]);
     await app.close();
     await adminDataSource.destroy();
   });
@@ -380,17 +405,19 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
   it('Decision 2: a claim statement that keeps failing → re-queued 20 times, then FAILED DISPATCH_GENERATIONS_EXHAUSTED (audited), never re-queued, nothing sent', async () => {
     const row = await seedRow(ADDR.claimloop);
     rows.claimloop = row;
-    // A REAL failure of the claim statement itself: a trigger on this one row refuses the move to PROCESSING (test-only,
-    // created and dropped by the cluster superuser fixture connection).
-    const fn = `etw_refuse_claim_${run.replace(/[^a-z0-9]/g, '')}`;
-    await adminDataSource.query(
-      `CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
-         IF NEW.status = 'PROCESSING' THEN RAISE EXCEPTION 'etw: claim refused' USING ERRCODE = 'P0001'; END IF; RETURN NEW; END $f$`,
-    );
-    await adminDataSource.query(
-      `CREATE TRIGGER ${fn} BEFORE UPDATE ON core.email_outbox FOR EACH ROW WHEN (NEW.id = '${row.id}'::uuid) EXECUTE FUNCTION public.${fn}()`,
-    );
+    // A REAL failure of the claim statement itself: a trigger on this one row refuses the move to PROCESSING. Test-only,
+    // created and dropped through the guarded fixture (owner) connection; `dropRefuseClaimTriggers` also sweeps any left by
+    // a killed run (beforeAll / afterAll), so a leftover can never reach the posture checks of a later run.
+    const fn = `${REFUSE_CLAIM_PREFIX}${run.replace(/[^a-z0-9]/g, '')}`;
+    const probe = new EmailQueueService({ get: (key: string) => (key === 'REDIS_URL' ? process.env.REDIS_URL : undefined) } as unknown as EnvironmentService);
     try {
+      await adminDataSource.query(
+        `CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN
+           IF NEW.status = 'PROCESSING' THEN RAISE EXCEPTION 'etw: claim refused' USING ERRCODE = 'P0001'; END IF; RETURN NEW; END $f$`,
+      );
+      await adminDataSource.query(
+        `CREATE TRIGGER ${fn} BEFORE UPDATE ON core.email_outbox FOR EACH ROW WHEN (NEW.id = '${row.id}'::uuid) EXECUTE FUNCTION public.${fn}()`,
+      );
       const job = (generation: number) => ({ id: jobIdOf(row.id, generation), data: { emailOutboxId: row.id, organisationId: org.id }, attemptsMade: 0, opts: { attempts: 5 } }) as unknown as Job;
       await expect(processor(job(0))).rejects.toThrow(/claim refused/); // the first-attempt job
       const generations: number[] = [];
@@ -410,6 +437,7 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
             if (id === row.id) requeued = generation;
           },
           emailService.ambiguousDeliverySafeToRetry,
+          (id, generation) => probe.isLive(id, generation), // the production probe: these jobs are never live
         );
         if (requeued === undefined) break;
         if (requeued > 0) generations.push(requeued);
@@ -437,8 +465,41 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
       expect([...publish.mock.calls, ...republish.mock.calls].some((c) => (c as unknown[])[0] === row.id)).toBe(false);
       expect(sink.transmissionsTo(ADDR.claimloop)).toHaveLength(0);
     } finally {
-      await adminDataSource.query(`DROP TRIGGER IF EXISTS ${fn} ON core.email_outbox`);
-      await adminDataSource.query(`DROP FUNCTION IF EXISTS public.${fn}()`);
+      await dropRefuseClaimTriggers();
+      await probe.onModuleDestroy();
+    }
+  });
+
+  it('Decision 2, backlog: a row at the cap whose current job is still WAITING in BullMQ is never failed; once that job is gone the cap applies', async () => {
+    const row = await seedRow(addr('backlog'));
+    const probe = new EmailQueueService({ get: (key: string) => (key === 'REDIS_URL' ? process.env.REDIS_URL : undefined) } as unknown as EnvironmentService);
+    try {
+      // 20 re-queues already spent; the row is waiting behind a backlog: its generation-20 job sits in the real `rab-email`
+      // queue (no consumer for it in this suite, so it stays `waiting`).
+      await tenantContext.runInTenantContext(ctx, (m) =>
+        m.query(`UPDATE core.email_outbox SET status = 'QUEUED', dispatch_generation = 20, queued_at = now() - interval '3 minutes' WHERE id = $1`, [row.id]),
+      );
+      await probe.republish(row.id, org.id, 20);
+      expect(await probe.isLive(row.id, 20)).toBe(true);
+      const { publish, republish } = dispatchSpies();
+      const live = await runEmailDispatchCycle(adminDataSource, tenantContext, publish, republish, false, (id, g) => probe.isLive(id, g));
+      expect(live.generationsExhausted).toBe(0);
+      const waiting = await rowOf(row.id);
+      expect(waiting).toMatchObject({ status: EmailOutboxStatus.QUEUED, dispatchGeneration: 20 }); // not failed, not bumped
+      expect(waiting.queuedAt!.getTime()).toBeGreaterThan(Date.now() - 60_000); // touched
+      expect(republish).not.toHaveBeenCalled();
+
+      // The job disappears (lost from Redis) and the row goes stale again: now it is a loop, not a backlog.
+      const legacy = new Queue(EMAIL_QUEUE_NAME, { connection });
+      await (await legacy.getJob(jobIdOf(row.id, 20)))?.remove();
+      await legacy.close();
+      expect(await probe.isLive(row.id, 20)).toBe(false);
+      await tenantContext.runInTenantContext(ctx, (m) => m.query(`UPDATE core.email_outbox SET queued_at = now() - interval '3 minutes' WHERE id = $1`, [row.id]));
+      const gone = await runEmailDispatchCycle(adminDataSource, tenantContext, publish, republish, false, (id, g) => probe.isLive(id, g));
+      expect(gone.generationsExhausted).toBeGreaterThanOrEqual(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: EmailOutboxStatus.FAILED, lastErrorCode: 'DISPATCH_GENERATIONS_EXHAUSTED' });
+    } finally {
+      await probe.onModuleDestroy();
     }
   });
 

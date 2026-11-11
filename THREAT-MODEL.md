@@ -6170,19 +6170,24 @@ server or network that fails at any stage; a database fault during revalidation.
   stale QUEUED row that it has already re-queued 20 times (`dispatch_generation >= 20`, the existing column; no
   migration): FAILED `DISPATCH_GENERATIONS_EXHAUSTED`, `failed_at`, an `email.delivery_failed` audit row with the
   generation count; it is listed by the platform-admin outbox operations view (which selects `last_error_code` and
-  `dispatch_generation`) and never re-queued. Nothing was sent by those re-queues. A re-queue whose publication fails
-  (Redis down) gives its generation back (fenced on `status = 'QUEUED'` and the generation it was given), so a Redis
-  outage does not spend the budget. RETRY and PROCESSING recoveries are not capped by this rule; they follow a counted
-  claim and stay bounded by the cumulative attempt cap of 5. Residual: a Worker whose email backlog keeps one row waiting
-  in Redis for roughly 50 minutes (20 stale-QUEUED cycles of about 2.5 minutes while the dispatcher keeps running) would
-  also reach the cap and end FAILED without an attempt; it is visible and replayable. An operator replay of such a row
-  (`core.replay_failed_email`) bumps the generation again, so the row gets exactly one more real try before the cap
-  applies again.
+  `dispatch_generation`) and never re-queued. Nothing was sent by those re-queues. Before failing a row at the cap
+  the dispatcher asks BullMQ whether the job of its CURRENT generation is still live (waiting, delayed, active,
+  prioritized; `EmailQueueService.isLive`, bounded like a publish): a row only waiting in a backlog is never failed (its
+  `queued_at` is refreshed), and an unanswerable probe (Redis down) also leaves it alone for that cycle. A re-queue whose
+  publication fails because Redis is unavailable (`QueuePublishUnavailableError`) gives its generation back (fenced on
+  `status = 'QUEUED'` and the generation it was given), so an outage does not spend the budget; a deterministic publish
+  refusal keeps the bump, so the cap still converges. RETRY and PROCESSING recoveries are not capped by this rule; they
+  follow a counted claim and stay bounded by the cumulative attempt cap of 5. The budget is the row's lifetime
+  generation count (RETRY/PROCESSING recoveries and operator replays bump it too): an operator replay of a row that
+  already used it (`core.replay_failed_email`) gets one real try, then is failed again at its next stale cycle with no
+  live job. Residual: below the cap a backlog still re-queues a waiting row every stale cycle (pre-existing duplicate
+  jobs, deduplicated by the claim; no duplicate email).
 - **Remaining duplicate-delivery risk (accepted, owner requirement 5):** (1) the connection drops or times out after
   the DATA terminator, before the server's reply: retried, so the recipient may get the email twice (reproduced: sink
   `drop_after_data` → 2 messages). (2) A provider that accepts but answers 4xx/timeout. (3) Since Decision 1(a): a
-  RETRY row whose last failure was ambiguous (no reply after DATA, recorded as retryable) and whose BullMQ job was then
-  lost from Redis is re-presented by the dispatcher, exactly as BullMQ itself would have retried it. (4) An operator
+  RETRY row whose last failure was ambiguous (no reply after DATA or a send-deadline timeout, recorded as retryable) and
+  whose BullMQ job was then lost from Redis is re-presented by the dispatcher, exactly as BullMQ itself would have
+  retried it (RETRY means "classified retryable", which includes these post-DATA cases, not only explicit 4xx refusals). (4) An operator
   replay of a DELIVERY_UNCERTAIN row with the allow-uncertain flag. A duplicate is the same content to the same recipient (no tenant
   or person boundary is crossed), but a duplicate password-reset or invitation email is a second copy of the same link.
 - **Changed — recorded refusals re-presented, true mid-send loss kept uncertain (owner decision 2026-11-07, "SPLIT",

@@ -1,3 +1,6 @@
+import { QueuePublishUnavailableError } from '@rab/server/engine/worker-shared/queue-producer-connection';
+import { QueueEnqueueRefusedError } from '@rab/server/engine/worker-shared/queue-enqueue';
+
 import { catalogue, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { dispatchEmailScope, MAX_DISPATCH_GENERATIONS, runEmailDispatchCycle } from './email-dispatch.job';
 
@@ -217,11 +220,46 @@ describe('email dispatch — email-twenty Decision 2: re-queue cap', () => {
     expect(await dispatchEmailScope(tenant as never, ORG_A, [R2], jest.fn(), republish, false)).toMatchObject({ recovered: 1, generationsExhausted: 0 });
   });
 
+  it('a row at the cap whose current-generation job is still LIVE in BullMQ (a backlog) is not failed: only its queued_at is refreshed', async () => {
+    const { tenant, statements } = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 20 })]));
+    const isLive = jest.fn(async () => true);
+    const republish = jest.fn(async () => undefined);
+    const result = await dispatchEmailScope(tenant as never, ORG_A, [R2], jest.fn(), republish, false, isLive);
+    expect(isLive).toHaveBeenCalledWith(R2, 20);
+    expect(result).toMatchObject({ generationsExhausted: 0, recovered: 0 });
+    expect(republish).not.toHaveBeenCalled();
+    expect(statements.some((s) => s.sql.includes('DISPATCH_GENERATIONS_EXHAUSTED'))).toBe(false);
+    expect(statements.some((s) => s.sql.includes('dispatch_generation = dispatch_generation + 1'))).toBe(false);
+    const touched = statements.find((s) => s.sql.includes('SET queued_at = now() WHERE id = ANY($1::uuid[]) AND status = \'QUEUED\''));
+    expect(touched?.params).toEqual([[R2]]);
+  });
+
+  it('a probe that cannot answer (Redis down) never fails the row; a probe that finds no live job lets the cap apply', async () => {
+    const down = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 20 })]));
+    const unanswered = jest.fn(async () => {
+      throw new QueuePublishUnavailableError('Redis is unavailable');
+    });
+    expect(await dispatchEmailScope(down.tenant as never, ORG_A, [R2], jest.fn(), jest.fn(), false, unanswered)).toMatchObject({ generationsExhausted: 0 });
+    const gone = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 20 })]));
+    expect(await dispatchEmailScope(gone.tenant as never, ORG_A, [R2], jest.fn(), jest.fn(), false, async () => false)).toMatchObject({ generationsExhausted: 1 });
+  });
+
+  it('a deterministic publish refusal keeps the bump (the cap still converges); only an outage gives it back', async () => {
+    const { tenant, statements } = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 0 })]));
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const refused = jest.fn(async () => {
+      throw new QueueEnqueueRefusedError('refused');
+    });
+    await dispatchEmailScope(tenant as never, ORG_A, [R2], jest.fn(), refused, false);
+    errorSpy.mockRestore();
+    expect(statements.some((s) => s.sql.includes('dispatch_generation = dispatch_generation - 1'))).toBe(false);
+  });
+
   it('a re-queue whose publication fails (Redis down) gives its generation back, so an outage does not spend the cap', async () => {
     const { tenant, statements } = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 0 })]));
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const republish = jest.fn(async () => {
-      throw new Error('Redis unavailable');
+      throw new QueuePublishUnavailableError('Redis unavailable');
     });
     const result = await dispatchEmailScope(tenant as never, ORG_A, [R2], jest.fn(), republish, false);
     errorSpy.mockRestore();
@@ -235,7 +273,7 @@ describe('email dispatch — email-twenty Decision 2: re-queue cap', () => {
     const { tenant, statements } = fakeTenant(responder([ROW(R1, 'PENDING', { dispatch_generation: 3 })]));
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const republish = jest.fn(async () => {
-      throw new Error('Redis unavailable');
+      throw new QueuePublishUnavailableError('Redis unavailable');
     });
     await dispatchEmailScope(tenant as never, ORG_A, [R1], jest.fn(), republish, false);
     errorSpy.mockRestore();

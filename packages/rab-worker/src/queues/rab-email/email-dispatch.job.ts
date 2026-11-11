@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { QueuePublishUnavailableError } from '@rab/server/engine/worker-shared/queue-producer-connection';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
@@ -27,9 +28,16 @@ const RETRY_STALE_MINUTES = 5;
  * QUEUED with no progress is the signature of an attempt that never gets counted (the claim statement itself failing, so
  * `infrastructure_attempt_count` and the cap of 5 never move); RETRY and PROCESSING recoveries follow a counted claim and stay
  * bounded by that cap. A re-queue whose publication fails (Redis down) gives its generation back (see the publish loop), so an
- * outage does not consume this budget.
+ * outage does not consume this budget. Before failing a row at the cap the dispatcher asks BullMQ whether the job of its
+ * CURRENT generation is still live (waiting / delayed / active / prioritized): a row that is only waiting in a backlog is
+ * left alone (its `queued_at` refreshed), never failed; an unanswerable probe also leaves it alone for this cycle. The budget
+ * is the row's lifetime `dispatch_generation` (RETRY/PROCESSING recoveries and operator replays bump it too): a replayed
+ * row that already used it gets one real try, then is failed at its next stale cycle with no live job.
  */
 export const MAX_DISPATCH_GENERATIONS = 20;
+
+/** Whether the BullMQ job of a row's CURRENT generation is still live (waiting, delayed, active, prioritized). */
+export type IsEmailJobLive = (emailOutboxId: string, generation: number) => Promise<boolean>;
 
 interface ClaimedRow {
   id: string;
@@ -123,6 +131,7 @@ export async function runEmailDispatchCycle(
     generation: number,
   ) => Promise<void>,
   ambiguousDeliverySafeToRetry: boolean,
+  isJobLive?: IsEmailJobLive,
 ): Promise<EmailDispatchResult> {
   const total: EmailDispatchResult = {
     claimed: 0,
@@ -140,6 +149,7 @@ export async function runEmailDispatchCycle(
       publish,
       republish,
       ambiguousDeliverySafeToRetry,
+      isJobLive,
     );
     total.claimed += scope.claimed;
     total.published += scope.published;
@@ -187,6 +197,7 @@ export async function dispatchEmailScope(
     generation: number,
   ) => Promise<void>,
   ambiguousDeliverySafeToRetry: boolean,
+  isJobLive?: IsEmailJobLive,
 ): Promise<EmailDispatchResult> {
   const total: EmailDispatchResult = {
     claimed: 0,
@@ -317,14 +328,33 @@ export async function dispatchEmailScope(
         );
         uncertainCount = uncertain.length + exhaustedUncertain.length;
 
-        // Decision 2: a stale QUEUED row already re-queued MAX_DISPATCH_GENERATIONS times is failed, never re-queued again.
-        const generationsExhausted = recoverable.filter(
+        // Decision 2: a stale QUEUED row already re-queued MAX_DISPATCH_GENERATIONS times is failed, never re-queued again —
+        // unless the job of its current generation is still live in BullMQ (a backlog, not a loop): then it is only touched.
+        const atCap = recoverable.filter(
           (row) =>
             row.status === 'QUEUED' &&
             Number(row.dispatch_generation ?? 0) >= MAX_DISPATCH_GENERATIONS,
         );
+        const stillLive: ClaimedRow[] = [];
+        for (const row of atCap) {
+          if (!isJobLive) continue;
+          let live = true; // an unanswerable probe never fails a row
+          try {
+            live = await isJobLive(row.id, Number(row.dispatch_generation ?? 0));
+          } catch {
+            live = true;
+          }
+          if (live) stillLive.push(row);
+        }
+        const generationsExhausted = atCap.filter((row) => !stillLive.includes(row));
+        if (stillLive.length > 0) {
+          await manager.query(
+            `UPDATE core.email_outbox SET queued_at = now() WHERE id = ANY($1::uuid[]) AND status = 'QUEUED'`,
+            [stillLive.map((row) => row.id)],
+          );
+        }
         const safeToRecover = recoverable.filter(
-          (row) => !generationsExhausted.includes(row),
+          (row) => !atCap.includes(row),
         );
         generationsExhaustedCount = generationsExhausted.length;
         if (generationsExhausted.length > 0) {
@@ -332,7 +362,7 @@ export async function dispatchEmailScope(
             // sql-injection-reviewed: interpolates the module-level numeric constant MAX_DISPATCH_GENERATIONS only; the ids are the bound $1 parameter.
             `UPDATE core.email_outbox
               SET status = 'FAILED', failed_at = now(), last_error_code = 'DISPATCH_GENERATIONS_EXHAUSTED',
-                  last_error_message_sanitized = 'Re-queued ${MAX_DISPATCH_GENERATIONS} times without any attempt being recorded (the claim never succeeded); not re-queued again. Nothing was sent by these re-queues.'
+                  last_error_message_sanitized = 'Re-queued ${MAX_DISPATCH_GENERATIONS} times without delivery and no job is live for it; not re-queued again (replay to retry).'
             WHERE id = ANY($1::uuid[]) AND status = 'QUEUED'`,
             [generationsExhausted.map((row) => row.id)],
           );
@@ -464,7 +494,9 @@ export async function dispatchEmailScope(
         // the row since), so a Redis outage does not spend MAX_DISPATCH_GENERATIONS. Best effort: a failure here only means
         // this one cycle counts.
         const generation = recoveredGenerations.get(row.id);
-        if (generation !== undefined && bumpedIds.has(row.id)) {
+        // Only an outage (Redis down / the bounded publish timed out). A deterministic refusal keeps the bump, so the cap
+        // still converges on it.
+        if (generation !== undefined && bumpedIds.has(row.id) && error instanceof QueuePublishUnavailableError) {
           await tenant
             .runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, (manager) =>
               manager.query(
