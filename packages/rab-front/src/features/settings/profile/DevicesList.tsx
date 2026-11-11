@@ -8,21 +8,11 @@ import { ListSkeleton } from '../../../shared/components/LoadingState';
 import ConfirmDialog from '../../../shared/components/ConfirmDialog';
 import Popover from '../../../shared/components/Popover';
 import { describeDevice, type DeviceKind } from './device-label';
+import { sessionsQuery, type Session } from './sessionsQuery';
 import './devices.css';
 
-interface Session {
-  familyId: string;
-  deviceId: string | null;
-  userAgent: string | null;
-  ip: string | null;
-  /** `private`: a loopback/private address (e.g. the local Docker gateway) — the real client IP could not be verified. */
-  ipScope: 'public' | 'private' | null;
-  createdAt: string;
-  lastActiveAt: string;
-  isCurrentDevice: boolean;
-}
 
-const SESSIONS_KEY = ['profile', 'sessions'] as const;
+const SESSIONS_KEY = sessionsQuery.queryKey;
 const KIND_ICON: Record<DeviceKind, typeof IconDeviceDesktop> = { desktop: IconDeviceDesktop, mobile: IconDeviceMobile, tablet: IconDeviceTablet };
 
 function sessionMeta(session: Session): string {
@@ -76,10 +66,7 @@ function SessionMenu({ session, label, onLogOut, busy }: { session: Session; lab
 export default function DevicesList() {
   const qc = useQueryClient();
   const [confirmOthers, setConfirmOthers] = useState(false);
-  const sessionsQuery = useQuery({
-    queryKey: SESSIONS_KEY,
-    queryFn: async () => (await api.get<Session[]>('/profile/sessions')).data,
-  });
+  const sessionsQueryResult = useQuery(sessionsQuery);
 
   // DELETE /profile/sessions/:familyId → 204 once the server has revoked that session. A 404 means it had already ended
   // (expired, or logged out elsewhere); the list is refreshed either way so it never shows a session that is gone.
@@ -108,10 +95,10 @@ export default function DevicesList() {
     },
   });
 
-  if (sessionsQuery.isLoading) return <ListSkeleton rows={3} />;
-  if (sessionsQuery.isError) {
+  if (sessionsQueryResult.isLoading) return <ListSkeleton rows={3} />;
+  if (sessionsQueryResult.isError) {
     // A failed request is never presented as "no active sessions" — it says what failed and offers Retry.
-    const status = (sessionsQuery.error as { response?: { status?: number } } | null)?.response?.status;
+    const status = (sessionsQueryResult.error as { response?: { status?: number } } | null)?.response?.status;
     const message = status === 401
       ? 'Your session has ended, so your devices could not be loaded. Sign in again.'
       : status && status >= 500
@@ -120,13 +107,13 @@ export default function DevicesList() {
     return (
       <p role="alert" className="device-error feedback-error">
         {message}{' '}
-        <button type="button" className="btn btn-outline" onClick={() => void sessionsQuery.refetch()}>Retry</button>
+        <button type="button" className="btn btn-outline" onClick={() => void sessionsQueryResult.refetch()}>Retry</button>
       </p>
     );
   }
 
   // This device first, then the server's most-recent-activity order (stable sort; nothing merged or hidden).
-  const sessions = [...(sessionsQuery.data ?? [])].sort((a, b) => Number(b.isCurrentDevice) - Number(a.isCurrentDevice));
+  const sessions = [...(sessionsQueryResult.data ?? [])].sort((a, b) => Number(b.isCurrentDevice) - Number(a.isCurrentDevice));
   const hasCurrent = sessions.some((s) => s.isCurrentDevice);
   const hasOthers = sessions.some((s) => !s.isCurrentDevice);
 
