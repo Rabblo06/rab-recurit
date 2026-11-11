@@ -118,8 +118,10 @@ export class SecurityVersionService {
           : null,
       platformAdminVersion: Number(row?.platform_admin_version ?? 0),
       organisationVersion: row?.organisation_version !== null && row?.organisation_version !== undefined ? Number(row.organisation_version) : null,
-      // An aggregate always returns one row, so a missing value only means "no row came back at all": fail closed to a
-      // value no real fingerprint has ('x'), which can never equal a previously cached one.
+      // An aggregate always returns one row, so a missing value only means "no row came back at all". Then 'x' is used:
+      // the SQL never produces it (it always yields `<count>-<md5 | 0>`), so this vector never matches a key built from a
+      // readable override set. Two unreadable reads would both give 'x', so they could share a key only if every other
+      // vector term matched as well.
       permissionOverrideFingerprint: row?.permission_override_fingerprint ?? 'x',
     };
   }
