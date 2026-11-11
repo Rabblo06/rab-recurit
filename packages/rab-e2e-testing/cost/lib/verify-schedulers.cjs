@@ -17,6 +17,8 @@ const DIST = '/app/packages/rab-worker/dist';
 const fromWorker = (id) => require(require.resolve(id, { paths: [DIST, '/app'] }));
 
 (async () => {
+  // The env validator's decorators need the reflection polyfill, as register-schedulers.js loads it first.
+  fromWorker('reflect-metadata');
   const { validate } = fromWorker('@rab/server/engine/core-modules/environment/env.validation');
   const { buildSchedulerPlan } = require(path.join(DIST, 'core/scheduler/scheduler-plan.js'));
   const { schedulerIdOf, crewflowSchedulerPrefixOf } = require(path.join(DIST, 'core/scheduler/scan-jobs.js'));
