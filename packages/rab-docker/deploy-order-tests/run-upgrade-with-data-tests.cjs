@@ -14,12 +14,17 @@
  *   DOT_PG_IMAGE=postgres@sha256:…  DOT_REDIS_IMAGE=redis@sha256:…
  *     node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs <16|18> <out-dir> [--only=U1,U2,...]
  *
- * Cases (each its own disposable project dou-pg<major>-<case>; run one after another):
+ *   [DOT_PROJECT_PREFIX=dou]       project names <prefix>-pg<major>-<case> (per agent / per run; never shared)
+ *   <out-dir> must be OUTSIDE the repository (it holds the per-run secrets).
+ *
+ * Cases (each its own disposable project <prefix>-pg<major>-<case>; run one after another):
  *   U1  seed-then-upgrade: fresh PREV, SEED (seed-organisations.sql: 2 organisations, users, staff, venues, shifts,
  *       assignments, offers, attendance, payroll), facts; [control: N1 image refuses, 65, Worker never started, nothing
  *       applied]; NEW: floor passes, 254 -> 256, entity-cache epoch bump logged, API healthy before the Worker starts; the
  *       seeded row sets, money, FKs and tenant ownership unchanged (data-facts.sql); RLS regression as crewflow_owner;
- *       rollback to PREV: AHEAD, serves, data unchanged.
+ *       rollback to PREV: AHEAD, serves, data unchanged; then the comparator SELF-CHECK: a rewritten seeded value and a
+ *       row moved to the other organisation make compareFacts FAIL, a wrong expectation makes rlsCheck FAIL, and the
+ *       reverted data compares equal again.
  *   U2  skipped / unknown history refused: seeded PREV with its last four ledger rows removed (older than R254): NEW
  *       refuses (UnsupportedUpgradeStartError, exit 65) in a restart loop, nothing applied, Worker never started; the
  *       loop re-reads the ledger: a hole (1786721450000 recorded, 1786721440000 not) is refused too; the ledger repaired
@@ -64,6 +69,17 @@ if (process.env.DOT_CONTROL_DIGEST && !DIGEST.test(process.env.DOT_CONTROL_DIGES
 for (const k of ['DOT_PG_IMAGE', 'DOT_REDIS_IMAGE']) if (!REF.test(process.env[k] ?? '')) fail(`${k} must be <repository>@sha256:<64 hex>`);
 if (!/^127\.0\.0\.1:\d+\/[a-z0-9._/-]+$/.test(process.env.DOT_REPOSITORY ?? '')) fail('DOT_REPOSITORY must be a LOCAL registry repository (127.0.0.1:<port>/<name>)');
 
+// Review note 7: outputs (which hold per-run secrets) never go inside the repository.
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+const inside = (child, parent) => {
+  const rel = path.relative(parent.toLowerCase(), child.toLowerCase());
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
+if (inside(OUT, REPO_ROOT)) fail('the output directory must be OUTSIDE the repository (it holds per-run secrets)');
+// Review note 6: the project-name prefix, so two runs (or two agents) never share or tear down each other's projects.
+const PREFIX = process.env.DOT_PROJECT_PREFIX || 'dou';
+if (!/^[a-z][a-z0-9-]{0,15}$/.test(PREFIX)) fail('DOT_PROJECT_PREFIX must match ^[a-z][a-z0-9-]{0,15}$');
+
 const REPO = process.env.DOT_REPOSITORY;
 const IMG = {
   prev: process.env.DOT_PREV_DIGEST,
@@ -90,7 +106,7 @@ const projects = [];
 function note(line) {
   const l = L.redact(line);
   logLines.push(l);
-  console.log(`[dou-pg${MAJOR}] ${l}`);
+  console.log(`[${PREFIX}-pg${MAJOR}] ${l}`);
 }
 function evidence(name, text) {
   fs.writeFileSync(path.join(OUT, 'evidence', name), L.redact(text));
@@ -116,7 +132,7 @@ function startPeakSampler() {
 }
 
 function project(kind, opts) {
-  const p = new L.Project(`dou-pg${MAJOR}-${kind}`, OUT, opts);
+  const p = new L.Project(`${PREFIX}-pg${MAJOR}-${kind}`, OUT, opts);
   projects.push(p);
   L.writeSecrets(p.secretsDir);
   return p;
@@ -125,7 +141,8 @@ function use(p, digest) {
   L.writeComposeEnv(p, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE });
 }
 
-async function step(id, title, fn, p) {
+/** `p`: the case's project (failure logs, teardown). `down: false` keeps it running for the next case (U4 -> U5). */
+async function step(id, title, fn, p, { down = true } = {}) {
   if (ONLY.length && !ONLY.includes(id)) return;
   const r = { id, title, status: 'NOT RUN', checks: [], notes: [] };
   results.push(r);
@@ -145,9 +162,10 @@ async function step(id, title, fn, p) {
     r.status = 'FAIL';
     r.checks.push({ ok: false, what: `threw: ${L.redact(e && e.message ? e.message : String(e))}` });
     note(`  FAIL threw: ${e && e.message ? e.message : e}`);
-    if (p) for (const svc of ['rab-api', 'rab-worker']) evidence(`${id}-failure-${svc}.log`, L.run('docker', ['logs', '--tail', '400', p.container(svc)]).out);
   } finally {
-    if (p && !KEEP) {
+    // A failed case (a failed check or a throw) keeps its containers' logs, before any teardown.
+    if (p && r.status === 'FAIL') for (const svc of ['rab-api', 'rab-worker']) evidence(`${id}-failure-${svc}.log`, L.run('docker', ['logs', '--tail', '400', p.container(svc)]).out);
+    if (p && down && !KEEP) {
       const d = p.down();
       note(`  cleanup ${p.name}: compose down exit ${d.code}`);
     }
@@ -184,11 +202,14 @@ function facts(p) {
   return { lines, map };
 }
 
-/** Seeded row sets and money equal; every FK holds; every cross-table organisation_id agrees. */
+/** Seeded row sets, row CONTENT and money equal; every FK holds; every cross-table organisation_id agrees. */
 function compareFacts(check, before, after, label) {
   const seeded = [...before.map.keys()].filter((k) => k.startsWith('rows|') && SEEDED_TABLES.includes(k.split('|')[1]));
   const changed = seeded.filter((k) => before.map.get(k) !== after.map.get(k));
   check(seeded.length === SEEDED_TABLES.length * 2 && changed.length === 0, `${label}: the seeded row sets of ${SEEDED_TABLES.length} tables x 2 organisations are identical (count + md5 of ids)${changed.length ? `; changed: ${changed.join(', ')}` : ''}`);
+  const content = [...before.map.keys()].filter((k) => k.startsWith('content|'));
+  const contentChanged = content.filter((k) => before.map.get(k) !== after.map.get(k));
+  check(content.length === SEEDED_TABLES.length * 2 && contentChanged.length === 0, `${label}: the seeded rows' CONTENT is identical (status, money, minutes, tenant keys, references, key timestamps; ${content.length} hashes)${contentChanged.length ? `; changed: ${contentChanged.join(', ')}` : ''}`);
   const nonZero = (k) => [...before.map.keys()].filter((key) => key.startsWith('rows|') && key.split('|')[1] === k && !before.map.get(key).startsWith('0:'));
   check(nonZero('payroll_record').length === 2 && nonZero('attendance').length === 2, `${label}: the seed is really there (payroll and attendance rows in both organisations)`);
   const money = [...before.map.keys()].filter((k) => k.startsWith('money|'));
@@ -203,7 +224,7 @@ function compareFacts(check, before, after, label) {
 }
 
 /** RLS regression as the runtime login: no context -> zero rows; organisation A's context -> exactly A's rows, none of B's. */
-function rlsCheck(p, check, label) {
+function rlsCheck(p, check, label, { tamperExpected = false } = {}) {
   const ids = p
     .psql(`SELECT o.slug || ' ' || o.id || ' ' || w.id || ' ' || w.owner_user_id FROM core.organisation o JOIN core.manager_workspace w ON w.organisation_id = o.id WHERE o.slug::text LIKE 'dot-seed-%' ORDER BY o.slug`)
     .split('\n')
@@ -217,10 +238,49 @@ function rlsCheck(p, check, label) {
   check(/^0(,0)*$/.test(none) && none.split(',').length === tables.length, `${label}: crewflow_owner with NO tenant context reads 0 rows from ${tables.length} tenant tables (${none})`);
   const ctx = (org, ws, user) => `BEGIN; SELECT set_config('rab.organisation_id', '${org}', true), set_config('rab.workspace_id', '${ws}', true), set_config('rab.user_id', '${user}', true);`;
   const own = p.psqlOwner(`${ctx(a[1], a[2], a[3])}\nSELECT 'A|' || ${counts()} || '|B|' || ${counts(` WHERE organisation_id = '${b[1]}'`)};\nCOMMIT;`).split('\n').pop();
-  const expected = p.psql(`SELECT ${counts(` WHERE organisation_id = '${a[1]}'`)}`);
+  const real = p.psql(`SELECT ${counts(` WHERE organisation_id = '${a[1]}'`)}`);
+  // Self-check only (review note 2): a deliberately wrong expectation must make this check FAIL.
+  const expected = tamperExpected ? real.replace(/^\d+/, (x) => String(Number(x) + 1)) : real;
   check(own === `A|${expected}|B|${tables.map(() => '0').join(',')}`, `${label}: in organisation A's context it reads exactly A's rows (${expected}) and none of B's`);
   const mixed = p.psqlOwner(`${ctx(a[1], b[2], a[3])}\nSELECT ${counts()};\nCOMMIT;`).split('\n').pop();
   check(/^0(,0)*$/.test(mixed), `${label}: organisation A with organisation B's workspace reads 0 rows (${mixed})`);
+}
+
+/** Runs `fn` with a collecting `check` and returns the failed descriptions (the step's own checks are not touched). */
+function failuresOf(fn) {
+  const failed = [];
+  fn((ok, what) => {
+    if (!ok) failed.push(what);
+    return Boolean(ok);
+  });
+  return failed;
+}
+
+/**
+ * Review note 2: the comparators can FAIL. On the disposable database, after the real comparisons: (a) one seeded value is
+ * rewritten -> compareFacts reports the content change; (b) one row is moved to the other organisation with FK triggers
+ * off (session_replication_role = replica, superuser, this disposable database only) -> compareFacts reports the tenant
+ * ownership violation; (c) rlsCheck is given a wrong expectation -> it fails. Each mutation is reverted and the facts are
+ * proven equal again, so the case still ends on unchanged data.
+ */
+function comparatorSelfCheck(p, check, baseline) {
+  const orgA = `(SELECT id FROM core.organisation WHERE slug = 'dot-seed-a')`;
+  const orgB = `(SELECT id FROM core.organisation WHERE slug = 'dot-seed-b')`;
+  const asg = p.psql(`SELECT id FROM core.shift_assignment WHERE organisation_id = ${orgA} ORDER BY id LIMIT 1`);
+  const att = p.psql(`SELECT id FROM core.attendance WHERE organisation_id = ${orgA} ORDER BY id LIMIT 1`);
+  if (!/^[0-9a-f-]{36}$/.test(asg) || !/^[0-9a-f-]{36}$/.test(att)) throw new Error('self-check: cannot pick the seeded rows');
+  p.psql(`UPDATE core.shift_assignment SET pay_rate_snapshot_pence = pay_rate_snapshot_pence + 1 WHERE id = '${asg}'`);
+  const a = failuresOf((c) => compareFacts(c, baseline, facts(p), 'self-check'));
+  check(a.some((w) => /CONTENT is identical.*changed: content\|shift_assignment\|dot-seed-a/.test(w)), `SELF-CHECK: a rewritten pay_rate_snapshot_pence makes compareFacts FAIL (${a.length} failure(s))`);
+  p.psql(`UPDATE core.shift_assignment SET pay_rate_snapshot_pence = pay_rate_snapshot_pence - 1 WHERE id = '${asg}'`);
+  p.psql(`SET session_replication_role = replica; UPDATE core.attendance SET organisation_id = ${orgB} WHERE id = '${att}'`);
+  const b = failuresOf((c) => compareFacts(c, baseline, facts(p), 'self-check'));
+  check(b.some((w) => /tenant ownership holds.*violations: .*payroll_record\.payroll_record_attendance_id_fkey=1/.test(w)), `SELF-CHECK: an attendance row moved to the other organisation makes compareFacts FAIL on tenant ownership (${b.length} failure(s))`);
+  p.psql(`SET session_replication_role = replica; UPDATE core.attendance SET organisation_id = ${orgA} WHERE id = '${att}'`);
+  const r = failuresOf((c) => rlsCheck(p, c, 'self-check', { tamperExpected: true }));
+  check(r.some((w) => /organisation A's context/.test(w)), 'SELF-CHECK: rlsCheck FAILS when given a wrong expectation');
+  const back = failuresOf((c) => compareFacts(c, baseline, facts(p), 'self-check'));
+  check(back.length === 0, `SELF-CHECK: both mutations reverted, the facts equal the baseline again${back.length ? ` (${back.join('; ')})` : ''}`);
 }
 
 function migrateResult(log) {
@@ -301,6 +361,7 @@ async function main() {
     evidence('U1-rollback-api.log', rl);
     check(/database state AHEAD/.test(rl), 'the old API classified the database AHEAD and served');
     compareFacts(check, before, facts(u1), 'after the rollback');
+    comparatorSelfCheck(u1, check, before);
   }, u1);
 
   // ---------------------------------------------------------------------------------------------------------------- U2
@@ -312,14 +373,13 @@ async function main() {
     const before = facts(u2);
     u2.setShortHealth(true); // the refusal is reported in about a minute (the fresh install above used the production window)
     use(u2, IMG.next);
-    const since = L.nowS() - 1;
     const d = u2.deploy(900_000);
     evidence('U2-older-deploy.log', d.out);
     check(d.code !== 0, `deploy of NEW on the older history FAILS (exit ${d.code}): compose reports the unhealthy API`);
     await L.waitFor('a second refusal (restart loop)', () => (u2.logs('rab-api').match(/UnsupportedUpgradeStartError/g) || []).length >= 4, 240_000, 5000);
     let al = u2.logs('rab-api');
     evidence('U2-older-api.log', al);
-    check(/older than every supported release/.test(al) && migrateResult(al).every((r) => r.exitCode === 65 && r.serve === false), 'refused with UnsupportedUpgradeStartError, every attempt exit 65, serve:false (fail closed under continue)');
+    check(/older than every supported release/.test(al) && migrateResult(al).length >= 1 && migrateResult(al).every((r) => r.exitCode === 65 && r.serve === false), `refused with UnsupportedUpgradeStartError, every attempt (${migrateResult(al).length}) exit 65, serve:false (fail closed under continue)`);
     check(Number(u2.health('rab-api').split('|')[3]) >= 1, `the API is in its restart loop (${u2.health('rab-api')})`);
     check(u2.neverStarted('rab-worker'), 'the Worker was never started');
     check(u2.psql('SELECT count(*) FROM core.migrations') === '250', 'nothing applied (250 ledger rows)');
@@ -346,7 +406,6 @@ async function main() {
     check(!u2.neverStarted('rab-worker'), `the next \`docker compose up -d\` (exit ${up.code}) started the Worker`);
     al = u2.logs('rab-api');
     evidence('U2-api-final.log', al);
-    void since;
   }, u2);
 
   // ---------------------------------------------------------------------------------------------------------------- U3
@@ -366,9 +425,14 @@ async function main() {
       const k = L.run('docker', ['kill', '--signal', 'KILL', u3.container('rab-api')]);
       check(k.code === 0, 'SIGKILL of the rab-api container mid-migration');
       await holder.release();
-      await L.waitFor('the killed session to end', () => u3.psql(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND ((classid::bigint << 32) | objid::bigint) = ${L.MIGRATION_LOCK_KEY_SQL}`) === '0' || u3.health('rab-api').startsWith('healthy'), 60_000, 1000);
-      const ledger = u3.psql(`SELECT count(*) FROM core.migrations`);
-      n(`just after the kill: ledger ${ledger}, api ${u3.health('rab-api')}`);
+      await L.waitFor('the killed session to end', () => u3.psql(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND ((classid::bigint << 32) | objid::bigint) = ${L.MIGRATION_LOCK_KEY_SQL}`) === '0', 60_000, 1000);
+      check(true, 'the killed migration session ended and released the migration lock');
+      check(!u3.health('rab-api').startsWith('healthy') && u3.inspect('rab-api', '{{.State.Status}}') === 'exited', `the killed API stays down (${u3.health('rab-api')}): no restart behind the test's back`);
+      check(u3.psql(`SELECT count(*) FROM core.migrations`) === '254', 'just after the kill: the ledger is still 254 (nothing of the interrupted run recorded)');
+      check(
+        u3.psql(`SELECT (SELECT count(*) FROM core.migrations WHERE name = '${NEWER[0]}') || '|' || coalesce((SELECT indisvalid::text FROM pg_index WHERE indexrelid = to_regclass('core.email_outbox_claim_idx')), 'absent')`) === '0|true',
+        'the first index stays (VALID) WITHOUT a ledger row for OutboxClaimIndexes1786721440000: partial DDL of the killed transaction=false migration',
+      );
     } finally {
       await holder.release().catch(() => undefined);
     }
@@ -414,7 +478,7 @@ async function main() {
     check(r.code === 0, `NEW (without the probe): exit ${r.code}`);
     await u4.waitHealthy('rab-api', 300_000);
     check(/"upgradeFailed":\s*false/.test(u4.healthz().body), 'NEW: CURRENT, upgradeFailed:false');
-  }, KEEP ? null : null);
+  }, u4, { down: Boolean(ONLY.length) && !ONLY.includes('U5') }); // U5 continues on this stack; tear it down here only when U5 will not run
 
   await step('U5', 'a failed NON-transactional migration: exit 70, serves; its committed first step stays, the probe is not recorded; NEW then CURRENT', async (check) => {
     if (!u4.inspect('rab-api', '{{.Id}}')) await freshSeeded(u4, check);
@@ -451,7 +515,7 @@ async function main() {
     check(d.code !== 0, `deploy of NEW on a foreign database FAILS (exit ${d.code})`);
     const al = u6.logs('rab-api');
     evidence('U6-api.log', al);
-    check(/state FOREIGN/.test(al) && /DatabaseStateError/.test(al) && migrateResult(al).every((r) => r.exitCode === 67), 'classified FOREIGN, refused with DatabaseStateError, exit 67');
+    check(/state FOREIGN/.test(al) && /DatabaseStateError/.test(al) && migrateResult(al).length >= 1 && migrateResult(al).every((r) => r.exitCode === 67), `classified FOREIGN, refused with DatabaseStateError, every attempt (${migrateResult(al).length}) exit 67`);
     check(u6.psql(`SELECT count(*) FROM pg_namespace WHERE nspname = 'core'`) === '0', 'nothing created (no core schema)');
     check(u6.psql('SELECT count(*) FROM public.not_crewflow') === '1', 'the foreign table is untouched');
     check(u6.neverStarted('rab-worker'), 'the Worker was never started');

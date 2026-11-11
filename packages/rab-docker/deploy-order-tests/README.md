@@ -65,12 +65,12 @@ PostgreSQL major per run (run it for 16 and 18). Same production files, same com
 | `run-upgrade-with-data-tests.cjs` | The driver (cases U1-U7 below). |
 | `upgrade-lib.cjs` | Its helpers (projects, secrets, psql as the superuser and as `crewflow_owner`, a lock holder). |
 | `seed-organisations.sql` | Two synthetic organisations: CEO, workspace, membership, roles, venues, a job role, three staff, shifts, assignments, offers, attendance, approved payroll records and a payroll run. `.invalid` addresses only. |
-| `data-facts.sql` | Read-only facts compared before and after: seeded row sets (count + md5 of ids), payroll pence and worked minutes, every core foreign key checked row by row, and tenant ownership on every cross-table reference. |
+| `data-facts.sql` | Read-only facts compared before and after: seeded row sets (count + md5 of ids), seeded row CONTENT (md5 of a fixed, reviewed column list per table: tenant keys, references, status, money, minutes, key timestamps), payroll pence and worked minutes, every core foreign key checked row by row, and tenant ownership on every cross-table reference. |
 | `probe/build-probe-images.cjs`, `probe/*.js` | Test-only images: the image under test (pinned by digest) plus one failing probe migration (transactional, or `transaction = false` with a committed first step). The build file is generated on stdin, so no unpinned Dockerfile is tracked (the image gate checks every tracked Dockerfile). Never pushed to Docker Hub. |
 
 | Case | What is proven |
 |---|---|
-| U1 | Fresh R254 (`cd7c7e32`), seed, then the new image: the floor admits R254, 254 → 256, the entity-cache epoch bump runs, the API is healthy before the Worker starts, the seeded data, money, foreign keys and tenant ownership are unchanged, and RLS holds for `crewflow_owner` (no context = 0 rows; organisation A sees only A; A with B's workspace = 0). Optional red control (`DOT_CONTROL_DIGEST`, an image with N1): refused with 65, Worker never started. Rollback to R254: AHEAD, serves. |
+| U1 | Fresh R254 (`cd7c7e32`), seed, then the new image: the floor admits R254, 254 → 256, the entity-cache epoch bump runs, the API is healthy before the Worker starts, the seeded data, money, foreign keys and tenant ownership are unchanged, and RLS holds for `crewflow_owner` (no context = 0 rows; organisation A sees only A; A with B's workspace = 0). Optional red control (`DOT_CONTROL_DIGEST`, an image with N1): refused with 65, Worker never started. Rollback to R254: AHEAD, serves. Then a self-check proves the comparators can fail (a rewritten value, a row moved to the other organisation, a wrong RLS expectation), and the reverted data compares equal again. |
 | U2 | An older history (last 4 ledger rows removed) and a holed one: refused with `UnsupportedUpgradeStartError` (65) in a restart loop, nothing applied, Worker never started. Repairing the ledger lets the same container upgrade; the Worker starts on the next `docker compose up -d` (SU-02). |
 | U3 | The API is SIGKILLed inside `OutboxClaimIndexes1786721440000` (its second index blocked by a lock holder): the Worker was not started, the first index stays without a ledger row; the documented command resumes to 256 with both indexes valid. |
 | U4 / U5 | A failed transactional / non-transactional upgrade migration (probe images): exit 70, the API serves with `upgradeFailed: true`, the Worker starts (C3), data unchanged; the new image afterwards is CURRENT. |
@@ -90,4 +90,4 @@ DOT_PG_IMAGE=postgres@sha256:<16 or 18> DOT_REDIS_IMAGE=redis@sha256:<7> \
   node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs <16|18> <out-dir> [--only=U1,U3]
 ```
 
-Projects are `dou-pg<major>-u1` … `-u7`, run one after another and taken `down` after each case.
+Projects are `<prefix>-pg<major>-u1` … `-u7` (`DOT_PROJECT_PREFIX`, default `dou`; give each agent or parallel run its own), run one after another and taken `down` after each case (U4 stays up for U5 when both run). The output directory must be outside the repository.

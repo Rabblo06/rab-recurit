@@ -1,7 +1,7 @@
 -- Deploy-order real-container tests (TEST-ONLY): a SYNTHETIC staffing picture written BEFORE an upgrade, so the upgrade
 -- runs against an EXISTING database (the fresh-install proof fails) and the driver can compare it afterwards.
 --
--- Run by run-deploy-order-tests.cjs as the disposable stack's PostgreSQL superuser (psql -v ON_ERROR_STOP=1), the way a
+-- Run by run-upgrade-with-data-tests.cjs as the disposable stack's PostgreSQL superuser (psql -v ON_ERROR_STOP=1), the way a
 -- restore or an operator fixture would write it. Two organisations (dot-seed-a, dot-seed-b), each with a CEO, its manager
 -- workspace, membership and profile, a role, two venues, a job role, three staff, shifts (completed and upcoming),
 -- assignments, offers, attendance (worked minutes from the fixed clock-in/out below: 8 h minus a 30 min break = 450), approved

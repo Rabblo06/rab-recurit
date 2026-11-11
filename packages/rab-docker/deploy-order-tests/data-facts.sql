@@ -5,6 +5,8 @@
 --   fk|<constraint>|<orphan rows>                                  every FOREIGN KEY of schema core, checked row by row
 --   own|<constraint>|<rows whose organisation_id differs from the referenced row's>
 --                                                                  every core FK whose two tables both carry organisation_id
+--   content|<table>|<org slug>|<count>:<md5 of a fixed list of columns of every row, in id order>   the seeded tables
+--   money|<table.column>|<org slug>|<sum>
 --   ledger|count|<n>
 -- Read-only: it creates a TEMP table only.
 \set ON_ERROR_STOP on
@@ -52,6 +54,42 @@ BEGIN
       EXECUTE format('SELECT count(*) FROM core.%I c JOIN core.%I p ON %s WHERE c.organisation_id IS DISTINCT FROM p.organisation_id', c.child, c.parent, cond) INTO n;
       INSERT INTO dot_fact VALUES ('own', c.child || '.' || c.conname, n::text);
     END IF;
+  END LOOP;
+
+  -- Content of the seeded rows (review note 1): a FIXED list of existing columns per seeded table (tenant keys, references,
+  -- status, money, minutes, key timestamps, identity text), hashed per organisation in id order, so a migration that
+  -- REWRITES a value (not only one that adds or drops a row) changes the fact. Every listed column must exist (a missing
+  -- one fails the run: the list is reviewed, not discovered).
+  FOR c IN
+    SELECT * FROM (VALUES
+      ('attendance', 'organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence'),
+      ('job_offer', 'organisation_id, workspace_id, shift_assignment_id, staff_profile_id, status, estimated_pay_pence, sent_at, expires_at'),
+      ('job_role', 'organisation_id, workspace_id, name, default_rate_pence'),
+      ('manager_profile', 'organisation_id, user_id, type, workspace_id'),
+      ('manager_workspace', 'organisation_id, owner_user_id, name, subdomain, status'),
+      ('payroll_calendar', 'organisation_id, year, version, source, created_by'),
+      ('payroll_calendar_period', 'organisation_id, calendar_id, period_start, period_end, payday'),
+      ('payroll_record', 'organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by'),
+      ('payroll_run', 'organisation_id, workspace_id, period_id, prepared_by'),
+      ('payroll_run_line', 'organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence'),
+      ('role', 'organisation_id, key, name, is_system'),
+      ('shift', 'organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by'),
+      ('shift_assignment', 'organisation_id, workspace_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, assigned_by'),
+      ('staff_profile', 'organisation_id, workspace_id, user_id, staff_ref, created_by'),
+      ('user', 'organisation_id, email, first_name, last_name, status, password_hash'),
+      ('venue', 'organisation_id, workspace_id, name, created_by'),
+      ('workspace_membership', 'organisation_id, workspace_id, user_id, status, source')
+    ) AS v(tbl, cols)
+  LOOP
+    FOR t IN EXECUTE format(
+      'SELECT o.slug::text AS slug, count(x.id) AS n,
+              coalesce(md5(string_agg(concat_ws(''|'', x.id, %s), E''\n'' ORDER BY x.id::text)), ''-'') AS h
+         FROM core.organisation o LEFT JOIN core.%I x ON x.organisation_id = o.id
+        WHERE o.slug::text LIKE ''dot-seed-%%'' GROUP BY o.slug',
+      (SELECT string_agg(format('x.%I::text', trim(col)), ', ') FROM unnest(string_to_array(c.cols, ',')) AS col), c.tbl)
+    LOOP
+      INSERT INTO dot_fact VALUES ('content', c.tbl || '|' || t.slug, t.n || ':' || t.h);
+    END LOOP;
   END LOOP;
 
   -- Money and worked minutes of the seeded organisations (bigint pence; minutes as written by the seed).
