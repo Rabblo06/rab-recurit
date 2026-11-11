@@ -6059,6 +6059,26 @@ stay off, and their sweeps keep the 2 s default.
   interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
   DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.
 
+## CONFIG — pay-statement sweep at 30 s in production (branch phase-x/j1a-statement-30s, 2026-11-11, not merged)
+
+Owner decision 2026-11-11 (Phase X Part 1, J1a / P1-7). Configuration only:
+`WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=30` (code default 5, bounds 1–300), committed on rab-api and rab-worker
+in `docker-compose.image.yml`, `docker-compose.production.yml` and `docker-compose.local-build.yml`, enforced by
+`scripts/compose-owner-login.cjs` (`STATEMENT_DISPATCH`) and `staging/verify-image-compose.cjs`. No code default,
+migration, role, grant, RLS, posture, payroll calculation or approval rule change; `core.payroll_record_guard`, the
+dispatcher's compare-and-set to `queued` (generation + 1), the consumer's generation / `statement_file_id IS NULL` /
+still-approved checks and the UNIQUE `worker_event` `shift-statement:<id>` are untouched.
+
+- **Asset:** generation of another person's pay statement (a payroll document). **Actor:** the Worker acting on a
+  committed approval; anyone able to configure one service differently from the other.
+- **Interval (both services):** the API registers the scheduler with its own value and the consume-only Worker verifies
+  scheduler ids, never intervals, so the gate requires the same value on both and refuses it in any env file.
+- **Residual (payroll-adjacent latency, accepted by the owner):** a statement is generated 0–30 s after approval (was
+  0–5 s). Lease recovery (10 min) and the failed-retry backoff (1 min × attempts) each gain at most 25 s. A slower sweep
+  never changes which statement is generated or how many: the guards above decide that, not the interval.
+- **Rollback:** remove the value on both services in the three compose files and the gate (the API re-registers the
+  scheduler at 5 s on its next start).
+
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
 Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
