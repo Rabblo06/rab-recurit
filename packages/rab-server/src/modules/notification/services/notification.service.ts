@@ -3,13 +3,12 @@ import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common'
 import { EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
-import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { PushDeliveryService } from '../../../engine/core-modules/push/push-delivery.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { escapeHtml } from '../../../engine/utils/escape-html';
-import { NotificationPreference } from '../../identity/entities';
+import { NotificationPreference, User } from '../../identity/entities';
 import { Notification } from '../entities/notification.entity';
 import { NotifyFastPublishService } from './notify-fast-publish.service';
 
@@ -62,7 +61,6 @@ export class NotificationService {
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly emailOutbox: EmailOutboxService,
-    private readonly entityCache: CoreEntityCacheService,
     private readonly pushDelivery: PushDeliveryService,
   ) {}
 
@@ -141,12 +139,13 @@ export class NotificationService {
     }
 
     if (emailEnabled) {
-      // Redis checkpoint — Core Entity Cache: only `user.email` is read here, never anything
-      // security-relevant, so the read-through display cache is a safe fit for this hot path
-      // (fired on nearly every offer/shift-request lifecycle event — see CoreEntityCacheService's
-      // own doc comment for why a stale-by-at-most-5-minutes email address is an acceptable trade
-      // here specifically, unlike e.g. a live status check).
-      const user = await this.entityCache.getUserDisplay(manager, params.userId);
+      // Phase X SC-01: the recipient address is read LIVE, in this transaction, under RLS — never from
+      // CoreEntityCacheService's display cache. An address is a delivery target, not display data: that
+      // cache's epoch is bumped in Redis after commit, so a missed or failed bump (or a write path that
+      // never bumps) would keep sending — offer, shift and PII-bearing mail included — to the OLD address
+      // for up to its TTL after an email change, which is often a takeover-recovery action. One narrow
+      // SELECT, the same statement count as the cache-off path before this change.
+      const user = await manager.findOne(User, { where: { id: params.userId }, select: { id: true, email: true } });
       if (user) {
         // MAIL-01 — `params.message` (and `.title`) reach this point already
         // assembled from dozens of call sites across services and worker
