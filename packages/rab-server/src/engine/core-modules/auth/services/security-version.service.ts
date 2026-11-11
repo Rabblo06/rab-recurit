@@ -5,6 +5,7 @@ import { Organisation } from '../../../../modules/identity/entities/organisation
 import { PlatformAdmin } from '../../../../modules/identity/entities/platform-admin.entity';
 import { Role } from '../../../../modules/identity/entities/role.entity';
 import { User } from '../../../../modules/identity/entities/user.entity';
+import { forgetTxPermissions } from '../../permissions/tx-permission-memo';
 
 /**
  * P1D — the authoritative security-version bump/read primitives. See
@@ -27,21 +28,26 @@ export class SecurityVersionService {
   /** Bump after any mutation to this user's OWN account authority (password set/changed/reset, status change). */
   async bumpUser(manager: EntityManager, userId: string): Promise<void> {
     await manager.increment(User, { id: userId }, 'securityVersion', 1);
+    // Phase X C5: an authority change inside this transaction; later layer-2 checks in it re-read the permission set.
+    forgetTxPermissions(manager);
   }
 
   /** Bump after `core.role_permission` changes for this role — once per role, never fanned out to its holders. */
   async bumpRole(manager: EntityManager, roleId: string): Promise<void> {
     await manager.increment(Role, { id: roleId }, 'permissionVersion', 1);
+    forgetTxPermissions(manager); // C5
   }
 
   /** Bump after an organisation-level security-configuration change (auth-provider toggles, maintenance mode). */
   async bumpOrganisation(manager: EntityManager, organisationId: string): Promise<void> {
     await manager.increment(Organisation, { id: organisationId }, 'securityVersion', 1);
+    forgetTxPermissions(manager); // C5
   }
 
   /** Bump after a platform-admin grant/revoke. Called from all three real write paths (service + two CLIs). */
   async bumpPlatformAdmin(manager: EntityManager, userId: string): Promise<void> {
     await manager.increment(PlatformAdmin, { userId }, 'securityVersion', 1);
+    forgetTxPermissions(manager); // C5
   }
 
   /**
