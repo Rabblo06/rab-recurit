@@ -243,3 +243,46 @@ test('a variant file whose rab-ops reads no env file fails, whatever the Compose
     fsx.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Phase X J2 (S0-J SJ-03): the push / realtime sweep rule, enforced once the feature is switched on.
+test('J2 static: push on without the committed 30 s sweep is refused; with 30 s on both it passes', { skip }, () => {
+  const pushOn = (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.PUSH_ENABLED = 'true'; };
+  assertRefused(problemsAfter(pushOn), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed/);
+  assertRefused(problemsAfter(pushOn), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed/);
+  assertRefused(problemsAfter((v) => { pushOn(v); v.services['rab-api'].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; }), /rab-worker: PUSH_ENABLED=true needs/);
+  assertRefused(problemsAfter((v) => { v.services['rab-api'].environment.PUSH_ENABLED = 'true'; }), /PUSH_ENABLED differs between rab-api and rab-worker/);
+  assertRefused(problemsAfter((v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.REALTIME_ENABLED = 'true'; v.services['rab-api'].environment.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS = '5'; }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs/);
+  const ok = problemsAfter((v) => { pushOn(v); for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; });
+  assert.ok(!ok.some((p) => /PUSH_ENABLED/.test(p)), ok.join(' | '));
+});
+
+test('J2 environment mode: push switched on in runtime.env without the committed sweep is refused; an env-file interval is refused', { skip }, () => {
+  const base = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET', 'PUSH_ENABLED'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_owner' }, switches: { PUSH_ENABLED: 'true' } };
+  const run = (keys, mutate = () => {}) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, keys);
+  };
+  const both = { 'rab-api': base, 'rab-worker': base };
+  assertRefused(run(both), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  assertRefused(run(both), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  // The interval entered in runtime.env instead of the compose files: refused (it must be committed on both services).
+  const viaFile = { ...base, names: [...base.names, 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS'] };
+  assertRefused(run({ 'rab-api': viaFile, 'rab-worker': viaFile }), /rab-api: WORKER_PUSH_DISPATCH_INTERVAL_SECONDS is set in an env file/);
+  // Push on in one service's env file only.
+  assertRefused(run({ 'rab-api': base, 'rab-worker': { ...base, switches: {} } }), /PUSH_ENABLED differs between rab-api and rab-worker in the deployed model/);
+  // Committed 30 s on both services: the rule holds.
+  const committed = run(both, (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; });
+  assert.ok(!committed.some((p) => /PUSH_ENABLED|PUSH_DISPATCH/.test(p)), committed.join(' | '));
+  // Push off (or "false", or any non-"true" text the environment parses as off): nothing to enforce.
+  for (const value of ['false', 'TRUE', '1', '']) {
+    const off = { ...base, switches: { PUSH_ENABLED: value } };
+    const problems = run({ 'rab-api': off, 'rab-worker': off });
+    assert.ok(!problems.some((p) => /PUSH_/.test(p)), `${value}: ${problems.join(' | ')}`);
+  }
+  // Realtime on: the interval must be identical on both (its value is not decided yet, so it is not pinned).
+  const rt = { ...base, names: [...base.names, 'REALTIME_ENABLED'], switches: { REALTIME_ENABLED: 'true' } };
+  assertRefused(run({ 'rab-api': rt, 'rab-worker': rt }, (v) => { v.services['rab-worker'].environment.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS = '10'; }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs between rab-api and rab-worker in the deployed model/);
+  const rtSame = run({ 'rab-api': rt, 'rab-worker': rt });
+  assert.ok(!rtSame.some((p) => /REALTIME/.test(p)), rtSame.join(' | '));
+});

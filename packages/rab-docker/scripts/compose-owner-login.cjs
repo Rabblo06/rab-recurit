@@ -40,6 +40,11 @@
  *     intervals (offer expiry 300 s, manager confirmation 120 s, late clock-in 300 s), committed, byte-identical, on rab-api
  *     AND rab-worker, never re-entered in an env file; the shift monitor keeps its 300 s and the combined shift scan stays
  *     off (neither may be changed by an env file);
+ *   - the push and realtime sweeps once those features are ON (Phase X J2, SJ-03): PUSH_ENABLED / REALTIME_ENABLED must be
+ *     the same on rab-api and rab-worker; with PUSH_ENABLED=true, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS=30 must be committed
+ *     on both (owner rule 2026-11-06); with REALTIME_ENABLED=true, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS must be
+ *     identical on both (its value is an owner decision not yet taken); neither interval may be set in an env file.
+ *     `--lint-env-file runtime` renders the committed compose with the file's switches to apply the same rule;
  *   - the bundled PostgreSQL: Agent 1's fresh-install SQL mounted as the ONLY init file (never the transition script), the
  *     superuser is not the app login and has no clear-text password variable, TLS on, the reviewed pg_hba, internal
  *     network only, and the app services wait for it.
@@ -156,6 +161,48 @@ const PHASE_D_SWITCHES = Object.freeze({
  * and arms the no-show / late clock-in triggers; the combined shift scan (D-Q4a) stays off until it is measured.
  */
 const PHASE_D_UNCHANGED = Object.freeze({ WORKER_SHIFT_MONITOR_INTERVAL_SECONDS: '300', WORKER_SHIFT_SCAN_MODE: 'separate' });
+/**
+ * Phase X J2 (S0-J SJ-03): the push and realtime sweep rule, enforced the moment the feature is switched on. Both switches
+ * are off in production and live in runtime.env (both services read it). Before J2 the rule was a compose comment only, so
+ * turning push on through runtime.env silently gave a 2 s push sweep (the code default).
+ *  - PUSH_ENABLED=true: the owner rule (2026-11-06) - push's immediate send is WORKER_FAST_PUBLISH_NOTIFY (already true)
+ *    and its sweep goes to 30 s, COMMITTED on rab-api AND rab-worker (the API registers the scheduler with ITS value; the
+ *    consume-only Worker never compares intervals).
+ *  - REALTIME_ENABLED=true: no owner value exists yet (realtime has no immediate path, so its sweep interval IS the live
+ *    latency; choosing it is a separate owner decision). The gate requires only what correctness needs: the same value on
+ *    both services (unset on both = the 2 s code default on both). `value: null` = not pinned.
+ * Either switch must be identical on both services, and neither interval may be set in an env file (commit it).
+ */
+const FEATURE_SWEEPS = Object.freeze({
+  PUSH_ENABLED: Object.freeze({ key: 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS', value: '30', decision: 'owner rule 2026-11-06' }),
+  REALTIME_ENABLED: Object.freeze({ key: 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS', value: null, decision: 'value not yet decided by the owner' }),
+});
+/** The environment's own parse (`@Transform(({ value }) => value === 'true')`): only the exact string true switches it on. */
+const switchedOn = (v) => String(v ?? '') === 'true';
+
+/**
+ * Problems of the J2 rule on the rab-api and rab-worker environments (pure; variable names and the rule's own values only,
+ * never a secret).
+ */
+function featureSweepProblems(apiEnv = {}, workerEnv = {}) {
+  const problems = [];
+  for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
+    const apiOn = switchedOn(apiEnv[flag]);
+    const workerOn = switchedOn(workerEnv[flag]);
+    if (apiOn !== workerOn) problems.push(`${flag} differs between rab-api and rab-worker (both read it from runtime.env; one value)`);
+    if (!apiOn && !workerOn) continue;
+    if (rule.value !== null) {
+      for (const [name, e] of [['rab-api', apiEnv], ['rab-worker', workerEnv]]) {
+        if (String(e[rule.key] ?? '') !== rule.value) {
+          problems.push(`${name}: ${flag}=true needs ${rule.key}="${rule.value}" committed in the compose files (${rule.decision}); it is "${e[rule.key] ?? ''}"`);
+        }
+      }
+    } else if (String(apiEnv[rule.key] ?? '') !== String(workerEnv[rule.key] ?? '')) {
+      problems.push(`${flag}=true: ${rule.key} differs between rab-api and rab-worker (the API registers the scheduler with its own value; the Worker never compares)`);
+    }
+  }
+  return problems;
+}
 const DATABASE_ALLOWED = Object.freeze([
   URL_KEY, 'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
@@ -382,6 +429,9 @@ function checkModel(model, combo) {
     }
   }
 
+  // Phase X J2 (SJ-03): the push / realtime sweep rule once a feature is on.
+  for (const msg of featureSweepProblems(envOf(api), envOf(worker))) p(msg);
+
   // rab-api: the lifecycle.
   const apiEnv = envOf(api);
   if (JSON.stringify(api.command) !== JSON.stringify(['./api-prestart.sh'])) p('rab-api: command is not ./api-prestart.sh');
@@ -490,6 +540,9 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
+    for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
+      if (key === rule.key) problems.push(`${key}: commit it in the compose files on rab-api and rab-worker, never in an env file (the API registers the ${flag === 'PUSH_ENABLED' ? 'push' : 'realtime'} scheduler with its own value)`);
+    }
     if (Object.hasOwn(PHASE_D_UNCHANGED, key) && value !== PHASE_D_UNCHANGED[key]) problems.push(`${key}: the owner decision 2026-11-06 keeps it at ${PHASE_D_UNCHANGED[key]} in production (leave it unset)`);
     if (/^CREWFLOW_AUDIT_SINK/.test(key) && kind !== 'runtime') problems.push(`${key}: belongs in runtime.env (rab-api and rab-worker both start the audit sink)`);
     if (kind === 'runtime' && key === AUDIT_SINK_KEY) {
@@ -578,7 +631,7 @@ const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis:
 const LEGACY_ENV_TEXT = `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_LEGACY_PW}@db-direct.example:5432/rab?sslmode=verify-full\nLEGACY_MARKER=${SENTINEL_LEGACY_PW}\n`;
 
 /** Renders the given combos; returns { [comboName]: model }. Throws when docker compose fails. */
-function renderModels(combos = COMBOS, extraComposeEnv = []) {
+function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = []) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-owner-login-'));
   try {
     const secrets = path.join(tmp, 'secrets');
@@ -586,7 +639,7 @@ function renderModels(combos = COMBOS, extraComposeEnv = []) {
     fs.mkdirSync(secrets);
     fs.mkdirSync(project);
     fs.writeFileSync(path.join(secrets, 'database.env'), DATABASE_ENV_TEXT, { mode: 0o600 });
-    fs.writeFileSync(path.join(secrets, 'runtime.env'), RUNTIME_ENV_TEXT, { mode: 0o600 });
+    fs.writeFileSync(path.join(secrets, 'runtime.env'), RUNTIME_ENV_TEXT + extraRuntimeEnv.map((l) => `${l}\n`).join(''), { mode: 0o600 });
     // The separated-mode env files (project-relative .env.migrate / .env.ops, per-service staging files) exist only so a
     // file that still names them renders; the gate then fails on their marker.
     for (const f of ['.env.migrate', '.env.ops']) fs.writeFileSync(path.join(project, f), LEGACY_ENV_TEXT, { mode: 0o600 });
@@ -644,6 +697,23 @@ function main(argv) {
     let text;
     try { text = fs.readFileSync(file, 'utf8'); } catch { console.error(`[owner-login] cannot read ${file}`); return 2; }
     const problems = lintEnvText(kind, text);
+    // Phase X J2: a runtime.env that switches push or realtime on is checked against the COMMITTED compose files, rendered
+    // with exactly those switches (no other value of the file is used).
+    const switches = kind === 'runtime' ? parseEnvText(text).filter((e) => Object.hasOwn(FEATURE_SWEEPS, e.key) && switchedOn(e.value)) : [];
+    if (switches.length) {
+      try { execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' }); } catch { console.log('[owner-login] docker compose is not available (needed to check the push/realtime sweep rule)'); return 2; }
+      let models;
+      try {
+        models = renderModels(COMBOS, [], switches.map((e) => `${e.key}=true`));
+      } catch (error) {
+        console.log(`[owner-login] FAIL docker compose config: ${String(error.stderr ?? error.message).trim().split('\n').slice(-3).join(' | ')}`);
+        return 1;
+      }
+      for (const combo of COMBOS) {
+        const s = models[combo.name]?.services ?? {};
+        for (const msg of featureSweepProblems(s['rab-api']?.environment, s['rab-worker']?.environment)) problems.push(`${combo.name}: ${msg}`);
+      }
+    }
     for (const msg of problems) console.log(`[owner-login] FAIL ${kind} env file: ${msg}`);
     console.log(`[owner-login] ${problems.length === 0 ? 'PASS' : 'FAIL'} ${kind} env file (${parseEnvText(text).length} entries; names only, no value printed)`);
     return problems.length === 0 ? 0 : 1;
@@ -676,7 +746,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, featureSweepProblems, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

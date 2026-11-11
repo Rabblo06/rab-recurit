@@ -389,3 +389,53 @@ test('bundled database: internal network only, and every app service waits for i
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
   }
 });
+
+// Phase X J2 (S0-J SJ-03): the push / realtime sweep rule once the feature is switched on.
+test('J2: the rule values (push 30 s by the owner rule 2026-11-06; realtime not pinned) and the verifier mirrors them', () => {
+  assert.equal(gate.FEATURE_SWEEPS.PUSH_ENABLED.key, 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS');
+  assert.equal(gate.FEATURE_SWEEPS.PUSH_ENABLED.value, '30');
+  assert.equal(gate.FEATURE_SWEEPS.REALTIME_ENABLED.key, 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS');
+  assert.equal(gate.FEATURE_SWEEPS.REALTIME_ENABLED.value, null);
+  const verifier = require('../staging/verify-image-compose.cjs');
+  assert.deepEqual(JSON.parse(JSON.stringify(verifier.FEATURE_SWEEPS)), JSON.parse(JSON.stringify(gate.FEATURE_SWEEPS)));
+});
+
+test('J2: 30 s lies within the push sweep bounds read from the TypeScript source; the switches parse exactly as the code does', () => {
+  const src = (rel) => fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment', rel), 'utf8');
+  const m = /WORKER_PUSH_DISPATCH_INTERVAL_SECONDS:\s*s\('push-dispatch',\s*(\d+),\s*(\d+),\s*(\d+)\)/.exec(src('worker-scan-intervals.ts'));
+  assert.ok(m, 'push-dispatch interval setting not found');
+  const [, , min, max] = m.map(Number);
+  assert.ok(30 >= min && 30 <= max);
+  const vars = src('environment-variables.ts');
+  for (const flag of ['PUSH_ENABLED', 'REALTIME_ENABLED']) {
+    assert.match(vars, new RegExp(`@Transform\\(\\(\\{ value \\}\\) => value === 'true'\\)\\s*@IsBoolean\\(\\)\\s*${flag}: boolean = false;`), flag);
+  }
+});
+
+test('J2 featureSweepProblems: push on needs 30 s on BOTH services; the switch must match; off enforces nothing', () => {
+  const f = gate.featureSweepProblems;
+  assert.deepEqual(f({}, {}), []);
+  assert.deepEqual(f({ PUSH_ENABLED: 'false' }, { PUSH_ENABLED: 'false' }), []);
+  for (const notOn of ['TRUE', '1', 'yes', ' true']) assert.deepEqual(f({ PUSH_ENABLED: notOn }, { PUSH_ENABLED: notOn }), [], notOn);
+  const on = { PUSH_ENABLED: 'true' };
+  assertRefused(f(on, on), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the compose files \(owner rule 2026-11-06\); it is ""/);
+  assertRefused(f(on, on), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  assertRefused(f({ ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }, { ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '2' }), /rab-worker: PUSH_ENABLED=true needs .*it is "2"/);
+  assertRefused(f(on, {}), /PUSH_ENABLED differs between rab-api and rab-worker/);
+  assert.deepEqual(f({ ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }, { ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }), []);
+  const rt = { REALTIME_ENABLED: 'true' };
+  assertRefused(f({ ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '2' }, { ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '10' }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs between rab-api and rab-worker/);
+  assertRefused(f({ ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '5' }, rt), /WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs/);
+  assert.deepEqual(f(rt, rt), []); // unset on both = the same 2 s default on both (the value itself is the owner's decision)
+  assertRefused(f(rt, {}), /REALTIME_ENABLED differs between rab-api and rab-worker/);
+});
+
+test('J2: the push and realtime sweep intervals are never accepted from an env file', () => {
+  for (const key of ['WORKER_PUSH_DISPATCH_INTERVAL_SECONDS', 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS']) {
+    for (const value of ['2', '30']) {
+      assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=${value}`), new RegExp(`${key}: commit it in the compose files on rab-api and rab-worker`));
+    }
+  }
+  // The switches themselves stay runtime.env values (off by default; turning one on is the owner's decision).
+  assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\nREALTIME_ENABLED=false'), []);
+});
