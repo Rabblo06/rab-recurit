@@ -128,6 +128,26 @@ describeIfDb('C5 transaction-local effective-permission set (integration)', () =
     });
   });
 
+  it('a write undone by a RAW-SQL savepoint rollback (manager.query, no TypeORM event) does not survive in the memo', async () => {
+    await inTx(manager, async (m) => {
+      const ctx = ctxOf(manager);
+      const original = await permissions.userHasPermissionTx(m, ctx, PermissionFlag.STAFF_VIEW);
+      expect(original).toBe(true);
+      await m.query('SAVEPOINT c5_raw');
+      await m.query(
+        `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect) SELECT $1, id, $2, 'revoke' FROM core.permission WHERE key = $3`,
+        [manager.userId, organisationId, PermissionFlag.STAFF_VIEW],
+      );
+      await versions.bumpUser(m, manager.userId); // the writer's in-transaction bump (clears the memo)
+      expect(await permissions.userHasPermissionTx(m, ctx, PermissionFlag.STAFF_VIEW)).toBe(false); // now denied, memoised
+      expect(hasTxPermissionMemo(m.queryRunner)).toBe(true);
+      await m.query('ROLLBACK TO SAVEPOINT c5_raw');
+      expect(hasTxPermissionMemo(m.queryRunner)).toBe(false);
+      expect(await permissions.userHasPermissionTx(m, ctx, PermissionFlag.STAFF_VIEW)).toBe(original); // the ORIGINAL answer
+      expect(await uncached(m, ctx, PermissionFlag.STAFF_VIEW)).toBe(original);
+    });
+  });
+
   it('a write undone by a savepoint rollback does not survive in the memo', async () => {
     await inTx(manager, async (m) => {
       const ctx = ctxOf(manager);
