@@ -3,9 +3,12 @@ import { expect, test } from '@playwright/test';
 // The idle-window classifier shared by run-system.sh `idle` and the cost harness (cost/lib/sql-families.js). Plain
 // CommonJS, so it is required, not imported.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { family, summarize } = require('../../cost/lib/sql-families.js') as {
+const { family, summarize, readPgssCsv, APPLICATION_ROLES, APPLICATION_ROLES_SQL } = require('../../cost/lib/sql-families.js') as {
   family: (q: string) => string;
   summarize: (rows: Row[], seconds: number, harnessRoles?: string[]) => any;
+  readPgssCsv: (file: string) => Row[];
+  APPLICATION_ROLES: string[];
+  APPLICATION_ROLES_SQL: string;
 };
 
 interface Row {
@@ -79,4 +82,46 @@ test('summary counts the application top-level rows (SET ROLE included); nested 
 test('the harness roles are configurable (a cluster whose superuser has another name)', () => {
   const rows = [...ROWS, { role: 'ci_bootstrap', toplevel: true, calls: 7, ms: 1, query: 'select pg_stat_statements_reset()' }];
   expect(summarize(rows, 240, ['rab', 'ci_bootstrap']).topLevelCalls).toBe(summarize(ROWS, 240).topLevelCalls);
+});
+
+test('global claims, the provisioner role switch and core.shift scans have their own families', () => {
+  expect(family('SELECT * FROM core.worker_claim_email_dispatch($1, $2)')).toBe('global-claim-email');
+  expect(family('SELECT * FROM core.worker_claim_push_dispatch($1, $2)')).toBe('global-claim-push');
+  expect(family('SELECT * FROM core.worker_claim_realtime_publish($1, $2)')).toBe('global-claim-realtime');
+  expect(family('SELECT * FROM core.worker_claim_statement_dispatch($1, $2)')).toBe('global-claim-statement');
+  expect(family('SELECT core.worker_release_dispatch_claim($1, $2, $3)')).toBe('global-claim-release');
+  expect(family('SET ROLE crewflow')).toBe('provisioner-set-role');
+  expect(family('SET LOCAL ROLE crewflow')).toBe('provisioner-set-role');
+  expect(family('RESET ROLE')).toBe('framing');
+  expect(family('SELECT s.id FROM core.shift s WHERE s.status = $1')).toBe('shift-scans');
+  expect(family('SELECT "Shift"."id" AS "Shift_id" FROM "core"."shift" "Shift" WHERE "Shift"."id" = $1')).toBe('shift-scans');
+});
+
+test('classification uses the full statement text, not a display truncation', () => {
+  const long = `SELECT ${Array.from({ length: 60 }, (_, i) => `x.col_${i}`).join(', ')} FROM core.email_outbox x WHERE x.status = $1`;
+  expect(long.length).toBeGreaterThan(400);
+  expect(family(long)).toBe('email-outbox');
+  expect(family(long.slice(0, 220))).toBe('other');
+  const s = summarize([{ role: 'crewflow_owner', toplevel: true, calls: 3, ms: 1, query: long }], 60);
+  expect(s.families['email-outbox'].calls).toBe(3);
+});
+
+test('pgss-raw.csv (full texts, quoted multi-line fields) is read as written by measure.sh', () => {
+  const { mkdtempSync, writeFileSync } = require('node:fs') as typeof import('node:fs');
+  const { join } = require('node:path') as typeof import('node:path');
+  const { tmpdir } = require('node:os') as typeof import('node:os');
+  const f = join(mkdtempSync(join(tmpdir(), 'pgss-')), 'pgss-raw.csv');
+  writeFileSync(f, ['role,toplevel,calls,total_exec_time,rows,shared_blks_hit,shared_blks_read,query', 'crewflow_owner,t,12,1.5,0,3,0,"SELECT id\nFROM core.email_outbox\nWHERE note = ""a,b"""', 'crewflow,t,2,0.1,0,0,0,SET ROLE crewflow', ''].join('\n'));
+  const rows = readPgssCsv(f);
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toMatchObject({ role: 'crewflow_owner', toplevel: true, calls: 12, ms: 1.5 });
+  expect(rows[0]!.query).toBe('SELECT id\nFROM core.email_outbox\nWHERE note = "a,b"');
+  expect(family(rows[0]!.query)).toBe('email-outbox');
+  expect(family(rows[1]!.query)).toBe('provisioner-set-role');
+});
+
+test('one application-role list for every harness filter: the owner login and the role its sessions SET ROLE into', () => {
+  expect(APPLICATION_ROLES.slice(0, 2)).toEqual(['crewflow_owner', 'crewflow']);
+  expect(APPLICATION_ROLES).not.toContain('rab_secure_owner');
+  expect(APPLICATION_ROLES_SQL).toBe(APPLICATION_ROLES.map((r) => `'${r}'`).join(','));
 });

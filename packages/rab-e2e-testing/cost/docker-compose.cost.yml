@@ -22,7 +22,14 @@ name: crewflow-cost
 #     BullMQ scheduler registration), then main.js;
 #   - worker (and worker2): consume-only (DISABLE_DB_MIGRATIONS, DISABLE_CRON_JOBS_REGISTRATION), after a healthy api;
 #   - ONE login, crewflow_owner, in ONE PG_DATABASE_URL for api, worker, worker2 and tool. No migrate service, no rab_owner /
-#     crewflow / crewflow_app / crewflow_worker login. pg_stat_statements windows filter on crewflow_owner (lib/*.js).
+#     crewflow / crewflow_app / crewflow_worker login. pg_stat_statements windows count the application's roles
+#     (lib/sql-families.js APPLICATION_ROLES: crewflow_owner and `crewflow`, the role its provisioner sessions SET ROLE into).
+#
+# SCAN SETTINGS = PRODUCTION'S on the api AND the workers (x-scan-env below; drift guard system/lib/
+# production-parity.selftest.ts); every `stack.sh worker` FAILS the run when the registered schedulers differ from the
+# worker's plan (lib/verify-schedulers.cjs). Remaining deliberate differences from production: NODE_ENV development, no
+# TLS and the image's default pg_hba (superuser reads pgss), LOGGER email / FAKE push / MinIO, the harness's CPU and
+# memory limits, no CREWFLOW_RUNTIME_ISOLATION, TRUSTED_PROXY_CIDRS for the load generator (README "Known limitations").
 
 x-app-env: &app-env
   NODE_ENV: development
@@ -34,7 +41,8 @@ x-app-env: &app-env
   APP_SECRET: ${APP_SECRET:?run scripts/gen-secrets.sh}
   REDIS_URL: redis://:${REDIS_PW:?}@costaudit-redis:6379
   EMAIL_DRIVER: LOGGER
-  PUSH_ENABLED: 'false'
+  # PUSH_ENABLED / REALTIME_ENABLED are in x-scan-env (api and workers, switchable per phase). Not here: in a YAML merge
+  # list the FIRST anchor wins, so a value here would silently override the switch.
   PUSH_PROVIDER: FAKE
   AI_ENABLED: 'false'
   HWS_RUNTIME_ENABLED: 'false'
@@ -57,6 +65,36 @@ x-app-env: &app-env
   # their Redis cost is still paid.
   TRUSTED_PROXY_CIDRS: ${COST_SUBNET:-172.31.70.0/24}
   APP_VERSION: costaudit-${COST_TAG:?}
+
+# SCAN AND DISPATCH SETTINGS = PRODUCTION'S, on the api AND the workers (Phase X P0-H review). Under WORKER_SCHEDULER=bullmq
+# the api registers every scan's BullMQ job scheduler with ITS environment and the consume-only workers run what is
+# registered, so a setting given to the workers alone would not be what runs. Values from
+# packages/rab-docker/docker-compose.image.yml (rab-api and rab-worker carry the same ones); system/lib/
+# production-parity.selftest.ts fails CI when they drift. A key production does not set is the code default. Phase-specific
+# values: the COST_* interpolations below, or the per-phase env file (COST_WORKER_ENV_FILE), which reaches the api too.
+x-scan-env: &scan-env
+  WORKER_FAST_PUBLISH_NOTIFY: 'true'
+  WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30'
+  WORKER_TIMER_TRIGGERS: 'on'
+  WORKER_TIMER_TRIGGER_KINDS: offer-expiry,manager-confirmation,no-show,late-clock-in
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300'
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120'
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300'
+  # Production does not set it today (code default 5 s); PR #92 proposes 30. Pass COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
+  # to measure another value (both services get it).
+  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: ${COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:-5}
+  # Same switches on both (Phase A acceptance: flags on = api AND worker). Default false/false = code defaults = production
+  # compose. Only `measure.sh flags-up` recreates them with both on.
+  REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
+  PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
+  # Phase D (D1/D2/E-1): poll vs event and per_scope vs global arms; defaults = the code defaults (production sets none and
+  # its gate refuses them). The api needs them too: event mode registers the dispatch scans at the backstop interval, and
+  # the api's own writes NOTIFY in event mode.
+  WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
+  WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
+  WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
+  WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
+  WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
 
 services:
   pg:
@@ -170,8 +208,12 @@ services:
   api:
     image: crewflow-cost/server:${COST_TAG:?}
     container_name: costaudit-api
+    # The SAME per-phase env file as the workers (scripts/measure.sh worker_up, dq6-bench.sh arms): a scan setting in it
+    # (e.g. WORKER_SHIFT_SCAN_MODE=combined) must reach the api, which registers the schedulers. `environment:` wins over it.
+    env_file:
+      - ${COST_WORKER_ENV_FILE:-./init/empty.env}
     environment:
-      <<: *app-env
+      <<: [*app-env, *scan-env]
       PORT: '3000'
       # The ONE application login (owner-login architecture), identical for api, worker, worker2 and tool.
       PG_DATABASE_URL: postgres://crewflow_owner:${CREWFLOW_OWNER_PW:?run scripts/gen-secrets.sh}@pg:5432/rab
@@ -179,13 +221,6 @@ services:
       # BullMQ schedulers, then main.js.
       CREWFLOW_MIGRATE_ON_START: 'true'
       CREWFLOW_MIGRATION_APPROVAL_MODE: none
-      # Same switches as the worker (Phase A acceptance: flags on = API AND worker). Default false/false = code defaults =
-      # production compose. Only `measure.sh flags-up` recreates the API with them on.
-      REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
-      PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
-      # Phase D (E-1): event-mode phases must set the same value on the API (its writes then NOTIFY; budget counts listeners).
-      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
-      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
     command: ['./api-prestart.sh']
     ports:
       - '127.0.0.1:${COST_API_PORT:-23070}:3000'
@@ -198,8 +233,9 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
+      # Production's interval (10 s): the health ping is part of the idle SQL a window measures.
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/healthz']
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 30
       # A fresh install applies the whole chain before main.js listens.
@@ -208,13 +244,14 @@ services:
   worker: &worker-svc
     image: crewflow-cost/worker:${COST_TAG:?}
     container_name: costaudit-worker
-    # Phase A measurement (2026-10-27): extra worker variables for one phase (e.g. a provisioner opt-in switch) come from
-    # a harness-generated env file under the results directory (scripts/measure.sh worker_up); default: the empty
-    # init/empty.env. `environment:` below wins over it, so the realtime/push switches are set by interpolation instead.
+    # Phase A measurement (2026-10-27): extra variables for one phase (e.g. a provisioner opt-in switch) come from a
+    # harness-generated env file under the results directory (scripts/measure.sh worker_up); default: the empty
+    # init/empty.env. The api reads the same file. `environment:` below wins over it, so the realtime/push switches are set
+    # by interpolation instead.
     env_file:
       - ${COST_WORKER_ENV_FILE:-./init/empty.env}
     environment:
-      <<: *app-env
+      <<: [*app-env, *scan-env]
       # The same ONE owner login as the api (also the Worker's session-lock connection, direct). Every claim mode (per_scope
       # and global) runs on it; there is no separate Worker login any more.
       PG_DATABASE_URL: postgres://crewflow_owner:${CREWFLOW_OWNER_PW:?run scripts/gen-secrets.sh}@pg:5432/rab
@@ -223,18 +260,9 @@ services:
       DISABLE_DB_MIGRATIONS: 'true'
       DISABLE_CRON_JOBS_REGISTRATION: 'true'
       CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
-      # O1 (one image): no CREWFLOW_PROVISIONER_DATABASE_URL pass-through any more. Provisioning runs in-process and the
-      # Worker refuses any non-empty CREWFLOW_PROVISIONER_* variable.
-      # Default false/false = the code defaults, which is also what the production compose runs (it sets neither key).
-      # The `idleflags` phase recreates the worker with both true (COST_REALTIME_ENABLED / COST_PUSH_ENABLED).
-      REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
-      PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
-      # Phase D (D1/D2): poll vs event and per_scope vs global phases; defaults = the code defaults (production sets none).
-      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
-      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
-      WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
-      WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
-      WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
+      # Production's in-process provisioner interval (the owner's 5 s onboarding pin; code default 60 s). O1: no
+      # CREWFLOW_PROVISIONER_* variable (the Worker refuses that prefix).
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
       # What the retired launcher gave its jobs child (H1-M1), as in production.
       HOME: /nonexistent
       TMPDIR: /tmp/crewflow-jobs

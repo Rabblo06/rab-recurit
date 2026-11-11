@@ -28,6 +28,21 @@ committed, and fixes three gaps in it:
   child under the lock, then the BullMQ scheduler registration); the Worker is consume-only (`DISABLE_DB_MIGRATIONS`,
   `DISABLE_CRON_JOBS_REGISTRATION`, `WORKER_SCHEDULER=bullmq`) and starts after a healthy API. There is no migrate service.
   This is the same lifecycle as `packages/rab-e2e-testing/system/docker-compose.e2e.yml`.
+- **Production's scan settings, on the API and the Worker.** The API registers every scan's BullMQ job scheduler with its
+  own environment and the consume-only Worker runs what is registered, so every scan, dispatch and notification setting
+  is on BOTH services (`x-scan-env` in the compose file), with production's values from
+  `packages/rab-docker/docker-compose.image.yml`: email sweep 30 s with fast publish, the four timer-trigger kinds on,
+  offer expiry 300 s, manager confirmation 120 s, late clock-in 300 s, provisioner 5 s (Worker), API health check every
+  10 s. A key production does not set stays at the code default (shift-statement dispatch 5 s today;
+  `COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` measures another value, e.g. the 30 s of PR #92). The per-phase env file
+  (`COST_WORKER_ENV_FILE`: `--worker-env-file`, `--prov-configs`, the dq6 arms) reaches the API too, and a key compose sets
+  on either service is refused in it. `system/lib/production-parity.selftest.ts` fails CI when a harness value drifts from
+  production (deliberate differences must be listed there with a reason; none today).
+- **Scheduler check (fails the run).** Every `stack.sh worker` (the initial start, `flags-up`, every `worker-up`
+  configuration, every dq6 arm) converges the API and the Worker together, then runs `lib/verify-schedulers.cjs` inside
+  the Worker: the schedulers registered in Redis must equal the Worker's own plan (no missing id, no unexpected Crewflow id,
+  the same interval for each). A difference aborts the run and is written to `<out>/schedulers-MISMATCH.json`; every check
+  is logged in `<out>/schedulers.log`.
 - **One login.** The API, the Worker (every claim mode) and the `tool` container use ONE `PG_DATABASE_URL`, as
   `crewflow_owner`; every `pg_stat_statements` filter counts that role (statements inside SECURITY DEFINER functions run as
   `rab_secure_owner` and are reported as nested). The API and the Worker therefore share a role: an idle window's
@@ -244,7 +259,7 @@ OUT=$OUT bash scripts/dq6-bench.sh report                                       
 |---|---|
 | `per_scope` | `WORKER_CLAIM_MODE=per_scope` (production default), Worker as `crewflow_owner` |
 | `global` | `WORKER_CLAIM_MODE=global` (Phase D), Worker as `crewflow_owner` (one login since P0-H) |
-| `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
+| `global_combined`, `per_scope_combined` | the same plus `WORKER_SHIFT_SCAN_MODE=combined` (D-Q4a), on the API AND the Worker (the API registers the combined scan; the scheduler check fails the arm otherwise). Refused unless the built Worker contains that key, so D-Q4a is measured on its own against the same image's `global` / `per_scope` |
 
 Dispatch mode is `poll` in every arm, and delayed triggers (D-Q4b) are never enabled. A label is never reused: `arm` refuses an
 arm-repetition that already has results, and the load generator refuses a label that already has tagged rows, so rerun
@@ -408,6 +423,12 @@ The results directory receives:
   Memory figures are indicative, and swapping can also inflate latency tails.
 - **Network.** Traffic stays on loopback and the Docker network, with no TLS and no VPC round trips. CPU per request
   carries over to production; wall-clock latency does not.
+- **Remaining differences from production (deliberate).** `NODE_ENV=development` (below); no TLS to PostgreSQL and the
+  image's default pg_hba (the `rab` superuser reads pg_stat_statements over the container socket); LOGGER email, FAKE
+  push, MinIO for S3; the harness's own CPU/memory limits (API 1 CPU / 768 MB, Worker 1 CPU / 1 GB) instead of
+  production's 2 CPUs / 1024 MB / 1536 MB; no runtime-isolation enforcement (`CREWFLOW_RUNTIME_ISOLATION` unset);
+  `TRUSTED_PROXY_CIDRS` set for the load generator's distinct client IPs. Scan, dispatch and notification settings are
+  production's (above).
 - **Runtime mode.** `NODE_ENV=development`, because production mode refuses the LOGGER email driver and loopback
   URLs. The caches are off, at their defaults. `HWS_RUNTIME_ENABLED=false`, and since P0-H `WORKER_SCHEDULER=bullmq`
   (production's mode; the old audit and every run before P0-H used `interval`, so idle numbers across that line are not

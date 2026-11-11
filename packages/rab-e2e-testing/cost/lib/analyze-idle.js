@@ -12,7 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { OUT } = require('./lib');
-const { summarize: familySummary } = require('./sql-families');
+const { summarize: familySummary, readPgssCsv, APPLICATION_ROLES } = require('./sql-families');
 
 const label = process.argv[2];
 const dir = path.join(OUT, `idle-${label}`);
@@ -27,8 +27,10 @@ const r0 = kv('redis-stats-start.txt'), r1 = kv('redis-stats-end.txt'), rm = kv(
 const cmds = Number(r1.total_commands_processed) - Number(r0.total_commands_processed);
 const pg = rd('pgss.txt').trim().split(/\r?\n/).filter(Boolean).map((l) => { const p = l.split('|'); return { role: p[0], calls: Number(p[1]), ms: Number(p[2]), rows: Number(p[3]), toplevel: p[4] === 't', query: p.slice(5).join('|') }; });
 const app = pg.filter((r) => r.role !== 'rab'); // 'rab' = this harness's own psql
-// crewflow_owner = the one login of the owner-login stack; the other three only appear in pre-P0-H result directories.
-const RUNTIME_ROLES = ['crewflow_owner', 'crewflow_app', 'crewflow', 'crewflow_worker'];
+// The application's roles (lib/sql-families.js, one list for every harness filter): crewflow_owner, the one login of the
+// owner-login stack, plus `crewflow` (its provisioner sessions after SET ROLE); crewflow_app / crewflow_worker only appear
+// in pre-P0-H result directories.
+const RUNTIME_ROLES = APPLICATION_ROLES;
 const runtime = app.filter((r) => RUNTIME_ROLES.includes(r.role));
 const nested = app.filter((r) => r.role === 'rab_secure_owner');
 const sum = (a, k) => a.reduce((s, r) => s + r[k], 0);
@@ -76,7 +78,8 @@ const out = {
     topLevelExecMsPerMin: perMin(sum(runtime, 'ms')),
     top15TopLevel: top(runtime),
     // Per Worker scan (and framing, and the API's health ping); see lib/sql-families.js.
-    families: familySummary(app, secs),
+    // Classified on the FULL statement texts (pgss-raw.csv) when the window has them; pgss.txt is truncated for display.
+    families: familySummary(fs.existsSync(path.join(dir, 'pgss-raw.csv')) ? readPgssCsv(path.join(dir, 'pgss-raw.csv')) : app, secs),
     top15All: top(app),
   },
   cpuFromCgroupPctOfOneCore: cpuPct,

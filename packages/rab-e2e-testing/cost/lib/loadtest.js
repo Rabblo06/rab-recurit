@@ -3,6 +3,7 @@
 // /offers/mine additionally gets a pg_stat_statements window (worker paused) for DB execution ms per request.
 //   node lib/loadtest.js <label>     env: SCEN=name1,name2 (filter), DUR=30 (seconds), COST_LOADGEN_IMAGE (built by run.sh)
 const { spawn } = require('child_process');
+const { APPLICATION_ROLES_SQL } = require('./sql-families');
 const { loginWeb, loginMobile, psql, redisInfo, cgroupUsec, cgroupMem, writeJson, dockerEnv, harnessDocker, HARNESS_LABEL_ARGS, sleep } = require('./lib');
 
 const label = process.argv[2] || 'run';
@@ -63,10 +64,10 @@ function runAc(cfg) {
       const cpuPct = Object.fromEntries(Object.keys(cpu0).map((k) => [k, +(((cpu1[k] - cpu0[k]) / 1e6 / secs) * 100).toFixed(1)]));
       let pgss = null;
       if (s.pgss) {
-        const [calls, ms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid = to_regrole('crewflow_owner') and toplevel`).split('|').map(Number);
+        const [calls, ms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in (${APPLICATION_ROLES_SQL})) and toplevel`).split('|').map(Number);
         const [ncalls, nms] = psql(`select coalesce(sum(calls),0)||'|'||coalesce(round(sum(total_exec_time)::numeric,1),0) from pg_stat_statements where userid='rab_secure_owner'::regrole`).split('|').map(Number);
         pgss = { toplevelStatements: calls, toplevelExecMs: ms, statementsPerRequest: +(calls / ac.requests).toFixed(2), dbExecMsPerRequest_toplevel: +(ms / ac.requests).toFixed(3), nestedDefinerStatementsPerRequest: +(ncalls / ac.requests).toFixed(2), nestedExecMs: nms,
-          topStatementsByTime: psql(`select round(total_exec_time::numeric,1)||'ms|'||calls||'|'||left(regexp_replace(query,'\\s+',' ','g'),140) from pg_stat_statements where userid=to_regrole('crewflow_owner') and toplevel order by total_exec_time desc limit 5`).split('\n') };
+          topStatementsByTime: psql(`select round(total_exec_time::numeric,1)||'ms|'||calls||'|'||left(regexp_replace(query,'\\s+',' ','g'),140) from pg_stat_statements where userid in (select oid from pg_roles where rolname in (${APPLICATION_ROLES_SQL})) and toplevel order by total_exec_time desc limit 5`).split('\n') };
       }
       const row = {
         scenario: s.name, connections: s.c, durationS: DUR, workerPaused: true, ...ac,

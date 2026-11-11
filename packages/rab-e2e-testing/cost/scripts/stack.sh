@@ -68,12 +68,28 @@ case "${1:?usage: stack.sh infra|migrate|seed|app|down}" in
     log "api healthy"
     ;;
   worker)
-    # COST_WORKER_ENV_FILE / COST_REALTIME_ENABLED / COST_PUSH_ENABLED (see docker-compose.cost.yml) select the worker
-    # configuration; a changed configuration makes compose recreate the container.
+    # COST_WORKER_ENV_FILE / COST_REALTIME_ENABLED / COST_PUSH_ENABLED / COST_WORKER_* (see docker-compose.cost.yml) select
+    # the configuration of the api AND the worker: the api registers the BullMQ schedulers with its environment, the worker
+    # only consumes them, so both are converged together (compose recreates whichever changed; a recreated api re-runs
+    # api-prestart.sh, whose registration reconciles intervals and removes disabled scans).
+    dc up -d api
+    wait_healthy costaudit-api 900
     dc up -d worker
     # Consume-only (bullmq): wait until the Worker reports it is up (its consume-only scheduler check runs at boot).
-    for _ in $(seq 1 60); do docker logs costaudit-worker 2>&1 | grep -qiE "\[jobs\]|rab-worker ready|consume only" && break; sleep 2; done
-    log "worker running ($(docker inspect -f '{{.State.Status}}' costaudit-worker))"
+    for _ in $(seq 1 60); do docker logs costaudit-worker 2>&1 | grep -qiE "rab-worker ready|consume only" && break; sleep 2; done
+    st="$(docker inspect -f '{{.State.Status}}' costaudit-worker 2>/dev/null || echo missing)"
+    log "worker $st"
+    # FAIL the run when what the api registered is not what this worker's configuration expects (missing, unexpected or a
+    # different interval): an arm must never measure another schedule than the one it names. A worker that did not stay up
+    # is left to the caller (measure.sh worker_up records it as REFUSED).
+    if [ "$st" = running ]; then
+      sched="$(docker exec -i costaudit-worker node - < "$(hostpath "$COST_DIR/lib/verify-schedulers.cjs")")" || {
+        echo "$sched" > "$OUT/schedulers-MISMATCH.json"
+        die "registered BullMQ schedulers differ from the worker's plan: $sched"
+      }
+      echo "$(date -u +%FT%TZ) $sched" >> "$OUT/schedulers.log"
+      log "schedulers verified: $(node -e 'const j=JSON.parse(process.argv[1]);console.log(Object.keys(j.expected).length+" registered = worker plan (shift scans "+j.shiftScanMode+", claim "+j.dispatch.claimMode+"/"+j.dispatch.dispatchMode+")")' "$sched")"
+    fi
     ;;
   app)
     "$0" api

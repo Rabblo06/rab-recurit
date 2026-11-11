@@ -24,7 +24,12 @@ name: crewflow-e2e
 # There is no migrate service, no rab_owner / crewflow / crewflow_app / crewflow_worker login and no role password.
 # Not production, on purpose (disposable): NODE_ENV development (no TLS verify-full, deployment identity or https origins);
 # the image's default pg_hba, so the `rab` superuser may log in over loopback for the specs' read-only evidence queries and
-# pg_stat_statements (production's local-db/pg_hba.conf rejects that); LOGGER email; LOCAL storage.
+# pg_stat_statements (production's local-db/pg_hba.conf rejects that); LOGGER email; LOCAL storage; the harness's own memory
+# limits; no CREWFLOW_RUNTIME_ISOLATION. Production's scan, dispatch and notification settings (on the server AND the
+# worker) and its 10 s API health check are in the parity layer (docker-compose.parity.yml; drift guard
+# lib/production-parity.selftest.ts); this base file keeps the dev-like code defaults for E2E_MODE=devlike.
+# run-system.sh `up` FAILS when the schedulers the server registered differ from the worker's plan
+# (cost/lib/verify-schedulers.cjs).
 #
 # Images are REUSED, never built here: rab-server:latest and rab-worker:latest (built from the branch head by the dev
 # rollout), or the exact images named by E2E_SERVER_IMAGE / E2E_WORKER_IMAGE (e.g. a release candidate; O1: the same image

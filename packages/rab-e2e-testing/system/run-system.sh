@@ -72,7 +72,14 @@ up() {
   "${C[@]}" up -d server worker >/dev/null 2>&1 || { docker logs "$PROJECT-server-1" 2>&1 | redact | tail -40; exit 1; }
   wait_healthy server 600; wait_healthy worker 300
   docker logs "$PROJECT-server-1" 2>&1 | redact >"$E2E_OUT/logs/server-start.log"
-  step "server + worker healthy in $((SECONDS - t0)) s; migrations: $(q -c 'select count(*) from core.migrations'); schedulers: $(grep -ciE 'register-schedulers|job scheduler' "$E2E_OUT/logs/server-start.log") log line(s)"
+  step "server + worker healthy in $((SECONDS - t0)) s; migrations: $(q -c 'select count(*) from core.migrations')"
+  # FAIL when what the server registered is not what the worker's configuration expects (missing, unexpected, or another
+  # interval): the server registers the BullMQ schedulers with its own environment, the worker only consumes them.
+  local sched
+  sched="$(docker exec -i "$PROJECT-worker-1" node - < "$ROOT/packages/rab-e2e-testing/cost/lib/verify-schedulers.cjs")" || {
+    echo "$sched" >"$E2E_OUT/logs/schedulers-MISMATCH.json"; step "REFUSED: registered schedulers differ from the worker's plan: $sched"; exit 1; }
+  echo "$sched" >"$E2E_OUT/logs/schedulers.json"
+  step "schedulers: $(node -e 'const j=JSON.parse(process.argv[1]);console.log(Object.keys(j.expected).length+" registered = the worker plan; email every "+(j.expected["crewflow:crewflow-scan-email:email-dispatch"]/1000)+" s")' "$sched")"
   step "bootstrap-admin as crewflow_owner (one-off, after the server is healthy)"
   BOOTSTRAP_ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-w6.admin@crewflow-e2e.test}" BOOTSTRAP_ADMIN_FIRST_NAME=Wave BOOTSTRAP_ADMIN_LAST_NAME=Admin \
     "${C[@]}" --profile ops run --rm --no-deps bootstrap 2>&1 | redact >"$E2E_OUT/logs/bootstrap.log"
@@ -86,8 +93,9 @@ idle() {
   sleep 3
   q -c 'select pg_stat_statements_reset()' >/dev/null
   date -u +%s >"$R/t-start"; sleep "$secs"; date -u +%s >"$R/t-end"
-  # Every role (the harness's own `rab` rows included, so nothing is hidden); the summary leaves out only `rab`.
-  q -F $'\t' -c "select r.rolname, s.toplevel, s.calls, s.rows, round(s.total_exec_time::numeric, 3), regexp_replace(left(s.query, 400), E'[\\n\\r\\t ]+', ' ', 'g') from pg_stat_statements s join pg_roles r on r.oid = s.userid join pg_database d on d.oid = s.dbid where d.datname = 'rab_e2e' order by s.calls desc" >"$R/pgss.tsv"
+  # Every role (the harness's own `rab` rows included, so nothing is hidden); the summary leaves out only `rab`. The FULL
+  # statement text, whitespace folded onto one line (TSV), so the families are classified on all of it.
+  q -F $'\t' -c "select r.rolname, s.toplevel, s.calls, s.rows, round(s.total_exec_time::numeric, 3), regexp_replace(s.query, E'[\\n\\r\\t ]+', ' ', 'g') from pg_stat_statements s join pg_roles r on r.oid = s.userid join pg_database d on d.oid = s.dbid where d.datname = 'rab_e2e' order by s.calls desc" >"$R/pgss.tsv"
   node "$ROOT/packages/rab-e2e-testing/cost/lib/sql-families.js" "$R/pgss.tsv" "$(( $(cat "$R/t-end") - $(cat "$R/t-start") ))" | tee "$R/summary.txt"
 }
 

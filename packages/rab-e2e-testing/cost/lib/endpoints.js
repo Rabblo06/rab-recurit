@@ -14,6 +14,7 @@
 // owner-login stack (the Worker is paused for it, as before).
 //   node lib/endpoints.js <label>      (env N=10 samples per endpoint)
 const crypto = require('crypto');
+const { APPLICATION_ROLES_SQL } = require('./sql-families');
 const { loginWeb, loginMobile, call, requestLog, psql, secrets, median, pct, writeJson, harnessDocker, sleep } = require('./lib');
 
 const label = process.argv[2] || 'run';
@@ -154,8 +155,8 @@ function signQr(shiftId, venueId, ver, startsAt, endsAt) {
     await sleep(500);
     psql('select pg_stat_statements_reset()');
     for (let i = 0; i < 20; i++) await call(mgr, 'GET', '/rest/v1/dashboard/summary');
-    const tl = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('crewflow_owner') and toplevel`));
-    const all = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('crewflow_owner')`));
+    const tl = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in (${APPLICATION_ROLES_SQL})) and toplevel`));
+    const all = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in (${APPLICATION_ROLES_SQL}))`));
     const nested = Number(psql(`select coalesce(sum(calls),0) from pg_stat_statements where userid=to_regrole('rab_secure_owner')`));
     pgss = { endpoint: 'GET /dashboard/summary', requests: 20, role: 'crewflow_owner', ownerToplevelPerRequest: tl / 20, ownerAllPerRequest: all / 20, nestedDefinerPerRequest: nested / 20 };
   } finally {

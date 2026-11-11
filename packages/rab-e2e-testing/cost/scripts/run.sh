@@ -139,10 +139,11 @@ fi
 mv "$OUT/worker-env/base.env.new" "$OUT/worker-env/base.env"
 export COST_WORKER_ENV_FILE; COST_WORKER_ENV_FILE="$(hostpath "$OUT/worker-env/base.env")"
 unset COST_REALTIME_ENABLED COST_PUSH_ENABLED
-fixed_keys="$(COST_WORKER_ENV_FILE="$(hostpath "$COST_DIR/init/empty.env")" dc config --format json worker | node -e 'let r="";process.stdin.on("data",d=>r+=d).on("end",()=>{const e=JSON.parse(r).services.worker.environment;console.log(Object.keys(e).join(" "))})')"
+. "$COST_DIR/lib/worker-env.sh"
+fixed_keys="$(fixed_env_keys)"
 while IFS='=' read -r k _; do
   [ -n "$k" ] || continue
-  [[ " $fixed_keys " != *" $k "* ]] || die "--worker-env-file: $k is set by docker-compose.cost.yml for the worker; an env-file value would be ignored"
+  [[ " $fixed_keys " != *" $k "* ]] || die "--worker-env-file: $k is set by docker-compose.cost.yml for the worker or the api; an env-file value would be ignored"
 done < "$OUT/worker-env/base.env"
 
 # ---- isolation preflight and baselines ------------------------------------------------------------------------------
