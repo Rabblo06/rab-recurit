@@ -87,10 +87,59 @@ const FEATURE_SWEEPS = Object.freeze({
   REALTIME_ENABLED: Object.freeze({ key: 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS', value: null, decision: 'value not yet decided by the owner' }),
 });
 const switchedOn = (v) => String(v ?? '') === 'true';
+/** The only values a feature switch may carry (after Compose's own normalisation); anything else is refused (fail closed). */
+const SWITCH_VALUES = Object.freeze(['true', 'false']);
+/**
+ * The value Docker Compose gives a service for one env-file value (review J2-1): quoted → the text between the quotes
+ * (then only blanks or a `#` comment); unquoted → everything before the first blank-then-`#`, trimmed. null when ambiguous
+ * (unterminated quote, text after the closing quote). Mirrors composeEnvValue in scripts/compose-owner-login.cjs.
+ */
+function composeEnvValue(raw) {
+  const v = String(raw ?? '').trim();
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    const end = v.indexOf(q, 1);
+    if (end < 0) return null;
+    const rest = v.slice(end + 1).trim();
+    return rest === '' || rest.startsWith('#') ? v.slice(1, end) : null;
+  }
+  const comment = v.search(/\s#/);
+  return (comment >= 0 ? v.slice(0, comment) : v).trim();
+}
+/**
+ * One env file's text → what environment mode may know of it: variable NAMES, unfilled placeholders, the login part of
+ * database URLs and the two non-secret feature switches (Phase X J2), never another value. Lines are read as Compose reads
+ * them: an optional `export ` prefix (review J2-2), quotes and inline ` #` comments (J2-1). A switch Compose would read
+ * ambiguously is recorded as null, which the rule refuses. `entry` accumulates over a service's files.
+ */
+function readEnvFileKeys(text, entry = { names: [], unfilled: [], dbUsers: {}, switches: {} }) {
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m || /^\s*#/.test(line)) continue;
+    entry.names.push(m[1]);
+    const value = composeEnvValue(m[2]);
+    if (Object.hasOwn(FEATURE_SWEEPS, m[1])) entry.switches[m[1]] = value;
+    if (/<[^>]*>/.test(m[2])) entry.unfilled.push(m[1]);
+    if (/DATABASE_URL$/.test(m[1])) {
+      try {
+        entry.dbUsers[m[1]] = decodeURIComponent(new URL(value ?? '').username);
+      } catch {
+        entry.unfilled.push(`${m[1]} (not a URL)`);
+      }
+    }
+  }
+  return entry;
+}
 /** The J2 rule on the two service environments plus each service's switch values (from the model or its env files). */
 function featureSweepProblems(apiEnv, workerEnv, switches = {}, where = '') {
   const problems = [];
   for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
+    // Fail closed (review J2-1): whatever the service receives must be exactly true or false (null = unreadable).
+    for (const name of ['rab-api', 'rab-worker']) {
+      const env = name === 'rab-api' ? apiEnv : workerEnv;
+      const v = env?.[flag] !== undefined ? env[flag] : (Object.hasOwn(switches[name] ?? {}, flag) ? switches[name][flag] : undefined);
+      if (v !== undefined && !SWITCH_VALUES.includes(String(v))) problems.push(`${name}: ${flag} must be exactly true or false${where}`);
+    }
     const on = (name, env) => switchedOn(env?.[flag] ?? switches[name]?.[flag]);
     const apiOn = on('rab-api', apiEnv);
     const workerOn = on('rab-worker', workerEnv);
@@ -525,20 +574,7 @@ function environmentMode(argv) {
         entry.unfilled.push(`(env file ${baseName(p)} not readable)`);
         continue;
       }
-      for (const line of text.split(/\r?\n/)) {
-        const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-        if (!m || /^\s*#/.test(line)) continue;
-        entry.names.push(m[1]);
-        if (Object.hasOwn(FEATURE_SWEEPS, m[1])) entry.switches[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, '$2');
-        if (/<[^>]*>/.test(m[2])) entry.unfilled.push(m[1]);
-        if (/DATABASE_URL$/.test(m[1])) {
-          try {
-            entry.dbUsers[m[1]] = decodeURIComponent(new URL(m[2].replace(/^(['"])(.*)\1$/, '$2')).username);
-          } catch {
-            entry.unfilled.push(`${m[1]} (not a URL)`);
-          }
-        }
-      }
+      readEnvFileKeys(text, entry);
     }
     envFileKeys[name] = entry;
   }
@@ -569,4 +605,4 @@ if (require.main === module) {
   console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, featureSweepProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

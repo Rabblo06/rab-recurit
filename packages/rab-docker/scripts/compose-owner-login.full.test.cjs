@@ -305,3 +305,49 @@ test('J2: `--lint-env-file runtime` refuses PUSH_ENABLED=true while the committe
     fsx.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Review of #97, finding J2-1 (reproduced by the reviewer): `PUSH_ENABLED=true # on` reaches the app as "true", so the
+// lint must treat it as ON; quoted values likewise; garbage is refused (fail closed), never read as off.
+test('J2-1: `--lint-env-file runtime` reads switches as Compose does: commented / quoted true = ON, garbage refused', { skip }, () => {
+  const fsx = require('node:fs');
+  const os = require('node:os');
+  const pathx = require('node:path');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'owner-login-j2-1-'));
+  const file = pathx.join(dir, 'runtime.env');
+  const original = console.log;
+  const lint = (line) => {
+    const logs = [];
+    console.log = (m) => logs.push(String(m));
+    try {
+      fsx.writeFileSync(file, `CREWFLOW_AUDIT_SINK=stdout\n${line}\n`);
+      return { code: gate.main(['--lint-env-file', 'runtime', file]), out: logs.join('\n') };
+    } finally {
+      console.log = original;
+    }
+  };
+  try {
+    for (const line of ['PUSH_ENABLED=true # on', 'PUSH_ENABLED="true"', "PUSH_ENABLED='true' # on", 'export PUSH_ENABLED=true']) {
+      const r = lint(line);
+      assert.equal(r.code, 1, line);
+      assert.match(r.out, /default: rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/, line);
+    }
+    for (const line of ['PUSH_ENABLED=yes', 'PUSH_ENABLED=TRUE', 'PUSH_ENABLED="true', 'REALTIME_ENABLED=1']) {
+      const r = lint(line);
+      assert.equal(r.code, 1, line);
+      assert.match(r.out, /_ENABLED: must be exactly true or false/, line);
+    }
+    assert.equal(lint('PUSH_ENABLED=false # off').code, 0);
+    assert.equal(lint('REALTIME_ENABLED="false"').code, 0);
+  } finally {
+    console.log = original;
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('J2-1: the committed compose rendered with a commented runtime.env switch: Compose gives "true", the gate refuses', { skip }, () => {
+  const on = renderModels([combo(DEF)], [], ['PUSH_ENABLED=true # on']);
+  assert.equal(on[DEF].services['rab-api'].environment.PUSH_ENABLED, 'true'); // what the app really receives
+  assertRefused(checkModel(on[DEF], combo(DEF)), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  // A compose value outside true/false is refused too (it would be read as off).
+  assertRefused(problemsAfter(DEF, (s) => { for (const svc of APP) s[svc].environment.PUSH_ENABLED = 'yes'; }), /rab-api: PUSH_ENABLED must be exactly true or false/);
+});

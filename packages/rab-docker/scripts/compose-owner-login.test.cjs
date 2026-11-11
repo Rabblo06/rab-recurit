@@ -416,7 +416,11 @@ test('J2 featureSweepProblems: push on needs 30 s on BOTH services; the switch m
   const f = gate.featureSweepProblems;
   assert.deepEqual(f({}, {}), []);
   assert.deepEqual(f({ PUSH_ENABLED: 'false' }, { PUSH_ENABLED: 'false' }), []);
-  for (const notOn of ['TRUE', '1', 'yes', ' true']) assert.deepEqual(f({ PUSH_ENABLED: notOn }, { PUSH_ENABLED: notOn }), [], notOn);
+  // Review J2-1 (fail closed): anything but exactly true / false is refused, never silently read as off.
+  for (const bad of ['TRUE', '1', 'yes', ' true', 'true # on', '']) {
+    assertRefused(f({ PUSH_ENABLED: bad }, { PUSH_ENABLED: bad }), /rab-api: PUSH_ENABLED must be exactly true or false/);
+    assertRefused(f({ PUSH_ENABLED: 'false' }, { REALTIME_ENABLED: bad }), /rab-worker: REALTIME_ENABLED must be exactly true or false/);
+  }
   const on = { PUSH_ENABLED: 'true' };
   assertRefused(f(on, on), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the compose files \(owner rule 2026-11-06\); it is ""/);
   assertRefused(f(on, on), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
@@ -438,4 +442,34 @@ test('J2: the push and realtime sweep intervals are never accepted from an env f
   }
   // The switches themselves stay runtime.env values (off by default; turning one on is the owner's decision).
   assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\nREALTIME_ENABLED=false'), []);
+});
+
+// Review of #97, finding J2-1: switch values are read the way Docker Compose reads them, and anything but true/false fails closed.
+test('J2-1: composeEnvValue reads a value the way Docker Compose does (quotes, inline # comments); ambiguous → null', () => {
+  const v = gate.composeEnvValue;
+  assert.equal(v('true # on'), 'true');
+  assert.equal(v('true\t# on'), 'true');
+  assert.equal(v('"true"'), 'true');
+  assert.equal(v("'true' # on"), 'true');
+  assert.equal(v('"true" # on'), 'true');
+  assert.equal(v('  false  '), 'false');
+  assert.equal(v('a#b'), 'a#b'); // a # not preceded by a blank is part of the value
+  assert.equal(v('"a # b"'), 'a # b'); // inside quotes it is not a comment
+  assert.equal(v('"true'), null); // unterminated quote
+  assert.equal(v('"true" yes'), null); // text after the closing quote
+  const verifier = require('../staging/verify-image-compose.cjs');
+  for (const raw of ['true # on', '"true"', "'true' # x", 'a#b', '"a # b"', '"true', '"true" yes', '', 'yes']) assert.equal(verifier.composeEnvValue(raw), v(raw), raw);
+});
+
+test('J2-1: lintEnvText refuses a switch that is not exactly true or false once read as Compose reads it', () => {
+  for (const line of ['PUSH_ENABLED=yes', 'PUSH_ENABLED=TRUE', 'PUSH_ENABLED=1', 'PUSH_ENABLED=', 'PUSH_ENABLED="true', 'PUSH_ENABLED="true" x', 'REALTIME_ENABLED=on # enabled']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), /(PUSH|REALTIME)_ENABLED: must be exactly true or false/);
+  }
+  for (const line of ['PUSH_ENABLED=false # off for now', 'PUSH_ENABLED="false"', "REALTIME_ENABLED='false'", 'export PUSH_ENABLED=false']) {
+    assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), [], line);
+  }
+  // parseEnvText now gives every rule the value Compose gives the app.
+  const [entry] = gate.parseEnvText('PUSH_ENABLED=true # on');
+  assert.deepEqual([entry.key, entry.value, entry.unreadable], ['PUSH_ENABLED', 'true', false]);
+  assert.equal(gate.parseEnvText('PUSH_ENABLED="true')[0].unreadable, true);
 });

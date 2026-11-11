@@ -179,6 +179,29 @@ const FEATURE_SWEEPS = Object.freeze({
 });
 /** The environment's own parse (`@Transform(({ value }) => value === 'true')`): only the exact string true switches it on. */
 const switchedOn = (v) => String(v ?? '') === 'true';
+/** The only values a feature switch may carry (after Compose's own normalisation); anything else is refused (fail closed). */
+const SWITCH_VALUES = Object.freeze(['true', 'false']);
+
+/**
+ * The value Docker Compose gives a service for one env-file value (the text after `KEY=`), so the gate reads what the app
+ * reads (review J2-1: `PUSH_ENABLED=true # on` reaches the app as "true"):
+ *  - "double" or 'single' quoted: the text between the quotes; after the closing quote only blanks or a `#` comment;
+ *  - unquoted: everything before the first blank-then-`#` (that starts a comment), trimmed; `a#b` stays `a#b`.
+ * Returns null when the value cannot be read unambiguously (an unterminated quote, text after the closing quote): callers
+ * that decide something from the value (the feature switches) fail closed on null.
+ */
+function composeEnvValue(raw) {
+  const v = String(raw ?? '').trim();
+  const q = v[0];
+  if (q === '"' || q === "'") {
+    const end = v.indexOf(q, 1);
+    if (end < 0) return null;
+    const rest = v.slice(end + 1).trim();
+    return rest === '' || rest.startsWith('#') ? v.slice(1, end) : null;
+  }
+  const comment = v.search(/\s#/);
+  return (comment >= 0 ? v.slice(0, comment) : v).trim();
+}
 
 /**
  * Problems of the J2 rule on the rab-api and rab-worker environments (pure; variable names and the rule's own values only,
@@ -187,6 +210,10 @@ const switchedOn = (v) => String(v ?? '') === 'true';
 function featureSweepProblems(apiEnv = {}, workerEnv = {}) {
   const problems = [];
   for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
+    // Fail closed (review J2-1): a switch the service receives must be exactly true or false (Compose already normalised it).
+    for (const [name, e] of [['rab-api', apiEnv], ['rab-worker', workerEnv]]) {
+      if (e[flag] !== undefined && !SWITCH_VALUES.includes(String(e[flag]))) problems.push(`${name}: ${flag} must be exactly true or false`);
+    }
     const apiOn = switchedOn(apiEnv[flag]);
     const workerOn = switchedOn(workerEnv[flag]);
     if (apiOn !== workerOn) problems.push(`${flag} differs between rab-api and rab-worker (both read it from runtime.env; one value)`);
@@ -512,9 +539,10 @@ function parseEnvText(text) {
     if (line === '' || line.startsWith('#')) return;
     const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
     if (!m) { out.push({ key: null, value: '', line: i + 1 }); return; }
-    let value = m[2].trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
-    out.push({ key: m[1], value, line: i + 1 });
+    // Review J2-1: the value as Docker Compose reads it (quotes, inline ` #` comments), so every rule checks what the app
+    // gets. `unreadable` when that reading is ambiguous; `value` then keeps the raw text, which no rule accepts as valid.
+    const parsed = composeEnvValue(m[2]);
+    out.push({ key: m[1], value: parsed ?? m[2].trim(), unreadable: parsed === null, line: i + 1 });
   });
   return out;
 }
@@ -540,6 +568,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === URL_KEY) problems.push(`${key}: belongs in database.env only (so it is identical on every service)`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
+    // Review J2-1 (fail closed): a feature switch is exactly true or false once read the way Compose reads it.
+    if (Object.hasOwn(FEATURE_SWEEPS, key) && !SWITCH_VALUES.includes(value)) problems.push(`${key}: must be exactly true or false (quotes and an inline # comment are read as Compose reads them)`);
     for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
       if (key === rule.key) problems.push(`${key}: commit it in the compose files on rab-api and rab-worker, never in an env file (the API registers the ${flag === 'PUSH_ENABLED' ? 'push' : 'realtime'} scheduler with its own value)`);
     }
@@ -746,7 +776,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, featureSweepProblems, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, INIT_SQL, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
