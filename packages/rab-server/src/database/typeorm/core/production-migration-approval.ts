@@ -17,9 +17,16 @@
  *
  * Owner-login architecture (owner decision 2026-11-04, PR 3): the locked runner WAIVES this list for the owner login on a
  * proven fresh install only (scripts/migrate/owner-login/fresh-install.ts: no tenant data was ever written, decided
- * physically) — "on EMPTY the full chain is allowed under the shim". On every existing database the list applies as
- * before (plus the F5 token in token mode). NEEDS OWNER APPROVAL (M0-A): a fresh production install therefore applies the
- * development-only 1786719500000 (G1 crewflow_app EXECUTE grant) and records 1786719520000 through the D3(b) shim.
+ * physically) — "on EMPTY the full chain is allowed under the shim". NEEDS OWNER APPROVAL (M0-A): a fresh production
+ * install therefore applies the development-only 1786719500000 (G1 crewflow_app EXECUTE grant) and records 1786719520000
+ * through the D3(b) shim.
+ *
+ * Phase X U-1 (owner decision 2026-11-11, P1-1 / P1-4): on the OWNER-LOGIN path of the locked runner (the migrate-on-start
+ * child and the owner-login release step) this list is NO LONGER consulted: the upgrade floor
+ * (scripts/migrate/owner-login/release-floor.ts) replaced it, because the list refused every upgrade of an existing
+ * production database (SU-01). This module now gates only the LEGACY CF-41 path of the locked runner and the CLI
+ * (GuardedMigrationDataSource.runMigrations: setup-db and the TypeORM CLI). Both are retired with the clean-up PR, together
+ * with this module; until then nothing here changes.
  */
 import type { DbTarget } from './database-target';
 
