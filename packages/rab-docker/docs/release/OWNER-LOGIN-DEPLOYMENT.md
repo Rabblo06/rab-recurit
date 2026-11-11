@@ -235,6 +235,22 @@ offer expiry and late clock-in, 2 min for the manager-confirmation withdrawal, 5
 creates no trigger consumer, so leftover trigger jobs stay unconsumed in Redis; the scans never stopped and do the work. The scans then keep the committed (slower) intervals: whether to
 restore the code defaults with the rollback is an owner decision.
 
+**Pay-statement sweep (owner decision 2026-11-11, Phase X J1a): committed configuration.** Like notification delivery:
+in all three compose files (`docker-compose.image.yml`, `docker-compose.production.yml`, `docker-compose.local-build.yml`),
+on rab-api AND rab-worker, with the same value on both. The gate (`STATEMENT_DISPATCH` in
+`scripts/compose-owner-login.cjs`) and the verifier (`staging/verify-image-compose.cjs`) enforce it, and `runtime.env` /
+`database.env` may not re-enter it. The code default (5 s) is unchanged for development and tests.
+
+| Variable | Production value | Code default | Why |
+|---|---|---|---|
+| `WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` | `30` | `5` (bounds 1–300) | The statement sweep was about 57 % of idle SQL at 20 organisations (Phase X S0-J SJ-01, derived from measured counts). The API registers the BullMQ scheduler with ITS value and the Worker never compares intervals, so both carry the same value. The first API start with the new value updates the same scheduler id in place. |
+
+What changes: a pay statement is generated 0–30 s after its pay record is approved (was 0–5 s). A statement whose claim
+was lost (dead Worker, Redis outage) is re-queued by the 10-minute lease up to 25 s later than before, and a failed
+statement is retried up to 25 s later. Nothing else: approval, the payroll guard, the generation fence and the consumer
+are untouched. Rollback: remove the line from both services in all three compose files and from the gate, then redeploy
+(the API re-registers the scheduler at 5 s).
+
 **Migration 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) is OBSOLETE under this design** (owner decision
 2026-11-06: keep it excluded). It stays in `core/gated-migrations/`, outside the migration glob, and must never be
 applied: its cutover gate needs every Worker to authenticate as `crewflow_worker`, which has no members and no password
