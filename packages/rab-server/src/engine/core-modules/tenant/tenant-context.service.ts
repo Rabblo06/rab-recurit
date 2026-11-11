@@ -301,9 +301,14 @@ export class TenantContextService {
     // Reset the optional read-only roster capability and the org-admin Assigned Staff scope (VenueManagerService) on every
     // transaction; only the service method that needs one binds it, after this.
     // T-1: when the schema is already known (ST-01) search_path is set in this same SELECT, and when the caller asked for a
-    // read-only transaction (ST-02) so is transaction_read_only; both transaction-local, like the identity GUCs. The
-    // search_path value is a bound parameter AND a single validated identifier ('core', or a workspaceSchemaName() result
-    // that matched the registry): binding stops SQL injection but not a comma-separated list, so nothing else is passed.
+    // read-only transaction (ST-02) so is transaction_read_only; both transaction-local, like the identity GUCs.
+    // The search_path value is a bound parameter, which stops SQL injection but NOT a comma-separated list ('a, core' would
+    // be two schemas). Neither this folded $6 nor bindSearchPath() checks the format itself; the value is validated where it
+    // comes from, and only there:
+    //   - the literal constant 'core' in the callers above; or
+    //   - a schema returned by SchemaResolverService.resolve(): `workspaceSchemaName()` (`workspace_` + 32 lowercase hex, from
+    //     a UUID) plus an exact match with the registry row, and, for a cached value, the same exact-name comparison (ST-07).
+    // Never pass anything else here (no request field, header, claim or other string).
     // RESET ROLE above stays its own statement (both layers kept, G-09).
     const params: string[] = [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''];
     if (extras.searchPath !== undefined) params.push(extras.searchPath);

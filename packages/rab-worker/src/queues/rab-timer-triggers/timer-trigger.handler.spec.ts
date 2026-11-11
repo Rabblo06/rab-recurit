@@ -78,8 +78,10 @@ describe('handleTimerTrigger (D-Q4b consumer)', () => {
   it('the decision runs bound to the PAYLOAD organisation/workspace, in a READ ONLY transaction (T-1: the option, not a statement)', async () => {
     const h = harness({ rows: [offerRow()] });
     await handleTimerTrigger(job(), 't', h.deps);
-    // ST-02: read-only is folded into the tenant binding SELECT (25006 on any write is proven in
-    // tenant-context-framing.integration.spec.ts and dq4b-timer-triggers.integration.spec.ts); no separate statement.
+    // ST-02: the handler asks runScoped for { readOnly: true }; no separate statement. Where it is proven:
+    //   - the consumer forwards it: timer-trigger.processors.spec.ts; runScopedForOrg passes it on: scoped-job.spec.ts;
+    //   - a write in the decision transaction fails with 25006 through the real consumer wiring: the "READ ONLY DECISION"
+    //     test in dq4b-timer-triggers.integration.spec.ts; the folded flag itself: tenant-context-framing.integration.spec.ts.
     expect(h.runScoped).toHaveBeenCalledWith(ORG, WS, expect.any(Function), { readOnly: true });
     expect(h.queries).not.toContain('SET TRANSACTION READ ONLY');
     expect(h.queries.every((q) => /^\s*SELECT/i.test(q))).toBe(true);

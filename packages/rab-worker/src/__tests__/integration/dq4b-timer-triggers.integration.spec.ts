@@ -48,7 +48,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { discoverShiftMonitorInWorkspace, runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { armShiftTimerTriggers, redisTimerTriggerOutcomeRecorder } from '../../queues/rab-timer-triggers/timer-trigger-arming';
 import { handleTimerTrigger, TimerTriggerHandlerDeps } from '../../queues/rab-timer-triggers/timer-trigger.handler';
-import { buildTimerTriggerActions } from '../../queues/rab-timer-triggers/timer-trigger.processors';
+import { buildTimerTriggerActions, TimerTriggerConsumer } from '../../queues/rab-timer-triggers/timer-trigger.processors';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -392,6 +392,46 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       down.disconnect();
     }
     expect((await sideEffects(fx, offer.id)).audits).toBe(1);
+  });
+
+  // T-1 review F1(c): the decision step runs in a READ ONLY transaction through the PRODUCTION wiring (TimerTriggerConsumer
+  // → runScopedForOrg → TenantContextService, the read-only flag folded into the binding SELECT). Before T-1 the decision
+  // sent its own SET TRANSACTION READ ONLY; now dropping the option anywhere on that path would make it read-write, and a
+  // write probed inside the decision transaction would succeed. Shadow mode: the decision is the only transaction opened.
+  it('READ ONLY DECISION: a write inside the decision transaction fails with 25006 (real consumer wiring)', async () => {
+    const fx = await seedFx('dq4bReadOnly');
+    const { offer } = await sendOffer(fx);
+    const payload = await makeDue(fx, offer.id);
+    const probes: Array<{ code: string; readOnly: string }> = [];
+    const probe = async (m: EntityManager) => {
+      await m.query('SAVEPOINT t1_probe');
+      const code = await m.query(`UPDATE core.user_session SET revoked_reason = revoked_reason WHERE false`).then(
+        () => 'ok',
+        (e: { code?: string; driverError?: { code?: string } }) => e.driverError?.code ?? e.code ?? 'error',
+      );
+      await m.query('ROLLBACK TO SAVEPOINT t1_probe');
+      const [{ ro }] = await m.query(`SELECT current_setting('transaction_read_only') AS ro`);
+      probes.push({ code, readOnly: ro });
+    };
+    const probingTenant = {
+      runInTenantContext: <T>(ctx: AuthContext, fn: (m: EntityManager) => Promise<T>, options?: Parameters<TenantContextService['runInTenantContext']>[2]) =>
+        tenantContext.runInTenantContext(ctx, async (m) => {
+          const out = await fn(m);
+          await probe(m);
+          return out;
+        }, options),
+    };
+    const deps = { tenantContext: probingTenant, notificationService, auditService, realtimeEventService, environmentService: env, runtimeDataSource: dataSource, logger: quietLogger };
+    const consumer = new TimerTriggerConsumer({ get: () => deps } as never, { settings: { mode: 'shadow', enabled: () => true } } as never);
+
+    await expect(consumer.trigger(fakeJob('offer-expiry', payload) as never)).resolves.toEqual({ outcome: 'would-act' });
+    expect(probes).toEqual([{ code: '25006', readOnly: 'on' }]);
+
+    // Control: the same probe in a scoped transaction WITHOUT the option is not refused, so 25006 above is the option.
+    probes.length = 0;
+    await runScopedForOrg(probingTenant as never, payload.organisationId, payload.workspaceId, async () => undefined);
+    expect(probes).toEqual([{ code: 'ok', readOnly: 'off' }]);
+    expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.PENDING); // shadow wrote nothing
   });
 
   describe('real BullMQ consumers', () => {
