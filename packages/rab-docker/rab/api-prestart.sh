@@ -170,11 +170,11 @@ for name in DATABASE_URL_UNPOOLED CREWFLOW_MIGRATION_DATABASE_URL CREWFLOW_PREST
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service (migration and command authority belong only to the migrate child and its per-release approval)."; fi
 done
-# Phase B (ops): the one-off operations container's variables (its own crewflow_app URL, its marker, the operator label) belong
-# to `docker compose --profile ops run --rm rab-ops ...` only. pg-config.ts refuses them in the API process as well.
+# Retired separated-mode operations variables (the removed rab-ops container's own crewflow_app URL, its marker, the operator
+# label). Nothing reads them any more; any value is refused here, and pg-config.ts refuses them in every process as well.
 for name in CREWFLOW_OPS_RUN PG_OPS_APP_DATABASE_URL CREWFLOW_OPS_ACTOR_SOURCE CREWFLOW_OPS_ACTOR_ID CREWFLOW_OPS_CHANGE_REF; do
   eval "value=\${$name:-}"
-  if [ -n "$value" ]; then refuse "$name must never be set on the api service (it belongs to the one-off ops container only)."; fi
+  if [ -n "$value" ]; then refuse "$name must never be set on the api service (a retired separated-mode variable; never valid)."; fi
 done
 # Owner-login architecture: ONE database URL (PG_DATABASE_URL). Legacy and second database URLs and role passwords never
 # belong here. (The removed CREWFLOW_DB_MODE is refused above by the runtime-db-config copy, with its own message.)
