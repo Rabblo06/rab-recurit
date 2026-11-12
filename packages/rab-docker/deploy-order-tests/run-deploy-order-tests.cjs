@@ -49,7 +49,7 @@ const L = require('./upgrade-lib.cjs');
 const RD = path.resolve(__dirname, '..'); // packages/rab-docker
 const argv = process.argv.slice(2);
 const MAJOR = argv[0];
-const OUT = argv[1] ? path.resolve(argv[1]) : '';
+const OUT = argv[1] ? path.resolve(process.platform === 'win32' ? argv[1].replace(/^\/([a-z])\//i, '$1:/') : argv[1]) : '';
 const KEEP = argv.includes('--keep');
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 if (!['16', '17', '18'].includes(MAJOR) || !OUT) {
@@ -74,6 +74,9 @@ const OVERLAY = 'deploy-order-tests/docker-compose.deploy-order.yml';
 const OWNER_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-owner.yml';
 const PREV_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-prev.yml';
 const PREV_PRE_DB_SETUP = (process.env.DOT_PREV_PRE_DB_SETUP ?? '1') !== '0';
+/** Project-name prefix (default dot: projects dot-pg<major>, dot-pg<major>-t4), so two runs or agents never share one. */
+const PREFIX = process.env.DOT_PROJECT_PREFIX || 'dot';
+if (!/^[a-z][a-z0-9-]{0,15}$/.test(PREFIX)) fail('DOT_PROJECT_PREFIX must match ^[a-z][a-z0-9-]{0,15}$');
 const T4_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-t4.yml';
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
 const MAX_CONTAINERS = 5;
@@ -95,7 +98,7 @@ function redact(text) {
 function note(line) {
   const l = redact(line);
   logLines.push(l);
-  console.log(`[dot-pg${MAJOR}] ${l}`);
+  console.log(`[${PREFIX}-pg${MAJOR}] ${l}`);
 }
 function evidence(name, text) {
   fs.writeFileSync(path.join(OUT, 'evidence', name), redact(text));
@@ -302,8 +305,8 @@ function redeployOrder(check, evs, before, after) {
 
 async function main() {
   L.newSecrets();
-  const main = new Project(`dot-pg${MAJOR}`, path.join(OUT, 'secrets'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY]);
-  const t4 = new Project(`dot-pg${MAJOR}-t4`, path.join(OUT, 'secrets-t4'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY, T4_OVERLAY]);
+  const main = new Project(`${PREFIX}-pg${MAJOR}`, path.join(OUT, 'secrets'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY]);
+  const t4 = new Project(`${PREFIX}-pg${MAJOR}-t4`, path.join(OUT, 'secrets-t4'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY, T4_OVERLAY]);
   const stopSampler = startPeakSampler([main, t4]);
   note(`projects ${main.name}, ${t4.name}; PostgreSQL ${process.env.DOT_PG_IMAGE}; previous ${imageRef(PREV)}; new ${imageRef(NEW)}`);
   writeSecrets(main.secretsDir);

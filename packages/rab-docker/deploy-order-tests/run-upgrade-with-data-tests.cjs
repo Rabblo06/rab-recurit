@@ -62,7 +62,7 @@ const L = require('./upgrade-lib.cjs');
 
 const argv = process.argv.slice(2);
 const MAJOR = argv[0];
-const OUT = argv[1] ? path.resolve(argv[1]) : '';
+const OUT = argv[1] ? path.resolve(process.platform === 'win32' ? argv[1].replace(/^\/([a-z])\//i, '$1:/') : argv[1]) : '';
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 const KEEP = argv.includes('--keep');
 function fail(msg) {
