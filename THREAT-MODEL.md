@@ -6575,6 +6575,34 @@ cache change. The layer-2 service checks stay in the services; this changes only
   `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
   10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
 
+## CONFIG — OpenShip deploy: pinned default release digest and the full env listing (PR #122, 2026-11-12)
+- **Change.** `packages/rab-docker/docker-compose.production.yml` (the file OpenShip imports) now:
+  - pins a default release on the rab-api, rab-worker and rab-ops image lines,
+    `${CREWFLOW_IMAGE_TAG:-sha256:<64 hex>}`, so a deploy needs no `CREWFLOW_IMAGE_TAG`;
+  - lists every production environment variable with no secret value: 13 required (`:?`, so the platform refuses the
+    deploy before boot), the optional ones with their exact code defaults or no value, and the existing pinned values
+    unchanged.
+  - The three files uploaded directly to main on 2026-11-12 (`docker-compose.prod.yml`, `postgres-init-prod/*`) are
+    removed; they re-created the retired two-login model on PG17.
+- **Accepted risk (owner, 2026-11-12): the release is chosen by the commit on main.**
+  - Anyone who can merge to main picks what is deployed, and a deploy-from-main platform redeploys on that merge.
+  - The default is still an immutable, gate-verified index digest, never a mutable tag.
+  - `compose-one-image.cjs` accepts a default only in production.yml, only as a full `sha256:<64 lowercase hex>`, and
+    the same expression on every service. `docker-compose.image.yml` stays strict (`:?`, no default).
+  - Branch protection on `main` (changes only through reviewed PRs, required gates) is the control this relies on.
+    **It is NOT enabled yet** (2026-11-12: no protection rule or ruleset; a write collaborator pushed the reverted files
+    directly). Until the owner enables it, any write account can change the pinned digest without CI.
+  - The pinned default is the newest published release (`0e0a6edd`, 2026-11-11), which predates later fixes (#31, #93,
+    #96, #98, #99, #101, #103). It is meant for a fresh install; publish a new image from main and bump the default.
+- **Accepted risk: OpenShip service-scoped values override any committed value, pinned ones included.** No repository
+  gate can see that. The listing only makes more names visible; it is how OpenShip already worked.
+- **Residual.**
+  - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
+    (verified against env validation and the direct readers).
+  - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
+- **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
+  wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
+
 ### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
 - **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
   a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
