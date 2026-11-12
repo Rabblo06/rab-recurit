@@ -17,7 +17,12 @@
 -- cannot change that setting, so check the provider's log retention for failed statements.
 --
 -- PostgreSQL 16 or later only (on 15 and earlier CREATEROLE can grant predefined roles such as
--- pg_execute_server_program; the migration child refuses those servers). PostgreSQL 16 and 18 are supported.
+-- pg_execute_server_program; the migration child refuses those servers). PostgreSQL 16, 17 and 18 are supported.
+--
+-- DB-SETUP (database setup like Twenty): this file is now the FALLBACK for operators who create crewflow_owner by hand
+-- (then PG_DATABASE_URL names crewflow_owner and the API passes it through). By default the API does this itself on every
+-- start: PG_DATABASE_URL is the database ADMIN URL and api-prestart.sh's bootstrap child creates crewflow_owner (or resets
+-- its password to the one derived from APP_SECRET) and grants it the database.
 --
 -- Provider extras (M0 §5.1):
 --   Cloud SQL: CREATE EXTENSION IF NOT EXISTS btree_gist, citext, pg_trgm, pgcrypto, unaccent WITH SCHEMA public (as admin).

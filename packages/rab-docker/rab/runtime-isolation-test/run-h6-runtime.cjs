@@ -61,6 +61,9 @@ const SECRETS = {
   H6_S3_ACCESS_KEY: `h6${hex(10)}`,
   H6_S3_SECRET_KEY: hex(24),
   H6_FIXTURE_PASSWORD: `Fx${hex(16)}`,
+  // DB-SETUP: docker-compose.production.yml's bundled `db` (and the default admin URL) require it to render. Random per
+  // run and redacted like every other secret; this harness still runs its own `pg` (KNOWN GAP above).
+  PG_DATABASE_PASSWORD: hex(32),
 };
 // The QA fixture is seeded with H6_SEED_IMAGE (default: the image under test). seed-qa on a branch without PR #38
 // (fix/qa-seed-org-provisioning) fails organisation RLS; pass that branch's image for the FIXTURE step only.

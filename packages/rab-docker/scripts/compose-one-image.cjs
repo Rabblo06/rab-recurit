@@ -19,6 +19,10 @@
  *     replaces the API, so an old Worker never runs beside a new API), or for a healthy rab-redis;
  *   - rab-api runs with the Worker-only switches (it must migrate and register the schedulers), or rab-worker without them;
  *   - rab-api's stop_grace_period is below 40 s;
+ *   - DB-SETUP (owner decisions D1 a / D3): the bundled database `db` is missing, its image is not EXACTLY
+ *     ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the one non-app image allowed a committed default: the official
+ *     postgres repository by digest, never a tag), rab-api does not wait for it healthy, or rab-worker's command is not
+ *     exactly ./worker-start.sh (the Worker must never start with the admin URL; T-5);
  *   - a `rab-ops` service, or any service under an `ops` profile, is present. The separated operations container was
  *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
  *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
@@ -37,7 +41,6 @@ const DOCKER_DIR = path.resolve(__dirname, '..');
 const DEPLOY_COMBOS = Object.freeze([
   ['docker-compose.production.yml'],
   ['docker-compose.image.yml'],
-  ['docker-compose.image.yml', 'docker-compose.local-db.yml'],
   ['docker-compose.image.yml', 'staging/docker-compose.staging.yml'],
   ['docker-compose.image.yml', 'staging/rehearsal/docker-compose.image-rehearsal.yml'],
 ]);
@@ -51,6 +54,8 @@ const PINNED_DIGEST_IMAGE_REF = /^(\$\{CREWFLOW_IMAGE_REPOSITORY(:-[a-z0-9./_-]+
 /** The deploy combinations whose image line may carry the pinned release digest as its default (owner decision 2026-11-12). */
 const DEFAULT_DIGEST_COMBOS = Object.freeze(['docker-compose.production.yml']);
 const allowsDefaultDigest = (combo) => combo.length === 1 && DEFAULT_DIGEST_COMBOS.includes(combo[0]);
+/** DB-SETUP: the bundled db's image expression (no-interpolate render): the official postgres repository, a full digest. */
+const DB_IMAGE_REF = /^\$\{CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:[0-9a-f]{64}\}$/;
 
 function durationSeconds(v) {
   if (v === undefined || v === null) return NaN;
@@ -120,6 +125,16 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (String(workerEnv[k]) !== 'true') p(`rab-worker: ${k} must be "true" (the Worker never migrates or registers schedulers)`);
   }
   if (!(durationSeconds(api.stop_grace_period) >= MIN_API_STOP_GRACE_S)) p(`rab-api: stop_grace_period below ${MIN_API_STOP_GRACE_S}s`);
+
+  // DB-SETUP: the bundled database and the Worker wrapper.
+  const db = services.db;
+  if (!db) p('db: the bundled database service is missing (DB-SETUP D3: it replaces docker-compose.local-db.yml)');
+  else {
+    if (db.build !== undefined) p('db: has a build section');
+    if (!DB_IMAGE_REF.test(String(db.image ?? ''))) p(`db: image must be \${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the official postgres repository by digest), got ${JSON.stringify(db.image)}`);
+  }
+  if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy (the bootstrap child connects first)');
+  if (JSON.stringify(worker.command ?? []) !== JSON.stringify(['./worker-start.sh'])) p('rab-worker: command must be exactly ["./worker-start.sh"] (DB-SETUP T-5: the Worker never starts with the admin URL)');
   return problems;
 }
 
@@ -151,5 +166,5 @@ function main() {
   console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after`);
 }
 
-module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest, render };
+module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest, render };
 if (require.main === module) main();

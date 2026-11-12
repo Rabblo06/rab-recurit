@@ -15,14 +15,16 @@ function good() {
   return {
     services: {
       'rab-redis': { image: 'redis@sha256:x' },
+      db: { image: `\${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:${'f9'.repeat(32)}}` },
       'rab-api': {
         image: IMG,
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
-        depends_on: { 'rab-redis': { condition: 'service_healthy' } },
+        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' } },
         stop_grace_period: '40s',
       },
       'rab-worker': {
         image: IMG,
+        command: ['./worker-start.sh'],
         environment: { DISABLE_DB_MIGRATIONS: 'true', DISABLE_CRON_JOBS_REGISTRATION: 'true' },
         depends_on: {
           'rab-redis': { condition: 'service_healthy' },
@@ -260,7 +262,7 @@ test('DENIAL: one service with the default, another without (one expression for 
 test('only the production.yml combination may carry a default', () => {
   const allowed = DEPLOY_COMBOS.filter(allowsDefaultDigest).map((c) => c.join(' + '));
   assert.deepEqual(allowed, ['docker-compose.production.yml']);
-  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'docker-compose.local-db.yml']), false);
+  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'staging/docker-compose.staging.yml']), false);
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(withDefault(DIGEST)));
 });
 
@@ -277,4 +279,46 @@ test('committed files: production.yml pins one full digest on every app service;
     assert.ok(!/CREWFLOW_IMAGE_TAG:?-/.test(line), `docker-compose.image.yml must keep no default: ${line}`);
     assert.ok(/CREWFLOW_IMAGE_TAG:\?/.test(line), `docker-compose.image.yml must require the digest: ${line}`);
   }
+});
+
+// DB-SETUP (owner decisions D1 a / D3, T-5): the bundled db and the Worker wrapper.
+test('DENIAL DB-SETUP: no bundled db, a db image by tag / from another repository / without the digest default', () => {
+  let m = good();
+  delete m.services.db;
+  refused(m, /db: the bundled database service is missing/);
+  for (const image of ['postgres:16', 'postgres:16@sha256:' + 'f9'.repeat(32), '${CREWFLOW_POSTGRES_IMAGE:-postgres:16}', '${CREWFLOW_POSTGRES_IMAGE:?x}',
+    `\${CREWFLOW_POSTGRES_IMAGE:-evil/postgres@sha256:${'f9'.repeat(32)}}`, `\${OTHER_IMAGE:-postgres@sha256:${'f9'.repeat(32)}}`, `\${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:${'f9'.repeat(31)}}`]) {
+    m = good();
+    m.services.db.image = image;
+    refused(m, /db: image must be/);
+  }
+  m = good();
+  m.services.db.build = { context: '.' };
+  refused(m, /db: has a build section/);
+});
+
+test('DENIAL DB-SETUP: rab-api not waiting for a healthy db; the Worker started without worker-start.sh', () => {
+  let m = good();
+  delete m.services['rab-api'].depends_on.db;
+  refused(m, /rab-api: must depend on db with condition service_healthy/);
+  m = good();
+  m.services['rab-api'].depends_on.db.condition = 'service_started';
+  refused(m, /rab-api: must depend on db/);
+  for (const cmd of [undefined, ['node', 'packages/rab-worker/dist/main.js'], ['sh', '-c', './worker-start.sh']]) {
+    m = good();
+    m.services['rab-worker'].command = cmd;
+    refused(m, /rab-worker: command must be exactly \["\.\/worker-start\.sh"\]/);
+  }
+});
+
+test('committed files: production.yml and image.yml pin the SAME bundled db image (one digest)', () => {
+  const { DB_IMAGE_REF } = require('./compose-one-image.cjs');
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const dbImage = (text) => [...text.matchAll(/^\s+image:\s*(\$\{CREWFLOW_POSTGRES_IMAGE[^}]*\})\s*$/gm)].map((x) => x[1]);
+  const prod = dbImage(read('docker-compose.production.yml'));
+  const image = dbImage(read('docker-compose.image.yml'));
+  assert.equal(prod.length, 1);
+  assert.deepEqual(image, prod);
+  assert.ok(DB_IMAGE_REF.test(prod[0]), prod[0]);
+  assert.ok(!fs.existsSync(path.join(__dirname, '..', 'docker-compose.local-db.yml')), 'docker-compose.local-db.yml is retired (DB-SETUP D3)');
 });

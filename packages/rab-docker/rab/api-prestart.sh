@@ -10,10 +10,13 @@
 #      CREWFLOW_UPGRADE_FAILURE (continue | refuse, default continue — O3 C3; the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY
 #      maps refuse -> refuse, continue-if-compatible -> continue and must agree); the removed CREWFLOW_DB_MODE is refused
 #      (exit 64). CREWFLOW_UPGRADE_INCOMPLETE is set ONLY by this script: an inherited value is refused (exit 64);
-#   2. refuses to start when a second database URL, a role password, migration/command authority or an operations variable
+#   2. refuses to start when a second database URL, a role password (PG_DATABASE_PASSWORD included: only compose reads it,
+#      for the bundled db), migration/command authority or an operations variable
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
+#   2b. DB-SETUP: runs the bootstrap child as the database admin, derives the crewflow_owner runtime URL, replaces
+#      PG_DATABASE_URL with it and unsets every admin credential (details at the step below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger
 #      ahead; 70 = an UPGRADE migration FAILED and CREWFLOW_UPGRADE_FAILURE=continue (degraded start, loud ERROR/WARNING);
@@ -29,7 +32,7 @@
 #      reports 70 for one, and the relay below vetoes a 70 result that names one.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
-# The Worker never runs this, and never migrates.
+# The Worker never runs this, and never migrates: its command is worker-start.sh (derive + swap only, never the admin).
 set -eu
 
 SCRIPTS=packages/rab-server/dist/database/typeorm/scripts
@@ -234,6 +237,56 @@ isolation_report() {
   fi
 }
 isolation_report
+
+# DB-SETUP (database setup like Twenty; DB-SETUP-PLAN §3, §5.3, owner decisions D1 a / D5): PG_DATABASE_URL is the database
+# ADMIN URL (the bundled `db` by default, or the operator's own database), or an existing crewflow_owner URL (pass-through).
+#   1. The bootstrap child (the ONLY process that ever connects as the admin) creates crewflow_owner, or resets its password
+#      to the one derived from APP_SECRET, and grants it the database. A crewflow_owner URL: no connection, exit 0.
+#      Exit 0 = ready, 64 = refusal (fixed message), 70 = unexpected; anything but 0 never starts the API.
+#   2. The derive step (pure, never connects) builds the crewflow_owner runtime URL and hands it back on fd 4 (command
+#      substitution: never a file, never argv, never the log).
+#   3. PG_DATABASE_URL is REPLACED by that runtime URL and every admin credential is unset in THIS shell, so the migrate
+#      child, the schema check, the scheduler registration and main.js (exec: /proc/1/environ is the exported env at
+#      execve) never hold the admin URL. worker-start.sh does steps 2-3 for the Worker (it never runs step 1).
+# TLS (D1 a): the bundled `db` makes its own CA on first start; rab-api and rab-worker mount it read-only. When the URL's
+# host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to that CA, so verify-full needs no client
+# step. The block below is identical in worker-start.sh (run-prestart-shell-tests.cjs compares the two).
+# BEGIN crewflow bundled-db CA
+crewflow_bundled_db_ca() {
+  db_rest="${PG_DATABASE_URL#*://}"
+  db_authority="${db_rest%%[/?#]*}"
+  db_hostport="${db_authority##*@}"
+  db_host="${db_hostport%%:*}"
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+    export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
+  fi
+  unset db_rest db_authority db_hostport db_host
+}
+# END crewflow bundled-db CA
+if [ -z "${PG_DATABASE_URL:-}" ]; then
+  refuse 'PG_DATABASE_URL is required: the database admin URL (the bundled db by default), or a crewflow_owner URL.'
+fi
+crewflow_bundled_db_ca
+OWNER_BOOTSTRAP="$SCRIPTS/owner-login/bootstrap-owner-login.js"
+DERIVE_RUNTIME_URL="$SCRIPTS/owner-login/derive-runtime-url.js"
+STATUS=0
+run_step node "$OWNER_BOOTSTRAP" || STATUS=$?
+case "$STATUS" in
+  0) ;;
+  64) fail_after_delay 64 "the database setup step refused (see the [owner-bootstrap] line above)" ;;
+  *) fail_after_delay "$STATUS" "the database setup step failed (see the [owner-bootstrap] lines above)" ;;
+esac
+STATUS=0
+RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+  RUNTIME_URL=""
+  fail_after_delay "$STATUS" "could not build the crewflow_owner connection from PG_DATABASE_URL and APP_SECRET (see the derive-runtime-url line above)"
+fi
+if [ -z "$RUNTIME_URL" ]; then
+  fail_after_delay 70 'the derive step returned an empty crewflow_owner connection'
+fi
+export PG_DATABASE_URL="$RUNTIME_URL"
+unset RUNTIME_URL PG_DATABASE_PASSWORD
 
 # The short-lived migrate child (Agent 1). Its stdout/stderr are relayed line by line; its LAST line is
 #   TWENTY_MIGRATE_RESULT {"state":...,"applied":[...],"pending":[...],"exitCode":N,"serve":...,"policy":...,"reason":...,

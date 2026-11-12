@@ -28,11 +28,15 @@
 # This file mirrors docker-compose.image.yml's runtime contract (same image variable, services, commands, isolation keys,
 # environment keys) with per-service environment instead of env_file. Where the two differ, docker-compose.image.yml wins.
 #
-# ONE DATABASE CREDENTIAL. rab-api and rab-worker each take PG_DATABASE_URL = crewflow_owner at the provider's DIRECT
-# host, sslmode=verify-full — the SAME value on both (entered per service on a platform without env_file).
-# There is no migrator, provisioner, worker, ops or replica URL, no .env.migrate and no role password. Created by the
-# provider admin with Agent 1's postgres-init/owner-login/01-crewflow-owner.sql (fresh) or transition-from-separated.sql
-# (existing separated database): a URL alone never works.
+# ONE DATABASE URL, LIKE TWENTY (DB-SETUP, owner decisions D1 a / D3 / D4 / D5). Enter only PG_DATABASE_PASSWORD (and
+# APP_SECRET): PG_DATABASE_URL then defaults to the bundled `db` service's superuser, sslmode=verify-full (db makes its own
+# CA; the app mounts it read-only). Your own database instead: set PG_DATABASE_URL to its ADMIN URL (DIRECT host,
+# sslmode=verify-full); `db` then runs idle. An existing crewflow_owner URL is passed through unchanged (D5). rab-api's
+# api-prestart.sh runs the bootstrap child (the ONLY admin connection: creates crewflow_owner or resets its password to
+# the one derived from APP_SECRET), then replaces PG_DATABASE_URL with the derived crewflow_owner URL and unsets the admin
+# credential before the migrate child and main.js; rab-worker's worker-start.sh does the same swap and never connects as
+# the admin (accepted risk TM-DB-1, T-1: the admin URL is in this service definition). No manual SQL step. There is no
+# migrator, provisioner, worker, ops or replica URL and no .env.migrate.
 #
 # LIFECYCLE (O3, owner decisions C1-C5, like Twenty): no release step, no rab-migrate. The API migrates on start
 # (CREWFLOW_MIGRATE_ON_START=true, approval mode none), registers the job schedulers, then serves. The Worker never
@@ -87,8 +91,11 @@ x-logging: &logging
 # ACCOUNTS_URL, CORS_ORIGINS, TRUSTED_PROXY_CIDRS and EMAIL_DRIVER are development values production refuses.
 # ---------------------------------------------------------------------------------------------------------------------------
 x-crewflow-required-env: &required-env
-  # crewflow_owner at the provider's DIRECT host, sslmode=verify-full. The one database URL (no other may be entered).
-  PG_DATABASE_URL: ${PG_DATABASE_URL:?PG_DATABASE_URL is required (crewflow_owner, direct host, sslmode=verify-full)}
+  # The database ADMIN URL. Unset = the bundled db (postgres://postgres:<PG_DATABASE_PASSWORD>@db:5432/crewflow,
+  # verify-full); your own database: its admin URL at the DIRECT host, sslmode=verify-full. The one database URL (no other
+  # may be entered). PG_DATABASE_PASSWORD (REQUIRED, `openssl rand -hex 32`) is read only by compose: the db service and
+  # this default; it never reaches a container of rab-api or rab-worker.
+  PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_URL}@db:5432/crewflow?sslmode=verify-full}
   # Root secret, 32+ random bytes. Changing it later breaks every session and stored encrypted secret.
   APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
   # https:// and not localhost (refused otherwise).
@@ -115,7 +122,8 @@ x-crewflow-required-env: &required-env
 # ---------------------------------------------------------------------------------------------------------------------------
 x-crewflow-optional-env: &optional-env
   # -- Database connection (one login: every pool shares crewflow_owner's connection limit) --
-  # PEM CA bundle for verify-full (unset = the system CA store); the file must exist in the container.
+  # PEM CA bundle for verify-full. Unset = the bundled db's own CA when the URL's host is db (api-prestart.sh /
+  # worker-start.sh), otherwise the system CA store; the file must exist in the container.
   PG_SSL_CA_CERT_PATH:
   # When set, must equal current_database().
   PG_EXPECTED_DATABASE_NAME:
@@ -300,6 +308,109 @@ x-crewflow-optional-env: &optional-env
 
 services:
 
+  # ---------------------------------------------------------------------------
+  # db — the BUNDLED PostgreSQL (DB-SETUP, owner decisions D1 a / D3 / D4; like Twenty's `db`). The default database: the
+  # client sets only PG_DATABASE_PASSWORD (its superuser password, `openssl rand -hex 32`: letters and digits only, it is
+  # interpolated into the default admin URL) and APP_SECRET. Never published, on the internal crewflow-db network only.
+  # TLS (D1 a): on the first start (and whenever the certificate is missing, invalid or within 30 days of expiry) the
+  # entrypoint below creates its OWN CA and a server certificate for the name `db` (EC P-256, 10 years) with the image's
+  # openssl; the CA's private key is deleted right after signing, so nothing can issue another certificate for `db`. The
+  # server key stays in the data volume (0600, never shared); the CA certificate goes to the crewflow-db-ca volume, which
+  # rab-api and rab-worker mount read-only (api-prestart.sh / worker-start.sh point PG_SSL_CA_CERT_PATH at it when the URL's
+  # host is `db`): sslmode=verify-full holds with no client step. A regenerated certificate reaches the app at its next start.
+  # The image reads the superuser password ONLY when the data volume is empty (first start): changing PG_DATABASE_PASSWORD
+  # later does not change it (ALTER ROLE postgres PASSWORD ... in the db container first).
+  # EXTERNAL DATABASE: set PG_DATABASE_URL to your database's admin URL (direct host, sslmode=verify-full); the app then
+  # ignores this service, which still runs idle and still needs a PG_DATABASE_PASSWORD (any strong value).
+  # Image: postgres:16 (Debian, 16.15), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name another Debian
+  # postgres:16 or :17 image by digest (the volume layout below is theirs; postgres:18 moved its data directory).
+  # ---------------------------------------------------------------------------
+  db:
+    image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        # The two volume roots arrive world-writable (copied from the image): only postgres may write them.
+        chmod 0755 /var/lib/postgresql /var/lib/postgresql/data
+        cd /var/lib/postgresql/data
+        if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/lib/postgresql/ca.crt ] &&
+          openssl verify -CAfile /var/lib/postgresql/ca.crt tls/server.crt >/dev/null 2>&1 &&
+          openssl x509 -checkend 2592000 -noout -in tls/server.crt >/dev/null 2>&1; }; then
+          echo 'crewflow-db: creating the bundled database CA and server certificate (CN/SAN db)'
+          rm -rf /var/lib/postgresql/data/tls.new
+          ( umask 077; mkdir /var/lib/postgresql/data/tls.new )
+          cd /var/lib/postgresql/data/tls.new
+          openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ca.key -out ca.crt -days 3650 -subj '/CN=crewflow bundled db CA' -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null
+          openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout server.key -out server.csr -subj '/CN=db' 2>/dev/null
+          printf 'subjectAltName=DNS:db\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > server.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3649 -extfile server.ext 2>/dev/null
+          rm -f ca.key ca.srl server.csr server.ext
+          chmod 0600 server.key
+          chmod 0644 server.crt ca.crt
+          if [ "$$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/data/tls.new; fi
+          cd /var/lib/postgresql/data
+          rm -rf /var/lib/postgresql/data/tls
+          mv tls.new tls
+          cp tls/ca.crt /var/lib/postgresql/ca.crt.new
+          chmod 0644 /var/lib/postgresql/ca.crt.new
+          mv /var/lib/postgresql/ca.crt.new /var/lib/postgresql/ca.crt
+        fi
+        exec docker-entrypoint.sh "$$@"
+      - crewflow-db
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/data/tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/data/tls/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - password_encryption=scram-sha-256
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: crewflow
+      # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
+      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also when PG_DATABASE_URL names your own database}
+      POSTGRES_INITDB_ARGS: --auth-local=peer --data-checksums
+      # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/).
+      PGDATA: /var/lib/postgresql/data/pgdata
+      # psql history and the like never land in /var/lib/postgresql (the crewflow-db-ca volume the app mounts).
+      HOME: /tmp
+    volumes:
+      - crewflow-db-data:/var/lib/postgresql/data
+      # Holds only ca.crt (and the empty mount point of the data volume): mounted read-only by rab-api and rab-worker.
+      - crewflow-db-ca:/var/lib/postgresql
+    networks: [crewflow-db]
+    healthcheck:
+      # TCP, not the socket: the image's first-start init runs a socket-only temporary server, which must not count.
+      test: ["CMD-SHELL", "pg_isready -q -h localhost -p 5432 -U postgres -d crewflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    # SIGINT = PostgreSQL fast shutdown (checkpoint, then exit); give it time before SIGKILL.
+    stop_signal: SIGINT
+    stop_grace_period: 90s
+    logging: *logging
+    # The image's own postgres user (999:999 in the Debian image): it initialises the cluster as that user, no capability.
+    user: '999:999'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/run/postgresql:uid=999,gid=999,mode=2775
+      - /tmp:uid=999,gid=999,mode=0700
+    shm_size: 256m
+    pids_limit: 256
+    mem_limit: ${CREWFLOW_POSTGRES_MEM_LIMIT:-1024m}
+    cpus: ${CREWFLOW_POSTGRES_CPUS:-2}
+
   rab-redis:
     image: redis:7-alpine
     # AOF + noeviction (an evicting policy can drop BullMQ jobs and locks). No ACL file here: a platform without a host
@@ -322,6 +433,10 @@ services:
     command: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
+    networks: [default, crewflow-db]
+    volumes:
+      # The bundled db's own CA (read-only; api-prestart.sh sets PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt for host db).
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
     environment:
       # REQUIRED and OPTIONAL: the shared lists above (identical on rab-worker).
       <<: [*required-env, *optional-env]
@@ -365,6 +480,9 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
+      # The bootstrap child connects to the bundled db first (idle when PG_DATABASE_URL names an external database).
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 10s
@@ -389,8 +507,12 @@ services:
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
-    command: ["node", "packages/rab-worker/dist/main.js"]
+    # DB-SETUP: derives the crewflow_owner URL, unsets the admin credential, then execs node packages/rab-worker/dist/main.js.
+    command: ["./worker-start.sh"]
     working_dir: /app
+    networks: [default, crewflow-db]
+    volumes:
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
     # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
     # so the Worker refuses to start as PID 1. Required (compose-owner-login.cjs).
     init: true
@@ -465,5 +587,13 @@ services:
         restart: true
     restart: unless-stopped
 
+networks:
+  # The bundled db's network: internal (no route out), never published; only db, rab-api and rab-worker are on it.
+  crewflow-db:
+    internal: true
+
 volumes:
   rab-redis-data:
+  # The bundled db: its cluster and server TLS key; and its CA certificate (shared read-only with rab-api and rab-worker).
+  crewflow-db-data:
+  crewflow-db-ca:

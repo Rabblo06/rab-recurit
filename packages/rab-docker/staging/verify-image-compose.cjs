@@ -23,6 +23,13 @@
  *     that every image resolved to repository@sha256:<64 hex> from an allowed repository (default adhin007/adolphus for
  *     the application images; Redis: any repository, digest required). Prints image references and check names only.
  *
+ * DB-SETUP (database setup like Twenty, owner decisions D1 a / D3 / D4 / D5): both files carry the bundled database `db`,
+ * and its definition (image, entrypoint, command, environment, volumes, network, health check and every H6 key) must be
+ * IDENTICAL in the two files. PG_DATABASE_URL is the database ADMIN URL, committed on rab-api and rab-worker as
+ * ${PG_DATABASE_URL:-<the bundled db>} (compose.env), so it must never come from an env file (it would be silently
+ * overridden); in the deployed model it must be present, identical on both services, verify-full and never a former
+ * separated login (T-1 accepts a provider admin login). Only the login part of the URL is ever read.
+ *
  * Exit 0 = every check passed, 1 = a check failed, 2 = usage error or docker compose unavailable.
  * Never prints an environment value other than image references (which are not secrets).
  */
@@ -172,6 +179,14 @@ const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_
   'CREWFLOW_DB_MODE'];
 /** The one runtime login. */
 const OWNER_LOGIN = 'crewflow_owner';
+/**
+ * DB-SETUP T-1: PG_DATABASE_URL is the database ADMIN URL (or crewflow_owner, passed through). Still never one of the former
+ * separated logins / schema roles (mirrors NOT_THE_APP_LOGIN in scripts/compose-owner-login.cjs; a test asserts the two agree).
+ */
+const NOT_THE_APP_LOGIN = Object.freeze(['crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator', 'rab_owner', 'rab_secure_owner', 'rab_app']);
+/** DB-SETUP: the bundled database service; its whole definition must be identical in the two compose files. */
+const DB_SERVICE = 'db';
+const DB_KEYS = [...RUNTIME_KEYS, 'image', 'environment', 'networks', 'ports', 'stop_signal', 'depends_on', 'profiles', 'env_file', 'build'];
 const OPS_ONLY = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 const LEGACY_DB = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'];
 
@@ -187,6 +202,8 @@ const SENTINEL_DIGEST = `sha256:${'5e'.repeat(32)}`;
  */
 const PRODUCTION_REQUIRED_DUMMIES = Object.freeze({
   PG_DATABASE_URL: `postgresql://${OWNER_LOGIN}:dummy@db-direct.example:5432/rab?sslmode=verify-full`,
+  // DB-SETUP: the bundled db's superuser password (both files' db require it).
+  PG_DATABASE_PASSWORD: 'dummy-production-required-db-password-0000',
   APP_SECRET: 'dummy-production-required-app-secret',
   APP_URL: 'https://app.example.com',
   ACCOUNTS_URL: 'https://app.example.com',
@@ -260,9 +277,21 @@ function checkVariant(variant, production, variantFiles = variant) {
   const services = variant?.services ?? {};
   const names = Object.keys(services).sort();
   // O3 (owner decisions C1-C5): no rab-migrate; the API migrates on start.
-  const expected = ['rab-api', 'rab-redis', 'rab-worker'];
+  const expected = ['db', 'rab-api', 'rab-redis', 'rab-worker'];
   if (stable(names) !== stable(expected)) fail(`services are ${names.join(',')}; expected exactly ${expected.join(',')}`);
   for (const pr of retiredOpsProblems(services)) fail(pr);
+  // DB-SETUP: the bundled db is the same service in both files (never a weaker copy in one of them), never published.
+  const vdb = services[DB_SERVICE];
+  const pdb = production?.services?.[DB_SERVICE];
+  if (!vdb || !pdb) fail(`${DB_SERVICE}: missing in ${vdb ? 'docker-compose.production.yml' : 'the variant'}`);
+  else {
+    for (const key of DB_KEYS) if (stable(vdb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} differs from docker-compose.production.yml`);
+    if ((vdb.ports ?? []).length) fail(`${DB_SERVICE}: publishes a port`);
+    if (stable(Object.keys(vdb.networks ?? {})) !== stable(['crewflow-db'])) fail(`${DB_SERVICE}: must be on the internal crewflow-db network only`);
+    if (variant?.networks?.['crewflow-db']?.internal !== true || production?.networks?.['crewflow-db']?.internal !== true) fail('network crewflow-db is not internal in both files');
+  }
+  // DB-SETUP T-5: the Worker starts through worker-start.sh (the admin URL never reaches the Worker process).
+  if (stable(services['rab-worker']?.command) !== stable(['./worker-start.sh'])) fail('rab-worker: command is not exactly ./worker-start.sh (DB-SETUP T-5)');
 
   // 1. Image-based and digest-pinned only.
   for (const [name, svc] of Object.entries(services)) {
@@ -400,6 +429,11 @@ function checkResolvedImages(model, allowed = [DEFAULT_APP_REPOSITORY]) {
       problems.push(`${name}: image "${ref}" is not repository@sha256:<64 hex>`);
       continue;
     }
+    // DB-SETUP: the bundled db runs the official postgres image (by digest), never another repository.
+    if (name === DB_SERVICE) {
+      if (!['postgres', 'library/postgres'].includes(m[1].replace(/^docker\.io\//, ''))) problems.push(`${name}: repository ${m[1]} is not the official postgres image`);
+      continue;
+    }
     if (name !== 'rab-redis' && !allowed.includes(m[1].replace(/^docker\.io\//, ''))) {
       problems.push(`${name}: repository ${m[1]} is not an allowed release repository (${allowed.join(', ')})`);
     }
@@ -431,13 +465,34 @@ function checkDeployment(merged, production, envFileKeys = {}) {
     }
     if (Object.prototype.hasOwnProperty.call(envOf(svc), 'REDIS_URL')) fail(`${name}: REDIS_URL is committed in a compose file (enter it in the env file)`);
     for (const k of envFileKeys[name]?.unfilled ?? []) fail(`${name}: ${k} still holds a template <placeholder>`);
-    for (const k of ['PG_DATABASE_URL', 'REDIS_URL']) {
-      if (envFileKeys[name] && !fromFiles.includes(k)) fail(`${name}: ${k} is missing from its env file`);
-    }
+    if (envFileKeys[name] && !fromFiles.includes('REDIS_URL')) fail(`${name}: REDIS_URL is missing from its env file`);
+    // DB-SETUP: PG_DATABASE_URL is a compose.env value; in an env file the committed ${PG_DATABASE_URL:-<bundled db>} would
+    // silently override it, and the bundled db's password never belongs in an env file.
+    if (fromFiles.includes('PG_DATABASE_URL')) fail(`${name}: PG_DATABASE_URL is set in an env file (set it in compose.env; the committed default would silently override it)`);
+    if (fromFiles.includes('PG_DATABASE_PASSWORD') || Object.prototype.hasOwnProperty.call(envOf(svc), 'PG_DATABASE_PASSWORD')) fail(`${name}: PG_DATABASE_PASSWORD reaches the container (compose.env only)`);
     for (const [k, login] of Object.entries(envFileKeys[name]?.dbUsers ?? {})) {
-      if (login !== OWNER_LOGIN) fail(`${name}: ${k} logs in as "${login}" (allowed: ${OWNER_LOGIN})`);
+      if (NOT_THE_APP_LOGIN.includes(login)) fail(`${name}: ${k} logs in as "${login}" (a former separated login)`);
+    }
+    const url = envOf(svc).PG_DATABASE_URL;
+    let parsed = null;
+    try { parsed = new URL(String(url ?? '')); } catch { /* reported below */ }
+    if (!parsed) fail(`${name}: PG_DATABASE_URL is missing or not a URL in the deployed model`);
+    else {
+      const login = decodeURIComponent(parsed.username);
+      if (NOT_THE_APP_LOGIN.includes(login)) fail(`${name}: PG_DATABASE_URL logs in as "${login}" (a former separated login; use the database admin login or ${OWNER_LOGIN})`);
+      if (parsed.searchParams.get('sslmode') !== 'verify-full') fail(`${name}: PG_DATABASE_URL is not sslmode=verify-full in the deployed model`);
     }
   }
+  if (String(envOf(services['rab-api']).PG_DATABASE_URL ?? '') !== String(envOf(services['rab-worker']).PG_DATABASE_URL ?? '')) fail('PG_DATABASE_URL differs between rab-api and rab-worker in the deployed model');
+  // DB-SETUP: the bundled db as committed (an override must not weaken it), and the Worker wrapper.
+  const ddb = services[DB_SERVICE];
+  const pdb = production?.services?.[DB_SERVICE];
+  if (!ddb) fail(`${DB_SERVICE}: missing in the deployed model`);
+  else if (pdb) {
+    for (const key of DB_KEYS.filter((k) => k !== 'environment' && k !== 'image')) if (stable(ddb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} is overridden in the deployed model`);
+    if ((ddb.ports ?? []).length) fail(`${DB_SERVICE}: publishes a port in the deployed model`);
+  }
+  if (stable(services['rab-worker']?.command) !== stable(['./worker-start.sh'])) fail('rab-worker: command is not exactly ./worker-start.sh in the deployed model (DB-SETUP T-5)');
   for (const name of ['rab-api', 'rab-worker']) {
     const a = services[name];
     const b = production?.services?.[name];
@@ -560,7 +615,6 @@ function renderModels(variantPath = VARIANT) {
       CREWFLOW_IMAGE_TAG: SENTINEL_DIGEST,
       CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0c'.repeat(32)}`,
       CREWFLOW_SECRETS_DIR: secrets.split(path.sep).join('/'),
-      CREWFLOW_PG_CA_FILE: '/etc/crewflow/pg-ca.crt',
     };
     const variant = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     const rawFiles = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: false });
@@ -663,4 +717,5 @@ if (require.main === module) {
   console.log(argv.includes('--environment') ? 'OK: every image is an allowed repository pinned by digest, and the deployed model keeps every runtime control' : 'OK: docker-compose.image.yml is image-only, digest-pinned and keeps every H6 runtime key and the credential isolation');
 }
 
-module.exports = { checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+module.exports = {
+  NOT_THE_APP_LOGIN, DB_SERVICE, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

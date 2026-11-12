@@ -191,9 +191,11 @@ COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-c
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
-# api-prestart.sh; start.sh is kept only as a forwarder to it. The Worker needs no script: its command is
-# `node packages/rab-worker/dist/main.js`.
+# api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the Worker's command is worker-start.sh, which
+# derives the crewflow_owner runtime URL from the admin PG_DATABASE_URL and APP_SECRET, unsets the admin credential and
+# execs `node packages/rab-worker/dist/main.js` (it never connects as the admin; DB-SETUP-PLAN §5.3).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
+COPY --chmod=0555 packages/rab-docker/rab/worker-start.sh ./worker-start.sh
 COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
 # The Worker's per-instance jobs health check (compose: `env CREWFLOW_PROVISIONER_ENABLED=false node
 # /opt/crewflow-bundle/worker-bundle-health.cjs`), at the path every compose file and gate already uses. 0444 file, 0755
@@ -220,7 +222,7 @@ RUN set -eu; \
     chmod 0700 /tmp/crewflow-jobs; chmod 0755 /run/crewflow-health /run/crewflow-health/jobs; \
     test -f /app/packages/rab-server/dist/main.js; \
     test -f /app/packages/rab-worker/dist/main.js; \
-    test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
+    test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js;     test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js;     test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js;     test "$(stat -c %a /app/api-prestart.sh)" = 555; test "$(stat -c %a /app/worker-start.sh)" = 555; \
     test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-emails/dist; \
     for f in /app/.env /app/packages/rab-worker/.env /app/packages/rab-worker/.env.provisioner /app/packages/rab-server/.env; do test ! -e "$f"; done; \
     test -z "$(find /app -path /app/node_modules -prune -o -name '.env*' -print)"; \
@@ -273,6 +275,6 @@ EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "-s", "--"]
 # The default command is the API: api-prestart.sh (env refusals, the runtime-isolation check, the owner-login migration
 # child when CREWFLOW_MIGRATE_ON_START=true or the read-only code<->schema compatibility check otherwise, then main.js).
-# The Worker runs the SAME image with `node packages/rab-worker/dist/main.js`. A real shell script rather than a command
-# string, so platforms that do not shell-parse a command field behave the same.
+# The Worker runs the SAME image with `./worker-start.sh` (which execs `node packages/rab-worker/dist/main.js`). Real shell
+# scripts rather than command strings, so platforms that do not shell-parse a command field behave the same.
 CMD ["./api-prestart.sh"]

@@ -174,7 +174,10 @@ const deployed = (mutate = () => {}) => {
 test('environment mode: the deployed model passes, with the staging CA bind and prefix allowed', { skip }, () => {
   assert.deepEqual(deployed((v) => {
     for (const s of ['rab-api', 'rab-worker']) {
-      v.services[s].volumes = [{ type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true }];
+      v.services[s].volumes = [
+        { type: 'volume', source: 'crewflow-db-ca', target: '/run/crewflow/db-ca', read_only: true, volume: {} },
+        { type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true },
+      ];
       v.services[s].environment.STORAGE_KEY_PREFIX = 'staging';
     }
   }), []);
@@ -198,7 +201,8 @@ test('environment mode refuses a Redis without AOF, noeviction or the ACL file',
 });
 
 test('environment mode refuses migration/ops authority, foreign logins and unfilled templates in the runtime env files', { skip }, () => {
-  const ok = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_owner' } };
+  // DB-SETUP: PG_DATABASE_URL is a compose.env value now; the env files carry REDIS_URL and the runtime settings.
+  const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
   const worker = { ...ok };
   const run = (keys, mutate = () => {}) => {
     const m = fresh();
@@ -282,7 +286,8 @@ const renderWeakened = (edit, check) => {
 
 test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, statically and in the deployed model', { skip }, () => {
   renderWeakened(
-    (src) => src.replace(/\nvolumes:\n/, [
+    // The first top-level key after `services:` (DB-SETUP added `networks:` before `volumes:`).
+    (src) => src.replace(/\nnetworks:\n/, [
       '',
       '  rab-ops:',
       '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
@@ -290,12 +295,12 @@ test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, stati
       '    env_file:',
       '      - .env.ops',
       '',
-      'volumes:',
+      'networks:',
       '',
     ].join('\n')),
     (m) => {
       const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /services are .*rab-ops.*; expected exactly rab-api,rab-redis,rab-worker/);
+      assertRefused(problems, /services are .*rab-ops.*; expected exactly db,rab-api,rab-redis,rab-worker/);
       assertRefused(problems, /rab-ops: present \(removed/);
       assertRefused(problems, /rab-ops: has the "ops" profile/);
       assertRefused(problems, /rab-ops: names \.env\.ops/);
@@ -422,4 +427,64 @@ test('J2-3: with push on the verifier refuses a 2 s push sweep on either service
   assertRefused(deployedWith(on, set('30', '60')), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
   const ok = deployedWith(on, set('30', '30'));
   assert.ok(!ok.some((p) => /PUSH_/.test(p)), ok.join(' | '));
+});
+
+// DB-SETUP (owner decisions D1 a / D3 / D4 / D5, T-1 / T-2 / T-5).
+test('DENIAL DB-SETUP static: the bundled db must be identical in both files, unpublished, internal; the Worker runs worker-start.sh', { skip }, () => {
+  for (const [label, mutate, pattern] of [
+    ['db missing in the variant', (v) => { delete v.services.db; }, /services are .*expected exactly db,rab-api,rab-redis,rab-worker|db: missing in the variant/],
+    ['db read-only root dropped', (v) => { v.services.db.read_only = false; }, /db\.read_only differs from docker-compose\.production\.yml/],
+    ['db published', (v) => { v.services.db.ports = [{ target: 5432, host_ip: '127.0.0.1', published: '5432' }]; }, /db: publishes a port|db\.ports differs/],
+    ['db password from somewhere else', (v) => { v.services.db.environment.POSTGRES_PASSWORD = 'postgres'; }, /db\.environment differs/],
+    ['db trust auth', (v) => { v.services.db.environment.POSTGRES_HOST_AUTH_METHOD = 'trust'; }, /db\.environment differs/],
+    ['db TLS off', (v) => { v.services.db.command = ['postgres']; }, /db\.command differs/],
+    ['db certificate step removed', (v) => { delete v.services.db.entrypoint; }, /db\.entrypoint differs/],
+    ['db on the default network', (v) => { v.services.db.networks = { default: null, 'crewflow-db': null }; }, /db: must be on the internal crewflow-db network only|db\.networks differs/],
+    ['db network not internal', (v) => { v.networks['crewflow-db'].internal = false; }, /crewflow-db is not internal/],
+    ['db image by another digest', (v) => { v.services.db.image = `postgres@sha256:${'0'.repeat(64)}`; }, /db\.image differs/],
+    ['the Worker started without worker-start.sh', (v) => { v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }, /rab-worker: command is not exactly \.\/worker-start\.sh/],
+  ]) {
+    const m = fresh();
+    mutate(m.variant);
+    assertRefused(checkVariant(m.variant, m.production, m.variantFiles), pattern);
+    assert.ok(label);
+  }
+});
+
+test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, identical, verify-full, never a former separated login; db not weakened', { skip }, () => {
+  const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
+  const run = (keys, mutate = () => {}) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, keys);
+  };
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }), []);
+  assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] }, 'rab-worker': ok }), /rab-api: PG_DATABASE_URL is set in an env file/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /rab-worker: PG_DATABASE_PASSWORD reaches the container/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_PASSWORD = 'x'; }), /rab-api: PG_DATABASE_PASSWORD reaches the container/);
+  const setUrl = (url, which = ['rab-api', 'rab-worker']) => (v) => { for (const n of which) v.services[n].environment.PG_DATABASE_URL = url; };
+  // T-1: a provider admin login is accepted; a former separated login is not.
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
+  for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow']) {
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`)), new RegExp(`PG_DATABASE_URL logs in as "${login}"`));
+  }
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /not sslmode=verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@other.example:5432/d?sslmode=verify-full', ['rab-worker'])), /PG_DATABASE_URL differs between rab-api and rab-worker/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['rab-api'].environment.PG_DATABASE_URL; }), /rab-api: PG_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.read_only = false; }), /db\.read_only is overridden in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.ports = [{ target: 5432, published: '5432' }]; }), /db: publishes a port in the deployed model|db\.ports is overridden/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services.db; }), /db: missing in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }), /rab-worker: command is not exactly \.\/worker-start\.sh in the deployed model|rab-worker\.command differs/);
+  // The bundled db's image: the official postgres repository by digest only.
+  const { checkResolvedImages } = require('./verify-image-compose.cjs');
+  const d = `sha256:${'a'.repeat(64)}`;
+  assert.deepEqual(checkResolvedImages({ services: { db: { image: `postgres@${d}` } } }).problems, []);
+  assert.match(checkResolvedImages({ services: { db: { image: `evil/postgres@${d}` } } }).problems.join(), /not the official postgres image/);
+  assert.match(checkResolvedImages({ services: { db: { image: 'postgres:16' } } }).problems.join(), /not repository@sha256/);
+});
+
+test('DB-SETUP: the verifier and the owner-login gate refuse the same former separated logins', () => {
+  const gate = require('../scripts/compose-owner-login.cjs');
+  const verifier = require('./verify-image-compose.cjs');
+  assert.deepEqual([...verifier.NOT_THE_APP_LOGIN].sort(), [...gate.NOT_THE_APP_LOGIN].sort());
 });

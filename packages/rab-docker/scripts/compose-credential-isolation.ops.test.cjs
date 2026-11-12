@@ -126,3 +126,20 @@ test('DENIAL (rendered): a file that reads .env.ops, or re-adds rab-ops under th
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// DB-SETUP (owner decisions D1 a / D4, T-2): the bundled db's superuser password is a compose interpolation value only.
+test('DB-SETUP: the bundled db password may appear only as db POSTGRES_PASSWORD; no service has a PG_DATABASE_PASSWORD variable', () => {
+  const { dbPasswordChecks, DB_SENTINEL_PASSWORD } = require('./compose-credential-isolation.cjs');
+  const ok = { ...clean(), db: { environment: { POSTGRES_USER: 'postgres', POSTGRES_PASSWORD: DB_SENTINEL_PASSWORD } } };
+  assert.deepEqual(failed(dbPasswordChecks(REL, ok)), []);
+  for (const [svc, key] of [['rab-api', 'PG_DATABASE_URL'], ['rab-worker', 'X'], ['rab-redis', 'Y'], ['db', 'OTHER']]) {
+    const m = structuredClone(ok);
+    m[svc].environment = { ...(m[svc].environment ?? {}), [key]: `postgresql://postgres:${DB_SENTINEL_PASSWORD}@db:5432/crewflow` };
+    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password only as db's POSTGRES_PASSWORD \\(found in ${key}\\)`));
+  }
+  for (const svc of ['rab-api', 'rab-worker', 'db']) {
+    const m = structuredClone(ok);
+    m[svc].environment = { ...m[svc].environment, PG_DATABASE_PASSWORD: 'x' };
+    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} has no PG_DATABASE_PASSWORD variable`));
+  }
+});
