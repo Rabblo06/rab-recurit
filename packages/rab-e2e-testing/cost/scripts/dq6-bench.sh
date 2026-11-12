@@ -11,7 +11,7 @@
 #                                                                           in its own heavy-run.sh window
 #   OUT=<dir> bash scripts/dq6-bench.sh report                              results tables (lib/dq6-report.js)
 #
-# Arms (Worker as crewflow_app for per_scope, as crewflow_worker for global; dispatch mode poll, the production default):
+# Arms (every arm on the one crewflow_owner login since P0-H; dispatch mode poll, the production default):
 #   per_scope          WORKER_CLAIM_MODE=per_scope                         (the production default; D0-comparable)
 #   global             WORKER_CLAIM_MODE=global                            (Phase D)
 #   global_combined    global + WORKER_SHIFT_SCAN_MODE=combined            (D-Q4a; refused unless the image knows the key)
@@ -113,12 +113,12 @@ image_knows_combined() { # D-Q4a present in this image? (grep the built Worker f
 }
 
 set_arm() {
-  unset COST_WORKER_CLAIM_MODE COST_WORKER_DISPATCH_MODE COST_WORKER_DB_USER COST_WORKER_DB_PW
+  unset COST_WORKER_CLAIM_MODE COST_WORKER_DISPATCH_MODE
   : > "$OUT/worker-env/base.env"
   case "$1" in
     per_scope | per_scope_combined) ;;
     global | global_combined)
-      export COST_WORKER_CLAIM_MODE=global COST_WORKER_DB_USER=crewflow_worker COST_WORKER_DB_PW="$CREWFLOW_WORKER_PW" ;;
+      export COST_WORKER_CLAIM_MODE=global ;;
     *) die "unknown arm '$1' (per_scope | global | per_scope_combined | global_combined)" ;;
   esac
   case "$1" in

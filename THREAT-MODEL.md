@@ -6079,6 +6079,28 @@ still-approved checks and the UNIQUE `worker_event` `shift-statement:<id>` are u
 - **Rollback:** remove the value on both services in the three compose files and the gate (the API re-registers the
   scheduler at 5 s on its next start).
 
+## CONFIG — production refuses global claims and event dispatch at env validation (branch phase-x/sj05-refuse-global-claims, 2026-11-11, not merged)
+
+Phase X SJ-05, owner decision 2026-11-11 (P1-10). Before: only the compose gate (`compose-owner-login.cjs`
+FORBIDDEN_NAMES) refused `WORKER_CLAIM_MODE` / `WORKER_DISPATCH_MODE`; a Worker started outside the gated compose path
+booted in global mode (the boot gate accepts the owner login under `global`). Not an exposure (global mode keeps FORCE
+RLS, the definers and lease fencing), but a governance gap.
+
+- **Control:** `productionConfigurationProblems` refuses `WORKER_CLAIM_MODE=global` and `WORKER_DISPATCH_MODE=event` when
+  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers, and the CLI, whose own production
+  marker is `DB_TARGET`; no CLI command runs dispatch claims). The approval is
+  the code constant `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false` (the `WORKER_INVITE_AUTO_DELETE` pattern): enabling
+  global claims in production is a reviewed code change that records the owner's J5 decision, never a setting.
+  Development and test are unchanged (CI's Phase D suites run global mode). A gate test re-reads the source so the two
+  layers cannot drift apart.
+- **Staging:** staging runs `NODE_ENV=production`, so it is refused there too. The runbook's staging rehearsal of global
+  activation and rollback (phase-d-deployment-runbook §5.2) therefore needs the J5 change (the constant flipped in a reviewed
+  PR) FIRST, and that change then applies to staging and production at the same time. Rehearse on staging before any
+  production deploy of that release.
+- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision). Unlike the invite rule,
+  the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
+  compose gate remains the other).
+
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
 Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
@@ -6398,6 +6420,50 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   F5 token mode, N1 on the legacy and CLI paths.
 - **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
   U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).
+
+## CONFIG — the push and realtime sweep rule is enforced by the deployment gates (branch phase-x/j2-push-realtime-gate, 2026-11-11, PR #97)
+
+Phase X J2 (S0-J SJ-03). Gate-only: no runtime, code default, migration, role, grant or RLS change; push and realtime stay
+off. Before this, the owner rule "push's sweep goes to 30 s on both services when `PUSH_ENABLED` is turned on" (2026-11-06)
+was a compose comment, so switching push on in `runtime.env` silently registered a 2 s push scheduler.
+
+- **Asset:** the delivery cadence of other people's push notifications and live updates. **Actor:** an operator enabling
+  push or realtime, or an override that configures one service differently from the other.
+- **Control:** `scripts/compose-owner-login.cjs` (full mode, and `--lint-env-file runtime`, which renders the committed
+  compose with the file's switches) and `staging/verify-image-compose.cjs` (static and `--environment`) refuse: a
+  `PUSH_ENABLED` / `REALTIME_ENABLED` value that differs between rab-api and rab-worker; `PUSH_ENABLED=true` without
+  `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"` committed on both; `REALTIME_ENABLED=true` with a realtime interval that
+  differs between the services; either interval in an env file. "On" is exactly the string `true` (the environment's own
+  parse). The verifier's env-file reader records only those two non-secret switch values in addition to names.
+- **Residual:** the realtime interval value is not pinned (no owner decision yet); the gate guarantees only that both
+  services agree. Deciding it is a precondition of turning realtime on.
+
+## SC-01 — notification email is addressed from the live user row, never from the display cache (branch phase-x/c-fix-1-recipient-email, 2026-11-11, PR #96)
+
+Phase X Stage 0 finding SC-01 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env
+default or cache flag change. `CORE_ENTITY_CACHE_ENABLED` stays off in every deploy file.
+
+- **Asset:** delivery of another person's notification email (offer, shift and request mail, PII included).
+  **Actor:** an administrator or the account owner changing an email address (often a takeover-recovery action), and any
+  write path that changes `user.email` without clearing `CoreEntityCacheService` (operator SQL, a crash after commit, a
+  failed Redis INCR).
+- **Before:** `NotificationService.notify()` took the recipient from `CoreEntityCacheService.getUserDisplay().email`. That
+  cache's epoch lives in Redis and is bumped only after commit, and most `user.email` writers never bumped it. With the
+  flag on, mail kept going to the OLD address for up to 300 s after an email change. Latent (flag off in production).
+- **Control 1 (the decision):** `notify()` reads `user.email` LIVE, in the notifying transaction, under the caller's RLS
+  context (one narrow SELECT; the cache-off path already issued one). The recipient no longer depends on any Redis state.
+  This also removes the SC-02 path (a planted entity-cache value redirecting mail): the entity cache is display-only again.
+- **Control 2 (display freshness):** every service writer of a field in the `user` display projection (first/last name,
+  email, avatar) or of the row's existence clears the entry AFTER its transaction commits; a failed transaction clears
+  nothing: `EmailChangeService.confirm`; `ManagerService.update` (name), `changePendingEmail`, `changeEmail` (direct
+  path), `deleteUser`; `StaffService.update` (name), `changePendingEmail`, `changeEmail` (direct path), `deleteUser`,
+  `uploadAvatar`, `removeAvatar`; `VenueManagerService.uploadAvatar`, `removeAvatar` (`ProfileService` already did).
+- **Tests:** `sc01-notification-recipient-live.integration.spec.ts` (cache ON, real PostgreSQL/RLS, Redis, HTTP): a
+  confirmed email change sends the next notification to the new address; a stale cache entry (row changed by SQL, cache
+  not cleared) still sends to the live address (fails on the previous code: it sent to the old one); each writer above
+  bumps the epoch exactly once; a failed (409) change and a phone-only update bump nothing.
+- **Residual:** the display cache itself keeps its documented bounded staleness (≤ 300 s) for writes outside these
+  services (operator SQL, the Worker's invite-expiry DELETE, a failed INCR). It is display-only: names and avatars.
 
 ## SC-05 — `/auth/capabilities` answers from the request's resolved permission set (branch phase-x/c-fix-2-capabilities, 2026-11-11, PR #99)
 
