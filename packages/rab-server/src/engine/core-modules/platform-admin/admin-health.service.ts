@@ -2,23 +2,38 @@ import { Injectable, Logger } from '@nestjs/common';
 import nodemailer from 'nodemailer';
 import { DataSource } from 'typeorm';
 
+import { AuditAction, AuditService } from '../audit/audit.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { FileService } from '../storage/file.service';
 import { AuthContext } from '../tenant/auth-context.interface';
+import { TenantContextService } from '../tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
-import { PROVISIONER_HEARTBEAT_KEY, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../worker-shared/heartbeat.constants';
+import { PROVISIONER_HEARTBEAT_KEY, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY } from '../../worker-shared/heartbeat.constants';
+import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, SCAN_QUEUE_NAMES, resolveScanPrefix } from '../../worker-shared/queue-registry';
 import { assertActivePlatformAdmin, withTimeout } from './admin-actor';
+import { apiIndicator } from './indicators/api.indicator';
+import { databaseIndicator } from './indicators/database.indicator';
+import { redisIndicator } from './indicators/redis.indicator';
+import { schedulerIndicator } from './indicators/scheduler.indicator';
+import { HealthQueueRef, heartbeatAgeSeconds, workerIndicator } from './indicators/worker.indicator';
 import { PlatformAdminService } from './platform-admin.service';
 
 /** The panel's status model (mockup v2): healthy / warning / degraded / unavailable. */
 export type AdminHealthStatus = 'healthy' | 'warning' | 'degraded' | 'unavailable';
 
 export interface AdminHealthCard {
-  key: 'database' | 'redis' | 'worker' | 'provisioner' | 'email' | 'storage';
+  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage';
   status: AdminHealthStatus;
   /** Fixed, operator-facing text built here — never a raw error message, host name, URL or credential. */
   detail: string;
   latencyMs: number | null;
+  /** X2.4: the indicator's numbers as label/value lines (fixed labels, numbers or allowlisted tokens only). */
+  facts?: AdminHealthFact[];
+}
+
+export interface AdminHealthFact {
+  label: string;
+  value: string;
 }
 
 export interface AdminHealthReport {
@@ -28,19 +43,35 @@ export interface AdminHealthReport {
   attention: number;
 }
 
-export const ADMIN_HEALTH_CACHE_KEY = 'rab:admin-panel:health:v1';
-export const ADMIN_HEALTH_CACHE_SECONDS = 10;
+/** X2.4: the report is cached IN THIS PROCESS for 10 s (no Redis write: the health page is read-only on Redis). */
+export const ADMIN_HEALTH_CACHE_MS = 10_000;
+/** X2.4 (owner assumption, see the PR): one `admin.health_viewed` row per admin per process at most every 5 minutes, plus every manual Refresh. */
+export const ADMIN_HEALTH_AUDIT_INTERVAL_MS = 5 * 60_000;
+const AUDIT_DEDUPE_MAX_ENTRIES = 1_000;
 export const ADMIN_HEALTH_PROBE_TIMEOUT_MS = 2_000;
 const SLOW_MS = 500;
 
 /**
  * Crewflow Platform Admin Panel — Health tab probes. Every probe is bounded at 2 s (a hung SMTP server or Redis can never
- * hold the request), the probes run in parallel, and the result is cached in Redis for 10 s so 15-second polling by
- * several admins does not multiply probes (a Redis failure just skips the cache). Details are fixed strings composed
- * here: no raw `error.message`, no host names, no URLs (the old `/admin/health` returned raw DB/storage error text).
+ * hold the request), the probes run in parallel, and one failing probe only turns its own card `unavailable` — the page
+ * still answers. Details are fixed strings composed here: no raw `error.message`, no host names, no URLs (the old
+ * `/admin/health` returned raw DB/storage error text).
  *
- * Not measured (no source yet, shown as such in the UI): per-queue failure rates (BullMQ metrics are not enabled on the
- * Workers), "last email sent", stale uploads.
+ * Phase X Part 2, X2.4 ("health monitoring, the Twenty way"; Twenty: `admin-panel/admin-panel-health.service.ts` with
+ * one file per indicator under `admin-panel/indicators/`): the API, database (connections vs max_connections), Redis
+ * (memory and version), Worker (heartbeat + per-queue failed/waiting) and BullMQ scheduler indicators live one per file in
+ * `./indicators/`. Every indicator is READ-ONLY: statistics views and settings on PostgreSQL, read commands only on Redis
+ * (`HealthRedisReader`). The report is cached for 10 s in process memory, never in Redis (Twenty keeps its last known
+ * state in memory too: `health-state-manager.util.ts`), so 15-second polling by several admins does not multiply probes.
+ * The cache is per API process (not shared across replicas). There is no external alerting here (as in Twenty); an
+ * uptime monitor on `/healthz` covers "the API is down".
+ *
+ * ADDING AN INDICATOR is one more entry: a key in `AdminHealthCard['key']`, a probe line in `report()` (usually a function
+ * in `./indicators/`), and a label in the front's `CARD_LABEL`. Nothing else registers it.
+ *
+ * Access is audited: `admin.health_viewed` in the admin's organisation, at most once per admin per process every
+ * 5 minutes (the tab polls every 15 s), and on every manual Refresh (`?refresh=1`, which also skips the cache). The audit
+ * write fails closed, like every other audited admin read.
  */
 @Injectable()
 export class AdminHealthService {
@@ -51,35 +82,78 @@ export class AdminHealthService {
     private readonly env: EnvironmentService,
     private readonly redis: ThrottlerRedisClientProvider,
     private readonly fileService: FileService,
+    private readonly audit: AuditService,
+    private readonly tenantContext: TenantContextService,
     private readonly platformAdmin: PlatformAdminService,
   ) {}
 
-  async report(actor: Pick<AuthContext, 'userId'>): Promise<AdminHealthReport> {
+  private cache: { at: number; report: AdminHealthReport } | null = null;
+  /** X2.4 audit dedupe: the acting admin's user id -> when this process last wrote their `admin.health_viewed` row. */
+  private readonly lastAudited = new Map<string, number>();
+
+  async report(actor: Pick<AuthContext, 'userId' | 'organisationId' | 'inspectedBy'>, opts: { refresh?: boolean } = {}): Promise<AdminHealthReport> {
     await assertActivePlatformAdmin(this.platformAdmin, actor);
-    try {
-      const cached = await withTimeout(this.redis.client.get(ADMIN_HEALTH_CACHE_KEY), 500);
-      if (cached) {
-        const parsed = JSON.parse(cached) as AdminHealthReport;
-        if (Array.isArray(parsed.cards)) return parsed;
-      }
-    } catch {
-      // no cache: probe live
-    }
+    await this.auditView(actor, opts.refresh === true);
+    if (!opts.refresh && this.cache && Date.now() - this.cache.at < ADMIN_HEALTH_CACHE_MS) return this.cache.report;
     const cards = await Promise.all([
-      this.probe('database', () => this.database()),
-      this.probe('redis', () => this.redisCard()),
-      this.probe('worker', () => this.heartbeat('worker', WORKER_HEARTBEAT_KEY, 'Worker')),
+      this.probe('api', async () => apiIndicator({ version: this.env.get('APP_VERSION') || 'dev', commit: this.env.get('APP_GIT_COMMIT') ?? null, nodeVersion: process.version, uptimeSeconds: process.uptime() })),
+      this.probe('database', () => databaseIndicator(this.dataSource)),
+      this.probe('redis', () => redisIndicator(this.redis.client, this.redisPasswordSet())),
+      this.probe('worker', () => workerIndicator(this.redis.client, { heartbeatKey: WORKER_HEARTBEAT_KEY, heartbeatTtlSeconds: WORKER_HEARTBEAT_TTL_SECONDS, queues: this.healthQueues() })),
+      this.probe('scheduler', () => schedulerIndicator(this.redis.client, { configuredMode: this.schedulerMode(), statusKey: WORKER_SCHEDULER_STATUS_KEY, fallbackPrefix: this.scanPrefix(), scanQueues: SCAN_QUEUE_NAMES })),
       this.probe('provisioner', () => this.heartbeat('provisioner', PROVISIONER_HEARTBEAT_KEY, 'Provisioner')),
       this.probe('email', () => this.email()),
       this.probe('storage', () => this.storage()),
     ]);
     const report: AdminHealthReport = { checkedAt: new Date().toISOString(), cards, attention: cards.filter((c) => c.status !== 'healthy').length };
-    try {
-      await withTimeout(this.redis.client.set(ADMIN_HEALTH_CACHE_KEY, JSON.stringify(report), 'EX', ADMIN_HEALTH_CACHE_SECONDS), 500);
-    } catch {
-      // cache is best effort
-    }
+    this.cache = { at: Date.now(), report };
     return report;
+  }
+
+  /**
+   * X2.4: `admin.health_viewed` in the admin's own organisation — always on a manual Refresh, otherwise at most once per
+   * admin per process every 5 minutes. Runs before any probe and fails closed (a failed audit write fails the request,
+   * and the dedupe is only marked after the row is written). A process restart resets the dedupe.
+   */
+  private async auditView(actor: Pick<AuthContext, 'userId' | 'organisationId' | 'inspectedBy'>, refresh: boolean): Promise<void> {
+    const who = actor.inspectedBy ?? actor.userId;
+    const now = Date.now();
+    const last = this.lastAudited.get(who);
+    if (!refresh && last !== undefined && now - last < ADMIN_HEALTH_AUDIT_INTERVAL_MS) return;
+    await this.tenantContext.runInTenantContext({ organisationId: actor.organisationId, workspaceId: null, userId: actor.userId, role: '' }, (manager) =>
+      this.audit.record(manager, actor, AuditAction.ADMIN_HEALTH_VIEWED, { metadata: { refresh } }),
+    );
+    if (this.lastAudited.size >= AUDIT_DEDUPE_MAX_ENTRIES) {
+      for (const [id, at] of this.lastAudited) if (now - at >= ADMIN_HEALTH_AUDIT_INTERVAL_MS) this.lastAudited.delete(id);
+      if (this.lastAudited.size >= AUDIT_DEDUPE_MAX_ENTRIES) this.lastAudited.clear();
+    }
+    this.lastAudited.set(who, now);
+  }
+
+  /** The registry's consumer queues (BullMQ's default `bull` prefix) and, in bullmq mode, the scan queues. */
+  private healthQueues(): HealthQueueRef[] {
+    const consumers = Object.values(CONSUMER_QUEUES).map((q) => ({ name: q.name, prefix: LEGACY_BULL_PREFIX }));
+    if (this.schedulerMode() !== 'bullmq') return consumers;
+    const prefix = this.scanPrefix();
+    return [...consumers, ...SCAN_QUEUE_NAMES.map((name) => ({ name, prefix }))];
+  }
+
+  private schedulerMode(): 'interval' | 'bullmq' {
+    const configured = this.env.get('WORKER_SCHEDULER');
+    if (configured === 'bullmq' || configured === 'interval') return configured;
+    return this.env.get('NODE_ENV') === 'production' ? 'bullmq' : 'interval';
+  }
+
+  private scanPrefix(): string {
+    return resolveScanPrefix(this.env.get('NODE_ENV'), this.env.get('BULLMQ_PREFIX'));
+  }
+
+  private redisPasswordSet(): boolean {
+    try {
+      return new URL(this.env.get('REDIS_URL')).password !== '';
+    } catch {
+      return false;
+    }
   }
 
   /** Bounds one probe at 2 s; a timeout or any throw becomes a fixed "unavailable" card (never the error text). */
@@ -93,42 +167,9 @@ export class AdminHealthService {
     }
   }
 
-  private async database(): Promise<AdminHealthCard> {
-    const started = Date.now();
-    await this.dataSource.query('SELECT 1');
-    const latencyMs = Date.now() - started;
-    const pool = (this.dataSource.driver as unknown as { master?: { totalCount?: number; idleCount?: number; options?: { max?: number } } }).master;
-    const inUse = typeof pool?.totalCount === 'number' && typeof pool?.idleCount === 'number' ? pool.totalCount - pool.idleCount : null;
-    const max = typeof pool?.options?.max === 'number' ? pool.options.max : null;
-    const poolText = inUse !== null && max !== null ? ` · pool ${inUse} of ${max} in use` : '';
-    return { key: 'database', status: latencyMs > SLOW_MS ? 'warning' : 'healthy', detail: `PostgreSQL · ${latencyMs} ms${poolText}`, latencyMs };
-  }
-
-  private async redisCard(): Promise<AdminHealthCard> {
-    const started = Date.now();
-    const pong = await this.redis.client.ping();
-    const latencyMs = Date.now() - started;
-    if (pong !== 'PONG') return { key: 'redis', status: 'degraded', detail: 'Reachable but did not answer PING correctly.', latencyMs };
-    let passwordSet = false;
-    try {
-      const url = new URL(this.env.get('REDIS_URL'));
-      passwordSet = url.password !== '';
-    } catch {
-      passwordSet = false;
-    }
-    return {
-      key: 'redis',
-      status: passwordSet ? (latencyMs > SLOW_MS ? 'warning' : 'healthy') : 'warning',
-      detail: `Reachable · ${latencyMs} ms${passwordSet ? '' : ' · no password set'}`,
-      latencyMs,
-    };
-  }
-
-  private async heartbeat(key: 'worker' | 'provisioner', redisKey: string, label: string): Promise<AdminHealthCard> {
-    const value = await this.redis.client.get(redisKey);
-    const at = Number(value);
-    if (!value || !Number.isFinite(at)) return { key, status: 'unavailable', detail: `No ${label.toLowerCase()} heartbeat seen.`, latencyMs: null };
-    const age = Math.max(0, Math.round((Date.now() - at) / 1000));
+  private async heartbeat(key: 'provisioner', redisKey: string, label: string): Promise<AdminHealthCard> {
+    const age = heartbeatAgeSeconds(await this.redis.client.get(redisKey), Date.now());
+    if (age === null) return { key, status: 'unavailable', detail: `No ${label.toLowerCase()} heartbeat seen.`, latencyMs: null };
     const stale = age > WORKER_HEARTBEAT_TTL_SECONDS;
     return { key, status: stale ? 'degraded' : 'healthy', detail: `Heartbeat ${age} s ago${stale ? ' (stale)' : ''}`, latencyMs: null };
   }

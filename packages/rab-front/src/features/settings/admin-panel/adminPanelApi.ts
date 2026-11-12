@@ -90,10 +90,12 @@ export interface AdminMigrations {
 
 export type HealthStatus = 'healthy' | 'warning' | 'degraded' | 'unavailable';
 export interface HealthCard {
-  key: 'database' | 'redis' | 'worker' | 'provisioner' | 'email' | 'storage';
+  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage';
   status: HealthStatus;
   detail: string;
   latencyMs: number | null;
+  /** X2.4: the indicator's numbers (fixed labels; values are numbers or short tokens composed by the server). */
+  facts?: Array<{ label: string; value: string }>;
 }
 export interface HealthReport {
   checkedAt: string;
@@ -367,6 +369,8 @@ export const adminApi = {
   searchOrganisations: async (q: string) => (await api.get<AdminOrganisation[]>('/admin/lookup/organisations', { params: q ? { q } : undefined })).data,
   organisationSummary: async (id: string) => (await api.get<AdminOrganisationSummary>(`/admin/lookup/organisations/${encodeURIComponent(id)}/summary`)).data,
   health: async () => (await api.get<HealthReport>('/admin/health/report')).data,
+  /** X2.4: the Refresh button: the server skips its 10 s cache and always audits the view. Polling never uses it. */
+  healthRefresh: async () => (await api.get<HealthReport>('/admin/health/report', { params: { refresh: '1' } })).data,
   queues: async () => (await api.get<QueuesOverview>('/admin/queues')).data,
   queueMetrics: async (queue: string, range: MetricsRange) => (await api.get<QueueMetrics>(`/admin/queues/${encodeURIComponent(queue)}/metrics`, { params: { range } })).data,
   jobs: async (queue: string, state: JobState) => (await api.get<{ items: JobItem[]; total: number | null }>(`/admin/queues/${encodeURIComponent(queue)}/jobs`, { params: { state, limit: 25 } })).data,

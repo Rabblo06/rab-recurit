@@ -11,7 +11,7 @@ const QueueMetricsChart = lazy(() => import('./QueueMetricsChart'));
 
 export const HEALTH_REFETCH_MS = 15_000;
 
-const CARD_LABEL: Record<HealthCard['key'], string> = { database: 'Database', redis: 'Redis', worker: 'Worker', provisioner: 'Provisioner', email: 'Email', storage: 'File storage' };
+const CARD_LABEL: Record<HealthCard['key'], string> = { database: 'Database', redis: 'Redis', worker: 'Worker', provisioner: 'Provisioner', email: 'Email', storage: 'File storage', api: 'API', scheduler: 'BullMQ schedulers' };
 const STATUS_PILL: Record<HealthStatus, [string, string]> = {
   healthy: ['ap-ok', 'Healthy'],
   warning: ['ap-warn', 'Warning'],
@@ -49,6 +49,18 @@ export default function HealthTab() {
     return () => clearInterval(t);
   }, []);
   const health = useQuery({ queryKey: ['admin', 'health'], queryFn: adminApi.health, ...pollingOptions(HEALTH_REFETCH_MS) });
+  // X2.4: the Refresh button asks for a live check (no server cache) and is always audited; polling never sets it.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshNow = async () => {
+    setRefreshing(true);
+    try {
+      qc.setQueryData(['admin', 'health'], await adminApi.healthRefresh());
+    } catch {
+      toast.error('Health could not be checked. Please try again.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
   const queues = useQuery({ queryKey: ['admin', 'queues'], queryFn: adminApi.queues, ...pollingOptions(HEALTH_REFETCH_MS) });
   const outbox = useQuery({ queryKey: ['admin', 'outbox'], queryFn: adminApi.failedOutbox, ...pollingOptions(HEALTH_REFETCH_MS) });
 
@@ -89,7 +101,7 @@ export default function HealthTab() {
           <h2 className="ap-h2">System health</h2>
           <span className="ap-muted" style={{ font: 'var(--text-small)' }}>
             {health.data ? `Checked ${secondsAgo(health.data.checkedAt, now)}` : health.isError ? 'Health could not be checked' : 'Checking…'} ·{' '}
-            <button type="button" className="ap-btn ap-sm" onClick={() => void health.refetch()} disabled={health.isFetching}>{health.isFetching ? 'Checking…' : 'Refresh'}</button>
+            <button type="button" className="ap-btn ap-sm" onClick={() => void refreshNow()} disabled={refreshing || health.isFetching}>{refreshing || health.isFetching ? 'Checking…' : 'Refresh'}</button>
           </span>
         </div>
         <div className="ap-grid-3">
@@ -98,6 +110,13 @@ export default function HealthTab() {
               <b>{CARD_LABEL[c.key]}</b>
               <span className={`ap-pill ${STATUS_PILL[c.status][0]}`}>{STATUS_PILL[c.status][1]}</span>
               <p>{c.detail}</p>
+              {c.facts?.length ? (
+                <dl className="ap-facts" aria-label={`${CARD_LABEL[c.key]} details`}>
+                  {c.facts.map((f) => (
+                    <div key={f.label}><dt>{f.label}</dt><dd>{f.value}</dd></div>
+                  ))}
+                </dl>
+              ) : null}
             </div>
           ))}
           {!health.data?.cards && (

@@ -73,6 +73,8 @@ export const AuditAction = {
   ADMIN_ORGANISATION_SEARCHED: 'admin.organisation_searched',
   ADMIN_TEST_EMAIL_SENT: 'admin.test_email_sent',
   ADMIN_EMAIL_REPLAY_REASON: 'admin.email_replay_reason',
+  /** X2.4: a platform admin opened (or refreshed) the Health tab; at most once per admin per API process every 5 min, plus every manual Refresh. */
+  ADMIN_HEALTH_VIEWED: 'admin.health_viewed',
   PASSWORD_SIGN_IN_PROVIDER_DISABLED: 'auth.password_sign_in_provider_disabled',
   EMAIL_CHANGE_REQUESTED: 'user.email_change_requested',
   EMAIL_CHANGE_CONFIRMED: 'user.email_change_confirmed',

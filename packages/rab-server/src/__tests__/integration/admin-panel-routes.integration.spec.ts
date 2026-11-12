@@ -12,13 +12,12 @@ import { EnvironmentService } from '../../engine/core-modules/environment/enviro
 import { EnvironmentVariables } from '../../engine/core-modules/environment/environment-variables';
 import { AdminAuditService } from '../../engine/core-modules/platform-admin/admin-audit.service';
 import { AdminConfigService } from '../../engine/core-modules/platform-admin/admin-config.service';
-import { ADMIN_HEALTH_CACHE_KEY, AdminHealthService } from '../../engine/core-modules/platform-admin/admin-health.service';
+import { AdminHealthService } from '../../engine/core-modules/platform-admin/admin-health.service';
 import { AdminQueuesService } from '../../engine/core-modules/platform-admin/admin-queues.service';
 import { AdminUsersService } from '../../engine/core-modules/platform-admin/admin-users.service';
 import { AdminWorkspacesService } from '../../engine/core-modules/platform-admin/admin-workspaces.service';
 import { FileService } from '../../engine/core-modules/storage/file.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
-import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -76,7 +75,6 @@ describeIfDb('admin panel routes (integration)', () => {
   let owner: DataSource;
   let factory: TestIdentityFactory;
   let authRedis: AuthCacheRedisClientProvider;
-  let throttlerRedis: ThrottlerRedisClientProvider;
   const overrides: Partial<Record<keyof EnvironmentVariables, unknown>> = {};
   const http = () => request(app.getHttpServer());
   const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
@@ -105,7 +103,6 @@ describeIfDb('admin panel routes (integration)', () => {
     owner = createAdminDataSource();
     await owner.initialize();
     authRedis = moduleRef.get(AuthCacheRedisClientProvider);
-    throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
     factory = new TestIdentityFactory({ app, dataSource: moduleRef.get(DataSource), adminDataSource: owner, tenantContext: moduleRef.get(TenantContextService), passwordHashing: moduleRef.get(PasswordHashingService) });
     const adminOrg = await factory.createOrganisation('aproutes-admin');
     admin = await factory.createInternalManager(adminOrg, { permissions: 'all', label: 'aprtadm', platformAdmin: true });
@@ -348,17 +345,16 @@ describeIfDb('admin panel routes (integration)', () => {
 
   it('health probes: bounded at 2 s, fixed detail text — a hung or failing probe never leaks its error text', async () => {
     const files = app.get(FileService);
-    await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+    // X2.4: the report cache is in process memory now (no Redis key to delete); `?refresh=1` skips it.
     const failing = jest.spyOn(files, 'healthProbe').mockRejectedValueOnce(new Error('ECONNREFUSED planted-storage-host.internal:9000 key=planted-key'));
-    let res = await http().get('/rest/v1/admin/health/report').set(bearer(adminToken));
+    let res = await http().get('/rest/v1/admin/health/report?refresh=1').set(bearer(adminToken));
     expect(res.status).toBe(200);
     expect(JSON.stringify(res.body)).not.toMatch(/planted|ECONNREFUSED/);
     expect(res.body.cards.find((c: { key: string }) => c.key === 'storage')).toMatchObject({ status: 'unavailable', detail: 'Not reachable.' });
     failing.mockRestore();
-    await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
     const hung = jest.spyOn(files, 'healthProbe').mockImplementationOnce(() => new Promise<void>(() => undefined));
     const started = Date.now();
-    res = await http().get('/rest/v1/admin/health/report').set(bearer(adminToken));
+    res = await http().get('/rest/v1/admin/health/report?refresh=1').set(bearer(adminToken));
     expect(Date.now() - started).toBeLessThan(4_000);
     expect(res.body.cards.find((c: { key: string }) => c.key === 'storage')).toMatchObject({ status: 'unavailable', detail: 'No answer within 2 seconds.' });
     hung.mockRestore();
@@ -367,7 +363,6 @@ describeIfDb('admin panel routes (integration)', () => {
     await http().get('/rest/v1/admin/health/report').set(bearer(adminToken));
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
-    await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
   });
 
   it('send test email to me: the configured (test: Logger) driver, the admin\'s own address only, masked in the reply, audited', async () => {
