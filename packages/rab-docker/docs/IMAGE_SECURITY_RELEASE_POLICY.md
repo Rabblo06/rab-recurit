@@ -174,8 +174,8 @@ and update `verified_on`.
   second registry would need its own tag policy, verification and cleanup, so it does not come for free. The image is
   one multi-arch index (linux/amd64 + linux/arm64) built from the release commit.
 - **Exactly ONE immutable tag per release (O2):**
-  - `<full commit sha>` (40 hex, nothing else), pointing at the one multi-arch index that runs the API, the Worker,
-    `rab-migrate` and `rab-ops`;
+  - `<full commit sha>` (40 hex, nothing else), pointing at the one multi-arch index that runs the API and the Worker,
+    and, as one-off containers of the API service, `bootstrap-admin` and the three operations commands;
   - no `latest`, no prefix, no version or per-architecture tags, nothing that moves; `publish-gated.sh` refuses any other
     tag, including the retired `api-<sha>` / `worker-<sha>` (its self-tests prove it);
   - the push refuses any existing tag, whatever digest it points at;

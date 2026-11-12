@@ -10,8 +10,11 @@
  *
  *   node packages/rab-docker/staging/verify-image-compose.cjs
  *     STATIC: renders the variant and docker-compose.production.yml with `docker compose config --format json` in a
- *     throw-away project directory (sentinel database.env / runtime.env / .env.ops, dummy digests; no real .env is read)
- *     and checks the rendered models (checkVariant below).
+ *     throw-away project directory (sentinel database.env / runtime.env, and the retired .env.migrate / .env.ops so a file
+ *     that still names them renders and then fails; dummy digests; no real .env is read) and checks the rendered models
+ *     (checkVariant below). rab-ops removal (PR 2): there is no rab-ops service; one by that name or under the "ops"
+ *     profile, a service naming .env.ops, or a PG_OPS_* / CREWFLOW_OPS_* name on rab-api / rab-worker fails. The OpenShip
+ *     import guard (the one long-form tmpfs) is on rab-api, in the variant only.
  *
  *   node packages/rab-docker/staging/verify-image-compose.cjs --environment [--env-file <file>]... [--compose <extra file>]...
  *          [--project-directory <dir>] [--allow-repository <repo>]...
@@ -207,6 +210,48 @@ const withoutCa = (vols) => {
   const rest = (vols ?? []).filter((v) => !caMount(v));
   return rest.length ? rest : undefined;
 };
+/**
+ * The OpenShip IMPORT GUARD (rab-ops removal PR 2, plan §6(a); docs/release/OPENSHIP-COMPATIBILITY.md): ONE long-form tmpfs
+ * on rab-api in docker-compose.image.yml only, exactly /tmp, 16 MiB, mode 0555 (root-owned and not writable by the API's
+ * uid 1000, so it adds no writable path). OpenShip refuses a `type: tmpfs` volume, so it can never import the variant and
+ * silently drop its H6 keys. It moved here from the removed rab-ops (before that, the removed rab-migrate). It is the one
+ * allowed difference from docker-compose.production.yml besides the CA bind, and only in that exact shape: a changed guard
+ * (another target, size, mode or option) is not the guard, so it fails both the guard check and the production
+ * comparison. production.yml must stay importable by OpenShip, so it never carries a long-form tmpfs.
+ */
+const IMPORT_GUARD_SERVICE = 'rab-api';
+const IMPORT_GUARD_BYTES = 16 * 1024 * 1024;
+const IMPORT_GUARD_MODE = 0o555;
+const longFormTmpfs = (v) => v?.type === 'tmpfs';
+const importGuardMount = (v) => longFormTmpfs(v)
+  && v.target === '/tmp'
+  && Object.keys(v).every((k) => ['type', 'target', 'tmpfs'].includes(k))
+  && Object.keys(v.tmpfs ?? {}).every((k) => ['size', 'mode'].includes(k))
+  && Number(v.tmpfs?.size) === IMPORT_GUARD_BYTES
+  && Number(v.tmpfs?.mode) === IMPORT_GUARD_MODE;
+/** The variant's volumes for the production comparison: the CA bind, and on rab-api the exact import guard, left out. */
+const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols);
+/**
+ * rab-ops removal (PR 2): the retired operations container must not come back, by name, under the "ops" profile, or under
+ * ANY name and profile (security review of PR #124, MEDIUM: a `rab-maint` with `profiles: ["maint"]` reading .env.ops
+ * passed every gate). Every render enables every profile (`--profile '*'`), and on EVERY service: no profile at all (a
+ * deploy file starts every service with the stack; profiles, not a service allowlist, so a new always-on service needs no
+ * gate change), no value of the .env.ops sentinel and none of the retired ops names. `env` is each service's RESOLVED
+ * environment, so a service that reads .env.ops is caught by its values whatever the Compose version.
+ */
+const retiredOpsProblems = (services, where = '') => {
+  const out = [];
+  if (services['rab-ops']) out.push(`rab-ops: present${where} (removed; operations run as one-off owner-login commands of rab-api)`);
+  for (const [name, svc] of Object.entries(services)) {
+    if (Array.isArray(svc?.profiles) && svc.profiles.includes('ops')) out.push(`${name}: has the "ops" profile${where} (the rab-ops container was removed)`);
+    if (Array.isArray(svc?.profiles) && svc.profiles.length) out.push(`${name}: has profiles ${JSON.stringify(svc.profiles)}${where} (a deploy file has no profile-gated service)`);
+    const env = svc?.environment ?? {};
+    if (Object.values(env).some((v) => String(v ?? '').includes(SENTINEL_OPS_PW))) out.push(`${name}: carries a value of the retired .env.ops${where}`);
+    const held = OPS_ONLY.filter((k) => Object.prototype.hasOwnProperty.call(env, k));
+    if (held.length) out.push(`${name}: sets the retired ${held.join(', ')}${where}`);
+  }
+  return out;
+};
 /** The Redis command must carry these flag/value pairs (AOF, never evicting, ACL file). */
 const REDIS_FLAGS = [['--appendonly', 'yes'], ['--maxmemory-policy', 'noeviction'], ['--aclfile', '/run/secrets/redis-users.acl']];
 const redisFlagProblems = (redis, where) => {
@@ -217,8 +262,8 @@ const redisFlagProblems = (redis, where) => {
 /**
  * Pure checks on the rendered models (`docker compose config --format json` output). `variant`: env files resolved with
  * the sentinels (compose then inlines their values and drops the env_file key); `variantFiles`: the same file rendered
- * with --no-env-resolution (keeps the env_file names); `production`: docker-compose.production.yml, --no-env-resolution.
- * Returns failure messages.
+ * with --no-env-resolution (keeps the env_file names); `production`: docker-compose.production.yml, env files resolved
+ * (it names none, so only a re-added one, such as the retired .env.ops, contributes values). Returns failure messages.
  */
 function checkVariant(variant, production, variantFiles = variant) {
   const problems = [];
@@ -227,8 +272,11 @@ function checkVariant(variant, production, variantFiles = variant) {
   const services = variant?.services ?? {};
   const names = Object.keys(services).sort();
   // O3 (owner decisions C1-C5): no rab-migrate; the API migrates on start.
-  const expected = ['rab-api', 'rab-ops', 'rab-redis', 'rab-worker'];
+  const expected = ['rab-api', 'rab-redis', 'rab-worker'];
   if (stable(names) !== stable(expected)) fail(`services are ${names.join(',')}; expected exactly ${expected.join(',')}`);
+  for (const pr of retiredOpsProblems(services)) fail(pr);
+  // docker-compose.production.yml (the file OpenShip imports) gets the same refusals.
+  for (const pr of retiredOpsProblems(production?.services ?? {}, ' in docker-compose.production.yml')) fail(pr);
 
   // 1. Image-based and digest-pinned only.
   for (const [name, svc] of Object.entries(services)) {
@@ -243,9 +291,7 @@ function checkVariant(variant, production, variantFiles = variant) {
     }
   }
   const apiImage = services['rab-api']?.image;
-  for (const name of ['rab-migrate', 'rab-ops']) {
-    if (services[name] && services[name].image !== apiImage) fail(`${name}: image differs from rab-api's (the migrations ship in the API image)`);
-  }
+  if (services['rab-migrate'] && services['rab-migrate'].image !== apiImage) fail('rab-migrate: image differs from rab-api\'s (the migrations ship in the API image)');
   // O1/O2: ONE image. The Worker runs rab-api's image with its own command; a different Worker image is a drift.
   if (services['rab-worker'] && services['rab-worker'].image !== apiImage) fail('rab-worker: image differs from rab-api\'s (O2: one image for every application service)');
 
@@ -258,8 +304,9 @@ function checkVariant(variant, production, variantFiles = variant) {
       continue;
     }
     for (const key of RUNTIME_KEYS) {
-      // The read-only PostgreSQL CA bind is the one allowed difference (the image file mounts it from the host).
-      const av = key === 'volumes' ? withoutCa(a.volumes) : a[key];
+      // Allowed differences: the read-only PostgreSQL CA bind (the image file mounts it from the host) and rab-api's exact
+      // OpenShip import guard.
+      const av = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
       const bv = key === 'volumes' ? withoutCa(b.volumes) : b[key];
       if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
@@ -276,7 +323,7 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (envOf(a).REDIS_URL !== SENTINEL_RUNTIME_REDIS_URL) fail(`${name}: REDIS_URL is committed (enter it from the secret store)`);
   }
   // The isolation variable belongs to the long-running runtime services only.
-  for (const name of ['rab-migrate', 'rab-ops', 'rab-redis']) {
+  for (const name of ['rab-migrate', 'rab-redis']) {
     if (services[name] && envOf(services[name]).CREWFLOW_RUNTIME_ISOLATION !== undefined) fail(`${name}: sets CREWFLOW_RUNTIME_ISOLATION`);
   }
 
@@ -321,15 +368,12 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (name === 'rab-api') for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']))) fail(pr);
     if ('CREWFLOW_UPGRADE_FAILURE_POLICY' in envOf(services[name])) fail(`${name}: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY (O3 C3)`);
   }
-  const ops = services['rab-ops'];
-  // The OpenShip import guard (a long-form tmpfs volume; OpenShip refuses the file at import). O3 moved it from the removed
-  // rab-migrate to rab-ops.
-  if (!Object.values(services).some((svc) => (svc.volumes ?? []).some((v) => v.type === 'tmpfs'))) fail('no long-form tmpfs volume: the OpenShip import guard is missing');
-  if (ops) {
-    if (stable(ops.profiles) !== stable(['ops'])) fail('rab-ops: not in (only) the "ops" profile');
-    if (stable(envFiles('rab-ops').map(baseName)) !== stable(['.env.ops'])) fail('rab-ops: must read .env.ops only');
-    if (ops.restart !== 'no') fail('rab-ops: restart is not "no"');
-    if ((ops.ports ?? []).length) fail('rab-ops: publishes a port');
+  // The OpenShip import guard (a long-form tmpfs volume; OpenShip refuses the file at import) on rab-api, in its exact shape
+  // (rab-ops removal PR 2 moved it there from the removed rab-ops; see importGuardMount). docker-compose.production.yml must
+  // stay importable by OpenShip: no long-form tmpfs on any of its services.
+  if (!(services[IMPORT_GUARD_SERVICE]?.volumes ?? []).some(importGuardMount)) fail(`${IMPORT_GUARD_SERVICE}: no long-form tmpfs at /tmp (16 MiB, mode 0555): the OpenShip import guard is missing or changed`);
+  for (const [name, svc] of Object.entries(production?.services ?? {})) {
+    if ((svc.volumes ?? []).some(longFormTmpfs)) fail(`docker-compose.production.yml: ${name} has a long-form tmpfs volume (OpenShip would refuse to import the production file)`);
   }
   for (const name of ['rab-api', 'rab-worker']) {
     const svc = services[name];
@@ -347,9 +391,10 @@ function checkVariant(variant, production, variantFiles = variant) {
     }
     if (svc.depends_on?.['rab-migrate']) fail(`${name}: depends on rab-migrate (O3: there is none)`);
   }
+  // Every service, not only the app services: nothing names the retired .env.ops or waits for a rab-ops.
   for (const [name, svc] of Object.entries(services)) {
-    if (name !== 'rab-ops' && svc.depends_on?.['rab-ops']) fail(`${name}: depends on rab-ops`);
-    if (name !== 'rab-ops' && envFiles(name).some((f) => baseName(f) === '.env.ops')) fail(`${name}: names .env.ops`);
+    if (svc.depends_on?.['rab-ops']) fail(`${name}: depends on rab-ops`);
+    if (envFiles(name).some((f) => baseName(f) === '.env.ops')) fail(`${name}: names .env.ops`);
   }
   return problems;
 }
@@ -415,7 +460,7 @@ function checkDeployment(merged, production, envFileKeys = {}) {
       continue;
     }
     for (const key of RUNTIME_KEYS) {
-      const value = key === 'volumes' ? withoutCa(a.volumes) : a[key];
+      const value = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
       const expected = key === 'volumes' ? withoutCa(b.volumes) : b[key];
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
@@ -450,17 +495,11 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   }
   // O3: an override must not bring a release step back (a second migrating process next to the API).
   if (services['rab-migrate']) fail('rab-migrate: present in the deployed model (O3: the API migrates on start)');
-  const fileNames = (svc) => (svc?.env_file ?? []).map((e) => baseName(typeof e === 'string' ? e : e.path));
-  const ops = services['rab-ops'];
-  if (ops) {
-    if (ops.image !== services['rab-api']?.image) fail('rab-ops: image differs from rab-api\'s in the deployed model');
-  }
+  // rab-ops removal (PR 2): an override must not bring the operations container back either.
+  for (const pr of retiredOpsProblems(services, ' in the deployed model')) fail(pr);
   if (services['rab-worker'] && services['rab-worker'].image !== services['rab-api']?.image) fail('rab-worker: image differs from rab-api\'s in the deployed model (O2: one image)');
-  if (ops) {
-    if (stable(ops.profiles) !== stable(['ops'])) fail('rab-ops: not in (only) the "ops" profile in the deployed model');
-    if (stable(fileNames(ops)) !== stable(['.env.ops'])) fail('rab-ops: must read .env.ops only in the deployed model');
-    if (!ops.read_only || stable(ops.cap_drop) !== stable(['ALL']) || !(ops.security_opt ?? []).includes('no-new-privileges:true')) fail('rab-ops: not read-only / cap_drop ALL / no-new-privileges in the deployed model');
-    if ((ops.ports ?? []).length) fail('rab-ops: publishes a port');
+  for (const [name, svc] of Object.entries(services)) {
+    if ((svc.env_file ?? []).some((e) => baseName(typeof e === 'string' ? e : e.path) === '.env.ops')) fail(`${name}: names .env.ops in the deployed model`);
   }
   const redis = services['rab-redis'];
   if (redis) {
@@ -485,7 +524,8 @@ function checkDeployment(merged, production, envFileKeys = {}) {
 
 function render(files, { projectDirectory, env, resolveEnvFiles }) {
   const args = ['compose', '-p', 'crewflow-image-verify', '--project-directory', projectDirectory, ...files.flatMap((f) => ['-f', f]),
-    '--profile', 'ops', 'config', '--format', 'json', ...(resolveEnvFiles ? [] : ['--no-env-resolution'])];
+    // Every profile (review of PR #124): a profile-gated service is rendered and refused, never hidden.
+    '--profile', '*', 'config', '--format', 'json', ...(resolveEnvFiles ? [] : ['--no-env-resolution'])];
   const out = execFileSync('docker', args, { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   return JSON.parse(out);
 }
@@ -516,7 +556,7 @@ function attachEnvFilesFromMarkers(files, resolved, dir) {
 }
 
 /** Renders the three models checkVariant takes (throw-away project directory with sentinel env files). */
-function renderModels(variantPath = VARIANT) {
+function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
   try {
     // Owner login: the shared database.env and runtime.env in a sentinel secret directory. A separated-mode .env.migrate
@@ -542,7 +582,8 @@ function renderModels(variantPath = VARIANT) {
     // Whether this Compose reports env_file under --no-env-resolution (rab-migrate declares one in the committed file).
     const composeReportsEnvFiles = (rawFiles.services?.['rab-migrate']?.env_file ?? []).length > 0;
     const variantFiles = attachEnvFilesFromMarkers(rawFiles, variant, dir);
-    const production = render([PRODUCTION], { projectDirectory: dir, env, resolveEnvFiles: false });
+    // Resolved: production.yml names no env file, so only a re-added one (the retired .env.ops sentinel) adds values.
+    const production = render([productionPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     return { variant, production, variantFiles, composeReportsEnvFiles };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

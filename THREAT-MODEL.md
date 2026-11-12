@@ -4132,8 +4132,9 @@ databases only.
 - **Residuals:** the deploying host's operator account can read `.env.migrate`; it must be removed or the approval line
   dropped after each release (procedure, not enforced). Platforms that ignore compose `depends_on` conditions must run the
   step as a release job and promote only on exit 0.
-- **Owner decision (implemented, B7 below):** the owner CLI commands `containment`, `hws:backfill` and
-  `user-session:backfill` run only in the one-off `rab-ops` operations container, at a verified minimum role per mode.
+- **Owner decision (implemented, B7 below; superseded by X2.2):** the owner CLI commands `containment`, `hws:backfill` and
+  `user-session:backfill` run as one-off CLI commands of the API image under `crewflow_owner` (X2.2, #116; rab-ops
+  removed in PR 2 #124).
 
 ### B4: read replica — permission lag
 
@@ -4168,7 +4169,31 @@ databases only.
   organisation cannot initiate provisioning; there is no platform-admin exemption, at the service or in the function.
 - **Residual:** until G2 the privileged `crewflow` credential stays in the Worker launcher (root) and the provisioner child.
 
-### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill (owner decision, branch phase-b/one-db-url, not merged)
+### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill — SUPERSEDED (history)
+
+- **Status: SUPERSEDED (2026-11-12) by "X2.2 (PR #116): ops commands from the API image under crewflow_owner" below;
+  the container was removed in PR 2 #124.**
+  - **Now:** the three commands run as a one-off of the API service, from the same image, under the one owner login.
+  - **PR 2 removed:**
+    - the `rab-ops` service from the three compose files, and `.env.ops.example`;
+    - the `ops` process role in `pg-config.ts`;
+    - the ops-container branches of `ops-run.ts` and `elevated-ops-session.ts` (`assertOpsLoginFacts`,
+      `NEVER_LOGIN_ROLES`, the `crewflow_app` app-session branch);
+    - `assertOpsValuesNotFromDotenv`;
+    - the gates' positive checks of the operations container;
+    - `ops-elevated-session.integration.spec.ts`. #116 ported its live cases to `ops-owner-login.integration.spec.ts`.
+  - **Kept:** every refusal of `CREWFLOW_OPS_RUN`, `PG_OPS_APP_DATABASE_URL`, `CREWFLOW_OPS_ACTOR_SOURCE`,
+    `CREWFLOW_OPS_ACTOR_ID` and `CREWFLOW_OPS_CHANGE_REF`:
+    - `never-in-runtime-env.ts`;
+    - `api-prestart.sh`;
+    - `pg-config.ts`, now in every process, `cli` included;
+    - `ops-run.ts`;
+    - `compose-owner-login.cjs`, `compose-credential-isolation.cjs` and `verify-image-compose.cjs`;
+    - `run-h6-runtime.cjs`;
+    - the env-example refusal lists.
+  - `compose-one-image.cjs` now also refuses a `rab-ops` service or an `ops` profile.
+  - **No database change.** No ops-only role ever existed, so no role was dropped (plan §3).
+  - **History only.** The text below is unchanged and does not describe the current system.
 
 - **Threats:** a migration-capable credential in a long-running container (any RCE reaches every tenant's identity rows);
   an owner command run with more privilege than it needs (the bare migration login inherits BOTH owner roles); a code bug in
@@ -4335,12 +4360,14 @@ databases only.
   `.env`, which Nx 22.7 injects (`nx/dist/src/tasks-runner/task-env-paths.js` `getEnvPathsForTask`), went unseen: the
   checks read only `packages/rab-server/.env` (commands) or the working directory's `.env` (runtimes, ops). Control:
   `core/nx-dotenv-files.ts` lists every file Nx loads for every rab-server and rab-worker target under the repository root
-  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule), `readRuntimeDotenvValues`
-  (API / Worker / provisioner, core.datasource, check-pending-migrations) and the ops container's dotenv refusal read all
-  of them. `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals Nx's own function for
-  every target; target list pinned to both project.json files, no configurations; a production command, a production
-  runtime and the ops container refuse values in `.env.local`, `.local.env`, `.env.<target>`, `packages/rab-worker/.env.*`
-  and the root `.env`).
+  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule) and `readRuntimeDotenvValues`
+  (API / Worker / provisioner, core.datasource, check-pending-migrations) read all of them. The ops container's own
+  dotenv refusal (`assertOpsValuesNotFromDotenv`) was removed with the container in PR 2 #124. An ops variable that
+  reaches a process's environment, Nx's dotenv injection included, is still refused by `pg-config.ts` in every process
+  and by `ops-run.ts` (B7 status). `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals
+  Nx's own function for every target; target list pinned to both project.json files, no configurations; a production
+  command and a production runtime refuse values in `.env.local`, `.local.env`, `.env.<target>`,
+  `packages/rab-worker/.env.*` and the root `.env`; the ops-container case was deleted with its function in PR 2).
 - **Container-image dependencies (fixed; branch phase-b/sec-fixes) — undici, qs, deepmerge (Trivy / code scanning).**
   qs 6.15.3 (CVE-2026-82417, CVE-2026-82562, CVE-2026-110816; MEDIUM) under express 5.2.1 and superagent 10.3.0: deduped to
   6.17.0 (lockfile only). undici 6.27.0 (CVE-2026-19534, -87018, -109383, -109869 HIGH; four MEDIUM, one LOW): not a
@@ -6645,6 +6672,43 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   bump the generation. Timer triggers have the backstop scan.
 - **Residual:** failed BullMQ jobs, and manual admin retry of them, are available for 7 days instead of 30, for the newest
   1,000 per queue. The outbox and worker_event rows remain the long-term record.
+
+### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
+- **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
+  a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
+  path was removed in PR 2 #124 (B7, now SUPERSEDED).
+- **Actor → action → consequence.**
+  - A holder of the owner credential can already do everything these commands do (BC-01, BC-03, BC-16).
+  - The commands add no grant, no statement and no plan. Their cross-tenant reads and the session-row inserts still run
+    only through the frozen statement names, in a transaction narrowed to `rab_secure_owner` and verified each time.
+    The narrowed session gains nothing.
+  - **What is wider (security review L2).** The non-narrowed command code runs as `crewflow_owner`, where in the ops
+    container it ran as `crewflow_app`: RefreshTokenService, SecurityVersionService, AuditService, the HWS physical copy and
+    the tenant-context writes.
+    - That is the privilege the API already runs with (PT-01).
+    - But a bug in these commands now has the owner login's blast radius (BC-01, BC-05, BC-06), not the restricted
+      login's.
+  - **The frozen lists limit the command code, not the operator.** Whoever runs the one-off holds a login that can
+    `SET ROLE rab_secure_owner` directly (G-02). The operator is trusted exactly as far as any holder of the owner
+    credential.
+- **Controls.** Any other login is refused three times:
+  - before connecting (the URL user);
+  - at boot gate 1;
+  - on the database (`verifyOpsAppSession`).
+
+  The command body refuses to run inside the API, Worker or provisioner process. The operator label is required.
+  `SET LOCAL` ends with the transaction, and the pool's `RESET ROLE` still runs.
+- **Residual.**
+  - The label is an operator claim, not a verified identity. Accountability comes from the platform's job controls.
+  - **OPEN owner decision: read-only modes are unaudited.** `--dry-run`, `--verify` and the containment dry-run write no
+    `audit_log` row. Their only record is the console line and the operator's retained copy of stdout (the runbook
+    requires a `tee`); `--rm` with json-file logging loses the container log. Auditing them would need a new per-run
+    action and a choice of organisation, because `audit_log` is tenant-scoped. Not decided.
+  - Containment's outcome log needs the runbook's host bind-mount. Without it the log write fails after the suspensions
+    have committed, and the evidence is lost (the audit rows remain).
+  - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
+- **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
+  `__tests__/integration/ops-owner-login.integration.spec.ts`.
 
 ## Phase X1.4 — forgot-password limit per address (XA-04)
 

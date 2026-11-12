@@ -71,7 +71,6 @@ jobs:
           set -euo pipefail
           t="$RUNNER_TEMP/owner-login-config"
           mkdir -p "$t/project" "$t/secrets"
-          : > "$t/project/.env.ops"
           : > "$t/secrets/database.env"
           : > "$t/secrets/runtime.env"
           z="$(printf '%064d' 0)"
