@@ -11,7 +11,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 
-const { checkVariant, checkResolvedImages, renderModels, SENTINEL_MIGRATOR_PW, RUNTIME_KEYS } = require('./verify-image-compose.cjs');
+const { checkVariant, checkResolvedImages, renderModels, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, RUNTIME_KEYS } = require('./verify-image-compose.cjs');
+
+/** The five retired separated-mode operations names (rab-ops removal PR 2, plan §2.6): every one stays refused. */
+const RETIRED_OPS_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
+/** rab-api's OpenShip import guard as Compose renders it (docker-compose.image.yml only). */
+const isGuard = (v) => v?.type === 'tmpfs' && v.target === '/tmp';
+const guardOf = (v) => v.services['rab-api'].volumes.find(isGuard);
 
 let composeAvailable = true;
 try {
@@ -43,13 +49,14 @@ test('the committed variant passes every check', { skip }, () => {
 test('the variant and the production file declare the same runtime keys for rab-api and rab-worker', { skip }, () => {
   const m = fresh();
   for (const svc of ['rab-api', 'rab-worker']) {
-    // The read-only PostgreSQL CA bind (image file only) is the one intended difference.
+    // The intended differences (image file only): the read-only PostgreSQL CA bind, and rab-api's OpenShip import guard.
     const noCa = (vols) => {
       const rest = (vols ?? []).filter((v) => !(v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true));
       return rest.length ? rest : undefined;
     };
+    const noGuard = (vols) => (svc === 'rab-api' ? (vols ?? []).filter((v) => !isGuard(v)) : vols);
     for (const key of RUNTIME_KEYS) {
-      const a = key === 'volumes' ? noCa(m.variant.services[svc][key]) : m.variant.services[svc][key];
+      const a = key === 'volumes' ? noCa(noGuard(m.variant.services[svc][key])) : m.variant.services[svc][key];
       const b = key === 'volumes' ? noCa(m.production.services[svc][key]) : m.production.services[svc][key];
       assert.deepEqual(a, b, `${svc}.${key}`);
     }
@@ -74,7 +81,7 @@ const weakenings = [
   ['a build section', (v) => { v.services['rab-worker'].build = { context: '.' }; }, /rab-worker: has a build section/],
   ['an image tag instead of a digest', (v) => { v.services['rab-api'].image = 'adhin007/adolphus:latest'; }, /rab-api: image .* is not repository@sha256/],
   ['tag and digest together', (v) => { v.services['rab-api'].image = `adhin007/adolphus:v1@sha256:${'1'.repeat(64)}`; }, /rab-api: image/],
-  ['a release step brought back (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present/],
+  ['a release step brought back (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-api']); }, /rab-migrate: present/],
   ['rab-worker on another image than rab-api (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'7a'.repeat(32)}`; }, /rab-worker: image differs from rab-api/],
   ['enforce mode switched to warn', (v) => { v.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION = 'warn'; }, /rab-worker: CREWFLOW_RUNTIME_ISOLATION is not "enforce"/],
   ['enforce mode removed from the API', (v) => { delete v.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION; }, /rab-api: CREWFLOW_RUNTIME_ISOLATION/],
@@ -119,8 +126,27 @@ const weakenings = [
   ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
   ['Redis evicting', (v) => { const c = v.services['rab-redis'].command; c[c.indexOf('--maxmemory-policy') + 1] = 'allkeys-lru'; }, /rab-redis: command lacks --maxmemory-policy noeviction/],
   ['Redis without the ACL file', (v) => { const c = v.services['rab-redis'].command; c.splice(c.indexOf('--aclfile'), 2); }, /rab-redis: command lacks --aclfile/],
-  ['OpenShip import guard removed', (v) => { v.services['rab-ops'].volumes = []; }, /OpenShip import guard is missing/],
-  ['rab-ops started by up', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
+  // The OpenShip import guard (rab-ops removal PR 2 moved it to rab-api): removed, or changed in any way, it fails.
+  ['OpenShip import guard removed from rab-api', (v) => { v.services['rab-api'].volumes = v.services['rab-api'].volumes.filter((x) => !isGuard(x)); }, /rab-api: no long-form tmpfs at \/tmp .*import guard is missing/],
+  ['import guard made writable (mode 1777)', (v) => { guardOf(v).tmpfs.mode = 0o1777; }, /import guard is missing or changed/],
+  ['import guard made writable (mode 1777): not ignored by the production comparison', (v) => { guardOf(v).tmpfs.mode = 0o1777; }, /rab-api\.volumes differs/],
+  ['import guard enlarged', (v) => { guardOf(v).tmpfs.size = String(64 * 1024 * 1024); }, /rab-api\.volumes differs/],
+  ['import guard moved to another path', (v) => { guardOf(v).target = '/var/tmp'; }, /import guard is missing or changed/],
+  ['import guard with an extra option', (v) => { guardOf(v).read_only = false; }, /rab-api\.volumes differs/],
+  ['import guard moved to rab-worker', (v) => { const g = guardOf(v); v.services['rab-api'].volumes = v.services['rab-api'].volumes.filter((x) => x !== g); v.services['rab-worker'].volumes.push(g); }, /import guard is missing|rab-worker\.volumes differs/],
+  ['a second, writable tmpfs next to the guard', (v) => { v.services['rab-api'].volumes.push({ type: 'tmpfs', target: '/srv/scratch', tmpfs: { size: '1048576' } }); }, /rab-api\.volumes differs/],
+  ['a long-form tmpfs in docker-compose.production.yml (OpenShip could no longer import it)', (_v, _f, p) => { p.services['rab-api'].volumes = [{ type: 'tmpfs', target: '/tmp', tmpfs: { size: '16777216', mode: 365 } }]; }, /docker-compose\.production\.yml: rab-api has a long-form tmpfs/],
+  // rab-ops removal (PR 2): the operations container and its environment stay refused (plan §2.6).
+  ['a rab-ops service added back (no profile)', (v) => { v.services['rab-ops'] = structuredClone(v.services['rab-api']); }, /rab-ops: present \(removed/],
+  ['a rab-ops service added back under the ops profile', (v) => { v.services['rab-ops'] = { ...structuredClone(v.services['rab-api']), profiles: ['ops'] }; }, /rab-ops: has the "ops" profile/],
+  ['any service under the ops profile', (v) => { v.services['rab-tools'] = { ...structuredClone(v.services['rab-api']), profiles: ['ops'] }; }, /rab-tools: has the "ops" profile/],
+  ['the API reads .env.ops', (_v, f) => { f.services['rab-api'].env_file = [{ path: '/x/.env.ops' }]; }, /rab-api: names \.env\.migrate or \.env\.ops/],
+  ['Redis reads .env.ops', (_v, f) => { f.services['rab-redis'].env_file = [{ path: '/x/.env.ops' }]; }, /rab-redis: names \.env\.ops/],
+  ['an ops credential (the .env.ops sentinel) reaches the Worker', (v) => { v.services['rab-worker'].environment.SOME_URL = `postgresql://crewflow_app:${SENTINEL_OPS_PW}@h:5432/rab`; }, /rab-worker: SOME_URL carries a migration\/ops credential/],
+  ['a service waits for a rab-ops', (v) => { v.services['rab-worker'].depends_on['rab-ops'] = { condition: 'service_started' }; }, /rab-worker: depends on rab-ops/],
+  ...RETIRED_OPS_NAMES.flatMap((k) => ['rab-api', 'rab-worker'].map((svc) => [
+    `${svc} sets the retired ${k}`, (v) => { v.services[svc].environment[k] = 'one-off'; }, new RegExp(`${svc}: sets ${k}`),
+  ])),
 ];
 for (const [name, mutate, pattern] of weakenings) {
   test(`refuses: ${name}`, { skip }, () => assertRefused(problemsAfter(mutate), pattern));
@@ -190,9 +216,16 @@ test('environment mode refuses migration/ops authority, foreign logins and unfil
   assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: ['PG_DATABASE_URL'] } }), /rab-worker: REDIS_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }), /rab-api: names \.env\.migrate/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_PHASE = 'B'; }), /rab-worker: sets CREWFLOW_MIGRATION_PHASE/);
+  // rab-ops removal (PR 2): every retired ops name in an env file, and .env.ops itself, stay refused.
+  for (const k of RETIRED_OPS_NAMES) {
+    assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, k] }, 'rab-worker': worker }), new RegExp(`rab-api: sets ${k} in the deployed model`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...worker, names: [...worker.names, k] } }), new RegExp(`rab-worker: sets ${k} in the deployed model`));
+  }
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': worker }, (v) => { v.services['rab-worker'].env_file = [{ path: '/x/.env.ops' }]; }), /rab-worker: names \.env\.migrate or \.env\.ops in the deployed model/);
 });
 
-// Review G1: overrides on rab-redis and rab-ops are re-checked in the deployed model (O3: and none may add a rab-migrate).
+// Review G1: overrides on rab-redis are re-checked in the deployed model (O3: none may add a rab-migrate; rab-ops removal
+// PR 2: none may add a rab-ops back).
 const otherWeakenings = [
   ['rab-redis privileged', (v) => { v.services['rab-redis'].privileged = true; }, /rab-redis: privileged/],
   ['rab-redis on the host network', (v) => { v.services['rab-redis'].network_mode = 'host'; }, /rab-redis: host namespace/],
@@ -206,11 +239,12 @@ const otherWeakenings = [
   ['an override sets the API pay-statement sweep back to 5 s', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override removes the Worker pay-statement sweep', (v) => { delete v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the combined shift scan on', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }, /rab-worker\.environment\.WORKER_SHIFT_SCAN_MODE is overridden in the deployed model/],
-  ['an override adds a rab-migrate (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present in the deployed model/],
+  ['an override adds a rab-migrate (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-api']); }, /rab-migrate: present in the deployed model/],
   ['rab-worker on another image (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-worker: image differs from rab-api's in the deployed model/],
-  ['rab-ops without its profile', (v) => { delete v.services['rab-ops'].profiles; }, /rab-ops: not in \(only\) the "ops" profile/],
-  ['rab-ops with a writable root', (v) => { v.services['rab-ops'].read_only = false; }, /rab-ops: not read-only/],
-  ['rab-ops privileged', (v) => { v.services['rab-ops'].privileged = true; }, /rab-ops: privileged/],
+  ['an override adds a rab-ops back', (v) => { v.services['rab-ops'] = structuredClone(v.services['rab-api']); }, /rab-ops: present in the deployed model/],
+  ['an override adds a service under the ops profile', (v) => { v.services['rab-tools'] = { ...structuredClone(v.services['rab-api']), profiles: ['ops'] }; }, /rab-tools: has the "ops" profile in the deployed model/],
+  ['an override makes rab-redis read .env.ops', (v) => { v.services['rab-redis'].env_file = [{ path: '/x/.env.ops' }]; }, /rab-redis: names \.env\.ops in the deployed model/],
+  ['an override changes rab-api\'s import guard (mode 1777)', (v) => { v.services['rab-api'].volumes.find(isGuard).tmpfs.mode = 0o1777; }, /rab-api\.volumes differs from docker-compose\.production\.yml in the deployed model/],
   ['an extra capability on rab-redis', (v) => { v.services['rab-redis'].cap_add = ['SYS_ADMIN']; }, /rab-redis: adds devices or capabilities/],
   ['the retired launcher capabilities back on the Worker', (v) => { v.services['rab-worker'].cap_add = ['SETUID', 'SETGID', 'KILL']; }, /rab-worker: adds devices or capabilities/],
 ];
@@ -226,30 +260,61 @@ test('environment mode accepts the operator token opt-in (compose.env), and none
 });
 
 // Compose-version independence (CI runs Compose v2.38, which resolves env files and drops env_file even under
-// --no-env-resolution). A REAL variant file in which rab-ops no longer reads its env file must still fail.
-test('a variant file whose rab-ops reads no env file fails, whatever the Compose version', { skip }, () => {
+// --no-env-resolution). rab-ops removal (PR 2): a REAL variant file that adds rab-ops back under its old profile, or makes
+// rab-api read the retired .env.ops, must still fail (the render enables the "ops" profile so the service is not hidden).
+const renderWeakened = (edit, check) => {
   const fsx = require('node:fs');
   const os = require('node:os');
   const pathx = require('node:path');
   const src = fsx.readFileSync(pathx.join(__dirname, '../docker-compose.image.yml'), 'utf8');
-  const weakened = src.replace(/\n    env_file:\n      - \.env\.ops\n/, '\n');
+  const weakened = edit(src);
   assert.notEqual(weakened, src, 'the fixture edit did not apply');
   const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'crewflow-image-verify-test-'));
   try {
     // renderModels() renders in its own throw-away project directory, so the copy's location does not change any path.
     const copy = pathx.join(dir, 'docker-compose.image.yml');
     fsx.writeFileSync(copy, weakened);
-    try {
-      const m = renderModels(copy);
-      const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /rab-ops: must read \.env\.ops only/);
-      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-ops: must read \.env\.ops only in the deployed model/);
-    } finally {
-      fsx.rmSync(copy, { force: true });
-    }
+    check(renderModels(copy));
   } finally {
     fsx.rmSync(dir, { recursive: true, force: true });
   }
+};
+
+test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, statically and in the deployed model', { skip }, () => {
+  renderWeakened(
+    (src) => src.replace(/\nvolumes:\n/, [
+      '',
+      '  rab-ops:',
+      '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+      '    profiles: ["ops"]',
+      '    env_file:',
+      '      - .env.ops',
+      '',
+      'volumes:',
+      '',
+    ].join('\n')),
+    (m) => {
+      const problems = checkVariant(m.variant, m.production, m.variantFiles);
+      assertRefused(problems, /services are .*rab-ops.*; expected exactly rab-api,rab-redis,rab-worker/);
+      assertRefused(problems, /rab-ops: present \(removed/);
+      assertRefused(problems, /rab-ops: has the "ops" profile/);
+      assertRefused(problems, /rab-ops: names \.env\.ops/);
+      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-ops: present in the deployed model/);
+    },
+  );
+});
+
+test('a variant file whose rab-api reads .env.ops fails, whatever the Compose version', { skip }, () => {
+  renderWeakened(
+    (src) => src.replace(/(\n  rab-api:\n[\s\S]*?\/runtime\.env\n        required: true\n)/, '$1      - path: .env.ops\n        required: true\n'),
+    (m) => {
+      const problems = checkVariant(m.variant, m.production, m.variantFiles);
+      assertRefused(problems, /rab-api: names \.env\.migrate or \.env\.ops/);
+      assertRefused(problems, /rab-api: sets CREWFLOW_OPS_RUN/);
+      assertRefused(problems, /rab-api: PG_OPS_APP_DATABASE_URL carries a migration\/ops credential/);
+      assertRefused(checkDeployment(m.variantFiles, m.production), /rab-api: names \.env\.migrate or \.env\.ops in the deployed model/);
+    },
+  );
 });
 
 // Phase X J2 (S0-J SJ-03): the push / realtime sweep rule, enforced once the feature is switched on.

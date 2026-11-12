@@ -8,7 +8,7 @@
  * rab-worker TOGETHER from ONE image variable. This check renders every DEPLOY compose combination WITHOUT interpolation
  * (`docker compose config --no-interpolate`), so it compares the variable references themselves, not values that could
  * happen to be equal, and fails when:
- *   - rab-api, rab-worker (and rab-ops, when present) do not use the IDENTICAL image reference;
+ *   - rab-api and rab-worker do not use the IDENTICAL image reference;
  *   - that reference is not <repository>@${CREWFLOW_IMAGE_TAG...} (one variable, a digest, never a tag), or names any other
  *     image variable (a separate API or Worker tag variable is exactly what this forbids). Only docker-compose.production.yml
  *     may carry a DEFAULT (owner decision 2026-11-12: the release is pinned in the file so OpenShip deploys without anyone
@@ -18,7 +18,12 @@
  *   - rab-worker does not wait for a HEALTHY rab-api with `restart: true` (Compose then stops the old Worker before it
  *     replaces the API, so an old Worker never runs beside a new API), or for a healthy rab-redis;
  *   - rab-api runs with the Worker-only switches (it must migrate and register the schedulers), or rab-worker without them;
- *   - rab-api's stop_grace_period is below 40 s.
+ *   - rab-api's stop_grace_period is below 40 s;
+ *   - a `rab-ops` service, or any service under an `ops` profile, is present. The separated operations container was
+ *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
+ *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
+ *     service must not come back unnoticed. The render enables every profile (`--profile '*'`) so a profile-gated
+ *     service is never hidden from this check.
  * Scope (owner decision D): the DEPLOY files only. The test-only compose files (system e2e, H6 runtime test, cost harness,
  * BullMQ integration, the weakened rehearsal) and the dev stacks (docker-compose.yml, docker-compose.qa.yml,
  * docker-compose.local-build.yml) are deliberately not checked.
@@ -70,7 +75,13 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
   if (!worker) p('rab-worker is missing');
   if (!api || !worker) return problems;
 
-  const appServices = ['rab-api', 'rab-worker', 'rab-ops'].filter((n) => services[n]);
+  // rab-ops removal (PR 2): the separated operations container is gone and must not come back, under any profile.
+  if (services['rab-ops']) p('rab-ops: service must not exist (removed; operations run as one-off owner-login commands of rab-api)');
+  for (const [name, s] of Object.entries(services)) {
+    if (Array.isArray(s?.profiles) && s.profiles.includes('ops')) p(`${name}: an "ops" profile service must not exist (the rab-ops container was removed)`);
+  }
+
+  const appServices = ['rab-api', 'rab-worker'];
   for (const name of appServices) {
     const s = services[name];
     if (s.build !== undefined) p(`${name}: has a build section (a server never builds; use the gated image)`);
@@ -115,7 +126,8 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
 function render(files) {
   const args = ['compose', '--project-directory', DOCKER_DIR];
   for (const f of files) args.push('-f', path.join(DOCKER_DIR, f));
-  args.push('--profile', 'ops', 'config', '--no-interpolate', '--no-env-resolution', '--format', 'json');
+  // Every profile is enabled so a profile-gated service (a re-added ops container) is rendered and refused, never hidden.
+  args.push('--profile', '*', 'config', '--no-interpolate', '--no-env-resolution', '--format', 'json');
   return JSON.parse(execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 }
 
