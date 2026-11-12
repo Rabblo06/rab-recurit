@@ -114,13 +114,14 @@ describeIfDb('admin health indicators (X2.4, integration)', () => {
     else expect(maxFact).not.toBe('Not set (no limit)');
   });
 
-  it('worker: heartbeat age and per-queue failed / waiting / active / delayed equal the planted BullMQ keys', async () => {
+  it('worker: heartbeat age and per-queue failed / waiting (wait + paused) / prioritized / active / delayed equal the planted BullMQ keys', async () => {
     const prefix = `crewflow:test:x24-${RUN_ID}`;
     const q = `x24-queue-${RUN_ID}`;
     const k = (s: string) => `${prefix}:${q}:${s}`;
     const beat = `${prefix}:heartbeat`;
     planted.push(k('wait'), k('paused'), k('active'), k('prioritized'), k('delayed'), k('failed'), beat);
     await side.rpush(k('wait'), 'j1', 'j2', 'j3');
+    await side.rpush(k('paused'), 'j8');
     await side.rpush(k('active'), 'j4');
     await side.zadd(k('prioritized'), 1, 'j5');
     await side.zadd(k('delayed'), 1, 'j6', 2, 'j7');
@@ -128,7 +129,7 @@ describeIfDb('admin health indicators (X2.4, integration)', () => {
     await side.set(beat, String(Date.now() - 3_000), 'EX', 60);
     const result = await workerIndicator(throttlerRedis.client, { heartbeatKey: beat, heartbeatTtlSeconds: 30, queues: [{ name: q, prefix }] });
     expect(result.status).toBe('healthy');
-    expect(result.facts).toContainEqual({ label: q, value: '4 failed · 4 waiting · 1 active · 2 delayed' });
+    expect(result.facts).toContainEqual({ label: q, value: '4 failed · 4 waiting · 1 prioritized · 1 active · 2 delayed' });
     expect(result.detail).toMatch(/^Heartbeat [3-5] s ago · 4 failed · 4 waiting across 1 queue$/);
   });
 
