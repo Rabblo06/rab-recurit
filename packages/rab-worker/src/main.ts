@@ -45,6 +45,7 @@ import {
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
 import { boundedPublish, createQueueProducerConnection, QUEUE_PRODUCER_REDIS_OPTIONS } from '@rab/server/engine/worker-shared/queue-producer-connection';
+import { parseWorkerShutdownTimeoutMs, WORKER_SHUTDOWN_HARD_EXIT_MARGIN_MS } from '@rab/server/engine/worker-shared/worker-shutdown-timeout.contract';
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
@@ -141,8 +142,9 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 // cadence: 2 s dispatchers that back the request-time fast path, 1–5 min monitors, 24 h housekeeping, env-driven cleanups)
 // and the consumer concurrencies (5 / 10 / 2 when they moved; AI Phase 1 added `rab-ai`, 4) moved VERBATIM to core/scheduler/scan-jobs.ts and core/scheduler/queue-registry.ts — the single registry both scheduler
 // modes read, so interval mode and bullmq mode can never disagree about a cadence or a stats key.
-// How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway.
-const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+// How long SIGTERM waits for in-flight cycles (a PDF render is seconds) before giving up and exiting anyway: XR-10,
+// WORKER_SHUTDOWN_TIMEOUT_MS, default 30 000 ms, bounded 1 000..34 000 so the drain plus the hard-exit margin end inside the
+// 45 s stop_grace_period (engine/worker-shared/worker-shutdown-timeout.contract.ts). Resolved once at boot, fail closed.
 /**
  * Phase B (P6): explicit ceiling of `directDataSource` (it used to have none, so pg's default 10 applied, unrelated to the
  * runtime pool's setting). Holders, from the code: the five lock-holding scans (shift-report-scheduler, final-timesheet,
@@ -182,6 +184,8 @@ function refuseStartup(error: unknown): never {
               ? '[worker-schema-wait] refused: '
             : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
               ? '[worker-pdf] refused: '
+            : error instanceof Error && error.name === 'WorkerShutdownTimeoutError'
+              ? '[worker-shutdown] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
@@ -403,6 +407,16 @@ async function bootstrap(): Promise<void> {
   const dispatchConfig = (() => {
     try {
       return resolveDispatchConfig({ get: (key: string) => environmentService.get(key as never) });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  // XR-10: the SIGTERM drain budget, resolved at boot (never at shutdown, where a bad value used to become NaN and skip the
+  // drain). Validated by env.validation.ts for both processes and re-checked here, fail closed: an invalid or out-of-range
+  // value refuses to start.
+  const shutdownTimeoutMs = (() => {
+    try {
+      return parseWorkerShutdownTimeoutMs(environmentService.get('WORKER_SHUTDOWN_TIMEOUT_MS' as never));
     } catch (error) {
       return refuseStartup(error);
     }
@@ -718,7 +732,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    const timeoutMs = shutdownTimeoutMs;
     const startedAt = Date.now();
     // eslint-disable-next-line no-console
     console.log(`Worker received ${signal}, shutting down (waiting up to ${timeoutMs}ms for in-flight work)`);
@@ -727,7 +741,7 @@ async function bootstrap(): Promise<void> {
       // eslint-disable-next-line no-console
       console.error('Worker shutdown exceeded its deadline — exiting');
       process.exit(1);
-    }, timeoutMs + 10_000);
+    }, timeoutMs + WORKER_SHUTDOWN_HARD_EXIT_MARGIN_MS);
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)

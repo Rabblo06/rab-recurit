@@ -62,6 +62,10 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 
 `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` no longer exists: Crewflow never confirms an offer automatically, and the manager-confirmation deadline (30 minutes before a standard offer's start) is fixed, not configurable. A deployment that still sets it keeps booting; the value is ignored. `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` still sets how often the Worker checks for passed deadlines.
 
+## Worker shutdown
+
+`WORKER_SHUTDOWN_TIMEOUT_MS` (default 30000) is how long the Worker waits, after SIGTERM, for its active jobs and in-flight cycles before it exits anyway. It must be a plain integer from 1000 to 34000: the drain plus the Worker's 10-second hard-exit margin has to end inside the Worker's `stop_grace_period: 45s`, or Docker kills a job mid-drain. Anything else, including a value with a unit such as `30s`, refuses to boot.
+
 ## Feature flags (all default `false`)
 
 `HWS_RUNTIME_ENABLED`, `AUTH_CONTEXT_CACHE_ENABLED`, `USER_SESSION_CACHE_ENABLED`, `CORE_ENTITY_CACHE_ENABLED`, `WORKSPACE_METADATA_CACHE_ENABLED`, `USER_SESSION_ENFORCEMENT_CUTOVER`, `REALTIME_ENABLED`, `PUSH_ENABLED`.
@@ -93,7 +97,6 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | `PG_DATABASE_REPLICA_URL`, `PG_DATABASE_REPLICA_TIMEOUT_MS`, `PG_DATABASE_REPLICA_MAX_LAG_MS` | Optional read replica. |
 | `CREWFLOW_DEPLOYMENT_ENVIRONMENT`, `CREWFLOW_DEPLOYMENT_ID`, `PG_EXPECTED_DATABASE_NAME` | Deployment identity, compared with the database's protected marker (required in production). |
 | `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
-| `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
 | `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 
