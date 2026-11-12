@@ -26,6 +26,7 @@ import { runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet.job';
 import * as renderPdf from '../../queues/rab-reports/render-pdf.util';
+import { reportHtmlFor } from '../helpers/report-html';
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { SmtpSink } from './helpers/smtp-sink';
@@ -80,7 +81,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   let sink: SmtpSink;
   let emailWorker: Worker;
   let workerRedis: Redis;
-  let renderSpy: jest.SpyInstance;
+  let renderDocSpy: jest.SpyInstance;
   const renderedHtml: string[] = [];
 
   // ---- actors ---------------------------------------------------------
@@ -226,11 +227,12 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     emailWorker.on('failed', (job, err) => console.error('[lifecycle] email job failed', job?.id, err.message));
     emailWorker.on('error', (err) => console.error('[lifecycle] email worker error', err.message));
 
-    // Pass-through spy: records the HTML the renderer is asked to print, still renders a real PDF.
-    const original = renderPdf.renderHtmlToPdf;
-    renderSpy = jest.spyOn(renderPdf, 'renderHtmlToPdf').mockImplementation(async (html: string) => {
-      renderedHtml.push(html);
-      return original(html);
+    // Every report goes through renderReportPdf (data-in seam; native only since P5, no browser): record the HTML its
+    // data renders to through the shared view-model and the rab-server template, then render the real (native) PDF.
+    const originalRenderReportPdf = renderPdf.renderReportPdf;
+    renderDocSpy = jest.spyOn(renderPdf, 'renderReportPdf').mockImplementation(async (doc, env) => {
+      renderedHtml.push(reportHtmlFor(doc));
+      return originalRenderReportPdf(doc, env);
     });
 
     // ---- setup (not numbered): identities ---------------------------------
@@ -254,7 +256,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   }, 120_000);
 
   afterAll(async () => {
-    renderSpy?.mockRestore();
+    renderDocSpy?.mockRestore();
     await emailWorker?.close();
     await workerRedis?.quit();
     await app.close();
@@ -345,21 +347,25 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   });
 
   // ======================================================================
-  // C. Staff accepts -> assignment CONFIRMED (no second approval)
+  // C. Staff accepts -> waits for the Internal Manager -> manager confirms (owner rule 2026-11-06: no auto-confirm)
   // ======================================================================
   it('Step 09 — Staff 2 accepts the offer', async () => {
     expect([200, 201]).toContain((await post(s2Token, `/offers/${offerS2}/accept`)).status);
   });
 
-  it('Step 10 — the assignment is CONFIRMED immediately: a Venue-Manager-requested shift needs NO second manager approval', async () => {
-    const rows = await tenantContext.runInTenantContext(imContext(), (m) =>
-      m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
-    );
-    expect(rows[0]).toEqual({ assignment_status: 'confirmed', offer_status: 'manager_confirmed' });
+  it('Step 10 — the acceptance WAITS for the Internal Manager (never auto-confirmed, even on a VM-requested shift), who then confirms it', async () => {
+    const statusOf = async () =>
+      (await tenantContext.runInTenantContext(imContext(), (m) =>
+        m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
+      ))[0];
+    expect(await statusOf()).toEqual({ assignment_status: 'staff_accepted', offer_status: 'staff_accepted' });
+    expect([200, 201]).toContain((await post(imToken, `/offers/${offerS2}/confirm`)).status);
+    expect(await statusOf()).toEqual({ assignment_status: 'confirmed', offer_status: 'manager_confirmed' });
   });
 
-  it('Step 11 — Staff 3 accepts and is confirmed the same way', async () => {
+  it('Step 11 — Staff 3 accepts and the Internal Manager confirms the same way', async () => {
     expect([200, 201]).toContain((await post(s3Token, `/offers/${offerS3}/accept`)).status);
+    expect([200, 201]).toContain((await post(imToken, `/offers/${offerS3}/confirm`)).status);
     const rows = await tenantContext.runInTenantContext(imContext(), (m) =>
       m.query(`SELECT sa.status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS3]),
     );

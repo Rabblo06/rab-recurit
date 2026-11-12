@@ -13,6 +13,7 @@ import AnimatedNumber, { COUNT_EASE } from '../../shared/components/AnimatedNumb
 import { EmptyState, ListSkeleton } from '../../shared/components/LoadingState';
 import { ListError, listErrorStatus, useRetryUnlessPermanent } from '../../shared/table-toolbar/ListPresentation';
 import { timeAgo } from '../../shared/lib/timeAgo';
+import { isWithdrawnAtDeadline, NOT_CONFIRMED_IN_TIME } from '../../shared/lib/offerConfirmation';
 import { useCurrentProfile } from '../../shared/hooks/useCurrentProfile';
 import { getUserId, subscribeToSession } from '../../shared/lib/auth-session';
 import { duration, ease, layoutSpring, period, staggerDelay, tooltip, usePrefersReducedMotion } from '../../shared/motion';
@@ -33,7 +34,11 @@ interface ShiftRow {
 }
 interface VenueRow { id: string; name: string }
 interface AttendanceRow { id: string; clockInAt: string; workedMinutes: number | null }
-interface OfferRow { id: string; status: string; sentAt: string; staffName: string; venueName: string; startsAt: string }
+interface OfferRow {
+  id: string; status: string; sentAt: string; staffName: string; venueName: string; startsAt: string;
+  /** `confirmation_deadline_passed` when the server withdrew the acceptance at its approval deadline (newer API only). */
+  closedReason?: string | null;
+}
 interface PipelineSummary {
   summary: Record<string, number>;
   report: { ready: boolean; finalisedAt?: string | null } | null;
@@ -452,7 +457,9 @@ function Readiness({ index, now }: { index: number; now: Date }) {
   ] : pipeline.data ? [
     { label: 'Staff assigned', meta: `${filled} / ${required} places filled`, done: required > 0 && filled >= required },
     { label: 'Offers answered', meta: `${(s.offered ?? 0) + (s.waiting ?? 0)} awaiting a reply`, done: (s.offered ?? 0) + (s.waiting ?? 0) === 0 && filled > 0 },
-    { label: 'Staff confirmed', meta: `${s.accepted ?? 0} accepted, awaiting confirmation`, done: (s.accepted ?? 0) === 0 && filled > 0 },
+    // `withdrawnAtDeadline` (newer API): acceptances withdrawn because no manager confirmed them in time. Shown so the
+    // manager sees places that may need filling again; it never counts as confirmed.
+    { label: 'Staff confirmed', meta: `${s.accepted ?? 0} accepted, awaiting confirmation${(s.withdrawnAtDeadline ?? 0) > 0 ? ` · ${s.withdrawnAtDeadline} ${NOT_CONFIRMED_IN_TIME.toLowerCase()}` : ''}`, done: (s.accepted ?? 0) === 0 && filled > 0 },
     { label: 'Staff clocked in', meta: `${arrived} / ${filled} arrived`, done: filled > 0 && arrived >= filled },
     { label: 'Attendance reviewed', meta: `${s.pendingReview ?? 0} pending review`, done: filled > 0 && (s.pendingReview ?? 0) === 0 && (s.clockedOut ?? 0) >= filled },
     { label: 'Timesheet ready', meta: pipeline.data.report?.ready ? 'All staff clocked out' : 'Waiting for clock-outs', done: !!pipeline.data.report?.ready },
@@ -643,7 +650,9 @@ function RecentOffers({ index }: { index: number }) {
                 <td className="cell-primary">{o.staffName ?? '–'}</td>
                 <td>{o.venueName ?? '–'}</td>
                 <td>{o.startsAt ? new Date(o.startsAt).toLocaleDateString('en-GB') : '–'}</td>
-                <td><span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span></td>
+                <td>{isWithdrawnAtDeadline(o)
+                  ? <span className="badge badge-withdrawn">{NOT_CONFIRMED_IN_TIME}</span>
+                  : <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>}</td>
                 <td>{timeAgo(o.sentAt)}</td>
               </tr>
             ))}

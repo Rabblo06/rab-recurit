@@ -1,4 +1,16 @@
-import { assertTransition, OFFER_TRANSITIONS, OfferStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, SHIFT_TRANSITIONS, ShiftStatus } from '@rab/shared';
+import {
+  assertSafePence,
+  assertTransition,
+  CONFIRMATION_DEADLINE_MESSAGES,
+  CONFIRMATION_DEADLINE_PASSED,
+  OFFER_CLOSED_REASON,
+  OFFER_TRANSITIONS,
+  OfferStatus,
+  SHIFT_ASSIGNMENT_TRANSITIONS,
+  ShiftAssignmentStatus,
+  SHIFT_TRANSITIONS,
+  ShiftStatus,
+} from '@rab/shared';
 import { ConflictException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -11,6 +23,7 @@ import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.enti
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { JobOffer } from '../entities/job-offer.entity';
 import { assertShiftActionWindowOpen } from '../../scheduling/utils/shift-action-window';
+import { confirmationDeadlineSql } from '../../scheduling/utils/assignment-time';
 import { NO_VACANCY_MESSAGE, OfferKind } from '../constants/offer-kind';
 import { occupiedSeatSql } from './shift-vacancy';
 
@@ -22,60 +35,44 @@ function isExclusionViolation(error: unknown): boolean {
 }
 
 /**
- * PHASE 4/5/6 — the shared seat-claiming core, unchanged in substance since
- * its introduction, only EXTRACTED (Phase 7.1) out of `OfferService` into a
- * standalone function so a caller with no NestJS DI container — the
- * manager-confirmation-timeout worker (`offer-expiry.job.ts`), which has no
- * way to invoke an injected class method — can reuse the EXACT SAME
- * invariants a real Manager's confirm click already enforces, rather than a
- * second, drifting implementation. This is the direct answer to Phase 7.1's
- * own instruction: "the timeout must use the SAME seat-claiming and safety
- * logic as a real Manager confirmation."
+ * A confirm attempted at or after the offer's manager-confirmation deadline (owner rule 2026-11-06). 409 with the
+ * stable `body.code` of the frozen contract. `OfferService` catches it to run the lazy withdrawal (in a second,
+ * committing transaction) before rethrowing, so the state and notifications land even when the Worker is down.
+ */
+export class ConfirmationDeadlinePassedException extends ConflictException {
+  constructor(
+    readonly offerId: string,
+    message: string = CONFIRMATION_DEADLINE_MESSAGES.CONFIRM,
+  ) {
+    super({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message });
+  }
+}
+
+/**
+ * The ONE manager-confirmation writer: the only code that sets `job_offer.status = 'manager_confirmed'` and
+ * `shift_assignment.status = 'confirmed'`. Owner rule 2026-11-06: the system NEVER confirms; there is exactly one
+ * caller, `OfferService.confirmOne()` (an Internal Manager's explicit confirm, single or confirm-all). The previous
+ * automatic callers (the staff-accept auto-confirm on Venue-Manager-requested shifts and the Worker's
+ * manager-confirmation timeout) were removed, `confirmedBy` is a required human user id, and the audit actor is always
+ * the request's own actor (`ctx.inspectedBy ?? ctx.userId`). A static spec pins that nothing else imports this file
+ * (`apply-offer-confirmation-callers.spec.ts`).
  *
- * Called from three places, all passing the SAME function, never a
- * reimplementation: `OfferService.confirmOne()` (an Internal Manager's
- * explicit confirm click, `confirmedBy` = their own userId),
- * `OfferService.staffAccept()`'s auto-confirm branch (immediately,
- * automatically, only for a Venue-Manager-request-originated shift,
- * `confirmedBy: null` since no manager actually clicked confirm — see
- * `Shift.requestedBy`'s own doc comment), and (Phase 7.1, new)
- * `offer-expiry.job.ts`'s manager-confirmation-timeout worker
- * (`confirmedBy: null`, `auditMetadataSource: 'manager_confirmation_
- * timeout'` — a SYSTEM confirmation, never a fabricated Manager identity).
+ * The deadline (standard: assignment start - 30 min; replacement/standby: window end, `confirmationDeadlineSql`) is
+ * enforced IN the offer CAS that claims the row, on the database clock: `clock_timestamp() < deadline`. The withdrawal
+ * (`withdraw-unconfirmed-offer.ts`) claims the same row with `clock_timestamp() >= deadline`, so the two are mutually
+ * exclusive. Clock choice: `clock_timestamp()` (statement time), not `now()` (transaction start): with `now()` a confirm
+ * transaction that began before the deadline but claimed the row after it would pass. See THREAT-MODEL's SECURITY
+ * TRADE-OFF (Q11): the deadline is judged at the claiming statement, not at COMMIT.
  *
- * This is where the last-seat race (rab-workforce-architecture.md §8.4)
- * actually resolves: the atomic `UPDATE ... WHERE filled_count <
- * required_count` is the lock. Whoever's UPDATE returns a row wins the
- * seat; everyone else gets zero rows back and a clean `SHIFT_FULL`, never a
- * duplicate booking.
+ * This is also where the last-seat race (rab-workforce-architecture.md §8.4) resolves: the atomic `UPDATE ... WHERE
+ * filled_count < required_count` is the lock. Whoever's UPDATE returns a row wins the seat; everyone else gets zero rows
+ * back and a clean `SHIFT_FULL`, never a duplicate booking. The offer's own status is claimed atomically FIRST (`WHERE
+ * status = 'staff_accepted'`), before the filled_count claim, so two concurrent confirms of the SAME offer (double-click,
+ * network retry) can never both reach the capacity claim and double-increment filled_count.
  *
- * The offer's own status is claimed atomically FIRST (`WHERE status =
- * :priorStatus`), before the filled_count claim below — without this, two
- * concurrent confirms of the SAME offer (double-click, network retry, or —
- * Phase 7.1 — a real Manager confirm racing the timeout worker) both pass
- * the in-memory `assertTransition` check (neither has committed yet), then
- * both reach the filled_count UPDATE: the first's row lock blocks the
- * second until it commits, and under READ COMMITTED the second's UPDATE
- * then re-evaluates against the now-committed row and can ALSO succeed if
- * capacity allows — incrementing filled_count twice for one real
- * confirmation. Claiming the offer's status first closes that window: only
- * one caller can ever win the `WHERE status = STAFF_ACCEPTED` guard, so
- * only one caller ever reaches the capacity claim for this offer. The
- * `$5`/prior-status parameter is evaluated by Postgres against the LIVE
- * row regardless of how stale the caller's own in-memory `offer` read was
- * — a caller racing the timeout worker (or vice versa) simply finds zero
- * rows if the other side already won, exactly like every other offer-CAS
- * in this codebase.
- *
- * THROWS `ConflictException` on any safety failure (shift cancelled, offer/
- * assignment no longer in the expected prior state, shift full, or a
- * double-booking exclusion-constraint violation) — deliberately never
- * caught internally, never silently downgraded to a fake success or an
- * invented auto-reject. A caller with no legitimate business reason to
- * treat that failure as terminal (Phase 7.1's timeout worker, specifically)
- * must let it propagate out of its own transaction so nothing partial
- * commits, leaving the offer retryable on a later tick — see that call
- * site's own comment.
+ * THROWS `ConflictException` on any safety failure (shift cancelled, deadline passed, offer/assignment no longer in the
+ * expected prior state, shift full, or a double-booking exclusion-constraint violation): never caught internally,
+ * never downgraded to a fake success.
  */
 export async function applyOfferConfirmation(
   manager: EntityManager,
@@ -85,29 +82,22 @@ export async function applyOfferConfirmation(
   ctx: Pick<AuthContext, 'organisationId' | 'userId' | 'inspectedBy'>,
   offer: JobOffer,
   assignment: ShiftAssignment,
-  confirmedBy: string | null,
-  auditMetadataSource?: string,
-  // Omit to preserve each EXISTING caller's own default actor attribution
-  // (`AuditService.record`'s own `ctx.inspectedBy ?? ctx.userId` — the real
-  // Manager for `confirmOne`, the staff member who triggered the
-  // auto-confirm-on-accept path) — never derived from `confirmedBy` here,
-  // since those are two different concepts (who is stored in the offer's
-  // own `confirmed_by` column vs. who the audit trail's actor is). Only the
-  // NEW system-timeout caller passes `null` explicitly, matching the same
-  // established `actorUserId: null` convention every other worker-driven
-  // audit entry in this codebase already uses (`OFFER_EXPIRED_BY_WORKER`,
-  // `OFFER_REJECTED_BY_WORKER`, ...).
-  actorUserId?: string | null,
+  confirmedBy: string,
 ): Promise<JobOffer> {
-  // PHASE 5 (§5) — lock + reload the shift BEFORE confirming, explicitly,
-  // rather than relying on the filled_count claim below to catch a
-  // cancelled shift only as a side effect of its own WHERE clause plus
-  // `assertTransition`'s incidental rejection of `cancelled -> partially_
-  // filled`/`fully_filled` (which it does, but only after the offer's own
-  // status has already been claimed — this fails earlier and with an
-  // explicit, purpose-built message). Re-acquiring the row lock here is a
-  // safe no-op when `staffAccept`'s auto-confirm path already took it
-  // moments earlier in this same transaction.
+  // Fail closed: a confirmation always names the human who made it.
+  if (!confirmedBy || !ctx.userId || !ctx.organisationId) throw new ConflictException('A confirmation needs an authenticated manager.');
+  const kind = offer.offerKind ?? OfferKind.STANDARD;
+  const deadlineMessage = kind === OfferKind.STANDARD ? CONFIRMATION_DEADLINE_MESSAGES.CONFIRM : CONFIRMATION_DEADLINE_MESSAGES.CONFIRM_REPLACEMENT;
+  // Already withdrawn at its deadline (by the Worker or an earlier lazy withdrawal): answer with the same coded 409 a
+  // late confirm gets, not a generic invalid-transition error.
+  if (
+    offer.status === OfferStatus.MANAGER_REJECTED &&
+    offer.rejectedBy == null &&
+    offer.rejectionReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED
+  ) {
+    throw new ConfirmationDeadlinePassedException(offer.id, deadlineMessage);
+  }
+  // PHASE 5 (§5) — lock + reload the shift BEFORE confirming, so a cancelled shift fails early with an explicit message.
   const shift = await manager.findOne(Shift, { where: { id: assignment.shiftId }, lock: { mode: 'pessimistic_write' } });
   if (!shift || shift.status === ShiftStatus.CANCELLED) {
     throw new ConflictException('This shift has been cancelled and can no longer be confirmed.');
@@ -115,25 +105,42 @@ export async function applyOfferConfirmation(
   if (shift.status === ShiftStatus.COMPLETED) {
     throw new ConflictException('This shift is complete and can no longer take a confirmation.');
   }
-  await assertShiftActionWindowOpen(manager, shift.id, 'confirm');
-  const kind = offer.offerKind ?? OfferKind.STANDARD;
-  if (kind !== OfferKind.STANDARD) {
-    // A replacement / standby is confirmed only while its own window is still running (never for time already over).
-    const [{ ended }] = await manager.query(`SELECT COALESCE(upper(period) <= now(), false) AS ended FROM shift_assignment WHERE id = $1`, [assignment.id]);
-    if (ended) throw new ConflictException('This shift has ended, so this replacement can no longer be confirmed.');
-  }
   assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_CONFIRMED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CONFIRMED);
 
-  const now = new Date();
-  const [, confirmedCount] = (await manager.query(
-    `UPDATE job_offer SET status = $1, manager_confirmed_at = $2, confirmed_by = $3
-       WHERE id = $4 AND status = $5`,
-    [OfferStatus.MANAGER_CONFIRMED, now, confirmedBy, offer.id, offer.status],
-  )) as [unknown, number];
-  if (confirmedCount === 0) {
+  // The deadline authority: claim the offer row only while still staff_accepted, in this organisation, and strictly
+  // before its deadline by the database clock. (A replacement/standby's deadline is its window end, so this also
+  // replaces the earlier separate "window has ended" read.)
+  const deadline = confirmationDeadlineSql('o', 'sa', 's');
+  const [confirmedRows] = (await manager.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+    `UPDATE job_offer o SET status = 'manager_confirmed', manager_confirmed_at = clock_timestamp(), confirmed_by = $1
+       FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+      WHERE o.id = $2 AND o.organisation_id = $3 AND o.status = 'staff_accepted'
+        AND sa.id = o.shift_assignment_id
+        AND clock_timestamp() < ${deadline}
+      RETURNING o.id`,
+    [confirmedBy, offer.id, ctx.organisationId],
+  )) as [Array<{ id: string }>, number];
+  if (confirmedRows.length === 0) {
+    // Why zero rows: still awaiting but past the deadline, or withdrawn at the deadline by a concurrent Worker / lazy
+    // path (whose CAS won the row lock first) — both are the deadline 409; anything else is the generic conflict.
+    const [state] = await manager.query<Array<{ status: string; past: boolean; withdrawn_at_deadline: boolean }>>(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+      `SELECT o.status, clock_timestamp() >= ${deadline} AS past,
+              (o.status = 'manager_rejected' AND o.rejected_by IS NULL AND o.rejection_reason = $2) AS withdrawn_at_deadline
+         FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+        WHERE o.id = $1`,
+      [offer.id, OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED],
+    );
+    if (state && ((state.status === OfferStatus.STAFF_ACCEPTED && state.past) || state.withdrawn_at_deadline)) {
+      throw new ConfirmationDeadlinePassedException(offer.id, deadlineMessage);
+    }
     throw new ConflictException('This offer was already confirmed or is no longer awaiting confirmation.');
   }
+  // The generic post-end action window (end + SHIFT_ACTION_WINDOW_HOURS) is always looser than the deadline now; kept as
+  // defence in depth (a failure here rolls the claim above back with the rest of this transaction).
+  await assertShiftActionWindowOpen(manager, shift.id, 'confirm');
 
   // TypeORM's manager.query() returns [rows, rowCount] for UPDATE/DELETE
   // statements (unlike SELECT, which returns rows directly) — not the rows
@@ -147,6 +154,7 @@ export async function applyOfferConfirmation(
   // occupied), and a legacy/denormalised filled_count can only ever make it stricter, never looser. filled_count is
   // re-written as effectiveFilled + 1 (≤ required_count by the WHERE, so `shift_capacity_bound` holds).
   const [claimedRows] = (await manager.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `UPDATE shift s SET filled_count = GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) + 1, updated_at = now()
        FROM (SELECT count(*) FILTER (WHERE ${occupiedSeatSql('sa')})::int AS occupied,
                     count(*) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows
@@ -198,7 +206,7 @@ export async function applyOfferConfirmation(
       // Snapshotted at confirmation, not at send or staff-accept (§1 A6) —
       // re-read from the shift row just locked by the UPDATE above, in
       // case the rate changed since the offer was sent.
-      payRateSnapshotPence: Number(row.pay_rate_pence),
+      payRateSnapshotPence: assertSafePence(Number(row.pay_rate_pence), 'shift.pay_rate_pence'),
     });
   } catch (error) {
     if (isExclusionViolation(error)) {
@@ -216,10 +224,8 @@ export async function applyOfferConfirmation(
     entityId: offer.id,
     metadata: {
       offerBatchId: offer.offerBatchId,
-      ...(auditMetadataSource ? { source: auditMetadataSource } : {}),
       ...(kind !== OfferKind.STANDARD ? { offerKind: kind, shiftId: assignment.shiftId } : {}),
     },
-    ...(actorUserId !== undefined ? { actorUserId } : {}),
   });
   const staffProfile = await manager.findOne(StaffProfile, { where: { id: offer.staffProfileId } });
   if (staffProfile) {
@@ -236,10 +242,7 @@ export async function applyOfferConfirmation(
     // `offer.accepted` (never a second outbox). Staff-facing: lets the mobile
     // Confirmed/Upcoming screens (both backed by the same `OffersProvider`,
     // see `offers_provider.dart`) refresh the moment a Manager confirms,
-    // instead of waiting for the next 30s reconcile poll. Covers all three
-    // callers of this shared function (a real Manager's confirm click, the
-    // staff-accept auto-confirm branch, and the manager-confirmation-timeout
-    // worker) for free — exactly the point of extracting this function once.
+    // instead of waiting for the next 30s reconcile poll.
     await realtimeEventService.record(manager, {
       organisationId: ctx.organisationId!,
       workspaceId: assignment.workspaceId,

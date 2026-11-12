@@ -34,7 +34,15 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
  * substitute a value from the developer's `.env` or `.env.provisioner`.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
-const describeIfDb = RUN ? describe : describe.skip;
+/**
+ * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
+ * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs
+ * in-process on the owner login (T4: workspace-provisioning-owner-login.integration.spec.ts). SKIPPED BY NAME until the
+ * separated code is deleted: REMOVE IN PR #9.
+ * Coverage: the standalone entrypoint is superseded by in-process provisioning; its four properties are T4 GAPS routed to Agent 2.
+ */
+const LEGACY_PROVISIONER_REMOVE_IN_PR9 = true;
+const describeIfDb = RUN && !LEGACY_PROVISIONER_REMOVE_IN_PR9 ? describe : describe.skip;
 jest.setTimeout(120_000);
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -120,7 +128,7 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-describeIfDb('workspace-provisioner.main.ts — standalone process (integration)', () => {
+describeIfDb('LEGACY, REMOVE IN PR #9 (skipped: separate provisioner, no crewflow login under the owner login) — workspace-provisioner.main.ts — standalone process (integration)', () => {
   let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
   const createdOrgIds: string[] = [];

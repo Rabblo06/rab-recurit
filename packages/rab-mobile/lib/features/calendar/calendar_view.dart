@@ -112,6 +112,12 @@ class CalendarShiftCard extends StatelessWidget {
                             ),
                           ],
                         ),
+                        if (item.status == CalendarStatus.withdrawn) ...[
+                          const SizedBox(height: 6),
+                          _WithdrawnChip(
+                            key: ValueKey('calendar-withdrawn-${offer.id}'),
+                          ),
+                        ],
                         const SizedBox(height: 6),
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -193,6 +199,28 @@ class CalendarShiftCard extends StatelessWidget {
           ),
         ),
       ],
+    ),
+  );
+}
+
+/// "Withdrawn" chip on a calendar card (owner decision Q8). The text states the
+/// status, so colour is never the only signal.
+class _WithdrawnChip extends StatelessWidget {
+  const _WithdrawnChip({super.key});
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+    decoration: const ShapeDecoration(
+      color: Colors.white,
+      shape: StadiumBorder(),
+    ),
+    child: Text(
+      CalendarStatus.withdrawn.label,
+      style: const TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        color: CalendarTokens.ink,
+      ),
     ),
   );
 }

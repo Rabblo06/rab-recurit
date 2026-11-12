@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
 import {
   BASELINE_WORKSPACE_MODULE_VERSION,
@@ -32,6 +33,14 @@ import {
  *     and is never marked current at a version it does not fully have. The failure is then recorded in a separate
  *     transaction (FAILED / REFUSED ledger row with a safe `error_class`, never the driver message) and the run moves on
  *     to the next schema. Rerunning resumes: applied modules are skipped, the failed one is attempted again (attempt + 1).
+ *
+ * M-T2 (WorkspaceRegistryGuardAllowList1786721410000, Twenty Mode Option A): the registry versioning guard is now an
+ * ALLOW-list — only `crewflow`, `rab_secure_owner` (its definers) and a superuser may write the versioning / drift
+ * columns. A session that merely INHERITS crewflow (Twenty mode's crewflow_owner; the separated migration identity) is
+ * refused. So each schema's work (migrateOne, recordProvisioned) runs `SET LOCAL ROLE crewflow` first when the session is
+ * not already allowed and MAY set that role (actAsMigrationRole), and restores the previous role afterwards when it runs
+ * inside the caller's transaction (savepoint mode / provisioning). A session that is neither allowed nor able to SET ROLE
+ * crewflow is not elevated: the guard then refuses its write (42501) — fail closed, never silently skipped.
  */
 
 /** Minimal query surface: a pg `Client` (`(sql, p) => client.query(sql, p).then(r => r.rows)`) or a TypeORM QueryRunner. */
@@ -154,6 +163,19 @@ export class WorkspaceSchemaMigrator {
   }
 
   async migrateOne(workspaceId: string, organisationId: string, options: MigrateOptions = {}): Promise<WorkspaceMigrationOutcome> {
+    // Savepoint mode runs inside the caller's (migration) transaction: a SET LOCAL ROLE taken inside the savepoint survives
+    // RELEASE SAVEPOINT, so the caller's role is restored afterwards. 'own' mode ends its transaction itself (COMMIT /
+    // ROLLBACK clear it).
+    if (options.txMode !== 'savepoint') return this.migrateOneInTransaction(workspaceId, organisationId, options);
+    const previousRole = await this.currentRoleSetting();
+    try {
+      return await this.migrateOneInTransaction(workspaceId, organisationId, options);
+    } finally {
+      await this.restoreRole(previousRole);
+    }
+  }
+
+  private async migrateOneInTransaction(workspaceId: string, organisationId: string, options: MigrateOptions): Promise<WorkspaceMigrationOutcome> {
     const schemaName = workspaceSchemaNameOf(workspaceId);
     const through = options.throughVersion ?? LATEST_WORKSPACE_MODULE_VERSION;
     modulesThrough(through); // validates the target before anything is opened
@@ -167,6 +189,7 @@ export class WorkspaceSchemaMigrator {
     await this.db.query(savepoint ? 'SAVEPOINT workspace_schema_migrate' : 'BEGIN');
     try {
       if (!savepoint) await this.db.query(`SET LOCAL lock_timeout = '${lockTimeout}ms'`);
+      await this.actAsMigrationRole();
       await this.bind(organisationId, workspaceId);
       await this.db.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext($1))', [schemaName]);
       const reg: RegistryRow[] = await this.db.query(
@@ -231,11 +254,45 @@ export class WorkspaceSchemaMigrator {
   async recordProvisioned(workspaceId: string, organisationId: string, throughVersion: number, startedAt: string, appVersion?: string): Promise<void> {
     const schemaName = workspaceSchemaNameOf(workspaceId);
     const version = resolveAppVersion(appVersion);
-    for (const module of modulesThrough(throughVersion)) {
-      await this.insertLedger(workspaceId, organisationId, schemaName, module, 0, throughVersion, 'APPLIED', startedAt, null, version);
+    // Inside the caller's provisioning transaction: elevate to crewflow only for these writes (M-T2), then restore.
+    const previousRole = await this.currentRoleSetting();
+    await this.actAsMigrationRole();
+    try {
+      for (const module of modulesThrough(throughVersion)) {
+        await this.insertLedger(workspaceId, organisationId, schemaName, module, 0, throughVersion, 'APPLIED', startedAt, null, version);
+      }
+      await this.db.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [workspaceId, throughVersion]);
+      await this.verifyAndRecordFingerprint(workspaceId, throughVersion, true, 'provisioned');
+    } finally {
+      await this.restoreRole(previousRole);
     }
-    await this.db.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [workspaceId, throughVersion]);
-    await this.verifyAndRecordFingerprint(workspaceId, throughVersion, true, 'provisioned');
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+
+  /** The session's `role` setting ('none' when no SET ROLE is in effect). */
+  private async currentRoleSetting(): Promise<string> {
+    const rows: Array<{ role: string }> = await this.db.query(`SELECT pg_catalog.current_setting('role') AS role`);
+    return rows[0]?.role ?? 'none';
+  }
+
+  /**
+   * M-T2: `SET LOCAL ROLE crewflow` when the session is not already allowed by the registry guard (crewflow,
+   * rab_secure_owner, superuser) and may SET that role. Transaction-local, never session-level: it can never outlive the
+   * transaction on a pooled connection.
+   */
+  private async actAsMigrationRole(): Promise<void> {
+    const rows: Array<{ allowed: boolean; can_set: boolean }> = await this.db.query(
+      `SELECT (current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
+               OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false)) AS allowed,
+              EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow') AND pg_catalog.pg_has_role(current_user, 'crewflow', 'SET') AS can_set`,
+    );
+    if (!rows[0]?.allowed && rows[0]?.can_set) await this.db.query(`SELECT pg_catalog.set_config('role', 'crewflow', true)`);
+  }
+
+  /** Restores a role setting captured by currentRoleSetting (transaction-local; a no-op if the transaction already ended). */
+  private async restoreRole(previous: string): Promise<void> {
+    await this.db.query(`SELECT pg_catalog.set_config('role', $1, true)`, [previous]).catch(() => undefined);
   }
 
   // ---------------------------------------------------------------------------------------------------------------

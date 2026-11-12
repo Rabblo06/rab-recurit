@@ -84,8 +84,8 @@ Source-backed inventory of every feature the documentation covers: its implement
 | Atomic accept (pending and not expired) | Verified | `offer.service.ts:841-847` | Offer suites | shifts/staff-responses |
 | Decline with no reason (mobile) | Implemented | `M/features/offers/schedule_offer_detail_screen.dart` | Mobile audit | shifts/staff-responses, mobile/offers |
 | Confirm / reject / confirm-all per batch | Verified | `offer.controller.ts:113-118`, `offer.service.ts:1062` | Offer suites | shifts/confirming-offers |
-| Auto-confirm on accept for venue requests | Verified | `offer.service.ts:820-828,915-925` | Suites | shifts/confirming-offers, shifts/venue-requests |
-| Auto-confirm after 60 min manager inaction | Verified | `W/queues/rab-offers/offer-expiry.job.ts:200-310` | Worker suites; spot check (`'Shift auto-confirmed'`) | shifts/offer-expiry |
+| No automatic confirmation, including venue requests (owner rule 2026-11-06; replaces the former auto-confirm on accept for venue requests) | Implemented | `SH/constants/offer-confirmation.ts`, `S/modules/offer/services/offer.service.ts` | Code read (2026-11-06) | shifts/confirming-offers, shifts/venue-requests, shifts/staff-responses |
+| Unconfirmed acceptance withdrawn at the approval deadline (standard: start − 30 min, fixed; replacement/standby: window end) — replaces the former auto-confirm after 60 min manager inaction | Implemented | `S/modules/offer/services/withdraw-unconfirmed-offer.ts`, `W/queues/rab-offers/offer-expiry.job.ts` | Code read (2026-11-06) | shifts/offer-expiry, shifts/confirming-offers, notifications/automation |
 | Offer expiry 48 h default, checked every 60 s | Verified | `offer.service.ts:357`, worker loop | Spot check | shifts/offer-expiry |
 | Replacement suggestions (≤ 5, never auto-send) | Implemented (no UI list) | `W/queues/rab-offers/replacement-staff.job.ts` | Spot check: no `replacement-requests` call in `F` | shifts/sending-offers |
 | Replacement offers from live board | Implemented | `F/features/scheduling/StaffSelectionPage.tsx:60`, `venue-offer-pipeline.service.ts:229-259` | Code read | shifts/live-staffing-pipeline |
@@ -143,7 +143,7 @@ Source-backed inventory of every feature the documentation covers: its implement
 | --- | --- | --- |
 | `breakPaid` stored but never applied to pay | `S/modules/venue/entities/venue.entity.ts:56` | Warning on venue and pay pages |
 | Admin Panel SMTP settings unused by the email driver | `email-driver.factory.ts:21-47` | Warning on administration page |
-| `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` comment says auto-reject; job auto-confirms | `environment-variables.ts:558-579` vs `offer-expiry.job.ts` | Docs follow the job's behaviour |
+| ~~`MANAGER_CONFIRMATION_TIMEOUT_MINUTES` comment says auto-reject; job auto-confirms~~ — resolved 2026-11-06: the variable was removed and the system never confirms (owner rule) | `environment-variables.ts` vs `offer-expiry.job.ts` | Docs describe the approval-deadline withdrawal |
 | `/users/:id` legacy page calls a non-existent `/users/:id` endpoint | `F/features/users/UserProfile.tsx` | Not documented |
 | Orphan settings routes (workspace security/domains/roles/team) | `F/App.tsx`, `SettingsSidebar.tsx` | Not documented as navigable |
 | Venue manager "Scheduled" row shows `?` between times | `M/features/venue_manager/venue_manager_screens.dart:1287` | Not documented |

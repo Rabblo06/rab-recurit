@@ -138,9 +138,10 @@ export class AuthService {
   ) {}
 
   /**
-   * A security notice, queued (never inline) — the password change itself
-   * has already committed by the time this is called; delivery of the
-   * notice never gates or blocks that. Never called for the very first
+   * A security notice, queued (never inline) — written in the SAME
+   * transaction as the password change and fast-published only after that
+   * transaction commits (`publishAfterCommit`); delivery of the notice
+   * never gates or blocks the change. Never called for the very first
    * password an account ever gets (see `resetPassword`'s `INITIAL_SETUP`
    * branch, which sends a welcome email instead).
    */
@@ -153,7 +154,7 @@ export class AuthService {
       targetUserId: userId,
       rendered,
     });
-    void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+    this.emailOutbox.publishAfterCommit(manager, (id, orgId) => this.emailQueue.publish(id, orgId), row);
   }
 
   private dummyHashPromise: Promise<string> | null = null;
@@ -494,7 +495,7 @@ export class AuthService {
             targetUserId: user.id,
             rendered,
           });
-          void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+          this.emailOutbox.publishAfterCommit(manager, (id, orgId) => this.emailQueue.publish(id, orgId), row);
         }
       } else {
         await manager.update(User, user.id, { lastLoginAt: new Date() });
@@ -1027,8 +1028,10 @@ export class AuthService {
         const resetUrl = `${this.env.get('ACCOUNTS_URL')}/reset-password?token=${token}${dto.applicationTarget ? `&applicationTarget=${dto.applicationTarget}` : ''}`;
         const rendered = renderPasswordResetEmail({ firstName: user.firstName, resetUrl, selfRequested: true });
         // Queued, not awaited-inline — anti-enumeration is preserved (every
-        // candidate does the same DB write regardless of outcome; no
-        // network I/O of any kind happens in this request either way now).
+        // candidate does the same DB write regardless of outcome; the request
+        // never waits on network I/O: the fast publish is registered here and
+        // runs detached after this transaction commits, or never if it rolls
+        // back; the response-time floor above pads every request either way).
         const row = await this.emailOutbox.enqueue(manager, {
           organisationId: user.organisationId,
           jobType: EmailOutboxJobType.PASSWORD_RESET,
@@ -1037,7 +1040,7 @@ export class AuthService {
           passwordResetTokenId: tokenId,
           rendered,
         });
-        void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+        this.emailOutbox.publishAfterCommit(manager, (id, orgId) => this.emailQueue.publish(id, orgId), row);
         await this.auditService.record(manager, ctx, AuditAction.PASSWORD_RESET_REQUESTED, { targetUserId: user.id });
       });
     }
@@ -1118,7 +1121,7 @@ export class AuthService {
           targetUserId: user.id,
           rendered,
         });
-        void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), row);
+        this.emailOutbox.publishAfterCommit(manager, (id, orgId) => this.emailQueue.publish(id, orgId), row);
       } else {
         await this.sendPasswordUpdatedEmail(manager, user.organisationId, user.id, user.email, user.firstName);
       }

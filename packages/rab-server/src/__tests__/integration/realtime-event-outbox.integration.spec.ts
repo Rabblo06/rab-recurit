@@ -22,8 +22,7 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { OfferService } from '../../modules/offer/services/offer.service';
-import { applyOfferConfirmation } from '../../modules/offer/services/apply-offer-confirmation';
-import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
+import { withdrawUnconfirmedOffer } from '../../modules/offer/services/withdraw-unconfirmed-offer';
 import { AuditService } from '../../engine/core-modules/audit/audit.service';
 import { NotificationService } from '../../modules/notification/services/notification.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
@@ -417,29 +416,33 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
       expect(row!.organisation_id).toBe(org.id);
     });
 
-    it('Stage 5 — applyOfferConfirmation() via the manager-confirmation-timeout worker path produces the SAME offer.confirmed event, addressed the same way', async () => {
-      // Proves the shared-function insertion point covers the worker caller too, not just the
-      // real Manager's own confirm click — the whole point of extracting applyOfferConfirmation
-      // once (see that file's own doc comment: three callers, one canonical core).
+    it('owner rule 2026-11-06 — the deadline withdrawal (the Worker path; it never confirms) emits ONE offer.rejected per recipient, ids only', async () => {
+      // Replaces the Stage 5 "timeout worker auto-confirms → offer.confirmed" proof: that path no longer exists.
       const org = await factory.createOrganisation();
-      const manager = await factory.createInternalManager(org, { label: 'rt-confirm-timeout-mgr' });
-      const staff = await factory.createStaff(org, { owner: manager, label: 'rt-confirm-timeout-staff' });
+      const manager = await factory.createInternalManager(org, { label: 'rt-deadline-mgr' });
+      const staff = await factory.createStaff(org, { owner: manager, label: 'rt-deadline-staff' });
       await activateStaff(manager, staff);
       const { shiftId } = await seedSendableShift(manager);
       const offer = await offerService.send(offerCtx(manager), shiftId, { staffProfileId: staff.profileId! });
-
       const staffCtx: AuthContext = { organisationId: org.id, workspaceId: manager.workspaceId, userId: staff.userId, role: '' };
       const accepted = await offerService.staffAccept(staffCtx, offer.id);
 
-      await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, async (m) => {
-        const assignment = await m.findOneByOrFail(ShiftAssignment, { id: accepted.shiftAssignmentId });
-        return applyOfferConfirmation(m, auditService, notificationService, realtimeEventService, { organisationId: org.id, userId: '' }, accepted, assignment, null, 'manager_confirmation_timeout', null);
-      });
+      const ctx = { organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' };
+      const withdraw = () =>
+        tenantContext.runInTenantContext(ctx, async (m) => {
+          // FIXTURE (tests only): the assignment now starts in 10 minutes, so its approval deadline passed 20 minutes ago.
+          await m.query(`UPDATE shift_assignment SET period = tstzrange(now() + interval '10 minutes', now() + interval '8 hours', '[)') WHERE id = $1`, [accepted.shiftAssignmentId]);
+          return withdrawUnconfirmedOffer(m, { auditService, notificationService, realtimeEventService }, org.id, offer.id, 'worker_pointer');
+        });
+      expect(await withdraw()).not.toBeNull();
+      expect(await withdraw()).toBeNull(); // the CAS: a second withdrawal (retry / replica) does nothing
 
-      const row = await rowFor(`offer.confirmed:${offer.id}`);
-      expect(row).not.toBeNull();
-      expect(row!.event_type).toBe(RealtimeEventType.OFFER_CONFIRMED);
-      expect(row!.target_user_id).toBe(staff.userId);
+      const staffRow = await rowFor(`offer.rejected:${offer.id}:${staff.userId}`);
+      expect(staffRow).not.toBeNull();
+      expect(staffRow!.event_type).toBe(RealtimeEventType.OFFER_REJECTED);
+      expect(await countFor(`offer.rejected:${offer.id}:${staff.userId}`)).toBe(1);
+      expect(await countFor(`offer.rejected:${offer.id}:${manager.userId}`)).toBe(1);
+      expect(await rowFor(`offer.confirmed:${offer.id}`)).toBeNull();
     });
   });
 });

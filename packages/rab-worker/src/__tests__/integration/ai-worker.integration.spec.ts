@@ -57,9 +57,9 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
     expect(CONSUMER_QUEUES.ai).toMatchObject({ name: 'rab-ai', prefix: 'bull', concurrency: 4, lockDurationMs: 60_000 });
   });
 
-  it('the step loop runs on the restricted runtime role (crewflow_app, no BYPASSRLS)', async () => {
+  it('the step loop runs on the runtime login (crewflow_owner, no BYPASSRLS; BC-02)', async () => {
     const [row] = await moduleRef.get(DataSource).query(`SELECT current_user AS u, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass`);
-    expect(row).toEqual({ u: 'crewflow_app', bypass: false });
+    expect(row).toEqual({ u: 'crewflow_owner', bypass: false });
     expect(moduleRef.get(AiTurnConsumer)).toBeInstanceOf(AiTurnConsumer);
     expect(moduleRef.get(AiTurnRunnerService, { strict: false })).toBeInstanceOf(AiTurnRunnerService);
     // Phase 2 (P2-C11): the Worker graph — and only it — has the model side.
@@ -84,7 +84,7 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
       // Duplicate add with the same jobId is deduplicated by BullMQ (one job per turn).
       const again = await queue.add(AI_TURN_JOB_NAME, forged, { jobId: aiTurnJobId(forged.turnId), attempts: 1 });
       expect(again.id).toBe(job.id);
-      // Phase 2 dispatch on job.name (T2-17): a forged title job is skipped; agent-run is refused; a kind that does not
+      // Phase 2 dispatch on job.name (T2-17): a forged title job is skipped; agent-run is failed closed (D-Q1); a kind that does not
       // match its job name is skipped. 5b: a resume job runs the turn loop, whose RLS-bound claim finds no such turn for
       // forged ids: skipped, nothing written.
       const forgedTitle = { ...forged, v: 2, kind: 'title' } as unknown as AiTurnJobData;
@@ -93,7 +93,10 @@ describeIfDb('rab-ai consumer in the WorkerModule (integration)', () => {
       const resume = await queue.add(AI_TURN_JOB_NAME, { ...forged, v: 2, kind: 'resume' } as unknown as AiTurnJobData, { jobId: aiTurnJobId(randomUUID()), attempts: 1 });
       expect(await resume.waitUntilFinished(events, 30_000)).toBe('skipped');
       const agent = await queue.add('ai-agent-run', { ...forged, v: 2, kind: 'agent-run' } as unknown as AiTurnJobData, { jobId: `ai-agent-run.${randomUUID()}`, attempts: 1 });
-      expect(await agent.waitUntilFinished(events, 30_000)).toBe('refused');
+      // D-Q1: `ai-agent-run` is not a registered rab-ai job name (EX-3 not approved), so the consumer Worker now fails it
+      // closed BEFORE the AI handler runs (BullMQ failed set, nothing read) instead of completing it as 'refused'. The
+      // processor's own refusal stays as defence in depth (ai-agents-no-execution static spec).
+      await expect(agent.waitUntilFinished(events, 30_000)).rejects.toThrow('unknown job name for rab-ai');
       const mismatch = await queue.add('ai-title', { ...forged, v: 2, kind: 'turn' } as unknown as AiTurnJobData, { jobId: `ai-title.${randomUUID()}`, attempts: 1 });
       expect(await mismatch.waitUntilFinished(events, 30_000)).toBe('skipped');
       // Shutdown: nothing in flight here, and both abort hooks exist (main.ts calls them on SIGTERM).

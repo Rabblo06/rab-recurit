@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { Client } from 'pg';
 import { DataSourceOptions, MigrationInterface } from 'typeorm';
 
 import { BootGateReport, DatabaseBootGateError, runDatabaseBootGates, RunBootGatesOptions } from '../../database/boot-checks/database-boot-gates';
@@ -45,6 +47,20 @@ async function refusedAt(promise: Promise<unknown>, gate: string, pattern: RegEx
   expect((error as Error).message).not.toMatch(/postgres:\/\//);
 }
 
+/**
+ * An OLD-timestamped migration the ledger has never seen while newer ones are applied: pending, but NOT an in-order tail
+ * (out of order), so no C3 relaxation can apply.
+ */
+class BootGateFakeOutOfOrder1700000000000 implements MigrationInterface {
+  name = 'BootGateFakeOutOfOrder1700000000000';
+  async up(): Promise<void> {
+    throw new Error('never run');
+  }
+  async down(): Promise<void> {
+    throw new Error('never run');
+  }
+}
+
 /** A migration the ledger has never seen: the database is then "behind the code". */
 class BootGateFakePending9999999999999 implements MigrationInterface {
   name = 'BootGateFakePending9999999999999';
@@ -56,6 +72,8 @@ class BootGateFakePending9999999999999 implements MigrationInterface {
   }
 }
 
+const OWNER_LOGIN_DOCUMENTED_WARNING = (w: string) => w.startsWith('BC-08 (DBA-01') || w.startsWith('semantic posture: the PostgreSQL');
+
 describe('database boot gates (integration, migrations-only test database)', () => {
   let report: BootGateReport;
 
@@ -63,23 +81,28 @@ describe('database boot gates (integration, migrations-only test database)', () 
     report = await runDatabaseBootGates('api', options(appUrl));
   });
 
-  it('the API runtime login passes every gate: crewflow_app, PostgreSQL 16+, extensions, FORCE RLS, no pending migration', () => {
-    expect(report.role).toBe('crewflow_app');
+  // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner. Its boot report also carries the
+  // documented owner-login warnings: BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05); asserted present) and, on a database with
+  // workspace schemas the PostgreSQL golden has no template for, the semantic-posture note. Any OTHER warning still counts.
+  it('the API runtime login passes every gate: crewflow_owner, PostgreSQL 16+, extensions, FORCE RLS, no pending migration', () => {
+    expect(report.role).toBe('crewflow_owner');
     expect(report.serverVersionNum).toBeGreaterThanOrEqual(160000);
     expect(report.forceRlsTables).toBeGreaterThanOrEqual(10);
     // The marker migration is applied on the harness-built database but never left bound: unbound (absent on an older build).
     expect(['absent', 'unbound']).toContain(report.identity);
-    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings.filter((w) => w.startsWith('BC-08 (DBA-01'))).toHaveLength(1);
+    expect(report.warnings.filter((w) => !OWNER_LOGIN_DOCUMENTED_WARNING(w))).toHaveLength(1);
   });
 
-  it('the CLI gate accepts crewflow_app for runtime commands and for the operator commands', async () => {
-    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'storage:reconcile' }))).resolves.toMatchObject({ role: 'crewflow_app' });
-    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow_app' });
+  it('the CLI gate accepts the runtime login (crewflow_owner, BC-02) for runtime commands and for the operator commands', async () => {
+    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'storage:reconcile' }))).resolves.toMatchObject({ role: 'crewflow_owner' });
+    await expect(runDatabaseBootGates('cli', options(appUrl, { cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow_owner' });
   });
 
   it('role: a superuser login is refused (API and CLI)', async () => {
-    await refusedAt(runDatabaseBootGates('api', options(adminUrl)), 'role', /expected crewflow_app/);
-    await refusedAt(runDatabaseBootGates('cli', options(adminUrl, { cliCommand: 'bootstrap-admin' })), 'role', /expected crewflow or crewflow_app/);
+    // Still refused; the message names the one login now (BC-02).
+    await refusedAt(runDatabaseBootGates('api', options(adminUrl)), 'role', /expected crewflow_owner/);
+    await refusedAt(runDatabaseBootGates('cli', options(adminUrl, { cliCommand: 'bootstrap-admin' })), 'role', /expected crewflow_owner/); // still refused (BC-02)
   });
 
   it('role: a privileged login cannot even ask to SET ROLE to crewflow_app — the factory refuses the URL option before connecting', async () => {
@@ -91,9 +114,41 @@ describe('database boot gates (integration, migrations-only test database)', () 
     await refusedAt(runDatabaseBootGates('api', options(withRole.toString())), 'connect', /sets "options"/);
   });
 
-  it('pending migrations: a migration the ledger lacks refuses the boot', async () => {
+  // ASSERTION CHANGE (owner decision 2026-11-05, C3 "the Worker starts too, like Twenty"): one pending migration that is
+  // an in-order tail of the chain, on a database with physical upgrade evidence (CHAIN-PARTIAL and not a fresh install),
+  // no longer refuses the WORKER: it starts with the one partly-upgraded warning. The refusals that still hold are asserted
+  // here: the API without CREWFLOW_UPGRADE_INCOMPLETE, and the Worker on an out-of-order pending migration.
+  it('pending migrations: the API without CREWFLOW_UPGRADE_INCOMPLETE refuses one pending migration', async () => {
     const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakePending9999999999999];
-    await refusedAt(runDatabaseBootGates('worker', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakePending9999999999999/);
+    await refusedAt(runDatabaseBootGates('api', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakePending9999999999999/);
+  });
+
+  it('pending migrations: the Worker refuses an OUT-OF-ORDER pending migration (older than the newest applied)', async () => {
+    const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakeOutOfOrder1700000000000];
+    await refusedAt(runDatabaseBootGates('worker', options(appUrl, {}, migrations)), 'pending-migrations', /1 migration\(s\) are not applied: BootGateFakeOutOfOrder1700000000000/);
+  });
+
+  it('pending migrations: the Worker STARTS on an in-order pending tail with upgrade evidence (C3), with the partly-upgraded warning', async () => {
+    // Physical upgrade evidence, deterministic on any test database (a pristine owner-login fresh install has none and must
+    // refuse — the first-install rule, covered by unit tests): a rolled-back INSERT still allocates a heap page, so
+    // pg_relation_size(core.organisation) > 0, exactly what Agent 1's fresh-install proof reads. Superuser fixture.
+    const su = new Client({ connectionString: adminUrl });
+    await su.connect();
+    try {
+      await su.query('BEGIN');
+      const slug = `bootgate-evidence-${randomUUID().slice(0, 8)}`;
+      await su.query(`INSERT INTO core.organisation (name, slug) VALUES ($1, $2)`, [slug, slug]);
+      await su.query('ROLLBACK');
+    } finally {
+      await su.end();
+    }
+    const migrations = [...((coreDataSourceOptions.migrations as string[]) ?? []), BootGateFakePending9999999999999];
+    const lines: string[] = [];
+    const result = await runDatabaseBootGates('worker', options(appUrl, { log: (l: string) => lines.push(l) }, migrations));
+    expect(result).toBeDefined();
+    const warnings = [...result.warnings, ...lines].join(String.fromCharCode(10));
+    expect(warnings).toMatch(/running on a partly-upgraded schema: BootGateFakePending9999999999999 and 0 more not applied/);
+    expect(warnings).toMatch(/semantic posture NOT compared with the golden: UPGRADE INCOMPLETE/);
   });
 
   it('identity: PG_EXPECTED_DATABASE_NAME must equal current_database()', async () => {
@@ -101,7 +156,7 @@ describe('database boot gates (integration, migrations-only test database)', () 
     await expect(runDatabaseBootGates('api', options(appUrl, { env: { ...NON_PROD, PG_EXPECTED_DATABASE_NAME: report.database } }))).resolves.toBeDefined();
   });
 
-  it('identity: a declared identity cannot match an absent/unbound marker; production fails closed without a bound marker', async () => {
+  it('identity: a declared identity cannot match an absent/unbound marker; DECLARED production fails closed without a bound marker (undeclared production only warns: BC-11, owner-accepted 2026-11-05, covered by Agent 1 unit tests; it needs TLS)', async () => {
     await refusedAt(
       runDatabaseBootGates('api', options(appUrl, { env: { ...NON_PROD, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID } })),
       'identity',
@@ -147,9 +202,9 @@ describe('B3 identity in the command and runtime guards (integration, marker abs
 
   it('the runtime guard reads the marker on its probe connection: unmarked non-production passes, a declared identity is refused', async () => {
     silence();
-    await expect(assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ classification: 'LOCAL' });
+    await expect(assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', PG_DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ classification: 'LOCAL' });
     await expect(
-      assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
+      assertRuntimeDatabaseIdentity('api', { NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'ci', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
     ).rejects.toBeInstanceOf(RuntimeDbError);
   });
 });

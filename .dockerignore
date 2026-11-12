@@ -23,3 +23,17 @@ packages/rab-docs
 **/.*.env
 !**/.env.example
 .audit
+
+# H3: local Yarn state and caches (the images resolve dependencies from yarn.lock in their own stages; a developer's
+# install state must not steer `yarn workspaces focus`), local agent/editor configuration, and test/coverage output.
+# Nothing here is needed to build; none of it reaches a runtime image (the final stages copy only named dist folders).
+.yarn/install-state.gz
+.yarn/build-state.yml
+.yarn/cache
+.yarn/unplugged
+.claude
+.agents
+**/coverage
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo

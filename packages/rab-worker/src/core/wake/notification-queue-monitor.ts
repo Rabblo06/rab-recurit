@@ -129,6 +129,7 @@ export class NotificationQueueMonitor {
     if (typeof transaction === 'function') {
       // queryTimeoutMs is an integer 1..5000 computed above — never caller text.
       return transaction.call(this.db, async (manager: DispatchQueryable) => {
+        // sql-injection-reviewed: integer code constant / validated integer setting, not request data.
         await manager.query(`SET LOCAL statement_timeout = ${this.queryTimeoutMs}`);
         return manager.query(NOTIFICATION_QUEUE_USAGE_SQL);
       });

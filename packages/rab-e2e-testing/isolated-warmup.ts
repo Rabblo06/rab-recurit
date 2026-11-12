@@ -9,15 +9,29 @@ import { chromium, type FullConfig } from '@playwright/test';
  * for one browser on Windows, longer with several workers loading at once), and a lazy route's first visit pays its own
  * compile while React Router keeps the previous route rendered. The isolated specs measure animations and frame timings,
  * so that one-off compile would be timed as if it were the app. This loads the app once and imports every lazy route
- * module listed in rab-front's App.tsx, so the server's transform cache is warm. No API is involved: every /rest/v1
+ * module listed in rab-front's App.tsx and shell/consolePages.ts, so the server's transform cache is warm. No API is involved: every /rest/v1
  * request is answered 401 here, and nothing is asserted.
  */
 export default async function warmIsolatedDevServer(config: FullConfig): Promise<void> {
   const baseURL = config.projects[0]?.use.baseURL;
   if (!baseURL) throw new Error('playwright.isolated.config.ts must set use.baseURL');
-  const appSource = fs.readFileSync(path.resolve(__dirname, '../rab-front/src/App.tsx'), 'utf8');
-  const lazyModules = [...appSource.matchAll(/lazy\(\(\) => import\('\.\/([^']+)'\)\)/g)].map((m) => `/src/${m[1]}`);
-  if (!lazyModules.length) throw new Error('No lazy routes found in rab-front/src/App.tsx; update isolated-warmup.ts');
+  // Lazy routes: the auth/onboarding pages in App.tsx and the console pages in shell/consolePages.ts (both declared with
+  // `lazy(...)` or `lazyWithPreload(...)`; import paths are relative to their own file).
+  const routeSources: Array<{ file: string; dir: string }> = [
+    { file: '../rab-front/src/App.tsx', dir: '/src' },
+    { file: '../rab-front/src/shell/consolePages.ts', dir: '/src/shell' },
+  ];
+  const lazyModules = [
+    ...new Set(
+      routeSources.flatMap(({ file, dir }) => {
+        const source = fs.readFileSync(path.resolve(__dirname, file), 'utf8');
+        return [...source.matchAll(/(?:lazy|lazyWithPreload)\(\(\) => import\('(\.{1,2}\/[^']+)'\)/g)].map((m) =>
+          path.posix.normalize(`${dir}/${m[1]}`),
+        );
+      }),
+    ),
+  ];
+  if (!lazyModules.length) throw new Error('No lazy routes found in rab-front App.tsx / shell/consolePages.ts; update isolated-warmup.ts');
 
   const browser = await chromium.launch();
   try {

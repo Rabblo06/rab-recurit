@@ -5,6 +5,8 @@ import { useQuery } from '@tanstack/react-query';
 import { IconChevronLeft, IconChevronRight, IconPlus, IconCalendar } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import { fetchAllPages } from '../../shared/table-toolbar/pagination';
+import { jobRolesQuery } from '../../shared/queries/navQueries';
+import { venuesWithArchivedQuery } from './schedulingQueries';
 import { CalendarSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 
@@ -67,15 +69,9 @@ export default function Calendar() {
     // skeleton; the detail line says "Loading schedule…" until the real data for the new range arrives.
     placeholderData: (previous) => previous,
   });
-  const { data: venues = [], isLoading: venuesLoading } = useQuery({
-    queryKey: ['venues', 'with-archived'],
-    // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
-    queryFn: () => fetchAllPages<Venue>('/venues', { includeArchived: true }),
-  });
-  const { data: jobRoles = [], isLoading: rolesLoading } = useQuery({
-    queryKey: ['job-roles'],
-    queryFn: async () => { const { data } = await api.get<JobRole[]>('/job-roles'); return data; },
-  });
+  // Name resolution for historical shifts: archived venues included (wave 5 excludes them from the plain list).
+  const { data: venues = [], isLoading: venuesLoading } = useQuery(venuesWithArchivedQuery<Venue>());
+  const { data: jobRoles = [], isLoading: rolesLoading } = useQuery(jobRolesQuery<JobRole>());
   const venueName = (id: string) => venues.find((v) => v.id === id)?.name ?? '';
   const roleName = (id: string) => jobRoles.find((r) => r.id === id)?.name ?? '';
 

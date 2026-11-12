@@ -1,4 +1,4 @@
-import { assertTransition, NotificationType, OFFER_TRANSITIONS, OfferStatus, ReplacementRequestStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftAssignmentStatusType, ShiftStatus } from '@rab/shared';
+import { assertTransition, NotificationType, OFFER_CLOSED_REASON, OFFER_TRANSITIONS, OfferStatus, ReplacementRequestStatus, SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus, ShiftAssignmentStatusType, ShiftStatus } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -129,13 +129,13 @@ export async function runShiftCancellationFollowupCycle(
       // PHASE 7 — the offer is claimed FIRST, the assignment SECOND — same
       // lock-acquisition order as every other offer-lifecycle transition
       // in this codebase (`OfferService.managerReject`, `apply-offer-
-      // confirmation.ts` — used by manual confirm, Venue-request auto-
-      // confirm, and (Phase 7.1) the manager-confirmation-timeout worker's
-      // own auto-confirm — and `claim-expired-offer.ts`: all claim
+      // confirmation.ts` — the manual confirm, the only confirm path — and
+      // `withdraw-unconfirmed-offer.ts` (the manager-confirmation-deadline
+      // withdrawal) and `claim-expired-offer.ts`: all claim
       // `job_offer` before touching `shift_assignment`). Ordering
       // this the other way round (as a prior draft of this job did —
       // assignment first, offer second) risks a real Postgres deadlock
-      // against the manager-confirmation-timeout worker, which can now race
+      // against the manager-confirmation-deadline worker, which can race
       // this same offer/assignment pair on every tick: if the two jobs lock
       // the pair in opposite orders concurrently, each can end up waiting on
       // a row the other already holds. Both CAS guards below are new — this
@@ -156,7 +156,7 @@ export async function runShiftCancellationFollowupCycle(
             await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_WITHDRAWN_BY_WORKER, {
               entityType: 'offer',
               entityId: offer.id,
-              metadata: { reason: 'shift_cancelled', shiftId: shift.id },
+              metadata: { reason: OFFER_CLOSED_REASON.SHIFT_CANCELLED, shiftId: shift.id },
               actorUserId: null,
             });
             offerClosed = true;
@@ -176,13 +176,13 @@ export async function runShiftCancellationFollowupCycle(
             await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.OFFER_REJECTED_BY_WORKER, {
               entityType: 'offer',
               entityId: offer.id,
-              metadata: { reason: 'shift_cancelled', shiftId: shift.id },
+              metadata: { reason: OFFER_CLOSED_REASON.SHIFT_CANCELLED, shiftId: shift.id },
               actorUserId: null,
             });
             offerClosed = true;
           }
-          // A zero-row result here means Phase 7's manager-confirmation-
-          // timeout worker (or a manual reject) already claimed this exact
+          // A zero-row result here means the manager-confirmation-deadline
+          // withdrawal (or a manual confirm/reject) already claimed this exact
           // offer moments earlier — its own audit/notification already
           // fired for that winning transition; this job does nothing
           // further for the offer.

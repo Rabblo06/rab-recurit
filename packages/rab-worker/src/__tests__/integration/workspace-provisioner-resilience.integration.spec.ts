@@ -53,7 +53,15 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
  *      so a waiting cycle provisions within its bound.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
-const describeIfDb = RUN ? describe : describe.skip;
+/**
+ * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
+ * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs
+ * in-process on the owner login (T4: workspace-provisioning-owner-login.integration.spec.ts). SKIPPED BY NAME until the
+ * separated code is deleted: REMOVE IN PR #9.
+ * Coverage: R1, R3, R4 and connection loss are covered by T4 (workspace-provisioning-owner-login 3/4/5); R5a (shutdown aborts the lock wait) and R5b (a foreign lock holder dies) are T4 GAPS routed to Agent 2.
+ */
+const LEGACY_PROVISIONER_REMOVE_IN_PR9 = true;
+const describeIfDb = RUN && !LEGACY_PROVISIONER_REMOVE_IN_PR9 ? describe : describe.skip;
 jest.setTimeout(240_000);
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
@@ -105,7 +113,7 @@ class ProcessWatch {
 }
 
 describeIfDb(
-  'Phase A verification — provisioner resilience (integration)',
+  'LEGACY, REMOVE IN PR #9 (skipped: separate provisioner, no crewflow login under the owner login) — Phase A verification — provisioner resilience (integration)',
   () => {
     let admin: DataSource;
     let superClient: Client;

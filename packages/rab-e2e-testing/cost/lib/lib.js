@@ -5,7 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileP = promisify(execFile);
 
 const SECRETS_FILE = process.env.COST_SECRETS || 'C:/rab-ai-wt/cost-secrets/cost.env';
 const secrets = Object.fromEntries(
@@ -37,11 +39,11 @@ async function loginWeb(email) {
   return { cookie: cookies.join('; ') };
 }
 
-async function loginMobile(email) {
+async function loginMobile(email, applicationTarget = 'staff_app') {
   const res = await fetch(`${BASE}/rest/v1/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'cf-connecting-ip': nextIp(), 'x-client-platform': 'mobile' },
-    body: JSON.stringify({ email, password: secrets.SEED_PW, applicationTarget: 'staff_app' }),
+    body: JSON.stringify({ email, password: secrets.SEED_PW, applicationTarget }),
   });
   if (res.status !== 200) throw new Error(`mobile login ${email}: ${res.status} ${(await res.text()).slice(0, 300)}`);
   const j = await res.json();
@@ -119,6 +121,12 @@ function harnessDocker(verb, name, opts = {}) {
   assertHarnessContainer(name);
   return execFileSync('docker', [verb, name], { env: dockerEnv, ...opts });
 }
+/** Same guard and verb allowlist as harnessDocker, without blocking the event loop (D-Q6 recovery keeps its load running). */
+async function harnessDockerAsync(verb, name, opts = {}) {
+  if (!['pause', 'unpause', 'stop', 'start'].includes(verb)) throw new Error(`harnessDocker: verb '${verb}' not allowed`);
+  assertHarnessContainer(name);
+  return execFileP('docker', [verb, name], { env: dockerEnv, ...opts });
+}
 const HARNESS_LABEL_ARGS = ['--label', 'crewflow-cost.harness=true'];
 
 const cgroupUsec = (c) => Number(/usage_usec (\d+)/.exec(execFileSync('docker', ['exec', c, 'cat', '/sys/fs/cgroup/cpu.stat'], { encoding: 'utf8', env: dockerEnv }))[1]);
@@ -146,4 +154,4 @@ const median = (a) => pct(a, 50);
 const writeJson = (name, obj) => { fs.writeFileSync(path.join(OUT, name), JSON.stringify(obj, null, 2)); return path.join(OUT, name); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-module.exports = { BASE, OUT, secrets, dockerEnv, harnessDocker, assertHarnessContainer, HARNESS_LABEL_ARGS, loginWeb, loginMobile, call, requestLog, psql, redis, redisInfo, cgroupUsec, cgroupMem, noisePng, pct, median, nextIp, authHeaders, writeJson, sleep };
+module.exports = { BASE, OUT, secrets, dockerEnv, harnessDocker, harnessDockerAsync, assertHarnessContainer, HARNESS_LABEL_ARGS, loginWeb, loginMobile, call, requestLog, psql, redis, redisInfo, cgroupUsec, cgroupMem, noisePng, pct, median, nextIp, authHeaders, writeJson, sleep };

@@ -2,7 +2,7 @@ import { assignmentTimeSql, effectiveAssignmentTime } from '@rab/server/modules/
 import { MISSING_CLOCK_OUT_GRACE_MINUTES } from '@rab/server/modules/attendance/services/missing-clock-out-policy';
 import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
 import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, NotificationType, ShiftStatus } from '@rab/shared';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
@@ -52,14 +52,22 @@ interface ScanCandidate {
   workspace_id: string | null;
 }
 
-export async function runAttendanceMonitorCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  notificationService: NotificationService,
-  auditService: AuditService,
-): Promise<AttendanceMonitorResult> {
-  const scopes = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      return await manager.query<Omit<ScanCandidate, 'attendance_id'>[]>(`
+/**
+ * D-Q4a (refactor only, no behaviour change): discovery for ONE workspace (the scopes with clocked-in, not clocked-out
+ * attendance), then the unchanged second phase (`processAttendanceMonitorScopes`: per scope the overdue candidates, per
+ * candidate `flagMissingClockOutCandidate` in its own scoped transaction). The combined shift scan calls the same two
+ * functions; `runAttendanceMonitorCycle` stays the separate-mode entry with the same SQL in the same order.
+ */
+export interface AttendanceMonitorDeps {
+  notificationService: NotificationService;
+  auditService: AuditService;
+}
+
+export type AttendanceMonitorScope = Omit<ScanCandidate, 'attendance_id'>;
+export type AttendanceMonitorCandidate = ScanCandidate;
+
+export async function discoverAttendanceMonitorScopes(manager: EntityManager): Promise<AttendanceMonitorScope[]> {
+  return await manager.query<Omit<ScanCandidate, 'attendance_id'>[]>(`
         SELECT DISTINCT a.organisation_id, a.workspace_id
         FROM attendance a
         JOIN shift s ON s.id = a.shift_id
@@ -68,14 +76,31 @@ export async function runAttendanceMonitorCycle(
           AND s.status != 'cancelled'
 
       `);
-  });
+}
 
+export async function runAttendanceMonitorCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  notificationService: NotificationService,
+  auditService: AuditService,
+): Promise<AttendanceMonitorResult> {
+  const scopes = await discoverInWorkspaces(ownerDataSource, tenantContext, discoverAttendanceMonitorScopes);
+  return processAttendanceMonitorScopes(tenantContext, { notificationService, auditService }, scopes);
+}
+
+/** Everything after discovery, unchanged: per scope the overdue candidates (LIMIT 500), then one transaction per candidate. */
+export async function processAttendanceMonitorScopes(
+  tenantContext: TenantContextService,
+  deps: AttendanceMonitorDeps,
+  scopes: readonly AttendanceMonitorScope[],
+): Promise<AttendanceMonitorResult> {
   // Discover eligible assignment IDs with all assignment RLS policies active.
   // Filtering before the per-workspace limit prevents later-ending attendance
   // from hiding shorter assignments that are already overdue.
   const candidates: ScanCandidate[] = [];
   for (const scope of scopes) {
     const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, manager =>
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       manager.query<ScanCandidate[]>(`
         SELECT a.id AS attendance_id, a.organisation_id, a.workspace_id
         FROM attendance a
@@ -91,86 +116,91 @@ export async function runAttendanceMonitorCycle(
 
   let flagged = 0;
   for (const candidate of candidates) {
-    const didFlag = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
-      const attendance = await manager.findOne(Attendance, { where: { id: candidate.attendance_id } });
-      if (!attendance || attendance.status !== AttendanceStatus.CLOCKED_IN || attendance.clockOutAt) return false;
-      const shift = await manager.findOne(Shift, { where: { id: attendance.shiftId } });
-      const assignment = await manager.findOne(ShiftAssignment, { where: { id: attendance.shiftAssignmentId } });
-      if (!shift || !assignment || effectiveAssignmentTime(assignment, shift).endsAt.getTime() > Date.now() - MISSING_CLOCK_OUT_GRACE_MS) return false;
-      // PHASE 5 (§9) — the discovery scan already excludes `s.status =
-      // 'cancelled'`, but this per-candidate re-check never repeated that
-      // exclusion, so a cancellation landing between the scan and this
-      // candidate's own transaction could still flag/notify a missing
-      // clock-out for a shift that's since been cancelled. This does NOT
-      // suppress missing-clock-out handling for genuine attendance — the
-      // row only ever reaches here once `status = 'clocked_in'` already
-      // (someone really did clock in) — it only closes the race so the
-      // per-candidate check matches the discovery query's own already-
-      // decided exclusion, exactly like every other job in this package.
-      // `clockInAt`/`clockOutAt`/`workedMinutes`/`earnedPence` are never
-      // touched by this job either way (see the class doc comment) — a
-      // cancelled shift's real attendance facts are preserved regardless.
-      if (shift.status === ShiftStatus.CANCELLED) return false;
-
-      const staffProfile = await manager.findOne(StaffProfile, { where: { id: attendance.staffProfileId } });
-      const user = staffProfile ? await manager.findOne(User, { where: { id: staffProfile.userId } }) : null;
-      // WORK-02 — `staffProfile.createdBy` records who onboarded the STAFF
-      // MEMBER (an HR relationship), never who is responsible for THIS
-      // shift assignment; falling back to the staff member's own user id
-      // sent an "operational manager" notification to the staff member
-      // themselves. Replaced with the same canonical resolver
-      // `late-clock-in.job.ts` already uses — see its own doc comment for
-      // the full rationale. `null` (no valid manager found) is handled
-      // below: the event still completes and the status transition still
-      // happens, there is simply no one to notify — never an invented
-      // fallback recipient.
-      const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, assignment, shift);
-
-      const eventId = await claimWorkerEvent(manager, {
-        organisationId: candidate.organisation_id,
-        workspaceId: candidate.workspace_id,
-        eventKey: `missing-clock-out:${attendance.id}`,
-        eventType: 'missing_clock_out',
-        entityType: 'attendance',
-        entityId: attendance.id,
-      });
-      if (!eventId) return false; // another replica/tick already claimed this occurrence
-
-      // Status label only — clockOutAt/workedMinutes/earnedPence are never
-      // touched here (see the class doc comment).
-      assertTransition(ATTENDANCE_TRANSITIONS, attendance.status, AttendanceStatus.MISSING_CLOCK_OUT);
-      await manager.update(Attendance, attendance.id, { status: AttendanceStatus.MISSING_CLOCK_OUT });
-
-      // WORK-02 — the manager notification is conditional on a real,
-      // validated recipient; there is no fallback recipient. The status
-      // transition and audit record above/below always happen regardless —
-      // "no one to notify" is a safe, complete outcome, never a reason to
-      // invent one or leave the event unclaimed.
-      if (resolvedManager) {
-        await notificationService.notify(manager, {
-          organisationId: candidate.organisation_id,
-          userId: resolvedManager.userId,
-          type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT,
-          title: 'Missing clock-out',
-          message: `${user ? `${user.firstName} ${user.lastName}` : 'A staff member'} has not clocked out from a shift that ended at ${effectiveAssignmentTime(assignment, shift).endsAt.toISOString()}.`,
-          relatedEntityType: 'attendance',
-          relatedEntityId: attendance.id,
-        });
-      }
-      await auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_ASSIGNMENT_MISSING_CLOCK_OUT_FLAGGED, {
-        targetUserId: user?.id,
-        metadata: {
-          attendanceId: attendance.id,
-          notifiedManagerUserId: resolvedManager?.userId ?? null,
-          managerResolutionSource: resolvedManager?.source ?? 'none',
-        },
-        actorUserId: null,
-      });
-      await completeWorkerEvent(manager, eventId);
-      return true;
-    });
+    const didFlag = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, (manager) =>
+      flagMissingClockOutCandidate(manager, deps, candidate),
+    );
     if (didFlag) flagged += 1;
   }
 
   return { flagged };
+}
+
+/** One overdue attendance row, inside the caller's scoped transaction (re-check, claim, status label, notify, audit). */
+export async function flagMissingClockOutCandidate(manager: EntityManager, deps: AttendanceMonitorDeps, candidate: AttendanceMonitorCandidate): Promise<boolean> {
+  const attendance = await manager.findOne(Attendance, { where: { id: candidate.attendance_id } });
+  if (!attendance || attendance.status !== AttendanceStatus.CLOCKED_IN || attendance.clockOutAt) return false;
+  const shift = await manager.findOne(Shift, { where: { id: attendance.shiftId } });
+  const assignment = await manager.findOne(ShiftAssignment, { where: { id: attendance.shiftAssignmentId } });
+  if (!shift || !assignment || effectiveAssignmentTime(assignment, shift).endsAt.getTime() > Date.now() - MISSING_CLOCK_OUT_GRACE_MS) return false;
+  // PHASE 5 (§9) — the discovery scan already excludes `s.status =
+      // 'cancelled'`, but this per-candidate re-check never repeated that
+  // exclusion, so a cancellation landing between the scan and this
+  // candidate's own transaction could still flag/notify a missing
+  // clock-out for a shift that's since been cancelled. This does NOT
+  // suppress missing-clock-out handling for genuine attendance — the
+  // row only ever reaches here once `status = 'clocked_in'` already
+  // (someone really did clock in) — it only closes the race so the
+  // per-candidate check matches the discovery query's own already-
+  // decided exclusion, exactly like every other job in this package.
+  // `clockInAt`/`clockOutAt`/`workedMinutes`/`earnedPence` are never
+  // touched by this job either way (see the class doc comment) — a
+  // cancelled shift's real attendance facts are preserved regardless.
+  if (shift.status === ShiftStatus.CANCELLED) return false;
+
+  const staffProfile = await manager.findOne(StaffProfile, { where: { id: attendance.staffProfileId } });
+  const user = staffProfile ? await manager.findOne(User, { where: { id: staffProfile.userId } }) : null;
+  // WORK-02 — `staffProfile.createdBy` records who onboarded the STAFF
+  // MEMBER (an HR relationship), never who is responsible for THIS
+  // shift assignment; falling back to the staff member's own user id
+  // sent an "operational manager" notification to the staff member
+  // themselves. Replaced with the same canonical resolver
+  // `late-clock-in.job.ts` already uses — see its own doc comment for
+  // the full rationale. `null` (no valid manager found) is handled
+  // below: the event still completes and the status transition still
+  // happens, there is simply no one to notify — never an invented
+  // fallback recipient.
+  const resolvedManager = await resolveResponsibleManager(manager, candidate.organisation_id, assignment, shift);
+
+  const eventId = await claimWorkerEvent(manager, {
+    organisationId: candidate.organisation_id,
+    workspaceId: candidate.workspace_id,
+    eventKey: `missing-clock-out:${attendance.id}`,
+    eventType: 'missing_clock_out',
+    entityType: 'attendance',
+    entityId: attendance.id,
+  });
+  if (!eventId) return false; // another replica/tick already claimed this occurrence
+
+  // Status label only — clockOutAt/workedMinutes/earnedPence are never
+  // touched here (see the class doc comment).
+  assertTransition(ATTENDANCE_TRANSITIONS, attendance.status, AttendanceStatus.MISSING_CLOCK_OUT);
+  await manager.update(Attendance, attendance.id, { status: AttendanceStatus.MISSING_CLOCK_OUT });
+
+  // WORK-02 — the manager notification is conditional on a real,
+  // validated recipient; there is no fallback recipient. The status
+  // transition and audit record above/below always happen regardless —
+  // "no one to notify" is a safe, complete outcome, never a reason to
+  // invent one or leave the event unclaimed.
+  if (resolvedManager) {
+    await deps.notificationService.notify(manager, {
+      organisationId: candidate.organisation_id,
+      userId: resolvedManager.userId,
+      type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT,
+      title: 'Missing clock-out',
+      message: `${user ? `${user.firstName} ${user.lastName}` : 'A staff member'} has not clocked out from a shift that ended at ${effectiveAssignmentTime(assignment, shift).endsAt.toISOString()}.`,
+      relatedEntityType: 'attendance',
+      relatedEntityId: attendance.id,
+    });
+  }
+  await deps.auditService.record(manager, { organisationId: candidate.organisation_id, userId: '' }, AuditAction.SHIFT_ASSIGNMENT_MISSING_CLOCK_OUT_FLAGGED, {
+    targetUserId: user?.id,
+    metadata: {
+      attendanceId: attendance.id,
+      notifiedManagerUserId: resolvedManager?.userId ?? null,
+      managerResolutionSource: resolvedManager?.source ?? 'none',
+    },
+    actorUserId: null,
+  });
+  await completeWorkerEvent(manager, eventId);
+  return true;
 }

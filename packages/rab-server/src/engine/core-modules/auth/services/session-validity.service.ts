@@ -58,6 +58,7 @@ const LAST_SEEN_BUMP_THRESHOLD = '5 minutes';
  */
 export function usableUserSessionSql(alias: string): string {
   if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error('Invalid SQL alias.');
+  // sql-injection-reviewed: alias is validated against ^[a-z_][a-z0-9_]*$ before use (throws otherwise).
   return `${alias}.revoked_at IS NULL
     AND ${alias}.absolute_expires_at > now()
     AND (${alias}.idle_expires_at IS NULL OR ${alias}.idle_expires_at > now())
@@ -123,6 +124,7 @@ export class SessionValidityService {
     const idleMs = idleSessionTimeoutMsByTarget();
     const overrideMs = params.idleOverrideMs ?? null;
     const rows = await manager.query<Array<{ live: boolean; session_exists: boolean; session_revoked: boolean; idle_expired: boolean; credential_mismatch: boolean }>>(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `WITH live AS (
          SELECT 1 FROM core.refresh_token
           WHERE family_id = $1

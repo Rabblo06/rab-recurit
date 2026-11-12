@@ -1,0 +1,7 @@
+{
+  "_comment": "High/Critical advisories that the pinned scanners do NOT reliably report for Alpine (Trivy reads Alpine's secdb, which lists fixed CVEs only; Grype matches some of them only through NVD CPE ranges). Each entry ADDS a finding whenever one of its packages is installed: at a listed affected version it is an unfixed High that needs an owner decision; at any other version it must be re-verified against the Alpine security tracker and this file updated. This list never removes or downgrades a scanner finding. Process: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 6. P5 (2026-11-04): the seven Chromium-dependency entries (CVE-2026-70628, CVE-2026-70632 ffmpeg-libav*; CVE-2026-67215, CVE-2026-67216 cjson; CVE-2025-52194, CVE-2026-37555 libsndfile; CVE-2026-86140 libxml2) were removed after their packages were proven absent from the built Worker image (apk info -e, file search, Trivy + Grype, CycloneDX SBOM; P5 PR evidence) and from the API image, whose apk set has none of them either. If any of those packages returns, the image gate's forbidden_apk check fails first; re-add the entry if a package ever comes back legitimately.",
+  "schema": 1,
+  "verified_on": "2026-11-04",
+  "evidence": "docs/DOCKER_SCOUT_VS_TRIVY_2026-11-02.md section 3.1 and the 2026-11-03 CVE recheck (Alpine tracker states, secdb, APKINDEX v3.24 and edge, NVD)",
+  "advisories": []
+}

@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../workspace-schema/v1/expected-fingerprints';
 import { ProvisionLedgerModule, provisionWorkspaceFunctionV2Sql } from '../workspace-schema/v1/provision-workspace-function-v2';
 import { composeServerPathTemplateV1VenueTeamAdmin } from '../workspace-schema/v1/server-path-template-venue-team-admin';

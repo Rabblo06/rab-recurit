@@ -39,7 +39,7 @@ for (const l of ['O0', 'O5', 'O20']) {
   const b = idle(BASE, l), a = idle(AFTER, l);
   if (!b || !a) continue;
   const ctl = l === 'O0' && !phaseAControls;
-  add('idle', `Idle SQL/min ${l} (old-audit def: all crewflow_app/crewflow)`, 'stmts/min', b.sql.topLevelCallsPerMin, a.sql.topLevelCallsPerMin, 'MEASURED', 'idle-sql', { control: ctl });
+  add('idle', `Idle SQL/min ${l} (old-audit def: all statements of the runtime login)`, 'stmts/min', b.sql.topLevelCallsPerMin, a.sql.topLevelCallsPerMin, 'MEASURED', 'idle-sql', { control: ctl });
   add('idle', `Idle client-sent SQL/min ${l} (toplevel)`, 'stmts/min', b.sql.clientStatementsPerMin, a.sql.clientStatementsPerMin, 'MEASURED', 'idle-sql', { control: ctl });
   add('idle', `Idle nested SQL/min ${l} (SECURITY DEFINER)`, 'stmts/min', b.sql.nestedInsideDefinerFunctionsPerMin, a.sql.nestedInsideDefinerFunctionsPerMin, 'MEASURED', 'idle-sql', { control: ctl });
   for (const [c, name] of [['costaudit-pg', 'DB'], ['costaudit-worker', 'Worker'], ['costaudit-api', 'API (control)'], ['costaudit-redis', 'Redis (control)'], ['costaudit-minio', 'MinIO (control)']]) {
@@ -214,7 +214,7 @@ const parseCsv = (text) => {
 const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
 const fpKey = (x) => `${x.role}|${x.toplevel}|${norm(x.query)}`;
 const agg = (rowsIn) => { const m = new Map(); for (const x of rowsIn) { const k = fpKey(x); const v = m.get(k) || { calls: 0, ms: 0 }; v.calls += Number(x.calls); v.ms += Number(x.total_exec_ms || x.total_exec_time || 0); m.set(k, v); } return m; };
-const runRoles = new Set(['crewflow_app', 'crewflow', 'rab_secure_owner']);
+const runRoles = new Set(['crewflow_owner', 'crewflow_app', 'crewflow', 'rab_secure_owner']);
 const shiftCycle = (d) => {
   const sc = J(d, 'shift-cycle.json'); const raw = T(d, 'shift-cycle.pgss-raw.csv'); const idleRaw = T(d, 'idle-O20/pgss-raw.csv');
   if (!sc || !raw || !idleRaw) return null;

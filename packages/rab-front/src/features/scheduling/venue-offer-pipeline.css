@@ -95,7 +95,11 @@
 .pipeline-column:last-child { border-right: 0; }
 .pipeline-column > h2 { flex: none; display: flex; align-items: center; gap: 8px; margin: 0 2px 10px; font-size: 12px; font-weight: 500; }
 .pipeline-column .pipeline-count { font-size: 11px; color: var(--font-tertiary); font-weight: 400; }
-.pipeline-column-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 0 2px 4px; }
+/* position: relative is load-bearing: AnimatePresence mode="popLayout" takes a leaving card out of flow as
+   position: absolute. Without a positioned lane body its containing block is an ancestor outside the board, so the
+   card escapes the board's and the lane's overflow clipping and briefly widens the whole page (a horizontal page
+   scrollbar while cards move lanes on a poll). Here it stays inside the lane and is clipped like every other card. */
+.pipeline-column-body { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 0 2px 4px; }
 .pipeline-empty { font-size: 11.5px; color: var(--font-tertiary); text-align: center; margin: 22px 0; }
 .pipeline-lane-send { flex: none; display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; border: 0; background: none; font: inherit; font-size: 12px; color: var(--font-secondary); padding: 4px 6px; margin: 0 0 8px; border-radius: 6px; cursor: pointer; }
 .pipeline-lane-send:hover:not(:disabled) { background: var(--bg-transparent-light); color: var(--font-primary); }
@@ -131,6 +135,8 @@
 .pipeline-tag.is-reviewed { background: var(--status-success-bg); color: var(--feedback-success); }
 .pipeline-tag.is-awaiting { background: var(--status-warning-bg); color: var(--feedback-warning); }
 .pipeline-tag.is-kind { background: var(--status-info-bg); color: var(--feedback-info); }
+.pipeline-tag.is-deadline { background: var(--status-neutral-bg); color: var(--font-secondary); margin: 0 6px 0 0; }
+.pipeline-lane-note { flex: none; margin: -4px 2px 8px; font-size: 11px; color: var(--font-tertiary); }
 .pipeline-card-state > .pipeline-tag:first-child { margin-left: 0; }
 .pipeline-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; }
 .pipeline-venue-chip { min-width: 0; font-size: 10.5px; color: var(--font-secondary); background: var(--bg-tertiary); border-radius: 5px; padding: 3px 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

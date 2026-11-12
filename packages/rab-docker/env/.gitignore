@@ -1,0 +1,4 @@
+# Real owner-login env files and secrets never enter the repository: only the *.example templates do.
+*
+!.gitignore
+!*.example

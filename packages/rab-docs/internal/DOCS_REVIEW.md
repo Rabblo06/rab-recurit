@@ -60,7 +60,7 @@ See `CONTENT_AUDIT.md` → *Known product defects*. Highlights for the product o
 
 1. `Venue.breakPaid` is stored but never used in pay calculations.
 2. Admin Panel SMTP configuration is not used by the email driver.
-3. `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` comment says auto-reject; the job auto-confirms.
+3. ~~`MANAGER_CONFIRMATION_TIMEOUT_MINUTES` comment says auto-reject; the job auto-confirms.~~ Resolved 2026-11-06: the variable was removed; Crewflow never confirms an offer automatically, and unconfirmed acceptances are withdrawn at the approval deadline (owner rule).
 4. Mobile notifications show UTC times (`createdAt` without `.toLocal()`), one hour early during BST.
 5. Mobile real-time and push services are never started, so the app relies on 30-second polling.
 6. "Set up Biometric Login" sheet can render blank on slow devices (animation race in `auth_flow_shell.dart`).

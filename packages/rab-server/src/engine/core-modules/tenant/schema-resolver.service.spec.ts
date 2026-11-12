@@ -98,13 +98,15 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     }
   }
 
-  it('the floor never exceeds LATEST; Phase D keeps it at 18', () => {
-    // Phase D decision (owner-approved with the v19 fingerprint): module 19 only adds the statement dispatch pointer
-    // triggers, so the routing floor stays at 18 — a READY v18 workspace the migrator has not reached yet stays routable
-    // during a mixed-version rollout (workspace-schema-modules.ts MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION). Raising it is a
-    // deliberate release decision, which must update this assertion.
+  it('the floor never exceeds LATEST; the owner-login release keeps it at LATEST - 1 = 19', () => {
+    // Phase D kept the floor at 18 (module 19 only added the statement dispatch pointer triggers). The owner-login PAY-1
+    // release (module 20, WorkspaceGrantParityGuards1786721430000) raised it to 19, reviewed as E-10 in
+    // workspace-schema-modules.spec.ts: a READY v18 workspace returns 503 (incompatible-module) until migrated. The release
+    // migrates every READY workspace to 20 inside that migration, before migrate-on-start lets the API serve (a failing
+    // schema throws and the deploy refuses). Raising or lowering it is a deliberate release decision, which must update
+    // this assertion.
     expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
-    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(18);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
     expect(() => assertCompatibleModuleVersion(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(LATEST_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(Number.NaN)).toThrow(WorkspaceRoutingError);

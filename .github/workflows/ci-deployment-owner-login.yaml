@@ -1,0 +1,110 @@
+# Owner-login deployment configuration CI. NOT a release workflow: it builds, pushes and deploys nothing, holds no secret
+# and needs only `contents: read`.
+#
+#   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs) in FULL mode
+#                      (one identical PG_DATABASE_URL on rab-api / rab-worker, no second identity, no token, the H1-H6
+#                      keys, the O3 lifecycle: the API migrates on start, no rab-migrate, one API, the Worker never
+#                      migrates and only consumes the job schedulers; the bundled database), plus
+#                      `docker compose config` of every supported combination, and the ONE-IMAGE check
+#                      (scripts/compose-one-image.cjs, owner decision 2026-11-11 "deploy exactly like Twenty"): every
+#                      deploy compose gives rab-api and rab-worker the SAME image variable (CREWFLOW_IMAGE_TAG, a digest),
+#                      no build, and the Worker starts after a healthy API (restart: true). ci-security.yaml's deployment-config job
+#                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
+# The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
+# transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
+name: CI owner-login deployment
+
+on:
+  pull_request:
+    paths:
+      - packages/rab-docker/docker-compose*.yml
+      - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
+      - packages/rab-docker/env/**
+      - packages/rab-docker/local-db/**
+      - packages/rab-docker/postgres-init/owner-login/**
+      - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/scripts/compose-one-image*.cjs
+      - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - .github/workflows/ci-deployment-owner-login.yaml
+      - .nvmrc
+  push:
+    branches: [main, deploy/twenty-mode-a]
+    paths:
+      - packages/rab-docker/docker-compose*.yml
+      - packages/rab-docker/staging/docker-compose.staging.yml
+      - packages/rab-docker/staging/rehearsal/docker-compose.image-rehearsal.yml
+      - packages/rab-docker/env/**
+      - packages/rab-docker/local-db/**
+      - packages/rab-docker/postgres-init/owner-login/**
+      - packages/rab-docker/scripts/compose-owner-login*.cjs
+      - packages/rab-docker/scripts/compose-one-image*.cjs
+      - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - .github/workflows/ci-deployment-owner-login.yaml
+      - .nvmrc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-deployment-owner-login-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-config:
+    name: Owner-login compose and env gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      # The self-tests skip their rendered-model cases without docker compose; here it is required, so they cannot skip.
+      - name: docker compose is available
+        run: docker compose version
+      - name: docker compose config — every supported combination
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP/owner-login-config"
+          mkdir -p "$t/project" "$t/secrets"
+          : > "$t/project/.env.ops"
+          : > "$t/secrets/database.env"
+          : > "$t/secrets/runtime.env"
+          z="$(printf '%064d' 0)"
+          {
+            echo "CREWFLOW_IMAGE_TAG=sha256:$z"
+            echo "CREWFLOW_REDIS_IMAGE=redis@sha256:$z"
+            echo "CREWFLOW_POSTGRES_IMAGE=postgres@sha256:$z"
+            echo "CREWFLOW_SECRETS_DIR=$t/secrets"
+            echo "CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt"
+          } > "$t/compose.env"
+          D=packages/rab-docker
+          I="$D/docker-compose.image.yml"; L="$D/docker-compose.local-db.yml"; S="$D/staging/docker-compose.staging.yml"
+          # O3: docker-compose.migrate-on-start.yml is folded into the image compose (the API migrates on start).
+          test ! -e "$D/docker-compose.migrate-on-start.yml"
+          for combo in "$I" "$I $L" "$I $S"; do
+            args=()
+            for f in $combo; do args+=(-f "$f"); done
+            echo "docker compose config: $combo"
+            docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
+          done
+          # Fail closed: a missing required interpolation value must refuse to render.
+          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
+            grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
+            if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
+              echo "::error::docker-compose.image.yml rendered without $var"
+              exit 1
+            fi
+          done
+      - name: Gate self-tests (static and full)
+        run: node --test packages/rab-docker/scripts/compose-owner-login.test.cjs packages/rab-docker/scripts/compose-owner-login.full.test.cjs
+      - name: Owner-login gate (full)
+        run: node packages/rab-docker/scripts/compose-owner-login.cjs
+      - name: One image, API first, Worker after (self-tests, then every deploy compose)
+        run: |
+          node --test packages/rab-docker/scripts/compose-one-image.test.cjs
+          node packages/rab-docker/scripts/compose-one-image.cjs

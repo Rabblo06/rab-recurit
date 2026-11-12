@@ -55,8 +55,11 @@ describe('Dashboard', () => {
     serve((url) => (url === '/dashboard/summary' || url === '/profile' ? undefined : new Promise(() => {})));
     mount();
     expect(screen.getByText('Dashboard')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('12')).toBeInTheDocument());
-    expect(screen.getByText('Managers')).toBeInTheDocument();
+    // Scoped to the counts box: the dashboard's date strip can also show "12" (e.g. tomorrow on the 11th of a month), which
+    // used to satisfy this wait before the summary had loaded.
+    const counts = (await screen.findByText('Staff')).closest('dl') as HTMLElement;
+    await waitFor(() => expect(within(counts).getByText('12')).toBeInTheDocument());
+    expect(within(counts).getByText('Managers')).toBeInTheDocument();
   });
 
   it('offer stages use the server COUNT (`total` of a status-filtered list), not a downloaded page', async () => {
@@ -124,6 +127,39 @@ describe('Dashboard', () => {
     expect(within(list).getByText('Staff assigned').parentElement).toHaveTextContent('(done)');
     expect(within(list).getByText('Staff clocked in').parentElement).toHaveTextContent('(to do)');
     expect(within(list).getByText(/^3$/)).toBeInTheDocument(); // 3 of 7 tasks done
+  });
+
+  it('readiness: acceptances withdrawn at the confirmation deadline are named from summary.withdrawnAtDeadline, never as confirmed', async () => {
+    act(() => applyIdentityFromServer({ userId: 'u1', sessionId: 's1' }));
+    const start = new Date(Date.now() + 3_600_000);
+    const end = new Date(Date.now() + 6 * 3_600_000);
+    serve((url) => {
+      if (url === '/shifts') return Promise.resolve({ data: { total: 1, data: [{ id: 'sh1', venueId: 'v1', startsAt: start.toISOString(), endsAt: end.toISOString(), requiredCount: 4, filledCount: 2, status: 'partially_filled', createdBy: 'u1', requestedBy: 'vm1' }] } });
+      if (url === '/shifts/sh1/pipeline') return Promise.resolve({ data: {
+        shift: { id: 'sh1', venueName: 'Venue One', roleName: 'Role', startsAt: start.toISOString(), endsAt: end.toISOString() },
+        summary: { required: 4, filled: 2, offered: 0, waiting: 0, accepted: 1, confirmed: 2, rejected: 1, withdrawnAtDeadline: 1, clockedIn: 0, pendingReview: 0, clockedOut: 0 },
+        report: { ready: false, finalisedAt: null },
+      } });
+      return undefined;
+    });
+    mount();
+    const list = (await screen.findByText('Shift checklist')).closest('.dash-checklist') as HTMLElement;
+    const confirmed = within(list).getByText('Staff confirmed').parentElement as HTMLElement;
+    expect(confirmed).toHaveTextContent('1 accepted, awaiting confirmation · 1 not confirmed in time');
+    expect(confirmed).toHaveTextContent('(to do)');
+  });
+
+  it('recent offers: a withdrawal at the confirmation deadline reads "Not confirmed in time", never "manager rejected"', async () => {
+    serve((url, params) => (url === '/offers' && params.limit === 6
+      ? Promise.resolve({ data: { total: 2, data: [
+        { id: 'o1', status: 'manager_rejected', closedReason: 'confirmation_deadline_passed', sentAt: new Date().toISOString(), staffName: 'Dara Withdrawn', venueName: 'Venue One', startsAt: new Date().toISOString() },
+        { id: 'o2', status: 'manager_rejected', sentAt: new Date().toISOString(), staffName: 'Finn Rejected', venueName: 'Venue One', startsAt: new Date().toISOString() },
+      ] } })
+      : undefined));
+    mount();
+    const recent = (await screen.findByText('Dara Withdrawn')).closest('tr') as HTMLElement;
+    expect(within(recent).getByText('Not confirmed in time')).toBeInTheDocument();
+    expect(within((screen.getByText('Finn Rejected')).closest('tr') as HTMLElement).getByText('manager rejected')).toBeInTheDocument();
   });
 
   describe('shift readiness: which details the caller may see, and why a load failed', () => {
@@ -252,7 +288,9 @@ describe('Dashboard', () => {
     who = 'u2';
     act(() => applyIdentityFromServer({ userId: 'u2', sessionId: 's2' }));
     // The very next paint after the switch shows nothing of u1 …
-    expect(screen.queryByText('12')).toBeNull();
+    // (Scoped to the counts box: a "12" in the date strip is a date, not u1's figure.)
+    const countsAfterSwitch = document.querySelector('.dash-counts') as HTMLElement | null;
+    expect(countsAfterSwitch === null || within(countsAfterSwitch).queryByText('12') === null).toBe(true);
     // … and u2's own figure loads fresh (requested again, counted up from 0, never from 12).
     await waitFor(() => expect(staff().querySelector('dd [data-value]')).toHaveAttribute('data-value', '3'));
     expect(mockApi.get.mock.calls.filter(([u]) => u === '/dashboard/summary').length).toBeGreaterThanOrEqual(2);

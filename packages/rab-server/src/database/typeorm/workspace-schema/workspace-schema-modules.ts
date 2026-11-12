@@ -5,6 +5,7 @@ import { archiveColumnsSql } from './v1/archive-columns';
 import { attendanceCheckInSql } from './v1/attendance-check-in';
 import { attendanceMoneyChecksSql, attendanceMoneyPrecheckSql } from './v1/attendance-money-checks';
 import { attendanceReviewSql } from './v1/attendance-review';
+import { workspaceGrantParitySql } from './v1/grant-parity-guards';
 import { offerKindSql } from './v1/offer-kind';
 import { payStatementSql } from './v1/pay-statement';
 import { payrollEvidenceRestrictSql } from './v1/payroll-evidence-restrict';
@@ -81,6 +82,9 @@ export const WORKSPACE_SCHEMA_MODULES: readonly WorkspaceSchemaModule[] = [
   // Phase D (owner-approved 2026-11-01, v19 fingerprint signed off): statement dispatch pointer triggers. Its expected
   // fingerprint is recorded in v1/expected-fingerprints.ts (EXPECTED_WORKSPACE_FINGERPRINTS[19]).
   { id: 'v1.019-statement-dispatch-pointer', version: 19, introducedBy: 'StatementDispatchPointer1786721320000', sql: statementDispatchPointerSql },
+  // Owner-login PAY-1 (2026-11-04): grant-parity guards on the workspace payroll copies. Its expected fingerprint is PENDING
+  // (v1/expected-fingerprints.ts PENDING_FINGERPRINT_VERSIONS) until Agent 1's append mode generates it on PG16 and PG18.
+  { id: 'v1.020-grant-parity-guards', version: 20, introducedBy: 'WorkspaceGrantParityGuards1786721430000', sql: workspaceGrantParitySql },
 ];
 
 /** The newest module version this code knows. A workspace is "current" only at exactly this module_version. */
@@ -92,8 +96,13 @@ export const LATEST_WORKSPACE_MODULE_VERSION = WORKSPACE_SCHEMA_MODULES[WORKSPAC
  * Default: LATEST. Lower it in a release only when the newest module(s) are additive for this code, so a workspace the
  * migrator has not reached yet stays routable. Never above LATEST.
  */
-export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = 18;
+export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = 19;
 /*
+ * Owner-login PAY-1 (2026-11-04, reviewed value, E-10): 19, not LATEST (20). Module 20 adds the grant-parity triggers only
+ * (no table, column, policy or grant); this code reads nothing module 20 creates, so a READY v19 workspace the migrator has
+ * not reached yet stays routable (it lacks only the normal-path guards, which WorkspaceGrantParityGuards1786721430000
+ * adds on deploy). v18 is no longer routable: module 19's statement pointers are expected by the global dispatcher.
+ *
  * Phase D: 18, not LATEST (19). Module 19 only adds the statement dispatch pointer triggers (no table, column, policy or
  * grant): this code reads nothing module 19 creates, so a READY v18 workspace the migrator has not reached yet stays
  * routable. Its statements are then dispatched by the per-workspace (reconciliation) cycle instead of the global claim.

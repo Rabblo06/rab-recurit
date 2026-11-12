@@ -1,8 +1,10 @@
+import { Optional } from '@nestjs/common';
 import { Job } from 'bullmq';
 
 import { AI_AGENT_RUN_JOB_NAME, AI_JOB_NAME_FOR_KIND, AI_TITLE_JOB_NAME, AiJobKind } from '@rab/server/engine/worker-shared/ai-jobs.contract';
 import { AI_TURN_JOB_NAME } from '@rab/server/engine/worker-shared/ai-queue.constants';
 import { AiRetentionService } from '@rab/server/modules/ai/services/ai-retention.service';
+import { AiStaleTurnSweepService } from '@rab/server/modules/ai/services/ai-stale-turn-sweep.service';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
@@ -63,7 +65,28 @@ export class AiMaintenanceProcessor {
   constructor(
     private readonly deps: WorkerDependencies,
     private readonly retention: AiRetentionService,
+    // Phase D-Q2. Always provided by AiWorkerCoreModule in the Worker graph; optional so existing unit constructions
+    // keep compiling (absent ⇒ the sweep does nothing).
+    @Optional() private readonly staleTurns?: AiStaleTurnSweepService,
   ) {}
+
+  /**
+   * Phase D-Q2 (AI_STALE_TURN_SWEEP, default false ⇒ not scheduled; `false` here too as defence in depth): finalises AI
+   * turns stuck `queued` past AI_STALE_TURN_THRESHOLD_MINUTES (their BullMQ job was lost) as failed AI_WORKER_INTERRUPTED.
+   * Never re-runs or requeues. Runtime connection (RLS), per-user tenant context, compare-and-set per turn — safe with
+   * several replicas without a lock (the CAS lets exactly one finalise each turn).
+   */
+  @Process('ai-stale-turn-sweep')
+  async aiStaleTurnSweep(): Promise<boolean> {
+    if (!this.staleTurns) return false;
+    const { runtimeDataSource, logger } = this.deps.get();
+    const r = await this.staleTurns.runCycle(runtimeDataSource);
+    if (!r.ran) return false;
+    if (r.finalised > 0 || r.skipped > 0) {
+      logger.log(`ai stale-turn sweep: workspaces=${r.workspaces} users=${r.users} candidates=${r.candidates} finalised=${r.finalised} skipped=${r.skipped}`);
+    }
+    return r.finalised > 0;
+  }
 
   @Process('ai-retention')
   async aiRetention(): Promise<boolean> {

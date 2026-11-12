@@ -78,7 +78,8 @@ describeIfDb('admin panel SQL functions (integration, crewflow_app)', () => {
 
   it('the runtime connection really is crewflow_app, without BYPASSRLS', async () => {
     const [row] = await dataSource.query(`SELECT current_user AS u, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`);
-    expect(row).toEqual({ u: 'crewflow_app', b: false });
+    // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
+    expect(row).toEqual({ u: 'crewflow_owner', b: false });
   });
 
   it.each(CALLS)('ABUSE %s: no tenant context bound → 42501, never rows', async (_name, sql, params) => {
@@ -197,7 +198,9 @@ describeIfDb('admin panel SQL functions (integration, crewflow_app)', () => {
         WHERE relnamespace = 'core'::regnamespace AND relname IN ('audit_log', 'workspace_schema_registry', 'user_role', 'role', 'user', 'user_session')`,
     );
     const flags = Object.fromEntries(rows.map((r) => [r.relname, `${r.enable}/${r.force}`]));
-    expect(flags).toEqual({ audit_log: 'true/true', workspace_schema_registry: 'true/true', user_role: 'true/true', role: 'true/true', user: 'true/false', user_session: 'true/false' });
+    // M-class (PreAuthTablesForceOwnerOnly1786721400000, M-T1): "user" and user_session are FORCE now (owner-only definer
+    // policy for rab_secure_owner); every other flag is unchanged.
+    expect(flags).toEqual({ audit_log: 'true/true', workspace_schema_registry: 'true/true', user_role: 'true/true', role: 'true/true', user: 'true/true', user_session: 'true/true' });
     const [secure] = await owner.query(`SELECT rolbypassrls, rolcanlogin FROM pg_roles WHERE rolname = 'rab_secure_owner'`);
     expect(secure).toEqual({ rolbypassrls: false, rolcanlogin: false });
   });

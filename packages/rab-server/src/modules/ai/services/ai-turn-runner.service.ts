@@ -646,6 +646,56 @@ export class AiTurnRunnerService implements Omit<AiTurnStatePrimitives, 'pause'>
     });
   }
 
+  /**
+   * Phase D-Q2: the longest a turn can LEGITIMATELY stay `queued` is bounded by the code: a successor deferring behind a
+   * running predecessor fails itself at `queuedWaitCapMs` (turn timeout + 60 s; each deferral re-checks within
+   * AI_TURN_DEFER_MAX_MS), and a turn still waiting in the BullMQ backlog after the conversation's org slot TTL
+   * (`slotTtlMs` = turn timeout + 5 min — "queue wait + turn + margin") already fails at its claim when the organisation
+   * is at its cap. A stale threshold must exceed both, so a deferred claim that is legitimately delayed is never swept.
+   */
+  isSafeStaleQueuedThreshold(staleAfterMs: number): boolean {
+    if (!Number.isInteger(staleAfterMs) || staleAfterMs <= 0) return false;
+    return staleAfterMs > Math.max(this.queuedWaitCapMs + AI_TURN_DEFER_MAX_MS, this.config.slotTtlMs);
+  }
+
+  /**
+   * Phase D-Q2 (AI_STALE_TURN_SWEEP, default off; called only by AiStaleTurnSweepService): ends ONE turn that has been
+   * `queued` for longer than `staleAfterMs` — its BullMQ job was evidently lost. Owner rule: fail-and-user-retry only —
+   * the turn is FINALISED `failed` / AI_WORKER_INTERRUPTED (the existing interrupted code; the UI shows "This answer was
+   * interrupted by a service restart. Please ask again."), never re-run, requeued or replayed.
+   *
+   * One compare-and-set on status AND age, under the turn's own (organisation, workspace, user) RLS binding, with the
+   * terminal usage counter + audit (`AI_TURN_FAILED`, stage `stale_queued`) in the same transaction: across replicas
+   * exactly one caller finalises a turn; a turn claimed, cancelled or finished meanwhile is left alone. After commit,
+   * exactly as the other queued → failed paths (`defer`, `wait_cap_exceeded`): the reservation is refunded (a queued turn
+   * never called the model), the conversation's org slot is released only if nothing else in it is queued or running
+   * (a running predecessor keeps it), and the turn's stream gets `done`. Returns true when THIS call finalised it.
+   */
+  async finaliseStaleQueued(ids: AiTurnIds, staleAfterMs: number): Promise<boolean> {
+    if (!this.isSafeStaleQueuedThreshold(staleAfterMs)) throw new Error('stale-queued threshold does not exceed the legitimate queued wait');
+    assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.QUEUED, AiTurnStatus.FAILED);
+    const ctx = this.ctxOf(ids);
+    const outcome = await this.tenantContext.runInTenantContext(ctx, async (m) => {
+      const [row] = await returningRows<{ created_at: Date; reserved_tokens: number; content: string | null }>(
+        m,
+        `UPDATE core.ai_message SET status = 'failed', error_code = $3, completed_at = now(), updated_at = now()
+          WHERE id = $1 AND conversation_id = $2 AND role = 'assistant' AND status = 'queued'
+            AND created_at < now() - ($4 || ' milliseconds')::interval
+          RETURNING created_at, reserved_tokens, content`,
+        [ids.turnId, ids.conversationId, AiErrorCode.WORKER_INTERRUPTED, String(staleAfterMs)],
+      );
+      if (!row) return null;
+      await this.recordTerminal(m, ctx, ids, new Date(row.created_at), 'failed', AiErrorCode.WORKER_INTERRUPTED, { ...NO_USAGE, calls: [], model: null, stage: 'stale_queued' });
+      const [active] = await m.query(`SELECT 1 FROM core.ai_message WHERE conversation_id = $1 AND role = 'assistant' AND status IN ('queued', 'running') LIMIT 1`, [ids.conversationId]);
+      return { createdAt: new Date(row.created_at), reserved: Number(row.reserved_tokens), content: row.content ?? '', idle: !active };
+    });
+    if (!outcome) return false;
+    await this.quota.adjustBudget(ids.organisationId, utcDay(outcome.createdAt), -outcome.reserved);
+    if (outcome.idle) await this.quota.releaseSlot(ids.organisationId, ids.conversationId);
+    await this.streams.publishQuietly(ids.conversationId, ids.turnId, { type: 'done', turnId: ids.turnId, status: 'failed', errorCode: AiErrorCode.WORKER_INTERRUPTED, content: outcome.content });
+    return true;
+  }
+
   /** Ends a running turn whose lease expired as AI_WORKER_INTERRUPTED (content = its last checkpoint). Null = lost. */
   private async interruptExpired(m: EntityManager, ctx: AuthContext, ids: AiTurnIds, createdAt: Date): Promise<string | null> {
     assertTransition(AI_TURN_TRANSITIONS, AiTurnStatus.RUNNING, AiTurnStatus.FAILED);

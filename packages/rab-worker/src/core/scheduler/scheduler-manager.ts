@@ -1,7 +1,8 @@
 import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
 
-import { SCAN_JOB_DATA, SCAN_JOB_OPTIONS, ScanQueueName } from './queue-registry';
+import { scanJobTemplate } from '@rab/server/engine/worker-shared/queue-enqueue';
+import { JobNameOf, SCAN_JOB_DATA, ScanQueueName } from './queue-registry';
 import { crewflowSchedulerPrefixOf, ScanJobDefinition, schedulerIdOf } from './scan-jobs';
 
 /**
@@ -21,7 +22,19 @@ import { crewflowSchedulerPrefixOf, ScanJobDefinition, schedulerIdOf } from './s
  *    registered scan whose enable predicate is false is treated like a stale one (removed, plus its waiting job).
  *  - NEVER removes schedulers on shutdown (a rolling deploy must not leave a gap); rollback removal is an explicit
  *    operator command (tools/remove-crewflow-schedulers.ts).
+ *  - O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): in production the API registers the schedulers ONCE at
+ *    start-up (register-schedulers.ts: one `reconcile()`), and the Worker runs with DISABLE_CRON_JOBS_REGISTRATION=true and
+ *    only ever calls `verify()` — a READ-ONLY listing that reports missing ids and never upserts or removes anything.
  */
+export interface VerifyReport {
+  /** Enabled scans whose Crewflow scheduler exists. */
+  present: string[];
+  /** Enabled scans whose Crewflow scheduler does NOT exist (lost to a Redis restart/flush, or the API never registered). */
+  missing: string[];
+  /** Registered scans that are disabled here (not expected to exist). */
+  disabled: string[];
+}
+
 export interface ReconcileReport {
   upserted: string[];
   removedStale: string[];
@@ -138,7 +151,10 @@ export class CrewflowSchedulerManager {
       } else if (def.firstRunAfterInterval) {
         repeat.startDate = now() + every;
       }
-      await this.queue(def.queue).upsertJobScheduler(id, repeat, { name: def.jobName, data: { ...SCAN_JOB_DATA }, opts: { ...SCAN_JOB_OPTIONS } });
+      // D-Q1: the template is built and checked by the registry (system scope, a registered scan job name, the
+      // metadata-only payload, the scan job options) — same name, data and options as before.
+      const template = scanJobTemplate(def.queue, def.jobName as JobNameOf<ScanQueueName>, { kind: 'system' }, { ...SCAN_JOB_DATA });
+      await this.queue(def.queue).upsertJobScheduler(id, repeat, { name: template.name, data: template.data, opts: { ...template.opts } });
       report.upserted.push(id);
     }
     if (report.removedStale.length) this.options.logger.warn(`scheduler reconcile removed stale Crewflow schedulers: ${report.removedStale.join(', ')}`);
@@ -147,12 +163,45 @@ export class CrewflowSchedulerManager {
     return report;
   }
 
+  /**
+   * O3 C2: READ-ONLY check that every ENABLED scan's Crewflow scheduler exists on its queue. Only `getJobSchedulers` — it never
+   * upserts, removes or touches a job, so a consume-only Worker (DISABLE_CRON_JOBS_REGISTRATION=true) can call it safely.
+   * Throws on a Redis failure (caller reports it).
+   */
+  async verify(): Promise<VerifyReport> {
+    const report: VerifyReport = { present: [], missing: [], disabled: [] };
+    const isEnabled = this.options.isEnabled ?? (() => true);
+    const existing = new Set<string>();
+    for (const [name, queue] of this.queues) {
+      const ownPrefix = crewflowSchedulerPrefixOf(name);
+      for (const scheduler of await queue.getJobSchedulers(0, -1, true)) {
+        if (scheduler.key.startsWith(ownPrefix)) existing.add(scheduler.key);
+      }
+    }
+    for (const def of this.options.jobs) {
+      const id = schedulerIdOf(def);
+      if (!isEnabled(def)) report.disabled.push(id);
+      else if (existing.has(id)) report.present.push(id);
+      else report.missing.push(id);
+    }
+    return report;
+  }
+
   /** Starts the periodic reconcile. `onResult` sees every pass (success or failure); a failure never throws here. */
   startPeriodic(periodMs: number, onResult: (outcome: { ok: true; report: ReconcileReport } | { ok: false; error: Error }) => void): void {
+    this.startTimer(periodMs, () => this.reconcile(), onResult);
+  }
+
+  /** O3 C2: the consume-only Worker's periodic READ-ONLY verify (never registers). Same contract as startPeriodic. */
+  startPeriodicVerify(periodMs: number, onResult: (outcome: { ok: true; report: VerifyReport } | { ok: false; error: Error }) => void): void {
+    this.startTimer(periodMs, () => this.verify(), onResult);
+  }
+
+  private startTimer<R>(periodMs: number, pass: () => Promise<R>, onResult: (outcome: { ok: true; report: R } | { ok: false; error: Error }) => void): void {
     if (this.timer || this.stopped) return;
     this.timer = setInterval(() => {
       if (this.stopped) return;
-      this.reconcile().then(
+      pass().then(
         (report) => onResult({ ok: true, report }),
         (error: Error) => onResult({ ok: false, error }),
       );

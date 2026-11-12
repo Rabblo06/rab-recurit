@@ -65,7 +65,8 @@ describeIfApproved('Phase D global dispatch claim (integration — opt-in)', () 
     await workerA.initialize();
     await workerB.initialize();
     const [{ current_user: who }] = await workerA.query<[{ current_user: string }]>('SELECT current_user');
-    expect(who).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): the Worker runs on crewflow_owner; crewflow_worker is a schema role.
+    expect(who).toBe('crewflow_owner');
   });
 
   afterAll(async () => {
@@ -180,11 +181,28 @@ describeIfApproved('Phase D global dispatch claim (integration — opt-in)', () 
     for (const [i, id] of ids.entries()) expect(await status(scopes[Math.floor(i / 10)]!, id)).toBe('completed');
   });
 
-  it('5. the API login (crewflow_app) cannot execute any claim or release function', async () => {
+  // P-class (owner-login architecture). The schema role crewflow_app (the old API login) still cannot execute any claim or
+  // release function: 42501 through the fixture superuser's SET LOCAL ROLE, rolled back. The one runtime login (API and
+  // Worker alike) CAN: OWNER-LOGIN DIFFERENCE BC-08 (DBA-01 lost, ACCEPTED (owner, 2026-11-05)), reproduced green inside a
+  // transaction that is always rolled back, so no pointer is leased.
+  it('5. the schema role crewflow_app cannot execute any claim or release function (42501); the runtime login can (BC-08, rolled back)', async () => {
+    const asSchemaApp = (fn: (m: EntityManager) => Promise<unknown>) =>
+      admin.transaction(async (m) => {
+        await m.query(`SET LOCAL ROLE crewflow_app`);
+        await fn(m);
+      });
     for (const queue of DISPATCH_QUEUES) {
-      await expect(claimDispatchPointers(runtime, queue, 1)).rejects.toMatchObject({ code: '42501' });
+      await expect(asSchemaApp((m) => claimDispatchPointers(m, queue, 1))).rejects.toMatchObject({ code: '42501' });
     }
-    await expect(releaseDispatchClaim(runtime, 'email', randomUUID(), randomUUID(), 1)).rejects.toMatchObject({ code: '42501' });
+    await expect(asSchemaApp((m) => releaseDispatchClaim(m, 'email', randomUUID(), randomUUID(), 1))).rejects.toMatchObject({ code: '42501' });
+    const rollback = new Error('rollback');
+    await expect(
+      runtime.transaction(async (m) => {
+        for (const queue of DISPATCH_QUEUES) await claimDispatchPointers(m, queue, 1);
+        await releaseDispatchClaim(m, 'email', randomUUID(), randomUUID(), 1);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
   });
 
   it('6. F-W4-1: a 50-row single-organisation email backlog drains in ONE run (5 claims of 10 under the per-organisation cap)', async () => {

@@ -2,12 +2,16 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 
 import { EnvironmentVariables } from './environment-variables';
+import { COMBINED_SHIFT_SCAN_MEMBER_KEYS, COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS, combinedShiftScanTickSeconds } from './worker-scan-intervals';
 import { normaliseKeyPrefix } from '../storage/storage-key-prefix';
 import { parseHostAuthority } from '@rab/shared';
 import { keyMaterialProblems, productionKeyMaterialProblems } from '../secret-encryption/keyring.util';
 import { aiBootProblems, legacyAiEnvFacts } from '../ai/ai-readiness';
 import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/postgres/pg-config';
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
+import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
+import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
+import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -54,6 +58,19 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
     throw new Error(`Invalid environment configuration:\n${message}`);
   }
 
+  // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): WORKER_SCHEDULER unset → bullmq in production (the API
+  // registers the job schedulers at start-up, the Worker consumes), interval elsewhere (development and test keep the
+  // process-local timers: `yarn start` has no api-prestart.sh to register anything). An explicit `interval` in production is
+  // refused below (productionConfigurationProblems).
+  validated.WORKER_SCHEDULER = validated.WORKER_SCHEDULER ?? (validated.NODE_ENV === 'production' ? 'bullmq' : 'interval');
+  // DISABLE_CRON_JOBS_REGISTRATION=true means "consume the BullMQ schedulers, never register them": with interval timers
+  // there is nothing to consume, so nothing would ever be scheduled. Refused in every environment.
+  if (validated.DISABLE_CRON_JOBS_REGISTRATION === true && validated.WORKER_SCHEDULER !== 'bullmq') {
+    throw new Error(
+      'Invalid environment configuration:\nDISABLE_CRON_JOBS_REGISTRATION=true requires WORKER_SCHEDULER=bullmq (it consumes the BullMQ job schedulers the API registers; with interval timers nothing would be scheduled).',
+    );
+  }
+
   // Cross-field rule: an S3 deployment missing any of these must fail at boot, not on the first upload at 2am.
   // S3_ENDPOINT is required here (not merely "optional, only for non-AWS providers") because production's actual
   // target is Cloudflare R2, which has no default AWS endpoint to fall back to — a boot with S3 selected and no
@@ -74,6 +91,42 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     throw new Error(
       'Invalid environment configuration:\nWORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global (supported: per_scope+poll, global+poll, global+event).',
     );
+  }
+
+  // Phase D-Q4a: the combined shift scan ticks at the greatest common divisor of its members' intervals, so each member
+  // still runs exactly at its own interval. A tick under 30 s (e.g. 301 s and 300 s → 1 s) refuses to boot rather than
+  // walking every workspace every second. Separate mode (the default) never reads this: its four scans are unchanged.
+  if (validated.WORKER_SHIFT_SCAN_MODE === 'combined') {
+    const tick = combinedShiftScanTickSeconds(COMBINED_SHIFT_SCAN_MEMBER_KEYS.map((key) => validated[key]));
+    if (tick < COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS) {
+      throw new Error(
+        `Invalid environment configuration:
+WORKER_SHIFT_SCAN_MODE=combined needs the greatest common divisor of ${COMBINED_SHIFT_SCAN_MEMBER_KEYS.join(', ')} ` +
+          `to be at least ${COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS} s (it is ${tick} s). Use intervals with a common tick (for example multiples of 60) or WORKER_SHIFT_SCAN_MODE=separate.`,
+      );
+    }
+  }
+
+  // Phase D-Q4b: the regex on WORKER_TIMER_TRIGGER_KINDS cannot see a repeated kind; the shared parser (the one the API and
+  // the Worker use) is the rule. Fail closed at boot, never on the first trigger.
+  try {
+    parseTimerTriggerKinds(validated.WORKER_TIMER_TRIGGER_KINDS);
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
+  }
+
+  // PDF renderer P1 (review M-3): the native render threads' heap caps must fit the budget (default half of the Worker's
+  // 1536m mem_limit), so concurrent oversized renders kill their own thread, never the whole Worker container. Checked in
+  // every mode (a configuration that would be unsafe once PDF_RENDERER=native is refused now, not on the switch).
+  try {
+    assertPdfNativeMemoryFits(
+      validated.PDF_NATIVE_CONCURRENCY === undefined ? PDF_NATIVE_CONCURRENCY_DEFAULT : Number(validated.PDF_NATIVE_CONCURRENCY),
+      parsePdfNativeMemoryBudgetMb(validated.PDF_NATIVE_MEMORY_BUDGET_MB),
+    );
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
   }
 
   // Fail fast on a malformed STORAGE_KEY_PREFIX (e.g. `../etc`) rather than on the first object write.
@@ -160,6 +213,16 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }
 
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): the remaining database start-up settings (DISABLE_DB_MIGRATIONS,
+  // CREWFLOW_MIGRATE_ON_START, the approval mode, CREWFLOW_UPGRADE_FAILURE and its deprecated alias) and the removed mode
+  // switch (CREWFLOW_DB_MODE), through the one shared parser
+  // (database/owner-login/runtime-db-config.ts) — the same rules api-prestart.sh and the runtime guard apply. Read from the
+  // RAW configuration (a blank value is unset). Names and allowed values only, never a value.
+  const runtimeDbProblems = runtimeDbConfigProblems(config as Record<string, string | undefined>);
+  if (runtimeDbProblems.length > 0) {
+    throw new Error(`Invalid environment configuration:\n${runtimeDbProblems.join('\n')}`);
+  }
+
   return validated;
 }
 
@@ -171,6 +234,16 @@ STORAGE_DRIVER=S3 requires ${missing.join(', ')}`);
  */
 export const WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED = false as boolean;
 
+/**
+ * Phase X SJ-05 (owner decision 2026-11-11): global claims (WORKER_CLAIM_MODE=global) and event dispatch
+ * (WORKER_DISPATCH_MODE=event) are NOT approved for production until the J3 benchmark and the owner's J5 decision. Before
+ * this, only the compose gate (scripts/compose-owner-login.cjs, FORBIDDEN_NAMES) refused them, so a Worker started outside
+ * the gated compose path booted in global mode. Like the invite rule above this is a code constant, never an environment
+ * variable: switching production to global claims is a reviewed code change that records the owner's J5 decision.
+ * Development and test (CI's Phase D suites run global mode) are untouched.
+ */
+export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;
+
 /** Exported for its unit test. Pure: reads only the validated configuration. */
 export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
   const problems: string[] = [];
@@ -180,6 +253,25 @@ export function productionConfigurationProblems(env: EnvironmentVariables): stri
     problems.push(
       'WORKER_INVITE_AUTO_DELETE_ENABLED=true would let the Worker automatically delete user accounts, and the owner has not approved a retention policy for that (grace period, eligibility, audit wording, rollback/monitoring). Missing owner approval: set WORKER_INVITE_AUTO_DELETE_ENABLED=false (or leave it unset) in production.',
     );
+  }
+  // O3 C2: the interval timers are off the production path (unset already defaults to bullmq in production).
+  if (env.WORKER_SCHEDULER === 'interval') {
+    problems.push(
+      'WORKER_SCHEDULER=interval runs every scan on each replica\'s own timer, which is not the production path: the API registers the BullMQ job schedulers at start-up and the Worker consumes them. Remove WORKER_SCHEDULER (production defaults to bullmq) or set it to bullmq.',
+    );
+  }
+  // Phase X SJ-05: per-scope polling is the only approved production dispatch until the owner's J5 decision.
+  if (!WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED) {
+    if (env.WORKER_CLAIM_MODE === 'global') {
+      problems.push(
+        'WORKER_CLAIM_MODE=global is not approved for production (owner decision 2026-11-11: global claims wait for the J3 benchmark and the J5 decision). Remove WORKER_CLAIM_MODE (production runs per_scope).',
+      );
+    }
+    if (env.WORKER_DISPATCH_MODE === 'event') {
+      problems.push(
+        'WORKER_DISPATCH_MODE=event is not approved for production (owner decision 2026-11-11: event dispatch needs global claims, which wait for the J3 benchmark and the J5 decision). Remove WORKER_DISPATCH_MODE (production runs poll).',
+      );
+    }
   }
   if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');
   if (env.STORAGE_DRIVER === 'LOCAL') problems.push('STORAGE_DRIVER=LOCAL keeps uploads on one container disk. Configure S3-compatible storage.');

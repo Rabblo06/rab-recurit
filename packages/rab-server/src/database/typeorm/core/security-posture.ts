@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { Client } from 'pg';
 
 import { createPgClientForUrl } from '../../postgres';
@@ -235,6 +236,25 @@ export interface SecurityPosture {
   core: string[];
   /** Canonical `ws|` lines per physical workspace schema, in schema-name order. */
   workspaces: Map<string, string[]>;
+  /** The cluster has the owner login `crewflow_owner` (owner-login layout); false = the separated layout. */
+  ownerLoginLayout?: boolean;
+}
+
+/**
+ * BC-17 (owner decision 2026-11-05, MITIGATE): on an owner-login database the legacy logins crewflow and crewflow_app are
+ * NOLOGIN (fresh install: the locked runner; transition: transition-from-separated.sql). The committed golden is the
+ * owner-login posture. A SEPARATED-layout database (no crewflow_owner role in the cluster: the M2 restricted-migrator
+ * harness, the legacy CF-41 path until PR #9) keeps both as LOGIN; these are the only golden lines that differ, and they
+ * are swapped for exactly these lines there. crewflow_worker keeps LOGIN in both layouts (its historical migrations assert it).
+ */
+export const SEPARATED_LAYOUT_ROLE_LINES: Readonly<Record<string, string>> = Object.freeze({
+  'role|crewflow_app|super=false|bypassrls=false|login=false|member_of=': 'role|crewflow_app|super=false|bypassrls=false|login=true|member_of=',
+  'role|crewflow|super=false|bypassrls=false|login=false|member_of=': 'role|crewflow|super=false|bypassrls=false|login=true|member_of=',
+});
+
+/** The golden as it applies to this database's layout (pure). */
+export function goldenForLayout(golden: string[], ownerLoginLayout: boolean): string[] {
+  return ownerLoginLayout ? golden : golden.map((line) => SEPARATED_LAYOUT_ROLE_LINES[line] ?? line);
 }
 
 /** Core + every workspace schema, read in ONE read-only transaction (a consistent snapshot). */
@@ -245,12 +265,13 @@ export async function readFullSecurityPosture(connectionString: string): Promise
     await client.query('BEGIN READ ONLY');
     const core = (await client.query<{ line: string }>(POSTURE_QUERY)).rows.map((r) => r.line);
     const raw = (await client.query<{ schema: string; line: string }>(WORKSPACE_POSTURE_QUERY)).rows;
+    const [layout] = (await client.query<{ owner: boolean }>(`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner') AS "owner"`)).rows;
     await client.query('ROLLBACK');
     const bySchema = new Map<string, string[]>();
     for (const r of raw) bySchema.set(r.schema, [...(bySchema.get(r.schema) ?? []), r.line]);
     const workspaces = new Map<string, string[]>();
     for (const schema of [...bySchema.keys()].sort()) workspaces.set(schema, canonicalWorkspaceLines(schema, bySchema.get(schema)!));
-    return { core, workspaces };
+    return { core, workspaces, ownerLoginLayout: layout?.owner === true };
   } finally {
     await client.end().catch(() => undefined);
   }
@@ -289,8 +310,8 @@ export async function compareWithGolden(
   connectionString: string,
   golden: string[],
 ): Promise<{ core: { missing: string[]; unexpected: string[] }; workspaces: WorkspacePostureDrift[]; workspaceCount: number; lines: number }> {
-  const expected = splitGolden(golden);
   const posture = await readFullSecurityPosture(connectionString);
+  const expected = splitGolden(goldenForLayout(golden, posture.ownerLoginLayout === true));
   return {
     core: diffPosture(expected.core, posture.core),
     workspaces: diffWorkspacePosture(expected.workspace, posture.workspaces),
@@ -305,6 +326,9 @@ export async function compareWithGolden(
  */
 export function goldenLinesFrom(posture: SecurityPosture, previousWorkspaceLines: string[]): { lines: string[]; workspaceSource: string } {
   // Phase D wave 3: a persistent crewflow.dispatch_notify setting is drift by definition; never bless it into the golden.
+  // BC-17: the golden is the owner-login posture; written from a separated-layout database, its two LOGIN lines are mapped back.
+  const toOwnerLogin = Object.fromEntries(Object.entries(SEPARATED_LAYOUT_ROLE_LINES).map(([o, sep]) => [sep, o]));
+  const core = posture.ownerLoginLayout === false ? posture.core.map((l) => toOwnerLogin[l] ?? l) : posture.core;
   const notify = posture.core.filter((l) => l.startsWith('setting|'));
   if (notify.length > 0) {
     throw new Error(`refusing to write a golden that contains a persistent ${DISPATCH_NOTIFY_SETTING_NAME} setting (${notify.join('; ')}): remove it (ALTER ROLE/DATABASE … RESET) first`);
@@ -319,10 +343,10 @@ export function goldenLinesFrom(posture: SecurityPosture, previousWorkspaceLines
     throw new Error(`workspace schemas disagree (${distinct.size} distinct fingerprints: ${groups}); refusing to pick one as the template`);
   }
   if (distinct.size === 0) {
-    return { lines: [...posture.core, ...previousWorkspaceLines], workspaceSource: 'kept from the previous golden (no workspace schema present)' };
+    return { lines: [...core, ...previousWorkspaceLines], workspaceSource: 'kept from the previous golden (no workspace schema present)' };
   }
   const [only] = posture.workspaces.values();
-  return { lines: [...posture.core, ...only!], workspaceSource: `${posture.workspaces.size} identical workspace schema(s)` };
+  return { lines: [...core, ...only!], workspaceSource: `${posture.workspaces.size} identical workspace schema(s)` };
 }
 
 export async function readSecurityPosture(connectionString: string): Promise<string[]> {

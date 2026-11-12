@@ -1,0 +1,122 @@
+# LOCAL ISOLATED STAGING REHEARSAL of docker-compose.image.yml. Never a deployment file.
+#
+# Layered ON TOP of packages/rab-docker/docker-compose.image.yml by run-image-rehearsal.cjs (random credentials per run,
+# passed as S_* variables; nothing stored). It replaces ONLY what a throwaway local stack cannot have:
+#   - the database: a throwaway postgres:16-alpine (tmpfs data, dev roles from ./postgres-init) instead of a managed or
+#     self-hosted production cluster with TLS verify-full and a bound deployment identity, so the runtime services run
+#     with NODE_ENV/RAB_RUNTIME_ENV=development and rab-migrate with DB_TARGET=local (container security does not depend
+#     on NODE_ENV; the migrations still go through deploy-prepare.js: target guard, migration lock, CF-41 identity, the F5
+#     approval token and the post-checks);
+#   - object storage and email: a throwaway MinIO (stand-in for R2, path-style, no SSE header) and a local SMTP sink;
+#   - rab-api's published port (reset: nothing on this stack is reachable from the host);
+#   - rab-redis's data volume (tmpfs instead, so the run creates no Docker volume); its reviewed config file and ACL file
+#     stay as the variant mounts them (the ACL is generated per run with a random password);
+#   - rab-migrate's .env.migrate (the driver passes the throwaway migration logins with `run -e`).
+# It sets NONE of the runtime security keys (user, read_only, cap_*, security_opt, tmpfs, pids_limit, limits,
+# stop_grace_period, healthcheck, restart, depends_on) and never touches `image:` of rab-api / rab-worker / rab-migrate /
+# rab-redis: the images come from the variant's own digest references (the driver asserts both before starting).
+services:
+  rab-redis:
+    volumes: !override
+      - ${CREWFLOW_REDIS_CONF:?}:/usr/local/etc/redis/redis.conf:ro
+      - ${CREWFLOW_SECRETS_DIR:?}/redis-users.acl:/run/secrets/redis-users.acl:ro
+    tmpfs:
+      - /data
+
+  rab-api:
+    ports: !reset []
+    environment: &runtime-env
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+      PG_DATABASE_URL: postgres://crewflow_app:${S_APP_PASSWORD:?}@pg:5432/rab
+      REDIS_URL: redis://crewflow:${S_REDIS_PASSWORD:?}@rab-redis:6379
+      APP_SECRET: ${S_APP_SECRET:?}
+      EMAIL_DRIVER: SMTP
+      EMAIL_SMTP_HOST: smtp
+      EMAIL_SMTP_PORT: '2525'
+      EMAIL_SMTP_NO_TLS: 'true'
+      EMAIL_FROM_ADDRESS: 'Crewflow staging rehearsal <no-reply@staging-rehearsal.invalid>'
+      APP_URL: http://127.0.0.1:5173
+      ACCOUNTS_URL: http://127.0.0.1:5173
+      CORS_ORIGINS: http://127.0.0.1:5173
+      STORAGE_KEY_PREFIX: rehearsal
+      S3_BUCKET: s-rehearsal
+      S3_REGION: eu-west-2
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${S_S3_ACCESS_KEY:?}
+      S3_SECRET_ACCESS_KEY: ${S_S3_SECRET_KEY:?}
+      PUSH_ENABLED: 'false'
+    depends_on:
+      pg:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      smtp:
+        condition: service_started
+
+  rab-worker:
+    # O1 (one image): no CREWFLOW_PROVISIONER_DATABASE_URL (provisioning runs in-process; the Worker refuses that prefix).
+    environment:
+      <<: *runtime-env
+    depends_on:
+      pg:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      smtp:
+        condition: service_started
+
+  pg:
+    image: ${S_POSTGRES_IMAGE:-postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36}
+    environment:
+      POSTGRES_USER: rab
+      POSTGRES_PASSWORD: ${S_SUPERUSER_PASSWORD:?}
+      POSTGRES_DB: rab
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio:
+    image: ${S_MINIO_IMAGE:-pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    command: ['minio', 'server', '/data']
+    environment:
+      MINIO_ROOT_USER: ${S_S3_ACCESS_KEY:?}
+      MINIO_ROOT_PASSWORD: ${S_S3_SECRET_KEY:?}
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:9000/minio/health/live']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  minio-init:
+    image: ${S_MINIO_IMAGE:-pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372}
+    entrypoint: ['sh', '-c', 'mc alias set s http://minio:9000 "$$S_S3_ACCESS_KEY" "$$S_S3_SECRET_KEY" >/dev/null && mc mb --ignore-existing s/s-rehearsal && mc anonymous set none s/s-rehearsal && echo bucket-ready']
+    environment:
+      S_S3_ACCESS_KEY: ${S_S3_ACCESS_KEY:?}
+      S_S3_SECRET_KEY: ${S_S3_SECRET_KEY:?}
+      MC_CONFIG_DIR: /tmp/mc
+    # The image declares VOLUME /data: without a tmpfs there Docker would create an anonymous volume (run 2 did).
+    tmpfs:
+      - /data
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: 'no'
+
+  smtp:
+    image: ${S_NODE_IMAGE:-node@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53}
+    user: '1000:1000'
+    read_only: true
+    command: ['node', '/sink/smtp-sink.cjs']
+    tmpfs:
+      - /out:uid=1000,gid=1000,mode=0755
+    volumes:
+      - ./rab/worker-bundle/test/integration/smtp-sink.cjs:/sink/smtp-sink.cjs:ro

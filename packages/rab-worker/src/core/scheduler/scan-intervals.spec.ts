@@ -45,6 +45,7 @@ describe('Phase A scan interval settings', () => {
       ['login-handoff-cleanup', { kind: 'env-minutes', key: 'LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES' }],
       ['outbox-retention', { kind: 'env-minutes', key: 'OUTBOX_RETENTION_INTERVAL_MINUTES' }],
       ['ai-retention', { kind: 'env-minutes', key: 'AI_RETENTION_INTERVAL_MINUTES' }],
+      ['ai-stale-turn-sweep', { kind: 'env-minutes', key: 'AI_STALE_TURN_SWEEP_INTERVAL_MINUTES' }],
     ]);
   });
 
@@ -54,9 +55,11 @@ describe('Phase A scan interval settings', () => {
       const expected =
         def.interval.kind === 'constant'
           ? 86_400_000
-          : def.interval.kind === 'env-seconds'
+          : def.interval.kind === 'combined-shift-scan'
+            ? 300_000 // D-Q4a: gcd of its four 300-s members (registered only in combined mode)
+            : def.interval.kind === 'env-seconds'
             ? HISTORICAL_SECONDS[def.jobName]! * 1000
-            : { 'login-handoff-cleanup': 15, 'outbox-retention': 60, 'ai-retention': 60 }[def.jobName]! * 60_000;
+            : { 'login-handoff-cleanup': 15, 'outbox-retention': 60, 'ai-retention': 60, 'ai-stale-turn-sweep': 5 }[def.jobName]! * 60_000;
       expect([def.jobName, resolveIntervalMs(def, env)]).toEqual([def.jobName, expected]);
     }
     // Each table default is inside its own bounds.
@@ -105,9 +108,10 @@ describe('Phase A enable predicate (push-dispatch ⇐ PUSH_ENABLED, realtime-out
 
   it('defaults (both switches false) disable those two (+ the Phase D switch-gated retention scans, off by default); "true" enables; anything not exactly true stays disabled', () => {
     const off = envOf();
-    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, off)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention']);
-    const on = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report' });
-    expect(SCAN_JOBS.every((d) => isScanJobEnabled(d, on))).toBe(true);
+    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, off)).map((d) => d.jobName)).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep', 'shift-scan-combined']);
+    const on = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report', AI_STALE_TURN_SWEEP: 'true' });
+    // Phase D-Q4a: the combined shift scan is registered only with WORKER_SHIFT_SCAN_MODE=combined (shift-scan-combined.spec.ts).
+    expect(SCAN_JOBS.filter((d) => !isScanJobEnabled(d, on)).map((d) => d.jobName)).toEqual(['shift-scan-combined']);
     for (const value of ['true', 1, 'yes', undefined, null]) {
       expect(isScanJobEnabled(byJob('push-dispatch'), { get: () => value as never })).toBe(false);
     }
@@ -127,8 +131,8 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     const env = envOf();
     const { calls, runtime } = fakeRuntime();
     const result = registerIntervalScans(runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env), (d) => isScanJobEnabled(d, env));
-    const gated = ['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention'];
-    expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention']);
+    const gated = ['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep', 'shift-scan-combined'];
+    expect(result.disabled).toEqual(['push-dispatch', 'realtime-outbox-publish', 'outbox-retention', 'ai-retention', 'ai-stale-turn-sweep', 'shift-scan-combined']);
     const expected = SCAN_JOBS.filter((d) => !gated.includes(d.jobName));
     expect(calls.map((c) => c.metricKey)).toEqual(expected.map((d) => d.jobName));
     expect(new Set(calls.map((c) => c.name)).size).toBe(17);
@@ -138,10 +142,10 @@ describe('interval-mode registration (registerIntervalScans)', () => {
   });
 
   it('re-enabled (PUSH_ENABLED / REALTIME_ENABLED true, Phase D: retention switches on): all 21, in the historical order', () => {
-    const env = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report' });
+    const env = envOf({ PUSH_ENABLED: 'true', PUSH_PROVIDER: 'FAKE', REALTIME_ENABLED: 'true', OUTBOX_RETENTION_ENABLED: 'true', AI_RETENTION_MODE: 'report', AI_STALE_TURN_SWEEP: 'true' });
     const { calls, runtime } = fakeRuntime();
     registerIntervalScans(runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env), (d) => isScanJobEnabled(d, env));
-    expect(calls.map((c) => c.metricKey)).toEqual(SCAN_JOBS.map((d) => d.jobName));
+    expect(calls.map((c) => c.metricKey)).toEqual(SCAN_JOBS.filter((d) => d.jobName !== 'shift-scan-combined').map((d) => d.jobName));
   });
 
   it('exactly once per runtime: a second registration is refused and adds no timer', () => {
@@ -164,7 +168,7 @@ describe('interval-mode registration (registerIntervalScans)', () => {
     expect(bad.calls).toHaveLength(0);
     // ...and the refused runtime was not marked registered, so a corrected boot path could still register once.
     registerIntervalScans(bad.runtime, registry, SCAN_JOBS, (d) => resolveIntervalMs(d, env));
-    expect(bad.calls).toHaveLength(21);
+    expect(bad.calls).toHaveLength(23); // no enable predicate given: every scan, the D-Q4a combined one included
   });
 
   it('loopOptionsOf carries firstRunAfterInterval only when the scan opts in (default shape unchanged)', () => {

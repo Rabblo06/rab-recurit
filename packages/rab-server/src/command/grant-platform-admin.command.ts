@@ -72,6 +72,7 @@ export class GrantPlatformAdminCommand extends CommandRunner {
     }
 
     const candidates = await this.dataSource.query<Array<{ id: string; organisation_id: string; org_slug: string; email: string }>>(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT u.id, u.organisation_id, o.slug AS org_slug, u.email
          FROM core."user" u
          JOIN core.organisation o ON o.id = u.organisation_id

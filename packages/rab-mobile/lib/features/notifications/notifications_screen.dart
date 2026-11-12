@@ -6,8 +6,17 @@ import '../../core/models/notification_item.dart';
 import '../../core/theme/tokens.dart';
 import 'notifications_provider.dart';
 
+/// Where a notification leads, or null when it only marks read. Notifications
+/// carry no entity ids, so a target is a screen within the caller's own
+/// (server-scoped) lists, chosen by type.
+typedef NotificationTarget =
+    VoidCallback? Function(BuildContext context, NotificationItem item);
+
 class NotificationsScreen extends StatefulWidget {
-  const NotificationsScreen({super.key});
+  const NotificationsScreen({super.key, this.targetFor});
+
+  /// Optional per-type destination (the Venue Manager shell passes one).
+  final NotificationTarget? targetFor;
 
   @override
   State<NotificationsScreen> createState() => _NotificationsScreenState();
@@ -71,12 +80,18 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                     ),
                   ),
                 ),
-              ...provider.notifications.map(
-                (n) => _NotificationTile(
+              ...provider.notifications.map((n) {
+                final open = widget.targetFor?.call(context, n);
+                return _NotificationTile(
                   notification: n,
-                  onTap: n.isUnread ? () => provider.markRead(n.id) : null,
-                ),
-              ),
+                  onTap: open == null && !n.isUnread
+                      ? null
+                      : () {
+                          if (n.isUnread) provider.markRead(n.id);
+                          open?.call();
+                        },
+                );
+              }),
             ],
           ),
         ),

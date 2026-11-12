@@ -200,6 +200,18 @@ export class AdminQueuesService implements OnModuleDestroy {
         idKeys: ['turnId', 'organisationId'],
         lockedReason: 'AI turns run once by design: a failed turn is final and the user asks again, so jobs here cannot be retried or deleted.',
       },
+      {
+        // Phase D-Q4b: listed for health (counts, metrics, failed job ids) but READ-ONLY. A trigger only lets a transition
+        // happen earlier inside its existing window; a failed or lost trigger is handled by the unchanged backstop scan, so
+        // an admin action adds nothing (and no D7 action is extended to a new queue without an owner decision).
+        name: CONSUMER_QUEUES.timerTriggers.name,
+        kind: 'consumer',
+        prefix: LEGACY_BULL_PREFIX,
+        retryStates: [],
+        deleteStates: [],
+        idKeys: ['organisationId'],
+        lockedReason: 'Timer triggers are read-only here: the backstop scan handles any failed or lost trigger.',
+      },
     ];
     if (scheduler) {
       for (const name of SCAN_QUEUE_NAMES) {

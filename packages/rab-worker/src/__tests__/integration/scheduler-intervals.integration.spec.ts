@@ -11,7 +11,7 @@ import { CrewflowSchedulerManager } from '../../core/scheduler/scheduler-manager
 import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { defaultIntervalEnv } from './helpers/default-interval-env';
-import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
+import { COMBINED_SHIFT_SCAN_ID, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
 
 /**
  * Phase A pa-intervals — configurable intervals + the push/realtime enable predicate against a REAL Redis (the disposable
@@ -37,7 +37,7 @@ const def = (jobName: string) => SCAN_JOBS.find((d) => d.jobName === jobName)!;
  * here (their own gating is covered by core/scheduler/scheduler-d3.spec.ts).
  */
 const enabledFrom = (switches: { PUSH_ENABLED: boolean; REALTIME_ENABLED: boolean }) => {
-  const env: Record<string, unknown> = { ...switches, LOGIN_HANDOFF_CLEANUP_ENABLED: true, OUTBOX_RETENTION_ENABLED: true, AI_RETENTION_MODE: 'report' };
+  const env: Record<string, unknown> = { ...switches, LOGIN_HANDOFF_CLEANUP_ENABLED: true, OUTBOX_RETENTION_ENABLED: true, AI_RETENTION_MODE: 'report', AI_STALE_TURN_SWEEP: true }; // D-Q2 gate held ON too
   return (d: ScanJobDefinition) => isScanJobEnabled(d, { get: (k) => env[k] });
 };
 const ALL_OFF = enabledFrom({ PUSH_ENABLED: false, REALTIME_ENABLED: false }); // push/realtime at their defaults
@@ -109,12 +109,12 @@ describeIf('Phase A scheduler intervals + enable predicate (integration, real Re
     const prefix = track(freshPrefix());
     const manager = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf: intervalOfEnv(), isEnabled: ALL_OFF, logger: quietLogger });
     const report = await manager.reconcile();
-    expect(report.disabled).toEqual(GATED);
+    expect(report.disabled).toEqual([...GATED, COMBINED_SHIFT_SCAN_ID]); // D-Q4a: combined is not registered in the default (separate) mode
     expect(report.removedDisabled).toEqual([]);
     const ids = [...(await schedulers(redis, prefix)).keys()].sort();
-    expect(ids).toEqual(EXPECTED_SCAN_SCHEDULER_IDS.filter((id) => !GATED.includes(id)).sort());
+    expect(ids).toEqual(SEPARATE_MODE_SCAN_IDS.filter((id) => !GATED.includes(id)).sort());
     const jobs = await pending(redis, prefix);
-    expect(jobs).toHaveLength(19);
+    expect(jobs).toHaveLength(20); // D-Q2: + ai-stale-turn-sweep (held ON)
     expect(jobs.some((j) => GATED.includes(String(j.scheduler)))).toBe(false);
     await manager.close();
   });
@@ -124,7 +124,7 @@ describeIf('Phase A scheduler intervals + enable predicate (integration, real Re
     const intervalOf = intervalOfEnv();
     const on = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf, isEnabled: ALL_ON, logger: quietLogger });
     await on.reconcile();
-    expect((await schedulers(redis, prefix)).size).toBe(21);
+    expect((await schedulers(redis, prefix)).size).toBe(22);
     const before = await pending(redis, prefix);
     // A brand-new scheduler's first job is due immediately (wait), which removeJobScheduler alone would leave behind.
     expect(before.filter((j) => GATED.includes(String(j.scheduler))).map((j) => j.state)).toEqual(['wait', 'wait']);
@@ -143,12 +143,65 @@ describeIf('Phase A scheduler intervals + enable predicate (integration, real Re
 
     const back = await on.reconcile();
     expect(back.removedDisabled).toEqual([]);
-    expect([...(await schedulers(redis, prefix)).keys()].sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
+    expect([...(await schedulers(redis, prefix)).keys()].sort()).toEqual([...SEPARATE_MODE_SCAN_IDS].sort());
     const again = await pending(redis, prefix);
     expect([...perScheduler(again).values()].every((n) => n === 1)).toBe(true);
-    expect(again).toHaveLength(21);
+    expect(again).toHaveLength(22);
     await on.close();
     await off.close();
+  });
+
+  it('D-Q4a Lane A: WORKER_SHIFT_SCAN_MODE separate → combined swaps the four member schedulers for ONE combined scheduler, a Redis wipe re-creates it, rollback swaps back', async () => {
+    const prefix = track(freshPrefix());
+    const MEMBER_IDS = [
+      'crewflow:crewflow-scan-shifts:shift-monitor',
+      'crewflow:crewflow-scan-shifts:attendance-monitor',
+      'crewflow:crewflow-scan-reports:shift-report-scheduler',
+      'crewflow:crewflow-scan-reports:final-timesheet',
+    ];
+    const modeOf = (mode: 'separate' | 'combined') => {
+      const env: Record<string, unknown> = { LOGIN_HANDOFF_CLEANUP_ENABLED: true, WORKER_SHIFT_SCAN_MODE: mode };
+      return (d: ScanJobDefinition) => isScanJobEnabled(d, { get: (k) => env[k] });
+    };
+    const intervalOf = intervalOfEnv();
+    const separate = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf, isEnabled: modeOf('separate'), logger: quietLogger });
+    const combined = new CrewflowSchedulerManager({ connection: redis, prefix, jobs: SCAN_JOBS, intervalOf, isEnabled: modeOf('combined'), logger: quietLogger });
+
+    await separate.reconcile();
+    let ids = [...(await schedulers(redis, prefix)).keys()];
+    expect(ids).toEqual(expect.arrayContaining(MEMBER_IDS));
+    expect(ids).not.toContain(COMBINED_SHIFT_SCAN_ID);
+
+    const toCombined = await combined.reconcile();
+    expect(toCombined.removedDisabled.sort()).toEqual([...MEMBER_IDS].sort());
+    ids = [...(await schedulers(redis, prefix)).keys()];
+    expect(ids).toContain(COMBINED_SHIFT_SCAN_ID);
+    for (const id of MEMBER_IDS) expect(ids).not.toContain(id);
+    expect((await schedulers(redis, prefix)).get(COMBINED_SHIFT_SCAN_ID)!.every).toBe(300_000); // gcd of four 300-s members
+    let jobs = await pending(redis, prefix);
+    expect(jobs.filter((j) => MEMBER_IDS.includes(String(j.scheduler)))).toEqual([]); // members stop firing
+    expect(jobs.filter((j) => j.scheduler === COMBINED_SHIFT_SCAN_ID)).toHaveLength(1);
+    expect([...perScheduler(jobs).values()].every((n) => n === 1)).toBe(true);
+    // late clock-in and cancellation follow-up are untouched by the mode.
+    expect(ids).toEqual(expect.arrayContaining(['crewflow:crewflow-scan-shifts:late-clock-in', 'crewflow:crewflow-scan-shifts:shift-cancellation-followup']));
+
+    // Redis loss: every key of this prefix gone (a wipe / FLUSHALL); the periodic reconcile re-creates the combined scheduler.
+    for (const key of await keysUnder(redis, `${prefix}:*`)) await redis.del(key);
+    expect((await schedulers(redis, prefix)).size).toBe(0);
+    await combined.reconcile();
+    expect([...(await schedulers(redis, prefix)).keys()]).toContain(COMBINED_SHIFT_SCAN_ID);
+    expect((await pending(redis, prefix)).filter((j) => j.scheduler === COMBINED_SHIFT_SCAN_ID)).toHaveLength(1);
+
+    // Flag rollback: separate again ⇒ the combined scheduler (and its pending job) is removed, the four members return.
+    const back = await separate.reconcile();
+    expect(back.removedDisabled).toEqual([COMBINED_SHIFT_SCAN_ID]);
+    ids = [...(await schedulers(redis, prefix)).keys()];
+    expect(ids).toEqual(expect.arrayContaining(MEMBER_IDS));
+    expect(ids).not.toContain(COMBINED_SHIFT_SCAN_ID);
+    jobs = await pending(redis, prefix);
+    expect(jobs.some((j) => j.scheduler === COMBINED_SHIFT_SCAN_ID)).toBe(false);
+    await separate.close();
+    await combined.close();
   });
 
   it('interval change ⇒ the SAME scheduler id updated in place: one scheduler, one pending job, next run time kept', async () => {
@@ -166,7 +219,7 @@ describeIf('Phase A scheduler intervals + enable predicate (integration, real Re
     const report = await m2.reconcile();
     expect(report.intervalChanged).toEqual([`${id} 60000→300000`]);
     const all = await schedulers(redis, prefix);
-    expect(all.size).toBe(21);
+    expect(all.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // no enable predicate: every scan (23, D-Q4a included)
     expect(all.get(id)!.every).toBe(300_000);
     const now = (await pending(redis, prefix)).filter((j) => j.scheduler === id);
     expect(now).toHaveLength(1);
@@ -202,9 +255,9 @@ describeIf('Phase A scheduler intervals + enable predicate (integration, real Re
     const storageFirst = (await pending(redis, prefix)).find((j) => j.scheduler === schedulerIdOf(storage))!;
     for (let round = 0; round < 3; round += 1) await Promise.all(managers.map((m) => m.reconcile()));
     const all = await schedulers(redis, prefix);
-    expect([...all.keys()].sort()).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS].sort());
+    expect([...all.keys()].sort()).toEqual([...SEPARATE_MODE_SCAN_IDS].sort());
     const jobsNow = await pending(redis, prefix);
-    expect(jobsNow).toHaveLength(21);
+    expect(jobsNow).toHaveLength(22);
     expect([...perScheduler(jobsNow).values()].every((n) => n === 1)).toBe(true);
     // The 24 h sweep's next run never moved forward to "now" while the replicas flipped its interval.
     expect(jobsNow.find((j) => j.scheduler === schedulerIdOf(storage))!.id).toBe(storageFirst.id);

@@ -35,6 +35,28 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
   const created: Ws[] = [];
   const roles: string[] = [];
 
+  /**
+   * Owner-login architecture (Agent 5's review; coordinator-approved classification). Four tests below assert properties of
+   * the RESTRICTED runtime login (crewflow_app): its identity, that it cannot execute provisioner-only functions, cannot run
+   * DDL / disable RLS / SET ROLE, and gained no CREATE. Under the owner login the API's runtime login IS the schema owner, so
+   * these do not hold by design (owner-accepted §2 / DBA-01 class) — and run as the owner, the DDL "attempts" SUCCEED and
+   * rewrite the database (they replaced core.provision_workspace and dropped the workspace schema, failing every later test).
+   * They are therefore never flipped and never run as the owner: they run unchanged against crewflow_app when the harness
+   * provides it (TEST_DATABASE_SEPARATED_APP_URL, or a TEST_DATABASE_URL that IS crewflow_app), otherwise they are skipped by
+   * name. Every other test asserts the function's OWN behaviour and runs unchanged as the API's actual runtime login.
+   */
+  const restrictedAppUrl = !RUN
+    ? undefined
+    : process.env.TEST_DATABASE_SEPARATED_APP_URL?.trim() || (new URL(appUrl).username === 'crewflow_app' ? appUrl : undefined);
+  const RESTRICTED_SKIP_REASON = 'restricted-runtime-login property → behaviour-change catalogue (Agent 5) / retarget in PR #9';
+  const itRestricted = (title: string, fn: () => Promise<void>) =>
+    restrictedAppUrl ? it(title, fn) : it.skip(`${title} [SKIPPED on the owner login: ${RESTRICTED_SKIP_REASON}]`, fn);
+  const restrictedApp = async (): Promise<Client> => {
+    const c = new Client({ connectionString: restrictedAppUrl });
+    await c.connect();
+    return c;
+  };
+
   const app = async (): Promise<Client> => {
     const c = new Client({ connectionString: appUrl });
     await c.connect();
@@ -155,8 +177,8 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
 
   // ---------------------------------------------------------------------------------------------- identity and grants
 
-  it('connects as the real restricted runtime login (crewflow_app, NOSUPERUSER, NOBYPASSRLS, owns nothing)', async () => {
-    const c = await app();
+  itRestricted('connects as the real restricted runtime login (crewflow_app, NOSUPERUSER, NOBYPASSRLS, owns nothing)', async () => {
+    const c = await restrictedApp();
     try {
       const { rows } = await c.query(
         `SELECT session_user AS s, current_user AS u, r.rolsuper, r.rolbypassrls, r.rolcreaterole, r.rolcreatedb,
@@ -196,8 +218,8 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     }
   });
 
-  it('crewflow_app still cannot EXECUTE the provisioner-only functions or the verification helper (42501)', async () => {
-    const c = await app();
+  itRestricted('crewflow_app still cannot EXECUTE the provisioner-only functions or the verification helper (42501)', async () => {
+    const c = await restrictedApp();
     try {
       for (const sql of [
         `SELECT core.provision_workspace_schema(gen_random_uuid())`,
@@ -260,8 +282,8 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
 
   // ---------------------------------------------------------------------------------------------- no new DDL authority
 
-  it('§12.2–§12.6 crewflow_app still cannot CREATE schemas/tables, ALTER/DROP workspace tables, disable RLS or SET ROLE', async () => {
-    const c = await app();
+  itRestricted('§12.2–§12.6 crewflow_app still cannot CREATE schemas/tables, ALTER/DROP workspace tables, disable RLS or SET ROLE', async () => {
+    const c = await restrictedApp();
     try {
       const attempts: Array<[string, string]> = [
         ['create schema', `CREATE SCHEMA spp_${suffix}`],
@@ -307,7 +329,7 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     }
   });
 
-  it('crewflow_app gained no CREATE anywhere and no role membership after provisioning', async () => {
+  itRestricted('crewflow_app gained no CREATE anywhere and no role membership after provisioning', async () => {
     const { rows } = await admin.query(
       `SELECT has_database_privilege('crewflow_app', current_database(), 'CREATE') AS db,
               has_schema_privilege('crewflow_app', 'core', 'CREATE') AS core,

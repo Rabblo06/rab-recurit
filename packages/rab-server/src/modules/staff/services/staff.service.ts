@@ -31,6 +31,7 @@ import { EmailOutboxService } from '../../../engine/core-modules/email/email-out
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
@@ -156,6 +157,13 @@ export class StaffService {
   private readonly directoryPermissions!: PermissionsService;
   @Inject(MemberAccessPolicyService)
   private readonly memberAccess!: MemberAccessPolicyService;
+  /**
+   * Phase X SC-01: every write below that changes a field of CoreEntityCacheService's `user` display projection (name,
+   * email, avatar) or removes the row clears that entry AFTER its transaction commits (the cache's own contract). A
+   * failed transaction never reaches the call. Property-injected so the constructor is unchanged.
+   */
+  @Inject(CoreEntityCacheService)
+  private readonly entityCache!: CoreEntityCacheService;
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly workspaceMembership: WorkspaceMembershipService,
@@ -725,19 +733,23 @@ export class StaffService {
         profile.user = await manager.findOneByOrFail(User, { id: userId });
 
         // Account creation must never depend on, or fail because of, email
-        // deliverability — checked synchronously (a cheap Redis read, never
-        // a live SMTP round-trip) before deciding whether to create an
-        // invite at all. If unavailable, skip cleanly: no AccountInvite row,
-        // no EmailOutbox row — nothing durable that could fire a stale
-        // invite later once the worker comes back. A Manager can send a
-        // fresh one at any time via the existing "Resend invitation" action.
-        const emailAvailable = await this.accountLifecycle.isEmailDeliveryAvailable();
-        const invite = emailAvailable
+        // deliverability. Owner decision (Phase D-Q §12.1 #3, "always
+        // queue"): the invite is written to the durable outbox whenever email
+        // delivery is CONFIGURED on — Worker health (the Redis heartbeat) no
+        // longer decides it. If the Worker is down the row waits and is sent
+        // when it returns; the Worker's pre-delivery revalidation cancels it
+        // instead if by then it was revoked, superseded by a resend, accepted
+        // or expired. EMAIL_DELIVERY_ENABLED=false (creation-time setting)
+        // still skips it: no AccountInvite row, no EmailOutbox row, and a
+        // Manager can send one later via "Resend invitation".
+        const emailEnabled = this.accountLifecycle.isEmailDeliveryEnabled();
+        const invite = emailEnabled
           ? await this.accountLifecycle.sendAccountInvite(manager, ctx, { userId, email, createdBy: ctx.userId })
           : null;
         await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
           targetUserId: userId,
-          metadata: { emailQueued: emailAvailable },
+          // What actually happened: true only when an invite outbox row was written in this transaction.
+          metadata: { emailQueued: invite !== null },
         });
         const createdByNames = await this.resolveCreatedByNames(manager, [profile]);
 
@@ -745,13 +757,13 @@ export class StaffService {
           ...this.toSummary(profile, null, null, (profile.createdBy && createdByNames.get(profile.createdBy)) ?? null),
           // The invite row is now always durably committed before this
           // returns (A8) — delivery outcome is no longer known synchronously.
-          // Null throughout when email was skipped at creation time.
+          // Null throughout when email delivery is configured off.
           pendingInvite: invite
             ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
             : null,
           invitationStatus: invite ? ('queued' as const) : null,
           invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
-          emailQueued: emailAvailable,
+          emailQueued: invite !== null,
         };
       });
     } catch (e) {
@@ -820,7 +832,8 @@ export class StaffService {
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateStaffDto): Promise<StaffSummary> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let displayChangedFor: string | null = null;
+    const summary = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -834,6 +847,7 @@ export class StaffService {
       // comment). No raw-field path, named action, or client request can
       // change it here.
       const { firstName, lastName, phone, ...profileFields } = dto;
+      if (firstName !== undefined || lastName !== undefined) displayChangedFor = profile.userId;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
         await manager.update(User, profile.userId, {
           ...(firstName !== undefined && { firstName }),
@@ -875,6 +889,13 @@ export class StaffService {
       refreshed.user = await manager.findOneByOrFail(User, { id: profile.userId });
       return this.toSummaryWithInvite(manager, refreshed);
     });
+    await this.invalidateUserDisplay(displayChangedFor);
+    return summary;
+  }
+
+  /** SC-01: after commit only; a no-op for null (nothing in the projection changed). Best-effort, never throws. */
+  private async invalidateUserDisplay(userId: string | null): Promise<void> {
+    if (userId) await this.entityCache.invalidate('user', userId);
   }
 
   /**
@@ -1069,7 +1090,8 @@ export class StaffService {
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let emailChangedFor: string | null = null;
+    const invite = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already the pending email for this account.');
@@ -1089,6 +1111,7 @@ export class StaffService {
       // NULL is idempotent regardless of the column's current value.
       await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
       await manager.update(User, profile.userId, { email: newEmail });
+      emailChangedFor = profile.userId;
       await this.auditService.record(manager, ctx, AuditAction.INVITE_PENDING_EMAIL_CHANGED, {
         targetUserId: profile.userId,
         metadata: { from: profile.user!.email, to: newEmail },
@@ -1096,6 +1119,8 @@ export class StaffService {
 
       return this.accountLifecycle.sendAccountInvite(manager, ctx, { userId: profile.userId, email: newEmail, createdBy: ctx.userId });
     });
+    await this.invalidateUserDisplay(emailChangedFor);
+    return invite;
   }
 
   /**
@@ -1179,11 +1204,13 @@ export class StaffService {
         targetUserId: profile.userId,
         metadata: { field: 'email', from: profile.user!.email, to: newEmail },
       });
-      return { verify: false as const, email: newEmail };
+      return { verify: false as const, email: newEmail, userId: profile.userId };
     });
     if (outcome.verify) {
+      // The verified path changes nothing yet; EmailChangeService.confirm() clears the entry when it does.
       return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission: PermissionFlag.STAFF_EDIT });
     }
+    await this.invalidateUserDisplay(outcome.userId);
     return { email: outcome.email };
   }
 
@@ -1294,14 +1321,17 @@ export class StaffService {
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let deletedUserId: string | null = null;
+    await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
       await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+      deletedUserId = profile.userId;
     });
+    await this.invalidateUserDisplay(deletedUserId);
   }
 
   /** Tombstones the replaced avatar (row kept as `DELETED`); its object is purged later by `storage:reconcile` — mirrors `ProfileService`'s own identical private helper for the self-service case. */
@@ -1323,7 +1353,8 @@ export class StaffService {
    * other cross-Manager attempt against this entity.
    */
   async uploadAvatar(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ avatarKey: string }> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let avatarChangedFor: string | null = null;
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1339,6 +1370,7 @@ export class StaffService {
         createdBy: ctx.userId,
       });
       await manager.update(User, profile.userId, { avatarFileId: file.id });
+      avatarChangedFor = profile.userId;
       await this.retireAvatar(manager, before);
       await this.auditService.record(manager, ctx, AuditAction.FILE_UPLOADED, { entityType: 'stored_file', entityId: file.id, metadata: { kind: file.kind, sizeBytes: file.sizeBytes } });
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
@@ -1347,17 +1379,21 @@ export class StaffService {
       });
       return { avatarKey: file.id };
     });
+    await this.invalidateUserDisplay(avatarChangedFor);
+    return result;
   }
 
   /** Removes a Staff member's avatar — same ownership gate as `uploadAvatar`. */
   async removeAvatar(ctx: AuthContext, id: string): Promise<{ avatarKey: string | null }> {
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let avatarChangedFor: string | null = null;
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;
       await manager.update(User, profile.userId, { avatarFileId: null });
+      avatarChangedFor = profile.userId;
       await this.retireAvatar(manager, before);
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, {
         targetUserId: profile.userId,
@@ -1365,5 +1401,7 @@ export class StaffService {
       });
       return { avatarKey: null };
     });
+    await this.invalidateUserDisplay(avatarChangedFor);
+    return result;
   }
 }

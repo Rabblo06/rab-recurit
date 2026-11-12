@@ -72,7 +72,11 @@ class _ShiftStatusControlState extends State<ShiftStatusControl>
   Widget build(BuildContext context) {
     final provider = context.watch<OffersProvider>();
     final p = widget.offer.presentation;
-    var label = p?.label ?? widget.fallback;
+    // An acceptance still waiting for a manager reads as exactly that (the
+    // projection's generic 'pending' covers open offers too).
+    var label = widget.offer.isAwaitingManagerConfirmation
+        ? ConfirmationDeadlineCopy.awaiting
+        : p?.label ?? widget.fallback;
     if (!widget.reconciling && p?.state == 'live' && p?.clockInAt != null) {
       final now = provider.trustedNow ?? p!.serverNow;
       final seconds = now

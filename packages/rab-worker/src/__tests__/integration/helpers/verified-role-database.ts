@@ -26,7 +26,7 @@ import {
  */
 export async function resolveVerifiedRoleDatabaseUrl(
   envVar: string,
-  expectedRole: 'crewflow_app' | 'crewflow',
+  expectedRole: 'crewflow_owner' | 'crewflow_app' | 'crewflow',
 ): Promise<string> {
   const resolved = resolveIntegrationTestDatabase(process.env);
   const url = process.env[envVar]?.trim();
@@ -78,9 +78,13 @@ export async function resolveVerifiedRoleDatabaseUrl(
   return url;
 }
 
-/** The restricted runtime role: TEST_DATABASE_URL, which jest-setup.ts also binds to DATABASE_URL for the app under test. */
+/**
+ * The runtime login: TEST_DATABASE_URL, which jest-setup.ts also binds to DATABASE_URL for the app under test. Owner-login
+ * architecture (BC-02, behaviour change): the one runtime login is crewflow_owner; crewflow_app is a schema role now. The
+ * NOSUPERUSER / NOBYPASSRLS and same-database checks above are unchanged.
+ */
 export const verifiedRestrictedRuntimeUrl = (): Promise<string> =>
-  resolveVerifiedRoleDatabaseUrl(TEST_DATABASE_URL, 'crewflow_app');
+  resolveVerifiedRoleDatabaseUrl(TEST_DATABASE_URL, 'crewflow_owner');
 
 /** The ordinary migration/DDL role the provisioner authenticates as, on the same test database. */
 export const TEST_DATABASE_CREWFLOW_URL = 'TEST_DATABASE_CREWFLOW_URL';

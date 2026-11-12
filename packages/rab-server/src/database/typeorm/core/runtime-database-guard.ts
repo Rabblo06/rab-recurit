@@ -68,6 +68,7 @@ import {
 } from '../../deployment-identity/deployment-identity';
 import { unmarkedProductionRefusal } from '../../deployment-identity/unmarked-production-endpoints';
 import { runtimeEnvRefusal } from './never-in-runtime-env';
+import { runtimeDbConfigProblems } from '../../owner-login/runtime-db-config';
 
 export const RUNTIME_ENV_VAR = 'RAB_RUNTIME_ENV';
 
@@ -161,6 +162,12 @@ export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb
   if (forbidden) {
     throw new RuntimeDbError(`${forbidden.name} is present in the ${processName} process's environment. ${forbidden.why} Refusing to start.`);
   }
+
+  // Owner-login architecture: the remaining database start-up settings (CREWFLOW_MIGRATE_ON_START,
+  // CREWFLOW_MIGRATION_APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE_POLICY) are validated here as well, so a process started
+  // without api-prestart.sh never runs with a malformed value. Names and allowed values only, never the value.
+  const [configProblem] = runtimeDbConfigProblems(env);
+  if (configProblem) throw new RuntimeDbError(`The ${processName} process: ${configProblem}`);
 
   const declared = env[RUNTIME_ENV_VAR]?.trim();
   if (declared !== undefined && declared !== '' && !['production', 'development', 'non-production'].includes(declared)) {

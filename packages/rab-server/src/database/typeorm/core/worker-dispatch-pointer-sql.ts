@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Phase D (D1/D2/D5/D8) — the SQL of migrations 1786721300000 … 1786721340000, kept as DATA so the exact statements can be
  * shown for owner approval (docs/plans/PHASE-D-SQL-GATE.md is rendered from this file), scanned by unit tests without a

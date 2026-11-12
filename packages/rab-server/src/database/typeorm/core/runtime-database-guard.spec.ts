@@ -58,11 +58,11 @@ const PROD_ENV = (extra: Record<string, string | undefined> = {}): Record<string
 
 describe('runtime database identity guard (API, worker and provisioner boot)', () => {
   it('1. NODE_ENV=production without RAB_RUNTIME_ENV is refused', () => {
-    expectRefused('api', { NODE_ENV: 'production', DATABASE_URL: PROD_POOLED }, /requires RAB_RUNTIME_ENV=production/);
+    expectRefused('api', { NODE_ENV: 'production', PG_DATABASE_URL: PROD_POOLED }, /requires RAB_RUNTIME_ENV=production/);
   });
 
   it('2. RAB_RUNTIME_ENV=production without NODE_ENV=production is refused', () => {
-    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'production', DATABASE_URL: PROD_POOLED }, /requires NODE_ENV=production/);
+    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'production', PG_DATABASE_URL: PROD_POOLED }, /requires NODE_ENV=production/);
   });
 
   it('3. production runtime is refused when RAB_RUNTIME_ENV appears in .env', () => {
@@ -77,10 +77,10 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('4b. Phase B: production refuses the legacy names and libpq variables, and requires PG_DATABASE_URL', () => {
-    expectRefused('api', PROD_ENV({ DATABASE_URL: PROD_APP }), /refuses the legacy database variable\(s\) DATABASE_URL/);
+    expectRefused('api', PROD_ENV({ DATABASE_URL: PROD_APP }), /^DATABASE_URL is present in the api process's environment\. It is the retired name of PG_DATABASE_URL\. Rename it to PG_DATABASE_URL/);
     expectRefused('worker', PROD_ENV({ DB_POOL_MAX: '10' }), /refuses the legacy database variable\(s\) DB_POOL_MAX/);
     expectRefused('api', PROD_ENV({ PGPASSWORD: 'x' }), /libpq environment variable\(s\) PGPASSWORD/);
-    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: undefined, DATABASE_URL: PROD_APP }), /legacy database variable|PG_DATABASE_URL is required in production/);
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: undefined, DATABASE_URL: PROD_APP }), /^DATABASE_URL is present in the api process's environment\. It is the retired name/);
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
   });
 
@@ -90,8 +90,9 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED })).classification).toBe('PRODUCTION');
   });
 
-  it('5. B3: production runtime needs the declared deployment identity; the marker check itself is live (deployment-identity.spec)', () => {
-    expectRefused('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: undefined, CREWFLOW_DEPLOYMENT_ID: undefined }), /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+  it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {
+    // Owner decision BC-11 (2026-11-05): undeclared resolves (the live check then warns instead of matching).
+    expect(resolve('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: undefined, CREWFLOW_DEPLOYMENT_ID: undefined })).declared).toBeNull();
     expectRefused('worker', PROD_ENV({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'staging' }), /must declare production/);
     expectRefused('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_ID: undefined }), /must be set together/);
     expectRefused('api', PROD_ENV(), /present in a \.env file/, { CREWFLOW_DEPLOYMENT_ID: PROD_ID });
@@ -100,7 +101,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
 
   it('5b. B3: the runtime never honours the production bootstrap flag', () => {
     expectRefused('api', PROD_ENV({ CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' }), /honoured only by production database commands/);
-    expectRefused('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'x' }, /honoured only by production database commands/);
+    expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'x' }, /honoured only by production database commands/);
   });
 
   it('5c. B3: the Neon pin is gone — a production runtime on any provider host resolves; identity is the live marker', () => {
@@ -112,10 +113,10 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('6. ALLOW_PRODUCTION_DB_COMMANDS does NOT satisfy the runtime guard: since L-4 its presence alone refuses the runtime', () => {
     expectRefused(
       'api',
-      { NODE_ENV: 'production', DATABASE_URL: PROD_POOLED, [ALLOW_PRODUCTION_DB_COMMANDS]: 'true' },
+      { NODE_ENV: 'production', PG_DATABASE_URL: PROD_POOLED, [ALLOW_PRODUCTION_DB_COMMANDS]: 'true' },
       /ALLOW_PRODUCTION_DB_COMMANDS is present in the api process's environment\. It is command authority/,
     );
-    expectRefused('api', { NODE_ENV: 'production', DATABASE_URL: PROD_POOLED }, /requires RAB_RUNTIME_ENV=production/);
+    expectRefused('api', { NODE_ENV: 'production', PG_DATABASE_URL: PROD_POOLED }, /requires RAB_RUNTIME_ENV=production/);
     // By NAME in every runtime, production or not, whatever its value.
     for (const processName of ['api', 'worker', 'provisioner'] as const) {
       for (const value of ['true', 'false', 'local']) {
@@ -191,14 +192,14 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('8d. a non-production WORKER also refuses to boot if DATABASE_URL_UNPOOLED is present at all — the restriction is not production-only', () => {
     expectRefused(
       'worker',
-      { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER },
+      { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER },
       /only the provisioner process may hold it/,
     );
   });
 
-  it('8d2. API, worker AND provisioner refuse to boot if the Worker bundle launcher variable CREWFLOW_PROVISIONER_DATABASE_URL reached them', () => {
+  it('8d2. API, worker AND provisioner refuse to boot if the retired provisioner credential CREWFLOW_PROVISIONER_DATABASE_URL reached them', () => {
     expectRefused('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the api process's environment/);
-    expectRefused('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_DATABASE_URL: LOCAL_OWNER }, /Only the Worker bundle launcher may hold it/);
+    expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_DATABASE_URL: LOCAL_OWNER }, /there is no provisioner credential\. Remove it/);
     expectRefused('provisioner', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT, CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the provisioner/);
     // An empty value is treated as absent, like DATABASE_URL_UNPOOLED.
     expect(resolve('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: '' })).classification).toBe('PRODUCTION');
@@ -207,7 +208,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('8d3. API and worker refuse to boot if any migration authority (prestart URL, rab-migrate URL, approval) reached them', () => {
     expectRefused('api', PROD_ENV({ CREWFLOW_PRESTART_MIGRATION_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PRESTART_MIGRATION_DATABASE_URL is present in the api process's environment/);
     expectRefused('api', PROD_ENV({ CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }), /CREWFLOW_MIGRATION_APPROVED is present in the api/);
-    expectRefused('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_DATABASE_URL: LOCAL_OWNER }, /never reaches a long-running process/);
+    expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_DATABASE_URL: LOCAL_OWNER }, /never reaches a long-running process/);
     expect(resolve('api', PROD_ENV({ CREWFLOW_PRESTART_MIGRATION_DATABASE_URL: ' ', CREWFLOW_MIGRATION_APPROVED: '' })).classification).toBe('PRODUCTION');
   });
 
@@ -223,10 +224,10 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('10. B3: a NON-production process may not declare production (the dev .env incident path is now refused LIVE by the marker: a production-bound database refuses every non-production process, whatever the host)', () => {
-    expectRefused('api', { NODE_ENV: 'development', DATABASE_URL: PROD_POOLED, ...DECLARED_PROD }, /non-production api process declares CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+    expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: PROD_POOLED, ...DECLARED_PROD }, /non-production api process declares CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
     // A production-BOUND database is refused live by the marker (deployment-identity.spec.ts); today's UNMARKED production
     // endpoint is refused before any connection by the interim deny list (10b).
-    expect(resolve('api', { NODE_ENV: 'development', DATABASE_URL: OTHER_NEON }).classification).toBe('NON-PRODUCTION');
+    expect(resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: OTHER_NEON }).classification).toBe('NON-PRODUCTION');
   });
 
   it('10b. H-1 (interim, until production carries a bound marker): a non-production API / Worker / Provisioner pointed at the current production Neon endpoint is refused before connecting — direct or -pooler host, any region, any database, any of its URLs', () => {
@@ -237,7 +238,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       for (const NODE_ENV of ['development', 'test', undefined]) {
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: PROD_APP }, pattern);
         // The -pooler host (the API's shape; the Worker and provisioner already refuse a transaction pooler first).
-        if (processName === 'api') expectRefused(processName, { NODE_ENV, DATABASE_URL: PROD_POOLED }, pattern);
+        if (processName === 'api') expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: PROD_POOLED }, pattern);
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: otherRegion }, pattern);
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: otherDatabase }, pattern);
       }
@@ -245,7 +246,8 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       expectRefused(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'non-production', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: PROD_APP }, pattern);
     }
     // Any endpoint the process can open: the read replica too.
-    expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, PG_DATABASE_REPLICA_URL: PROD_APP }, /PG_DATABASE_REPLICA_URL names the current production Neon endpoint/);
+    // Owner-login architecture: the read replica URL is refused by name before any endpoint check (one URL only).
+    expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, PG_DATABASE_REPLICA_URL: PROD_APP }, /^PG_DATABASE_REPLICA_URL is present in the api process's environment/);
     // Production itself is not on this path (it is decided by the declared identity + the live marker).
     expect(resolve('api', PROD_ENV()).classification).toBe('PRODUCTION');
     // Another Neon endpoint, a loopback and a docker-service host are unaffected.
@@ -275,13 +277,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('11. a non-production process on a local database is accepted, classified LOCAL', () => {
-    const resolved = resolve('api', { NODE_ENV: 'development', DATABASE_URL: LOCAL });
+    const resolved = resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL });
     expect(resolved.classification).toBe('LOCAL');
     expect(resolved.runtimeEnvironment).toBe('non-production');
   });
 
   it('11b. RAB_RUNTIME_ENV=development on a local database is accepted, runtime development, classified LOCAL', () => {
-    const resolved = resolve('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DATABASE_URL: LOCAL });
+    const resolved = resolve('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: LOCAL });
     expect(resolved.runtimeEnvironment).toBe('development');
     expect(resolved.classification).toBe('LOCAL');
   });
@@ -289,13 +291,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('11c. RAB_RUNTIME_ENV=development is refused for a remote database, even one that is not production', () => {
     expectRefused(
       'api',
-      { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DATABASE_URL: OTHER_NEON },
+      { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: OTHER_NEON },
       /development refuses a remote database/,
     );
   });
 
   it('11d. a non-production process on a remote database that is not production is NON-PRODUCTION, not LOCAL', () => {
-    const resolved = resolve('api', { NODE_ENV: 'development', DATABASE_URL: OTHER_NEON });
+    const resolved = resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: OTHER_NEON });
     expect(resolved.classification).toBe('NON-PRODUCTION');
   });
 
@@ -327,23 +329,23 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('11e. RAB_RUNTIME_ENV=development with NODE_ENV=production is refused: production needs RAB_RUNTIME_ENV=production', () => {
-    expectRefused('api', { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'development', DATABASE_URL: LOCAL }, /requires RAB_RUNTIME_ENV=production/);
+    expectRefused('api', { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: LOCAL }, /requires RAB_RUNTIME_ENV=production/);
   });
 
   it('12. NODE_ENV=test declaring production is refused as non-production (no test process touches production)', () => {
-    expectRefused('api', { NODE_ENV: 'test', DATABASE_URL: PROD_POOLED, ...DECLARED_PROD }, /non-production api process declares/);
+    expectRefused('api', { NODE_ENV: 'test', PG_DATABASE_URL: PROD_POOLED, ...DECLARED_PROD }, /non-production api process declares/);
   });
 
   it('12b. F1: a query-string host/port/user override is refused for every runtime URL', () => {
-    expectRefused('api', { NODE_ENV: 'development', DATABASE_URL: `${LOCAL}?host=db.attacker.example` }, /sets "host" as a query parameter/);
-    expectRefused('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: `${LOCAL}?port=6543` }, /DATABASE_DIRECT_URL sets "port"/);
+    expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: `${LOCAL}?host=db.attacker.example` }, /sets "host" as a query parameter/);
+    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: `${LOCAL}?port=6543` }, /DATABASE_DIRECT_URL sets "port"/);
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: `${PROD_APP}&user=postgres` }), /sets "user" as a query parameter/);
     // RAB_RUNTIME_ENV=development "local only" can no longer be satisfied by a loopback URL that pg would redirect elsewhere.
-    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DATABASE_URL: `${LOCAL}?hostaddr=203.0.113.9` }, /sets "hostaddr"/);
+    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: `${LOCAL}?hostaddr=203.0.113.9` }, /sets "hostaddr"/);
   });
 
   it('13. an unrecognised RAB_RUNTIME_ENV is refused', () => {
-    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'prod', DATABASE_URL: LOCAL }, /is not recognised/);
+    expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'prod', PG_DATABASE_URL: LOCAL }, /is not recognised/);
   });
 
   it('14. a missing PG_DATABASE_URL is refused, and never silently replaced by the elevated URL', () => {
@@ -352,7 +354,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('15. no refusal message contains a credential, including for a malformed URL', () => {
-    expectRefused('api', { NODE_ENV: 'development', DATABASE_URL: `postgres://u:${SECRET}@[bad/db` }, /is not a parseable postgres URL/);
+    expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: `postgres://u:${SECRET}@[bad/db` }, /is not a parseable postgres URL/);
     // The factory's own message names the accepted schemes (literally "postgres://"), never the value.
     expect(() => resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: `not a url ${SECRET}` })).toThrow(RuntimeDbError);
     expect(() => resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: `not a url ${SECRET}` })).toThrow(/PG_DATABASE_URL must be a postgres:\/\/ or postgresql:\/\/ URL \(value not shown\)/);
@@ -367,13 +369,22 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   // THIRD, separate url from DATABASE_URL_UNPOOLED: it is still the restricted `crewflow_app` role, just
   // a direct (non-pgbouncer) connection string for session-level advisory locks — unrelated to the
   // provisioner's privileged-credential isolation, so the ordinary worker legitimately sets it.)
+  // Owner-login architecture (behaviour change, catalogued): the API and the Worker take ONE URL, so the Worker now REFUSES
+  // DATABASE_DIRECT_URL by name (tests 16 and 16b). The lock-endpoint probe machinery below is retained only for the
+  // superseded separate provisioner process (unused; removed in the final clean-up PR), so cases 17-22 exercise it there.
   describe('DATABASE_DIRECT_URL (rab-worker\'s directDataSource — the previously-unguarded path)', () => {
+    it('16b. owner-login: a NON-production worker (and the API) refuse DATABASE_DIRECT_URL by name — one URL only', () => {
+      for (const processName of ['api', 'worker'] as const) {
+        expectRefused(processName, { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL_DIRECT_USER }, /^DATABASE_DIRECT_URL is present in the .* process's environment/);
+      }
+    });
+
     it('16. Phase B: a production worker refuses DATABASE_DIRECT_URL (PG_DATABASE_URL is itself the direct session-lock connection)', () => {
-      expectRefused('worker', PROD_ENV({ DATABASE_DIRECT_URL: PROD_DIRECT }), /refuses the legacy database variable\(s\) DATABASE_DIRECT_URL/);
+      expectRefused('worker', PROD_ENV({ DATABASE_DIRECT_URL: PROD_DIRECT }), /^DATABASE_DIRECT_URL is present in the worker process's environment\. The API, the Worker and the migrate child use ONE database URL/);
     });
 
     it('17. a non-production worker with a deprecated DATABASE_DIRECT_URL naming the same endpoint (another login) is accepted and probed', () => {
-      const resolved = resolve('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL_DIRECT_USER });
+      const resolved = resolve('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL_DIRECT_USER });
       expect(resolved.direct?.endpointKey).toBe('127.0.0.1:55462');
       expect(resolved.direct?.label).toBe('DATABASE_DIRECT_URL');
     });
@@ -385,13 +396,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     });
 
     it('19. DATABASE_DIRECT_URL explicitly equal to DATABASE_URL (the literal fallback value) is also treated as a no-op, never double-probed', () => {
-      const resolved = resolve('worker', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL });
+      const resolved = resolve('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL });
       expect(resolved.direct).toBeNull();
     });
 
     it('20. a non-production worker whose DATABASE_DIRECT_URL points at the production database is refused — caught by the earlier cross-URL identity check, before the production/non-production branch even runs', () => {
       expectRefused(
-        'worker',
+        'provisioner',
         { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: PROD_DIRECT },
         /different databases/,
       );
@@ -403,10 +414,55 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
 
     it('22. a DATABASE_DIRECT_URL at a different (even non-production) endpoint than DATABASE_URL is refused outright — any cross-URL identity mismatch is caught before any environment classification runs', () => {
       expectRefused(
-        'worker',
+        'provisioner',
         { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: OTHER_NEON },
         /different databases/,
       );
+    });
+  });
+
+  // ------------------------------------------------------------------------------------------------ owner login
+  describe('owner-login architecture: one PG_DATABASE_URL and the remaining start-up settings', () => {
+    it('23. the API and the Worker refuse a legacy or second database URL, a role password and the removed mode switch (actionable, never the value)', () => {
+      const cases: Array<[string, RegExp]> = [
+        ['DATABASE_URL', /Rename it to PG_DATABASE_URL/],
+        ['PG_DATABASE_REPLICA_URL', /use ONE database URL, PG_DATABASE_URL/],
+        ['PG_WORKER_DATABASE_URL', /use ONE database URL, PG_DATABASE_URL/],
+        ['CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', /Role passwords never belong in application configuration/],
+      ];
+      for (const processName of ['api', 'worker'] as const) {
+        for (const [name, why] of cases) {
+          const message = expectRefused(processName, { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, [name]: SECRET }, new RegExp(`^${name} is present in the ${processName} process's environment\\. `));
+          expect(message).toMatch(why);
+          expectRefused(processName, PROD_ENV({ [name]: SECRET }), new RegExp(`^${name} is present`));
+        }
+      }
+      // The removed mode switch: refused by the runtime-db-config parser the guard runs (actionable message).
+      for (const processName of ['api', 'worker'] as const) {
+        expectRefused(processName, { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_DB_MODE: 'twenty' }, new RegExp(`^The ${processName} process: There is no database mode switch any more`));
+      }
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_ENABLED: 'false' }, /^CREWFLOW_PROVISIONER_ENABLED is present in the api process's environment\. Workspace provisioning runs inside the Worker/);
+    });
+
+    it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE / UPGRADE_FAILURE_POLICY is refused in-process too (a start that skips api-prestart.sh)', () => {
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATE_ON_START: 'yes' }, /The api process: CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false/);
+      expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }, /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
+      // Owner decision C3 (2026-11-05): `continue` is a value of the NEW name only; under the deprecated alias it still refuses,
+      // now with the alias message (assertion change: the message text, not the refusal).
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible/);
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse/);
+      expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'yes' }, /DISABLE_DB_MIGRATIONS must be exactly one of: true, false/);
+      // Owner decision C1: DISABLE_DB_MIGRATIONS=true is accepted on both processes (the Worker never migrates either way).
+      expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
+      expect(resolve('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
+      // Owner decision BC-11: production no longer needs an explicit approval mode (none by default); an invalid one refuses.
+      expect(resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true' })).classification).toBe('PRODUCTION');
+      expectRefused('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'Token' }), /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
+      // Not required in-process (only the API image entrypoint requires it); valid values pass.
+      expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL }).classification).toBe('LOCAL');
+      expect(
+        resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).classification,
+      ).toBe('PRODUCTION');
     });
   });
 });

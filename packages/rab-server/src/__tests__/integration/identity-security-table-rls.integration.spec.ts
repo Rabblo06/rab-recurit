@@ -11,6 +11,7 @@ import { Organisation, User } from '../../modules/identity/entities';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 
@@ -201,28 +202,48 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
       expect(rows[0].id).toBe(b!.userId);
     });
 
-    it('password_hash is blocked at the column-privilege layer for ANY row, including the caller\'s own — the fix is table-wide, not RLS-conditional', async () => {
+    // P-class (owner-login architecture): the column block is kept for the SCHEMA ROLE crewflow_app (42501); the runtime
+    // login's DIFFERENT behaviour is asserted separately below: catalogue BC-13, HIGH, ACCEPTED (owner, 2026-11-05).
+    it('password_hash is blocked at the column-privilege layer for the schema role crewflow_app, for ANY row including the caller\'s own (42501)', async () => {
       const { organisation, managers } = await seedOrgWithManagers(1);
       const [a] = managers;
+      const ctx = { organisationId: organisation.id, workspaceId: null, userId: a!.userId, role: '' };
+      expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: `SELECT password_hash FROM core."user" WHERE id = $1`, params: [a!.userId] }])).toBe('42501');
+    });
 
+    // OWNER-LOGIN DIFFERENCE BC-13 (HIGH, ACCEPTED (owner, 2026-11-05); a labelled difference, NOT a passed control): the runtime login
+    // crewflow_owner is not refused password_hash.
+    it('OWNER-LOGIN DIFFERENCE BC-13 (ACCEPTED (owner, 2026-11-05)): the runtime login is NOT refused password_hash', async () => {
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const [a] = managers;
       await expect(
         tenantContext.runInTenantContext(
           { organisationId: organisation.id, workspaceId: null, userId: a!.userId, role: '' },
           (m) => m.query(`SELECT password_hash FROM core."user" WHERE id = $1`, [a!.userId]),
         ),
-      ).rejects.toThrow(/permission denied for table user/);
+      ).resolves.toBeDefined();
     });
 
-    it('totp_secret_encrypted is likewise blocked at the column-privilege layer', async () => {
+    // P-class (owner-login architecture): the column block is kept for the SCHEMA ROLE crewflow_app (42501); the runtime
+    // login's DIFFERENT behaviour is asserted separately below: catalogue BC-13, HIGH, ACCEPTED (owner, 2026-11-05).
+    it('totp_secret_encrypted is blocked at the column-privilege layer for the schema role crewflow_app, for ANY row including the caller\'s own (42501)', async () => {
       const { organisation, managers } = await seedOrgWithManagers(1);
       const [a] = managers;
+      const ctx = { organisationId: organisation.id, workspaceId: null, userId: a!.userId, role: '' };
+      expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: `SELECT totp_secret_encrypted FROM core."user" WHERE id = $1`, params: [a!.userId] }])).toBe('42501');
+    });
 
+    // OWNER-LOGIN DIFFERENCE BC-13 (HIGH, ACCEPTED (owner, 2026-11-05); a labelled difference, NOT a passed control): the runtime login
+    // crewflow_owner is not refused totp_secret_encrypted.
+    it('OWNER-LOGIN DIFFERENCE BC-13 (ACCEPTED (owner, 2026-11-05)): the runtime login is NOT refused totp_secret_encrypted', async () => {
+      const { organisation, managers } = await seedOrgWithManagers(1);
+      const [a] = managers;
       await expect(
         tenantContext.runInTenantContext(
           { organisationId: organisation.id, workspaceId: null, userId: a!.userId, role: '' },
           (m) => m.query(`SELECT totp_secret_encrypted FROM core."user" WHERE id = $1`, [a!.userId]),
         ),
-      ).rejects.toThrow(/permission denied for table user/);
+      ).resolves.toBeDefined();
     });
 
     it('a different organisation cannot see the row at all, regardless of columns requested — RLS org boundary still holds', async () => {
@@ -244,13 +265,17 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
     // (information_schema only lists grants to enabled roles of current_user), so it read [] regardless of the
     // real ACL. It now (a) checks the RUNTIME role's own view, and (b) reads the raw ACL from pg_catalog for every
     // login role, so a secret-column grant to any of them fails the test whatever role runs it.
-    it('the runtime role crewflow_app holds SELECT on exactly the 19 safe columns, and no login role can read password_hash/totp_secret_encrypted', async () => {
+    // Owner-login architecture: I-class (the runtime login is crewflow_owner, BC-02) + P-class. crewflow_app's column grants
+    // are read from the catalog over the fixture connection (information_schema only lists grants to roles the CURRENT
+    // user has enabled, and the runtime login is not a crewflow_app member), with the same column-SELECT semantics.
+    it('the schema role crewflow_app holds SELECT on exactly the 19 safe columns; no login role but crewflow_owner (BC-13, ACCEPTED (owner, 2026-11-05)) can read password_hash/totp_secret_encrypted', async () => {
       const [{ current_user: runtimeRole }] = await dataSource.manager.query<Array<{ current_user: string }>>(`SELECT current_user`);
-      expect(runtimeRole).toBe('crewflow_app');
-      const grants = await dataSource.manager.query<Array<{ column_name: string }>>(
-        `SELECT column_name FROM information_schema.column_privileges
-          WHERE table_schema = 'core' AND table_name = 'user' AND grantee = 'crewflow_app' AND privilege_type = 'SELECT'
-          ORDER BY column_name`,
+      expect(runtimeRole).toBe('crewflow_owner');
+      const grants = await adminDataSource.manager.query<Array<{ column_name: string }>>(
+        `SELECT a.attname AS column_name FROM pg_attribute a
+          WHERE a.attrelid = 'core."user"'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+            AND has_column_privilege('crewflow_app', a.attrelid, a.attname, 'SELECT')
+          ORDER BY 1`,
       );
       const columns = grants.map((g) => g.column_name);
       expect(columns).not.toContain('password_hash');
@@ -282,11 +307,22 @@ describeIfDb('identity/security table RLS (Stage 2A final verification)', () => 
           WHERE r.rolcanlogin AND NOT r.rolsuper
             AND has_column_privilege(r.oid, 'core."user"'::regclass, c.col, 'SELECT')`,
       );
-      expect(secretReaders).toEqual([]);
+      // OWNER-LOGIN DIFFERENCE BC-13 (HIGH, ACCEPTED (owner, 2026-11-05)): exactly crewflow_owner reads the four secret columns
+      // (it inherits the table owner); any OTHER login role reading one still fails this test.
+      expect(secretReaders.filter((r) => r.rolname !== 'crewflow_owner')).toEqual([]);
+      expect(secretReaders.filter((r) => r.rolname === 'crewflow_owner').map((r) => r.col).sort()).toEqual(
+        ['password_hash', 'temporary_password_hash', 'totp_last_used_step', 'totp_secret_encrypted'],
+      );
       const loginRoles = await adminDataSource.manager.query<Array<{ rolname: string }>>(
         `SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname IN ('crewflow', 'crewflow_app')`,
       );
-      expect(loginRoles.map((r) => r.rolname).sort()).toEqual(['crewflow', 'crewflow_app']);
+      const [{ ownerLogin }] = await adminDataSource.manager.query<Array<{ ownerLogin: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner' AND rolcanlogin) AS "ownerLogin"`,
+      );
+      // BC-17 (owner decision 2026-11-05, mitigated; Agent 1 80686512 / f91f1038): on an owner-login database crewflow and
+      // crewflow_app are NOLOGIN, so neither can log in at all (stricter than before). A separated-layout database keeps the
+      // original expectation: both are login roles there.
+      expect(loginRoles.map((r) => r.rolname).sort()).toEqual(ownerLogin ? [] : ['crewflow', 'crewflow_app']);
     });
 
     it('the pre-auth SECURITY DEFINER login flow (auth_find_users_by_email) is unaffected by the column revoke — still returns passwordHash', async () => {

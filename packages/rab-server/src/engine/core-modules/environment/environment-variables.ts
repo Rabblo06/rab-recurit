@@ -3,6 +3,7 @@ import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches,
 
 // Phase A pa-intervals
 import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-intervals';
+import { TIMER_TRIGGER_KINDS_PATTERN } from '../../worker-shared/timer-trigger.contract';
 // Phase B (B3): the deployment identity's accepted values, from their one definition.
 import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
 
@@ -322,10 +323,15 @@ export class EnvironmentVariables {
   EMAIL_DRIVER: string = 'LOGGER';
 
   /**
-   * Operator kill-switch, independent of the worker heartbeat check
-   * AccountLifecycleService.isEmailDeliveryAvailable() also performs — lets
-   * an operator disable all outbound invite/welcome email (e.g. during a
-   * maintenance window) even while the worker itself is technically up.
+   * Gates ONE thing: whether StaffService/ManagerService.create() queues a
+   * Staff/Manager account invite at creation
+   * (AccountLifecycleService.isEmailDeliveryEnabled()); `false` creates the
+   * account with no invite (a Manager can send one later). It is NOT a global
+   * email kill switch: Resend invite, change-pending-email, password reset,
+   * welcome, MFA notices, member/organisation invitations and notify() emails
+   * do not read it (the Admin Panel only displays it). Since the owner's
+   * "always queue" decision (Phase D-Q §12.1 #3) the Worker's Redis heartbeat
+   * no longer takes part in that creation-time decision.
    * Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS below — see its
    * comment for why @Type(() => String) is required here too.
    */
@@ -581,16 +587,47 @@ export class EnvironmentVariables {
   WORKER_INVITE_AUTO_DELETE_ENABLED: boolean = false;
 
   /**
-   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its 20 periodic scans.
-   *  - `interval` (DEFAULT): every replica runs every loop on its own process-local timer, exactly as before.
+   * BullMQ worker migration (Lane A, M2) — how the jobs process schedules its periodic scans.
+   *  - `interval`: every replica runs every loop on its own process-local timer (development and test).
    *  - `bullmq`: ONE cluster-wide BullMQ job scheduler per scan (`crewflow:<queue>:<jobName>`) hands each tick to one
    *    replica; a per-scan PostgreSQL advisory lock stops two replicas running the same scan at once. Requires a Redis whose
    *    `maxmemory-policy` is `noeviction` (refuses to boot otherwise).
-   * Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
+   * O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): UNSET means `bullmq` when NODE_ENV=production and `interval`
+   * otherwise (env.validation.ts applies it), and `interval` in production refuses to boot — the interval timers are off
+   * the production path. Anything else refuses to boot. The email/push/shift-statement consumers are the same in both modes.
    */
   @IsOptional()
   @IsIn(['interval', 'bullmq'])
-  WORKER_SCHEDULER: 'interval' | 'bullmq' = 'interval';
+  WORKER_SCHEDULER!: 'interval' | 'bullmq';
+
+  /**
+   * O3 C2 (owner decision 2026-11-05, Twenty's `DISABLE_CRON_JOBS_REGISTRATION`): exactly true or false (default false).
+   *  - API image (api-prestart.sh): unless true, a one-shot `register-schedulers` command upserts every scan's BullMQ job
+   *    scheduler (fixed ids) after the migrate step and before main.js; a registration failure is a loud WARNING and the API
+   *    starts anyway (like Twenty's entrypoint).
+   *  - Worker: true = CONSUME ONLY. It never upserts or removes a scheduler and never starts interval timers; it only
+   *    verifies, read-only, that every enabled scheduler exists (a missing one is an ERROR and turns health unhealthy).
+   *    true with WORKER_SCHEDULER=interval refuses to boot (it would schedule nothing).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: 'DISABLE_CRON_JOBS_REGISTRATION must be exactly true or false' })
+  DISABLE_CRON_JOBS_REGISTRATION: boolean = false;
+
+  /**
+   * Phase D-Q4a (owner approval 2026-11-04, OD-1): how the Worker walks the four 300-s shift-family scans (shift monitor,
+   * attendance monitor, shift report scheduler, final timesheet).
+   *  - `separate` (DEFAULT): four independent scans, each with its own workspace walk (today, unchanged).
+   *  - `combined`: one scan `shift-scan-combined` walks the workspaces once and runs every DUE member's own discovery
+   *    query inside that workspace's tenant transaction (one SAVEPOINT per member); each member then processes its own
+   *    candidates exactly as in separate mode. Same SQL, keys, thresholds and transitions; each member keeps its interval.
+   * Late clock-in is never a member. Exactly `separate` or `combined`; anything else refuses to boot. Combined mode also
+   * refuses to boot when the members' intervals have no common tick of at least 30 s (env.validation.ts).
+   */
+  @IsOptional()
+  @IsIn(['separate', 'combined'], { message: 'WORKER_SHIFT_SCAN_MODE must be exactly separate or combined' })
+  WORKER_SHIFT_SCAN_MODE: 'separate' | 'combined' = 'separate';
 
   /**
    * Redis key prefix for the NEW BullMQ scan queues only (`bullmq` mode). Unset → `crewflow:<NODE_ENV>:bull`. The three
@@ -613,11 +650,94 @@ export class EnvironmentVariables {
   @Max(3600)
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
+  /**
+   * PDF renderer P5 (owner decision D10): every report renders natively (@react-pdf/renderer, no browser). The key is
+   * kept for ONE release and accepts only `native` (unset or empty = native); `chromium` refuses to boot, because this
+   * Worker has no browser (roll back by redeploying the previous image). Delete the key in the release after.
+   */
+  @IsOptional()
+  @Transform(({ value }) => (value === '' ? undefined : value))
+  @IsIn(['native'], { message: 'PDF_RENDERER must be exactly native (chromium was retired in P5: the Worker has no browser)' })
+  PDF_RENDERER?: 'native' = 'native';
+
+  /**
+   * PDF renderer P1 — size of the native renderer's worker_threads pool (rab-worker queues/rab-reports/native/runtime,
+   * `pdfNativeConcurrency`, which applies the same rule at render time). Unset (or empty, as for every variable) → 2;
+   * exactly "1".."4"; anything else (spaces, "0", "5", "2.0") refuses to boot.
+   */
+  @IsOptional()
+  @IsIn(['1', '2', '3', '4'], { message: 'PDF_NATIVE_CONCURRENCY must be an integer from 1 to 4' })
+  PDF_NATIVE_CONCURRENCY?: '1' | '2' | '3' | '4';
+
+  /**
+   * PDF renderer P1 (F3) — render threads started at Worker boot when PDF_RENDERER=native (`pdfNativePrewarm`, rab-worker
+   * native/runtime/render-pool.ts). Unset → min(2, PDF_NATIVE_CONCURRENCY); exactly "0".."4" ("0" = none); more than the
+   * pool size refuses to start (checked at Worker boot, where the pool size is known); anything else refuses to boot.
+   */
+  @IsOptional()
+  @IsIn(['0', '1', '2', '3', '4'], { message: 'PDF_NATIVE_PREWARM must be an integer from 0 to 4' })
+  PDF_NATIVE_PREWARM?: '0' | '1' | '2' | '3' | '4';
+
+  /**
+   * PDF renderer P1 (review M-3) — total MB the native render threads' heap caps may add up to
+   * (engine/worker-shared/pdf-native-memory.contract.ts). Unset (or empty) → 768, half of the Worker's default 1536m
+   * mem_limit; a plain integer from 384 to 16384; anything else refuses to boot. Boot also refuses (env.validation.ts)
+   * when PDF_NATIVE_CONCURRENCY × 384 MB exceeds it, so concurrent oversized renders fail their own thread with
+   * error_PDF_NATIVE_OUT_OF_MEMORY instead of getting the whole Worker container OOM-killed. Raise it only together with
+   * the Worker's mem_limit (CREWFLOW_WORKER_MEM_LIMIT).
+   */
+  @IsOptional()
+  @IsString()
+  PDF_NATIVE_MEMORY_BUDGET_MB?: string;
+
   // ───────────────────────── Phase D (D1/D2) — Worker dispatch claims and wake-ups ─────────────────────────
   // Read by rab-worker only (the API validates them like every variable but never acts on them). Supported combinations:
   // per_scope+poll (DEFAULT, today's behaviour), global+poll, global+event. event without global refuses to boot
   // (env.validation.ts); global needs the Worker's live database login to be `crewflow_worker` (the boot gate,
   // database/boot-checks/database-boot-gate-rules.ts — that rule needs the database, so it is not checked here).
+
+  /**
+   * Phase D-Q3: best-effort AFTER-COMMIT fast publish of the email_outbox / push_delivery rows NotificationService.notify()
+   * writes in the caller's transaction (NotifyFastPublishService). DEFAULT false = today's behaviour: those rows wait for the
+   * dispatcher's next tick. true = the same `.attempt.0` jobs the dispatcher's first publish adds are added right after the
+   * transaction commits (never before; a rollback publishes nothing); the outbox row stays the record, nothing in the
+   * database is changed by the fast path, and the dispatcher remains the safety net (its later add of the same jobId is
+   * deduplicated). A latency change only. Read where notify() runs (the API; the Worker too if it is set there).
+   */
+  @IsOptional()
+  @Type(() => String)
+  @Transform(({ value }) => value === 'true')
+  @IsBoolean()
+  WORKER_FAST_PUBLISH_NOTIFY: boolean = false;
+
+  /**
+   * Phase D-Q4b (owner approval OD-3, 2026-11-04): delayed-job TIMER TRIGGERS for offer expiry, manager-confirmation
+   * timeout, provisional no-show and late clock-in (engine/worker-shared/timer-trigger.contract.ts). The backstop scans keep
+   * their intervals and code in every mode; triggers only let a transition happen earlier INSIDE its existing window, and
+   * they add database work (no load reduction is claimed).
+   *  - `off` (DEFAULT): today exactly — the API adds no trigger job, the Worker creates no trigger consumer and arms nothing.
+   *  - `shadow`: triggers are armed and fire; the Worker runs a READ ONLY decision and logs/counts what it WOULD do. No
+   *    business write, notification or audit row.
+   *  - `on`: the Worker runs the scan's own per-candidate compare-and-set for the subject (same worker_event key, same
+   *    notifications and audit as the scan).
+   * Set the same value on the API (offer producers) and the Worker (consumer, no-show/late arming). Strict: exactly off,
+   * shadow or on (OFF, On, ' on', true, 1 refuse to boot). Production `on` needs the owner's approval per kind (OD-3).
+   */
+  @IsOptional()
+  @IsIn(['off', 'shadow', 'on'], { message: 'WORKER_TIMER_TRIGGERS must be exactly off, shadow or on' })
+  WORKER_TIMER_TRIGGERS: 'off' | 'shadow' | 'on' = 'off';
+
+  /**
+   * Phase D-Q4b (OD-3 "on one kind at a time"): the trigger kinds WORKER_TIMER_TRIGGERS applies to — a comma-separated list
+   * without spaces of offer-expiry, manager-confirmation, no-show, late-clock-in. Unset → all four. A kind not listed is
+   * `off` for that kind. Unknown, misspelt, spaced or repeated items refuse to boot.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(TIMER_TRIGGER_KINDS_PATTERN, {
+    message: 'WORKER_TIMER_TRIGGER_KINDS must be a comma-separated list (no spaces) of offer-expiry, manager-confirmation, no-show, late-clock-in',
+  })
+  WORKER_TIMER_TRIGGER_KINDS?: string;
 
   /**
    * How the email/push/realtime/statement dispatchers find due work.
@@ -1024,6 +1144,38 @@ export class EnvironmentVariables {
   @Min(15)
   @Max(1440)
   AI_RETENTION_INTERVAL_MINUTES: number = 60;
+
+  /**
+   * Phase D-Q2: the Worker scan that ends AI turns stuck `queued` because their BullMQ job was lost (Redis loss). OFF by
+   * default (not even scheduled). When on, a turn `queued` for longer than AI_STALE_TURN_THRESHOLD_MINUTES is finalised
+   * `failed` / AI_WORKER_INTERRUPTED (the user asks again) — never re-run or requeued (owner rule 2026-11-02).
+   */
+  @IsOptional()
+  @Type(() => String) // before Transform: stops enableImplicitConversion turning 'false' into true
+  @Transform(({ value }) => strictBoolean(value)) // 'true' / 'false' only; TRUE, 1, yes, ' true' refuse to boot (review F46-1)
+  @IsBoolean()
+  AI_STALE_TURN_SWEEP: boolean = false;
+
+  /**
+   * How long a turn may stay `queued` before the sweep treats its job as lost. Default 15 min; floor 11 min because the
+   * longest LEGITIMATE queued wait is bounded by the org-slot TTL = AI_TURN_TIMEOUT_SECONDS (max 300 s) + 5 min = 10 min
+   * (a deferred successor gives up even earlier, at timeout + 60 s). The service re-checks against the live timeout and
+   * refuses to run with a threshold that is not above it (fail closed).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(11)
+  @Max(1440)
+  AI_STALE_TURN_THRESHOLD_MINUTES: number = 15;
+
+  /** Cadence of the stale-turn sweep (minutes, 1–60, default 5). Read by rab-worker only. */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(60)
+  AI_STALE_TURN_SWEEP_INTERVAL_MINUTES: number = 5;
 
   /**
    * AI Phase 2 (PHASE2_TWENTY_PLAN §2.5, P2-D8): a conversation's first question also enqueues one thread-title call on
@@ -1652,28 +1804,10 @@ export class EnvironmentVariables {
   @Min(0)
   LATE_CLOCK_IN_GRACE_MINUTES: number = 10;
 
-  /**
-   * How long a `STAFF_ACCEPTED` offer can wait for a manager's confirm/reject
-   * before the worker automatically closes it out. NOT a duplicate of an
-   * offer's own `expiresAt`/`expiresInHours` (that governs the STAFF's
-   * response window, already enforced by the existing offer-expiry job) —
-   * this is the separate manager-side half of the same two-step
-   * confirmation flow. Never auto-CONFIRMS (a seat is only ever claimed by
-   * an actual manager action or an auto-confirm shift's own accept) — PHASE
-   * 7 made this atomically auto-REJECT (`STAFF_ACCEPTED -> MANAGER_REJECTED`,
-   * the same edge a manager's own manual reject already used, `rejected_by`
-   * left NULL to distinguish a system timeout from a real person) once the
-   * deadline (`staff_accepted_at + this duration`) passes, replacing an
-   * earlier notify-only-forever implementation that never resolved the
-   * offer at all. See `queues/rab-offers/offer-expiry.job.ts`'s
-   * `runManagerConfirmationTimeoutCycle` and `claim-manager-confirmation-
-   * timeout.ts`'s own doc comment for the exact atomic claim.
-   */
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  MANAGER_CONFIRMATION_TIMEOUT_MINUTES: number = 60;
+  // MANAGER_CONFIRMATION_TIMEOUT_MINUTES was removed (owner decision Q12, 2026-11-06): the system never confirms an
+  // offer, and the manager-confirmation deadline is the fixed rule `MANAGER_CONFIRMATION_LEAD_MINUTES` in @rab/shared
+  // (standard: assignment start − 30 min; replacement/standby: window end), not a tunable. A deployment that still sets
+  // the variable keeps booting: unknown keys are ignored by this validation.
 
   /**
    * Member-invitation rate limits (`InvitationRateLimitService`, atomic Redis token buckets on the bounded
@@ -1838,4 +1972,53 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(10)
   PUSH_DELIVERY_MAX_ATTEMPTS: number = 5;
+
+  // ---------------------------------------------------------------------------------------------------------------------
+  // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM; M0 §7). The full rules (required on the API service; an
+  // explicit approval mode for a production runtime that migrates on start; the removed CREWFLOW_DB_MODE) live in the one
+  // shared parser, database/owner-login/runtime-db-config.ts, which env.validation.ts runs too. These declarations give
+  // the values a type and their allowed sets. Strings, exactly as written.
+  // ---------------------------------------------------------------------------------------------------------------------
+
+  /** true: the API image entrypoint applies pending migrations on start (short-lived child, migration lock). false: a release step does. */
+  @IsOptional()
+  @IsIn(['true', 'false'], { message: 'CREWFLOW_MIGRATE_ON_START must be exactly true or false' })
+  CREWFLOW_MIGRATE_ON_START?: 'true' | 'false';
+
+  /** none | token: whether a migrate-on-start run needs the per-release approval token (CREWFLOW_MIGRATION_APPROVED). */
+  @IsOptional()
+  @IsIn(['none', 'token'], { message: 'CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly none or token' })
+  CREWFLOW_MIGRATION_APPROVAL_MODE?: 'none' | 'token';
+
+  /**
+   * O3 C1 (owner decision 2026-11-05, Twenty's switch): true = this process never migrates. On the API it overrides
+   * CREWFLOW_MIGRATE_ON_START (api-prestart.sh runs only the read-only pending check). The Worker never migrates either way.
+   */
+  @IsOptional()
+  @IsIn(['true', 'false'], { message: 'DISABLE_DB_MIGRATIONS must be exactly true or false' })
+  DISABLE_DB_MIGRATIONS?: 'true' | 'false';
+
+  /**
+   * O3 C3 (owner decision 2026-11-05): continue (default) | refuse — what the API does when a schema UPGRADE migration fails.
+   * continue: the migrate child logs an ERROR and exits 70; api-prestart.sh starts main.js with CREWFLOW_UPGRADE_INCOMPLETE.
+   * A first install, the configuration, the identity, the lock, the approval and the post-checks stay fail-closed.
+   */
+  @IsOptional()
+  @IsIn(['continue', 'refuse'], { message: 'CREWFLOW_UPGRADE_FAILURE must be exactly continue or refuse' })
+  CREWFLOW_UPGRADE_FAILURE?: 'continue' | 'refuse';
+
+  /** DEPRECATED alias of CREWFLOW_UPGRADE_FAILURE: refuse -> refuse, continue-if-compatible -> continue (the two must agree). */
+  @IsOptional()
+  @IsIn(['refuse', 'continue-if-compatible'], { message: 'CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly refuse or continue-if-compatible' })
+  CREWFLOW_UPGRADE_FAILURE_POLICY?: 'refuse' | 'continue-if-compatible';
+
+  /**
+   * O3 C3: set ONLY by api-prestart.sh, on main.js, after a verified exit 70 (an upgrade migration failed and
+   * CREWFLOW_UPGRADE_FAILURE=continue): the failing migration's name, or `unknown`. api-prestart.sh REFUSES (exit 64) an
+   * inherited value, so an operator cannot pre-set it. Read by /healthz (`upgradeFailed: true`, informational; never the name) and by the API's
+   * boot gate (Agent 3). A migration name only: letters, digits, `_`, `-`, `.`, at most 200 characters.
+   */
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9_.-]{1,200}$/, { message: 'CREWFLOW_UPGRADE_INCOMPLETE must be a migration name (letters, digits, _ - .) or unknown' })
+  CREWFLOW_UPGRADE_INCOMPLETE?: string;
 }
