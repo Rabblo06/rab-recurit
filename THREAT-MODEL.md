@@ -6559,6 +6559,25 @@ cache change. The layer-2 service checks stay in the services; this changes only
   not clear the memo for later checks in that transaction. Every service writer bumps (P1D); a writer that does not is
   already a revocation defect for the auth-context cache.
 
+## Phase X1.7 — attendance per-user throttle: atomic window (cleanup audit DUP-02)
+
+- **Asset:** a staff member's ability to clock in / out (attendance feeds payroll). **Actor:** not an attacker: a Redis
+  command timeout, dropped connection or process crash between two commands.
+- **Before (reproduced 2026-11-02 against a disposable `redis:7-alpine`):** `AttendancePerUserThrottleGuard` ran `INCR`
+  and then, separately, `EXPIRE` when the count was 1. With `INCR` succeeding and `EXPIRE` failing, the guard failed open
+  (correct, CF-17) but left `attendance-clock-throttle:<userId>` with no TTL (`PTTL = -1`); every later request
+  incremented it, so from the 11th on that user got 429 on Clock In / Clock Out / geofence exit permanently, until someone
+  deleted the key.
+- **Control:** one Lua script (`ATTENDANCE_THROTTLE_SCRIPT`), the way Twenty runs every throttle step
+  (`throttler.service.ts`, try-consume-token-buckets script): `INCR`, then `PEXPIRE 60 s` whenever the key has no TTL,
+  atomically. The window stays fixed from its first request (never extended); a key already stuck without a TTL is healed
+  on its next request. Unchanged: key name (no namespace added, so live counters and the heal both apply), 10 per user per
+  60 s, `ThrottlerException` (429) contract, the throttler Redis client, and the fail-OPEN policy on any store error or an
+  unexpected reply (owner decision CF-17).
+- **Regression tests:** `attendance-per-user-throttle.guard.spec.ts` against real Redis (CI's service; skipped without
+  `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
+  10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
+
 ## X1.6 — Redis is protected by the private Docker network only, as in Twenty (branch phase-x2/x16-redis-port-gate, 2026-11-12, PR #111)
 
 Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way", §2): Twenty has no Redis authentication mechanism, so
