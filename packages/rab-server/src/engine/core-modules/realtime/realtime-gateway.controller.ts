@@ -295,6 +295,8 @@ function vectorsEqual(a: SecurityVersionVector, b: SecurityVersionVector): boole
     a.rolePermissionVersion === b.rolePermissionVersion &&
     a.workspaceMembershipVersion === b.workspaceMembershipVersion &&
     a.platformAdminVersion === b.platformAdminVersion &&
-    a.organisationVersion === b.organisationVersion
+    a.organisationVersion === b.organisationVersion &&
+    // SC-03: an override grant/revoke changes the effective permissions this connection was admitted with.
+    a.permissionOverrideFingerprint === b.permissionOverrideFingerprint
   );
 }

@@ -6493,3 +6493,33 @@ cache change.
   inspect: one effective-set query for the target; next-request revoke; 401; inspect-header disclosure);
   `permissions.service.spec.ts` (routing: snapshot of this identity → 0 transactions; inspect / mismatched user,
   organisation or workspace / no snapshot → one live read; a failed read propagates).
+
+## SC-03 — permission overrides are part of the auth-context version vector (branch phase-x/c-fix-3-override-fingerprint, 2026-11-11, PR #101)
+
+Phase X Stage 0 finding SC-03 (`docs/plans/phase-x0/S0-C-caches.md`). Owner decision: the code fingerprint option, no
+database triggers. No migration, role, grant, RLS or env change; `AUTH_CONTEXT_CACHE_ENABLED` stays off everywhere.
+
+- **Asset:** the cached request security snapshot (effective permissions) when the auth-context cache is switched on.
+  **Actor:** anyone who changes a `core.user_permission_override` row: a future service writer, operator SQL, a
+  migration. (No production writer exists today.)
+- **Before:** the cache key is the PostgreSQL version vector (session, user, SUM(role permission_version), workspace
+  membership, platform admin, organisation). Overrides decide effective permissions (an override beats every role) but
+  had no version column, so a revoke by override kept the cached grant for up to 900 s.
+- **Control:** `SecurityVersionService.readVector` reads, in its single statement and under RLS, a CONTENT fingerprint of
+  the user's override rows: `<count>-<md5 of (permission_id, effect) ordered by permission_id | 0>`. It is part of the
+  auth-context cache key and of the realtime connection's vector comparison. Any INSERT, UPDATE of `effect` or DELETE, by
+  any path, changes it: there is no bump for a writer to forget. An unreadable value is `'x'`, which no cached key has.
+  Same mechanism as the AI access fingerprint.
+- **Revocation guarantee:** the vector is read from PostgreSQL inside the request's own transaction before any lookup, so
+  the next request after a committed override change computes a new key and rebuilds from PostgreSQL, with the cache warm,
+  with the cache's Redis unreachable (a miss, never a stale hit), and after Redis returns (the old granting entry stays
+  under the old, unreachable key).
+- **Writers:** a static test lists every writer of `core.user_permission_override` in the whole repository (production:
+  none; one e2e fixture seed) and every SECURITY DEFINER function in migrations that writes it (none), with a fixture
+  test per write form, so a new writer is reviewed as a permission write path (layer-2 check, audit, step-up). It also
+  proves the fingerprint feeds the cache key (vectors differing only in it give different keys) and pins it into
+  readVector and the realtime comparison.
+- **Status:** SC-03 is only PARTLY closed: the override half. See Residual.
+- **Residual:** role grants (`user_role`, `role_permission`) still rely on the in-transaction version bumps every service
+  writer makes; operator SQL on those tables without a bump, and the two bump-less additive grants (SC-04, a stale DENY
+  only), keep a ≤ 900 s window once the cache is on. A content hash of the role grants is a possible follow-up (owner call).
