@@ -362,6 +362,9 @@ export function acceptsJobName(name: QueueName, jobName: string): boolean {
  * system-scoped, every scan queue present. The Worker runs it before any consumer, scheduler or loop exists; `registry`
  * is a parameter only so a spec can feed it a broken one.
  */
+/** Keys a system-scoped job payload may never declare: a tenant or user identity has no place in a job without a tenant. */
+const SYSTEM_JOB_FORBIDDEN_KEYS: readonly string[] = Object.freeze(['organisationId', 'organisation_id', 'orgId', 'tenantId', 'userId']);
+
 export function assertQueueRegistryValid(registry: Readonly<Record<string, QueueSettings>> = QUEUE_SETTINGS): void {
   const problems: string[] = [];
   const posInt = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0;
@@ -388,7 +391,8 @@ export function assertQueueRegistryValid(registry: Readonly<Record<string, Queue
     if (!s.payloadKeys.length || new Set(s.payloadKeys).size !== s.payloadKeys.length) p('payload keys must be non-empty and unique');
     for (const [jobName, keys] of Object.entries(s.systemScopedJobs ?? {})) {
       if (s.kind !== 'consumer' || !s.jobNames.includes(jobName)) p(`system-scoped job ${jobName} is not a job of this consumer queue`);
-      if (!keys.length || new Set(keys).size !== keys.length || keys.includes('organisationId')) p(`system-scoped job ${jobName}: payload keys must be non-empty, unique and never organisationId`);
+      const tenantKey = keys.find((k) => SYSTEM_JOB_FORBIDDEN_KEYS.includes(k));
+      if (!keys.length || new Set(keys).size !== keys.length || tenantKey) p(`system-scoped job ${jobName}: payload keys must be non-empty, unique and never a tenant or user id (${tenantKey ?? 'duplicate or empty'})`);
     }
     if (!posInt(s.worker.concurrency)) p('worker.concurrency must be a positive integer');
     if (!posInt(s.worker.lockDurationMs)) p('worker.lockDurationMs must be a positive integer');

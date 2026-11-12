@@ -29,6 +29,19 @@ import { classifyAuditAction } from './security-audit-event-catalogue';
 export const AUDIT_EVENT_MAX_PER_TRANSACTION = 1_000;
 /** Process-wide bound on publishes in flight (each publish is also bounded by `boundedPublish`, 3 s). */
 export const AUDIT_EVENT_MAX_IN_FLIGHT = 1_000;
+/**
+ * Separate, smaller bound for pre-auth failed-login publishes in flight: a failed-login flood while Redis is slow can never
+ * use up the slots audit-ROW events need (review finding, 2026-11-12).
+ */
+export const AUDIT_PREAUTH_MAX_IN_FLIGHT = 200;
+/** A failed backlog read keeps the previous over-limit reading while it is younger than this; only then: unknown → send. */
+export const AUDIT_BACKLOG_STALE_MS = 10_000;
+/** The only shape a provider / provider-reason code may have in the queued payload (the Worker refuses anything else). */
+const PREAUTH_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+const preAuthCode = (value: unknown, max: number): string => {
+  const text = String(value ?? '').slice(0, max);
+  return PREAUTH_CODE.test(text) ? text : 'unknown';
+};
 /** How long shutdown waits for publishes already in flight (a CLI command exits right after its commit). */
 export const AUDIT_EVENT_DRAIN_TIMEOUT_MS = 3_500;
 
@@ -45,6 +58,7 @@ export interface AuditEventProducerDeps {
   now?: () => number;
   maxPerTransaction?: number;
   maxInFlight?: number;
+  maxPreAuthInFlight?: number;
 }
 
 export interface PreAuthDropStats {
@@ -70,17 +84,24 @@ export interface PreAuthDropStats {
  *    INCRBY on one dedicated key, shown on the platform-admin Health tab).
  *    Backlog reading: one count per process every AUDIT_BACKLOG_CACHE_MS (2 s), refreshed in the background (never awaited
  *    by a login), and bumped by one for every event this process sends in between, so a burst trips the guard without
- *    waiting for the next reading. When the backlog cannot be read (or before the first reading) the event is SENT: the
+ *    waiting for the next reading. A failed read keeps an over-limit reading younger than 10 s (AUDIT_BACKLOG_STALE_MS). When
+ *    the backlog cannot be read otherwise (or before the first reading) the event is SENT: the
  *    add itself is bounded (fail-fast connection, 3 s, in-flight cap), so a Redis outage costs only lost events, while
  *    dropping on a failed READ would lose events whenever a count call hiccups on a healthy Redis.
  *  Every failure is logged by error NAME only and swallowed. NOTHING here can block, delay or roll back the caller.
  */
 export class AuditEventProducer implements AuditEventShipper {
+  /** Audit-ROW publishes in flight (the no-transaction branch of afterCommit; the deferred ones too, for drain). */
   private readonly inFlight = new Set<Promise<unknown>>();
+  /** Pre-auth failed-login publishes in flight: their own set and their own, smaller cap. */
+  private readonly preAuthInFlight = new Set<Promise<unknown>>();
   private readonly maxInFlight: number;
+  private readonly maxPreAuthInFlight: number;
   private readonly publisher: AfterCommitPublisher;
   private readonly now: () => number;
   private backlog: number | null = null;
+  /** When the current `backlog` value was last READ successfully (a failed read does not move it). */
+  private backlogReadAt = -Infinity;
   private lastBacklogReadAt = -Infinity;
   private refreshing = false;
   private dropsSinceStart = 0;
@@ -88,6 +109,7 @@ export class AuditEventProducer implements AuditEventShipper {
 
   constructor(private readonly deps: AuditEventProducerDeps) {
     this.maxInFlight = deps.maxInFlight ?? AUDIT_EVENT_MAX_IN_FLIGHT;
+    this.maxPreAuthInFlight = deps.maxPreAuthInFlight ?? AUDIT_PREAUTH_MAX_IN_FLIGHT;
     this.now = deps.now ?? Date.now;
     this.publisher = new AfterCommitPublisher({
       maxPerTransaction: deps.maxPerTransaction ?? AUDIT_EVENT_MAX_PER_TRANSACTION,
@@ -111,20 +133,20 @@ export class AuditEventProducer implements AuditEventShipper {
     const runner = manager.queryRunner;
     if (runner && !runner.isReleased && runner.isTransactionActive) {
       const registered = this.publisher.defer(manager, async () => {
-        await this.track(this.deps.publish(job));
+        await this.track(this.inFlight, this.deps.publish(job));
       });
       if (!registered) this.deps.logger.warn('audit event not shipped: the per-transaction bound was reached (the row stays in core.audit_log)');
       return registered;
     }
-    // No open transaction: the insert has already committed. Publish now, detached.
+    // No open transaction: the insert has already committed. Publish now, detached (its own in-flight cap, never the pre-auth one).
     if (this.inFlight.size >= this.maxInFlight) return false;
-    void this.track(this.deps.publish(job)).catch((error: Error) => this.deps.logger.warn(`audit event publish failed (${error?.name ?? 'Error'}); not shipped (best effort)`));
+    void this.track(this.inFlight, this.deps.publish(job)).catch((error: Error) => this.deps.logger.warn(`audit event publish failed (${error?.name ?? 'Error'}); not shipped (best effort)`));
     return true;
   }
 
   shipPreAuthLoginFailure(failure: PreAuthLoginFailure): void {
     this.refreshIfStale();
-    if ((this.backlog !== null && this.backlog > AUDIT_PREAUTH_BACKLOG_LIMIT) || this.inFlight.size >= this.maxInFlight) {
+    if ((this.backlog !== null && this.backlog > AUDIT_PREAUTH_BACKLOG_LIMIT) || this.preAuthInFlight.size >= this.maxPreAuthInFlight) {
       this.dropsSinceStart++;
       this.dropsPending++;
       return;
@@ -134,8 +156,9 @@ export class AuditEventProducer implements AuditEventShipper {
       const data: AuditPreAuthJobData = {
         v: 1,
         reason: failure.reason,
-        provider: String(failure.provider).slice(0, 32),
-        ...(failure.providerReason ? { providerReason: String(failure.providerReason).slice(0, 64) } : {}),
+        // Codes only, in the exact shape the Worker accepts (an odd error name would otherwise be refused there and lost).
+        provider: preAuthCode(failure.provider, 32),
+        ...(failure.providerReason ? { providerReason: preAuthCode(failure.providerReason, 64) } : {}),
         email: maskEmailForAudit(failure.email).slice(0, 128),
         at: this.now(),
       };
@@ -145,7 +168,7 @@ export class AuditEventProducer implements AuditEventShipper {
       return;
     }
     if (this.backlog !== null) this.backlog++;
-    void this.track(this.deps.publish(job)).catch((error: Error) => this.deps.logger.warn(`pre-auth audit event publish failed (${error?.name ?? 'Error'}); not shipped (best effort)`));
+    void this.track(this.preAuthInFlight, this.deps.publish(job)).catch((error: Error) => this.deps.logger.warn(`pre-auth audit event publish failed (${error?.name ?? 'Error'}); not shipped (best effort)`));
   }
 
   /** Drop counts and the last backlog reading of this process (platform-admin Health tab). */
@@ -153,14 +176,19 @@ export class AuditEventProducer implements AuditEventShipper {
     return { sinceProcessStart: this.dropsSinceStart, lastBacklog: this.backlog };
   }
 
-  /** Publishes currently in flight (tests / diagnostics). */
+  /** Audit-row publishes currently in flight (tests / diagnostics). */
   get inFlightCount(): number {
     return this.inFlight.size;
   }
 
+  /** Pre-auth failed-login publishes currently in flight (tests / diagnostics). */
+  get preAuthInFlightCount(): number {
+    return this.preAuthInFlight.size;
+  }
+
   /** Waits (bounded) for what is already in flight, then flushes the pending drop count once. Never rejects. */
   async drain(timeoutMs: number = AUDIT_EVENT_DRAIN_TIMEOUT_MS): Promise<void> {
-    const pending: Array<Promise<unknown>> = [...this.inFlight];
+    const pending: Array<Promise<unknown>> = [...this.inFlight, ...this.preAuthInFlight];
     const flush = this.flushDrops();
     if (flush) pending.push(flush);
     if (pending.length === 0) return;
@@ -186,9 +214,13 @@ export class AuditEventProducer implements AuditEventShipper {
       .then(
         (n) => {
           this.backlog = Number.isFinite(n) && n >= 0 ? n : null;
+          if (this.backlog !== null) this.backlogReadAt = now;
         },
         () => {
-          this.backlog = null; // unknown → send (see the class comment)
+          // One failed read must not switch the guard off: an over-limit reading younger than AUDIT_BACKLOG_STALE_MS is kept.
+          // Older (or under the limit, or none): unknown → send (see the class comment).
+          const keep = this.backlog !== null && this.backlog > AUDIT_PREAUTH_BACKLOG_LIMIT && now - this.backlogReadAt < AUDIT_BACKLOG_STALE_MS;
+          if (!keep) this.backlog = null;
         },
       )
       .finally(() => {
@@ -212,9 +244,9 @@ export class AuditEventProducer implements AuditEventShipper {
     });
   }
 
-  private track<T>(pending: Promise<T>): Promise<T> {
-    this.inFlight.add(pending);
-    const done = () => this.inFlight.delete(pending);
+  private track<T>(set: Set<Promise<unknown>>, pending: Promise<T>): Promise<T> {
+    set.add(pending);
+    const done = () => set.delete(pending);
     pending.then(done, done);
     return pending;
   }

@@ -326,7 +326,12 @@ describe('queue registry (Phase D-Q1)', () => {
         const clone = (): Record<string, QueueSettings> => JSON.parse(JSON.stringify(QUEUE_SETTINGS));
         const withOrg = clone();
         (withOrg[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'audit-preauth-login-failed': ['v', 'organisationId'] };
-        expect(() => assertQueueRegistryValid(withOrg)).toThrow(/never organisationId/);
+        expect(() => assertQueueRegistryValid(withOrg)).toThrow(/never a tenant or user id \(organisationId\)/);
+        for (const key of ['organisation_id', 'orgId', 'tenantId', 'userId']) {
+          const bad = clone();
+          (bad[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'audit-preauth-login-failed': ['v', key] };
+          expect(() => assertQueueRegistryValid(bad)).toThrow(`never a tenant or user id (${key})`);
+        }
         const stray = clone();
         (stray[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'not-a-job': ['v'] };
         expect(() => assertQueueRegistryValid(stray)).toThrow(/not a job of this consumer queue/);

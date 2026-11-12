@@ -363,7 +363,7 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
       deps: { publish: (job: unknown) => Promise<unknown> };
       backlog: number | null;
       lastBacklogReadAt: number;
-      inFlightCount: number;
+      preAuthInFlightCount: number;
       preAuthDropStats: { sinceProcessStart: number };
       drain(ms?: number): Promise<void>;
     };
@@ -373,11 +373,11 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
       // (1) The add hangs: the 401 comes back while the add is still pending.
       let releaseHung!: () => void;
       producer.deps.publish = () => new Promise((resolve) => (releaseHung = () => resolve(undefined)));
-      const before = producer.inFlightCount;
+      const before = producer.preAuthInFlightCount;
       const started = Date.now();
       expect((await factory.loginRaw(owner, { password: wrong })).status).toBe(401);
       expect(Date.now() - started).toBeLessThan(5_000);
-      expect(producer.inFlightCount).toBe(before + 1); // the add is still pending: the response did not wait for it
+      expect(producer.preAuthInFlightCount).toBe(before + 1); // the add is still pending: the response did not wait for it
       releaseHung();
       // (2) The add rejects: the same 401, nothing thrown into the login.
       producer.deps.publish = async () => {

@@ -2,7 +2,7 @@ import { AuditAction } from '../audit/audit.service';
 import { AUDIT_BACKLOG_CACHE_MS, AUDIT_EVENT_QUEUE_NAME, AUDIT_PREAUTH_BACKLOG_LIMIT, auditEventJobId } from '../../worker-shared/audit-event.contract';
 import { bullmqJobOptionsOf } from '../../worker-shared/queue-registry';
 import { currentAuditEventShipperForTests, shipAuditRowAfterCommit, shipPreAuthLoginFailure } from './audit-event-shipping';
-import { AuditEventProducer, AuditEventQueueService } from './audit-event-queue.service';
+import { AUDIT_BACKLOG_STALE_MS, AUDIT_PREAUTH_MAX_IN_FLIGHT, AuditEventProducer, AuditEventQueueService } from './audit-event-queue.service';
 
 /**
  * X1.1 producer contract (no database, no reachable Redis):
@@ -228,7 +228,7 @@ describe('AuditEventQueueService (X1.1 producer)', () => {
     const started = Date.now();
     expect(() => hung.p.shipPreAuthLoginFailure(FAILURE)).not.toThrow();
     expect(Date.now() - started).toBeLessThan(50);
-    expect(hung.p.inFlightCount).toBe(1); // still pending, the caller already returned
+    expect(hung.p.preAuthInFlightCount).toBe(1); // still pending, the caller already returned
     const failing = producer({
       publish: jest.fn(async () => {
         throw Object.assign(new Error('Redis is unavailable'), { name: 'QueuePublishUnavailableError' });
@@ -258,6 +258,56 @@ describe('AuditEventQueueService (X1.1 producer)', () => {
     await flush();
     expect(publish.mock.calls.map((c) => c[0].name)).toEqual(['audit-event-ship', 'audit-event-ship']);
     expect(p.preAuthDropStats.sinceProcessStart).toBe(1);
+  });
+
+  it('a failed-login flood that fills the PRE-AUTH in-flight cap never stops audit-row events (separate caps)', async () => {
+    const { p, publish } = producer({ publish: jest.fn(() => new Promise(() => undefined)) }); // Redis "slow": nothing settles
+    for (let i = 0; i < AUDIT_PREAUTH_MAX_IN_FLIGHT + 50; i++) p.shipPreAuthLoginFailure(FAILURE);
+    expect(p.preAuthInFlightCount).toBe(AUDIT_PREAUTH_MAX_IN_FLIGHT);
+    expect(p.preAuthDropStats.sinceProcessStart).toBe(50); // beyond the pre-auth cap: dropped and counted
+    publish.mockClear();
+    expect(p.afterCommit({ queryRunner: undefined } as never, { organisationId: ORG, auditLogId: ROW, action: AuditAction.USER_DELETED })).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish.mock.calls[0]![0].name).toBe('audit-event-ship');
+    expect(p.inFlightCount).toBe(1);
+  });
+
+  it('one failed backlog read straight after an over-limit reading keeps the guard on (until the reading is 10 s old)', async () => {
+    let fail = false;
+    const readBacklog = jest.fn(async () => {
+      if (fail) throw new Error('timeout');
+      return AUDIT_PREAUTH_BACKLOG_LIMIT + 1;
+    });
+    const { p, publish, advance } = producer({ readBacklog });
+    p.shipPreAuthLoginFailure(FAILURE); // first reading starts; sent (unknown)
+    await flush();
+    expect(p.preAuthDropStats.lastBacklog).toBe(AUDIT_PREAUTH_BACKLOG_LIMIT + 1);
+    fail = true;
+    advance(AUDIT_BACKLOG_CACHE_MS);
+    p.shipPreAuthLoginFailure(FAILURE); // refresh fails; this one is dropped on the (still fresh) reading
+    await flush();
+    p.shipPreAuthLoginFailure(FAILURE); // still dropped: the failed read kept the over-limit reading
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(p.preAuthDropStats.sinceProcessStart).toBe(2);
+    advance(AUDIT_BACKLOG_STALE_MS); // the reading is now older than 10 s and the next read fails too → unknown → send
+    p.shipPreAuthLoginFailure(FAILURE);
+    await flush();
+    expect(p.preAuthDropStats.lastBacklog).toBeNull();
+    p.shipPreAuthLoginFailure(FAILURE);
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  it('a provider refusal with an odd error name is normalised to `unknown`, so the Worker never refuses (and loses) it', async () => {
+    const { p, publish } = producer();
+    p.shipPreAuthLoginFailure({ email: 'a@example.com', reason: 'provider_sign_in_refused', provider: 'google', providerReason: 'Some Error: with spaces/and:colons' });
+    p.shipPreAuthLoginFailure({ email: 'a@example.com', reason: 'provider_sign_in_refused', provider: 'g o o g l e', providerReason: 'state_invalid' });
+    p.shipPreAuthLoginFailure({ email: 'a@example.com', reason: 'provider_sign_in_refused', provider: 'microsoft', providerReason: 'x'.repeat(100) });
+    await flush();
+    expect(publish.mock.calls.map((c) => [c[0].data.provider, c[0].data.providerReason])).toEqual([
+      ['google', 'unknown'],
+      ['unknown', 'state_invalid'],
+      ['microsoft', 'x'.repeat(64)],
+    ]);
   });
 
   it('drain waits (bounded) for publishes in flight', async () => {
