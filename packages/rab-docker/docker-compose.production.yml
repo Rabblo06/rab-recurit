@@ -36,13 +36,26 @@
 # Accepted risk: every start of a new image applies what it ships; recovery is the mandatory pre-upgrade backup
 # (docs/release/OWNER-LOGIN-RECOVERY.md).
 #
-# ENTER FOR rab-api AND rab-worker (identical values): PG_DATABASE_URL, PG_SSL_CA_CERT_PATH (mount the CA read-only),
-# PG_EXPECTED_DATABASE_NAME, OPTIONALLY CREWFLOW_DEPLOYMENT_ENVIRONMENT=production + CREWFLOW_DEPLOYMENT_ID (BC-11 opt-ins,
-# the same values on both services), the connection budget
-# (PG_POOL_MAX_CONNECTIONS / PG_EXPECTED_* — one login, so all pools share crewflow_owner's limit), REDIS_URL, APP_SECRET
-# (+ keyrings if used; CURRENT values unchanged in a transition), CORS_ORIGINS, APP_URL, ACCOUNTS_URL (https only),
-# TRUSTED_PROXY_CIDRS, EMAIL_* / RESEND_API_KEY, S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_ENDPOINT,
-# SENTRY_DSN / APP_VERSION (optional), AUTH_GOOGLE_* / AUTH_MICROSOFT_* (if enabled), WORKSPACE_BASE_DOMAIN (owner decision).
+# ENVIRONMENT (owner request 2026-11-12: OpenShip shows every variable rab-api and rab-worker read in production as a field).
+# Every name is listed below, in four groups, with NO value committed for a secret:
+#   REQUIRED  x-crewflow-required-env, ${KEY:?...}: the API and the Worker refuse to boot in production without it, so the
+#             platform must not deploy without it either (OpenShip shows it as "needs value" and refuses the deploy).
+#   OPTIONAL  x-crewflow-optional-env (both services, identical by construction) and the per-service extras:
+#             ${KEY:-<code default>} = unset behaves exactly as the code default; a bare `KEY:` = no code default (or one
+#             that depends on NODE_ENV): plain Compose passes nothing when it is unset; OpenShip passes an empty string,
+#             which every reader treats as unset (env.validation.ts drops blank values; the direct readers do the same).
+#   PINNED    the literal values under each service: shown, but fixed by owner decisions. Do not override them in the
+#             platform UI (OpenShip lets a service-scoped value win; the gates cannot see that).
+#   NOT LISTED  names production must never carry (below) and names with no legitimate production value: PORT (the
+#             container listens on 3000), PDF_RENDERER and AUTH_MICROSOFT_TENANT (one accepted value), STORAGE_LOCAL_ROOT and
+#             S3_KMS_KEY_ID (storage and encryption are pinned), PG_SSL_ALLOW_SELF_SIGNED and CREWFLOW_AUDIT_SINK_FAILURE
+#             (production accepts only the default), CREWFLOW_AUDIT_SINK_FILE and AI_DEV_ALLOW_REAL_PROVIDERS (development
+#             only), WORKER_DISPATCH_BACKSTOP/RECONCILE_SECONDS and WORKER_DISPATCH_CLAIM_BATCH (global/event dispatch only,
+#             not approved), AUTH_LOGIN_HANDOFF_ENABLED/_TTL_SECONDS (needs the refused origin-trust switch),
+#             WORKER_SHIFT_MONITOR_INTERVAL_SECONDS and WORKER_SHIFT_SCAN_MODE (owner decision 2026-11-06: leave unset), the
+#             inert OPENAI/GOOGLE/MISTRAL/XAI_API_KEY, and CREWFLOW_APP_VERSION (an internal provisioning label).
+# rab-api and rab-worker take the SAME values (one login, one connection budget, the API registers the job schedulers with
+# its own intervals and the consume-only Worker never compares them). REDIS_URL is pinned to the bundled rab-redis.
 # MUST NOT BE ENTERED ANYWHERE: DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX, PG_WORKER_DATABASE_URL,
 # CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
 # CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
@@ -63,6 +76,223 @@ x-logging: &logging
   options:
     max-size: 10m
     max-file: '5'
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# REQUIRED (rab-api AND rab-worker, the same value on both). The app refuses to boot in production without each of these
+# (env.validation.ts productionConfigurationProblems + pg-config.ts + security-audit-sink.ts); the code defaults of APP_URL,
+# ACCOUNTS_URL, CORS_ORIGINS, TRUSTED_PROXY_CIDRS and EMAIL_DRIVER are development values production refuses.
+# ---------------------------------------------------------------------------------------------------------------------------
+x-crewflow-required-env: &required-env
+  # crewflow_owner at the provider's DIRECT host, sslmode=verify-full. The one database URL (no other may be entered).
+  PG_DATABASE_URL: ${PG_DATABASE_URL:?PG_DATABASE_URL is required (crewflow_owner, direct host, sslmode=verify-full)}
+  # Root secret, 32+ random bytes. Changing it later breaks every session and stored encrypted secret.
+  APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+  # https:// and not localhost (refused otherwise).
+  APP_URL: ${APP_URL:?APP_URL is required (https)}
+  ACCOUNTS_URL: ${ACCOUNTS_URL:?ACCOUNTS_URL is required (https)}
+  # Comma-separated https:// origins only.
+  CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required (https origins)}
+  # The exact edge-proxy address(es) (IPv4 /16 or narrower, IPv6 /48 or narrower).
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?TRUSTED_PROXY_CIDRS is required}
+  # SMTP or RESEND (LOGGER is refused in production). SMTP needs EMAIL_SMTP_HOST; RESEND needs RESEND_API_KEY.
+  EMAIL_DRIVER: ${EMAIL_DRIVER:?EMAIL_DRIVER is required (SMTP or RESEND)}
+  # STORAGE_DRIVER is pinned to S3, which needs all five (R2: S3_REGION=auto).
+  S3_BUCKET: ${S3_BUCKET:?S3_BUCKET is required}
+  S3_REGION: ${S3_REGION:?S3_REGION is required}
+  S3_ENDPOINT: ${S3_ENDPOINT:?S3_ENDPOINT is required}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
+  # Security audit sink (BC-07): production accepts only `stdout`, compliant only with an off-host append-only log shipper.
+  CREWFLOW_AUDIT_SINK: ${CREWFLOW_AUDIT_SINK:?CREWFLOW_AUDIT_SINK is required (stdout)}
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# OPTIONAL (rab-api AND rab-worker, identical). `${KEY:-x}`: x is the exact code default, so leaving it unset changes
+# nothing. Bare `KEY:`: no fixed code default; unset (or blank) = the code's own behaviour.
+# ---------------------------------------------------------------------------------------------------------------------------
+x-crewflow-optional-env: &optional-env
+  # -- Database connection (one login: every pool shares crewflow_owner's connection limit) --
+  # PEM CA bundle for verify-full (unset = the system CA store); the file must exist in the container.
+  PG_SSL_CA_CERT_PATH:
+  # When set, must equal current_database().
+  PG_EXPECTED_DATABASE_NAME:
+  PG_POOL_IDLE_TIMEOUT_MS: ${PG_POOL_IDLE_TIMEOUT_MS:-600000}
+  PG_POOL_ALLOW_EXIT_ON_IDLE: ${PG_POOL_ALLOW_EXIT_ON_IDLE:-false}
+  PG_DATABASE_PRIMARY_TIMEOUT_MS: ${PG_DATABASE_PRIMARY_TIMEOUT_MS:-30000}
+  # true declares PG_DATABASE_URL a direct (non-pooled) connection; refused on a pooler-shaped URL.
+  PG_DATABASE_URL_IS_DIRECT:
+  # Connection budget, checked at boot against the server's limit once both instance counts are set.
+  PG_EXPECTED_API_INSTANCES:
+  PG_EXPECTED_WORKER_INSTANCES:
+  PG_EXPECTED_API_POOL_MAX:
+  PG_EXPECTED_WORKER_POOL_MAX:
+  PG_EXPECTED_MIGRATE_CONNECTIONS: ${PG_EXPECTED_MIGRATE_CONNECTIONS:-3}
+  PG_PROVIDER_RESERVED_CONNECTIONS: ${PG_PROVIDER_RESERVED_CONNECTIONS:-0}
+  # -- Deployment identity (BC-11 opt-in): both or neither, e.g. production + the uuid the database was bound with --
+  CREWFLOW_DEPLOYMENT_ENVIRONMENT:
+  CREWFLOW_DEPLOYMENT_ID:
+  # -- Key material (only if this deployment uses keyrings; keep CURRENT values unchanged in a transition) --
+  APP_ENCRYPTION_KEYRING:
+  APP_ENCRYPTION_ACTIVE_KID:
+  APP_JWT_SIGNING_KEYRING:
+  APP_JWT_ACTIVE_KID:
+  APP_AUTH_CACHE_HMAC_KEY:
+  APP_JWT_LEGACY_VERIFY_ENABLED: ${APP_JWT_LEGACY_VERIFY_ENABLED:-true}
+  APP_KEY_SEPARATION_REQUIRED: ${APP_KEY_SEPARATION_REQUIRED:-false}
+  AUTH_COOKIE_HOST_PREFIX_ENABLED: ${AUTH_COOKIE_HOST_PREFIX_ENABLED:-false}
+  AUTH_COOKIE_LEGACY_MIGRATION_ENABLED: ${AUTH_COOKIE_LEGACY_MIGRATION_ENABLED:-true}
+  # -- Observability and release labels --
+  SENTRY_DSN:
+  # Unset = 0.01 in production.
+  SENTRY_TRACES_SAMPLE_RATE:
+  APP_VERSION: ${APP_VERSION:-dev}
+  APP_GIT_COMMIT:
+  # -- Email (EMAIL_DRIVER is REQUIRED above) --
+  EMAIL_SMTP_HOST:
+  EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT:-587}
+  EMAIL_SMTP_USER:
+  EMAIL_SMTP_PASSWORD:
+  EMAIL_SMTP_NO_TLS: ${EMAIL_SMTP_NO_TLS:-false}
+  RESEND_API_KEY:
+  # The code default is a placeholder sender: set your verified sender address.
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-rab <no-reply@example.com>}
+  EMAIL_REPLY_TO:
+  EMAIL_DELIVERY_ENABLED: ${EMAIL_DELIVERY_ENABLED:-true}
+  # -- Object storage (S3_* credentials are REQUIRED above; the driver, prefix, path style and encryption are pinned) --
+  S3_SIGNED_URL_TTL_SECONDS: ${S3_SIGNED_URL_TTL_SECONDS:-120}
+  S3_MAX_UPLOAD_BYTES: ${S3_MAX_UPLOAD_BYTES:-20971520}
+  STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: ${STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS:-30}
+  STORAGE_RECONCILE_METHOD: ${STORAGE_RECONCILE_METHOD:-list}
+  STORAGE_CLEANUP_MIN_SPACING_MINUTES: ${STORAGE_CLEANUP_MIN_SPACING_MINUTES:-720}
+  # -- Sign-in providers (at least one must stay enabled; a provider's client id, secret and callback when enabled) --
+  AUTH_PASSWORD_ENABLED: ${AUTH_PASSWORD_ENABLED:-true}
+  AUTH_GOOGLE_ENABLED: ${AUTH_GOOGLE_ENABLED:-false}
+  AUTH_GOOGLE_CLIENT_ID:
+  AUTH_GOOGLE_CLIENT_SECRET:
+  AUTH_GOOGLE_CALLBACK_URL:
+  AUTH_MICROSOFT_ENABLED: ${AUTH_MICROSOFT_ENABLED:-false}
+  AUTH_MICROSOFT_CLIENT_ID:
+  AUTH_MICROSOFT_CLIENT_SECRET:
+  AUTH_MICROSOFT_CALLBACK_URL:
+  AUTH_OAUTH_HANDOFF_ENABLED: ${AUTH_OAUTH_HANDOFF_ENABLED:-false}
+  USER_SESSION_ENFORCEMENT_CUTOVER: ${USER_SESSION_ENFORCEMENT_CUTOVER:-false}
+  # -- Sign-in rate limits --
+  AUTH_LOGIN_EMAIL_IP_BURST: ${AUTH_LOGIN_EMAIL_IP_BURST:-5}
+  AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS: ${AUTH_LOGIN_EMAIL_IP_WINDOW_SECONDS:-900}
+  AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT: ${AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT:-30}
+  AUTH_LOGIN_ACCOUNT_BURST: ${AUTH_LOGIN_ACCOUNT_BURST:-50}
+  AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS: ${AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS:-900}
+  AUTH_LOGIN_KNOWN_IP_TTL_DAYS: ${AUTH_LOGIN_KNOWN_IP_TTL_DAYS:-30}
+  # -- Two-factor authentication and step-up --
+  AUTH_MFA_ENROLMENT_ENABLED: ${AUTH_MFA_ENROLMENT_ENABLED:-true}
+  AUTH_MFA_ENFORCE_PLATFORM_ADMIN: ${AUTH_MFA_ENFORCE_PLATFORM_ADMIN:-false}
+  AUTH_MFA_ENFORCE_ORGANISATION_OWNER: ${AUTH_MFA_ENFORCE_ORGANISATION_OWNER:-false}
+  AUTH_MFA_ENFORCE_INITIAL_MANAGER: ${AUTH_MFA_ENFORCE_INITIAL_MANAGER:-false}
+  AUTH_MFA_ENFORCE_OTHER_WEB_USERS: ${AUTH_MFA_ENFORCE_OTHER_WEB_USERS:-false}
+  AUTH_MFA_MOBILE_POLICY: ${AUTH_MFA_MOBILE_POLICY:-exempt}
+  AUTH_MFA_CHALLENGE_TTL_SECONDS: ${AUTH_MFA_CHALLENGE_TTL_SECONDS:-300}
+  AUTH_MFA_CHALLENGE_MAX_ATTEMPTS: ${AUTH_MFA_CHALLENGE_MAX_ATTEMPTS:-5}
+  AUTH_MFA_USER_ATTEMPTS_BURST: ${AUTH_MFA_USER_ATTEMPTS_BURST:-10}
+  AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS: ${AUTH_MFA_USER_ATTEMPTS_WINDOW_SECONDS:-900}
+  AUTH_MFA_ISSUER: ${AUTH_MFA_ISSUER:-Crewflow}
+  AUTH_STEP_UP_WINDOW_SECONDS: ${AUTH_STEP_UP_WINDOW_SECONDS:-300}
+  AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS: ${AUTH_STEP_UP_MFA_FOR_LEGACY_ACTIONS:-false}
+  # -- Workspace domains (OWNER DECISION, production runbook D6: leave unset unless approved) --
+  WORKSPACE_BASE_DOMAIN:
+  # Needs WORKSPACE_BASE_DOMAIN.
+  WORKSPACE_HOST_ROUTING_ENABLED: ${WORKSPACE_HOST_ROUTING_ENABLED:-false}
+  # -- Redis-backed caches (rollout flags) --
+  AUTH_CONTEXT_CACHE_ENABLED: ${AUTH_CONTEXT_CACHE_ENABLED:-false}
+  USER_SESSION_CACHE_ENABLED: ${USER_SESSION_CACHE_ENABLED:-false}
+  CORE_ENTITY_CACHE_ENABLED: ${CORE_ENTITY_CACHE_ENABLED:-false}
+  WORKSPACE_METADATA_CACHE_ENABLED: ${WORKSPACE_METADATA_CACHE_ENABLED:-false}
+  METADATA_L1_CACHE_ENABLED: ${METADATA_L1_CACHE_ENABLED:-false}
+  METADATA_L1_CACHE_TTL_MS: ${METADATA_L1_CACHE_TTL_MS:-2000}
+  METADATA_L1_CACHE_MAX_ENTRIES: ${METADATA_L1_CACHE_MAX_ENTRIES:-5000}
+  METADATA_L1_CACHE_MAX_BYTES: ${METADATA_L1_CACHE_MAX_BYTES:-8388608}
+  # -- Realtime (OFF; enabling it is a separate owner decision). The interval must be the same on both services (J2). --
+  REALTIME_ENABLED: ${REALTIME_ENABLED:-false}
+  REALTIME_HEARTBEAT_INTERVAL_MS: ${REALTIME_HEARTBEAT_INTERVAL_MS:-30000}
+  REALTIME_MAX_CONNECTIONS_PER_USER: ${REALTIME_MAX_CONNECTIONS_PER_USER:-3}
+  WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: ${WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS:-2}
+  # -- Push (OFF; enabling it is a separate owner decision). Its sweep interval is PINNED at 30 s on both services (J2). --
+  PUSH_ENABLED: ${PUSH_ENABLED:-false}
+  # FAKE is refused with PUSH_ENABLED=true in production; REAL needs the Firebase / APNs credentials below.
+  PUSH_PROVIDER: ${PUSH_PROVIDER:-FAKE}
+  FIREBASE_SERVICE_ACCOUNT_JSON:
+  APNS_AUTH_KEY_P8:
+  APNS_KEY_ID:
+  APNS_TEAM_ID:
+  APNS_BUNDLE_ID:
+  APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-sandbox}
+  PUSH_DELIVERY_MAX_ATTEMPTS: ${PUSH_DELIVERY_MAX_ATTEMPTS:-5}
+  # -- Background scans (seconds). The API registers the schedulers with these values; the Worker consumes them. --
+  WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS: ${WORKER_ACCOUNT_INVITE_CLEANUP_INTERVAL_SECONDS:-900}
+  WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS: ${WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS:-300}
+  WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS: ${WORKER_SHIFT_CANCELLATION_FOLLOWUP_INTERVAL_SECONDS:-60}
+  WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS: ${WORKER_REPLACEMENT_STAFF_INTERVAL_SECONDS:-120}
+  WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS: ${WORKER_TOKEN_CLEANUP_INTERVAL_SECONDS:-86400}
+  WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS: ${WORKER_STORAGE_CLEANUP_INTERVAL_SECONDS:-86400}
+  WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS: ${WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS:-300}
+  WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS: ${WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS:-300}
+  WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS: ${WORKER_PAYROLL_PERIOD_ATTENTION_INTERVAL_SECONDS:-1800}
+  WORKER_SCHEDULER_RECONCILE_SECONDS: ${WORKER_SCHEDULER_RECONCILE_SECONDS:-60}
+  # Unset = crewflow:production:bull. Must be identical on both services.
+  BULLMQ_PREFIX:
+  # -- Retention and clean-up --
+  OUTBOX_RETENTION_ENABLED: ${OUTBOX_RETENTION_ENABLED:-false}
+  OUTBOX_RETENTION_MODE: ${OUTBOX_RETENTION_MODE:-report}
+  OUTBOX_RETENTION_EMAIL_DAYS: ${OUTBOX_RETENTION_EMAIL_DAYS:-90}
+  OUTBOX_RETENTION_PUSH_DAYS: ${OUTBOX_RETENTION_PUSH_DAYS:-30}
+  OUTBOX_RETENTION_REALTIME_DAYS: ${OUTBOX_RETENTION_REALTIME_DAYS:-7}
+  OUTBOX_RETENTION_WORKER_EVENT_DAYS: ${OUTBOX_RETENTION_WORKER_EVENT_DAYS:-30}
+  OUTBOX_RETENTION_BATCH_SIZE: ${OUTBOX_RETENTION_BATCH_SIZE:-1000}
+  OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: ${OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE:-20}
+  OUTBOX_RETENTION_INTERVAL_MINUTES: ${OUTBOX_RETENTION_INTERVAL_MINUTES:-60}
+  LOGIN_HANDOFF_CLEANUP_ENABLED: ${LOGIN_HANDOFF_CLEANUP_ENABLED:-true}
+  LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES: ${LOGIN_HANDOFF_CLEANUP_INTERVAL_MINUTES:-15}
+  # -- PDF rendering (Worker). Concurrency x 384 MB must fit the memory budget (unset = 768 MB); set them together. --
+  PDF_NATIVE_CONCURRENCY:
+  PDF_NATIVE_PREWARM:
+  PDF_NATIVE_MEMORY_BUDGET_MB:
+  # -- Attendance and invitation rules (business values; change only on an owner decision) --
+  CLOCK_IN_EARLY_MINUTES: ${CLOCK_IN_EARLY_MINUTES:-15}
+  QR_POST_SHIFT_GRACE_MINUTES: ${QR_POST_SHIFT_GRACE_MINUTES:-120}
+  REPORT_AVAILABLE_BEFORE_MINUTES: ${REPORT_AVAILABLE_BEFORE_MINUTES:-180}
+  GEOFENCE_MAX_ACCURACY_M: ${GEOFENCE_MAX_ACCURACY_M:-100}
+  LOCATION_EVIDENCE_MAX_AGE_SECONDS: ${LOCATION_EVIDENCE_MAX_AGE_SECONDS:-120}
+  LOCATION_EVIDENCE_MAX_FUTURE_SKEW_SECONDS: ${LOCATION_EVIDENCE_MAX_FUTURE_SKEW_SECONDS:-30}
+  LATE_CLOCK_IN_GRACE_MINUTES: ${LATE_CLOCK_IN_GRACE_MINUTES:-10}
+  MEMBER_INVITE_RATE_RECIPIENT_PER_DAY: ${MEMBER_INVITE_RATE_RECIPIENT_PER_DAY:-6}
+  MEMBER_INVITE_RATE_ACTOR_PER_HOUR: ${MEMBER_INVITE_RATE_ACTOR_PER_HOUR:-60}
+  MEMBER_INVITE_RATE_ORGANISATION_PER_DAY: ${MEMBER_INVITE_RATE_ORGANISATION_PER_DAY:-500}
+  MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR: ${MEMBER_INVITE_RATE_REDEEM_PER_IP_PER_HOUR:-30}
+  # -- Runtime isolation report: warn (default) logs each missing control. `enforce` REFUSES to start when a platform drops
+  # the H6 keys, which OpenShip does: never set enforce on OpenShip. --
+  CREWFLOW_RUNTIME_ISOLATION: ${CREWFLOW_RUNTIME_ISOLATION:-warn}
+  # -- AI: INERT while AI_ENABLED is pinned 'false' below (every AI route answers 404, the Worker refuses every turn) --
+  ANTHROPIC_API_KEY:
+  AI_AGENTS_ENABLED: ${AI_AGENTS_ENABLED:-false}
+  AI_MODELS_DEFAULT_DISABLED:
+  AI_MODELS_DEFAULT_FAST:
+  AI_MODELS_DEFAULT_SMART:
+  AI_DAILY_BUDGET_USD: ${AI_DAILY_BUDGET_USD:-2}
+  AI_USER_DAILY_BUDGET_USD: ${AI_USER_DAILY_BUDGET_USD:-1}
+  AI_ORG_DAILY_TOKEN_BUDGET: ${AI_ORG_DAILY_TOKEN_BUDGET:-200000}
+  AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-1500}
+  AI_MAX_STEPS: ${AI_MAX_STEPS:-8}
+  AI_MAX_INPUT_CHARS: ${AI_MAX_INPUT_CHARS:-4000}
+  AI_USER_RATE_PER_MIN: ${AI_USER_RATE_PER_MIN:-10}
+  AI_ORG_RATE_PER_MIN: ${AI_ORG_RATE_PER_MIN:-60}
+  AI_USER_TURNS_PER_DAY: ${AI_USER_TURNS_PER_DAY:-100}
+  AI_ORG_MAX_ACTIVE_TURNS: ${AI_ORG_MAX_ACTIVE_TURNS:-2}
+  AI_TURN_TIMEOUT_SECONDS: ${AI_TURN_TIMEOUT_SECONDS:-90}
+  AI_TITLE_GENERATION: ${AI_TITLE_GENERATION:-true}
+  AI_RETENTION_DAYS: ${AI_RETENTION_DAYS:-90}
+  AI_RETENTION_MODE: ${AI_RETENTION_MODE:-off}
+  AI_RETENTION_INTERVAL_MINUTES: ${AI_RETENTION_INTERVAL_MINUTES:-60}
+  AI_STALE_TURN_SWEEP: ${AI_STALE_TURN_SWEEP:-false}
+  AI_STALE_TURN_THRESHOLD_MINUTES: ${AI_STALE_TURN_THRESHOLD_MINUTES:-15}
+  AI_STALE_TURN_SWEEP_INTERVAL_MINUTES: ${AI_STALE_TURN_SWEEP_INTERVAL_MINUTES:-5}
 
 services:
 
@@ -89,6 +319,15 @@ services:
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
     environment:
+      # REQUIRED and OPTIONAL: the shared lists above (identical on rab-worker).
+      <<: [*required-env, *optional-env]
+      # OPTIONAL, rab-api only. Pool ceiling (code default 10; the Worker's 12 is pinned on rab-worker).
+      PG_POOL_MAX_CONNECTIONS:
+      # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).
+      CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS: ${CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS:-15}
+      # continue (code default when unset) | refuse: whether the API starts after a failed schema UPGRADE (O3 C3).
+      CREWFLOW_UPGRADE_FAILURE:
+      # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -102,10 +341,12 @@ services:
       # none by default (C4); token is an opt-in (BC-11), entered as the interpolation value (docker-compose.image.yml).
       CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
       # Notification delivery (owner decision 2026-11-06), identical on rab-api and rab-worker: see docker-compose.image.yml.
-      # When PUSH_ENABLED is turned on, also set WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" on both (owner rule; the gates
-      # refuse PUSH_ENABLED=true without it, Phase X J2).
+      # Push sweep: the owner rule (2026-11-06, Phase X J2) for the day PUSH_ENABLED is turned on, committed now on both
+      # services so turning push on needs no compose change. No effect while push is off: the push-dispatch scheduler is
+      # registered only with PUSH_ENABLED=true (rab-worker scheduler-plan.ts).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"
       # Phase D switches (owner decision 2026-11-06), identical on rab-api and rab-worker: see docker-compose.image.yml.
       # Timer triggers on for all four kinds; safety sweeps offer expiry 300 s, manager confirmation 120 s, late clock-in
       # 300 s; the shift monitor keeps 300 s (not set); the combined scan stays off (WORKER_SHIFT_SCAN_MODE not set).
@@ -165,6 +406,13 @@ services:
     cpus: ${CREWFLOW_WORKER_CPUS:-2}
     logging: *logging
     environment:
+      # REQUIRED and OPTIONAL: the shared lists above (identical on rab-api).
+      <<: [*required-env, *optional-env]
+      # OPTIONAL, rab-worker only. Event-loop watchdog: a loop silent this long is a stall (30-900 s).
+      CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS: ${CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS:-120}
+      # Milliseconds the Worker waits for running jobs on shutdown (keep below stop_grace_period).
+      WORKER_SHUTDOWN_TIMEOUT_MS: ${WORKER_SHUTDOWN_TIMEOUT_MS:-30000}
+      # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -180,9 +428,10 @@ services:
       DISABLE_DB_MIGRATIONS: "true"
       DISABLE_CRON_JOBS_REGISTRATION: "true"
       CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: "0"
-      # Notification delivery (owner decision 2026-11-06): identical to rab-api.
+      # Notification delivery (owner decision 2026-11-06) and the push sweep (J2): identical to rab-api.
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
+      WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"
       # Phase D switches (owner decision 2026-11-06): identical to rab-api.
       WORKER_TIMER_TRIGGERS: "on"
       WORKER_TIMER_TRIGGER_KINDS: "offer-expiry,manager-confirmation,no-show,late-clock-in"
