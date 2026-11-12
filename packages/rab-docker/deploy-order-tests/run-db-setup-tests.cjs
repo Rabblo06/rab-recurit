@@ -847,7 +847,11 @@ async function main() {
   if (BLOCKS.includes('a')) await blockBundled();
   if (BLOCKS.includes('race')) await blockRace();
   if (BLOCKS.includes('ext')) await blockExternal();
-  if (BLOCKS.includes('r256') && R256) await blockR256();
+  // R256 supports PostgreSQL 16 and 18 only (its fingerprint majors; it refuses 17 at boot): no R256 database exists on 17.
+  if (BLOCKS.includes('r256') && R256 && MAJOR === '17') {
+    note('block r256 not run on PostgreSQL 17: R256 refuses 17 at boot (SUPPORTED_FINGERPRINT_MAJORS = [16, 18]), so no R256 database on 17 exists to upgrade');
+    results.push({ id: 'S7', owner: '7', title: 'not applicable on 17: R256 never ran on PostgreSQL 17', status: 'N/A', checks: [], notes: [] });
+  } else if (BLOCKS.includes('r256') && R256) await blockR256();
   if (BLOCKS.includes('pg15') && PG15_IMAGE) await blockPg15();
   stopSampler();
   note(`peak of this run's running containers: ${peak.count} at ${peak.at} (${peak.names.join(', ')})`);
@@ -867,7 +871,7 @@ async function main() {
   fs.writeFileSync(path.join(OUT, 'SUMMARY.md'), L.redact(summary));
   fs.writeFileSync(path.join(OUT, 'run.log'), logLines.join('\n'));
   if (peak.count > MAX_CONTAINERS) note(`CONTAINER CAP EXCEEDED: ${peak.count} > ${MAX_CONTAINERS}`);
-  process.exitCode = results.length > 0 && results.every((r) => r.status === 'PASS') && peak.count <= MAX_CONTAINERS ? 0 : 1;
+  process.exitCode = results.length > 0 && results.every((r) => r.status === 'PASS' || r.status === 'N/A') && peak.count <= MAX_CONTAINERS ? 0 : 1;
 }
 
 main().catch((e) => {
