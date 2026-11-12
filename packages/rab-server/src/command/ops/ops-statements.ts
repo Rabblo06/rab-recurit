@@ -1,25 +1,25 @@
 /**
- * Phase B (ops container): the FROZEN statement list of the elevated ops session, and the plan per command + mode.
+ * The FROZEN statement list of the narrowed ops session, and the plan per command + mode.
  *
- * The elevated session (elevated-ops-session.ts) accepts statement NAMES from this registry only — never SQL text — and a
+ * The narrowed session (elevated-ops-session.ts) accepts statement NAMES from this registry only — never SQL text — and a
  * plan allows only the names it lists for a READ ONLY or a READ WRITE transaction. Adding a statement or widening a plan
- * is a reviewed code change to this file; nothing else can make the migration identity run SQL in the ops container.
+ * is a reviewed code change to this file; nothing else can make the narrowed session run SQL.
  *
- * Minimum effective role per command (the runbook's ops section has the same table):
+ * Minimum effective role per command (the runbook's ops section has the same table). Every run is a one-off of the API
+ * service under the owner login crewflow_owner (ops-run.ts; the separated-mode rab-ops container is removed):
  *
- *   command / mode                       primary (crewflow_app)                 elevated (migration identity, SET LOCAL ROLE)
+ *   command / mode                       primary (crewflow_owner, RLS-bound)    narrowed (crewflow_owner → SET LOCAL ROLE)
  *   containment (dry-run and --execute)  per-user suspension, audit (writes)    rab_secure_owner, READ ONLY: the five reads
- *   user-session:backfill --verify       count_user_session_backfill_status()   none (PG_DATABASE_URL refused)
+ *   user-session:backfill --verify       count_user_session_backfill_status()   none
  *   user-session:backfill --dry-run      —                                      rab_secure_owner, READ ONLY: candidate scan
  *   user-session:backfill --apply        per-organisation ops audit row         rab_secure_owner: scan READ ONLY; per family
  *                                                                               READ WRITE: bind its own identity + INSERT
- *   hws:backfill (every mode)            discovery, reads, checkpoint, writes   none (PG_DATABASE_URL refused) — the physical
- *                                        and the per-workspace ops audit row    copy runs as crewflow_app (proven, see runbook)
+ *   hws:backfill (every mode)            discovery, reads, checkpoint, writes   none — the physical copy runs on the primary
+ *                                        and the per-workspace ops audit row    (FORCE RLS-bound; proven, see runbook)
  *
- * Phase X2.2 owner-login path (one-off of the API service, ops-run.ts): "primary" is the owner login crewflow_owner (FORCE RLS
- * and tenant context bind it as they bound crewflow_app), and "elevated" is the SAME login on its own one-connection pool,
- * narrowed by the same `SET LOCAL ROLE` with the same plans and the same frozen names. X2.2 adds no statement and no plan:
- * the NARROWED session gains nothing.
+ * "primary" is the owner login crewflow_owner (FORCE RLS and tenant context bind it as they bound crewflow_app), and the
+ * narrowed session is the SAME login on its own one-connection pool, narrowed by `SET LOCAL ROLE` with these plans and
+ * these frozen names. X2.2 added no statement and no plan: the NARROWED session gained nothing.
  * What does change (security review L2): the NON-narrowed command code (RefreshTokenService, SecurityVersionService,
  * AuditService, the HWS physical copy, the tenant-context writes) now runs as crewflow_owner instead of crewflow_app. That is
  * the privilege the API already runs with (PT-01), but a bug in these commands has the owner login's larger blast radius,
@@ -42,9 +42,9 @@ export const OPS_STATEMENTS = Object.freeze({
 export type OpsStatementName = keyof typeof OPS_STATEMENTS;
 
 export interface OpsElevatedPlan {
-  /** application_name suffix (crewflow-ops-<purpose>) and the name in every log line. */
+  /** application_name suffix (crewflow-cli-<purpose>) and the name in every log line. */
   purpose: string;
-  /** The narrow role the migration identity SETs (LOCAL) for every elevated transaction. */
+  /** The narrow role the owner login SETs (LOCAL) for every narrowed transaction. */
   role: 'rab_secure_owner' | 'crewflow';
   /** Names allowed in a READ ONLY transaction. */
   readStatements: readonly OpsStatementName[];
