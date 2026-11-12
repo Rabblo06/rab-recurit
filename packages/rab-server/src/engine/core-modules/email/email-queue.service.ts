@@ -13,7 +13,8 @@ import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from './ema
  * D5: the same 5 attempts and 5 s exponential base, now with JITTER — each retry waits a random 50–100 % of its
  * exponential step (BullMQ 5.81 `backoff.jitter`), so the retries of many jobs that failed together (a provider or network
  * outage) do not all hit the provider again in the same second. D-Q1: read from the queue registry (values unchanged:
- * 5 attempts, exponential 5 s, jitter 0.5, 7 d completed, 30 d failed — pinned by queue-registry.spec.ts).
+ * 5 attempts, exponential 5 s, jitter 0.5 — pinned by queue-registry.spec.ts; retention since X3.4: 4 h / 1000 completed,
+ * 7 d / 1000 failed, the registry's QUEUE_RETENTION).
  */
 const LIVE_JOB_STATES: ReadonlySet<string> = new Set(['waiting', 'delayed', 'active', 'prioritized', 'waiting-children']);
 
@@ -35,7 +36,7 @@ export const EMAIL_QUEUE_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(EMAIL_QU
  *    republish (`republish()`), never a first attempt (`publish()`, always
  *    `attempt:0`). This is what actually fixes the confirmed bug: a row
  *    stuck because its OLD BullMQ job already reached a terminal state
- *    (completed, retained up to 7 days; or failed-and-removed) can no
+ *    (completed, retained up to 4 hours; or failed-and-removed) can no
  *    longer have that old job silently swallow the new attempt — a fresh
  *    generation gets a fresh jobId, decoupled from the old job's fate.
  */

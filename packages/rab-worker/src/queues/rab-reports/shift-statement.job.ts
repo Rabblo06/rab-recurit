@@ -15,6 +15,7 @@ import {
   shiftStatementReference,
 } from '@rab/server/modules/payroll/templates/approved-shift-statement.view-model';
 import { allocateRecords, paydayLabel, periodLabel } from '@rab/server/modules/payroll/services/payroll-allocation';
+import { QUEUE_RETENTION } from '@rab/server/engine/worker-shared/queue-registry';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
@@ -109,8 +110,9 @@ export async function dispatchStatementScope(
 
 /**
  * The BullMQ `add()` arguments for one claimed statement (jobId carries the dispatch generation; attempts 1 — retries are
- * the dispatcher's; 7 d / 30 d retention). Global mode's publisher uses this; it is asserted identical to what the
- * report processor's per_scope adapter passes (shift-statement.job.spec.ts).
+ * the dispatcher's; the X3.4 retention every queue shares, `QUEUE_RETENTION`). Global mode's publisher uses this; it is
+ * asserted identical to what the report processor's per_scope adapter passes (shift-statement.job.spec.ts) and to the
+ * registry's job (queue-registry-worker.spec.ts).
  */
 export function shiftStatementJobOptions(data: ShiftStatementJobData) {
   return [
@@ -118,7 +120,8 @@ export function shiftStatementJobOptions(data: ShiftStatementJobData) {
     data,
     {
       jobId: `shift-statement.${data.payrollRecordId}.gen.${data.generation}`, attempts: 1,
-      removeOnComplete: { age: 7 * 24 * 60 * 60 }, removeOnFail: { age: 30 * 24 * 60 * 60 },
+      removeOnComplete: { age: QUEUE_RETENTION.completedMaxAgeSeconds, count: QUEUE_RETENTION.completedMaxCount },
+      removeOnFail: { age: QUEUE_RETENTION.failedMaxAgeSeconds, count: QUEUE_RETENTION.failedMaxCount },
     },
   ] as const;
 }
