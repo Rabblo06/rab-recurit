@@ -62,7 +62,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
   const ctxOf = (who: TestIdentity): AuthContext => ({ organisationId: who.organisationId, workspaceId: who.workspaceId, userId: who.userId, role: who.roleKey });
 
   let day = 0;
-  /** One request by `requestedBy` at `venueId` with the given offers (one assignment per staff member; re-offers share it). */
+  /** One request by `requestedBy` at `venueId` with the given offers (one seat and one offer per recipient). */
   async function request_(o: {
     requestedBy: string | null; venueId: string; status: string; required?: number; createdAt?: string; past?: boolean;
     offers?: Array<{ staff: number; offer: string; seat: string; sentAt?: string; rejection?: string }>;
@@ -75,20 +75,13 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
       [fx.org.id, o.venueId, fx.jobRoleId, o.past ? -40 - d : d, o.required ?? 2, o.requestedBy ?? fx.manager.userId, fx.manager.workspaceId, o.status, o.requestedBy,
         o.createdAt ?? new Date(Date.now() - d * 60_000).toISOString()],
     );
-    const seats = new Map<number, string>();
     for (const off of o.offers ?? []) {
-      let seat = seats.get(off.staff);
-      if (!seat) {
-        const [a] = await sql<{ id: string }>(
-          `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
-           SELECT $1, s.id, $2, $3, 1500, tstzrange(s.starts_at, s.ends_at, '[)'), $4 FROM core.shift s WHERE s.id = $5 RETURNING id`,
-          [fx.org.id, fx.staff[off.staff], off.seat, fx.manager.workspaceId, s!.id],
-        );
-        seat = a!.id;
-        seats.set(off.staff, seat);
-      } else {
-        await sql(`UPDATE core.shift_assignment SET status = $2 WHERE id = $1`, [seat, off.seat]);
-      }
+      const [a] = await sql<{ id: string }>(
+        `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
+         SELECT $1, s.id, $2, $3, 1500, tstzrange(s.starts_at, s.ends_at, '[)'), $4 FROM core.shift s WHERE s.id = $5 RETURNING id`,
+        [fx.org.id, fx.staff[off.staff], off.seat, fx.manager.workspaceId, s!.id],
+      );
+      const seat = a!.id;
       await sql(
         `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id, rejection_reason)
          VALUES ($1, $2, $3, $4, $5::timestamptz, $5::timestamptz + interval '1 day', 6000, $6, $7, $8)`,
@@ -145,9 +138,10 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     // Expired: past the action window (non-terminal), and every latest offer expired.
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'offered', past: true, offers: [{ staff: 3, offer: 'pending', seat: 'offered' }] }));
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'offered', offers: [{ staff: 4, offer: 'expired', seat: 'withdrawn' }, { staff: 5, offer: 'expired', seat: 'withdrawn' }] }));
-    // Latest offer per recipient wins: an expired offer re-sent as pending; a deadline withdrawal (not_confirmed_in_time).
+    // Mixed recipients: one pending, one withdrawn at the confirmation deadline (not_confirmed_in_time). (One offer per seat:
+    // job_offer_shift_assignment_id_key, and one seat per recipient and shift.)
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'offered', offers: [
-      { staff: 2, offer: 'expired', seat: 'offered', sentAt: '2026-05-01T08:00:00Z' }, { staff: 2, offer: 'pending', seat: 'offered', sentAt: '2026-05-02T08:00:00Z' },
+      { staff: 2, offer: 'pending', seat: 'offered', sentAt: '2026-05-02T08:00:00Z' },
       { staff: 3, offer: 'manager_rejected', seat: 'rejected', rejection: 'confirmation_deadline_passed' }] }));
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'offered', required: 1, offers: [{ staff: 5, offer: 'declined', seat: 'declined' }] }));
     // Out of the venue manager's scope: another venue, another requester, a manager-created shift.
