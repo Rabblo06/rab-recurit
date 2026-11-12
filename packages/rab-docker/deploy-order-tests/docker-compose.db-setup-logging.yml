@@ -11,9 +11,9 @@ services:
       - -c
       - ssl=on
       - -c
-      - ssl_cert_file=/var/lib/postgresql/data/tls/server.crt
+      - ssl_cert_file=/var/lib/postgresql/tls/server.crt
       - -c
-      - ssl_key_file=/var/lib/postgresql/data/tls/server.key
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
       - -c
       - ssl_min_protocol_version=TLSv1.2
       - -c

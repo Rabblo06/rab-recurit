@@ -120,11 +120,8 @@ PostgreSQL major per run (16, 17, 18), with the production `docker-compose.image
 ```bash
 DOT_REPOSITORY=127.0.0.1:5055/adolphus DOT_NEW_DIGEST=sha256:<new> DOT_R256_DIGEST=sha256:<0e0a6edd re-pushed> \
 DOT_PG_IMAGE=postgres@sha256:<Debian 16|17|18> DOT_PG15_IMAGE=postgres@sha256:<Debian 15> DOT_REDIS_IMAGE=redis@sha256:<7> \
-[DOT_PROJECT_PREFIX=dbs] [DOT_DB_VOLUME_CHOWN=1] \
+[DOT_PROJECT_PREFIX=dbs] \
   node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,r256,pg15]
 ```
 
 Projects are `<prefix>-pg<major>-a`, `-race`, `-ext`, `-r256`, `-pg15`, each taken `down --volumes` after its block.
-`DOT_DB_VOLUME_CHOWN=1` is a reported WORKAROUND, never a default: it chowns the fresh data volume to 999:999 before the
-first start, which the PostgreSQL 18 image needs because it has no `/var/lib/postgresql/data` (see the area 6 notes in
-DB-SETUP-LEAD.md).

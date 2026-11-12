@@ -542,6 +542,11 @@ const SCENARIOS: Scenario[] = [
         assertCleanOutput(r);
         expect(r.code === 0, `a concurrent start exited ${r.code} (${r.result?.outcome ?? 'none'} ${r.result?.code ?? ''}; all: ${runs.map((x) => `${x.code}/${x.result?.code ?? '-'}`).join(' ')})`);
       }
+      // Outcome labels follow the post-lock plan (area 6 finding): exactly one start created the role, and none of them
+      // reports a password reset (all four share one APP_SECRET, so the password was right for everyone after the first).
+      const outcomes = runs.map((r) => r.result?.outcome);
+      expect(outcomes.filter((o) => o === 'created').length === 1, `concurrent: expected exactly one "created", got ${outcomes.join(', ')}`);
+      expect(runs.every((r) => r.result?.passwordSet !== true || r.result.created), `concurrent: a start reported a password reset (${outcomes.join(', ')})`);
       const state = await ownerState(ctx.admin);
       expect(state.exists && state.attrs === EXACT_01, 'concurrent: attributes not exact');
       for (const db of [a, b]) {

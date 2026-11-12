@@ -12,9 +12,6 @@
  *   [DOT_R256_DIGEST=sha256:…]                   R256 (0e0a6edd) in the same registry: enables block r256 (owner's test 7)
  *   [DOT_PG15_IMAGE=postgres@sha256:…]           a Debian postgres:15 image: enables block pg15 (owner's test 10, PG15)
  *   [DOT_PROJECT_PREFIX=dbs]                     project names <prefix>-pg<major>-<block>; never shared between runs
- *   [DOT_DB_VOLUME_CHOWN=1]                      WORKAROUND (reported, never silent): before each project's first start,
- *                                                chown the fresh data volume to 999:999 (needed on PostgreSQL 18, whose
- *                                                image has no /var/lib/postgresql/data: see block a's S0 check)
  *     node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,r256,pg15] [--keep]
  *
  * Blocks (each its own disposable project, run one after another, `down --volumes` after each):
@@ -84,7 +81,6 @@ const NEW = process.env.DOT_NEW_DIGEST;
 const R256 = process.env.DOT_R256_DIGEST || null;
 const PG_IMAGE = process.env.DOT_PG_IMAGE;
 const PG15_IMAGE = process.env.DOT_PG15_IMAGE || null;
-const VOLUME_CHOWN = process.env.DOT_DB_VOLUME_CHOWN === '1';
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
 const MAX_CONTAINERS = 5;
 const LOGGING_OVERLAY = 'deploy-order-tests/docker-compose.db-setup-logging.yml';
@@ -138,7 +134,7 @@ function startPeakSampler() {
 }
 
 function writeResults() {
-  fs.writeFileSync(path.join(OUT, 'RESULTS.json'), JSON.stringify({ major: MAJOR, image: imageRef(NEW), r256: R256 && imageRef(R256), pgImage: PG_IMAGE, volumeChown: VOLUME_CHOWN, peak, results }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'RESULTS.json'), JSON.stringify({ major: MAJOR, image: imageRef(NEW), r256: R256 && imageRef(R256), pgImage: PG_IMAGE, peak, results }, null, 2));
 }
 
 /** One case. A throw or a failed check fails it; the block continues with its next case unless `fatal`. */
@@ -184,17 +180,6 @@ function project(block, { ownerInit = false, logging = true } = {}) {
 
 function use(p, { digest = NEW, databaseUrl = null, pgImage = PG_IMAGE } = {}) {
   L.writeComposeEnv(p, { repository: REPO, digest, pgImage, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl });
-}
-
-/** The workaround of DOT_DB_VOLUME_CHOWN=1 (reported in RESULTS.json): compose creates the volumes, then 999:999 owns the data volume's root. */
-function prepareVolumes(p, n) {
-  if (!VOLUME_CHOWN) return;
-  const c = p.compose(['create', '--no-recreate', L.DB_SERVICE], { timeout: 300_000 });
-  keep(p, 'compose create db', c.out);
-  const img = L.run('docker', ['inspect', '-f', '{{.Config.Image}}', p.container(L.DB_SERVICE)]).stdout.trim();
-  const r = L.run('docker', ['run', '--rm', '--network', 'none', '-u', '0', '--entrypoint', 'chown', '-v', `${p.name}_crewflow-db-data:/d`, img, '999:999', '/d']);
-  n(`WORKAROUND DOT_DB_VOLUME_CHOWN=1: chown 999:999 on ${p.name}_crewflow-db-data before the first start (exit ${r.code}); the production files alone do not start the db on this image`);
-  if (r.code !== 0) throw new Error(`the DOT_DB_VOLUME_CHOWN workaround failed (compose create exit ${c.code}, chown exit ${r.code})`);
 }
 
 function deploy(p, label) {
@@ -360,7 +345,7 @@ function migrateResults(log) {
 
 /** The bundled db's certificate fingerprints (server, CA): a restart must not make new ones. */
 function certs(p) {
-  const r = L.run('docker', ['exec', p.container(L.DB_SERVICE), 'sh', '-c', 'openssl x509 -noout -fingerprint -sha256 -in /var/lib/postgresql/data/tls/server.crt; openssl x509 -noout -fingerprint -sha256 -in /var/lib/postgresql/ca.crt'], { timeout: 30_000 });
+  const r = L.run('docker', ['exec', p.container(L.DB_SERVICE), 'sh', '-c', 'openssl x509 -noout -fingerprint -sha256 -in /var/lib/postgresql/tls/server.crt; openssl x509 -noout -fingerprint -sha256 -in /var/tmp/ca.crt'], { timeout: 30_000 });
   return r.stdout.replace(/\s+/g, ' ').trim();
 }
 
@@ -392,7 +377,6 @@ async function blockBundled() {
     const envs = ['compose.env', 'database.env', 'runtime.env'].map((f) => fs.readFileSync(path.join(p.secretsDir, f), 'utf8'));
     check(!envs.some((e) => /^PG_DATABASE_URL=|^PG_SSL_CA_CERT_PATH=|^CREWFLOW_PG_CA_FILE=/m.test(e)), 'no PG_DATABASE_URL, PG_SSL_CA_CERT_PATH or CA file in any env file: the database settings are PG_DATABASE_PASSWORD (compose.env) and APP_SECRET (runtime.env) only');
     n(`database.env holds only: ${envs[1].trim().split('\n').map((l) => l.split('=')[0]).join(', ')}`);
-    prepareVolumes(p, n);
     const d = deploy(p, 'S1-deploy');
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
     const dbHealth = p.health(L.DB_SERVICE);
@@ -431,7 +415,8 @@ async function blockBundled() {
     check(/crewflow-db: creating the bundled database CA and server certificate/.test(p.logs(L.DB_SERVICE)), 'the db made its own CA and server certificate on its first start (D1 a)');
     state.certs = certs(p);
     const hba = p.psql(`SELECT string_agg(type || ' ' || coalesce(address, '-') || ' ' || auth_method, '; ' ORDER BY line_number) FROM pg_hba_file_rules`);
-    n(`the bundled db's pg_hba (the image default, T-3): ${hba}`);
+    n(`the bundled db's pg_hba: ${hba}`);
+    check(hba.length > 0 && !/\b(trust|peer)\b/.test(hba), 'the bundled db\'s pg_hba has no trust or peer line (SCRAM for local and host connections)');
   }, p);
   if (!ok1 && !p.health('rab-api').startsWith('healthy|')) {
     note('S1 did not bring the stack up: the rest of block a is not run');
@@ -552,7 +537,6 @@ async function blockRace() {
   L.writeSecrets(p.secretsDir, { caPath: null });
   use(p, { databaseUrl: null });
   await step('S9', '9', 'two API starts at the same moment on a fresh bundled database: one bootstrap creates the role, the migration lock lets one migrate child apply, the other finds CURRENT', async (check, n) => {
-    prepareVolumes(p, n);
     const pull = p.compose(['pull', '--quiet'], { timeout: 600_000 });
     check(pull.code === 0, 'images pulled');
     const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
@@ -577,8 +561,8 @@ async function blockRace() {
     n(`bootstrap 1: ${boot[0].join(' / ')} || bootstrap 2: ${boot[1].join(' / ')}`);
     const created = logs.filter((l) => l.includes(MSG.ready('created'))).length;
     const readyAll = logs.every((l) => /\[owner-bootstrap\] crewflow_owner is ready \(/.test(l));
-    check(readyAll, 'both bootstrap children report crewflow_owner ready (exit 0)');
-    if (created !== 1) n(`FINDING (bootstrap child, area 2): ${created} starts report "ready (created)" for ONE role: the plan is computed from facts read BEFORE the advisory lock; under the lock the DO block found the role and ALTERed its password (same derived password, a new salt) but the result line still says "created". End state correct; the log is not.`);
+    // Area 2 (388630e3): the bootstrap child re-plans under its advisory lock, so the start that waited reports what it did.
+    check(readyAll && created === 1, `both bootstrap children report crewflow_owner ready and exactly one says "created" (created: ${created}; the other: ${boot.map((b) => b.filter((l) => /is ready/.test(l)).pop() ?? '?').join(' | ')})`);
     check(exactly01(role(p)), `one crewflow_owner, exactly the 01 attributes (${roleShape(role(p))})`);
     const res = logs.map((l) => migrateResults(l).pop() || {});
     n(`migrate 1: state ${res[0].state} applied ${(res[0].applied || []).length} exit ${res[0].exitCode}; migrate 2: state ${res[1].state} applied ${(res[1].applied || []).length} exit ${res[1].exitCode}`);
@@ -618,7 +602,6 @@ async function blockExternal() {
   };
 
   await step('S4', '4', 'an existing crewflow_owner with SUPERUSER, then with BYPASSRLS: refused, the role left untouched', async (check, n) => {
-    prepareVolumes(p, n);
     const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
     keep(p, 'S4-db-up', up.out);
     check(up.code === 0, `db up and healthy (exit ${up.code})`);
@@ -759,7 +742,6 @@ async function blockR256() {
     // R256 on THIS release's compose files alone: what a rollback across DB-SETUP without the old files does.
     p.setPrev(false);
     use(p, { digest: R256, databaseUrl: L.ownerUrl() });
-    prepareVolumes(p, n);
     const d0 = deploy(p, 'S7-r256-new-files');
     await p.waitHealthy('rab-api', 600_000);
     await L.sleep(20_000);
@@ -827,7 +809,6 @@ async function blockPg15() {
   L.writeSecrets(p.secretsDir, { caPath: null });
   use(p, { databaseUrl: null, pgImage: PG15_IMAGE });
   await step('S10C', '10', 'PostgreSQL 15 as the bundled db: refused before anything is created', async (check, n) => {
-    prepareVolumes(p, n);
     const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
     keep(p, 'S10C-db-up', up.out);
     check(up.code === 0, `db (PostgreSQL 15) up and healthy (exit ${up.code})`);
@@ -844,7 +825,7 @@ async function blockPg15() {
 async function main() {
   L.newSecrets();
   const stopSampler = startPeakSampler();
-  note(`PostgreSQL ${PG_IMAGE}; image ${imageRef(NEW)}; R256 ${R256 ? imageRef(R256) : '(not set)'}; PG15 ${PG15_IMAGE ?? '(not set)'}; blocks ${BLOCKS.join(',')}${VOLUME_CHOWN ? '; WORKAROUND DOT_DB_VOLUME_CHOWN=1' : ''}`);
+  note(`PostgreSQL ${PG_IMAGE}; image ${imageRef(NEW)}; R256 ${R256 ? imageRef(R256) : '(not set)'}; PG15 ${PG15_IMAGE ?? '(not set)'}; blocks ${BLOCKS.join(',')}`);
   if (BLOCKS.includes('a')) await blockBundled();
   if (BLOCKS.includes('race')) await blockRace();
   if (BLOCKS.includes('ext')) await blockExternal();
@@ -860,7 +841,7 @@ async function main() {
   const summary = [
     `# DB-SETUP real-container tests, PostgreSQL ${MAJOR}`,
     '',
-    `image \`${imageRef(NEW)}\`; db \`${PG_IMAGE}\`; command \`docker compose pull && docker compose up -d\`${VOLUME_CHOWN ? '; **WORKAROUND DOT_DB_VOLUME_CHOWN=1**' : ''}`,
+    `image \`${imageRef(NEW)}\`; db \`${PG_IMAGE}\`; command \`docker compose pull && docker compose up -d\``,
     `peak running containers of this run: ${peak.count} (cap ${MAX_CONTAINERS})`,
     '',
     '| case | owner test | status | checks |',

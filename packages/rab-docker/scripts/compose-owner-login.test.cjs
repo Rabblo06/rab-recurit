@@ -455,8 +455,16 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { s.db.environment.PG_DATABASE_URL = 'postgresql://postgres:x@db:5432/crewflow'; }), /db: has PG_DATABASE_URL/);
   assertRefused(problemsAfter((s) => { s.db.environment.PGPASSWORD = 'x'; }), /db: environment has PGPASSWORD/);
   assertRefused(problemsAfter((s) => { s.db.environment.PGDATA = '/var/lib/postgresql/data'; }), /PGDATA must be/);
+  assertRefused(problemsAfter((s) => { s.db.environment.PGDATA = '/var/lib/postgresql/18/docker'; }), /PGDATA must be/);
+  assertRefused(problemsAfter((s) => { delete s.db.environment.PGDATA; }), /PGDATA is not set/);
+  // Area 6 note (T-3 tightened): SCRAM for socket and TCP, never trust / peer.
+  for (const args of ['--auth-local=peer --data-checksums', '--auth-local=scram-sha-256 --data-checksums', '--auth-host=scram-sha-256', '--auth-local=scram-sha-256 --auth-host=scram-sha-256 --auth-local=peer', '--auth-local=scram-sha-256 --auth-host=md5', '']) {
+    assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = args; }), /POSTGRES_INITDB_ARGS (lacks|sets an authentication method)/);
+  }
+  assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = '--auth=trust'; }), /trust/);
+  assertRefused(problemsAfter((s) => { s.db.tmpfs = s.db.tmpfs.filter((t) => !t.startsWith('/var/lib/postgresql/data')); }), /not an empty read-only tmpfs/);
   assertRefused(problemsAfter((s) => { s.db.command = s.db.command.filter((t) => t !== 'ssl=on'); }), /TLS is not on/);
-  assertRefused(problemsAfter((s) => { s.db.command = s.db.command.map((t) => t.replace('/data/tls/server.key', '/other.key')); }), /certificate it makes itself/);
+  assertRefused(problemsAfter((s) => { s.db.command = s.db.command.map((t) => t.replace('/tls/server.key', '/other.key')); }), /certificate it makes itself/);
   assertRefused(problemsAfter((s) => { delete s.db.entrypoint; }), /create its own CA/);
   assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('rm -f ca.key', 'rm -f ca.srl')); }), /CA key deleted/);
   assertRefused(problemsAfter((s) => { s.db.volumes.push({ type: 'bind', source: '/x/01-crewflow-owner.sql', target: '/docker-entrypoint-initdb.d/01.sql', read_only: true }); }), /mounts an init script/);
@@ -465,8 +473,11 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
 test('DENIAL bundled db: internal network only, its own volumes, rab-api waits for it, the app mounts only its CA read-only', { skip }, () => {
   assertRefused(problemsAfter((s) => { s.db.networks.default = null; }), /internal crewflow-db network only/);
   assertRefused(problemsAfter((s, m) => { m.networks['crewflow-db'].internal = false; }), /crewflow-db is not internal/);
-  assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/lib/postgresql/data'); }), /crewflow-db-data at \/var\/lib\/postgresql\/data is missing/);
-  assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/lib/postgresql').source = 'other'; }), /db: unexpected named volume/);
+  assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/lib/postgresql'); }), /crewflow-db-data at \/var\/lib\/postgresql is missing/);
+  assertRefused(problemsAfter((s) => { s.db.volumes = s.db.volumes.filter((v) => v.target !== '/var/tmp'); }), /crewflow-db-ca at \/var\/tmp is missing/);
+  assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/tmp').source = 'other'; }), /db: unexpected named volume/);
+  // The pre-fix layout (data on /var/lib/postgresql/data: root-owned on postgres:18, so the db cannot start there).
+  assertRefused(problemsAfter((s) => { s.db.volumes.find((v) => v.target === '/var/lib/postgresql').target = '/var/lib/postgresql/data'; }), /db: unexpected named volume at \/var\/lib\/postgresql\/data/);
   assertRefused(problemsAfter((s) => { delete s['rab-api'].depends_on.db; }), /rab-api: does not wait for a healthy db/);
   for (const svc of ['rab-api', 'rab-worker']) {
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));

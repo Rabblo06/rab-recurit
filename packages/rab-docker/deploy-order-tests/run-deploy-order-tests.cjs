@@ -153,7 +153,8 @@ class Project {
     return waitFor(`${service} healthy`, () => this.health(service).startsWith('healthy|'), timeoutMs);
   }
   psql(sql) {
-    const r = run('docker', ['exec', '-i', this.container('db'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow'], { input: sql, timeout: 120_000 });
+    // The bundled db is SCRAM on its socket too: the superuser password (PG_DATABASE_PASSWORD) via the exec environment.
+    const r = run('docker', ['exec', '-i', '-e', 'PGPASSWORD', this.container('db'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow'], { input: sql, env: { PGPASSWORD: secrets.dbPassword }, timeout: 120_000 });
     if (r.code !== 0) throw new Error(`psql failed (${r.code}): ${redact(r.out).slice(0, 600)}`);
     return r.stdout.trim();
   }

@@ -95,7 +95,13 @@ const DB_PASSWORD_KEY = 'PG_DATABASE_PASSWORD';
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
-const DB_VOLUMES = Object.freeze({ '/var/lib/postgresql/data': 'crewflow-db-data', '/var/lib/postgresql': DB_CA_VOLUME });
+// The layout that works on Debian postgres 16, 17 AND 18 as uid 999 (a fresh volume takes the ownership of the image
+// directory it is mounted on): the data volume on /var/lib/postgresql (postgres-owned in every major), the CA on /var/tmp
+// (sticky world-writable in every major). /var/lib/postgresql/data, 16/17's VOLUME, is an empty read-only tmpfs.
+const DB_VOLUMES = Object.freeze({ '/var/lib/postgresql': 'crewflow-db-data', '/var/tmp': DB_CA_VOLUME });
+const DB_PGDATA = '/var/lib/postgresql/pgdata';
+/** initdb authentication: SCRAM for socket and TCP (the image default trusts loopback TCP; peer lets any uid-999 process in). */
+const DB_INITDB_AUTH = Object.freeze(['--auth-local=scram-sha-256', '--auth-host=scram-sha-256']);
 /** The bundled db's image: the official postgres repository, by digest (the committed default is the postgres:16 index). */
 const DB_IMAGE = /^(docker\.io\/)?(library\/)?postgres@sha256:[0-9a-f]{64}$/;
 const MIN_FRESH_INSTALL_START_PERIOD_S = 600;
@@ -396,16 +402,21 @@ function bundledDbProblems(services, model, p) {
   if (String(env.POSTGRES_PASSWORD ?? '') !== SENTINEL_DB_PW) p(`${DB_SERVICE}: POSTGRES_PASSWORD must be exactly \${${DB_PASSWORD_KEY}:?...} (T-2), nothing else`);
   if ('POSTGRES_PASSWORD_FILE' in env) p(`${DB_SERVICE}: POSTGRES_PASSWORD_FILE is set (one source: PG_DATABASE_PASSWORD)`);
   if (String(env.POSTGRES_HOST_AUTH_METHOD ?? '').toLowerCase() === 'trust') p(`${DB_SERVICE}: POSTGRES_HOST_AUTH_METHOD=trust`);
-  if (/(^|\s)--auth(-host|-local)?=trust/.test(String(env.POSTGRES_INITDB_ARGS ?? ''))) p(`${DB_SERVICE}: POSTGRES_INITDB_ARGS sets trust authentication`);
+  const initdbArgs = String(env.POSTGRES_INITDB_ARGS ?? '').split(/\s+/).filter(Boolean);
+  if (initdbArgs.some((a) => /^--auth(-host|-local)?=/.test(a) && !DB_INITDB_AUTH.includes(a))) p(`${DB_SERVICE}: POSTGRES_INITDB_ARGS sets an authentication method other than scram-sha-256 (trust / peer / md5 / password)`);
+  for (const a of DB_INITDB_AUTH) if (!initdbArgs.includes(a)) p(`${DB_SERVICE}: POSTGRES_INITDB_ARGS lacks ${a} (the image default trusts loopback TCP)`);
   for (const [k, v] of Object.entries(env)) {
     if (k === URL_KEY) p(`${DB_SERVICE}: has ${URL_KEY}`);
-    else if (k === 'PGDATA') { if (v !== '/var/lib/postgresql/data/pgdata') p(`${DB_SERVICE}: PGDATA must be /var/lib/postgresql/data/pgdata (beside its TLS key in the data volume)`); }
+    else if (k === 'PGDATA') { if (v !== DB_PGDATA) p(`${DB_SERVICE}: PGDATA must be ${DB_PGDATA} (in the data volume beside its TLS key; fixed for every major)`); }
     else if (forbiddenReason(k)) p(`${DB_SERVICE}: environment has ${k}`);
     else if (isPgUrl(v)) p(`${DB_SERVICE}: ${k} holds a PostgreSQL URL`);
   }
   const cmd = (db.command ?? []).map(String);
   if (!cmd.includes('ssl=on')) p(`${DB_SERVICE}: TLS is not on (verify-full clients need it)`);
-  if (!cmd.includes('ssl_cert_file=/var/lib/postgresql/data/tls/server.crt') || !cmd.includes('ssl_key_file=/var/lib/postgresql/data/tls/server.key')) p(`${DB_SERVICE}: TLS does not use the certificate it makes itself (data volume tls/)`);
+  if (!cmd.includes('ssl_cert_file=/var/lib/postgresql/tls/server.crt') || !cmd.includes('ssl_key_file=/var/lib/postgresql/tls/server.key')) p(`${DB_SERVICE}: TLS does not use the certificate it makes itself (data volume tls/)`);
+  if (!('PGDATA' in env)) p(`${DB_SERVICE}: PGDATA is not set (the image default differs per major; ${DB_PGDATA} for all)`);
+  const dbTmpfs = (db.tmpfs ?? []).map(String);
+  if (!dbTmpfs.some((t) => /^\/var\/lib\/postgresql\/data:/.test(t) && /mode=0?555\b/.test(t))) p(`${DB_SERVICE}: /var/lib/postgresql/data (the 16/17 images' VOLUME) is not an empty read-only tmpfs`);
   // `docker compose config` keeps a literal $ escaped as $$ in its output.
   const entry = (db.entrypoint ?? []).map(String).join('\n').split('$$').join('$');
   if (!/openssl req -x509/.test(entry) || !/subjectAltName=DNS:db/.test(entry) || !/rm -f ca\.key/.test(entry) || !/exec docker-entrypoint\.sh "\$@"/.test(entry)) {

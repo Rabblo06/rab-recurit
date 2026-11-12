@@ -164,12 +164,14 @@ class Project {
     return !s || s.startsWith('0001-01-01');
   }
   /**
-   * psql as the PostgreSQL superuser over the db container's local socket (peer: the container user is the postgres OS
-   * user), database crewflow. The session first turns statement logging off (a superuser may), so no test statement (a
+   * psql as the PostgreSQL superuser over the db container's local socket, database crewflow. The bundled db is SCRAM on
+   * the socket too (no peer, no trust), so the superuser password (PG_DATABASE_PASSWORD) travels as PGPASSWORD in the
+   * exec environment (never argv). The session first turns statement logging off (a superuser may), so no test statement (a
    * test role's password, for instance) ever reaches the server log the log-scan cases read.
    */
   psql(sql, { db = 'crewflow' } = {}) {
-    const r = run('docker', ['exec', '-i', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', db], {
+    const r = run('docker', ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', db], {
+      env: { PGPASSWORD: secrets.dbPassword },
       input: `SET log_statement = 'none';\nSET log_min_error_statement = 'panic';\n${sql}`,
       timeout: 300_000,
     });
@@ -181,13 +183,12 @@ class Project {
   }
   /**
    * psql as crewflow_owner over TLS (verify-full against the db's own CA), from inside the db container but to its NETWORK
-   * address (the service name `db`), so the password is really checked: the postgres image's initdb leaves 127.0.0.1 on
-   * `trust` (only `--auth-local=peer` is set), so a loopback login would succeed with ANY password.
+   * address (the service name `db`), the path the app containers take.
    */
   psqlOwner(sql, password = this.ownerPassword ?? secrets.owner) {
     const r = run(
       'docker',
-      ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/lib/postgresql/ca.crt dbname=crewflow user=crewflow_owner'],
+      ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/tmp/ca.crt dbname=crewflow user=crewflow_owner'],
       { input: sql, env: { PGPASSWORD: password }, timeout: 120_000 },
     );
     if (r.code !== 0) throw new Error(`psql (owner) failed (${r.code}): ${redact(r.out).slice(0, 800)}`);
@@ -205,7 +206,7 @@ class Project {
   }
   /** An idle superuser transaction holding `lockSql` until release() (stdin kept open; no statement keeps a snapshot). */
   async holdLock(lockSql) {
-    const h = runAsync('docker', ['exec', '-i', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow']);
+    const h = runAsync('docker', ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow'], { env: { PGPASSWORD: secrets.dbPassword } });
     h.child.stdin.write(`SELECT 'holder-pid|' || pg_backend_pid();\nBEGIN;\n${lockSql};\nSELECT 'holder-ready';\n`);
     await waitFor('the lock holder', () => /holder-ready/.test(h.output()), 60_000, 500);
     const pid = (h.output().match(/holder-pid\|(\d+)/) || [])[1];
