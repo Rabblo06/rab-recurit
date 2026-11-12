@@ -6,13 +6,14 @@ const SECRET = 'S3cret-PW-do-not-print';
 const PROD_POOLED = `postgres://rab_app:${SECRET}@ep-round-rain-aess0njf-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_DIRECT = `postgres://rab_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const OTHER_NEON = `postgres://rab_owner:${SECRET}@ep-other-endpoint-xyz.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
-// Phase B: production takes PG_DATABASE_URL only, a DIRECT connection (the Worker refuses a transaction pooler).
-const PROD_APP = `postgres://crewflow_app:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
+// Phase B: production takes PG_DATABASE_URL only, a DIRECT connection (the Worker refuses a transaction pooler). DB-SETUP
+// (plan §2.2): the production API / Worker URL logs in as crewflow_owner (any other login is refused before connecting).
+const PROD_APP = `postgres://crewflow_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_PROVISIONER = `postgres://crewflow:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const LOCAL_DIRECT_USER = `postgres://rab_direct:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
 const LOCAL = `postgres://rab_app:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
 const LOCAL_OWNER = `postgres://rab_owner:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
-const DO_PRIVATE = `postgres://crewflow_app:${SECRET}@private-db-postgresql-lon1-12345-do-user-1-0.b.db.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
+const DO_PRIVATE = `postgres://crewflow_owner:${SECRET}@private-db-postgresql-lon1-12345-do-user-1-0.b.db.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
 const PROD_ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
 const DECLARED_PROD = { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: PROD_ID };
 
@@ -87,7 +88,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; the API only warns', () => {
     expectRefused('worker', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED }), /transaction-pooler shape/);
     expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow') }), /transaction-pooler shape/);
-    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED })).classification).toBe('PRODUCTION');
+    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') })).classification).toBe('PRODUCTION');
   });
 
   it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {

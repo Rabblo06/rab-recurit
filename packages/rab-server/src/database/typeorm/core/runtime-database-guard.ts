@@ -68,7 +68,7 @@ import {
 } from '../../deployment-identity/deployment-identity';
 import { unmarkedProductionRefusal } from '../../deployment-identity/unmarked-production-endpoints';
 import { runtimeEnvRefusal } from './never-in-runtime-env';
-import { runtimeDbConfigProblems } from '../../owner-login/runtime-db-config';
+import { checkRuntimeLogin, RuntimeDbConfigError, runtimeDbConfigProblems } from '../../owner-login/runtime-db-config';
 
 export const RUNTIME_ENV_VAR = 'RAB_RUNTIME_ENV';
 
@@ -147,8 +147,28 @@ function sameEndpoint(a: PgTargetIdentity, b: PgTargetIdentity): boolean {
   return a.database === b.database && a.endpointKey === b.endpointKey;
 }
 
-/** Pure resolution. No connection. */
+/**
+ * Pure resolution. No connection.
+ *
+ * DB-SETUP (plan §2.2 / §5.2): after every existing rule has passed (each keeps its own message and order), the API and the
+ * Worker apply the runtime-login rule (runtime-db-config.ts checkRuntimeLogin): in production a PG_DATABASE_URL whose login
+ * is not crewflow_owner is refused here, before the read-only probe or any pool opens a connection. The superseded
+ * provisioner process is left as it was.
+ */
 export function resolveRuntimeDatabase(input: RuntimeDbInput): ResolvedRuntimeDb {
+  const resolved = resolveRuntimeDatabaseUnchecked(input);
+  if (input.processName !== 'provisioner') {
+    try {
+      checkRuntimeLogin(input.env, input.processName);
+    } catch (error) {
+      if (error instanceof RuntimeDbConfigError) throw new RuntimeDbError(error.message);
+      throw error;
+    }
+  }
+  return resolved;
+}
+
+function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntimeDb {
   const { processName, env, dotenvValues } = input;
 
   // Worker credential isolation checkpoint + Phase B P7 + security review L-4: a long-running process must never be ABLE to
@@ -363,6 +383,12 @@ export async function assertRuntimeDatabaseIdentity(
   dotenvValues: Record<string, string> = readRuntimeDotenvValues(),
 ): Promise<ResolvedRuntimeDb> {
   const resolved = resolveRuntimeDatabase({ processName, env, dotenvValues });
+  // DB-SETUP: outside production a non-crewflow_owner login is allowed (dev and test suites) but reported, value-free.
+  const loginWarning = processName === 'provisioner' ? null : checkRuntimeLogin(env, processName).warning;
+  if (loginWarning) {
+    // eslint-disable-next-line no-console
+    console.warn(`[runtime-db-guard] WARNING process=${processName}: ${loginWarning}`);
+  }
   const appProbe = await probeRuntimeIdentity(resolved.pg, 'primary', {
     env,
     production: resolved.classification === 'PRODUCTION',
