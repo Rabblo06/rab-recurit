@@ -61,10 +61,33 @@ export function buildAuditRowSecurityEvent(row: AuditLogShippingRow, processLabe
 /** Longest address accepted (RFC 5321 path limit); anything longer is not treated as an e-mail. */
 const MAX_EMAIL_LENGTH = 320;
 
+/** One DNS label: letters, digits and `-` (Unicode letters for IDN), 1–63 characters. Anchored single class: linear. */
+const DOMAIN_LABEL = /^[\p{L}\p{N}-]{1,63}$/u;
+/** The top-level label: letters only (2–63), or an A-label (`xn--…`). */
+const TOP_LEVEL_LABEL = /^\p{L}{2,63}$/u;
+
 /**
- * `a***@example.com` for an e-mail shape; `[not-an-email]` for anything else (never the raw input). Plain string checks,
- * no regular expression (no backtracking on attacker-supplied input — the login e-mail field). Unicode-aware: IDN domains,
- * apostrophes and accented local parts are accepted, and the first CODE POINT is kept, never half a surrogate pair.
+ * True only for a real-looking domain: at least two labels, each a DOMAIN_LABEL without a leading or trailing `-`, the
+ * last one letters-only or `xn--`. This is what keeps a password typed into the e-mail field from being shipped almost
+ * whole (`P@ss.word1`, `Summer@2024.!`, `Tr0ub4dor&3@x.y9` are all rejected). Linear: one split, anchored single-class
+ * tests per label.
+ */
+function isPlausibleDomain(domain: string): boolean {
+  if (domain.length < 3 || domain.length > 253) return false;
+  const labels = domain.split('.');
+  if (labels.length < 2) return false;
+  for (const label of labels) {
+    if (!DOMAIN_LABEL.test(label) || label.startsWith('-') || label.endsWith('-')) return false;
+  }
+  const top = labels[labels.length - 1]!;
+  return TOP_LEVEL_LABEL.test(top) || top.startsWith('xn--');
+}
+
+/**
+ * `a***@example.com` for an e-mail shape; `[not-an-email]` for anything else (never the raw input). Plain string checks
+ * and anchored single-class patterns only (no backtracking on attacker-supplied input — the login e-mail field).
+ * Unicode-aware: IDN domains, apostrophes and accented local parts are accepted, and the first CODE POINT is kept, never
+ * half a surrogate pair. Residual (recorded): a password shaped like a real address (`x@y.com`) cannot be told apart.
  */
 export function maskEmailForAudit(raw: unknown): string {
   if (typeof raw !== 'string') return '[none]';
@@ -72,11 +95,10 @@ export function maskEmailForAudit(raw: unknown): string {
   if (!value) return '[none]';
   if (value.length > MAX_EMAIL_LENGTH) return '[not-an-email]';
   const at = value.indexOf('@');
-  if (at <= 0 || at !== value.lastIndexOf('@')) return '[not-an-email]';
+  if (at <= 0 || at !== value.lastIndexOf('@') || /\s/u.test(value)) return '[not-an-email]';
   const local = value.slice(0, at);
   const domain = value.slice(at + 1);
-  const dot = domain.indexOf('.');
-  if (/\s/u.test(value) || dot <= 0 || domain.endsWith('.')) return '[not-an-email]';
+  if (!isPlausibleDomain(domain)) return '[not-an-email]';
   return `${Array.from(local)[0]}***@${domain.slice(0, 128)}`;
 }
 
