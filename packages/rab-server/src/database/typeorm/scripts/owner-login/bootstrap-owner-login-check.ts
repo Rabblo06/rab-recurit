@@ -207,7 +207,7 @@ function assertCleanOutput(run: ChildRun, extraForbidden: string[] = []): void {
   for (const s of [...SECRETS, ...NAMES, ...extraForbidden]) {
     if (s && run.out.includes(s)) throw new Failed('a secret, URL, database name or login name appeared in the child output (not shown)');
   }
-  if (/postgres(ql)?:\/\//i.test(run.out)) throw new Failed('a URL shape appeared in the child output (not shown)');
+  if (/postgres(ql)?:\/\/[^\s)]*@/i.test(run.out)) throw new Failed('a URL shape appeared in the child output (not shown)');
   if (run.out.includes('SCRAM-SHA-256$')) throw new Failed('a verifier appeared in the child output (not shown)');
   if (/\n\s+at /.test(run.out)) throw new Failed('a stack trace appeared in the child output');
 }
@@ -540,7 +540,7 @@ const SCENARIOS: Scenario[] = [
       const runs = await Promise.all([runChild(suUrl(ctx, a), s), runChild(suUrl(ctx, a), s), runChild(suUrl(ctx, b), s), runChild(suUrl(ctx, b), s)]);
       for (const r of runs) {
         assertCleanOutput(r);
-        expect(r.code === 0, `a concurrent start exited ${r.code}`);
+        expect(r.code === 0, `a concurrent start exited ${r.code} (${r.result?.outcome ?? 'none'} ${r.result?.code ?? ''}; all: ${runs.map((x) => `${x.code}/${x.result?.code ?? '-'}`).join(' ')})`);
       }
       const state = await ownerState(ctx.admin);
       expect(state.exists && state.attrs === EXACT_01, 'concurrent: attributes not exact');

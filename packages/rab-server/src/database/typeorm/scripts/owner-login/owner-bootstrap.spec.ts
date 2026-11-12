@@ -159,12 +159,14 @@ describe('owner bootstrap: error mapping', () => {
   it('write transaction', () => {
     expect(classifyWriteError(err('42710'))).toBe('race');
     expect(classifyWriteError(err('23505'))).toBe('race');
+    expect(classifyWriteError(err('XX000'))).toBe('race'); // tuple concurrently updated (two databases, one role)
+    expect(classifyWriteError(err('40P01'))).toBe('race');
     expect(classifyWriteError(err('42501'))).toBeInstanceOf(OwnerBootstrapRefusal);
     expect(classifyWriteError(err('22023'))).toBeInstanceOf(OwnerBootstrapRefusal);
     expect(classifyWriteError(err('57014'))).toBeInstanceOf(OwnerBootstrapFailure);
   });
   it('never carries the driver message', () => {
-    for (const e of [classifyAdminConnectError(err('XX000'), false), classifyWriteError(err('XX000')) as Error]) {
+    for (const e of [classifyAdminConnectError(err('XX001'), false), classifyWriteError(err('XX001')) as Error]) {
       expect(e.message).not.toContain('secret-bearing');
     }
   });
@@ -307,9 +309,10 @@ describe('owner bootstrap: the whole step without a database', () => {
     return { result, text: [...lines, resultLine(result)].join('\n') };
   };
   const assertClean = (text: string) => {
-    for (const forbidden of [ADMIN_PW, 'postgres://', 'db.internal.example', 'crewflow_unit', 'dbadmin', SECRET, deriveOwnerPassword(SECRET), 'SCRAM-SHA-256$']) {
+    for (const forbidden of [ADMIN_PW, 'db.internal.example', 'crewflow_unit', 'dbadmin', SECRET, deriveOwnerPassword(SECRET), 'SCRAM-SHA-256$']) {
       expect(text).not.toContain(forbidden);
     }
+    expect(text).not.toMatch(/postgres(ql)?:\/\/[^\s)]*@/i); // a URL with userinfo (the fixed text "a postgres:// URL" is fine)
   };
 
   it('pass-through: a crewflow_owner URL never connects (unreachable port) and ignores APP_SECRET', async () => {

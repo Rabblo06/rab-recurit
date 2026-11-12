@@ -49,8 +49,14 @@ export const MIN_SERVER_VERSION_NUM = 160000;
 /** How long the admin connection is retried on connection-refused / 57P03 (OpenShip drops depends_on conditions). */
 export const ADMIN_CONNECT_RETRY_WINDOW_MS = 60_000;
 export const ADMIN_CONNECT_RETRY_INTERVAL_MS = 2_000;
-/** CREATE ROLE races between two DATABASES of one cluster (the advisory lock is per database): re-run from the facts. */
+/**
+ * Races between two DATABASES of one cluster (the advisory lock is per database, roles are cluster-wide): a concurrent
+ * CREATE ROLE (42710 / 23505), a concurrent ALTER ROLE / GRANT on the same catalog row ("tuple concurrently updated",
+ * XX000: the DO block keeps only the SQLSTATE), a serialization failure or deadlock (40001 / 40P01). The transaction is
+ * rolled back and the attempt re-runs from the facts and the probe, so a role another start just finished needs nothing.
+ */
 export const MAX_ATTEMPTS = 3;
+export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', 'XX000', '40001', '40P01']);
 
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
@@ -285,7 +291,7 @@ export function classifyAdminConnectError(error: unknown, retriesExhausted: bool
 /** The write transaction's failure: a privilege / provider refusal (64), a race (retried by the caller), else 70. */
 export function classifyWriteError(error: unknown): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' {
   const code = errorCode(error);
-  if (code === '42710' || code === '23505') return 'race';
+  if (RACE_SQLSTATES.has(code)) return 'race';
   if (code === '42501' || code === '22023' || code === '28P01') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeRefused(code), code);
   if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) return error;
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.writeFailed(code), code);
@@ -384,7 +390,10 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
       const result = await attempt(session, io);
       if (result !== 'race') return result;
-      if (i < MAX_ATTEMPTS) io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
+      if (i < MAX_ATTEMPTS) {
+        io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
+        await io.sleep(200 + Math.floor(Math.random() * 500)); // jitter, so two colliding starts do not collide again
+      }
     }
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
   } finally {
