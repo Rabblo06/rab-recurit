@@ -9,7 +9,8 @@
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --static   # templates + the bundled-database override only
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file <database|runtime|compose> <path>
  *
- * FULL mode renders, with `docker compose --env-file <throw-away> --project-directory <throw-away> config --format json`,
+ * FULL mode renders, with every profile enabled (`docker compose --env-file <throw-away> --project-directory <throw-away>
+ *   --profile '*' config --format json`; a profile-gated service is rendered and refused, review of PR #124),
  *   docker-compose.image.yml [+ docker-compose.local-db.yml]
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* are
@@ -715,8 +716,11 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
       const args = ['compose', '--env-file', composeEnv, '--project-directory', project];
-      for (const f of combo.files) args.push('-f', FILES[f]);
-      args.push('config', '--format', 'json');
+      // A combo names FILES keys; a test may pass a compose file path instead (a weakened copy of a committed file).
+      for (const f of combo.files) args.push('-f', FILES[f] ?? f);
+      // Every profile (security review of PR #124, MEDIUM): a profile-gated service is rendered, so the exact service list
+      // and the "has profiles" check refuse it, never a service hidden behind `profiles:` that `up --profile x` would start.
+      args.push('--profile', '*', 'config', '--format', 'json');
       models[combo.name] = JSON.parse(execFileSync('docker', args, { env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 }));
     }
     return models;

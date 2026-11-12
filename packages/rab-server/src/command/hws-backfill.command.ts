@@ -60,7 +60,7 @@ export interface HwsBackfillReport {
  * `--apply` / `--resume` while HWS runtime routing is OFF requires `--hws-cutover` (assertHwsApplyAllowed). Do not run it in
  * production while HWS is off. Each applied workspace gets one actor-less audit row (`ops.hws_backfill_applied`, its
  * organisation) carrying the operational label.
- * *
+ *
  * Modes (mutually exclusive; `--dry-run` is the default if none is given — report-only, zero writes):
  *   --dry-run   report only — workspace/registry status, row counts, conflicts, blocked rows
  *   --apply     copies rows (idempotent — a second run reports already-complete, never duplicates)

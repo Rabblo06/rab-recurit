@@ -21,9 +21,11 @@
  * rab-ops removal (PR 2): the separated operations container `rab-ops` and its .env.ops are retired; operations run as
  * one-off owner-login commands of the API image. The refusals stay, so neither can come back unnoticed. A sentinel .env.ops
  * (a crewflow_app URL with its own sentinel password, a migrator URL, the operator label) is still planted in the
- * throw-away project and every file is still rendered with `--profile ops` (so a service re-added under the old profile is
- * rendered, not hidden), and in every file:
- *   - no service is named rab-ops and no service has the "ops" profile;
+ * throw-away project and every file is rendered with EVERY profile enabled (`--profile '*'`, security review of PR #124:
+ * a service re-added under any profile, e.g. `rab-maint` with `profiles: ["maint"]` reading .env.ops, is rendered, not
+ * hidden), and in every file:
+ *   - no service is named rab-ops and no service has the "ops" profile; in the production files (production.yml,
+ *     local-build.yml) no service has any profile at all (every service starts with the stack);
  *   - no service names .env.ops, carries a value of the ops sentinel, or holds any ops-only name (CREWFLOW_OPS_*, PG_OPS_*).
  * opsRefusalChecks() is the pure part; compose-credential-isolation.ops.test.cjs proves each refusal.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
@@ -109,7 +111,7 @@ function render(rel) {
   try {
     const out = execFileSync(
       'docker',
-      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', 'ops', 'config', '--format', 'json'],
+      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', '*', 'config', '--format', 'json'],
       { env: { ...process.env, ...DUMMY_ENV, CREWFLOW_MIGRATION_DATABASE_URL: '', CREWFLOW_MIGRATION_APPROVED: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     return JSON.parse(out);
@@ -125,7 +127,7 @@ const envOf = (svc) => svc.environment ?? {};
  * [ok, label] pairs for one rendered model (`services`) and the env_file names read from the committed YAML (`raw`, or
  * null when the yaml package is unavailable; the env_file-name check is then skipped, as for .env.migrate).
  */
-function opsRefusalChecks(rel, services, raw) {
+function opsRefusalChecks(rel, services, raw, { production = false } = {}) {
   const out = [];
   const namesOpsFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.ops$/.test(f));
   out.push([!services['rab-ops'], `${rel}: has no rab-ops service (removed; operations run as one-off owner-login commands of rab-api)`]);
@@ -133,6 +135,7 @@ function opsRefusalChecks(rel, services, raw) {
     const env = envOf(svc ?? {});
     const values = Object.values(env).map((v) => String(v ?? ''));
     out.push([!(Array.isArray(svc?.profiles) && svc.profiles.includes('ops')), `${rel}: ${name} has no "ops" profile (the rab-ops container was removed)`]);
+    if (production) out.push([!(Array.isArray(svc?.profiles) && svc.profiles.length), `${rel}: ${name} has no profile (a production file has no profile-gated service)`]);
     if (raw) out.push([!namesOpsFile(name), `${rel}: ${name} does not name .env.ops`]);
     out.push([!values.some((v) => v.includes(OPS_SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the ops environment`]);
     const held = OPS_ONLY_NAMES.filter((k) => String(env[k] ?? '').trim() !== '');
@@ -181,7 +184,7 @@ function main() {
     if (raw === null) console.log(`[compose-isolation] note ${rel}: the yaml package is not installed; env_file names not checked`);
     const namesMigrateFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.migrate$/.test(f));
     // rab-ops removal (PR 2): no service (runtime, migrate, or the dev/QA files) carries anything of the ops environment.
-    for (const [ok, label] of opsRefusalChecks(rel, services, raw)) check(ok, label);
+    for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
     const migrate = migrateName ? services[migrateName] : undefined;
     // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
     const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml' || rel === 'packages/rab-docker/docker-compose.local-build.yml';

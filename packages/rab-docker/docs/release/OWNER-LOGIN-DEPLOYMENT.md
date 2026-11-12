@@ -594,7 +594,8 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 The three operations commands run like `bootstrap-admin`: as a **one-off container of the API service**, from the same
 image, under the same owner login (`database.env`) and the same runtime configuration. This is the Twenty way: one image,
 one login. Nothing new is deployed. There is no separate operations container any more (PR 2 #124 removed it from
-every compose file); its old `CREWFLOW_OPS_*` / `PG_OPS_*` variables are refused everywhere.
+every compose file). Of its old variables, the five retired names are refused in every process, and the compose lint
+refuses the whole `CREWFLOW_OPS_*` / `PG_OPS_*` prefix.
 
 | Command | What it does | Modes |
 |---|---|---|
@@ -628,8 +629,8 @@ every compose file); its old `CREWFLOW_OPS_*` / `PG_OPS_*` variables are refused
   `run` uses the service's own `database.env`. If that file sets `PG_DATABASE_REPLICA_URL`, blank it on the one-off with
   `-e PG_DATABASE_REPLICA_URL=` (an empty value counts as unset).
 - **A host directory, REQUIRED** for `--target`, `--log` and `--report-file`. rab-api runs with `read_only: true` and has
-  no writable tmpfs (`docker-compose.image.yml` mounts a read-only 0555 `/tmp` only as the OpenShip import guard), so a
-  path inside the container cannot be written.
+  no tmpfs writable by its uid 1000 (`docker-compose.image.yml` mounts a 0555, root-owned `/tmp`, not writable by the
+  API's uid 1000, only as the OpenShip import guard), so a path inside the container cannot be written.
   - Mount one host directory read-write, for example `-v "$PWD/ops-run:/ops"`, and give every path under `/ops`.
   - Without the mount, containment's JSON-lines log fails AFTER the suspensions have committed. The suspensions stay
     done, but the run's outcome log (the evidence) is lost.

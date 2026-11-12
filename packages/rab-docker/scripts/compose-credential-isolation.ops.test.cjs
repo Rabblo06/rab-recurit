@@ -15,7 +15,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { opsRefusalChecks, render, OPS_ONLY_NAMES, OPS_SENTINEL_PASSWORD, OPS_SENTINEL_APP_URL } = require('./compose-credential-isolation.cjs');
+const { opsRefusalChecks, render, rawEnvFiles, OPS_ONLY_NAMES, OPS_SENTINEL_PASSWORD, OPS_SENTINEL_APP_URL } = require('./compose-credential-isolation.cjs');
 
 const REL = 'fixture.yml';
 const failed = (checks) => checks.filter(([ok]) => !ok).map(([, label]) => label);
@@ -126,3 +126,63 @@ test('DENIAL (rendered): a file that reads .env.ops, or re-adds rab-ops under th
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile passed every gate.
+test('DENIAL: in a production file, a service with any profile (rab-maint, profile "maint")', () => {
+  const s = clean();
+  s['rab-maint'] = { profiles: ['maint'], environment: {} };
+  refused(opsRefusalChecks(REL, s, null, { production: true }), /rab-maint has no profile/);
+  // The dev / QA files keep their own profiles (s3, tools, migrate): the any-profile rule is for the production files only.
+  assert.deepEqual(failed(opsRefusalChecks(REL, s, null)), []);
+});
+
+/** A copy of a committed compose file with `rab-maint` (profile "maint", reading .env.ops) added before `volumes:`. */
+function withMaintService(file) {
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const weakened = src.replace(/\nvolumes:\n/, [
+    '',
+    '  rab-maint:',
+    '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+    '    profiles: ["maint"]',
+    '    env_file:',
+    '      - .env.ops',
+    '',
+    'volumes:',
+    '',
+  ].join('\n'));
+  assert.notEqual(weakened, src, `${file}: the fixture edit did not apply`);
+  return weakened;
+}
+
+for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+  test(`DENIAL (rendered): ${file} with a "maint"-profile service reading .env.ops is refused`, { skip: !dockerCompose() && 'docker compose not available' }, () => {
+    const repo = path.resolve(__dirname, '../../..');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'isolation-maint-'));
+    try {
+      const copy = path.join(dir, file);
+      fs.writeFileSync(copy, withMaintService(file));
+      // docker-compose.image.yml interpolates these; production.yml takes its values from the gate's own dummies.
+      const prev = { ...process.env };
+      Object.assign(process.env, { CREWFLOW_SECRETS_DIR: dir.split(path.sep).join('/'), CREWFLOW_PG_CA_FILE: '/etc/crewflow/pg-ca.crt', CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0'.repeat(64)}`, CREWFLOW_REDIS_CONF: '/etc/crewflow/redis.conf' });
+      fs.writeFileSync(path.join(dir, 'database.env'), '');
+      fs.writeFileSync(path.join(dir, 'runtime.env'), '');
+      let model;
+      try {
+        // render() plants the sentinel .env.ops in its throw-away project and enables every profile.
+        model = render(path.relative(repo, copy));
+      } finally {
+        for (const k of Object.keys(process.env)) if (!(k in prev)) delete process.env[k];
+      }
+      const rel = path.relative(repo, copy);
+      let raw = null;
+      try { raw = rawEnvFiles(rel); } catch { raw = null; }
+      const checks = opsRefusalChecks(file, model.services ?? {}, raw, { production: true });
+      refused(checks, /rab-maint has no profile/);
+      refused(checks, /rab-maint carries no value of the ops environment/);
+      refused(checks, /rab-maint holds no ops-only variable \(.*CREWFLOW_OPS_RUN/);
+      if (raw) refused(checks, /rab-maint does not name \.env\.ops/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

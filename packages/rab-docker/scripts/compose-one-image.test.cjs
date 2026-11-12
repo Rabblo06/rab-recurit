@@ -278,3 +278,49 @@ test('committed files: production.yml pins one full digest on every app service;
     assert.ok(/CREWFLOW_IMAGE_TAG:\?/.test(line), `docker-compose.image.yml must require the digest: ${line}`);
   }
 });
+
+// ---- Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
+// `profiles: ["maint"]`, reading .env.ops) passed every gate. Any profile-gated service in a deploy file is now refused.
+test('DENIAL: a service with any non-empty profiles, whatever its name or profile', () => {
+  for (const profiles of [['maint'], ['db'], ['ops', 'maint']]) {
+    const m = good();
+    m.services['rab-maint'] = { image: 'redis@sha256:x', profiles };
+    refused(m, /rab-maint: has profiles/);
+  }
+  const m = good();
+  m.services['rab-db'] = { image: 'postgres@sha256:x' }; // an always-on service is not refused by the profile rule
+  assert.ok(!checkModel(m, 'fixture').some((p) => /has profiles/.test(p)));
+});
+
+/** A copy of a committed deploy file with `rab-maint` (profile "maint", reading .env.ops) added before `volumes:`. */
+function withMaintService(file) {
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const weakened = src.replace(/\nvolumes:\n/, [
+    '',
+    '  rab-maint:',
+    '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+    '    profiles: ["maint"]',
+    '    env_file:',
+    '      - .env.ops',
+    '',
+    'volumes:',
+    '',
+  ].join('\n'));
+  assert.notEqual(weakened, src, `${file}: the fixture edit did not apply`);
+  return weakened;
+}
+
+for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+  test(`DENIAL (rendered): ${file} with a "maint"-profile service reading .env.ops fails the CLI render`, { skip: !dockerCompose() && 'docker compose not available' }, () => {
+    const { render } = require('./compose-one-image.cjs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-maint-'));
+    try {
+      const copy = path.join(dir, file);
+      fs.writeFileSync(copy, withMaintService(file));
+      const problems = checkModel(render([path.relative(path.resolve(__dirname, '..'), copy)]), file, { allowDefaultDigest: file === 'docker-compose.production.yml' });
+      assert.ok(problems.some((p) => /rab-maint: has profiles \["maint"\]/.test(p)), JSON.stringify(problems));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
