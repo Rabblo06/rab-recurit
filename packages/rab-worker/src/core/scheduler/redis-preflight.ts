@@ -11,9 +11,9 @@ import type Redis from 'ioredis';
  *    policy the preflight fails closed.
  *  - An unauthenticated connection (no password in REDIS_URL) is a WARNING and stays one: no later release turns it into a
  *    refusal. X1.6 (owner decision 2026-11-12, as in Twenty, whose compose Redis has no password and no published port):
- *    an unauthenticated Redis is protected by the private Docker network only, an accepted risk; what keeps it private is
- *    the compose gate (packages/rab-docker/scripts/compose-one-image.cjs refuses a published Redis port in every
- *    production compose file).
+ *    an unauthenticated Redis is protected by a private network only (the Docker network in compose), an accepted risk.
+ *    What keeps it private in compose is the gate: packages/rab-docker/scripts/compose-one-image.cjs refuses a published
+ *    or host-networked Redis in every production compose file.
  *
  * Messages never include REDIS_URL or any part of it.
  */
@@ -35,7 +35,7 @@ export interface RedisPreflightResult {
  * promises no later refusal (X1.6).
  */
 export const UNAUTHENTICATED_REDIS_WARNING =
-  'Redis connection is unauthenticated (REDIS_URL carries no password): this Redis is protected only by the private Docker network it runs on (accepted risk, as in Twenty). Never publish its port or expose it outside that network.';
+  'Redis connection is unauthenticated (REDIS_URL carries no password): this Redis is protected only by the private network it runs on (accepted risk, as in Twenty). Never publish its port or expose it outside that network.';
 
 export function parseInfoField(info: string, field: string): string | null {
   const match = new RegExp(`^${field}:(.*)$`, 'm').exec(info);

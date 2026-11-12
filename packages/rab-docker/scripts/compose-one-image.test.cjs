@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { checkModel, checkRedisPrivate, render } = require('./compose-one-image.cjs');
+const { checkModel, checkRedisPrivate, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS } = require('./compose-one-image.cjs');
 
 const IMG = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be a digest}';
 
@@ -212,6 +212,68 @@ test('X1.6: checkRedisPrivate (the Redis-only rule for docker-compose.local-buil
   assert.match(problems[0], /^local-build: rab-redis: publishes a port \(short syntax "6379:6379"\)/);
 });
 
+test('DENIAL (X1.6): host networking through `networks:` (list or map form), resolved in the top-level networks', () => {
+  const byName = good();
+  byName.services['rab-redis'].networks = ['hostnet'];
+  byName.networks = { hostnet: { external: true, name: 'host' } };
+  refused(byName, /rab-redis: joins network "hostnet", which is the host network/);
+  const bareHost = good();
+  bareHost.services['rab-redis'].networks = { host: null };
+  refused(bareHost, /rab-redis: joins network "host", which is the host network/);
+  for (const driver of ['host', 'macvlan', 'ipvlan']) {
+    const m = good();
+    m.services['rab-redis'].networks = { default: null, lan: null };
+    m.networks = { default: { name: 'p_default' }, lan: { driver, name: 'p_lan' } };
+    refused(m, new RegExp(`rab-redis: joins network "lan" with driver ${driver}`));
+  }
+});
+
+test('X1.6: a private bridge network (the default, or a named bridge / overlay) passes', () => {
+  const m = good();
+  m.services['rab-redis'].networks = { default: null, backend: null, swarm: null };
+  m.networks = { default: { name: 'p_default' }, backend: { driver: 'bridge', name: 'p_backend', internal: true }, swarm: { driver: 'overlay' } };
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+test('DENIAL (X1.6): a Redis without "redis" in its name or image is found by command, entrypoint, health check or REDIS_URL', () => {
+  const byCommand = good();
+  byCommand.services['kv-cache'] = { image: `registry.example.com/team/kv@sha256:${'0'.repeat(64)}`, command: ['redis-server', '--port', '6379'], ports: ['6380:6379'] };
+  refused(byCommand, /kv-cache: publishes a port/);
+  const byEntrypoint = good();
+  byEntrypoint.services.kv = { image: '${CACHE_IMAGE:?}', entrypoint: 'redis-server /etc/kv.conf', expose: ['6379'] };
+  refused(byEntrypoint, /kv: declares expose/);
+  const byHealthcheck = good();
+  byHealthcheck.services.kv = { image: '${CACHE_IMAGE:?}', healthcheck: { test: ['CMD', 'redis-cli', 'ping'] }, network_mode: 'host' };
+  refused(byHealthcheck, /kv: sets network_mode "host"/);
+  for (const url of ['redis://cache:6379', 'rediss://cache:6380/0']) {
+    const byUrl = good();
+    byUrl.services['rab-worker'].environment = { ...byUrl.services['rab-worker'].environment, REDIS_URL: url };
+    byUrl.services.cache = { image: '${CACHE_IMAGE:?}', ports: [{ target: 6379, published: '6380' }] };
+    refused(byUrl, /cache: publishes a port/);
+  }
+  // Array-form environment is read too.
+  const byArrayEnv = good();
+  byArrayEnv.services['rab-api'].environment = ['CREWFLOW_MIGRATE_ON_START=true', 'REDIS_URL=redis://cache:6379'];
+  byArrayEnv.services.cache = { image: '${CACHE_IMAGE:?}', ports: ['6380:6379'] };
+  refused(byArrayEnv, /cache: publishes a port/);
+});
+
+test('X1.6: an uncommitted or unparsable REDIS_URL names no service (no false positive on the app itself)', () => {
+  const m = good();
+  m.services['rab-api'].environment = { ...m.services['rab-api'].environment, REDIS_URL: '${REDIS_URL:?}' };
+  m.services['rab-api'].ports = ['127.0.0.1:3000:3000'];
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+test('DENIAL (X1.6): another service in a Redis network namespace (network_mode service:<redis>)', () => {
+  const m = good();
+  m.services.sidecar = { image: 'alpine', network_mode: 'service:rab-redis', ports: ['6379:6379'] };
+  refused(m, /sidecar: sets network_mode "service:rab-redis"/);
+  const other = good();
+  other.services.sidecar = { image: 'alpine', network_mode: 'service:rab-api' };
+  assert.deepEqual(checkModel(other, 'fixture'), []);
+});
+
 function dockerCompose() {
   try {
     execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' });
@@ -252,6 +314,15 @@ const OVERLAYS = {
   long: { lines: ['services:', '  rab-redis:', '    ports:', '      - target: 6379', '        published: "6379"', '        host_ip: 127.0.0.1'], want: /rab-redis: publishes a port \(long syntax target 6379 -> host 127\.0\.0\.1:6379\)/, what: 'a long-syntax port' },
   expose: { lines: ['services:', '  rab-redis:', '    expose:', '      - "6379"'], want: /rab-redis: declares expose/, what: 'expose' },
   host: { lines: ['services:', '  rab-redis:', '    network_mode: host'], want: /rab-redis: sets network_mode "host"/, what: 'network_mode: host' },
+  // Host networking through `networks:` (review finding on #111): an external network named `host`, or a macvlan / ipvlan
+  // network, puts Redis on the host or the LAN without any `ports:` or `network_mode`.
+  hostnet: { lines: ['services:', '  rab-redis:', '    networks: [hostnet]', 'networks:', '  hostnet:', '    external: true', '    name: host'], want: /rab-redis: joins network "hostnet", which is the host network/, what: 'an external network named host' },
+  macvlan: { lines: ['services:', '  rab-redis:', '    networks: [default, lan]', 'networks:', '  lan:', '    driver: macvlan', '    driver_opts: { parent: eth0 }'], want: /rab-redis: joins network "lan" with driver macvlan/, what: 'a macvlan network' },
+  ipvlan: { lines: ['services:', '  rab-redis:', '    networks: [default, lan]', 'networks:', '  lan:', '    driver: ipvlan', '    driver_opts: { parent: eth0 }'], want: /rab-redis: joins network "lan" with driver ipvlan/, what: 'an ipvlan network' },
+  // A Redis that does not say "redis" in its name or image: found by its command, or as the app's REDIS_URL host.
+  private: { lines: ['services:', '  kv-cache:', `    image: registry.example.com/team/kv@sha256:${'0'.repeat(64)}`, '    command: ["redis-server"]', '    ports: ["6380:6379"]'], want: /kv-cache: publishes a port/, what: 'a private-registry Redis (found by its command) with a port', service: 'kv-cache' },
+  urlhost: { lines: ['services:', '  rab-api:', '    environment: { REDIS_URL: "redis://cache:6379" }', '  rab-worker:', '    environment: { REDIS_URL: "redis://cache:6379" }', '  cache:', '    image: ${CACHE_IMAGE:?}', '    ports: ["6380:6379"]'], want: /cache: publishes a port/, what: 'a ${CACHE_IMAGE} service named by REDIS_URL with a port', service: 'cache' },
+  sidecar: { lines: ['services:', '  sidecar:', '    image: alpine', '    network_mode: "service:rab-redis"', '    ports: ["6379:6379"]'], want: /sidecar: sets network_mode "service:rab-redis"/, what: 'a sidecar in its network namespace' },
 };
 function withOverlay(kind, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-redis-'));
@@ -275,6 +346,14 @@ for (const base of ['docker-compose.production.yml', 'docker-compose.image.yml']
     });
   }
 }
+
+test('X1.6 (rendered): every committed deploy combination and local-build.yml still pass the Redis rule, with no network finding', { skip: noCompose }, () => {
+  for (const combo of [...DEPLOY_COMBOS, ...REDIS_ONLY_COMBOS]) {
+    const model = render(combo);
+    assert.deepEqual(checkRedisPrivate(model, combo.join(' + ')), [], combo.join(' + '));
+    assert.ok(model.services['rab-redis'], `${combo.join(' + ')}: rab-redis rendered`);
+  }
+});
 
 test('DENIAL (X1.6, rendered): a single compose file keeps short-syntax Redis ports as strings, and each is refused', { skip: noCompose }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-redis-'));

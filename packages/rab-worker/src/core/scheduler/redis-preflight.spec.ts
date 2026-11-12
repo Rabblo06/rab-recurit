@@ -2,7 +2,7 @@ import { assertRedisReadyForBullmq, UNAUTHENTICATED_REDIS_WARNING } from './redi
 
 /**
  * X1.6 (owner decision 2026-11-12): an unauthenticated Redis stays a WARNING, as in Twenty (its compose Redis has no
- * password and no published port). The warning states the accepted risk (private Docker network only) and never promises
+ * password and no published port). The warning states the accepted risk (private network only) and never promises
  * a later refusal. The bullmq integration spec covers the same function against a real Redis.
  */
 const fakeRedis = () => ({
@@ -21,7 +21,7 @@ describe('Redis preflight: unauthenticated Redis warning (X1.6)', () => {
     const message = String(warn.mock.calls[0]![0]);
     expect(message).toBe(UNAUTHENTICATED_REDIS_WARNING);
     expect(message).toMatch(/unauthenticated/);
-    expect(message).toMatch(/private Docker network/);
+    expect(message).toMatch(/protected only by the private network/);
     expect(message).toMatch(/accepted risk/);
     expect(message).toMatch(/Never publish its port/);
     // No promise of a future refusal or requirement (the old text said "production should require Redis AUTH/ACL").
