@@ -118,7 +118,7 @@ jobs:
             packages/rab-server/src/__tests__/integration/ops-owner-login.integration.spec.ts \
             --json "--outputFile=${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json"
           # Prove it ran (not skipped): at least one passed, none failed.
-          node -e 'const r=require(process.argv[1]);const t=r.testResults[0];const n=(s)=>t?t.assertionResults.filter((a)=>a.status===s).length:0;console.log(`ops-owner-login (PG${process.argv[2]}): passed=${n("passed")} failed=${n("failed")}`);process.exit(!t||n("passed")===0||n("failed")>0?1:0)' "${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json" "${{ matrix.pg }}"
+          node -e 'const r=require(process.argv[1]);const t=r.testResults[0];const n=(s)=>t?t.assertionResults.filter((a)=>a.status===s).length:0;console.log(`ops-owner-login (PG${process.argv[2]}): passed=${n("passed")} failed=${n("failed")}`);process.exit(!t||n("passed")===0||n("failed")>0||n("pending")>0?1:0)' "${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json" "${{ matrix.pg }}"
       - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
         if: success() || failure()
         run: |
