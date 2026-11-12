@@ -4,10 +4,14 @@ import { isAbsolute } from 'node:path';
 /**
  * EXTERNAL AUDIT SINK (M0 §3.4 / §6.4 control 5; catalogue BC-07). With one owner login, `core.audit_log` insert-only can
  * no longer be enforced in the database: the login can re-grant itself UPDATE / DELETE / TRUNCATE and rewrite the trail
- * (G-05, owner-accepted). Security-relevant events are therefore ALSO written, at the moment they happen, to a sink
- * OUTSIDE the database that the database login cannot reach. This module is the interface, the structured + redacted
- * event shape, the configuration rules and two development adapters. It creates no external service and holds no
- * credential: the production adapter (a log shipper / append-only bucket / SIEM endpoint) is a DEPLOYMENT DEPENDENCY.
+ * (G-05, owner-accepted). Security-relevant events are therefore ALSO written to a sink OUTSIDE the database that the
+ * database login cannot reach — BEST EFFORT since Phase X Part 2 X1.1 (owner decision 2026-11-12, Twenty's event-log
+ * model): the security audit rows are queued AFTER their transaction commits (audit-events/audit-event-queue.service.ts)
+ * and the Worker writes them here with BullMQ retries; an event can be lost when Redis or the sink fails beyond the
+ * retries, and an owner-login holder can alter a row before it is shipped. Nothing blocks or rolls back an action. This
+ * module is the interface, the structured + redacted event shape, the configuration rules and two development adapters.
+ * It creates no external service and holds no credential: the production adapter (a log shipper / append-only bucket /
+ * SIEM endpoint) is a DEPLOYMENT DEPENDENCY.
  *
  * Configuration (validated at startup by `securityAuditSinkConfig`; fail closed):
  *   CREWFLOW_AUDIT_SINK          none | stdout | file      (unset = none)
@@ -20,9 +24,11 @@ import { isAbsolute } from 'node:path';
  *   tamper-evident).
  *
  * Failure behaviour (documented, tested):
- *   - `refuse`: an emit that fails throws `AuditSinkError`; the caller (a security-relevant operation) must fail closed —
- *     the operation is not reported as done when its external record could not be written;
- *   - `log`: the failure is written to stderr once per event and the caller continues (development only by default).
+ *   - `refuse`: an emit that fails throws `AuditSinkError`. The callers are the Worker's audit-event delivery job (the throw
+ *     fails the JOB, and BullMQ retries it — never the action, which committed before the job existed), the API's
+ *     detached pre-auth login-failure emit (caught and logged) and the posture-drift monitor;
+ *   - `log`: the failure is written to stderr once per event and the caller continues (development only by default; a
+ *     delivery job then completes without a retry).
  *
  * Redaction (always, before anything leaves the process): keys that look like secrets (password, secret, token, hash,
  * totp, recovery, cookie, authorization, apiKey, key) are replaced by "[REDACTED]"; values are limited to strings,

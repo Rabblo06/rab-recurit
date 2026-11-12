@@ -4,6 +4,7 @@ import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-st
 import { AI_TITLE_JOB_NAME } from './ai-jobs.contract';
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
 import { TIMER_TRIGGER_JOB_NAMES, TIMER_TRIGGER_KINDS, TIMER_TRIGGER_PAYLOAD_KEYS, TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
+import { AUDIT_EVENT_JOB_NAME, AUDIT_EVENT_PAYLOAD_KEYS, AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
 
 /**
  * CANONICAL queue registry (Admin Panel plan §3; Phase D-Q1 "queue registry"). The worker (consumers, scan scheduler) and
@@ -43,7 +44,7 @@ export const BULLMQ_WORKER_DEFAULTS = Object.freeze({ lockDurationMs: 30_000, ma
 /** The job option D-Q1 records as "none": bullmq 5.x has no per-job timeout (a handler bounds its own run time). */
 export const NO_JOB_TIMEOUT = null;
 
-export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai' | 'timerTriggers';
+export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai' | 'timerTriggers' | 'auditEvents';
 
 /** The scan queues (bullmq scheduler mode only), grouped by the existing `queues/rab-<domain>` folders. */
 export const SCAN_QUEUES = Object.freeze({
@@ -62,7 +63,8 @@ export type ConsumerQueueName =
   | typeof PUSH_QUEUE_NAME
   | typeof SHIFT_STATEMENT_QUEUE_NAME
   | typeof AI_QUEUE_NAME
-  | typeof TIMER_TRIGGER_QUEUE_NAME;
+  | typeof TIMER_TRIGGER_QUEUE_NAME
+  | typeof AUDIT_EVENT_QUEUE_NAME;
 export type QueueName = ConsumerQueueName | ScanQueueName;
 
 /** Whose job a queue carries: `organisation` = one tenant's row (the payload carries its organisationId); `system` = none. */
@@ -227,6 +229,30 @@ export const QUEUE_SETTINGS = Object.freeze({
       backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }),
       removeOnComplete: Object.freeze({ age: 3600, count: 1000 }),
       removeOnFail: Object.freeze({ age: 7 * DAY, count: 5000 }),
+      timeoutMs: NO_JOB_TIMEOUT,
+    }),
+  }),
+  /**
+   * Phase X Part 2, X1.1 (owner decision 2026-11-12): the off-host copy of security audit events
+   * (engine/worker-shared/audit-event.contract.ts). Ids-only payload {organisationId, auditLogId}; jobId
+   * `audit-event.<auditLogId>`; the consumer re-reads the committed row under FORCE RLS and writes it to the configured
+   * sink. Produced only when CREWFLOW_AUDIT_SINK is not `none`. Concurrency 2 (a new consumer starts low, as D-Q4b's did).
+   * attempts 10, exponential from 5 s with jitter: a sink outage of up to ~40 minutes is retried before a job is failed
+   * (best effort: the row in core.audit_log stays the record). Retention: Twenty's queue-retention values
+   * (completed 4 h / 1,000, failed 7 days / 1,000; X3.4).
+   */
+  [AUDIT_EVENT_QUEUE_NAME]: Object.freeze({
+    kind: 'consumer' as const,
+    prefix: 'legacy-bull' as const,
+    jobNames: Object.freeze([AUDIT_EVENT_JOB_NAME] as const),
+    tenantScope: 'organisation' as const,
+    payloadKeys: Object.freeze([...AUDIT_EVENT_PAYLOAD_KEYS]),
+    worker: Object.freeze({ concurrency: 2, ...DEFAULT_STALL }),
+    job: Object.freeze({
+      attempts: 10,
+      backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }),
+      removeOnComplete: Object.freeze({ age: 4 * 3600, count: 1000 }),
+      removeOnFail: Object.freeze({ age: 7 * DAY, count: 1000 }),
       timeoutMs: NO_JOB_TIMEOUT,
     }),
   }),
@@ -406,6 +432,8 @@ export const CONSUMER_QUEUES: Readonly<Record<ConsumerQueueKey, ConsumerQueueDef
   ai: consumer('ai', AI_QUEUE_NAME, AI_TURN_JOB_NAME, 'ai turn'),
   // D-Q4b: one handler receives all four trigger job names (it dispatches on job.name); created only when the flag is not off.
   timerTriggers: consumer('timerTriggers', TIMER_TRIGGER_QUEUE_NAME, TIMER_TRIGGER_JOB_NAMES['offer-expiry'], 'timer trigger'),
+  // X1.1: the security audit event shipper (created in every Worker; with no sink configured nothing is ever produced).
+  auditEvents: consumer('auditEvents', AUDIT_EVENT_QUEUE_NAME, AUDIT_EVENT_JOB_NAME, 'audit event'),
 });
 
 export const SCAN_QUEUE_NAMES: readonly ScanQueueName[] = Object.freeze(Object.values(SCAN_QUEUES));

@@ -3,6 +3,7 @@ import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-ca
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { QueuePublishUnavailableError } from '@rab/server/engine/worker-shared/queue-producer-connection';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
+import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 
 const BATCH_SIZE = 50;
 
@@ -520,7 +521,11 @@ export async function dispatchEmailScope(
   return total;
 }
 
-/** Append-only audit uses the same scoped transaction as its state change. */
+/**
+ * Append-only audit uses the same scoped transaction as its state change. X1.1: the row then takes the same off-host path
+ * as `AuditService.record` (shipAuditRowAfterCommit — queued after this transaction commits, never awaited; today's
+ * e-mail delivery actions are not in the security catalogue, so nothing is queued for them).
+ */
 async function writeAuditRow(
   manager: import('typeorm').EntityManager,
   organisationId: string,
@@ -528,13 +533,16 @@ async function writeAuditRow(
   action: string,
   extraMetadata: Record<string, unknown>,
 ): Promise<void> {
-  await manager.query(
+  const inserted = await manager.query<Array<{ id?: string }> | undefined>(
     `INSERT INTO core.audit_log (organisation_id, actor_user_id, action, metadata)
-     VALUES ($1, NULL, $2, $3::jsonb)`,
+     VALUES ($1, NULL, $2, $3::jsonb)
+     RETURNING id`,
     [
       organisationId,
       action,
       JSON.stringify({ emailOutboxId, ...extraMetadata }),
     ],
   );
+  const auditLogId = Array.isArray(inserted) ? inserted[0]?.id : undefined;
+  if (typeof auditLogId === 'string') shipAuditRowAfterCommit(manager, { organisationId, auditLogId, action });
 }

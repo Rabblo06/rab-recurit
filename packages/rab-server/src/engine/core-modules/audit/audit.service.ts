@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditLog } from '../../../modules/identity/entities';
+import { shipAuditRowAfterCommit } from '../audit-events/audit-event-shipping';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 
@@ -424,6 +425,9 @@ export class AuditService {
       metadata,
     });
     await manager.save(entry);
+    // Phase X Part 2, X1.1: the off-host copy (security actions only), queued AFTER this transaction commits and never
+    // awaited — a Redis or sink problem cannot block or roll back the action (best effort; audit-event-queue.service.ts).
+    shipAuditRowAfterCommit(manager, { organisationId: entry.organisationId, auditLogId: entry.id, action });
   }
 
   /**

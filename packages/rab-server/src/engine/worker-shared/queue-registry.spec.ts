@@ -24,6 +24,7 @@ import {
 } from './queue-registry';
 import { registeredJob, QueueEnqueueRefusedError } from './queue-enqueue';
 import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
+import { AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
 
 /**
  * Phase D-Q1 "queue registry": every queue's options are explicit, complete at compile time, and EXACTLY the values in
@@ -37,7 +38,7 @@ import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
  */
 const DAY = 86_400;
 /** The queues that existed before D-Q4b (the pre-D-Q1 tables below cover exactly these; D-Q4b's queue is pinned on its own). */
-type PreDq4bQueueName = Exclude<QueueName, typeof TIMER_TRIGGER_QUEUE_NAME>;
+type PreDq4bQueueName = Exclude<QueueName, typeof TIMER_TRIGGER_QUEUE_NAME | typeof AUDIT_EVENT_QUEUE_NAME>;
 const PRE_DQ1_WORKER_OPTIONS: Record<PreDq4bQueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
   'rab-email': { concurrency: 5, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'rab-push': { concurrency: 10, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
@@ -62,6 +63,8 @@ const EXPECTED_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDura
   'crewflow-scan-maintenance': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'], concurrency: 8 },
   // Phase D-Q4b (plan §4): a NEW consumer starts at concurrency 2; stall settings are BullMQ's defaults, written out.
   'crewflow-timer-triggers': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
+  // Phase X Part 2, X1.1: a NEW consumer, concurrency 2 like D-Q4b's; stall settings are BullMQ's defaults, written out.
+  'crewflow-audit-events': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
 };
 const OUTBOX = {
   attempts: 5,
@@ -85,7 +88,7 @@ const PRE_DQ1_JOB_OPTIONS: Record<PreDq4bQueueName, object> = {
 };
 
 describe('queue registry (Phase D-Q1)', () => {
-  it('lists exactly the twelve BullMQ queues Crewflow uses (the eleven pre-D-Q4b names unchanged + crewflow-timer-triggers)', () => {
+  it('lists exactly the thirteen BullMQ queues Crewflow uses (the eleven pre-D-Q4b names unchanged + crewflow-timer-triggers + X1.1 crewflow-audit-events)', () => {
     expect([...QUEUE_NAMES].sort()).toEqual(
       [
         'rab-email',
@@ -100,6 +103,7 @@ describe('queue registry (Phase D-Q1)', () => {
         'crewflow-scan-maintenance',
         'crewflow-scan-realtime',
         'crewflow-timer-triggers',
+        'crewflow-audit-events',
       ].sort(),
     );
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.name, q.jobName, q.prefix])).toEqual([
@@ -108,6 +112,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-shift-statements', 'generate-shift-statement', 'bull'],
       ['rab-ai', 'ai-turn', 'bull'],
       ['crewflow-timer-triggers', 'offer-expiry-trigger', 'bull'],
+      ['crewflow-audit-events', 'audit-event-ship', 'bull'],
     ]);
   });
 
@@ -117,7 +122,7 @@ describe('queue registry (Phase D-Q1)', () => {
 
   it('Phase D-Q2: the only Worker-option change is one more crewflow-scan-maintenance slot for ai-stale-turn-sweep', () => {
     const changed = (Object.keys(PRE_DQ1_WORKER_OPTIONS) as PreDq4bQueueName[]).filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
-    expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers']);
+    expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers', 'crewflow-audit-events']);
     expect(changed).toEqual(['crewflow-scan-maintenance']);
     expect(bullmqWorkerOptionsOf('crewflow-scan-maintenance').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'].concurrency).toBe(1);
     expect(acceptsJobName('crewflow-scan-maintenance', 'ai-stale-turn-sweep')).toBe(true);
@@ -142,6 +147,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['shiftStatements', 2, 30_000, 'shift statement'],
       ['ai', 4, 60_000, 'ai turn'],
       ['timerTriggers', 2, 30_000, 'timer trigger'],
+      ['auditEvents', 2, 30_000, 'audit event'],
     ]);
   });
 
@@ -170,6 +176,7 @@ describe('queue registry (Phase D-Q1)', () => {
       'rab-shift-statements': ['organisation', ['payrollRecordId', 'organisationId', 'workspaceId', 'generation']],
       'rab-ai': ['organisation', ['v', 'kind', 'turnId', 'conversationId', 'organisationId', 'workspaceId', 'userId', 'pausedTurnId', 'cause', 'refId']],
       'crewflow-timer-triggers': ['organisation', ['organisationId', 'workspaceId', 'subjectId', 'dueAtEpochMs']],
+      'crewflow-audit-events': ['organisation', ['organisationId', 'auditLogId']],
       ...Object.fromEntries(SCAN_QUEUE_NAMES.map((n) => [n, ['system', ['v']]])),
     });
   });
@@ -181,6 +188,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-shift-statements', ['generate-shift-statement']],
       ['rab-ai', ['ai-turn', 'ai-title']],
       ['crewflow-timer-triggers', ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger']],
+      ['crewflow-audit-events', ['audit-event-ship']],
     ]);
     expect(acceptsJobName('rab-email', 'send-push')).toBe(false);
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
@@ -248,6 +256,45 @@ describe('queue registry (Phase D-Q1)', () => {
     it('an unknown job name is not accepted by the consumer (fail closed)', () => {
       expect(acceptsJobName(TIMER_TRIGGER_QUEUE_NAME, 'shift-monitor')).toBe(false);
       expect(acceptsJobName(TIMER_TRIGGER_QUEUE_NAME, 'offer-expiry-trigger')).toBe(true);
+    });
+  });
+
+  describe('Phase X Part 2, X1.1: crewflow-audit-events', () => {
+    const ORG = '11111111-1111-4111-8111-111111111111';
+    const OTHER = '22222222-2222-4222-8222-222222222222';
+    const ROW = '44444444-4444-4444-8444-444444444444';
+    const data = { organisationId: ORG, auditLogId: ROW };
+    const job = (d: object, scope: object | undefined = { kind: 'organisation', organisationId: ORG }, name = 'audit-event-ship') =>
+      registeredJob(AUDIT_EVENT_QUEUE_NAME, name as 'audit-event-ship', scope as never, d, { jobId: `audit-event.${ROW}` });
+
+    it('legacy `bull` prefix, a consumer queue, organisation-scoped, ids-only {organisationId, auditLogId}', () => {
+      expect(prefixOf(AUDIT_EVENT_QUEUE_NAME, resolveScanPrefix('production', undefined))).toBe(LEGACY_BULL_PREFIX);
+      expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME]).toMatchObject({ kind: 'consumer', prefix: 'legacy-bull', tenantScope: 'organisation', payloadKeys: ['organisationId', 'auditLogId'] });
+    });
+
+    it("job options: attempts 10, exponential from 5 s (jitter 0.5); Twenty's retention (4 h / 1000 completed, 7 d / 1000 failed)", () => {
+      expect(bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME)).toEqual({
+        attempts: 10,
+        backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
+        removeOnComplete: { age: 4 * 3600, count: 1000 },
+        removeOnFail: { age: 7 * DAY, count: 1000 },
+      });
+    });
+
+    it('a valid job: ids-only payload, the deterministic jobId and the registry options', () => {
+      expect(job(data)).toEqual({ queue: AUDIT_EVENT_QUEUE_NAME, name: 'audit-event-ship', data, opts: { jobId: `audit-event.${ROW}`, ...bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME) } });
+    });
+
+    it.each<[string, () => unknown]>([
+      ['no scope', () => job(data, null as never)],
+      ['a system scope', () => job(data, { kind: 'system' })],
+      ['a scope organisation different from the payload organisation (cross-tenant)', () => job(data, { kind: 'organisation', organisationId: OTHER })],
+      ['the action or metadata in the payload', () => job({ ...data, action: 'user.deleted' })],
+      ['an e-mail in the payload', () => job({ ...data, email: 'x@example.com' })],
+      ['a nested object', () => job({ ...data, auditLogId: { id: ROW } })],
+      ['an unknown job name', () => job(data, undefined, 'audit-event')],
+    ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, build) => {
+      expect(build).toThrow(QueueEnqueueRefusedError);
     });
   });
 
