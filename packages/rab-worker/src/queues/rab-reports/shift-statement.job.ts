@@ -110,9 +110,9 @@ export async function dispatchStatementScope(
 
 /**
  * The BullMQ `add()` arguments for one claimed statement (jobId carries the dispatch generation; attempts 1 — retries are
- * the dispatcher's; the X3.4 retention every queue shares, `QUEUE_RETENTION`). Global mode's publisher uses this; it is
- * asserted identical to what the report processor's per_scope adapter passes (shift-statement.job.spec.ts) and to the
- * registry's job (queue-registry-worker.spec.ts).
+ * the dispatcher's; the X3.4 retention every queue shares, `QUEUE_RETENTION`). Used only by specs, as an independent
+ * expectation: both publishers build the job with `shiftStatementJob` (shift-statement-enqueue.ts), which is asserted
+ * identical to this (shift-statement.job.spec.ts, queue-registry-worker.spec.ts).
  */
 export function shiftStatementJobOptions(data: ShiftStatementJobData) {
   return [
