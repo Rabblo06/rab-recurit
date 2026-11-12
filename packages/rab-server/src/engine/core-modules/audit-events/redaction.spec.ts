@@ -110,15 +110,17 @@ describe('security audit redaction (X1.1 review)', () => {
     const input = {
       privateKey: v(), private_key: v(), 'private-key': v(), 'x-api-key': v(), 'X-API-KEY': v(), 'Api Key': v(),
       access_key: v(), accessKey: v(), signingKey: v(), encryptionKey: v(),
-      session: v(), sessionId: v(), sid: v(), pwd: v(), pin: v(), backupCodes: v(), smsCode: v(), codes: v(),
+      session: v(), sid: v(), pwd: v(), pin: v(), backupCodes: v(), smsCode: v(), codes: v(),
       dsn: v(), connectionString: v(), databaseUrl: v(), DATABASE_URL: v(),
       jwt: v(), idJwt: v(), bearer: v(), mfaCode: v(), otpCode: v(), verificationCode: v(), resetCode: v(), second_factor_code: v(),
     };
     const out = ship({ metadata: input }).metadata as Record<string, string>;
     for (const key of Object.keys(input)) expect([key, out[key]]).toEqual([key, '[REDACTED]']);
     // Not over-broad: ordinary keys are kept.
-    const kept = ship({ metadata: { reason: 'routine', pinned: true, sessions: 3, codeOfConduct: 'v2', errorCode: 'E1' } }).metadata;
-    expect(kept).toEqual({ reason: 'routine', pinned: true, sessions: 3, codeOfConduct: 'v2', errorCode: 'E1' });
+    // sessionId is the user_session row id (auth.session_revoked ships it): an identifier the sink needs, not a secret.
+    const sessionId = randomUUID();
+    const kept = ship({ metadata: { reason: 'routine', pinned: true, sessions: 3, codeOfConduct: 'v2', errorCode: 'E1', sessionId } }).metadata;
+    expect(kept).toEqual({ reason: 'routine', pinned: true, sessions: 3, codeOfConduct: 'v2', errorCode: 'E1', sessionId });
   });
 
   it('a bare `code` is redacted only when it holds one-time code digits (also grouped, also arrays); an error code is kept', () => {
@@ -153,10 +155,38 @@ describe('security audit redaction (X1.1 review)', () => {
     const t = randomUUID();
     expect(redactString(`header was Bearer ${t} here`)).toBe('header was [bearer] here');
     const basic = Buffer.from(`user:${t}`).toString('base64');
-    expect(redactString(`Authorization: Basic ${basic} sent`)).toBe('Authorization: [basic] sent');
+    expect(redactString(`sent Basic ${basic} upstream`)).toBe('sent [basic] upstream');
+    // After an authorization name, the scheme AND its credential go (whatever the credential looks like).
+    expect(redactString(`Authorization: Basic ${basic} sent`)).toBe('Authorization: [REDACTED] sent');
+    expect(redactString('Authorization: Bearer abc sent')).toBe('Authorization: [REDACTED] sent');
+    expect(redactString('authorization=Bearer short')).toBe('authorization=[REDACTED]');
+    expect(redactString('Authorization Basic dXNlcg')).toBe('Authorization [basic]');
     const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
     const jwt = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: t })}.${t.replace(/-/g, '')}`; // built at run time, never a literal
     expect(redactString(`session ${jwt} end`)).toBe('session [jwt] end');
+  });
+
+  it('keeps prose that merely contains the words "basic" or "bearer"', () => {
+    for (const text of ['Basic plan upgraded', 'moved to the basic tier', 'the bearer of news', 'Bearer bonds are paper']) expect(redactString(text)).toBe(text);
+  });
+
+  it('quoted secret values are consumed to the matching quote; colon forms are covered too', () => {
+    const cases: Array<[string, string]> = [
+      ['password="hunter2" next', 'password=[REDACTED] next'],
+      ["pwd='a b' next", 'pwd=[REDACTED] next'],
+      ['password="never closed', 'password=[REDACTED]'],
+      ['password: hunter2 next', 'password: [REDACTED] next'],
+      ['{"password":"hunter 2","user":"u1"}', '{"password":[REDACTED],"user":"u1"}'],
+      ["{'password':'hunter 2','user':'u1'}", "{'password':[REDACTED],'user':'u1'}"],
+      ['"client_secret" : "s3 cr3t"', '"client_secret" : [REDACTED]'],
+      ['time 10:30 at https://app.example/x', 'time 10:30 at https://app.example/x'],
+      ['note: fine, user: u1', 'note: fine, user: u1'],
+    ];
+    for (const [input, expected] of cases) expect([input, redactString(input)]).toEqual([input, expected]);
+  });
+
+  it('residual (accepted): an unquoted value stops at `&`, so a password containing `&` leaves its tail', () => {
+    expect(redactString('password=hunter&2')).toBe('password=[REDACTED]&2');
   });
 
   it('one event ships at most ~16 KB of strings; values after the budget become [truncated]', () => {

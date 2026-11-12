@@ -113,7 +113,7 @@ export function securityAuditSinkConfig(env: Record<string, string | undefined> 
  * attachments); it is redacted only when its value looks like a one-time code (isOneTimeCodeValue).
  */
 const SECRET_KEY =
-  /pass(word)?|pwd|secret|token|hash|totp|recovery|cookie|authori[sz]ation|api_?key|^key$|private_?key|access_?key|signing_?key|encryption_?key|credential|signature|^sig$|otp|jwt|bearer|^session$|session_?id|^sid$|^pin$|backup_?codes?|sms_?code|^codes$|^dsn$|connection_?string|database_?url|(mfa|otp|totp|verification|auth|security|one_?time|second_?factor|reset)_?code/;
+  /pass(word)?|pwd|secret|token|hash|totp|recovery|cookie|authori[sz]ation|api_?key|^key$|private_?key|access_?key|signing_?key|encryption_?key|credential|signature|^sig$|otp|jwt|bearer|^session$|^sid$|^pin$|backup_?codes?|sms_?code|^codes$|^dsn$|connection_?string|database_?url|(mfa|otp|totp|verification|auth|security|one_?time|second_?factor|reset)_?code/;
 const OTP_CODE_KEY = 'code';
 
 /** `-` and whitespace runs become `_`, then lower case. Linear. */
@@ -149,8 +149,24 @@ function maskEmailToken(token: string): string {
   return `${Array.from(token.slice(0, at))[0]}***@${domain.includes('@') ? maskEmailToken(domain) : domain}`;
 }
 const PG_URL = /postgres(?:ql)?:\/\/\S+/gi;
-const BEARER = /\bbearer\s+[^\s,;]+/gi;
-const BASIC = /\bbasic\s+[A-Za-z0-9+/=._-]+/gi;
+const BEARER = /\bbearer\s+([^\s,;]+)/gi;
+const BASIC = /\bbasic\s+([A-Za-z0-9+/=._-]+)/gi;
+/** `Authorization `, `authorization:`, `"Authorization": "` … right before a scheme. Plain string operations on a short tail. */
+function afterAuthorization(text: string, offset: number): boolean {
+  let tail = text.slice(Math.max(0, offset - 32), offset).trimEnd().toLowerCase();
+  for (const ch of ['"', "'", ':', '=', '"', "'"]) {
+    if (tail.endsWith(ch)) tail = tail.slice(0, -1).trimEnd();
+  }
+  return tail.endsWith('authorization') || tail.endsWith('authorisation');
+}
+/** A bearer value that looks like a credential (not prose such as "bearer of news"): 12+ token characters with a digit. */
+const looksLikeCredential = (token: string): boolean => token.length >= 12 && /^[A-Za-z0-9._~+/=-]+$/.test(token) && /\d/.test(token);
+/** A Basic value that decodes to printable `user:password` text. */
+function looksLikeBasicCredential(token: string): boolean {
+  if (token.length < 4 || token.length > 512) return false;
+  const decoded = Buffer.from(token, 'base64').toString('utf8');
+  return decoded.includes(':') && /^[\x20-\x7e]+$/.test(decoded);
+}
 const JWT = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g;
 
 /** Longer strings are never shipped at all (a cut JWT head or payload could still leak); see redactString. */
@@ -160,32 +176,60 @@ const EVENT_STRING_BUDGET = 16_384;
 
 const isNameChar = (c: number): boolean =>
   (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 /* _ */ || c === 45 /* - */ || c === 46; /* . */
-const isValueStop = (ch: string): boolean => ch === '&' || ch === '#' || ch === ';' || ch === ',' || ch === '"' || ch === "'" || ch === '<' || ch === '>' || /\s/.test(ch);
+const isSpace = (ch: string | undefined): boolean => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v';
+/** An unquoted value ends at whitespace, `&` or `#` only (a `&` inside a password leaves its tail: accepted residual). */
+const isValueStop = (ch: string): boolean => ch === '&' || ch === '#' || isSpace(ch) || /\s/.test(ch);
+const isQuote = (ch: string | undefined): ch is '"' | "'" => ch === '"' || ch === "'";
+/** Authorization schemes whose credential is the NEXT word (`Authorization: Bearer <token>`). */
+const AUTH_SCHEMES = new Set(['bearer', 'basic', 'token', 'digest', 'negotiate']);
+
+/** End (exclusive) of the value that starts at `from`: a quoted value runs to its matching quote (or the end). */
+function valueEnd(value: string, from: number): number {
+  if (isQuote(value[from])) {
+    const close = value.indexOf(value[from]!, from + 1);
+    return close === -1 ? value.length : close + 1;
+  }
+  let end = from;
+  while (end < value.length && !isValueStop(value[end]!)) end++;
+  return end;
+}
 
 /**
- * `name=value` pairs anywhere in a string (URL query or fragment, `k=v` logs, a leading `token=` with no delimiter): the
- * value is replaced when the NAME is secret by the same normalised key pattern, or is exactly `code` (an OAuth / reset
- * code). Linear: one forward pass over the `=` signs; each backward name scan stops at the previous pair or `=`.
+ * Secret `name=value` and `name: value` pairs anywhere in a string — URL query or fragment, `k=v` logs, a leading `token=`,
+ * `password: x`, `"password":"x"`, `'password':'x'`: the value (quoted values up to the matching quote) is replaced when
+ * the NAME is secret by the same normalised key pattern, or is exactly `code`. For an authorization name followed by a
+ * scheme (`Bearer`, `Basic`, …) the credential word after the scheme goes too. Linear: one forward pass over the `=` / `:`
+ * separators; a backward name scan stops at the previous separator, quote or consumed value; each value is consumed once.
  */
 function redactNameValuePairs(value: string): string {
   let out = '';
   let last = 0;
-  let i = value.indexOf('=');
-  while (i !== -1) {
-    let start = i;
+  for (let i = 0; i < value.length; i++) {
+    const sep = value[i];
+    if (sep !== '=' && sep !== ':') continue;
+    // The name, optionally quoted: `password=`, `"password":`, `'password' :`.
+    let nameEnd = i;
+    while (nameEnd > last && isSpace(value[nameEnd - 1])) nameEnd--;
+    const quote = isQuote(value[nameEnd - 1]) ? value[nameEnd - 1] : null;
+    if (quote) nameEnd--;
+    let start = nameEnd;
     while (start > last && isNameChar(value.charCodeAt(start - 1))) start--;
-    let next = i + 1;
-    if (start < i) {
-      const name = value.slice(start, i);
-      if (isSecretKeyName(name) || normaliseKey(name) === OTP_CODE_KEY) {
-        let end = i + 1;
-        while (end < value.length && !isValueStop(value[end]!)) end++;
-        out += `${value.slice(last, i + 1)}[REDACTED]`;
-        last = end;
-        next = end;
-      }
+    if (start === nameEnd || (quote && value[start - 1] !== quote)) continue;
+    const name = value.slice(start, nameEnd);
+    if (!isSecretKeyName(name) && normaliseKey(name) !== OTP_CODE_KEY) continue;
+    let from = i + 1;
+    while (from < value.length && isSpace(value[from])) from++;
+    if (from >= value.length) continue;
+    let end = valueEnd(value, from);
+    // `Authorization: Bearer <token>` / `authorization=Basic <b64>`: the credential is the next word.
+    if (!isQuote(value[from]) && AUTH_SCHEMES.has(value.slice(from, end).toLowerCase())) {
+      let next = end;
+      while (next < value.length && isSpace(value[next])) next++;
+      if (next < value.length) end = valueEnd(value, next);
     }
-    i = value.indexOf('=', next);
+    out += `${value.slice(last, from)}[REDACTED]`;
+    last = end;
+    i = end - 1;
   }
   return out + value.slice(last);
 }
@@ -194,8 +238,8 @@ function redactNameValuePairs(value: string): string {
 export function redactString(value: string): string {
   if (value.length > MAX_REDACT_INPUT) return '[too-long]';
   return redactNameValuePairs(value.replace(PG_URL, '[url]'))
-    .replace(BEARER, '[bearer]')
-    .replace(BASIC, '[basic]')
+    .replace(BEARER, (m, token: string, offset: number, text: string) => (looksLikeCredential(token) || afterAuthorization(text, offset) ? '[bearer]' : m))
+    .replace(BASIC, (m, token: string, offset: number, text: string) => (looksLikeBasicCredential(token) || afterAuthorization(text, offset) ? '[basic]' : m))
     .replace(JWT, '[jwt]')
     .replace(TOKEN, (token) => (token.includes('@') ? maskEmailToken(token) : token))
     .slice(0, 256);
