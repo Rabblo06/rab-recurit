@@ -611,7 +611,8 @@ function scanServerLog(container: string, nonSuperuserVerifierAllowed: boolean):
   const lines = `${r.stdout}\n${r.stderr}`.split('\n');
   for (const s of SECRETS) if (s && s.length >= 12 && lines.some((l) => l.includes(s))) throw new Failed('a password, URL or derived password appeared in the server log (not shown)');
   const verifierLines = lines.filter((l) => l.includes('SCRAM-SHA-256$'));
-  for (const l of verifierLines) if (!/parameters: \$1 = /.test(l)) throw new Failed('a verifier appeared in the server log outside a bind-parameter line');
+  // PG16 writes 'parameters:', PG17+ 'Parameters:'.
+  for (const l of verifierLines) if (!/parameters: \$1 = /i.test(l)) throw new Failed('a verifier appeared in the server log outside a bind-parameter line');
   if (!nonSuperuserVerifierAllowed && verifierLines.length > 0) throw new Failed('a verifier appeared in the server log');
   return `server log: ${lines.length} lines scanned; no password; ${verifierLines.length} bind-parameter line(s) with a verifier (non-superuser admin residual, §3.6)`;
 }
