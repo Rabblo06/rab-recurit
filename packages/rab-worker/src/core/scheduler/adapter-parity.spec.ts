@@ -8,7 +8,7 @@ jest.mock('../../queues/rab-shifts/shift-monitor.job', () => ({ runShiftMonitorC
 jest.mock('../../queues/rab-shifts/attendance-monitor.job', () => ({ runAttendanceMonitorCycle: jest.fn() }));
 jest.mock('../../queues/rab-shifts/late-clock-in.job', () => ({ runLateClockInCycle: jest.fn() }));
 jest.mock('../../queues/rab-shifts/shift-cancellation-followup.job', () => ({ runShiftCancellationFollowupCycle: jest.fn() }));
-jest.mock('../../queues/rab-offers/offer-expiry.job', () => ({ runOfferExpiryCycle: jest.fn(), runManagerConfirmationTimeoutCycle: jest.fn() }));
+jest.mock('../../queues/rab-offers/offer-expiry.job', () => ({ runOfferExpiryCycle: jest.fn(), runManagerConfirmationDeadlineCycle: jest.fn(), runConfirmationDeadlineBackstopScan: jest.fn() }));
 jest.mock('../../queues/rab-offers/replacement-staff.job', () => ({ runReplacementStaffCycle: jest.fn() }));
 jest.mock('../../queues/rab-reports/shift-report-scheduler.job', () => ({ runShiftReportSchedulerCycle: jest.fn() }));
 jest.mock('../../queues/rab-reports/final-timesheet.job', () => ({ runFinalTimesheetCycle: jest.fn() }));
@@ -58,7 +58,7 @@ import { WorkerDependencies, WorkerJobDependencies } from './worker-dependencies
  */
 const tag = (name: string) => ({ __dep: name });
 const ENV: Record<string, unknown> = {
-  CLOCK_IN_EARLY_MINUTES: 31, LATE_CLOCK_IN_GRACE_MINUTES: 7, MANAGER_CONFIRMATION_TIMEOUT_MINUTES: 45, REPORT_AVAILABLE_BEFORE_MINUTES: 60,
+  CLOCK_IN_EARLY_MINUTES: 31, LATE_CLOCK_IN_GRACE_MINUTES: 7, REPORT_AVAILABLE_BEFORE_MINUTES: 60,
   LOGIN_HANDOFF_CLEANUP_ENABLED: false, STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: 9, NODE_ENV: 'test',
   OUTBOX_RETENTION_ENABLED: true, OUTBOX_RETENTION_MODE: 'report', OUTBOX_RETENTION_EMAIL_DAYS: 90, OUTBOX_RETENTION_PUSH_DAYS: 30,
   OUTBOX_RETENTION_REALTIME_DAYS: 7, OUTBOX_RETENTION_WORKER_EVENT_DAYS: 30, OUTBOX_RETENTION_BATCH_SIZE: 1000, OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: 20,
@@ -67,7 +67,8 @@ const ENV: Record<string, unknown> = {
 };
 const emailQueue = { publish: jest.fn(), republish: jest.fn() };
 const pushQueue = { publish: jest.fn(), republish: jest.fn() };
-const shiftStatementQueue = { add: jest.fn() };
+// D-Q1: the producer queue carries its registry name (checked before add), like the real BoundedProducerQueue.
+const shiftStatementQueue = { name: 'rab-shift-statements', add: jest.fn() };
 const deps = {
   logger: { log: jest.fn() },
   runtimeDataSource: tag('runtime'), directDataSource: tag('direct'), tenantContext: tag('tenant'), auditService: tag('audit'),
@@ -125,7 +126,8 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
 
   it('offer scans', async () => {
     (offers.runOfferExpiryCycle as jest.Mock).mockResolvedValue({});
-    (offers.runManagerConfirmationTimeoutCycle as jest.Mock).mockResolvedValue({});
+    (offers.runManagerConfirmationDeadlineCycle as jest.Mock).mockResolvedValue({ withdrawn: 0 });
+    (offers.runConfirmationDeadlineBackstopScan as jest.Mock).mockResolvedValue({ withdrawn: 0 });
     (replacement.runReplacementStaffCycle as jest.Mock).mockResolvedValue({});
     const p = new OfferScanProcessor(holder);
     await p.offerExpiry();
@@ -133,7 +135,10 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     await p.replacementStaff();
     const base = [d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService];
     expect((offers.runOfferExpiryCycle as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService]);
-    expect((offers.runManagerConfirmationTimeoutCycle as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService, 45]);
+    // Owner rule 2026-11-06: the manager-confirmation scan WITHDRAWS at the deadline (pointer cycle, then backstop scan);
+    // it no longer reads MANAGER_CONFIRMATION_TIMEOUT_MINUTES (removed) and never confirms.
+    expect((offers.runManagerConfirmationDeadlineCycle as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService]);
+    expect((offers.runConfirmationDeadlineBackstopScan as jest.Mock).mock.calls[0]).toEqual([...base, d.realtimeEventService]);
     expect((replacement.runReplacementStaffCycle as jest.Mock).mock.calls[0]).toEqual(base);
   });
 
@@ -154,9 +159,11 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     expect((finalTs.runFinalTimesheetCycle as jest.Mock).mock.calls[0]).toEqual([d.directDataSource, d.tenantContext, d.emailOutboxService, d.fileService, { audit: d.auditService }]);
     expect((payroll.runPayrollPeriodAttentionCycle as jest.Mock).mock.calls[0]).toEqual([d.runtimeDataSource, d.tenantContext, d.notificationService]);
     const publish = (statement.runShiftStatementDispatchCycle as jest.Mock).mock.calls[0][2];
-    await publish({ payrollRecordId: 'r1', generation: 4, organisationId: 'o', workspaceId: 'w' });
-    expect(shiftStatementQueue.add).toHaveBeenCalledWith('generate-shift-statement', { payrollRecordId: 'r1', generation: 4, organisationId: 'o', workspaceId: 'w' }, {
-      jobId: 'shift-statement.r1.gen.4', attempts: 1, removeOnComplete: { age: 604800 }, removeOnFail: { age: 2592000 },
+    // D-Q1: organisation ids are UUIDs (the declared tenant scope is validated); the add() itself is unchanged.
+    const [r1, o, w] = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-0000000000a1'];
+    await publish({ payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w });
+    expect(shiftStatementQueue.add).toHaveBeenCalledWith('generate-shift-statement', { payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w }, {
+      jobId: `shift-statement.${r1}.gen.4`, attempts: 1, removeOnComplete: { age: 604800 }, removeOnFail: { age: 2592000 },
     });
   });
 

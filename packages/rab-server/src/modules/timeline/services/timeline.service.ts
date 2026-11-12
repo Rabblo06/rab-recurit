@@ -9,7 +9,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { PayrollService } from '../../payroll/services/payroll.service';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { StaffService } from '../../staff/services/staff.service';
-import { TIMELINE_METADATA_KEYS, TIMELINE_MONEY_KEYS, TIMELINE_STEPS } from '../constants/timeline-steps';
+import { TIMELINE_METADATA_KEYS, TIMELINE_MONEY_KEYS, timelineStepFor } from '../constants/timeline-steps';
 import { TimelineQueryDto } from '../dto/timeline-query.dto';
 
 export interface TimelineItem {
@@ -273,6 +273,7 @@ export class TimelineService {
     }
     params.push(limit + 1);
     const rows = await m.query<Array<Record<string, unknown>>>(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.created_at,
               to_char(al.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_us,
               u.first_name AS actor_first_name, u.last_name AS actor_last_name
@@ -290,7 +291,7 @@ export class TimelineService {
       return {
         id: r.id as string,
         action,
-        step: TIMELINE_STEPS[action] ?? null,
+        step: timelineStepFor(action, r.metadata),
         entityType: (r.entity_type as string) ?? null,
         entityId: (r.entity_id as string) ?? null,
         actor: r.actor_first_name ? { fullName: `${r.actor_first_name} ${r.actor_last_name}` } : null,

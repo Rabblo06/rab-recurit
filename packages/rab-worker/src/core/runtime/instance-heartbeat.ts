@@ -7,8 +7,8 @@ import { WorkerRuntime } from './worker-runtime';
  * Optional per-instance heartbeat FILE, enabled only when `CREWFLOW_INSTANCE_HEALTH_FILE` names an absolute path.
  * Unset (every standalone deployment, `yarn start`, the integration suites) → a no-op, and behaviour is unchanged.
  *
- * Why it exists: the Worker bundle (packages/rab-docker/rab/start-worker-bundle.cjs) runs the ordinary jobs process and
- * the workspace provisioner as two OS processes in one container. Its health check must cover BOTH roles in THIS
+ * Why it exists: the (now retired, O1) Worker bundle launcher ran the ordinary jobs process and the workspace provisioner
+ * as two OS processes in one container; the Worker is one process now. Its health check must cover the roles in THIS
  * instance, but the existing Redis heartbeats (`rab:worker:heartbeat`, `rab:workspace-provisioner:heartbeat`,
  * `rab:worker:stats`) are global keys: any other healthy replica refreshes them, so a hung or dead child here would be
  * masked. A file in this container's own filesystem cannot be refreshed by another replica.

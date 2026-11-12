@@ -9,8 +9,8 @@ import {
 
 /**
  * Phase A (pa-provisioner): the provisioner entrypoint's start-up switch and interval. Pure — no database, no Redis.
- * The bundle-level opt-in (only start the child when CREWFLOW_PROVISIONER_ENABLED=true) is covered by
- * packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs; this covers what the child itself decides.
+ * The bundle-level opt-in was covered by the retired launcher's tests (O1: the launcher is gone; the Worker provisions
+ * in-process); this covers what the standalone provisioner entrypoint itself decides.
  */
 describe('resolveProvisionerConfig (Phase A)', () => {
   it('explicit opt-in provisions regardless of HWS_RUNTIME_ENABLED (production runs routing OFF and still needs the reconciler)', () => {

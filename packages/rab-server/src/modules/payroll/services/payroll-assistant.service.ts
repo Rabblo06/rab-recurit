@@ -162,6 +162,7 @@ export class PayrollAssistantService {
         rangeSql = ' AND s.starts_at >= $4 AND s.starts_at < $5';
       }
       const [queue] = await m.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*) FILTER (WHERE pr.status = 'pending_approval')::int AS awaiting,
                 count(*) FILTER (WHERE pr.status = 'rejected')::int AS rejected,
                 count(*) FILTER (WHERE pr.status = 'pending_approval' AND sp.user_id = $3)::int AS own,
@@ -196,6 +197,7 @@ export class PayrollAssistantService {
     const scopeSql = attendanceReadScopeCondition(scope, ctx, nextParam);
     const rangeSql = range ? ` AND s.starts_at >= ${nextParam(range.from)} AND s.starts_at < ${nextParam(range.to)}` : '';
     const [att] = await m.query(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT count(*) FILTER (WHERE a.status = 'under_review')::int AS under_review, count(*) FILTER (WHERE a.status = 'disputed')::int AS disputed
          FROM attendance a
          JOIN shift s ON s.id = a.shift_id
@@ -207,6 +209,7 @@ export class PayrollAssistantService {
     const reportParams: unknown[] = [ctx.userId];
     const reportRange = range ? (reportParams.push(range.from, range.to), ' AND s.starts_at >= $2 AND s.starts_at < $3') : '';
     const [rep] = await m.query(
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT count(*)::int AS open FROM shift_report sr JOIN shift s ON s.id = sr.shift_id
         WHERE s.created_by = $1 AND sr.status IN ('pending', 'ready')${reportRange}`,
       reportParams,

@@ -1,4 +1,5 @@
 import {
+  assertSafePence,
   assertTransition,
   payForMinutes,
   PAYROLL_RECORD_TRANSITIONS,
@@ -168,6 +169,7 @@ export interface StaffShiftStatement {
 const STATEMENT_SELECT = `pr.status AS statement_payroll_status, pr.statement_status, pr.statement_attempts, pr.statement_file_id, pr.statement_generated_at, pr.statement_notified_at,
     (SELECT f.original_filename FROM core.stored_file f WHERE f.id = pr.statement_file_id AND f.status = 'AVAILABLE') AS statement_filename`;
 
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const VIEW_SELECT = `
   SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.pay_rate_pence,
     pr.amount_pence, pr.approved_at, pr.rejected_at, pr.rejection_reason, pr.created_at, ${STATEMENT_SELECT},
@@ -217,8 +219,8 @@ function toView(r: Record<string, unknown>): PayrollRecordView {
     clockInAt: iso(r.clock_in_at),
     clockOutAt: iso(r.clock_out_at),
     workedMinutes: Number(r.worked_minutes),
-    payRatePence: Number(r.pay_rate_pence),
-    amountPence: Number(r.amount_pence),
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
+    amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
     approvedAt: iso(r.approved_at),
     approvedByName: (r.approved_by_name as string) ?? null,
     rejectedAt: iso(r.rejected_at),
@@ -328,9 +330,9 @@ export class PayrollService {
         throw new ConflictException('An approved attendance has no recorded hours or pay, so payroll cannot be prepared. Contact support.');
       }
       const workedMinutes = Number(row.worked_minutes);
-      const ratePence = Number(row.rate);
+      const ratePence = assertSafePence(Number(row.rate), 'shift_assignment.pay_rate_snapshot_pence');
       const amountPence = payForMinutes(ratePence, workedMinutes);
-      if (amountPence !== Number(row.earned_pence)) {
+      if (amountPence !== assertSafePence(Number(row.earned_pence), 'attendance.earned_pence')) {
         throw new ConflictException('The recorded pay for a staff member does not match their rate and hours, so payroll cannot be prepared. Contact support.');
       }
       await manager.query(
@@ -357,12 +359,14 @@ export class PayrollService {
       const { skip, take } = paginationSkipTake({ page: dto.page, limit: dto.limit ?? 50 });
       params.push(take, skip);
       const rows = await manager.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `${VIEW_SELECT}${where}
          ORDER BY (pr.status = 'pending_approval') DESC, s.starts_at DESC, pr.id
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params,
       );
       const [{ total }] = await manager.query(
+        // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
         `SELECT count(*)::int AS total FROM payroll_record pr WHERE pr.organisation_id = $1 AND pr.workspace_id = $2${dto.status ? ' AND pr.status = $3' : ''}`,
         dto.status ? [ctx.organisationId, ctx.workspaceId, dto.status] : [ctx.organisationId, ctx.workspaceId],
       );
@@ -390,6 +394,7 @@ export class PayrollService {
       const timezone = (org?.timezone as string | undefined) || 'Europe/London';
       const start = `${assignmentTimeSql().start}`;
       const rows: Array<Record<string, unknown>> = await manager.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT a.id AS attendance_id, a.status AS attendance_status, pr.id AS payroll_record_id, pr.status AS payroll_status,
                 pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, ${STATEMENT_SELECT},
                 sp.id AS staff_profile_id, sp.staff_ref, sp.employment_status, sp.default_pay_rate_pence, (sp.user_id = $3) AS own_hours,
@@ -461,6 +466,7 @@ export class PayrollService {
       const where = `pr.organisation_id = $1 AND pr.workspace_id = $2 AND pr.staff_profile_id = $3 AND pr.status = ANY($4::text[])`;
       const params = [ctx.organisationId, ctx.workspaceId, profile.id, PAYROLL_APPROVED_STATUSES];
       const rows: Array<Record<string, unknown>> = await manager.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, pr.approved_at,
                 ${STATEMENT_SELECT}, v.name AS venue_name, jr.name AS role_name,
                 ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at
@@ -475,6 +481,7 @@ export class PayrollService {
           LIMIT $5 OFFSET $6`,
         [...params, take, skip],
       );
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const [{ total }] = await manager.query(`SELECT count(*)::int AS total FROM payroll_record pr WHERE ${where}`, params);
       const alloc = await allocateRecords(manager, { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId! },
         rows.map((r) => ({ id: r.id as string, startsAt: r.starts_at as Date })));
@@ -490,8 +497,8 @@ export class PayrollService {
           startsAt: iso(r.starts_at)!,
           endsAt: iso(r.ends_at)!,
           workedMinutes: Number(r.worked_minutes),
-          payRatePence: Number(r.pay_rate_pence),
-          amountPence: Number(r.amount_pence),
+          payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
+          amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
           approvedAt: iso(r.approved_at)!,
           ...(() => { const v = toAllocationView(alloc.get(r.id as string)); return { payrollPeriod: v.payrollPeriod, payday: v.payday, allocationStatus: v.status }; })(),
           statement: toStatement(r)!,
@@ -562,7 +569,7 @@ export class PayrollService {
         entityId: record.id,
         metadata: {
           attendanceId: record.attendance_id, shiftId: record.shift_id, staffProfileId: record.staff_profile_id,
-          workedMinutes: Number(record.worked_minutes), amountPence: Number(record.amount_pence), bulk, payStatementRequested: true,
+          workedMinutes: Number(record.worked_minutes), amountPence: assertSafePence(Number(record.amount_pence), 'payroll_record.amount_pence'), bulk, payStatementRequested: true,
         },
       });
       await this.emitPayrollChanged(manager, ctx, ctx.workspaceId!, 'payroll_record', record.id, 'approved', sharedAudience); // C1b realtime
@@ -646,6 +653,7 @@ export class PayrollService {
   }
 
   private async views(manager: EntityManager, ctx: AuthContext, ids: string[]): Promise<PayrollRecordView[]> {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const rows = await manager.query(`${VIEW_SELECT} AND pr.id = ANY($4::uuid[]) ORDER BY pr.id`, [ctx.organisationId, ctx.workspaceId, ctx.userId, ids]);
     return rows.map(toView);
   }

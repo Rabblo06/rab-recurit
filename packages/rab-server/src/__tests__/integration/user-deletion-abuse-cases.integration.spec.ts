@@ -169,10 +169,10 @@ describeIfDb('user deletion abuse cases (integration)', () => {
   });
 
   beforeEach(async () => {
-    // See account-invite-abuse-cases.integration.spec.ts's identical
-    // beforeEach for why this is needed — no separate worker process runs
-    // during Jest, so AccountLifecycleService.isEmailDeliveryAvailable()
-    // would otherwise see no heartbeat and skip every invite send.
+    // Fixture only: since the Phase D-Q "always queue" decision the Worker
+    // heartbeat no longer gates invite creation (AccountLifecycleService.
+    // isEmailDeliveryEnabled() reads only EMAIL_DELIVERY_ENABLED); kept so the
+    // stack looks like a normal running one.
     await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
   });
 

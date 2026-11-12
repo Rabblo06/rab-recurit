@@ -1,5 +1,12 @@
 # Phase D deployment runbook — Worker identity and global dispatch claims
 
+> **OUTDATED for deploying (2026-11-11).** This runbook predates the owner login and the one-image release. Production now
+> deploys exactly like Twenty: **Deploy the API and Worker together, from the same image tag, with `docker compose pull &&
+> docker compose up -d`. The API starts first and migrates; the Worker starts when the API is healthy. Never update the
+> API alone while an older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
+> Rollback: `CREWFLOW_IMAGE_TAG=<previous digest>`, then the same command. Any step below that deploys or restarts the
+> API or the Worker on its own is superseded; follow `release/OWNER-LOGIN-DEPLOYMENT.md` section 3.
+
 Status: prepared 2026-11-01. Nothing in this document has been run against staging or production. All evidence quoted
 below comes from disposable rehearsal databases and stacks (2026-11-01); the detailed evidence lives in internal reports
 that are not in the repository.
@@ -39,25 +46,37 @@ credential at any point in this procedure.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. |
-| `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). |
+| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. **Production refuses `global` at env validation** (Phase X SJ-05, owner decision 2026-11-11) until the J3 benchmark and the owner's J5 decision; that decision is recorded by flipping `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED` in `env.validation.ts` in a reviewed change (never an environment variable). Staging also runs `NODE_ENV=production`, so the §5.2 staging rehearsal needs that change first; it then applies to staging and production together. The compose gate refuses the name as before. |
+| `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). Production refuses `event` at env validation too (SJ-05). |
 | `REALTIME_ENABLED` | `false` | Enabling it in production is a separate decision. |
-| `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. |
+| `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. Owner rule (2026-11-06) for that day: push's immediate send is `WORKER_FAST_PUBLISH_NOTIFY` (already `true`), and `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` goes to 30 s on the API and the Worker (`docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Notification delivery"). |
+| `WORKER_FAST_PUBLISH_NOTIFY` | `false` | **Production: `true`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. |
+| `WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS` | `2` | **Production: `30`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. The API registers the scheduler with its own value. |
+| `WORKER_TIMER_TRIGGERS` | `off` | **Production: `on`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. Evidence: the D-Q4b shadow run on main 85332cc6 (336 decisions, 0 wrong / early / missed for all four kinds). No-show and late clock-in touch attendance and payroll: decided explicitly by the owner (THREAT-MODEL). |
+| `WORKER_TIMER_TRIGGER_KINDS` | unset (= all four) | **Production: `offer-expiry,manager-confirmation,no-show,late-clock-in`**, listed explicitly on both services, so a kind added to the code later is never switched on by an unset list (the gate test fails until the list is decided again). |
+| `WORKER_OFFER_EXPIRY_INTERVAL_SECONDS` | `60` | **Production: `300`** (bounds 10–300) on both services: the scan is the safety sweep behind the trigger. A lost trigger is caught within 5 min; staff also get a lazy expiry when they touch the offer. |
+| `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` | `60` | **Production: `120`** (bounds 10–300) on both services. A standard withdrawal is due at start − 30 min, so a lost trigger costs at most 2 min of that notice. |
+| `WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS` | `120` | **Production: `300`** (bounds 30–600) on both services. Even a lost trigger lands the late flag before the 30-minute no-show. |
+| `WORKER_SHIFT_MONITOR_INTERVAL_SECONDS` | `300` | **Unchanged** (owner decision 2026-11-06): it also sends the clock-in reminders and arms the no-show / late clock-in triggers (horizon two intervals). Not committed; the gate refuses any other value in the compose files and env files. |
+| `WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` | `5` | **Production: `30`** (bounds 1–300) on rab-api and rab-worker (owner decision 2026-11-11, Phase X J1a), committed in the compose files; the gate refuses a missing or different value on either service and any value in an env file. A pay statement is generated 0–30 s after approval; the 10-minute lease recovery and the failed-retry backoff each gain at most 25 s. Payroll rules, `core.payroll_record_guard`, the generation fence and the consumer are unchanged. |
+| `WORKER_SHIFT_SCAN_MODE` | `separate` | **Production: `separate`** (unset). The D-Q4a combined scan stays off (owner decision 2026-11-06) until it is measured; the gate refuses `combined` in the compose files and env files. |
 | `WORKER_INVITE_AUTO_DELETE_ENABLED` | `false` | **Production refuses to boot with `true`** until the owner approves a retention policy (enforced in `packages/rab-server/src/engine/core-modules/environment/env.validation.ts`). |
 | `WORKER_DISPATCH_RECONCILE_SECONDS` | `900` | Boot refuses values outside 60–900. A longer interval needs evidence and a separate approval. |
 
 Defaults are defined in `packages/rab-server/src/engine/core-modules/environment/environment-variables.ts`. The
-production compose file (`packages/rab-docker/docker-compose.production.yml`) sets none of the Phase D dispatch
-variables, so the code defaults apply. It pins `WORKER_SCHEDULER: interval`.
+production compose files (`packages/rab-docker/docker-compose.image.yml` and `docker-compose.production.yml`) set none of
+the claim and wake-up variables above, so the code defaults apply. They commit the two notification-delivery values
+(fast publish on, the email sweep at 30 s) and the Phase D switches (timer triggers on for all four kinds; the offer-expiry,
+manager-confirmation and late-clock-in sweeps at 300 / 120 / 300 s), each with the same value on rab-api and rab-worker:
+the API registers every BullMQ scheduler with its own value and the consume-only Worker checks only that each scheduler
+exists, never its interval. `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs` enforce all of them,
+and `runtime.env` / `database.env` may not re-enter them. They do not set `WORKER_SCHEDULER`: production runs `bullmq` by
+default (O3).
 
-The Worker bundle launcher (`packages/rab-docker/rab/worker-bundle/start-worker-bundle.cjs`) also refuses, before any
-child starts:
-
-- `WORKER_DISPATCH_MODE=event` without `WORKER_CLAIM_MODE=global`;
-- `WORKER_CLAIM_MODE=global` unless the jobs child's `PG_DATABASE_URL` logs in as `crewflow_worker`;
-- a jobs login other than `crewflow_app` or `crewflow_worker`.
-
-The jobs child's own environment validation and live boot gate remain the authority.
+O1 (one image): the Worker bundle launcher that used to pre-check these is retired; the Worker runs
+`node packages/rab-worker/dist/main.js` directly. The Worker's own start-up refuses `WORKER_DISPATCH_MODE=event` without
+`WORKER_CLAIM_MODE=global` (`packages/rab-worker/src/core/wake/dispatch-wiring.ts`), and its environment validation and
+live boot gate (database login included) remain the authority.
 
 ## 3. Creating the `crewflow_worker` login (operator step, not a migration)
 
@@ -164,6 +183,12 @@ application login and never by hand.
 - It has never been executed anywhere.
 - Its cutover is a separate approval (§11). At that time it gets a new id greater than every applied migration and is
   moved into `core/migrations/`.
+- **OBSOLETE under the one-owner-login design (recorded 2026-11-06, owner decision: keep it EXCLUDED).** Its cutover gate
+  requires every Worker to authenticate as `crewflow_worker`. Under owner-login the Worker connects as `crewflow_owner`,
+  and `crewflow_worker` has zero members and no password
+  (`packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/bootstrap.ts`, `legacy-logins.ts`; BC-17), so the gate can
+  never hold. The file itself is not edited or moved. Whether to retire it or keep it for a possible return to separated
+  logins is a later owner decision; until then it must not be applied anywhere.
 
 ### 4.2 Verification after applying
 
@@ -229,6 +254,11 @@ the Worker, then check every item:
 - [ ] per_scope still delivers email, push, realtime and statements on the new login.
 - [ ] At least one full reconcile interval (≤ 900 s) has passed since the migrations were applied. Recommended: run
   per_scope for at least one full reconcile interval before switching.
+- [ ] **HARD BLOCKER (owner decision 2026-11-02):** the bounded, fair follow-up reconciliation for legacy sweeps that
+  reach their batch limit ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)) is merged, deployed in this
+  environment's Worker image, and verified there (§5.3: a backlog above one batch drains through follow-up sweeps; idle
+  SQL unchanged). Until it is, `WORKER_CLAIM_MODE=global` must not be enabled in staging or production, whatever the
+  other items show.
 
 Rollback for this step: §8.2.
 
@@ -240,13 +270,57 @@ restart. The API is unchanged in poll mode.
 Switching to global is itself the supervised initial reconciliation. On each Worker process's **first** scan tick for
 each queue (immediately at start with `WORKER_SCHEDULER=interval`), the legacy per-scope sweep runs. It is the same
 bounded, idempotent, tenant-scoped code as per_scope mode, dispatches pre-cutover work directly, and creates no
-pointers. It then repeats every reconcile interval, so a row whose pointer is missing is found within 15 minutes at
-most.
+pointers. It then repeats every reconcile interval. Each pass handles at most one batch per queue and scope:
+
+| Queue | Legacy sweep | Batch per pass |
+|---|---|---|
+| Email | each organisation | 50 rows |
+| Push | each organisation | 50 rows |
+| Realtime | each scope: the organisation's core scope and each of its workspaces | 25 rows |
+| Statement | each workspace | 200 rows |
+
+**Follow-up sweeps ([#24](https://github.com/Rabblo06/rab-recurit/issues/24)).** When any queue-and-scope batch of a
+sweep comes back FULL, more pointerless work may remain, so the Worker runs a follow-up sweep about 5 s later instead of
+waiting for the next interval. Follow-ups use the same per-queue loop (never two loops for one queue in a process) and the
+same scan slot, metrics and shutdown drain as a wake-up. They are:
+
+- **Bounded:** at most 30 follow-ups per reconcile window, per queue and Worker process, so at most 31 sweeps per window
+  and process. Follow-ups do not take the scan's cross-replica lock, so N replicas can run up to N × 31 sweeps per window;
+  that is safe (row locks with SKIP LOCKED and the state-machine claims, as in per_scope mode) and only costs load. When
+  the budget runs out, the Worker logs `follow-up budget exhausted` and the backlog continues in the next window. Only a
+  regular sweep opens a window: if sweeps are so slow that the 31 outlast the 900 s window, the follow-ups still spend the
+  old window's budget, and the next regular tick opens the next window (no self-renewing chain). A failed
+  sweep, or a failed global claim after it, never stalls the chain: the follow-up is armed after the run's global claim
+  either way, and a failed sweep keeps the existing 60 s retry.
+- **Push is consumer-paced:** a published push row stays PENDING until the push consumer takes it, so a push sweep asks
+  for a follow-up only when its full batch actually moved rows (first publish, stale re-publish or a terminal state). While
+  the consumer is behind, push drains at the consumer's pace, never through repeated re-walks.
+- **Fair:** every sweep still takes at most one batch from every organisation and scope, so a large backlog in one
+  organisation never delays a small one elsewhere.
+- **Idle-neutral:** with no full batch nothing extra runs. Measured A/B on the disposable test stack (four queues, 2 s
+  poll ticks, 60 s idle, global mode): 244 transactions before and after #24 at 20 organisations; 797 after and 897
+  before at 200 organisations (within run-to-run noise; the idle path is unchanged). Global idle SQL stays 97 % below
+  per_scope at 200 organisations in both builds (per_scope about 29,700 transactions per minute).
+
+Recovery bound: a queue-and-scope pointerless backlog of up to 31 batches (email 1,550 rows per organisation, realtime
+775 per scope, statements 6,200 per workspace; push at the consumer's pace) is reached within one reconcile window,
+provided each sweep takes well under about 24 s (31 sweeps plus 30 × 5 s within 900 s). Measured on the disposable test
+stack with the production defaults (5 s follow-up spacing, 900 s window, 2 s poll ticks; measurement harness, not a CI
+test): 500 pointerless email rows in one organisation drained in 46 s at 20 organisations and in 53 s at 200
+organisations (every sweep still walks all 200; about 2,400 transactions and 1.6 s of Worker CPU for the whole drain,
+peak RSS 552 MB in the Jest harness). Before #24 the same 200-organisation run moved 50 rows in 61 s and left 450 for
+later windows, one sweep of 50 per window (about 2.5 hours for 500). The CI integration test uses 20 ms spacing to prove
+the same sweep sequence quickly. The 31-batch bound is the configured limit, not a measurement at production data
+volume: re-measure sweep duration on the staging rehearsal (§5.3). A larger backlog drains 31 batches per window. That is a delay, not a loss.
 
 ### 5.3 What to watch in the first sweep
 
 - The first legacy sweep completes on each replica (Worker stats in `rab:worker:stats`).
-- No pending email / push / realtime / statement row is older than the reconcile interval.
+- No pending email / push / realtime / statement row is older than the reconcile interval. Exception: a queue-and-scope
+  backlog larger than 31 batches (§5.2), which the Worker reports with `follow-up budget exhausted`. Its rows can be
+  older, up to about ceil(backlog / (31 × batch)) intervals. Investigate any older row outside such a drain.
+- A backlog above one batch drains through follow-up sweeps about 5 s apart (cycle metrics under
+  `<scan>:reconcile`, e.g. `email-dispatch:reconcile`), and sweep duration stays well under 24 s.
 - No `dispatch claim-count alert` log lines (any claim with `claim_count > 20`), and `claimsOver20` stays 0.
 - Delivery latency stays at about the poll interval (measured p50 / p95 about 1.1 s / 2.0 s).
 - Idle SQL and PostgreSQL CPU fall in line with the measured figures.
@@ -330,7 +404,7 @@ move to steady state.
 | Signal | Source | Threshold / expectation | On breach |
 |---|---|---|---|
 | Repeated claims | Worker log `dispatch claim-count alert`; `claimsOver20` in `rab:worker:stats` | Alert on any claim with `claim_count > 20` (`claimsOver20 > 0`). Starvation, excessive SQL or material delivery delay from repeated claims is a release blocker. | Global-mode rollback (§8.1), then investigate. |
-| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). | Global-mode rollback, then investigate. |
+| Oldest pending work | Oldest pending email / push / realtime / statement age | Never older than the reconcile interval (≤ 900 s). A queue-and-scope backlog above 31 batches (§5.2, logged as `follow-up budget exhausted`) may take about ceil(backlog / (31 × batch)) intervals; that alone is not a breach. | Outside such a drain: global-mode rollback, then investigate. |
 | Delivery failures | `DELIVERY_UNCERTAIN` and failed counts (email, push) | No rise against the pre-change baseline. | Investigate; roll back if caused by the change. |
 | Worker restarts | Platform restart count, bundle exit lines | No unexplained restarts. | Investigate; check the boot gate messages. |
 | PostgreSQL load | CPU, statements per minute | Should fall after global activation (measured −86 to −95 % idle SQL at 200 organisations). | A rise is a breach: roll back, investigate. |
@@ -384,6 +458,7 @@ pointers while it runs.
 | What keeps processing | Everything. per_scope scans outboxes and workspaces directly. In-flight global claims expire with their leases (15 s realtime, 30 s email/push), and the rows are claimed by their own state machines, so nothing is lost or double-completed. The triggers keep pointers current for a later re-activation. |
 | Data change | None. |
 | Risk | Low and fast: about the time of a rolling deploy. Verified on the disposable performance stack (global → per_scope and event → poll). |
+| D-Q5a | per_scope includes the D-Q5a realtime reclaim cap (a reclaim after claimant death counts toward `max_attempts`), so switching to per_scope does **not** restore the pre-Phase-D realtime claim; undoing D-Q5a is an image rollback (§8.3). Re-take any per_scope realtime baseline recorded before D-Q5a. |
 
 ### 8.2 Worker credential rollback (`crewflow_worker` → `crewflow_app`)
 
@@ -484,7 +559,7 @@ exactly-once**.
 
 | Path | Guarantee | Why |
 |---|---|---|
-| Email (SMTP) | At-least-once | A timeout after the SMTP DATA phase is retried and can resend. |
+| Email (SMTP) | At-least-once | A timeout or a dropped connection after the SMTP DATA phase is retried and can resend. Confirmed by the 2026-11-06 fault-injection run (config/phase-d-switches PR): a connection dropped after the complete message, and a server that never answers after it, each produced a second, identical email. The D-Q5b paths (a failed SENT write after a confirmed send, a Worker killed mid-send) end `DELIVERY_UNCERTAIN` with one email. |
 | Push, provider timeout | At-least-once | Timeouts are retried. |
 | Realtime publish | At-least-once | A publish can be repeated; the gateway deduplicates. |
 | Push, interrupted call | At-most-once | Recorded as `DELIVERY_UNCERTAIN` and not retried. |
@@ -493,7 +568,10 @@ Further limits:
 
 - **Crashed Worker:** its claimed work waits for its lease to expire (15 s realtime, 30 s email/push), then another
   claim picks it up.
-- **Missing pointer:** found by the reconcile sweep within one interval (≤ 900 s).
+- **Missing pointer:** found by the reconcile sweep and its follow-up sweeps within one interval (≤ 900 s) for a
+  queue-and-scope pointerless backlog of up to 31 batches (email and push 50 per organisation, realtime 25 per scope,
+  statements 200 per workspace; §5.2, [#24](https://github.com/Rabblo06/rab-recurit/issues/24)). A larger backlog drains
+  31 batches per interval.
 - **Event mode:** a full notification queue fails the producer's COMMIT (§5.4).
 
 **Known limitation: send-time realtime authorisation.** A realtime event is not re-authorised against its recipient at
@@ -508,16 +586,29 @@ Each item is a separate owner decision. Nothing on this list is approved by this
 |---|---|---|---|
 | 1 | `crewflow_worker` creation (§3) | [ ] | [ ] |
 | 2 | Migration release: 1786721300000, 1786721310000, 1786721320000, 1786721340000, 1786721350000 (§4) | [ ] | [ ] |
-| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9) | [ ] | [ ] |
+| 3 | Global-mode activation, `WORKER_CLAIM_MODE=global` with poll (§5.2), within the 14-day maximum (§9). **Blocked until #24 is merged and verified in that environment (§5.1).** | [ ] | [ ] |
+
+**HARD BLOCKER before item 3 in any environment:** [#24](https://github.com/Rabblo06/rab-recurit/issues/24), bounded and
+fair follow-up reconciliation when a legacy sweep reaches its batch limit (§5.2). The fix must preserve Phase D's
+measured idle-load improvements. Owner decision 2026-11-02: a tracked follow-up, not a blocker for merging #23. The
+implementation PR needs its own owner approval to merge; then the §5.1 verification in each environment. Because of §9,
+apply the item 2 migrations to an environment only once #24 is merged, so the 14-day clock does not start while
+activation is blocked.
 
 Environment-independent decisions:
 
+- [ ] [#24](https://github.com/Rabblo06/rab-recurit/issues/24): legacy-sweep batch-limit follow-up reconciliation,
+  merged (owner approval) and verified per environment (§5.1; hard blocker for item 3).
+- [ ] #24 sweep duration and drain re-measured at production scale (about 200 organisations) on the staging rehearsal
+  (§5.2).
+
 - [ ] Event mode (`WORKER_DISPATCH_MODE=event`), with its OD-2 prerequisites (§5.4).
-- [ ] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: gated, outside the migration glob.
+- [x] 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) due-work cutover: **decided 2026-11-06: keep EXCLUDED, OBSOLETE under
+  owner-login** (§4.1). Its gate (every Worker authenticates as `crewflow_worker`) cannot hold with one owner login.
 - [ ] `REALTIME_ENABLED` / `PUSH_ENABLED` in production.
 - [ ] Invite auto-delete retention policy (`WORKER_INVITE_AUTO_DELETE_ENABLED`): grace period, eligibility, audit
   wording, rollback and monitoring. Production refuses `true` until then.
-- [ ] SMTP post-DATA duplicate policy (§10).
+- [ ] SMTP post-DATA duplicate policy (§10). Reproduced on 2026-11-06 (fault injection, config/phase-d-switches PR): still open.
 - [x] F2 SQL fix: physical pointer identity, migration 1786721350000 (§6), owner-approved 2026-11-01 (option C).
 - [ ] Managed PostgreSQL without a superuser: whether the `crewflow_worker` shape check may accept exactly the creating login's automatic membership (`admin=true, inherit=false, set=false`) (§3.1). Security review first.
 - [ ] F3: a database-side switch (and in-definer audit) for the invite-cleanup definers. Today the flag and the audit

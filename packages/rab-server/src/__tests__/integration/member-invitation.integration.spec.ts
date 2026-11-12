@@ -604,7 +604,20 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
       return m.query(`SELECT count(*)::int AS c FROM core.member_invitation WHERE workspace_id = $1`, [managerA.workspaceId]);
     });
     expect(bWorkspace).toEqual([{ c: 0 }]);
-    await expect(runtime.query(`DELETE FROM core.member_invitation`)).rejects.toThrow(/permission denied/);
+    // "History cannot be deleted" is enforced by the database only for the restricted crewflow_app login (no DELETE grant).
+    // Under the owner login it is the owner-accepted difference BC-18 (2026-11-04, "Accepted, like Twenty"): the DELETE is
+    // not refused, RLS still confines it (no tenant context → 0 rows), and the app-level check
+    // tools/check-protected-table-writes.cjs keeps every member_invitation write in MemberInvitationService. Asserted per
+    // the connected login so neither behaviour is silently flipped to the other.
+    const [{ login }] = await runtime.query(`SELECT session_user::text AS login`);
+    if (login === 'crewflow_owner') {
+      // TypeORM returns [rows, affectedCount] for DELETE … RETURNING.
+      const removed = await runtime.transaction(async (m) => m.query(`DELETE FROM core.member_invitation RETURNING id`));
+      expect(removed).toEqual([[], 0]); // BC-18: accepted, but nothing outside a bound tenant is visible to delete
+      expect(await runtime.query(`SELECT count(*)::int AS c FROM core.member_invitation`)).toEqual([{ c: 0 }]);
+    } else {
+      await expect(runtime.query(`DELETE FROM core.member_invitation`)).rejects.toThrow(/permission denied/);
+    }
   });
 
   it('X3. a suspended organisation can neither send nor redeem invitations', async () => {

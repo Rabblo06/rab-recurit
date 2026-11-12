@@ -12,6 +12,7 @@ export const ASSISTANT_STATEMENT_TIMEOUT_MS = AI_TOOL_LIMITS.statementTimeoutMs;
  * the AI tool layer answers the model with the fixed `tool_failed` and the turn continues.
  */
 export async function beginAssistantRead(manager: EntityManager): Promise<void> {
+  // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
   await manager.query(`SET LOCAL statement_timeout = '${Math.trunc(ASSISTANT_STATEMENT_TIMEOUT_MS)}ms'`);
   await manager.query('SET TRANSACTION READ ONLY');
 }

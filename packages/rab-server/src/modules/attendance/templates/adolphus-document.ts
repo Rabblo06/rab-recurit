@@ -50,18 +50,52 @@ export function initials(name: string): string {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('');
 }
 
+/**
+ * The shift-details block as plain display strings: the ONE place its wording and its formatting (the organisation
+ * timezone via `fmtDate` / `fmtTime`) are decided. Both PDF renderers print from this: the HTML helper below (escaping
+ * every value) and the native renderer in rab-worker (which draws text, never markup). Optional lines are `null` when
+ * the data is absent, never a literal placeholder.
+ */
+export interface ShiftDetailsView {
+  venueName: string;
+  address: string | null;
+  /** "Department / role: D · R" or "Role: R". */
+  role: string;
+  date: string;
+  /** "HH:MM–HH:MM". */
+  scheduled: string;
+  /** "name · phone" (either part optional), or null when neither exists. */
+  contact: string | null;
+  shiftReference: string;
+}
+
+export function shiftDetailsView(s: DocumentShiftInfo): ShiftDetailsView {
+  const contact = [s.contactName, s.contactPhone].filter((v): v is string => !!v && v.trim().length > 0).join(' · ');
+  return {
+    venueName: s.venueName,
+    address: s.venueAddress ? s.venueAddress : null,
+    role: s.department ? `Department / role: ${s.department} · ${s.roleName}` : `Role: ${s.roleName}`,
+    date: fmtDate(s.startsAt, s.timezone),
+    scheduled: `${fmtTime(s.startsAt, s.timezone)}–${fmtTime(s.endsAt, s.timezone)}`,
+    contact: contact ? contact : null,
+    shiftReference: s.shiftReference,
+  };
+}
+
 /** "Department / role", "Date · Scheduled", "Contact", "Shift reference" — optional lines only when the data exists. */
 export function shiftDetailsHtml(s: DocumentShiftInfo): string {
-  const role = s.department ? `Department / role: ${escapeHtml(s.department)} · ${escapeHtml(s.roleName)}` : `Role: ${escapeHtml(s.roleName)}`;
-  const contact = [s.contactName, s.contactPhone].filter((v): v is string => !!v && v.trim().length > 0).map(escapeHtml).join(' · ');
+  return shiftDetailsHtmlFromView(shiftDetailsView(s));
+}
+
+export function shiftDetailsHtmlFromView(v: ShiftDetailsView): string {
   return `
-    <h1 class="venue">${escapeHtml(s.venueName)}</h1>
+    <h1 class="venue">${escapeHtml(v.venueName)}</h1>
     <div class="details">
-      ${s.venueAddress ? `<div>${escapeHtml(s.venueAddress)}</div>` : ''}
-      <div>${role}</div>
-      <div>Date: ${escapeHtml(fmtDate(s.startsAt, s.timezone))} &nbsp;&nbsp; Scheduled: ${escapeHtml(fmtTime(s.startsAt, s.timezone))}–${escapeHtml(fmtTime(s.endsAt, s.timezone))}</div>
-      ${contact ? `<div>Contact: ${contact}</div>` : ''}
-      <div>Shift reference: ${escapeHtml(s.shiftReference)}</div>
+      ${v.address ? `<div>${escapeHtml(v.address)}</div>` : ''}
+      <div>${escapeHtml(v.role)}</div>
+      <div>Date: ${escapeHtml(v.date)} &nbsp;&nbsp; Scheduled: ${escapeHtml(v.scheduled)}</div>
+      ${v.contact ? `<div>Contact: ${escapeHtml(v.contact)}</div>` : ''}
+      <div>Shift reference: ${escapeHtml(v.shiftReference)}</div>
     </div>`;
 }
 
@@ -75,7 +109,11 @@ export function documentHeaderHtml(title: string): string {
 }
 
 export function staffCellHtml(name: string, sub: string): string {
-  return `<div class="staff"><span class="avatar">${escapeHtml(initials(name))}</span><span><b>${escapeHtml(name)}</b><br><small>${escapeHtml(sub)}</small></span></div>`;
+  return staffCellHtmlFromView(initials(name), name, sub);
+}
+
+export function staffCellHtmlFromView(avatarInitials: string, name: string, sub: string): string {
+  return `<div class="staff"><span class="avatar">${escapeHtml(avatarInitials)}</span><span><b>${escapeHtml(name)}</b><br><small>${escapeHtml(sub)}</small></span></div>`;
 }
 
 /**
@@ -83,13 +121,43 @@ export function staffCellHtml(name: string, sub: string): string {
  * generated time and page x of y on the right. Footer templates do not inherit page CSS, so styles are inline.
  */
 export function documentFooterTemplate(s: DocumentShiftInfo): string {
-  const left = [s.workspaceName, s.shiftReference].filter(Boolean).map((v) => escapeHtml(v!)).join(' · ');
+  return documentFooterTemplateFromView(documentFooterView(s));
+}
+
+/**
+ * The per-page footer's text, shared by both renderers: `left` (workspace · shift reference) and `generated`
+ * ("Generated <date, time>"). Each renderer appends its own " · Page x of y", since page numbers exist only at render time.
+ */
+export interface DocumentFooterView {
+  left: string;
+  generated: string;
+}
+
+export function documentFooterView(s: DocumentShiftInfo): DocumentFooterView {
+  return {
+    left: [s.workspaceName, s.shiftReference].filter((v): v is string => !!v).join(' · '),
+    generated: `Generated ${fmtDateTime(s.generatedAt, s.timezone)}`,
+  };
+}
+
+export function documentFooterTemplateFromView(v: DocumentFooterView): string {
   return `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 7.5px; color: #8A8F8C; width: 100%; padding: 0 12mm; display: flex; justify-content: space-between;">
-    <span>${left}</span>
-    <span>Generated ${escapeHtml(fmtDateTime(s.generatedAt, s.timezone))} · Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+    <span>${escapeHtml(v.left)}</span>
+    <span>${escapeHtml(v.generated)} · Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
   </div>`;
 }
 
+/**
+ * `.bottom > div` (NOTES | MANAGER SIGN-OFF on the final timesheet, NOTES | BEFORE-SHIFT DOCUMENT on the pre-shift
+ * roster): `min-width: 0` + `overflow-wrap: anywhere` keep both columns at their flex width whatever they hold. Without
+ * them a flex item's min-width is its longest unbreakable word, so a long token in the notes (a URL, an ID) widened the
+ * NOTES column and pushed the right-hand column off the page, where Chromium's print layout dropped it (sign-off and
+ * "Total worked hours" included) without any error: F-PDF-1, PDF P0 plan §15.
+ *
+ * `.notes-text` (the shift-notes paragraph only): `white-space: pre-line` keeps the line breaks the author typed (owner
+ * decision 2026-11-04) while still collapsing runs of spaces and tabs. The native renderer applies the same rule to the
+ * same field.
+ */
 export const DOCUMENT_CSS = `
   @page { size: A4 landscape; }
   * { box-sizing: border-box; }
@@ -114,7 +182,8 @@ export const DOCUMENT_CSS = `
   .avatar { width: 26px; height: 26px; border-radius: 50%; background: #E6E7E5; color: #4A4F4C; font-size: 9px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
   .note-line { color: #8A8F8C; font-size: 9.5px; margin-top: 8px; }
   .bottom { display: flex; gap: 40px; margin-top: 22px; page-break-inside: avoid; }
-  .bottom > div { flex: 1; }
+  .bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .notes-text { white-space: pre-line; }
   .bottom h3 { font-size: 10.5px; margin: 0 0 8px; letter-spacing: .3px; }
   .bottom p { margin: 0 0 6px; }
   .flag { color: #B45309; font-weight: 600; }

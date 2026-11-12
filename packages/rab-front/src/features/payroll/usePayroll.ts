@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { capabilitiesQuery } from '../../shared/queries/navQueries';
+import { payrollPeriodQuery } from './payrollQueries';
 import { api } from '../../shared/api';
 import { toast } from '../../shared/lib/toast';
 import { pollingOptions } from '../../shared/lib/polling';
@@ -28,16 +30,11 @@ export function usePayroll(month: string) {
   const [watching, setWatching] = useState<Record<string, number>>({});
   const watchingIds = Object.keys(watching);
 
-  const capabilities = useQuery({
-    queryKey: ['auth', 'capabilities'],
-    queryFn: async () => (await api.get<Record<string, boolean>>('/auth/capabilities')).data,
-    staleTime: 300_000,
-  });
+  const capabilities = useQuery(capabilitiesQuery);
   const canApprove = capabilities.data?.['payroll.approve'] === true;
 
   const period = useQuery({
-    queryKey: ['payroll', 'period', month],
-    queryFn: async () => (await api.get<PayrollPeriod>('/payroll/period', { params: { month } })).data,
+    ...payrollPeriodQuery(month),
     // Shared polling policy (Phase C1): ±20 % jitter, paused while the tab is hidden with one catch-up when it becomes
     // visible, backoff on failure; only while a just-released statement is being watched (bounded by WATCH_MS).
     ...pollingOptions(() => (watchingIds.length ? POLL_MS : false)),

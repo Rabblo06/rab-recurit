@@ -15,6 +15,7 @@ export async function schedulePointer(
   pointer: {
     organisationId: string;
     workspaceId: string;
+    /** 'manager_confirmation_timeout' is the historical value (no migration); it now means the manager-confirmation DEADLINE. */
     jobType: 'manager_confirmation_timeout';
     subjectType: 'job_offer';
     subjectId: string;

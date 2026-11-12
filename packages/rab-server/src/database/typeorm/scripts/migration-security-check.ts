@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * M2: proves the core migration chain runs under a RESTRICTED (non-superuser) migration identity, and that no migration
  * after Phase 0b silently changes the privilege boundary of the runtime logins. Disposable PostgreSQL only.
@@ -17,6 +18,10 @@
  *   LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE, a fresh random password per run (never printed), and only the
  *   memberships the current stage needs: SET-only rab_owner for phase A; rab_secure_owner + crewflow afterwards.
  *
+ * Owner-login scenarios (PR 3): MIGRATION_SECURITY_SCENARIOS=owner-login | owner-login:transition | owner-login:unsupported
+ * delegate, on a CLEAN cluster, to migrate/owner-login/owner-login-lifecycle-check.ts (bootstrap, the D3(b) shim with golden
+ * equivalence, lifecycle, transition, version refusal). They never run together with the scenarios below.
+ *
  * Scenarios, each on its own new database:
  *   fresh    empty database -> head. Every privileged migration is first attempted by the restricted migrator and must be
  *            refused with the ledger unchanged; the CF-41 runner must refuse a superuser in phase A, and the migrator
@@ -31,7 +36,8 @@
  * Every migration after Phase 0b (and, in the upgrade scenario, every held one) runs one at a time with a catalog drift
  * check (migration-privilege-drift.ts). At the end
  * of each scenario: secure-owner invariants, the migrator left nothing behind, the security posture matches the golden
- * snapshot, and the RLS coverage gate passes as crewflow_app.
+ * snapshot, and the RLS coverage gate refuses the legacy crewflow_app / crewflow_worker logins (it runs as crewflow_owner
+ * only; the owner-login scenarios run it to completion).
  *
  * Output: database names, migration names and counts. Never a URL, user name or password.
  * MIGRATION_SECURITY_KEEP_DATABASES=true keeps the databases (marked disposable) so the integration suites can run on them;
@@ -54,6 +60,7 @@ import {
   PRE_PHASE_0B_MIGRATIONS,
   prePhase0bMigrationFingerprint,
 } from '../core/migration-source-rules';
+import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../core/preauth-force-sql';
 import { compareWithGolden } from '../core/security-posture';
 import { WORKER_ROLE_FACTS_SQL, WorkerRoleFacts, workerRoleProblems } from '../core/worker-dispatch-pointer-sql';
 import { PENDING_FINGERPRINT_VERSIONS } from '../workspace-schema/v1/expected-fingerprints';
@@ -164,6 +171,24 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721300000-WorkerDispatchPointer': [
     "+ policy|worker_dispatch_pointer|worker_dispatch_pointer_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
     '+ policy|worker_dispatch_pointer|worker_dispatch_pointer_runtime_deny|*|permissive=false|roles=crewflow,crewflow_app,crewflow_worker|using=false|check=false',
+  ],
+  // M-T1 (permanent owner login, 2026-11-04; THREAT-MODEL "Permanent owner login"): one owner-only definer policy
+  // (CURRENT_USER = rab_secure_owner, true only inside the SECURITY DEFINER functions) on each of the 16 pre-auth tables,
+  // added only. Their FORCE flag is pinned by the golden posture snapshot and the migration's own post-condition; no
+  // runtime login gains a table privilege. Derived from the migration's own table list, so the set stays exact.
+  // Plus the platform_admin recursion guard (fixed in place 2026-11-04, owner-approved): the three TO PUBLIC policies
+  // replaced by their CASE-guarded form. Lines as measured on PostgreSQL 16 and 18 (Test G), whitespace collapsed.
+  '1786721400000-PreAuthTablesForceOwnerOnly': [
+    ...PREAUTH_FORCE_TABLES.map(
+      (t) =>
+        `+ policy|${t}|${preauthDefinerPolicyName(t)}|*|permissive=true|roles=rab_secure_owner|using=${PREAUTH_DEFINER_EXPRESSION}|check=${PREAUTH_DEFINER_EXPRESSION}`,
+    ),
+    '- policy|platform_admin|platform_admin_select|r|permissive=true|roles=public|using=((user_id = core.current_uid()) OR core.is_active_platform_admin())|check=',
+    '- policy|platform_admin|platform_admin_update|w|permissive=true|roles=public|using=core.is_active_platform_admin()|check=core.is_active_platform_admin()',
+    '- policy|platform_admin|platform_admin_write|a|permissive=true|roles=public|using=|check=core.is_active_platform_admin()',
+    "+ policy|platform_admin|platform_admin_select|r|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE ((user_id = core.current_uid()) OR core.is_active_platform_admin()) END|check=",
+    "+ policy|platform_admin|platform_admin_update|w|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
+    "+ policy|platform_admin|platform_admin_write|a|permissive=true|roles=public|using=|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
   ],
 };
 
@@ -520,23 +545,29 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
   const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
   for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
-    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET']) delete childEnv[k];
-  const rls = spawnSync('yarn', ['check-rls'], {
-    cwd: repoRoot,
-    env: childEnv,
-    encoding: 'utf8',
-    shell: process.platform === 'win32',
-  });
-  const tail = sanitise(`${rls.stdout ?? ''}${rls.stderr ?? ''}`).trim().split('\n').slice(-8);
-  check(rls.status === 0, `${db}: RLS coverage gate passes as crewflow_app`, tail);
+    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
+    // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
+    'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'TEST_DATABASE_WORKER_URL']) delete childEnv[k];
+  // Permanent owner login (owner decision, PERMANENT-OWNER-LOGIN-ADDENDUM): the RLS coverage gate connects ONLY as
+  // crewflow_owner, and these legacy scenarios have no owner login. What this harness pins here is that the gate fails
+  // closed on the legacy runtime logins: it must refuse them by name, not pass and not fail for another reason. The gate
+  // itself (zero rows with no tenant context, FORCE + definer policy on the pre-auth tables, the pointer boundary) runs as
+  // crewflow_owner in the owner-login scenarios (owner-login-lifecycle-check.ts, CI matrix owner-login 16/18).
+  const refusesLegacyLogin = (login: string, out: { status: number | null; stdout?: string; stderr?: string }) => {
+    const text = sanitise(`${out.stdout ?? ''}${out.stderr ?? ''}`);
+    const tail = text.trim().split('\n').slice(-8);
+    const named = text.includes(`connects as "${login}", not the owner login "crewflow_owner"`);
+    check(out.status !== 0 && named, `${db}: RLS coverage gate refuses the legacy ${login} login (owner login only)`, tail);
+  };
+  refusesLegacyLogin('crewflow_app', spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: childEnv, encoding: 'utf8', shell: process.platform === 'win32' }));
 
-  // Phase D: the same gate as the Worker's login (zero rows with no tenant context in every workspace table, the pointer
-  // table refused) — only when this run knows its password.
+  // Phase D: the same refusal for the Worker's legacy login — only when this run knows its password.
   if (workerPasswordKnown) {
     const workerEnv: NodeJS.ProcessEnv = { ...childEnv, DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
-    const asWorker = spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: workerEnv, encoding: 'utf8', shell: process.platform === 'win32' });
-    const workerTail = sanitise(`${asWorker.stdout ?? ''}${asWorker.stderr ?? ''}`).trim().split('\n').slice(-8);
-    check(asWorker.status === 0, `${db}: RLS coverage gate passes as crewflow_worker`, workerTail);
+    refusesLegacyLogin(
+      'crewflow_worker',
+      spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: workerEnv, encoding: 'utf8', shell: process.platform === 'win32' }),
+    );
   } else {
     log(`${db}: RLS coverage gate as crewflow_worker skipped (password unknown on this shared cluster)`);
   }
@@ -774,7 +805,25 @@ async function main(): Promise<void> {
   // `fresh,upgrade` (default, the migration-security job) or `fresh` alone (ci-server / rls-coverage build their test
   // database through the restricted path this way). Anything else is refused: a typo must not silently run less.
   const scenarios = (process.env.MIGRATION_SECURITY_SCENARIOS ?? 'fresh,upgrade').trim();
-  if (!['fresh,upgrade', 'fresh'].includes(scenarios)) throw new CheckFailure(`MIGRATION_SECURITY_SCENARIOS must be "fresh,upgrade" or "fresh"`);
+  if (scenarios.startsWith('owner-login')) {
+    // Owner-login lifecycle (PR 3) on a CLEAN disposable cluster: nothing of the restricted-migrator scenarios may run
+    // first (roles are cluster-wide and the owner-login bootstrap must create them itself). `owner-login` = fresh +
+    // lifecycle (golden equivalence included); `owner-login:transition` / `owner-login:unsupported` need their own cluster.
+    const group = scenarios === 'owner-login' ? 'fresh,lifecycle' : scenarios.slice('owner-login:'.length);
+    if (!['fresh,lifecycle', 'transition', 'unsupported'].includes(group)) throw new CheckFailure('MIGRATION_SECURITY_SCENARIOS=owner-login[:transition|:unsupported]');
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, OWNER_LOGIN_CHECK_ADMIN_URL: ADMIN.toString(), OWNER_LOGIN_CHECK_SCENARIOS: group };
+    for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete childEnv[k];
+    const r = spawnSync(
+      process.execPath,
+      [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', join(__dirname, '..', '..', '..', '..', 'tsconfig.app.json'), join(__dirname, 'migrate', 'owner-login', 'owner-login-lifecycle-check.ts')],
+      { env: childEnv, stdio: 'inherit' },
+    );
+    check(r.status === 0, `owner-login lifecycle (${group}) passes`);
+    if (failures.length) process.exit(1);
+    log('all checks passed');
+    return;
+  }
+  if (!['fresh,upgrade', 'fresh'].includes(scenarios)) throw new CheckFailure(`MIGRATION_SECURITY_SCENARIOS must be "fresh,upgrade", "fresh" or "owner-login[:transition|:unsupported]"`);
   staticChecks();
   await ensureMigratorRole();
   try {

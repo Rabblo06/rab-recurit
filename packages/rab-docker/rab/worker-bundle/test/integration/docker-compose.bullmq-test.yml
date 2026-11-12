@@ -49,33 +49,40 @@ services:
       timeout: 5s
       retries: 30
 
-  # Worker BUNDLE replicas (profile `bundle`) — the real image, launcher, jobs + provisioner children, security settings
-  # and health check of the production rab-worker service, in bullmq mode by default. Used for the Linux-only cases
-  # (SIGTERM drain, per-instance health, launcher tests as root). No host ports.
+  # Worker replicas (profile `bundle`) — O1 (one image): the real Crewflow image (rab/Dockerfile) run as the Worker
+  # command, with the security settings and jobs-only health check of the production rab-worker service: ONE process as
+  # uid 1000 under compose's init, workspace provisioning in-process. bullmq mode by default. Used for the Linux-only
+  # cases (SIGTERM drain, per-instance health). No host ports.
+  # KNOWN GAP (pre-existing since #72, not changed here): like run-bullmq-cluster.cjs, this harness still uses the
+  # separated logins (crewflow_app, legacy DATABASE_URL names); the runtime now requires the owner login (crewflow_owner).
   bundle-a: &bundle
-    image: ${BQ_BUNDLE_IMAGE:-crewflow-worker-bundle:lane-a}
+    image: ${BQ_BUNDLE_IMAGE:-crewflow-image:lane-a}
     profiles: ['bundle']
-    user: '0:0'
+    command: ['node', 'packages/rab-worker/dist/main.js']
+    # Docker's init as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1.
+    init: true
+    user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ['no-new-privileges:true']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    stop_grace_period: 55s
+    stop_grace_period: 45s
     restart: 'no'
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       DATABASE_URL: postgres://crewflow_app:${BQ_APP_PASSWORD:?}@pg:5432/rab
       DATABASE_DIRECT_URL: postgres://crewflow_app:${BQ_APP_PASSWORD:?}@pg:5432/rab
-      CREWFLOW_PROVISIONER_DATABASE_URL: postgres://crewflow:${BQ_CREWFLOW_PASSWORD:?}@pg:5432/rab
-      # Phase A (pa-provisioner): opt-in provisioner; 5 s keeps the pre-Phase-A cadence.
-      CREWFLOW_PROVISIONER_ENABLED: 'true'
+      # In-process provisioning every 5 s. No CREWFLOW_PROVISIONER_* variable: the Worker refuses that prefix.
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
+      # What the retired launcher gave its jobs child (H1-M1), as in production.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
       REDIS_URL: redis://redis:6379
       APP_SECRET: ${BQ_APP_SECRET:?}
       EMAIL_DRIVER: LOGGER
@@ -88,7 +95,8 @@ services:
       WORKER_SCHEDULER: ${BQ_WORKER_SCHEDULER:-bullmq}
       WORKER_SCHEDULER_RECONCILE_SECONDS: '15'
     healthcheck:
-      test: ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      # Jobs-only per-instance health (the provisioner role is off for this check only), as in production.
+      test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
       interval: 10s
       timeout: 10s
       retries: 3

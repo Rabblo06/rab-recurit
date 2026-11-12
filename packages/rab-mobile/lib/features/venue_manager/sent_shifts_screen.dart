@@ -530,7 +530,6 @@ class SentShiftCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final look = sentShiftLook(shift);
     final submitted = shift.submittedAt;
-    final sent = shift.count('sent');
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Container(
@@ -646,7 +645,7 @@ class SentShiftCard extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
+                    shift.sentSummary,
                     style: const TextStyle(fontSize: 13, color: _grey),
                   ),
                 ),

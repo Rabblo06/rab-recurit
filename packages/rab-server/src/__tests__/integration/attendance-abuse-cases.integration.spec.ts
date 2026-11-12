@@ -18,6 +18,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { withPoolTrace } from './helpers/pool-probe';
 import { clearThrottleState } from './helpers/throttle-state';
@@ -300,6 +301,15 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
   /** Full send -> accept -> confirm pipeline, leaving a real CONFIRMED ShiftAssignment for this staff. */
   async function confirmShiftForStaff(managerToken: string, staffToken: string, staffProfileId: string, shiftId: string): Promise<void> {
+    // Booked before the approval deadline (owner rule 2026-11-06), then moved back to the test's window — fixture only.
+    await bookBeforeDeadline(adminDataSource, shiftId, () => sendAcceptConfirm(managerToken, staffToken, staffProfileId, shiftId));
+    // This suite pins the Clock In contract of bookings made BEFORE Check In shipped (rollout rule, migration
+    // 1786719450000: check_in_required = false keeps the old flow and the legacy geofence payload). The Check In
+    // prerequisite and the strict geofence evidence are covered by attendance-check-in.integration.spec.ts.
+    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
+  }
+
+  async function sendAcceptConfirm(managerToken: string, staffToken: string, staffProfileId: string, shiftId: string): Promise<void> {
     const offerRes = await request(app.getHttpServer())
       .post(`/rest/v1/shifts/${shiftId}/offers`)
       .set('Authorization', `Bearer ${managerToken}`)
@@ -315,10 +325,6 @@ describeIfDb('attendance abuse cases (integration)', () => {
       .post(`/rest/v1/offers/${offerRes.body.id}/confirm`)
       .set('Authorization', `Bearer ${managerToken}`);
     expect(confirmRes.status).toBe(201);
-    // This suite pins the Clock In contract of bookings made BEFORE Check In shipped (rollout rule, migration
-    // 1786719450000: check_in_required = false keeps the old flow and the legacy geofence payload). The Check In
-    // prerequisite and the strict geofence evidence are covered by attendance-check-in.integration.spec.ts.
-    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
   }
 
   beforeAll(async () => {

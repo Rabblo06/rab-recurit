@@ -25,11 +25,55 @@ export interface CapturedMail {
  * side of SMTP delivery (queue -> worker -> attachment loaded from storage ->
  * MIME -> SMTP handoff), and nothing about how a real provider treats it.
  */
+/**
+ * Per-recipient fault modes (email-twenty fault injection; default = accept, the original behaviour):
+ *   tempfail         451 at RCPT, the reply echoing the mailbox as real servers do (transient)
+ *   permfail         550 at RCPT, the reply echoing the mailbox (permanent)
+ *   drop_after_data  receive the COMPLETE message, then destroy the socket with no reply
+ *   hang_after_data  receive the COMPLETE message, then never reply (the client's own timeout ends it)
+ * `n` = how many sessions get the fault before the recipient is accepted again (omitted = every session).
+ */
+export type SmtpFaultMode = 'tempfail' | 'permfail' | 'drop_after_data' | 'hang_after_data';
+
+/** One complete message the sink received (the final "."), whatever it then answered: a real provider may have delivered it. */
+export interface SmtpTransmission {
+  to: string[];
+  outcome: 'accepted' | 'dropped' | 'hung';
+}
+
 export class SmtpSink {
   readonly mails: CapturedMail[] = [];
+  /** Every complete message received, accepted or not — two for one recipient is a duplicate email. */
+  readonly transmissions: SmtpTransmission[] = [];
+  /** RCPT replies the sink refused (recipient in lower case). */
+  readonly rejections: Array<{ to: string; code: number }> = [];
+  private readonly faults = new Map<string, { mode: SmtpFaultMode; n?: number; used: number }>();
   private server!: Server;
   private readonly sockets = new Set<Socket>();
   port = 0;
+
+  setFault(recipient: string, mode: SmtpFaultMode, n?: number): void {
+    this.faults.set(recipient.toLowerCase(), { mode, n, used: 0 });
+  }
+
+  clearFault(recipient: string): void {
+    this.faults.delete(recipient.toLowerCase());
+  }
+
+  transmissionsTo(recipient: string): SmtpTransmission[] {
+    return this.transmissions.filter((t) => t.to.some((x) => x.toLowerCase() === recipient.toLowerCase()));
+  }
+
+  private faultFor(recipient: string): SmtpFaultMode | null {
+    const fault = this.faults.get(recipient.toLowerCase());
+    if (!fault || (fault.n !== undefined && fault.used >= fault.n)) return null;
+    return fault.mode;
+  }
+
+  private consumeFault(recipient: string): void {
+    const fault = this.faults.get(recipient.toLowerCase());
+    if (fault) fault.used += 1;
+  }
 
   async start(port = 0): Promise<void> {
     this.server = createServer((socket) => this.handle(socket));
@@ -55,10 +99,12 @@ export class SmtpSink {
     let data = '';
     let from = '';
     let to: string[] = [];
+    let hung = false;
     const send = (line: string) => socket.write(`${line}\r\n`);
     send('220 rab-smtp-sink ESMTP ready');
 
     socket.on('data', (chunk) => {
+      if (hung) return; // hang_after_data: nothing this session sends is ever answered
       buffer += chunk.toString('latin1');
       for (;;) {
         if (inData) {
@@ -71,6 +117,16 @@ export class SmtpSink {
           data = buffer.slice(0, end);
           buffer = buffer.slice(end + 5);
           inData = false;
+          const afterData = to.map((r) => this.faultFor(r)).find((m) => m === 'drop_after_data' || m === 'hang_after_data');
+          if (afterData) {
+            for (const r of to) this.consumeFault(r);
+            this.transmissions.push({ to: [...to], outcome: afterData === 'drop_after_data' ? 'dropped' : 'hung' });
+            if (afterData === 'drop_after_data') socket.destroy();
+            else hung = true;
+            buffer = '';
+            return; // hung: this session is never answered again
+          }
+          this.transmissions.push({ to: [...to], outcome: 'accepted' });
           this.mails.push(this.parse(from, to, data));
           from = '';
           to = [];
@@ -88,8 +144,17 @@ export class SmtpSink {
           from = /<([^>]*)>/.exec(line)?.[1] ?? '';
           send('250 2.1.0 ok');
         } else if (upper.startsWith('RCPT TO')) {
-          to.push(/<([^>]*)>/.exec(line)?.[1] ?? '');
-          send('250 2.1.5 ok');
+          const rcpt = /<([^>]*)>/.exec(line)?.[1] ?? '';
+          const fault = this.faultFor(rcpt);
+          if (fault === 'tempfail' || fault === 'permfail') {
+            this.consumeFault(rcpt);
+            const code = fault === 'tempfail' ? 451 : 550;
+            this.rejections.push({ to: rcpt.toLowerCase(), code });
+            send(code === 451 ? `451 4.7.1 <${rcpt}>: Recipient address rejected: try again later` : `550 5.1.1 <${rcpt}>: Recipient address rejected: User unknown`);
+          } else {
+            to.push(rcpt);
+            send('250 2.1.5 ok');
+          }
         } else if (upper === 'DATA') {
           inData = true;
           send('354 end data with <CR><LF>.<CR><LF>');

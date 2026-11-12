@@ -28,7 +28,7 @@ Every placement needs two separate decisions:
 1. **Staff acceptance** — the staff member taps **Accept** in the mobile app. The offer becomes **staff accepted** (shown as **Awaiting Confirmation** in the Offers view menu).
 2. **Manager confirmation** — a manager confirms the acceptance. The offer becomes **manager confirmed** and the person is on the shift.
 
-For a shift you created yourself, you confirm acceptances on the [Offers](/shifts/confirming-offers) page, or Crewflow confirms them automatically after 60 minutes. For an approved staffing request, acceptances are confirmed automatically straight away, because you already chose the people when you approved it.
+Crewflow never confirms an acceptance by itself, including on approved staffing requests. The manager who sent the offer confirms it on the [Offers](/shifts/confirming-offers) page before the approval deadline: 30 minutes before the person's start for a standard offer, or the end of the booked window for a replacement or standby offer. An acceptance still unconfirmed at the deadline is withdrawn. See [Offer expiry](/shifts/offer-expiry).
 
 ## The lifecycle of a shift
 
@@ -65,8 +65,8 @@ stateDiagram-v2
     pending --> declined: staff declines
     pending --> expired: deadline passes
     pending --> withdrawn: manager withdraws
-    staff_accepted --> manager_confirmed: manager confirms<br/>or automatic confirmation
-    staff_accepted --> manager_rejected: manager rejects
+    staff_accepted --> manager_confirmed: manager confirms
+    staff_accepted --> manager_rejected: manager rejects<br/>or confirmation deadline passes
     manager_confirmed --> [*]
     manager_rejected --> [*]
     declined --> [*]
@@ -98,5 +98,5 @@ Offer actions also close **5 hours after the shift's scheduled end**. After that
   <Card title="Venue requests" icon="inbox" href="/shifts/venue-requests">Approve staffing requests from venue managers.</Card>
   <Card title="Live staffing" icon="table-columns" href="/shifts/live-staffing-pipeline">Follow a request from offer to clock-out.</Card>
   <Card title="Cancelling shifts" icon="ban" href="/shifts/cancelling-shifts">Cancel and what happens to offers.</Card>
-  <Card title="Offer expiry" icon="hourglass-half" href="/shifts/offer-expiry">Deadlines and automatic confirmation.</Card>
+  <Card title="Offer expiry" icon="hourglass-half" href="/shifts/offer-expiry">Response and confirmation deadlines.</Card>
 </Columns>

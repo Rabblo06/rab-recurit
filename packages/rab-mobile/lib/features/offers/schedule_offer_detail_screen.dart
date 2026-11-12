@@ -154,6 +154,18 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
                               ),
                         ),
                       ),
+                      if (_confirmationNote(current, state) case final note?)
+                        Padding(
+                          key: const ValueKey('detail-confirmation-note'),
+                          padding: const EdgeInsets.only(top: 10),
+                          child: Text(
+                            note,
+                            textAlign: TextAlign.center,
+                            style: ScheduleType.secondary.copyWith(
+                              color: ScheduleTokens.ink,
+                            ),
+                          ),
+                        ),
                       // Finished but not yet in History: History lists
                       // payroll-approved shifts only.
                       if (attendance.history.any(
@@ -286,6 +298,27 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
     );
   }
 
+  /// The manager-confirmation line: the server's deadline while an acceptance
+  /// waits, the owner's withdrawal sentence once it was withdrawn. Null when
+  /// neither applies or the server did not send a deadline.
+  static String? _confirmationNote(
+    OfferSummary offer,
+    OfferDetailUiState state,
+  ) {
+    if (state == OfferDetailUiState.withdrawn) {
+      return ConfirmationDeadlineCopy.staffDetail;
+    }
+    final deadline = offer.approvalDeadlineAt;
+    if (state == OfferDetailUiState.pending &&
+        offer.isAwaitingManagerConfirmation &&
+        deadline != null) {
+      return 'A manager must confirm this shift by '
+          '${approvalDeadlineTime(deadline, offer.startsAt)}. '
+          'If it is not confirmed by then, the offer is withdrawn.';
+    }
+    return null;
+  }
+
   Widget _pill(IconData icon, String label, {bool status = false}) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
     decoration: BoxDecoration(
@@ -352,8 +385,14 @@ class ScheduleOfferDetailScreen extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: _button(
-                busy ? 'Please wait…' : 'Accept',
                 busy
+                    ? 'Please wait…'
+                    // Server `canAccept: false` (display only; the accept
+                    // endpoint stays the authority).
+                    : current.acceptRefused
+                    ? tooLateToAcceptLabel
+                    : 'Accept',
+                busy || current.acceptRefused
                     ? null
                     : () =>
                           respondToOffer(context, offers, current.id, 'accept'),

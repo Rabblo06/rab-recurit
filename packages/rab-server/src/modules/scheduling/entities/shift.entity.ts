@@ -79,10 +79,10 @@ export class Shift {
   /**
    * The Venue Manager who submitted this as a shift request — null for
    * every shift created directly by an Internal Manager (`createShiftAndSend`/
-   * `SchedulingService.create`). This is what `OfferService.staffAccept`
-   * checks to decide whether a staff acceptance immediately confirms
-   * (no second manager action) or still requires the original two-step
-   * manager-confirm flow — see that method's own doc comment.
+   * `SchedulingService.create`). It no longer changes the confirmation flow:
+   * an acceptance on a requested shift waits for an Internal Manager's
+   * explicit confirmation like every other (owner rule 2026-11-06 removed the
+   * old auto-confirm of requested shifts).
    */
   @Column({ name: 'requested_by', nullable: true })
   requestedBy?: string;

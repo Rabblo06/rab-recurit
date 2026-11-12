@@ -27,7 +27,8 @@ import { AppModule } from '../../app.module';
 import { ProvisionWorkspaceGuards1786721210000 } from '../../database/typeorm/core/migrations/1786721210000-ProvisionWorkspaceGuards';
 import { ProvisioningHealth1786721220000 } from '../../database/typeorm/core/migrations/1786721220000-ProvisioningHealth';
 import { PROVISION_WORKSPACE_STATE_SQL, provisionWorkspaceFunctionV3Sql } from '../../database/typeorm/core/provision-workspace-guards-sql';
-import { EXPECTED_WORKSPACE_FINGERPRINTS } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { composeServerPathTemplateV1GrantParity } from '../../database/typeorm/workspace-schema/v1/server-path-template-grant-parity';
 import { composeServerPathTemplateV1StatementPointer } from '../../database/typeorm/workspace-schema/v1/server-path-template-statement-pointer';
 import { moduleChecksum, modulesThrough } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
@@ -42,26 +43,31 @@ import { ManagerWorkspaceService } from '../../modules/manager-workspace/service
 import { WorkspaceProvisioningService } from '../../modules/manager-workspace/services/workspace-provisioning.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 
 const { appUrl } = resolveIntegrationTestDatabase(process.env);
 
 /**
  * The body (the text between `AS $provision$` and the closing `$provision$`, which is what pg_proc.prosrc stores) of
- * core.provision_workspace exactly as StatementDispatchPointer1786721320000.up() installs it: the same builder, template,
- * modules 1..19 with their checksums, the approved v19 expected fingerprint and the migration's own app_version literal.
+ * core.provision_workspace exactly as an approved migration's up() installs it: the same builder, template, modules
+ * 1..N with their checksums, the approved expected fingerprint for N and the migration's own app_version literal.
+ *   v19: StatementDispatchPointer1786721320000 (Phase D, owner-approved);
+ *   v20: WorkspaceGrantParityGuards1786721430000 (owner-login PAY-1, re-frozen in place 2026-11-04 for PAY-1b): the v19
+ *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
-function approvedV19ProvisionBody(): string {
-  const fingerprint = EXPECTED_WORKSPACE_FINGERPRINTS[19];
-  if (!fingerprint) throw new Error('no approved expected fingerprint for module 19');
-  const modules = modulesThrough(19).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
-  const literal = 'db:provision_workspace@StatementDispatchPointer1786721320000';
-  const sql = provisionWorkspaceFunctionV3Sql(composeServerPathTemplateV1StatementPointer(), modules, fingerprint, literal);
+function approvedProvisionBody(through: 19 | 20): string {
+  const fingerprint = EXPECTED_WORKSPACE_FINGERPRINTS[through];
+  if (!fingerprint) throw new Error(`no approved expected fingerprint for module ${through}`);
+  const modules = modulesThrough(through).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+  const literal = through === 20 ? 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000' : 'db:provision_workspace@StatementDispatchPointer1786721320000';
+  const template = through === 20 ? composeServerPathTemplateV1GrantParity() : composeServerPathTemplateV1StatementPointer();
+  const sql = provisionWorkspaceFunctionV3Sql(template, modules, fingerprint, literal);
   const open = 'AS $provision$';
   const start = sql.indexOf(open);
   const end = sql.lastIndexOf('$provision$');
   if (start < 0 || end <= start) throw new Error('could not locate the $provision$ body');
   const body = sql.slice(start + open.length, end);
-  if (!body.includes(literal) || !body.includes('CWP01') || !body.includes('CWP02')) throw new Error('derived v19 body lacks its literal or guards');
+  if (!body.includes(literal) || !body.includes('CWP01') || !body.includes('CWP02')) throw new Error(`derived v${through} body lacks its literal or guards`);
   return body;
 }
 
@@ -83,16 +89,13 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     const id = await factory.createInternalManager(o, { permissions: 'production', label: `p8d-${randomUUID().slice(0, 6)}`, workspace: false });
     return { id, token: await factory.login(id) };
   };
-  /** A CREATING workspace owned by `m` (create while the function is unavailable to the runtime role). */
+  /** A CREATING workspace owned by `m` (create while server-path provisioning is deferred: test seam). */
   const creatingWorkspace = async (m: { token: string }): Promise<string> => {
-    await admin.query(`REVOKE EXECUTE ON FUNCTION core.provision_workspace(uuid) FROM crewflow_app`);
-    try {
+    return withServerProvisioningDeferred(async () => {
       const res = await http().post('/rest/v1/manager-workspaces').set('Authorization', `Bearer ${m.token}`).send(body());
       expect(res.body.schemaStatus).toBe('CREATING');
       return res.body.id as string;
-    } finally {
-      await admin.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`);
-    }
+    });
   };
   /** Runs core.provision_workspace as crewflow_app with the given identity bound; returns the outcome or the SQLSTATE. */
   const provisionAs = async (id: TestIdentity, workspaceId: string): Promise<string> => {
@@ -129,11 +132,17 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // Invitation e-mail is queued only while a Worker heartbeat is fresh (same as initial-manager-invitation.integration.spec.ts).
     await app.get(ThrottlerRedisClientProvider).client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 300);
     const [{ current_user: who }] = await runtime.query('SELECT current_user');
-    expect(who).toBe('crewflow_app');
+    // BC-02 (owner-login architecture), merged with Agent 2's deferral-seam change: the suite runs as the CONFIGURED runtime
+    // login (crewflow_owner on the owner-login CI database; crewflow_app only on a separated fixture) and never as the admin
+    // superuser that seeds fixtures.
+    expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
+    expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
+    // D4: the approved body embeds the expected fingerprint of the server's major (PG16 and PG18 differ), so the table is
+    // selected exactly as the runner selects it, before approvedProvisionBody() reads it in a test.
+    await selectWorkspaceFingerprintsForServer((sql) => admin.query(sql));
   }, 180_000);
 
   afterAll(async () => {
-    await admin?.query(`GRANT EXECUTE ON FUNCTION core.provision_workspace(uuid) TO crewflow_app`).catch(() => undefined);
     await admin?.destroy();
     await app?.close();
   });
@@ -146,10 +155,13 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       // Phase D (owner-approved v19): StatementDispatchPointer1786721320000 replaces this migration's body with the module-19
       // body (same guards, its own app_version literal). Accepted ONLY when that migration is in the ledger AND the live body
       // is byte-for-byte the approved v19 SQL, derived exactly as the migration derives it — never "any body with guards".
+      // Owner-login PAY-1: WorkspaceGrantParityGuards1786721430000 replaces it again with the module-20 body. The newest
+      // approved migration in the ledger decides which reviewed body must be installed, byte for byte.
       const v19 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StatementDispatchPointer1786721320000'`);
       expect(v19).toHaveLength(1);
+      const v20 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceGrantParityGuards1786721430000'`);
       const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
-      expect(prosrc).toBe(approvedV19ProvisionBody());
+      expect(prosrc).toBe(approvedProvisionBody(v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);

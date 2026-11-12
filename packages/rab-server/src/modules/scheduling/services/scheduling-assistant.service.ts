@@ -333,6 +333,7 @@ export class SchedulingAssistantService {
   private async seatRows(m: EntityManager, ids: string[]): Promise<SeatRow[]> {
     if (ids.length === 0) return [];
     const rows: Array<Record<string, unknown>> = await m.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, s.venue_id, v.name AS venue_name, s.job_role_id, jr.name AS job_role_name,
               ${shiftSeatCountsSql('sa')}
          FROM shift s

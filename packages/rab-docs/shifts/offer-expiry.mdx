@@ -1,21 +1,21 @@
 ---
-title: "Offer expiry and automatic confirmation"
+title: "Offer expiry and the confirmation deadline"
 sidebarTitle: "Offer expiry"
-description: "The two timers that keep offers moving: the staff response deadline and the manager confirmation window."
+description: "The two deadlines that keep offers moving: the staff response deadline and the manager-confirmation deadline."
 icon: "hourglass-half"
 ---
 
-Crewflow uses two timers so a shift never waits forever on someone's answer.
+Crewflow uses two deadlines so a shift never waits forever on someone's answer. Crewflow never confirms an offer by itself: only the manager who sent it confirms an acceptance.
 
 ```mermaid
 flowchart LR
     S["Offer sent"] -->|"staff has 48 hours"| A{"Staff answers?"}
     A -->|No| E["Expired<br/>manager notified"]
     A -->|Declines| D["Declined<br/>manager notified"]
-    A -->|Accepts| W{"Manager acts<br/>within 60 minutes?"}
+    A -->|Accepts| W{"Manager acts<br/>before the deadline?"}
     W -->|Confirms| C["Confirmed"]
     W -->|Rejects| R["Rejected"]
-    W -->|No| AC["Auto-confirmed<br/>manager notified"]
+    W -->|No| WD["Withdrawn<br/>staff and managers notified"]
     E --> REP["Replacement needed"]
     D --> REP
 ```
@@ -29,17 +29,19 @@ flowchart LR
 | **Checked** | Every minute. An accept that arrives after the deadline is refused even if the check has not run yet. |
 | **You are told** | "An offer I sent expires unanswered", and Crewflow flags that a replacement is needed. |
 
-## Manager confirmation window
+## Manager-confirmation deadline
 
 | Rule | Detail |
 | --- | --- |
-| **Applies to** | Shifts you created. Shifts from approved venue requests are confirmed as soon as staff accept. |
-| **Default window** | 60 minutes after the staff member accepts. |
-| **If you do nothing** | Crewflow confirms the acceptance automatically and sends you "Shift auto-confirmed". |
-| **Never applies** | To cancelled shifts. |
+| **Applies to** | Every accepted offer, including shifts from approved venue requests. |
+| **Standard offer** | Confirm before 30 minutes ahead of the staff member's start time. |
+| **Replacement or standby offer** | Confirm before its booked window ends. |
+| **If you do nothing** | At the deadline the acceptance is withdrawn. Staff see **Withdrawn**; managers see **Not confirmed in time**. You, and the venue managers of that venue, get "Confirmation deadline passed". |
+| **Afterwards** | The offer can never be confirmed. History is kept. There is no attendance, no-show, lateness or pay consequence, and no automatic replacement — fill the place through your usual replacement or staffing steps. |
+| **Too close to start** | A standard offer can't be sent, or accepted, less than 30 minutes before the start. |
 
 <Note>
-  The 48-hour and 60-minute values are the defaults. Your Crewflow deployment may be configured differently.
+  The 30-minute confirmation deadline is fixed and measured by the Crewflow server's clock. The 48-hour response deadline is the default; your Crewflow deployment may be configured differently.
 </Note>
 
 ## After a shift ends

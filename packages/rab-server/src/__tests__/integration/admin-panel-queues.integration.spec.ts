@@ -132,6 +132,8 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
     expect(res.body.queues.find((q: { name: string }) => q.name === 'rab-shift-statements').actions).toMatchObject({ retry: [], delete: [] });
     // AI Phase 1: rab-ai is listed for health but read-only (an ai-turn runs once by design), with the reason shown.
     expect(res.body.queues.find((q: { name: string }) => q.name === 'rab-ai').actions).toEqual({ retry: [], delete: [], lockedReason: expect.stringMatching(/run once by design/) });
+    // Phase D-Q4b: the timer-trigger queue is listed for health but read-only (the backstop scans own a lost or failed trigger).
+    expect(res.body.queues.find((q: { name: string }) => q.name === 'crewflow-timer-triggers').actions).toEqual({ retry: [], delete: [], lockedReason: expect.stringMatching(/backstop scan/) });
   });
 
   it('job list: ids + safe error class + allowlisted ids only — never data, the failure message or a token', async () => {
@@ -178,6 +180,11 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
       const ai = await http().post(`/rest/v1/admin/queues/rab-ai/jobs/${action}`).set(bearer(adminToken)).send({ jobIds: ['ai-turn.x'], reason: 'ai retry attempt' });
       expect({ action, status: ai.status, code: ai.body.code }).toEqual({ action, status: 409, code: 'QUEUE_ACTION_NOT_ALLOWED' });
     }
+    // Phase D-Q4b: nothing on the timer-trigger queue either (the backstop scans own failed or lost triggers).
+    for (const action of ['retry', 'delete']) {
+      const trig = await http().post(`/rest/v1/admin/queues/crewflow-timer-triggers/jobs/${action}`).set(bearer(adminToken)).send({ jobIds: ['offer-expiry.x.1'], reason: 'trigger retry attempt' });
+      expect({ action, status: trig.status, code: trig.body.code }).toEqual({ action, status: 409, code: 'QUEUE_ACTION_NOT_ALLOWED' });
+    }
     for (const q of ['rab-email', 'rab-push']) {
       const res = await http().post(`/rest/v1/admin/queues/${q}/jobs/delete`).set(bearer(adminToken)).send({ jobIds: [failedEmailJob.id], reason: 'delete attempt' });
       expect({ q, status: res.status, code: res.body.code }).toEqual({ q, status: 409, code: 'QUEUE_ACTION_NOT_ALLOWED' });
@@ -215,7 +222,7 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
     service.schedulerStatus.mockResolvedValueOnce(null);
     const overview = await http().get('/rest/v1/admin/queues').set(bearer(adminToken));
     expect(overview.body.mode).toBe('interval');
-    expect(overview.body.queues.map((q: { name: string }) => q.name)).toEqual(['rab-email', 'rab-push', 'rab-shift-statements', 'rab-ai']);
+    expect(overview.body.queues.map((q: { name: string }) => q.name)).toEqual(['rab-email', 'rab-push', 'rab-shift-statements', 'rab-ai', 'crewflow-timer-triggers']);
     service.schedulerStatus.mockResolvedValueOnce(null);
     expect((await http().get('/rest/v1/admin/queues/crewflow-scan-offers/jobs?state=failed').set(bearer(adminToken))).status).toBe(404);
   });

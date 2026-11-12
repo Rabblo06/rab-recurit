@@ -15,3 +15,14 @@
 # prove the migrator credential never reaches rab-api / rab-worker. Not a credential. The line now carries
 # `gitleaks:allow`; this entry covers the commit that introduced it. Reviewed 2026-10-30.
 aa855a88a82d7473a2ff52ab5e96b238ca72a566:packages/rab-docker/scripts/compose-credential-isolation.cjs:generic-api-key:37
+
+# Docker hardening H5 (PR #41): an English workflow header comment (a list of gate checks) matched generic-api-key, and
+# so did the first version of this note, which quoted it; neither is a credential. Both texts were reworded; these
+# entries cover the commits that introduced them. Reviewed 2026-11-03.
+f12222fcd140be14b7764b4e21d1b2c792bf40ea:.github/workflows/image-security-gate.yaml:generic-api-key:8
+f78d830d32a21d0e24af019136c45dc451dfbca9:.gitleaksignore:generic-api-key:19
+
+# PDF renderer P2 roster (PR #59): the native QR spec first used a synthetic JWT-shaped QR payload, base64 of
+# {"alg":"HS256"} / {"shiftId":"fixture","venueId":"v","ver":1} / "signature-fixture" — not signed with any key and not a
+# credential. The line now uses a plain fixture string; this entry covers the commit that introduced it. Reviewed 2026-11-04.
+1522b3181312b8815d53340d41a0c6031b6da420:packages/rab-worker/src/queues/rab-reports/native/pre-shift-report.native.spec.ts:jwt:211

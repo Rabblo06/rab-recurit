@@ -1,0 +1,12 @@
+# Deploy-order real-container tests, case T4 ONLY (TEST-ONLY, never a deployment file): a SHORTER health-check window on
+# rab-api, so a broken API is reported unhealthy in about a minute instead of after the production 900 s fresh-install
+# window. Nothing else changes: the Worker's depends_on (rab-api: service_healthy, restart: true) is the production one.
+# The broken API itself comes from the T4 secrets directory (a wrong PG_EXPECTED_DATABASE_NAME), not from this file.
+
+services:
+  rab-api:
+    healthcheck:
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 45s

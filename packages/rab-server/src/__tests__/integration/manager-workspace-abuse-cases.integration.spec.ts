@@ -437,7 +437,22 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
            FROM pg_policy WHERE polrelid = 'core.manager_workspace'::regclass
           ORDER BY polname`,
       );
-      expect(policies).toHaveLength(2);
+      // M-class (owner-login architecture, M-T1 PreAuthTablesForceOwnerOnly1786721400000): manager_workspace is FORCE now and
+      // carries exactly one more policy, the owner-only definer policy (PERMISSIVE, FOR ALL, TO rab_secure_owner, CURRENT_USER
+      // = 'rab_secure_owner'). It admits only the definers' own security context, never a tenant session; asserted exactly.
+      expect(policies).toHaveLength(3);
+      const definer = policies.find((p) => p.polname === 'manager_workspace_secure_owner_definer')!;
+      expect(definer).toEqual({
+        polname: 'manager_workspace_secure_owner_definer',
+        polcmd: '*',
+        using_expr: "(CURRENT_USER = 'rab_secure_owner'::name)",
+        with_check_expr: "(CURRENT_USER = 'rab_secure_owner'::name)",
+      });
+      const [{ roles }] = await dataSource.manager.query<Array<{ roles: string[] }>>(
+        `SELECT array(SELECT pg_get_userbyid(r) FROM unnest(polroles) r ORDER BY 1)::text[] AS roles
+           FROM pg_policy WHERE polrelid = 'core.manager_workspace'::regclass AND polname = 'manager_workspace_secure_owner_definer'`,
+      );
+      expect(roles).toEqual(['rab_secure_owner']);
 
       // P2.9C (`ManagerWorkspacePlatformAdminRls1786712000000`) widened this to a Platform Admin (any organisation) or a
       // `manager.manage` holder IN THIS SPECIFIC organisation. Organisation isolation (`OrganisationIsolationHardening

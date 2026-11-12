@@ -4,9 +4,17 @@ import { IconCheck } from '@tabler/icons-react';
 import { api } from '../../shared/api';
 import Drawer from '../../shared/components/Drawer';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import { toast } from '../../shared/lib/toast';
 import { useFeedbackMutation } from '../../shared/hooks/useFeedbackMutation';
+import {
+  confirmationDeadlineMessage,
+  formatApprovalDeadline,
+  isConfirmationDeadlineError,
+  mayDecideAcceptedOffer,
+  type OfferConfirmationFields,
+} from '../../shared/lib/offerConfirmation';
 
-interface OfferPreview {
+interface OfferPreview extends OfferConfirmationFields {
   id: string;
   staffName: string;
   venueName: string;
@@ -64,6 +72,17 @@ export default function OfferDecisionDrawers() {
     qc.invalidateQueries({ queryKey: ['shifts'] });
   };
 
+  // The approval deadline passed before the server received the decision (the page was open, or the clock ran out
+  // mid-click). The server has already withdrawn the acceptance, so the drawer has nothing left to decide: it closes,
+  // the lists refresh to show "Not confirmed in time", and the server's own reason stays on screen until dismissed.
+  const deadlinePassed = (error: unknown, close: () => void) => {
+    if (!isConfirmationDeadlineError(error)) return;
+    toast.error(confirmationDeadlineMessage(error), { persistent: true });
+    invalidate();
+    qc.invalidateQueries({ queryKey: ['offer-batch'] });
+    close();
+  };
+
   // Each decision: one request per click (submit guard), success toast once the server confirms, the server's reason
   // inline in the drawer on failure (errorFeedback false: one announcement, not an inline alert AND a toast). An error
   // is only shown for the offer it belongs to, so it never carries over to the next offer opened.
@@ -79,6 +98,7 @@ export default function OfferDecisionDrawers() {
     successMessage: 'Shift confirmed.',
     errorFeedback: false,
     onSuccess: () => { invalidate(); setConfirmTarget(null); },
+    onError: (error) => deadlinePassed(error, () => setConfirmTarget(null)),
   });
 
   const reject = useFeedbackMutation<unknown, { id: string; reason: string }>({
@@ -86,7 +106,12 @@ export default function OfferDecisionDrawers() {
     successMessage: 'Offer rejected.',
     errorFeedback: false,
     onSuccess: () => { invalidate(); setRejectTarget(null); setRejectReason(''); },
+    onError: (error) => deadlinePassed(error, () => { setRejectTarget(null); setRejectReason(''); }),
   });
+
+  const confirmDeadline = formatApprovalDeadline(confirmTarget?.approvalDeadlineAt);
+  // Defence in depth: the list only opens this drawer for an offer the server still lets this manager confirm.
+  const confirmAllowed = !!confirmTarget && mayDecideAcceptedOffer({ status: 'staff_accepted', ...confirmTarget });
 
   return (
     <>
@@ -125,7 +150,7 @@ export default function OfferDecisionDrawers() {
         footer={
           <>
             <button className="btn btn-outline" onClick={() => setConfirmTarget(null)}>Cancel</button>
-            <button className="btn btn-dark" disabled={confirm.busy} onClick={() => confirmTarget && confirm.submit(confirmTarget.id)}>
+            <button className="btn btn-dark" disabled={confirm.busy || !confirmAllowed} onClick={() => confirmTarget && confirmAllowed && confirm.submit(confirmTarget.id)}>
               <IconCheck size={14} />{confirm.busy ? 'Confirming…' : 'Confirm shift'}
             </button>
           </>
@@ -139,9 +164,15 @@ export default function OfferDecisionDrawers() {
               {fmtTime(confirmTarget.startsAt)}–{fmtTime(confirmTarget.endsAt)}.
             </p>
             <p className="muted">Confirming will make the shift officially confirmed and visible in the staff member&apos;s upcoming shifts.</p>
+            {confirmDeadline && (
+              <p className="muted offer-confirm-deadline">
+                Confirm by <strong style={{ color: 'var(--font-primary)' }}>{confirmDeadline}</strong>. If it is not confirmed by then, the
+                acceptance is withdrawn automatically. It is never confirmed automatically.
+              </p>
+            )}
           </>
         )}
-        {confirm.isError && confirm.variables === confirmTarget?.id && (
+        {confirm.isError && confirm.variables === confirmTarget?.id && !isConfirmationDeadlineError(confirm.error) && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {getApiErrorMessage(confirm.error, 'Could not confirm — the shift may already be full or this offer may have changed status.')}
           </p>
@@ -177,7 +208,7 @@ export default function OfferDecisionDrawers() {
           <label>Reason (optional)</label>
           <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} rows={3} placeholder="e.g. Venue reduced headcount" />
         </div>
-        {reject.isError && reject.variables?.id === rejectTarget?.id && (
+        {reject.isError && reject.variables?.id === rejectTarget?.id && !isConfirmationDeadlineError(reject.error) && (
           <p role="alert" style={{ color: 'var(--feedback-error)', fontSize: 13 }}>
             {getApiErrorMessage(reject.error, 'Could not reject this offer. Try again.')}
           </p>

@@ -7,7 +7,7 @@ import Drawer from '../../shared/components/Drawer';
 import AccordionSection from '../../shared/components/AccordionSection';
 import DateInput, { todayIso } from '../../shared/components/DateInput';
 import { toast } from '../../shared/lib/toast';
-import PhoneInput from './PhoneInput';
+import PhoneInput from './LazyPhoneInput';
 import AvatarUploadButton from './AvatarUploadButton';
 import { isValidEmail } from './validateEmail';
 import { AnimatePresence, motion } from 'framer-motion';

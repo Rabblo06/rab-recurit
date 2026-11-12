@@ -193,6 +193,10 @@ wenv_tests() {
   echo "refused: PG_DATABASE_URL (set by compose for the worker)"
   ( make_worker_env t2 STORAGE_DRIVER=LOCAL ) >/dev/null 2>&1 && die "STORAGE_DRIVER (compose-set) was NOT refused"
   echo "refused: STORAGE_DRIVER (set by compose for the worker)"
+  ( make_worker_env t2b WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=2 ) >/dev/null 2>&1 && die "a production-mirrored scan key (compose-set) was NOT refused"
+  echo "refused: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS (production-mirrored on the api and the worker)"
+  ( make_worker_env t2c CREWFLOW_MIGRATE_ON_START=false ) >/dev/null 2>&1 && die "an api-only compose key was NOT refused"
+  echo "refused: CREWFLOW_MIGRATE_ON_START (set by compose for the api)"
   ( make_worker_env t3 'BAD KEY=1' ) >/dev/null 2>&1 && die "malformed assignment was NOT refused"
   echo "refused: malformed assignment"
   ( make_worker_env 'bad/name' X=1 ) >/dev/null 2>&1 && die "bad configuration name was NOT refused"
@@ -213,7 +217,7 @@ wenv_tests() {
   make_worker_env t7
   wdc config --format json worker | node -e '
     let r = ""; process.stdin.on("data", (d) => (r += d)).on("end", () => { const v = JSON.parse(r).services.worker.environment.CREWFLOW_PROVISIONER_DATABASE_URL;
-      const ok = typeof v === "string" && /^postgres:\/\/crewflow:[^@]+@pg:5432\/rab$/.test(v); console.log("default: provisioner URL rendered as postgres://crewflow:***@pg:5432/rab = " + ok); process.exit(ok ? 0 : 1); });'
+      const ok = v == null; console.log("default (O1): no provisioner URL in the rendered worker env = " + ok); process.exit(ok ? 0 : 1); });'
   : > "$OUT/worker-env/base.env"
   make_worker_env t4 REALTIME_ENABLED=true PUSH_ENABLED=true PHASEA_TEST_SWITCH=true
   COST_WORKER_ENV_FILE="$(hostpath "$WENV")" COST_REALTIME_ENABLED=true COST_PUSH_ENABLED=true check_compose_isolation | tail -1
@@ -224,6 +228,7 @@ wenv_tests() {
         const ok = e.PHASEA_TEST_SWITCH === "true" && e.REALTIME_ENABLED === "true" && e.PUSH_ENABLED === "true";
         console.log(s + " (" + m.services[s].container_name + "): env-file key and flags rendered: " + ok); if (!ok) bad++; }
       if (m.services.api.environment.PUSH_ENABLED !== "true" || m.services.api.environment.REALTIME_ENABLED !== "true") { console.log("api does NOT follow the flags"); bad++; } else console.log("api follows the flags (flags-up recreates it)");
+      if (m.services.api.environment.PHASEA_TEST_SWITCH !== "true") { console.log("api does NOT get the per-phase env file (it registers the schedulers)"); bad++; } else console.log("api gets the per-phase env file too (it registers the schedulers)");
       process.exit(bad ? 1 : 0); });'
 }
 check "10 worker env helper: refusals, flag mapping, compose model with worker2 + env file" wenv_tests

@@ -1,3 +1,5 @@
+import { OFFER_CLOSED_REASON, TIMELINE_STEP_OFFER_CONFIRMATION_DEADLINE } from '@rab/shared';
+
 /**
  * Wave 5 timeline — presentation keys for the shift / booking lifecycle, derived from the audit action. Display only:
  * a step is never a state, never accepted from a client and never used for an authorisation decision.
@@ -37,6 +39,19 @@ export const TIMELINE_STEPS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The step for one audit row. `offer.rejected_by_worker` is shared by two system close-outs, told apart by the row's own
+ * `metadata.reason`: a withdrawal at the manager-confirmation deadline (owner rule 2026-11-06) is
+ * `offer_confirmation_deadline` ("Not confirmed in time"); the shift-cancellation follow-up keeps no step, as before.
+ */
+export function timelineStepFor(action: string, metadata: unknown): string | null {
+  if (action === 'offer.rejected_by_worker') {
+    const reason = metadata && typeof metadata === 'object' ? (metadata as Record<string, unknown>).reason : undefined;
+    return reason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED ? TIMELINE_STEP_OFFER_CONFIRMATION_DEADLINE : null;
+  }
+  return TIMELINE_STEPS[action] ?? null;
+}
+
+/**
  * Metadata keys a timeline may show. Everything else in `audit_log.metadata` is dropped (allowlist, not denylist):
  * no emails, hashes, file checksums, coordinates, IPs or other people's identifiers ever leave through the timeline.
  * Values are returned only when they are primitives (or short arrays of primitives).
@@ -56,6 +71,7 @@ export const TIMELINE_METADATA_KEYS: ReadonlySet<string> = new Set([
   'created',
   'kind',
   'offerKind',
+  'deadlineAt',
   'requiredCount',
   'name',
   'staffRef',

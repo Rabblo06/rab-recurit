@@ -2,6 +2,7 @@ import { OfferStatus } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
 import { JobOffer } from '../entities/job-offer.entity';
+import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 
 /**
  * PHASE 6 — the ONE canonical `PENDING -> EXPIRED` transition, a real
@@ -33,6 +34,16 @@ import { JobOffer } from '../entities/job-offer.entity';
  * stop" outcome, not an error.
  */
 export async function claimExpiredOffer(manager: EntityManager, offerId: string): Promise<JobOffer | null> {
+  // Shift completion (owner decision 2026-11-06, Q1): an expired offer closes its `offered` seat for the completion
+  // roll-up, so the expiry re-runs it. Shift row lock FIRST (shift -> offer, the confirm / accept / withdrawal order), so
+  // an expiry racing a clock-out on the same shift is serialised on it and one of the two completes the shift. The
+  // organisation and shift come from the offer row itself under the caller's tenant context (RLS); nothing found =
+  // nothing locked, and the CAS below then matches nothing either.
+  const [target] = await manager.query<Array<{ shift_id: string; organisation_id: string }>>(
+    `SELECT sa.shift_id, o.organisation_id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
+    [offerId],
+  );
+  if (target) await lockShiftRow(manager, target.organisation_id, target.shift_id);
   const [claimedRows] = (await manager.query(
     `UPDATE job_offer
        SET status = $1, responded_at = now()
@@ -41,5 +52,6 @@ export async function claimExpiredOffer(manager: EntityManager, offerId: string)
     [OfferStatus.EXPIRED, offerId, OfferStatus.PENDING],
   )) as [Array<{ id: string }>, number];
   if (claimedRows.length === 0) return null;
+  if (target) await completeShiftIfSettled(manager, target.organisation_id, target.shift_id);
   return manager.findOneByOrFail(JobOffer, { id: offerId });
 }

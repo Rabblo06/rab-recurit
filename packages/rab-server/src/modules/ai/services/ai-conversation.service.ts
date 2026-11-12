@@ -301,6 +301,7 @@ export class AiConversationService {
         where += ` AND (last_message_at, id) < ($5, $6)`;
       }
       const rows = await m.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT id, title, message_count, last_message_at, created_at FROM core.ai_conversation WHERE ${where}
           ORDER BY last_message_at DESC, id DESC LIMIT $4`,
         params,
@@ -581,6 +582,7 @@ export class AiConversationService {
   /** The caller's own conversation row, or the uniform 404. */
   async ownConversation(m: EntityManager, ctx: AuthContext, id: string, forUpdate = false): Promise<Record<string, unknown>> {
     const [row] = await m.query(
+      // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
       `SELECT id, title, title_source, message_count, last_message_at, created_at FROM core.ai_conversation
         WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 AND user_id = $4${forUpdate ? ' FOR UPDATE' : ''}`,
       [id, ctx.organisationId, ctx.workspaceId, ctx.userId],

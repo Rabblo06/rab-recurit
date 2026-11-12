@@ -6,6 +6,7 @@ import {
   assertDeploymentIdentity,
   assertExpectedDatabaseName,
   decideDeploymentIdentity,
+  UNDECLARED_IDENTITY_WARNING,
   DeploymentIdentityError,
   DeploymentMarker,
   DISPOSABLE_TEST_DATABASE_SETTING_NAME,
@@ -79,8 +80,13 @@ describe('deployment identity: declared environment (pure)', () => {
     refused(() => readDeclaredDeploymentIdentity({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: 'not-a-uuid' }), /must be a uuid \(value not shown\)/);
   });
 
-  it('production requires a production declaration; a non-production process may not declare production', () => {
-    refused(() => assertDeclaredIdentityForProcess({}, true, 'api process'), /production api process requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+  it('BC-11: production may declare nothing (null); a declaration must be production; a non-production process may not declare production', () => {
+    // Owner decision BC-11 (2026-11-05): optional in production too.
+    expect(assertDeclaredIdentityForProcess({}, true, 'api process')).toBeNull();
+    // A partial or invalid declaration is still refused.
+    refused(() => assertDeclaredIdentityForProcess({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }, true, 'api process'), /must be set together/);
+    refused(() => assertDeclaredIdentityForProcess({ CREWFLOW_DEPLOYMENT_ID: PROD_ID }, true, 'api process'), /must be set together/);
+    refused(() => assertDeclaredIdentityForProcess({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: 'not-a-uuid' }, true, 'api process'), /must be a uuid/);
     refused(
       () => assertDeclaredIdentityForProcess({ CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'staging', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, true, 'api process'),
       /must declare production/,
@@ -114,12 +120,27 @@ describe('deployment identity: the marker decision (pure)', () => {
     });
   });
 
-  it('production refuses a wrong deployment id, a wrong environment, a missing or unbound marker', () => {
+  it('production, DECLARED: refuses a wrong deployment id, a wrong environment, a missing or unbound marker', () => {
     refused(() => decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: prod, marker: bound('production', OTHER_ID) }), /bound to production\/0b9a8c7d/);
     refused(() => decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: prod, marker: bound('staging', PROD_ID) }), /bound to staging\//);
     refused(() => decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: prod, marker: { state: 'absent' } }), /no deployment identity marker.*db:bind-identity/);
     refused(() => decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: prod, marker: { state: 'unbound' } }), /never bound/);
-    refused(() => decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: null, marker: bound('production', PROD_ID) }), /no declared deployment identity/);
+  });
+
+  it('BC-11: production, UNDECLARED: no marker check at all (absent, unbound, bound anywhere), one loud warning; bootstrap needs a declaration', () => {
+    for (const marker of [{ state: 'absent' as const }, { state: 'unbound' as const }, bound('production', PROD_ID), bound('staging', OTHER_ID)]) {
+      for (const connectionHost of [LOC.connectionHost, 'db.example.internal']) {
+        const d = decideDeploymentIdentity({ ...LOC, connectionHost, currentDatabase: 'elsewhere', processLabel: 'api', production: true, declared: null, marker });
+        expect(d).toEqual({ summary: 'undeclared', bootstrap: false, warnings: [`${UNDECLARED_IDENTITY_WARNING} (marker ${marker.state}).`] });
+      }
+    }
+    expect(UNDECLARED_IDENTITY_WARNING).toMatch(/^deployment identity not declared \(CREWFLOW_DEPLOYMENT_ID \/ CREWFLOW_DEPLOYMENT_ENVIRONMENT unset\): the marker was not verified/);
+    refused(
+      () => decideDeploymentIdentity({ ...LOC, processLabel: 'migrations', production: true, declared: null, marker: { state: 'unbound' }, bootstrapRequested: true, expectedDatabaseNameSet: true }),
+      /binds a DECLARED identity/,
+    );
+    // Declared and matching: accepted exactly as before.
+    expect(decideDeploymentIdentity({ ...LOC, processLabel: 'api', production: true, declared: prod, marker: bound('production', PROD_ID) }).summary).toBe(`production/${PROD_ID}`);
   });
 
   it('production bootstrap: allowed only for an absent/unbound marker AND with PG_EXPECTED_DATABASE_NAME; refused once bound', () => {
@@ -230,10 +251,11 @@ describe('deployment identity: the marker decision (pure)', () => {
 
   it('final review F4: only the listed compose database services count as local single-label hosts; any other single-label name is remote and refused unmarked', async () => {
     // The list is exactly the repository's own compose / harness database services (no env-var widening exists).
-    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'pg-other', 'postgres']);
-    for (const host of ['devdb', 'postgres', 'pg', 'pg-other', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
+    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'postgres']);
+    for (const host of ['devdb', 'postgres', 'pg', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
     // Resolved through a DNS search domain or a Kubernetes namespace: remote, whatever it looks like.
-    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'localhost.'];
+    // O1: pg-other (the retired bundle-test harness's second cluster) is remote again.
+    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'pg-other', 'localhost.'];
     for (const host of unlisted) expect(isRemoteDatabaseHost(host)).toBe(true);
     for (const connectionHost of unlisted) {
       for (const state of ['absent', 'unbound'] as const) {
@@ -266,7 +288,6 @@ describe('deployment identity: the marker decision (pure)', () => {
       'packages/rab-docker/docker-compose.qa.yml',
       'packages/rab-docker/docker-compose.production.yml',
       'packages/rab-e2e-testing/system/docker-compose.e2e.yml',
-      'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bundle-test.yml',
       'packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml',
     ];
     const used = new Set<string>();

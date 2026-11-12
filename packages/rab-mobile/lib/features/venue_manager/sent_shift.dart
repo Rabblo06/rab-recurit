@@ -20,6 +20,20 @@ class SentShift {
       ((json['offerCounts'] as Map?)?[key] as num?)?.toInt() ?? 0;
   bool counter(String key) => (json['counters'] as Map?)?[key] == true;
 
+  /// Latest offers withdrawn at the manager-confirmation deadline: a SUBSET of
+  /// `offerCounts.rejected`, never added to it. 0 from a server without the field.
+  int get withdrawnAtDeadline => count('withdrawnAtDeadline');
+
+  /// "Sent to 3 staff", plus "· 1 not confirmed in time" when the server
+  /// reports deadline withdrawals.
+  String get sentSummary {
+    final sent = count('sent');
+    if (sent == 0) return 'Not sent yet';
+    final withdrawn = withdrawnAtDeadline;
+    return 'Sent to $sent staff'
+        '${withdrawn > 0 ? ' · $withdrawn not confirmed in time' : ''}';
+  }
+
   /// Server-computed: the shift ended more than five hours ago (`now() >= ends_at + 5h`).
   bool get actionExpired => json['actionExpired'] == true;
   bool matches(String? status) =>
@@ -71,6 +85,10 @@ const _neutral = SentShiftLook(
   Color(0xFF555555),
 );
 
+/// The server's `statusLabel` when every recipient's latest offer was
+/// withdrawn at the manager-confirmation deadline.
+const offersNotConfirmedInTimeLabel = 'Offers not confirmed in time';
+
 SentShiftLook _as(SentShiftLook tone, String label) =>
     SentShiftLook(label, tone.card, tone.pill, tone.pillText);
 
@@ -92,6 +110,10 @@ SentShiftLook _as(SentShiftLook tone, String label) =>
 /// | `offerCounts.declined > 0` (staff declined)        | Declined           | light red  |
 /// | `offerCounts.cancelled > 0` (staff cancelled)      | Staff cancelled    | grey       |
 /// | every latest offer withdrawn                       | Offers withdrawn   | grey       |
+/// | every latest offer withdrawn at the confirmation   | Offers not         | grey       |
+/// |   deadline (`offerCounts.withdrawnAtDeadline`, or  |   confirmed in     |            |
+/// |   the server's own statusLabel when the count is   |   time             |            |
+/// |   absent)                                          |                    |            |
 /// | every latest offer rejected by the manager         | Offers rejected    | grey       |
 /// | anything else (no offers / a mix, none active)     | No active offers   | off-white  |
 ///
@@ -119,6 +141,13 @@ SentShiftLook sentShiftLook(SentShift shift) {
   final sent = shift.count('sent');
   if (sent > 0 && shift.count('withdrawn') == sent) {
     return _as(_grey, 'Offers withdrawn');
+  }
+  // Withdrawn at the deadline is not a rejection by anyone (owner rule
+  // 2026-11-06); checked before the generic rejected count it is part of.
+  if (sent > 0 &&
+      (shift.withdrawnAtDeadline == sent ||
+          shift.json['statusLabel'] == offersNotConfirmedInTimeLabel)) {
+    return _as(_grey, offersNotConfirmedInTimeLabel);
   }
   if (sent > 0 && shift.count('rejected') == sent) {
     return _as(_grey, 'Offers rejected');

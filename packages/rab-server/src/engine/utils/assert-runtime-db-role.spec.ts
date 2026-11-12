@@ -1,68 +1,71 @@
 import { DataSource } from 'typeorm';
 
+import { healthyOwnerLoginPosture, OwnerLoginPostureFixture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { acceptedRuntimeDbRoles, assertRuntimeDbRole, RUNTIME_IDENTITY_SQL, runtimeDbIdentityFor, WORKER_CONNECTION_LABELS } from './assert-runtime-db-role';
 
 /**
- * Phase D (D2) runtime identity assertion over a mocked connection: the API keeps exactly crewflow_app and refuses the
- * Worker-only crewflow_worker login; a Worker connection accepts crewflow_app|crewflow_worker (per_scope) or
- * crewflow_worker only (global). The real-database counterpart (needs the crewflow_worker role) is
- * src/__tests__/integration/worker-identity-boot-gates.integration.spec.ts — written, NOT run.
+ * Runtime identity assertion under the owner-login architecture (owner's final decision 2026-11-04), over a mocked
+ * connection. Every process — API, Worker (either claim mode, every Worker connection label), CLI — must be the owner
+ * login crewflow_owner itself, with the reviewed role posture (the boot gate's own function, owner-login-posture.ts).
+ * What changed is catalogued (owner-login-behaviour-catalogue.ts): BC-01 (owner-role membership is expected, no longer
+ * refused) and BC-02 (crewflow_app / crewflow_worker are schema roles; connecting as them is refused). The real-database
+ * counterpart is src/__tests__/integration/owner-login-guards.integration.spec.ts.
  */
-function fakeSource(facts: { who: string; login?: string; super?: boolean; ownerRoles?: string | null; workerMember?: boolean }): DataSource {
+function fakeSource(facts: { who: string; login?: string; super?: boolean; version?: number; posture?: OwnerLoginPostureFixture }): DataSource {
+  const posture = facts.posture ?? healthyOwnerLoginPosture();
   const query = jest.fn(async (sql: string) => {
     if (sql === 'SELECT current_user') return [{ current_user: facts.who }];
     if (sql.startsWith('SELECT rolbypassrls, rolsuper')) return [{ rolbypassrls: false, rolsuper: facts.super === true }];
-    if (sql === RUNTIME_IDENTITY_SQL) {
-      return [{ session_user: facts.login ?? facts.who, session_super: false, owner_roles: facts.ownerRoles ?? null, worker_member: facts.workerMember ?? facts.who === 'crewflow_worker' }];
-    }
+    if (sql === RUNTIME_IDENTITY_SQL) return [{ session_user: facts.login ?? facts.who, session_super: false, version: facts.version ?? 160015 }];
+    const answer = ownerLoginPostureAnswer(sql, posture);
+    if (answer) return answer;
     throw new Error(`unexpected SQL ${sql.slice(0, 40)}`);
   });
   return { query } as unknown as DataSource;
 }
 
-describe('assertRuntimeDbRole — Phase D identities', () => {
-  it('accepted roles are code constants per identity', () => {
-    expect(acceptedRuntimeDbRoles()).toEqual(['crewflow_app']);
-    expect(acceptedRuntimeDbRoles({ process: 'api' })).toEqual(['crewflow_app']);
-    expect(acceptedRuntimeDbRoles({ process: 'worker', claimMode: 'per_scope' })).toEqual(['crewflow_app', 'crewflow_worker']);
-    expect(acceptedRuntimeDbRoles({ process: 'worker', claimMode: 'global' })).toEqual(['crewflow_worker']);
+describe('assertRuntimeDbRole — the owner login', () => {
+  it('the accepted login is one code constant for every identity; an unknown claim mode accepts none (fail closed)', () => {
+    expect(acceptedRuntimeDbRoles()).toEqual(['crewflow_owner']);
+    expect(acceptedRuntimeDbRoles({ process: 'api' })).toEqual(['crewflow_owner']);
+    expect(acceptedRuntimeDbRoles({ process: 'worker', claimMode: 'per_scope' })).toEqual(['crewflow_owner']);
+    expect(acceptedRuntimeDbRoles({ process: 'worker', claimMode: 'global' })).toEqual(['crewflow_owner']);
     expect(acceptedRuntimeDbRoles({ process: 'worker', claimMode: 'bogus' as never })).toEqual([]);
   });
 
-  it('the API (default identity) refuses crewflow_worker with a clear message', async () => {
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), 'API server')).rejects.toThrow(
-      /API server connects as "crewflow_worker", the Worker-only login .* must connect as crewflow_app/,
-    );
+  it('accepts the owner login with the healthy layout, for the API and every Worker identity', async () => {
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner' }), 'API server')).resolves.toBeUndefined();
+    for (const claimMode of ['per_scope', 'global'] as const) {
+      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner' }), 'worker', { process: 'worker', claimMode })).resolves.toBeUndefined();
+    }
   });
 
-  it('the API refuses a crewflow_app login that is a member of crewflow_worker', async () => {
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app', workerMember: true }), 'API server')).rejects.toThrow(/member of crewflow_worker/);
+  it('BC-02: refuses the legacy logins (schema roles now) with an actionable message', async () => {
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), 'API server')).rejects.toThrow(/connects as "crewflow_worker", a schema role/);
+    for (const who of ['crewflow_app', 'crewflow']) {
+      await expect(assertRuntimeDbRole(fakeSource({ who }), 'API server')).rejects.toThrow(new RegExp(`connects as "${who}", not "crewflow_owner".*schema roles now`));
+    }
   });
 
-  it('the API still accepts crewflow_app', async () => {
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), 'API server')).resolves.toBeUndefined();
+  it('refuses SET ROLE, SUPERUSER / BYPASSRLS and PostgreSQL below 16', async () => {
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', login: 'someone' }), 'worker')).rejects.toThrow(/SET ROLE is not accepted/);
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', super: true }), 'worker')).rejects.toThrow(/BYPASSRLS\/SUPERUSER/);
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', version: 150008 }), 'API server')).rejects.toThrow(/PostgreSQL 16 or later/);
   });
 
-  it('a per_scope Worker accepts crewflow_app and crewflow_worker', async () => {
-    const id = { process: 'worker', claimMode: 'per_scope' } as const;
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), 'worker', id)).resolves.toBeUndefined();
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), 'worker', id)).resolves.toBeUndefined();
+  it('refuses a drifted role posture (the boot gate rules): a backdoor login, a reachable BYPASSRLS role, a member of crewflow_worker', async () => {
+    const backdoor = healthyOwnerLoginPosture();
+    backdoor.foreignLogins = [{ login: 'pg_monitor_agent', reaches: 'crewflow' }];
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', posture: backdoor }), 'API server')).rejects.toThrow(/unexpected LOGIN role "pg_monitor_agent"/);
+    const bypass = healthyOwnerLoginPosture();
+    bypass.reach.push({ role: 'x_bypass', path: 'crewflow_owner>x_bypass', super: false, bypassrls: true, createdb: false, replication: false, is_login: false });
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', posture: bypass }), 'API server')).rejects.toThrow(/"x_bypass" has BYPASSRLS/);
+    const workerMember = healthyOwnerLoginPosture();
+    workerMember.memberships.push({ role: 'crewflow_worker', role_login: true, member: 'crewflow_owner', member_login: true, member_super: false, admin: false, inherit: true, set: false });
+    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner', posture: workerMember }), 'worker')).rejects.toThrow(/not in the owner-login layout/);
   });
 
-  it('a global Worker refuses crewflow_app and accepts crewflow_worker', async () => {
-    const id = { process: 'worker', claimMode: 'global' } as const;
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), 'worker', id)).rejects.toThrow(/WORKER_CLAIM_MODE=global requires the worker to connect as "crewflow_worker"/);
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), 'worker', id)).resolves.toBeUndefined();
-  });
-
-  it('owner-role membership and SET ROLE refuse for the Worker login as for the API', async () => {
-    const id = { process: 'worker', claimMode: 'per_scope' } as const;
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker', ownerRoles: 'crewflow' }), 'worker', id)).rejects.toThrow(/can act as crewflow/);
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker', login: 'crewflow' }), 'worker', id)).rejects.toThrow(/SET ROLE is not accepted/);
-    await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow' }), 'worker', id)).rejects.toThrow(/Refusing to start: DATABASE_URL connects as "crewflow"/);
-  });
-
-  describe('Worker connection labels (B change request: worker, worker-direct, worker-scan-lock, worker-wake-listener)', () => {
+  describe('Worker connection labels (worker, worker-direct, worker-scan-lock, worker-wake-listener)', () => {
     const saved = process.env.WORKER_CLAIM_MODE;
     afterEach(() => {
       if (saved === undefined) delete process.env.WORKER_CLAIM_MODE;
@@ -73,36 +76,23 @@ describe('assertRuntimeDbRole — Phase D identities', () => {
       expect(WORKER_CONNECTION_LABELS).toEqual(['worker', 'worker-direct', 'worker-scan-lock', 'worker-wake-listener']);
       expect(runtimeDbIdentityFor('API server', { WORKER_CLAIM_MODE: 'global' })).toEqual({ process: 'api' });
       expect(runtimeDbIdentityFor('worker-x', {})).toEqual({ process: 'api' });
-      expect(runtimeDbIdentityFor('Worker', {})).toEqual({ process: 'api' });
       expect(runtimeDbIdentityFor('worker', {})).toEqual({ process: 'worker', claimMode: 'per_scope' });
       expect(runtimeDbIdentityFor('worker-wake-listener', { WORKER_CLAIM_MODE: 'global' })).toEqual({ process: 'worker', claimMode: 'global' });
     });
 
-    it.each(['worker', 'worker-direct', 'worker-scan-lock', 'worker-wake-listener'])('%s accepts crewflow_worker (per_scope and global) and refuses crewflow_app in global', async (label) => {
-      delete process.env.WORKER_CLAIM_MODE;
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), label)).resolves.toBeUndefined();
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), label)).resolves.toBeUndefined();
-      process.env.WORKER_CLAIM_MODE = 'global';
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), label)).resolves.toBeUndefined();
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), label)).rejects.toThrow(/WORKER_CLAIM_MODE=global/);
+    it.each(['worker', 'worker-direct', 'worker-scan-lock', 'worker-wake-listener'])('%s accepts the owner login in both claim modes and refuses the legacy logins', async (label) => {
+      for (const mode of [undefined, 'global']) {
+        if (mode === undefined) delete process.env.WORKER_CLAIM_MODE;
+        else process.env.WORKER_CLAIM_MODE = mode;
+        await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner' }), label)).resolves.toBeUndefined();
+        await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), label)).rejects.toThrow(/schema role/);
+        await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), label)).rejects.toThrow(/not "crewflow_owner"/);
+      }
     });
 
     it('an invalid WORKER_CLAIM_MODE accepts no role on a Worker label (fail closed)', async () => {
       process.env.WORKER_CLAIM_MODE = 'GLOBAL';
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), 'worker')).rejects.toThrow(/Refusing to start/);
-      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_app' }), 'worker')).rejects.toThrow(/Refusing to start/);
+      await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_owner' }), 'worker')).rejects.toThrow(/no accepted role/);
     });
-
-    it('API labels refuse crewflow_worker whatever WORKER_CLAIM_MODE says', async () => {
-      process.env.WORKER_CLAIM_MODE = 'global';
-      for (const label of ['API server', 'api prestart check', 'storage reconciliation', 'AI worker (ai-e2e test boot)']) {
-        await expect(assertRuntimeDbRole(fakeSource({ who: 'crewflow_worker' }), label)).rejects.toThrow(/Worker-only login/);
-      }
-    });
-  });
-
-  it('membership is tested with MEMBER for current_user and session_user (USAGE missed INHERIT FALSE, SET TRUE grants)', () => {
-    expect(RUNTIME_IDENTITY_SQL).toMatch(/pg_has_role\(current_user, r\.oid, 'MEMBER'\) OR pg_has_role\(session_user, r\.oid, 'MEMBER'\)/);
-    expect(RUNTIME_IDENTITY_SQL).not.toMatch(/'USAGE'/);
   });
 });

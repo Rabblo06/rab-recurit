@@ -318,8 +318,11 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       expect(JSON.stringify(refused.body)).toMatch(/No vacancy — the original staff member is still assigned/);
       expect((await offerFor(fx.shiftId, c1.profileId)).status).toBe('staff_accepted');
       expect(await occupied(fx.shiftId)).toBe(2);
-      // No timeout pointer is scheduled for a standby acceptance.
-      expect(await adminDataSource.query(`SELECT 1 FROM core.worker_due_work WHERE subject_id = $1`, [offer.id])).toHaveLength(0);
+      // Owner rule 2026-11-06 (Q1b): a standby acceptance gets a manager-confirmation DEADLINE pointer at its window end —
+      // the Worker withdraws it there if nobody confirmed it; it never confirms it.
+      const [pointer] = await adminDataSource.query(`SELECT due_at FROM core.worker_due_work WHERE subject_id = $1`, [offer.id]);
+      const [win] = await adminDataSource.query(`SELECT upper(sa.period) AS ends FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id = sa.id WHERE o.id = $1`, [offer.id]);
+      expect(new Date(pointer.due_at).getTime()).toBe(new Date(win.ends).getTime());
 
       await adminDataSource.query(`UPDATE core.shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [fx.absentAssignmentId, fx.manager.userId]);
       expect((await confirm(fx.managerToken, offer.id)).status).toBe(201);

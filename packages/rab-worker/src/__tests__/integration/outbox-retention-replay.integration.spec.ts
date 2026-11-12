@@ -25,6 +25,7 @@ import {
   runOutboxRetentionCycle,
 } from '../../queues/rab-maintenance/outbox-retention.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -209,12 +210,46 @@ describeIfDb('outbox retention + FAILED email replay (G6)', () => {
     expect(n).toBe(0);
   });
 
-  it('crewflow_app cannot DELETE outbox/event rows directly (only the definer functions can)', async () => {
+  // P-class (owner-login architecture): kept as a SCHEMA-ROLE test. crewflow_app is no longer a login; its grants are the
+  // reviewed boundary the purge definers are written against, and it still cannot DELETE outbox/event rows directly.
+  it('schema role crewflow_app cannot DELETE outbox/event rows directly (only the definer functions can)', async () => {
     const id = await email('SENT', 400);
     for (const t of ['email_outbox', 'push_delivery', 'realtime_event', 'worker_event']) {
-      await expect(tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${t} WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
+      // sql-injection-reviewed: t comes from the constant table list above
+      expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: `DELETE FROM core.${t} WHERE id = $1`, params: [id] }])).toBe('42501');
     }
     expect(await exists('email_outbox', id)).toBe(true);
+  });
+
+  // The runtime login (owner-login architecture): DELETE on all four outbox tables is covered by the grant-parity guard
+  // (OwnerLoginGrantParityGuards1786721420000, GRANT_PARITY_TARGETS; catalogue OUTBOX-1 mitigated), a row-level trigger today (per statement after Agent 3's PAY-1b). A
+  // zero-row DELETE would pass any row trigger, so each row's visibility to the runtime login is checked first: a VISIBLE row's
+  // direct DELETE must be refused (42501); every row must survive. At least the email and push rows must be visible (they are
+  // the tenant's own, under its bound context).
+  it('runtime login: a direct DELETE of a visible row is refused by the grant-parity guard (42501) on every outbox table; every row survives', async () => {
+    const rowsByTable: Array<[string, string]> = [
+      ['email_outbox', await email('SENT', 400)],
+      ['push_delivery', await push('ACCEPTED', 400)],
+      ['realtime_event', await event('realtime_event', 'completed', 400, owner.workspaceId)],
+      ['worker_event', await event('worker_event', 'failed', 400, owner.workspaceId)],
+    ];
+    const visibleTables: string[] = [];
+    for (const [table, id] of rowsByTable) {
+      // sql-injection-reviewed: table comes from the constant list above
+      const visible = (await tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT 1 FROM core.${table} WHERE id = $1`, [id]))).length === 1;
+      if (visible) {
+        visibleTables.push(table);
+        await expect(
+          // sql-injection-reviewed: table comes from the constant list above
+          tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${table} WHERE id = $1`, [id])),
+        ).rejects.toMatchObject({ code: '42501' });
+      } else {
+        // sql-injection-reviewed: table comes from the constant list above
+        await tenantContext.runInTenantContext(ctx, (m) => m.query(`DELETE FROM core.${table} WHERE id = $1`, [id])).catch(() => undefined);
+      }
+      expect({ table, survives: await exists(table, id) }).toEqual({ table, survives: true });
+    }
+    expect(visibleTables).toEqual(expect.arrayContaining(['email_outbox', 'push_delivery']));
   });
 
   it('periods below the DB5 floors are refused by the job AND by the database (22023)', async () => {

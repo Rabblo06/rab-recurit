@@ -1,6 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
+import { installSessionRoleResetOnDataSource, RESET_ROLE_SQL } from '../../../database/postgres/session-role-reset';
 import { databaseMetrics, DbPoolName } from '../../../database/runtime/database-metrics';
 import { PgReplicaService } from '../../../database/runtime/replica/pg-replica.service';
 import { EnvironmentService } from '../environment/environment.service';
@@ -52,6 +53,18 @@ import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.
  * Writes, auth/session/MFA/permission resolution, payroll, audit log, admin panel and read-your-writes paths never pass
  * the option (the register lists why).
  */
+/**
+ * Owner-login pool safety (M0 §6.4 control 3, G-09): the session acted as another role when a tenant transaction started —
+ * a session-level SET ROLE survived from an earlier request, or something re-set it. Thrown before the tenant is bound, so
+ * nothing runs.
+ */
+export class TenantSessionRoleError extends Error {
+  constructor(currentUser: string, sessionUser: string) {
+    super(`refusing the tenant transaction: the session acts as "${currentUser}", not its login "${sessionUser}" (pool safety)`);
+    this.name = 'TenantSessionRoleError';
+  }
+}
+
 export interface TenantContextOptions {
   /** Route this read to the read replica when it is validated and fresh. Register-listed reads only. */
   useReplica?: boolean;
@@ -64,7 +77,11 @@ export class TenantContextService {
     private readonly schemaResolver: SchemaResolverService,
     private readonly environment: EnvironmentService,
     @Optional() private readonly replica?: PgReplicaService,
-  ) {}
+  ) {
+    // Owner login: RESET ROLE on every checkout of this DataSource's pool (database/postgres/session-role-reset.ts). The
+    // per-transaction reset + assertion in bindGucs is the second layer; it also covers DataSources built elsewhere.
+    if (this.dataSource.isInitialized) installSessionRoleResetOnDataSource(this.dataSource);
+  }
 
   async runInTenantContext<T>(
     ctx: AuthContext,
@@ -226,12 +243,19 @@ export class TenantContextService {
   }
 
   private async bindGucs(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    // Owner-login pool safety (G-09): a session-level SET ROLE / set_config('role', …, false) left behind by an earlier
+    // request on this pooled connection must not carry into this tenant transaction. RESET ROLE (session level, inside the
+    // transaction: it persists on COMMIT, reverts on ROLLBACK — allowed in READ ONLY transactions, never DISCARD ALL), then
+    // the binding SELECT below also returns current_user / session_user and the transaction fails closed if they differ.
+    await manager.query(RESET_ROLE_SQL);
     // Reset the optional read-only roster capability and the org-admin Assigned Staff scope (VenueManagerService) on every
     // transaction; only the service method that needs one binds it, after this.
-    await manager.query(
-      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true)`,
+    const rows: Array<{ cu: string; su: string }> = await manager.query(
+      `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), current_user::text AS cu, session_user::text AS su`,
       [ctx.organisationId ?? '', ctx.workspaceId ?? '', ctx.userId, ctx.role, ctx.actorType ?? ''],
     );
+    const identity = rows?.[0];
+    if (!identity || identity.cu !== identity.su) throw new TenantSessionRoleError(String(identity?.cu), String(identity?.su));
   }
 
   private async bindSearchPath(manager: EntityManager, schema: string): Promise<void> {

@@ -1,8 +1,11 @@
+import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
+const logger = new Logger('PushDispatch');
 // A push send (one HTTP call to FCM) completes in low single-digit seconds — same reasoning as
 // email's own PROCESSING_LEASE_MINUTES: generous enough that a genuinely slow-but-alive attempt
 // is never wrongly reclaimed, short enough that a dead worker's claim doesn't stall a delivery long.
@@ -35,6 +38,14 @@ export interface PushDispatchResult {
   recovered: number;
   failedExhausted: number;
   deliveryUncertain: number;
+  /**
+   * Phase D-Q3 (audit §13 #5): publishes that threw (Redis down/slow). Caught PER ROW — the rest of the cycle carries on.
+   * The row's `queued_at` stamp is withdrawn (fenced) so the next tick publishes it again, as before the fix. per_scope
+   * only: in global claim mode a publish error propagates exactly as before (release with the 15 s retry).
+   */
+  publishFailed?: number;
+  /** The first publish error's name this cycle (for the one summary warning). */
+  lastPublishError?: string;
 }
 
 /**
@@ -65,7 +76,11 @@ export async function runPushDispatchCycle(
     total.recovered += scope.recovered;
     total.failedExhausted += scope.failedExhausted;
     total.deliveryUncertain += scope.deliveryUncertain;
+    if (scope.publishFailed) total.publishFailed = (total.publishFailed ?? 0) + scope.publishFailed;
+    if (scope.lastPublishError && !total.lastPublishError) total.lastPublishError = scope.lastPublishError;
   }
+  // One summary per cycle (not one line per row during an outage).
+  if (total.publishFailed) logger.warn(`push dispatch: ${total.publishFailed} publish(es) failed this cycle (${total.lastPublishError}); each is retried on the next tick`);
 
   return total;
 }
@@ -74,6 +89,7 @@ export async function runPushDispatchCycle(
  * Phase D (D1): `WORKER_CLAIM_MODE=global` claim — the per_scope eligibility predicate, unchanged (asserted by
  * push-dispatch.job.spec.ts), restricted to the ids the global pointer claim returned for this organisation.
  */
+// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
 const GLOBAL_CLAIM_SQL = `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
                   dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
            FROM core.push_delivery
@@ -105,6 +121,7 @@ export async function dispatchPushScope(
       const claimed = ids !== undefined
         ? await manager.query<ClaimedRow[]>(GLOBAL_CLAIM_SQL, [ids.length, [...ids]])
         : await manager.query<ClaimedRow[]>(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `SELECT id, organisation_id, status, attempt_count, max_attempts, provider_call_started_at,
                   dispatch_generation, queued_at, (status = 'PENDING' AND queued_at < now() - interval '${PENDING_STALE_MINUTES} minutes') AS stale_pending
            FROM core.push_delivery
@@ -137,7 +154,11 @@ export async function dispatchPushScope(
             recoveredGenerations.set(row.id, generation);
             recovered.add(row.id);
           } else {
-            if (row.queued_at === null || row.queued_at === undefined) firstPublish.push(row.id);
+            // Phase D-Q3 (audit §13 #5): a PENDING row already published (queued_at stamped) whose 2-minute window has not
+            // run out is NOT re-added. Before, every tick re-added the same deduplicated jobId while the consumer lagged:
+            // no effect on delivery, only Redis traffic. Its recovery is unchanged — the stale-PENDING branch above.
+            if (row.queued_at !== null && row.queued_at !== undefined) continue;
+            firstPublish.push(row.id);
             // A PENDING row that already has a generation (> 0) is always published under it, never `.attempt.0`.
             const generation = Number(row.dispatch_generation ?? 0);
             if (generation > 0) recoveredGenerations.set(row.id, generation);
@@ -146,6 +167,15 @@ export async function dispatchPushScope(
           continue;
         }
         if (hadPriorAttempt && row.attempt_count >= row.max_attempts) {
+          // D-Q5b: the claim now counts the in-flight attempt, so PROCESSING at the cap is "the last allowed attempt died".
+          // If it had already called the provider (marker set) the push may have been delivered: DELIVERY_UNCERTAIN, as it
+          // was before the counter change (with the job-relative count that row sat one below the cap) — never relabelled
+          // as a plain exhausted failure. Without the marker nothing was sent: exhausted, unchanged.
+          if (row.status === 'PROCESSING' && row.provider_call_started_at) {
+            await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN' WHERE id = $1`, [row.id]);
+            uncertainCount++;
+            continue;
+          }
           await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' WHERE id = $1`, [row.id]);
           exhaustedCount++;
           continue;
@@ -172,6 +202,13 @@ export async function dispatchPushScope(
       if (firstPublish.length > 0) {
         await manager.query(`UPDATE core.push_delivery SET queued_at = now() WHERE id = ANY($1::uuid[]) AND queued_at IS NULL`, [firstPublish]);
       }
+      // #24: a full per_scope batch means more due rows may remain in this organisation (global-mode follow-up sweep) — but
+      // only when this pass MOVED something. Unlike email, a published push row stays PENDING until the consumer takes it,
+      // so while the consumer is behind every pass re-selects the same oldest 50 already-queued rows; signalling then would
+      // only re-walk every organisation to re-publish deduplicated jobIds. Push backlog drain is therefore consumer-paced.
+      if (ids === undefined && claimed.length >= BATCH_SIZE && firstPublish.length + recovered.size + exhaustedCount + uncertainCount > 0) {
+        noteLegacyBatchLimitReached();
+      }
       return { toPublish, recoveredGenerations, recovered, exhaustedCount, uncertainCount };
     });
 
@@ -181,15 +218,38 @@ export async function dispatchPushScope(
 
     for (const row of claim.toPublish) {
       const generation = claim.recoveredGenerations.get(row.id);
-      if (generation !== undefined) {
-        // eslint-disable-next-line no-await-in-loop
-        await republish(row.id, organisationId, generation);
-        if (claim.recovered.has(row.id)) total.recovered++;
-      } else {
-        // eslint-disable-next-line no-await-in-loop
-        await publish(row.id, organisationId);
+      // Phase D-Q3 (audit §13 #5): caught per row, like email — one failed publish no longer aborts the rest of the cycle.
+      try {
+        if (generation !== undefined) {
+          // eslint-disable-next-line no-await-in-loop
+          await republish(row.id, organisationId, generation);
+          if (claim.recovered.has(row.id)) total.recovered++;
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          await publish(row.id, organisationId);
+        }
+        total.published++;
+      } catch (error) {
+        // Global claim mode (ids given): unchanged behaviour — the error propagates, so runGlobalDispatch releases this and
+        // every remaining scope with its 15 s retry and ends the run. Withdrawing queued_at here would make the pointer
+        // trigger re-time the pointer to "due now" and the SAME run would re-claim it every batch (independent review R1).
+        if (ids !== undefined) throw error;
+        total.publishFailed = (total.publishFailed ?? 0) + 1;
+        // per_scope only. Keep today's prompt retry: the claim already stamped queued_at, and a stamped row inside its 2-minute window is
+        // no longer re-added. Un-stamp it (fenced on status + generation, so a consumer claim or another replica's
+        // recovery is never undone) and the NEXT tick publishes it again under the same jobId — as the old every-tick
+        // re-add did. If this write fails too (database trouble), the 2-minute stale-PENDING rule still recovers the row.
+        const fence = generation ?? Number(row.dispatch_generation ?? 0);
+        await tenant
+          .runInTenantContext({ organisationId, workspaceId: null, userId: '', role: '' }, (manager) =>
+            manager.query(
+              `UPDATE core.push_delivery SET queued_at = NULL WHERE id = $1 AND status = 'PENDING' AND dispatch_generation = $2 AND queued_at IS NOT NULL`,
+              [row.id, fence],
+            ),
+          )
+          .catch(() => undefined);
+        if (!total.lastPublishError) total.lastPublishError = (error as Error)?.name ?? 'Error';
       }
-      total.published++;
     }
   }
 

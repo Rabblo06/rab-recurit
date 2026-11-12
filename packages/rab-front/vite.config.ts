@@ -18,6 +18,8 @@ export default defineConfig(({ mode }) => {
     .map((h) => h.trim())
     .filter(Boolean);
   const proxyTarget = env.VITE_API_PROXY_TARGET?.trim();
+  // Read from the environment as well as .env files: docker-compose.yml sets it on the container.
+  const pollWatch = (env.VITE_WATCH_POLLING ?? process.env.VITE_WATCH_POLLING) === 'true';
   return {
     root: __dirname,
     cacheDir: '../../node_modules/.vite/rab-front',
@@ -36,15 +38,50 @@ export default defineConfig(({ mode }) => {
             },
           }
         : {}),
-      // Docker Desktop on Windows doesn't reliably propagate inotify events
-      // across the Windows->Linux bind mount (this repo lives at C:\Rab-recruit,
-      // not inside WSL2's own filesystem), so Vite's default chokidar watcher
-      // never sees host-side edits and HMR silently never fires. Polling is the
-      // standard workaround. Harmless outside Docker (native fs events still work).
-      watch: {
-        usePolling: true,
-        interval: 300,
+      // Docker Desktop on Windows doesn't reliably propagate inotify events across the Windows->Linux bind mount (this repo
+      // lives at C:\Rab-recruit, not inside WSL2's own filesystem), so the dev container (docker-compose.yml `front`) sets
+      // VITE_WATCH_POLLING=true. Polling is OFF everywhere else: measured 2026-11-11, it kept ~29 % of a CPU core busy
+      // while idle and slowed every first module transform in the container. VITE_WATCH_INTERVAL tunes it (default 300 ms).
+      ...(pollWatch
+        ? { watch: { usePolling: true, interval: Number(env.VITE_WATCH_INTERVAL ?? process.env.VITE_WATCH_INTERVAL ?? 300) || 300 } }
+        : {}),
+      // Transform the shell and the main pages at start-up instead of on the first click (the dev server serves every
+      // module separately; in the container a page's first transform took 1-4 s).
+      warmup: {
+        clientFiles: [
+          './src/main.tsx',
+          './src/App.tsx',
+          './src/shell/Layout.tsx',
+          './src/features/dashboard/Dashboard.tsx',
+          './src/features/users/Users.tsx',
+          './src/features/scheduling/Shifts.tsx',
+          './src/features/scheduling/Calendar.tsx',
+          './src/features/payroll/Payroll.tsx',
+          './src/features/offers/Offers.tsx',
+          './src/features/venues/Venues.tsx',
+          './src/features/settings/layout/SettingsLayout.tsx',
+          './src/features/settings/profile/ProfilePage.tsx',
+        ],
       },
+    },
+    // Pre-bundle React and the heavy libraries reached through lazy() routes, like Twenty: otherwise Vite could discover
+    // one mid-session and re-optimise + reload the page. (No mid-session re-optimise was seen in the 2026-11-11
+    // measurement; this keeps it that way when imports change.)
+    optimizeDeps: {
+      include: [
+        'react',
+        'react-dom',
+        'react-dom/client',
+        'react/jsx-runtime',
+        'react/jsx-dev-runtime',
+        'react-router-dom',
+        '@tanstack/react-query',
+        'axios',
+        'framer-motion',
+        'recharts',
+        'react-phone-number-input',
+        '@tabler/icons-react',
+      ],
     },
   };
 });

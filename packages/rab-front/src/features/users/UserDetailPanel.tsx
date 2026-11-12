@@ -18,7 +18,7 @@ import { DetailSkeleton } from '../../shared/components/LoadingState';
 import { timeAgo } from '../../shared/lib/timeAgo';
 import { toast } from '../../shared/lib/toast';
 import { getStaffDisplayStatus, type InvitationStatus } from './staffStatus';
-import PhoneInput from './PhoneInput';
+import PhoneInput from './LazyPhoneInput';
 import AvatarUploadButton from './AvatarUploadButton';
 import EmailChangeStepUpDialog from './EmailChangeStepUpDialog';
 import VenueManagerTeamSection from './VenueManagerTeamSection';

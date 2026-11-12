@@ -93,6 +93,23 @@ export interface WorkerRuntimeOptions {
    * lock, so a waiting job holds no lock another replica could use. Bounds the scans' share of the runtime pool.
    */
   maxConcurrentCycles?: number;
+  /**
+   * Phase D-Q1 (missed-tick observability): when set, every scan TICK — the moment its trigger fires on this process
+   * (interval mode: the loop's timer; bullmq mode: a scheduled job handed to this replica), whatever the outcome
+   * (ran, idle, failed, skipped because still running or locked elsewhere) — HSETs field `<metricKey>` = epoch ms on this
+   * hash (7-day TTL, refreshed). Unlike `last<Loop>At` (stamped only when a cycle did real work), a stale field here means
+   * the TRIGGER stopped (a lost scheduler, a stuck timer, no live Worker), which an alert can detect. Best-effort, never
+   * blocks a cycle, never written in shutdown. Unset (default, and the provisioner) → nothing is written.
+   */
+  ticksKey?: string;
+  /** TTL of `ticksKey` (refreshed on each write). Default 7 days. */
+  ticksTtlSeconds?: number;
+  /**
+   * Client for the `ticksKey` writes. main.ts passes a FAIL-FAST client (QUEUE_PRODUCER_REDIS_OPTIONS: no offline queue,
+   * bounded commands) so tick writes during a Redis outage are rejected at once instead of piling up in the blocking main
+   * client's offline queue (`maxRetriesPerRequest: null`). Default: the runtime's own client.
+   */
+  ticksRedis?: Pick<Redis, 'multi'>;
 }
 
 /** Phase B (P6, owner-approved): the scan-concurrency cap of the Worker jobs process. */
@@ -146,10 +163,10 @@ export type CycleLockWrapper = <T>(work: () => Promise<T>) => Promise<{ acquired
  * half-rendered PDF, a mid-flight email claim) instead of `process.exit`-ing
  * underneath it.
  *
- * Why non-overlap matters: several jobs are heavy (a Playwright render is
+ * Why non-overlap matters: several jobs are heavy (a PDF render is
  * seconds). If a cycle outlasted its interval a second cycle would start on
  * top of it — harmless for correctness (per-resource advisory locks + CAS),
- * but it multiplies Chromium/DB-connection load exactly when the system is
+ * but it multiplies render CPU / DB-connection load exactly when the system is
  * already slow.
  *
  * Two drivers share ONE execution path (`execute`): `every()` (interval mode — a process-local timer per loop, exactly as
@@ -343,10 +360,27 @@ export class WorkerRuntime {
     return cycle;
   }
 
+  /** D-Q1: records that this loop's trigger fired (see `ticksKey`). Best-effort, never throws, never awaited. */
+  private recordTick(options: WorkerLoopOptions): void {
+    const key = this.options.ticksKey;
+    if (!key) return;
+    try {
+      (this.options.ticksRedis ?? this.redis)
+        .multi()
+        .hset(key, options.metricKey ?? options.name, Date.now())
+        .expire(key, this.options.ticksTtlSeconds ?? 7 * 24 * 60 * 60)
+        .exec()
+        .catch(() => undefined);
+    } catch {
+      // A broken client must never break a cycle.
+    }
+  }
+
   /** Runs the cycle once immediately (unless `firstRunAfterInterval`), then on `intervalMs` (interval mode). */
   every(options: WorkerLoopOptions): void {
     const tick = () => {
       if (this.shuttingDown) return;
+      this.recordTick(options);
       if (this.running.has(options.name)) {
         this.logger.warn(`${options.name}: previous cycle still running — skipping this tick`);
         return;
@@ -384,6 +418,7 @@ export class WorkerRuntime {
       this.metrics.record(key, 'skipped-shutdown');
       return 'skipped-shutdown';
     }
+    this.recordTick(options);
     if (this.running.has(options.name)) {
       this.logger.warn(`${options.name}: previous cycle still running on this instance — skipping this job`);
       if (options.statKeys.skipped) {

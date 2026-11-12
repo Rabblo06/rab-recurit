@@ -45,6 +45,7 @@ export function uniqueRecipients(recipients: Array<RealtimeRecipient | null | un
 
 export async function venueManagerUserIds(manager: EntityManager, venueId: string): Promise<string[]> {
   const rows = await manager.query<Array<{ user_id: string }>>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT DISTINCT mp.user_id
        FROM manager_venue mv
        JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
@@ -121,6 +122,7 @@ export async function attendanceAudience(manager: EntityManager, attendanceId: s
  */
 export async function payrollAudience(manager: EntityManager, workspaceId: string): Promise<RealtimeRecipient[]> {
   const rows = await manager.query<Array<{ user_id: string }>>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT DISTINCT wm.user_id
        FROM core.workspace_membership wm
        JOIN core."user" u ON u.id = wm.user_id AND ${ACTIVE_USER}
@@ -150,6 +152,7 @@ export async function payrollAudience(manager: EntityManager, workspaceId: strin
  */
 export async function approverAudience(manager: EntityManager, organisationId: string): Promise<RealtimeRecipient[]> {
   const rows = await manager.query<Array<{ user_id: string }>>(
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     `SELECT mp.user_id FROM core.manager_profile mp
        JOIN core."user" u ON u.id = mp.user_id AND ${ACTIVE_USER}
       WHERE mp.organisation_id = $1 AND mp.type IN ('internal', 'ceo')`,

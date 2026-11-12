@@ -56,9 +56,11 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | `CLOCK_IN_EARLY_MINUTES` | 15 | How early clock-in opens. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
+| `PDF_RENDERER` | `chromium` | How the Worker renders report PDFs that have a native layout (today the final timesheet): `chromium`, or `native` (pure JavaScript, no browser). Exactly one of the two; anything else refuses to boot. No automatic fallback between them. |
 | `GEOFENCE_MAX_ACCURACY_M` | 100 | Worst acceptable GPS accuracy at enforced venues. |
 | `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
-| `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` | 60 | When an unanswered acceptance is auto-confirmed. |
+
+`MANAGER_CONFIRMATION_TIMEOUT_MINUTES` no longer exists: Crewflow never confirms an offer automatically, and the manager-confirmation deadline (30 minutes before a standard offer's start) is fixed, not configurable. A deployment that still sets it keeps booting; the value is ignored. `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` still sets how often the Worker checks for passed deadlines.
 
 ## Feature flags (all default `false`)
 
@@ -93,7 +95,6 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
 | `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
 | `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
-| `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` | PDF rendering. |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 
 ## Clients

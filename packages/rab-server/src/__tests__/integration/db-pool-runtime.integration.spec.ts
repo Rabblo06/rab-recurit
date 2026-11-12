@@ -34,7 +34,7 @@ describeIfDb('database pools and sessions (B5, live)', () => {
       `SELECT current_setting('statement_timeout') AS st, current_setting('idle_in_transaction_session_timeout') AS iit,
               current_setting('application_name') AS app, current_setting('default_transaction_read_only') AS ro, current_user AS who`,
     );
-    expect(row).toMatchObject({ st: '30s', iit: '1min', app: 'crewflow-api', ro: 'off', who: 'crewflow_app' });
+    expect(row).toMatchObject({ st: '30s', iit: '1min', app: 'crewflow-api', ro: 'off', who: 'crewflow_owner' }); // I-class (BC-02): the one runtime login
     // The database-wide defaults are untouched: the values come from this session's startup options only.
     const [defaults] = await ds.query(`SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'`);
     const [source] = await ds.query(`SELECT source FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'`);

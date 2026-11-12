@@ -6,13 +6,13 @@ icon: "cloud-arrow-up"
 
 ## Images and processes
 
-`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, with Chromium for PDF rendering) builds the shared application image. `packages/rab-docker/rab/Dockerfile.worker-bundle` builds the Worker image on top of it.
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds ONE application image, which the API, the Worker and `rab-ops` run with different commands; it includes the Worker-only packages, including the native PDF renderer. The image contains no browser: the build fails if Chromium is installed, and the image gate fails if Chromium, Playwright or any library only Chromium pulled in comes back. Both builds fail if Node or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
 
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |
-| API | `api-prestart.sh` (then `main.js`) | `crewflow_app` (restricted) | Never migrates, never bootstraps an admin. Checks read-only that no migration is pending. |
-| Worker | `start-worker-bundle.cjs` (launcher) | jobs: `crewflow_app`; provisioner: `crewflow` | Two supervised processes with separate non-root users. Only the provisioner process receives the provisioning login. |
-| Migrate (one-off release step) | `deploy-prepare.js` | `crewflow_migrator`, from `.env.migrate` only | Runs before the API and the Worker (they wait for it to exit 0). Applies migrations only for an approved release; exit 3 when migrations are pending but not approved. |
+| API | `api-prestart.sh` (then `main.js`) | the one owner login | Migrates on start under the migration lock (O3, like Twenty; approval mode `none`), registers the BullMQ job schedulers, then serves. One instance, deployed stop-then-start. Never bootstraps an admin. |
+| Worker | `node packages/rab-worker/dist/main.js` (the same image as the API) | the one owner login | One non-root process (uid 1000) under the container init; workspace provisioning runs in-process. The former launcher and its provisioner child are retired (O1). |
+| (no release step) | | | O3 removed the one-off `rab-migrate`: the API migrates on start, and the Worker never migrates and only consumes the job schedulers. Back up before every upgrade (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md` section 3). |
 
 Every process reads one database variable, `PG_DATABASE_URL`, holding its own credential; production refuses the legacy names (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX`) and requires TLS verify-full on a direct (non-pooled) endpoint. The image's default `CMD` is `api-prestart.sh`, which never migrates. Migrations run only in the one-off `rab-migrate` step, which takes the migration lock and checks the target, the deployment identity, the identity and, for production, the reviewed approval list (`production-migration-approval.ts`, finding N1). Full procedure: `docs/runbooks/database.md`.
 
@@ -59,17 +59,17 @@ Any other value refuses to start. `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` sets 
 | `ci-front`, `ci-shared`, `ci-ui`, `ci-mobile`, `ci-e2e` | Pull requests, pushes to `main` | Package checks, run only when the package changed. |
 | `ci-security` | Pull requests, pushes to `main` | `yarn npm audit`, constraints, `check-rls`, Docker build. |
 | `cd-deploy-tag` | Tags `v*.*.*` | Creates a GitHub release. |
-| `publish-image` | Release published, or manual | Builds and pushes `ghcr.io/rabblo06/rab-recurit-server`. |
+| `publish-image` | Release published, or manual | Runs the image security gate, then, after a reviewer approves the `release` environment, pushes the one gated image (API + Worker) by digest to the private Docker Hub repository `docker.io/adhin007/adolphus`. GHCR is no longer a target. |
 
 A push to `main` may redeploy production if the hosting platform's auto-deploy is on. Keep it off until a release has been prepared with the runbook.
 
 ## Release image tags
 
-`publish-image` tags each image with:
+`publish-image` pushes the one exact gated image (the API and the Worker run the same image with different commands), with digests preserved and no rebuild, under exactly one immutable tag:
 
-- the release version, from `rab/vX.Y.Z` tags
-- `latest`, for full releases
-- the short commit SHA
+- `<full commit sha>`
+
+There is no `latest`, prefix, version or per-architecture tag, and the push refuses a tag that already exists. Releases up to v0.4.0 were two images tagged `api-<sha>` / `worker-<sha>`. The compose files take the one digest as `CREWFLOW_IMAGE_TAG` (named like Twenty's `TAG`, but it accepts only a `sha256:` digest; a plain tag is refused). Deploy by index digest (`docker.io/adhin007/adolphus@sha256:...`) from the release manifest; the tags are labels, not references. See `packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md` section 8.
 
 It always builds from a clean CI checkout, so no local `.env` can reach an image layer.
 

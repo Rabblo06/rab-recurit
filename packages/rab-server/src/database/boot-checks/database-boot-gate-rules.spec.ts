@@ -1,3 +1,4 @@
+import { healthyOwnerLoginPosture, OwnerLoginPostureFixture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
   BOOT_FACTS_SQL,
@@ -12,7 +13,7 @@ import {
   FORCE_RLS_SQL,
   isDatabaseUnreachable,
   isProductionProcess,
-  PROVISIONER_ROLE,
+  OWNER_LOGIN,
   RLS_DISABLED_TENANT_TABLES_SQL,
   ROUTINE_GRANTS_SQL,
   withDatabaseRetry,
@@ -28,17 +29,21 @@ interface FakeDb {
   markerRows: Array<Record<string, unknown>>;
   force: Array<Record<string, unknown>>;
   disabled: string[];
+  /** The owner-login posture (role walk, inventory, objects) — healthy unless a spec plants a deviation. */
+  posture: OwnerLoginPostureFixture;
 }
 
 function healthy(overrides: Partial<FakeDb> = {}, factOverrides: Record<string, unknown> = {}): FakeDb {
   return {
     facts: {
-      who: 'crewflow_app',
-      login: 'crewflow_app',
+      // Owner-login architecture: every process connects as crewflow_owner, a member of the owner roles by design.
+      who: 'crewflow_owner',
+      login: 'crewflow_owner',
       super: false,
       bypassrls: false,
       login_privileged: false,
-      owner_roles: null,
+      login_repl_createdb: false,
+      owner_roles: 'crewflow,rab_owner,rab_secure_owner',
       server_version_num: 160015,
       database: 'crewflow',
       extensions: 'btree_gist,citext,pg_trgm,pgcrypto,plpgsql,unaccent,uuid-ossp',
@@ -49,6 +54,7 @@ function healthy(overrides: Partial<FakeDb> = {}, factOverrides: Record<string, 
     markerRows: [],
     force: FORCE_RLS_SPOT_CHECK_TABLES.map((relname) => ({ relname, enabled: true, forced: true })),
     disabled: [],
+    posture: healthyOwnerLoginPosture(),
     ...overrides,
   };
 }
@@ -63,6 +69,8 @@ const GATE_HOST = 'devdb';
 function fakeQuery(db: FakeDb): Query {
   return async (sql: string) => {
     if (sql === BOOT_FACTS_SQL) return [db.facts];
+    const posture = ownerLoginPostureAnswer(sql, db.posture);
+    if (posture) return posture;
     // Phase D wave 3 gate 1c (covered in database-boot-gate-rules.dispatch-notify.spec.ts): nothing stored, poll-mode session.
     if (sql === DISPATCH_NOTIFY_STORED_SQL) return [];
     if (sql === DISPATCH_NOTIFY_SESSION_SQL) return [{ dispatch_notify: null }];
@@ -104,7 +112,7 @@ async function refusedAt(promise: Promise<unknown>, gate: string, pattern: RegEx
 describe('database boot gates (fake connection)', () => {
   it('a healthy non-production database passes every gate; an unbound marker is a warning', async () => {
     const report = await evaluateBootGates(input(healthy()));
-    expect(report).toMatchObject({ processName: 'api', role: 'crewflow_app', serverVersionNum: 160015, identity: 'absent', tls: false });
+    expect(report).toMatchObject({ processName: 'api', role: 'crewflow_owner', serverVersionNum: 160015, identity: 'absent', tls: false });
     expect(report.warnings).toHaveLength(1);
   });
 
@@ -112,7 +120,7 @@ describe('database boot gates (fake connection)', () => {
     const unbound = healthy({ markerPresent: true, markerRows: [] });
     for (const db of [healthy(), unbound]) {
       for (const processName of ['api', 'worker', 'provisioner', 'cli'] as const) {
-        const asRole = processName === 'provisioner' ? healthy(db === unbound ? { markerPresent: true, markerRows: [] } : {}, { who: 'crewflow', login: 'crewflow' }) : db;
+        const asRole = db;
         await refusedAt(
           evaluateBootGates(input(asRole, { processName, cliCommand: processName === 'cli' ? 'bootstrap-admin' : undefined, connectionHost: 'db.gate.example.com' })),
           'identity',
@@ -133,27 +141,56 @@ describe('database boot gates (fake connection)', () => {
     await expect(evaluateBootGates(input(healthy(), { connectionHost: '127.0.0.1' }))).resolves.toMatchObject({ identity: 'absent' });
   });
 
-  it('role: refuses the wrong login, SET ROLE, superuser / BYPASSRLS, and owner-role membership', async () => {
-    await refusedAt(evaluateBootGates(input(healthy({}, { who: 'crewflow', login: 'crewflow' }))), 'role', /connects as "crewflow"; expected crewflow_app/);
+  it('role: refuses the wrong login, SET ROLE, superuser / BYPASSRLS / REPLICATION / CREATEDB and a crewflow_worker membership', async () => {
+    // The legacy restricted logins are SCHEMA roles now: connecting as one of them is refused for every process.
+    for (const legacy of ['crewflow_app', 'crewflow']) {
+      await refusedAt(evaluateBootGates(input(healthy({}, { who: legacy, login: legacy }))), 'role', new RegExp(`connects as "${legacy}"; expected crewflow_owner`));
+    }
+    await refusedAt(evaluateBootGates(input(healthy({}, { who: 'crewflow_worker', login: 'crewflow_worker' }))), 'role', /schema role that holds the Worker-only/);
     await refusedAt(evaluateBootGates(input(healthy({}, { login: 'crewflow_migrator' }))), 'role', /SET ROLE is not accepted/);
     await refusedAt(evaluateBootGates(input(healthy({}, { super: true }))), 'role', /SUPERUSER or BYPASSRLS/);
     await refusedAt(evaluateBootGates(input(healthy({}, { bypassrls: true }))), 'role', /SUPERUSER or BYPASSRLS/);
     await refusedAt(evaluateBootGates(input(healthy({}, { login_privileged: true }))), 'role', /SUPERUSER or BYPASSRLS/);
-    await refusedAt(evaluateBootGates(input(healthy({}, { owner_roles: 'rab_secure_owner' }))), 'role', /member of rab_secure_owner/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { login_repl_createdb: true }))), 'role', /REPLICATION or CREATEDB/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { worker_member: true }))), 'role', /member of crewflow_worker, which must have zero members/);
   });
 
-  it('role, CLI: crewflow_app by default; the documented operator commands may also run as crewflow; never the migrator', async () => {
-    expect(expectedRolesFor('api')).toEqual(['crewflow_app']);
-    expect(expectedRolesFor('cli', 'storage:reconcile')).toEqual(['crewflow_app']);
-    expect(expectedRolesFor('cli', undefined)).toEqual(['crewflow_app']);
-    expect(expectedRolesFor('cli', 'bootstrap-admin')).toEqual(['crewflow', 'crewflow_app']);
-    const asCrewflow = healthy({}, { who: 'crewflow', login: 'crewflow' });
-    await expect(evaluateBootGates(input(asCrewflow, { processName: 'cli', cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow' });
-    await refusedAt(evaluateBootGates(input(asCrewflow, { processName: 'cli', cliCommand: 'storage:reconcile' })), 'role', /CLI command "storage:reconcile" connects as "crewflow"/);
+  it('role (BC-01, owner-accepted §2): membership of the owner roles is the design now — it is NOT refused; the layout is checked instead', async () => {
+    // Before: `owner_roles` non-empty refused at gate 1 ("member of rab_secure_owner, which own tables and bypass RLS").
+    await expect(evaluateBootGates(input(healthy()))).resolves.toMatchObject({ role: 'crewflow_owner' });
+  });
+
+  it('role, owner-login inventory: a backdoor login, a reachable predefined role or an owner role turned LOGIN is refused', async () => {
+    const backdoor = healthyOwnerLoginPosture();
+    backdoor.foreignLogins = [{ login: 'monitoring_agent', reaches: 'rab_secure_owner' }];
+    await refusedAt(evaluateBootGates(input(healthy({ posture: backdoor }))), 'role', /unexpected LOGIN role "monitoring_agent" can act as "rab_secure_owner"/);
+    const predefined = healthyOwnerLoginPosture();
+    predefined.reach.push({ role: 'pg_read_all_data', path: 'crewflow_owner>x>pg_read_all_data', super: false, bypassrls: false, createdb: false, replication: false, is_login: false });
+    await refusedAt(evaluateBootGates(input(healthy({ posture: predefined }))), 'role', /predefined role "pg_read_all_data" is reachable/);
+    const relogin = healthyOwnerLoginPosture();
+    relogin.layout = relogin.layout.map((r) => (r.role === 'rab_secure_owner' ? { ...r, canlogin: true } : r));
+    await refusedAt(evaluateBootGates(input(healthy({ posture: relogin }))), 'role', /owner role "rab_secure_owner" is LOGIN/);
+  });
+
+  it('objects (after the schema gate): a pre-auth table without FORCE or a rewritten definer policy is refused', async () => {
+    const drift = healthyOwnerLoginPosture();
+    drift.objectLines = ['not-forced|core.user|enable=true force=false'];
+    await refusedAt(evaluateBootGates(input(healthy({ posture: drift }))), 'objects', /not-forced\|core\.user/);
+    const policy = healthyOwnerLoginPosture();
+    policy.definerPolicies = policy.definerPolicies.map((r) => (r.tbl === 'user_session' ? { ...r, qual: 'true' } : r));
+    await refusedAt(evaluateBootGates(input(healthy({ posture: policy }))), 'objects', /core\.user_session: policy user_session_secure_owner_definer drifted/);
+  });
+
+  it('role, CLI: every command — and every process — expects the owner login only (the per-command role table is gone)', async () => {
+    expect(OWNER_LOGIN).toBe('crewflow_owner');
+    for (const [processName, cliCommand] of [['api'], ['worker'], ['provisioner'], ['cli', 'storage:reconcile'], ['cli', 'bootstrap-admin'], ['cli', undefined]] as const) {
+      expect(expectedRolesFor(processName, cliCommand)).toEqual(['crewflow_owner']);
+    }
+    await expect(evaluateBootGates(input(healthy(), { processName: 'cli', cliCommand: 'bootstrap-admin' }))).resolves.toMatchObject({ role: 'crewflow_owner' });
     await refusedAt(
       evaluateBootGates(input(healthy({}, { who: 'crewflow_migrator', login: 'crewflow_migrator' }), { processName: 'cli', cliCommand: 'bootstrap-admin' })),
       'role',
-      /expected crewflow or crewflow_app/,
+      /expected crewflow_owner/,
     );
   });
 
@@ -170,7 +207,9 @@ describe('database boot gates (fake connection)', () => {
     const prodBound = healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] });
     await refusedAt(evaluateBootGates(input(prodBound)), 'identity', /bound to production/);
     await refusedAt(evaluateBootGates(input(healthy(), { env: PROD_ENV })), 'identity', /production api process refuses to run: the database has no deployment identity marker/);
-    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'identity', /requires CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/);
+    // BC-11 (owner decision 2026-11-05): production with NO declaration skips the marker check (warning) and reaches the
+    // next gate; with a declaration the exact match above still refuses.
+    await refusedAt(evaluateBootGates(input(healthy(), { env: { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } })), 'tls', /not using TLS/);
     // Production with the right marker but no TLS: the identity gate passes, the TLS gate refuses.
     await refusedAt(evaluateBootGates(input(prodBound, { env: PROD_ENV })), 'tls', /not using TLS/);
     const tls = healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] }, { ssl: true });
@@ -251,22 +290,14 @@ describe('database boot gates (fake connection)', () => {
     );
   });
 
-  it('provisioner: expects crewflow (the provisioning identity), refuses crewflow_app, and keeps every other role rule', async () => {
-    expect(PROVISIONER_ROLE).toBe('crewflow');
-    expect(expectedRolesFor('provisioner')).toEqual(['crewflow']);
-    const asCrewflow = healthy({}, { who: 'crewflow', login: 'crewflow' });
-    await expect(evaluateBootGates(input(asCrewflow, { processName: 'provisioner' }))).resolves.toMatchObject({ processName: 'provisioner', role: 'crewflow' });
-    await refusedAt(evaluateBootGates(input(healthy(), { processName: 'provisioner' })), 'role', /provisioner process connects as "crewflow_app"; expected crewflow/);
-    await refusedAt(evaluateBootGates(input(healthy({}, { who: 'crewflow', login: 'crewflow', super: true }), { processName: 'provisioner' })), 'role', /SUPERUSER or BYPASSRLS/);
-    await refusedAt(
-      evaluateBootGates(input(healthy({}, { who: 'crewflow', login: 'crewflow', owner_roles: 'rab_secure_owner' }), { processName: 'provisioner' })),
-      'role',
-      /member of rab_secure_owner/,
-    );
-    await refusedAt(evaluateBootGates(input(healthy({}, { who: 'crewflow', login: 'crewflow_migrator' }), { processName: 'provisioner' })), 'role', /SET ROLE is not accepted/);
+  it('provisioner (in-process now): expects the owner login like every process, and keeps every other role rule', async () => {
+    await expect(evaluateBootGates(input(healthy(), { processName: 'provisioner' }))).resolves.toMatchObject({ processName: 'provisioner', role: 'crewflow_owner' });
+    await refusedAt(evaluateBootGates(input(healthy({}, { who: 'crewflow', login: 'crewflow' }), { processName: 'provisioner' })), 'role', /connects as "crewflow"; expected crewflow_owner/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { super: true }), { processName: 'provisioner' })), 'role', /SUPERUSER or BYPASSRLS/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { login: 'crewflow_migrator' }), { processName: 'provisioner' })), 'role', /SET ROLE is not accepted/);
     // Production is the runtime's own declaration, as for the jobs child; TLS is then required.
     expect(isProductionProcess('provisioner', { NODE_ENV: 'production' })).toBe(true);
-    await refusedAt(evaluateBootGates(input(asCrewflow, { processName: 'provisioner', env: PROD_ENV })), 'identity', /production provisioner process refuses to run/);
+    await refusedAt(evaluateBootGates(input(healthy(), { processName: 'provisioner', env: PROD_ENV })), 'identity', /production provisioner process refuses to run/);
   });
 
   it('provisioner: a ledger ahead of the code is a refusal for it, while the API only warns', async () => {
@@ -274,7 +305,7 @@ describe('database boot gates (fake connection)', () => {
     const facts = { expected: code, applied: [...code, 'Newer1786000000900'] };
     await refusedAt(
       evaluateBootGates(
-        input(healthy({}, { who: 'crewflow', login: 'crewflow' }), {
+        input(healthy(), {
           processName: 'provisioner',
           checkPendingMigrations: async ({ production }) => ({ warnings: assertSchemaCompatible(assessSchemaCompatibility('provisioner', facts, { production }), 'provisioner process') }),
         }),

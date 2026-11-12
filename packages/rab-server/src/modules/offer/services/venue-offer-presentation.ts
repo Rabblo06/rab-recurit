@@ -1,3 +1,5 @@
+import { OFFER_CLOSED_REASON } from '@rab/shared';
+
 import { isLateClockIn } from '../../scheduling/services/late-clock-in';
 
 /**
@@ -35,12 +37,17 @@ export function resolveVenueOfferStatus(input: {
   confirmed: number;
   accepted: number;
   rejected: number;
+  /** Rows of the `rejected` count that were withdrawn at the manager-confirmation deadline (never "staff rejected"). */
+  notConfirmedInTime?: number;
 }): string {
   if (input.status === 'declined') return 'Declined';
   if (input.status === 'pending_manager_approval') return 'Pending approval';
   if (input.confirmed >= input.required && input.required > 0)
     return 'Fully filled';
-  if (input.rejected > 0) return `${input.rejected} staff rejected`;
+  const deadline = input.notConfirmedInTime ?? 0;
+  const rejected = input.rejected - deadline;
+  if (rejected > 0) return `${rejected} staff rejected`;
+  if (deadline > 0) return `${deadline} not confirmed in time`;
   if (input.confirmed + input.accepted > 0) return 'Partially filled';
   return 'Offered';
 }
@@ -57,7 +64,8 @@ export function resolveVenueOfferStatus(input: {
  *  7. confirmed booking checked in (arrival evidence) but not clocked in → CHECKED IN, or ATTENDANCE MISSING once the
  *     booking's scheduled end has passed without a clock-in; not checked in: past start + grace → LATE STAFF, else
  *     CONFIRMED (not merely "accepted");
- *  8. staff accepted, awaiting confirmation → STAFF ACCEPTED;
+ *  8. staff accepted, awaiting confirmation → STAFF ACCEPTED (past its manager-confirmation deadline it is already
+ *     REJECTED, before the Worker has withdrawn it — it can never be confirmed);
  *  9. pending offer → WAITING once the staff member has opened it, else OFFERED.
  * Anything not listed (an unknown combination) lands in DELETED OFFER — never presented as a live offer.
  */
@@ -78,6 +86,8 @@ export function resolveVenueOfferKanbanStage(input: {
   checkedInAt?: Date | string | null;
   /** The booking's scheduled end (effective assignment time); needed to tell a checked-in seat with no clock-in apart. */
   endsAt?: Date | null;
+  /** From `confirmationProjectionSql` (database clock). */
+  closedReason?: string | null;
 }): PipelineStage {
   const attendance = input.attendanceStatus ?? null;
   if (input.clockOutAt) {
@@ -105,7 +115,8 @@ export function resolveVenueOfferKanbanStage(input: {
     }
     return isLateClockIn(input) ? 'late' : 'confirmed';
   }
-  if (input.assignmentStatus === 'staff_accepted' && input.offerStatus === 'staff_accepted') return 'staff_accepted';
+  if (input.assignmentStatus === 'staff_accepted' && input.offerStatus === 'staff_accepted')
+    return input.closedReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED ? 'rejected' : 'staff_accepted';
   if (input.assignmentStatus === 'offered' && input.offerStatus === 'pending')
     return input.notificationReadAt ? 'waiting' : 'offered';
   return 'deleted';

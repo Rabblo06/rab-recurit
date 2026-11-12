@@ -11,6 +11,14 @@ import { LIST_PAGE_SIZE } from '../../shared/table-toolbar/pageSize';
 import { toast } from '../../shared/lib/toast';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
 import { confirmAllSummary } from './confirm-all-summary';
+import {
+  confirmByLabel,
+  isWithdrawnAtDeadline,
+  mayDecideAcceptedOffer,
+  NOT_CONFIRMED_IN_TIME,
+  WITHDRAWN_AT_DEADLINE_DETAIL,
+  type OfferConfirmationFields,
+} from '../../shared/lib/offerConfirmation';
 import { EmptyState, TableSkeleton } from '../../shared/components/LoadingState';
 import PageHeader from '../../shared/components/PageHeader';
 import TableViewControls, { TableSearchInput } from '../../shared/table-toolbar/TableToolbar';
@@ -18,7 +26,7 @@ import { useTableQueryState } from '../../shared/table-toolbar/useTableQueryStat
 import { useColumnVisibility } from '../../shared/table-toolbar/useColumnVisibility';
 import type { TableToolbarConfig } from '../../shared/table-toolbar/types';
 
-interface Offer {
+interface Offer extends OfferConfirmationFields {
   id: string;
   status: string;
   sentAt: string;
@@ -38,6 +46,7 @@ interface Offer {
   roleName: string;
   staffProfileId: string;
   staffName: string;
+  // + the manager-confirmation deadline fields (OfferConfirmationFields), computed by the server; absent on an older API.
 }
 
 function openBatch(batchId: string) {
@@ -178,9 +187,12 @@ export default function Offers() {
     return map;
   }, [offers]);
 
+  // Only offers the server still lets this manager confirm (before the approval deadline, sent by them). With an older
+  // API that sends no deadline fields this is every staff_accepted row, as before.
+  const confirmable = useMemo(() => offers.filter(mayDecideAcceptedOffer), [offers]);
   const acceptedBatchIds = useMemo(
-    () => [...new Set(offers.filter((o) => o.status === 'staff_accepted' && o.offerBatchId).map((o) => o.offerBatchId!))],
-    [offers],
+    () => [...new Set(confirmable.filter((o) => o.offerBatchId).map((o) => o.offerBatchId!))],
+    [confirmable],
   );
 
   // One confirm-all per batch, in sequence. Every batch is attempted even if an earlier one fails, and the user is told
@@ -188,14 +200,14 @@ export default function Offers() {
   async function handleConfirmAllAccepted() {
     if (confirmingAllBatches) return;
     setConfirmingAllBatches(true);
-    const outcomes: Array<{ ok: boolean }> = [];
+    const outcomes: Array<{ ok: boolean; message?: string }> = [];
     let failedBatches = 0;
     let firstError: unknown = null;
     try {
       for (const batchId of acceptedBatchIds) {
         try {
           const res = await confirmAllBatch.mutateAsync(batchId);
-          outcomes.push(...(((res as { data?: { results?: Array<{ ok: boolean }> } })?.data?.results) ?? []));
+          outcomes.push(...(((res as { data?: { results?: Array<{ ok: boolean; message?: string }> } })?.data?.results) ?? []));
         } catch (error) {
           failedBatches += 1;
           firstError ??= error;
@@ -239,7 +251,7 @@ export default function Offers() {
           {activeStatus === 'staff_accepted' && acceptedBatchIds.length > 0 && (
             <button className="btn btn-dark" disabled={confirmingAllBatches} onClick={handleConfirmAllAccepted}>
               <IconCheck size={14} />
-              {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${offers.length})`}
+              {confirmingAllBatches ? 'Confirming…' : `Confirm All Accepted (${confirmable.filter((o) => o.offerBatchId).length})`}
             </button>
           )}
           <TableViewControls
@@ -300,14 +312,25 @@ export default function Offers() {
                     {isVisible('pay') && <td>{fmtMoney(o.estimatedPayPence)}</td>}
                     {isVisible('status') && (
                       <td>
-                        <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>
-                        {o.status === 'staff_accepted' && o.staffAcceptedAt && (
+                        {isWithdrawnAtDeadline(o) ? (
+                          // Withdrawn by the server at the approval deadline (or about to be): never the raw reason code.
+                          <>
+                            <span className="badge badge-withdrawn">{NOT_CONFIRMED_IN_TIME}</span>
+                            <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{WITHDRAWN_AT_DEADLINE_DETAIL}</span>
+                          </>
+                        ) : (
+                          <span className={`badge badge-${o.status}`}>{o.status.replace(/_/g, ' ')}</span>
+                        )}
+                        {o.status === 'staff_accepted' && !isWithdrawnAtDeadline(o) && o.staffAcceptedAt && (
                           <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>Staff accepted {timeAgo(o.staffAcceptedAt)}</span>
+                        )}
+                        {o.status === 'staff_accepted' && !isWithdrawnAtDeadline(o) && confirmByLabel(o.approvalDeadlineAt) && (
+                          <span className="muted offer-confirm-by" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{confirmByLabel(o.approvalDeadlineAt)}</span>
                         )}
                         {o.status === 'declined' && o.declineReason && (
                           <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.declineReason}</span>
                         )}
-                        {o.status === 'manager_rejected' && o.rejectionReason && (
+                        {o.status === 'manager_rejected' && !isWithdrawnAtDeadline(o) && o.rejectionReason && (
                           <span className="muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>{o.rejectionReason}</span>
                         )}
                       </td>
@@ -324,7 +347,7 @@ export default function Offers() {
                             <IconBan size={14} />
                           </button>
                         )}
-                        {o.status === 'staff_accepted' && (
+                        {mayDecideAcceptedOffer(o) && (
                           <>
                             <button className="btn-icon success" title="Confirm shift" onClick={() => openConfirm(o)}>
                               <IconCheck size={14} />

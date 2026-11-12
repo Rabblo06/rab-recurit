@@ -1,4 +1,5 @@
 import { InviteAutoDeleteConfigError, resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
+import { MaintenanceScanProcessor } from './maintenance.processors';
 
 /**
  * Phase D F-1 (owner condition D8; docs/plans/PHASE-D-SQL-GATE.md §1786721340000): as the runtime login the cycle sees no `core."user"` /
@@ -48,12 +49,20 @@ function harness(opts: {
     if (sql.includes('workspace_schema_registry')) return [];
     return [];
   };
-  const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn({ query }) };
+  const counters = { transactions: 0 };
+  const dataSource = {
+    transaction: async <T>(fn: (m: unknown) => Promise<T>) => {
+      counters.transactions += 1;
+      return fn({ query });
+    },
+    // A DataSource-level query (outside a transaction) would also be a database access: counted the same way.
+    query: async (sql: string, params: unknown[] = []) => query(sql, params),
+  };
   const audits = () =>
     statements
       .filter((s) => s.sql.includes('INSERT INTO core.audit_log'))
       .map((s) => [s.params[2], s.params[1], JSON.parse(s.params[3] as string)]);
-  return { statements, dataSource, audits };
+  return { statements, dataSource, audits, counters };
 }
 
 describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE_ENABLED=true AND the live role can EXECUTE the three functions)', () => {
@@ -153,13 +162,29 @@ describe('account invite cleanup — legacy path (flag ON but the role cannot EX
     expect(legacyExpire.params).toEqual([500]);
     expect(h.statements.some((s) => s.sql.includes(`WHERE u.status = 'invite_expired'`))).toBe(true);
   });
+
+  it('ON + not executable: the legacy statement sequence is pinned exactly (advisory lock, probe, expire SELECT, cleanup SELECT)', async () => {
+    const h = harness({ usable: false });
+    await runAccountInviteCleanupCycle(h.dataSource as never, ON);
+    expect(h.statements.map((s) => s.sql)).toEqual([
+      `SELECT pg_advisory_xact_lock(hashtext('rab_account_invite_cleanup'))`,
+      expect.stringContaining('has_function_privilege'),
+      MAIN_EXPIRE_SQL,
+      MAIN_CLEANUP_SQL,
+    ]);
+    expect(h.statements[2]!.params).toEqual([500]);
+    expect(h.statements[3]!.params).toEqual([50, null, null]);
+  });
 });
 
 /**
- * Phase D wave 2 — retention gate (owner decision 2026-11-01): WORKER_INVITE_AUTO_DELETE_ENABLED, default false. OFF ⇒ no
- * automatic deletion of user accounts and no other new externally visible behaviour: neither definer is ever called (not
- * even `worker_expire_account_invites` — on production the cycle is a silent no-op under RLS today, D0 F-1, so flipping
- * invite status would itself be new behaviour) and the cycle is the pre-Phase-D code path exactly as on main (no probe).
+ * Phase D wave 2 — retention gate (owner decision 2026-11-01): WORKER_INVITE_AUTO_DELETE_ENABLED, default false.
+ *
+ * D-1 (Twenty Mode M0, HIGH): OFF used to run the pre-Phase-D direct-SQL cycle and relied on the runtime login being
+ * crewflow_app (RLS, no tenant context ⇒ a silent no-op). On any owner-member login (an owner of the NOT-FORCE
+ * core."user" / core.account_invite, a superuser, or Twenty Mode's crewflow_owner) that same OFF path expired invites and
+ * DELETED accounts across every tenant. OFF now means OFF: the cycle returns before it opens a transaction, so no
+ * statement at all reaches the database, whatever the login can see or execute.
  */
 const MAIN_EXPIRE_SQL = `SELECT u.id, u.organisation_id
          FROM core."user" u
@@ -201,22 +226,50 @@ describe('account invite cleanup — retention gate OFF (WORKER_INVITE_AUTO_DELE
     expect(result).toEqual({ expired: 0, deleted: 0, retained: 0 });
   });
 
-  it('OFF is the pre-Phase-D statement sequence exactly as on main: advisory lock, expire SELECT, cleanup SELECT — no privilege probe', async () => {
+  it('D-1: OFF opens no transaction and sends no statement at all — not the advisory lock, not the legacy expire/cleanup SQL', async () => {
     const h = definersPresent();
-    await runAccountInviteCleanupCycle(h.dataSource as never, OFF);
-    expect(h.statements.map((s) => s.sql)).toEqual([
-      `SELECT pg_advisory_xact_lock(hashtext('rab_account_invite_cleanup'))`,
-      MAIN_EXPIRE_SQL,
-      MAIN_CLEANUP_SQL,
-    ]);
-    expect(h.statements[1]!.params).toEqual([500]);
-    expect(h.statements[2]!.params).toEqual([50, null, null]);
+    expect(await runAccountInviteCleanupCycle(h.dataSource as never, OFF)).toEqual({ expired: 0, deleted: 0, retained: 0 });
+    expect(h.counters.transactions).toBe(0);
+    expect(h.statements).toEqual([]);
   });
 
-  it('no options (any caller that does not pass the flag) is OFF — fail closed', async () => {
+  it('D-1: OFF on a login that WOULD see every tenant (owner-member / superuser: the legacy SELECTs return rows) still changes nothing', async () => {
+    // A harness that answers the legacy SQL the way an owner-member login does (RLS not applied to the table owner).
+    const statements: string[] = [];
+    let transactions = 0;
+    const ownerQuery = async (sql: string) => {
+      statements.push(sql);
+      if (sql.includes(`WHERE u.status = 'invited'`)) return [{ id: U(40), organisation_id: ORG }, { id: U(41), organisation_id: OTHER_ORG }];
+      if (sql.includes(`WHERE u.status = 'invite_expired'`)) return [{ id: U(42), organisation_id: ORG, cleanup_at: at }];
+      return [];
+    };
+    const ownerDataSource = {
+      transaction: async <T>(fn: (m: unknown) => Promise<T>) => {
+        transactions += 1;
+        return fn({ query: ownerQuery });
+      },
+      query: ownerQuery,
+    };
+    for (let tick = 0; tick < 3; tick += 1) {
+      expect(await runAccountInviteCleanupCycle(ownerDataSource as never, OFF)).toEqual({ expired: 0, deleted: 0, retained: 0 });
+    }
+    expect(transactions).toBe(0);
+    expect(statements).toEqual([]);
+  });
+
+  it('no options (any caller that does not pass the flag) is OFF — fail closed, no statement', async () => {
     const h = definersPresent();
-    await runAccountInviteCleanupCycle(h.dataSource as never);
-    expect(h.statements.some((s) => DEFINER_CALL.test(s.sql) || s.sql.includes('has_function_privilege'))).toBe(false);
+    expect(await runAccountInviteCleanupCycle(h.dataSource as never)).toEqual({ expired: 0, deleted: 0, retained: 0 });
+    expect(h.counters.transactions).toBe(0);
+    expect(h.statements).toEqual([]);
+  });
+
+  it('only the boolean true enables it: truthy non-boolean values passed by a careless caller stay OFF', async () => {
+    for (const value of ['true', 1, {}, 'yes'] as unknown[]) {
+      const h = definersPresent();
+      expect(await runAccountInviteCleanupCycle(h.dataSource as never, { autoDeleteEnabled: value as boolean })).toEqual({ expired: 0, deleted: 0, retained: 0 });
+      expect(h.statements).toEqual([]);
+    }
   });
 
   it('ON + definers executable ⇒ the Phase D definer path (expire + candidates + delete through the definers)', async () => {
@@ -252,4 +305,38 @@ describe('resolveInviteAutoDeleteEnabled (WORKER_INVITE_AUTO_DELETE_ENABLED, rea
     expect(() => resolveInviteAutoDeleteEnabled(env(true, 'production'))).toThrow(/owner approval/);
     expect(resolveInviteAutoDeleteEnabled(env(false, 'production'))).toBe(false);
   });
+});
+
+/**
+ * D-1 through the real Worker entry: the scheduled `account-invite-cleanup` processor reads the flag on every cycle and
+ * passes the RUNTIME data source. With the flag unset or false the data source is never touched — whatever login it is
+ * (in Twenty Mode it is the schema-owning crewflow_owner, which sees every tenant's core."user" row).
+ */
+describe('D-1: MaintenanceScanProcessor.accountInviteCleanup with the flag OFF never touches the runtime data source', () => {
+  for (const flag of [undefined, false, 'false', '']) {
+    it(`WORKER_INVITE_AUTO_DELETE_ENABLED=${JSON.stringify(flag)} ⇒ no transaction, no statement, nothing logged`, async () => {
+      const touched: string[] = [];
+      const runtimeDataSource = {
+        transaction: async () => {
+          touched.push('transaction');
+          throw new Error('the OFF cycle must not open a transaction');
+        },
+        query: async (sql: string) => {
+          touched.push(sql);
+          throw new Error('the OFF cycle must not send a statement');
+        },
+      };
+      const logged: string[] = [];
+      const deps = {
+        get: () => ({
+          runtimeDataSource,
+          environmentService: { get: (key: string) => (key === 'WORKER_INVITE_AUTO_DELETE_ENABLED' ? flag : key === 'NODE_ENV' ? 'production' : undefined) },
+          logger: { log: (m: string) => logged.push(m) },
+        }),
+      };
+      await new MaintenanceScanProcessor(deps as never).accountInviteCleanup();
+      expect(touched).toEqual([]);
+      expect(logged).toEqual([]);
+    });
+  }
 });
