@@ -12,7 +12,7 @@ process.env.WORKSPACE_HOST_ROUTING_ENABLED = 'true';
 process.env.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED = 'true';
 process.env.AUTH_LOGIN_HANDOFF_ENABLED = 'true';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import { createHash, randomUUID } from 'node:crypto';
@@ -24,6 +24,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -80,8 +81,7 @@ describeIfDb('wave 4 lane MFA — cross-host login handoff (integration, real fu
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     app.use(cookieParser());
     await app.init();
     owner = createAdminDataSource();

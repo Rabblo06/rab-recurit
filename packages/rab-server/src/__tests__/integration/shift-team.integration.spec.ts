@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -11,6 +11,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { ShiftTeamService } from '../../modules/attendance/services/shift-team.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
   jest.setTimeout(180000);
@@ -25,8 +26,7 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = module.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(module.createNestApplication());
     await app.init();
     owner = createAdminDataSource(); await owner.initialize();
     tenant = module.get(TenantContextService); service = module.get(ShiftTeamService);

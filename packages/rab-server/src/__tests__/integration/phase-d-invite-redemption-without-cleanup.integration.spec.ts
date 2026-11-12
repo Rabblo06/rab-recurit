@@ -1,7 +1,7 @@
 import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -19,6 +19,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -179,8 +180,7 @@ describeIfDb('Phase D F-1: dead account-invite links are refused at redemption e
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     accountInvites = moduleRef.get(AccountInviteService);
     authService = moduleRef.get(AuthService);

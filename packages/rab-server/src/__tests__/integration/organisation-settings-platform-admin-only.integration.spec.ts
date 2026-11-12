@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ForbiddenException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ManagerType } from '@rab/shared';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { OrganisationSettingsAdminService } from '../../modules/identity/services/organisation-settings-admin.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * W6-E2E-04 + owner decision 2026-10-23: "Changing organisation settings (incl. turning off password sign-in) =
@@ -57,8 +58,7 @@ describeIfDb('W6-E2E-04 organisation settings are platform-admin only (integrati
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

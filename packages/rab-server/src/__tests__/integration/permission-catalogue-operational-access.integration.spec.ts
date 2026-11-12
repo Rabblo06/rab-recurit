@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -13,6 +13,7 @@ import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { loadSystemRoleDefaultPermissions } from '../../modules/identity/services/system-role-permissions';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Recurring 403 on the Users page (2026-10-15, RECURRING_403_AUTHORIZATION_ROOT_CAUSE_REPORT.md). The permission catalogue
@@ -34,8 +35,7 @@ describeIfDb('permission catalogue and operational access (integration)', () => 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

@@ -11,7 +11,7 @@ process.env.WORKSPACE_HOST_ROUTING_ENABLED = 'true';
 process.env.WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED = 'true';
 process.env.AUTH_LOGIN_HANDOFF_ENABLED = 'true';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -27,6 +27,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { RATE_LIMIT_REQUIRED } from '../../engine/core-modules/throttler/rab-throttler.guard';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -79,8 +80,7 @@ describeIfDb('lane D — login handoff "Continue as …?" peek (integration, rea
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     app.use(cookieParser());
     await app.init();
     owner = createAdminDataSource();

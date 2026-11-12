@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ServiceUnavailableException, ValidationPipe } from '@nestjs/common';
+import { INestApplication, ServiceUnavailableException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -15,6 +15,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Settings → Members with exact role and access rules (owner-approved design 2026-10-14) — real PostgreSQL with
@@ -77,8 +78,7 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     runtime = moduleRef.get(DataSource);
     owner = createAdminDataSource();

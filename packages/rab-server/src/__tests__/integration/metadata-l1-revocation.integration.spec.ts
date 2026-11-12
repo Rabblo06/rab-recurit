@@ -7,7 +7,7 @@ process.env.METADATA_L1_CACHE_ENABLED = 'true';
 process.env.METADATA_L1_CACHE_TTL_MS = '5000'; // the longest allowed L1 TTL: revocation must still be immediate
 
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -21,6 +21,7 @@ import { CoreEntityCacheService } from '../../engine/core-modules/entity-cache/c
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Wave 5 lane OPS — "the L1 never delays a revocation". With EVERY cache on (auth context, user session, core entity,
@@ -44,8 +45,7 @@ describeIfDb('L1 metadata cache never delays revocation (all caches on)', () => 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

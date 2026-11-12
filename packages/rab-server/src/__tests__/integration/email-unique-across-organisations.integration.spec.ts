@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, UserStatus, VenueType } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +14,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Owner policy (2026-10-15): a NEW account (or an email change) may not use an email address that belongs to a live account in
@@ -56,8 +57,7 @@ describeIfDb('email addresses are unique across organisations for new accounts (
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

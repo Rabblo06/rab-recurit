@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ForbiddenException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -18,6 +18,7 @@ import { StaffService } from '../../modules/staff/services/staff.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { codeAt, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Lane D (owner decision M10-2): `StepUpReauthService.assertRecentStepUp` had ZERO callers, so every "sensitive" action
@@ -66,8 +67,7 @@ describeIfDb('lane D — step-up on sensitive operations (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     const env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) => (key in overrides ? overrides[key] : realGet(key))) as EnvironmentService['get']);

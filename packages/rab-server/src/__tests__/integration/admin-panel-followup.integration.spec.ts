@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Job, MetricsTime, Queue, Worker } from 'bullmq';
 import Redis from 'ioredis';
@@ -20,6 +20,7 @@ import { WORKER_SCHEDULER_STATUS_KEY } from '../../engine/worker-shared/heartbea
 import { OrganisationOnboardingService } from '../../modules/manager/services/organisation-onboarding.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Admin panel follow-up release (owner-approved 2026-10-25), real PostgreSQL + Redis:
@@ -80,8 +81,7 @@ describeIfDb('admin panel follow-up: required reasons, platform-admin hardening,
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

@@ -19,7 +19,7 @@ process.env.REALTIME_HEARTBEAT_INTERVAL_MS = '5000'; // the class's own @Min(5_0
 process.env.REALTIME_MAX_CONNECTIONS_PER_USER = '2';
 
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import * as http from 'node:http';
@@ -44,6 +44,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -183,8 +184,7 @@ describeIfDb('realtime gateway — authenticated SSE stream (integration)', () =
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     await app.listen(0); // a real bound port — required for a raw http client to read a streaming response
     baseUrl = await app.getUrl();
