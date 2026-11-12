@@ -1,6 +1,6 @@
 // W6-E2E-06: SQL-level before/after on the DISPOSABLE e2e database (127.0.0.1:15470/rab_e2e) only.
 // Runs the attendance / offer list COUNT queries exactly as the services build them for Initial Manager A (role manager,
-// actor user, search_path = A's workspace schema, executed as crewflow_app via SET ROLE), with and without the pinned
+// actor user, search_path = A's workspace schema, executed as crewflow_owner, the one app login, via SET ROLE), with and without the pinned
 // join order, under (1) the current statistics and (2) statistics removed from A's workspace tables (the state of freshly
 // bulk-loaded, not-yet-analysed tables: the planner falls back to default estimates). ANALYZE restores them at the end.
 // Usage: node explain06.mjs <e2e env file> <state.json> <out.json>
@@ -47,7 +47,7 @@ function maxRows(node) {
 async function explain(sqlText, pinned) {
   await c.query('BEGIN');
   try {
-    await c.query('SET LOCAL ROLE crewflow_app');
+    await c.query('SET LOCAL ROLE crewflow_owner');
     await c.query(
       `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', 'manager', true), set_config('rab.actor_type', 'user', true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('search_path', $4, true), set_config('jit', 'off', true)`,
       [A.orgId, ws, user.id, schema],

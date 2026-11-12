@@ -165,7 +165,8 @@ services:
       # transaction commits; the dispatcher stays the safety net. The email sweep runs every 30 s (code default 2 s, bounds
       # 1-60): the API registers the BullMQ scheduler with ITS value; the Worker only consumes it, and is set identically.
       # Push and realtime sweeps keep the 2 s default (not set here). When PUSH_ENABLED is turned on, set
-      # WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" here on both services (owner rule; its immediate send is this flag).
+      # WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" here on both services (owner rule; its immediate send is this flag). The
+      # gate and the verifier refuse PUSH_ENABLED=true without it (Phase X J2, SJ-03).
       # Committed (scripts/compose-owner-login.cjs and staging/verify-image-compose.cjs enforce both, on both services).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"

@@ -1,6 +1,6 @@
 import { PermissionFlagType } from '@rab/shared';
-import { Injectable } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
@@ -11,6 +11,7 @@ import {
   UserPermissionOverride,
   UserRole,
 } from '../../../modules/identity/entities';
+import { memoRunnerFor, readTxPermissions, storeTxPermissions, txPermissionIdentity } from './tx-permission-memo';
 
 /**
  * Resolved server-side per request, never read off the JWT (§5.2) — a
@@ -28,13 +29,135 @@ import {
 export class PermissionsService {
   constructor(private readonly tenantContext: TenantContextService) {}
 
+  /**
+   * C5: the PRIMARY DataSource; only a transaction on it may memoise a permission set (never the read replica). Property-
+   * injected and optional so the constructor is unchanged; absent (unit construction, a CLI without one), nothing is
+   * memoised and every check is the uncached two-query lookup.
+   */
+  @Optional()
+  @Inject(DataSource)
+  private readonly primaryDataSource?: DataSource;
+
+  /**
+   * Phase X SC-05: display hints for many flags at once (`GET /auth/capabilities`), never an authorisation decision — every
+   * action keeps its own route guard and service re-check.
+   *
+   *  - Common case: answered from the request's own security snapshot (`ctx.security.effectivePermissions`), the exact set
+   *    `PermissionGuard` authorises every route of this request from. Zero SQL, zero transactions (previously one
+   *    transaction and two queries per flag, 18 concurrent transactions per call against a 9-connection pool).
+   *  - The snapshot is used ONLY when it describes exactly this identity (same user, organisation and workspace, no Admin
+   *    Inspect). Under Admin Inspect `ctx` is the TARGET while `security` is still the ADMIN's, so the target's set is
+   *    resolved instead, in ONE tenant transaction with ONE query (`effectivePermissionsTx`) — never the admin's grants.
+   *    Any other mismatch (or no snapshot at all) takes the same one-transaction path: fail closed to a live read, never
+   *    to someone else's set.
+   */
+  async displayHints<F extends PermissionFlagType>(ctx: AuthContext, flags: readonly F[]): Promise<Record<F, boolean>> {
+    const snapshot = ctx.security;
+    const snapshotIsThisIdentity =
+      !ctx.inspectedBy &&
+      snapshot !== undefined &&
+      snapshot.userId === ctx.userId &&
+      snapshot.organisationId === ctx.organisationId &&
+      snapshot.workspaceId === ctx.workspaceId;
+    const effective: ReadonlySet<string> = snapshotIsThisIdentity
+      ? snapshot.effectivePermissions
+      : await this.tenantContext.runInTenantContext(ctx, (manager) => this.effectivePermissionsTx(manager, ctx));
+    return Object.fromEntries(flags.map((flag) => [flag, effective.has(flag)])) as Record<F, boolean>;
+  }
+
+  /**
+   * Every permission key `ctx.userId` holds in this transaction, in ONE statement: role grants (only roles visible under RLS,
+   * so another workspace's custom role never contributes; G5) minus per-user `revoke` overrides, plus `grant` overrides.
+   * The same precedence `userHasPermissionTx` applies one flag at a time (an override wins over roles; one override per
+   * (user, permission), the table's primary key), and the same `effective` CTE the request security snapshot uses.
+   * Equivalence for every flag is pinned by sc05-capabilities.integration.spec.ts.
+   */
+  async effectivePermissionsTx(manager: EntityManager, ctx: AuthContext): Promise<Set<string>> {
+    const rows = await manager.query<Array<{ key: string }>>(
+      `WITH role_perms AS (
+         SELECT DISTINCT p.key
+           FROM core.user_role ur
+           JOIN core.role r ON r.id = ur.role_id
+           JOIN core.role_permission rp ON rp.role_id = ur.role_id
+           JOIN core.permission p ON p.id = rp.permission_id
+          WHERE ur.user_id = $1
+       ),
+       overrides AS (
+         SELECT p.key, upo.effect
+           FROM core.user_permission_override upo
+           JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1
+       )
+       SELECT key FROM role_perms WHERE key NOT IN (SELECT key FROM overrides WHERE effect = 'revoke')
+       UNION
+       SELECT key FROM overrides WHERE effect = 'grant'`,
+      [ctx.userId],
+    );
+    return new Set(rows.map((row) => row.key));
+  }
+
   async userHasPermission(ctx: AuthContext, permission: PermissionFlagType): Promise<boolean> {
     return this.tenantContext.runInTenantContext(ctx, (manager) =>
       this.userHasPermissionTx(manager, ctx, permission),
     );
   }
 
+  /**
+   * Phase X C5: inside an open transaction on the primary, the FIRST check for an identity reads that identity's whole
+   * effective set in one statement (`effectivePermissionsTx`'s precedence) and memoises it on the transaction
+   * (`tx-permission-memo.ts`: never across transactions, keyed by identity, cleared by in-transaction authority writes,
+   * never filled from the replica or under a mismatched tenant binding). Every later check for the same identity in the
+   * same transaction is a set lookup. Outside a transaction: the original two-query lookup, unchanged.
+   */
   async userHasPermissionTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    permission: PermissionFlagType,
+  ): Promise<boolean> {
+    const runner = memoRunnerFor(manager, this.primaryDataSource);
+    if (!runner) return this.userHasPermissionUncachedTx(manager, ctx, permission);
+    const identity = txPermissionIdentity(ctx);
+    const memoised = readTxPermissions(runner, identity);
+    if (memoised) return memoised.has(permission);
+    const filled = await this.loadEffectivePermissionsTx(manager, ctx);
+    if (filled.boundToThisIdentity) storeTxPermissions(runner, identity, filled.keys);
+    return filled.keys.has(permission);
+  }
+
+  /** One statement: the identity's effective set plus the tenant this transaction is bound to (what role RLS reads). */
+  private async loadEffectivePermissionsTx(manager: EntityManager, ctx: AuthContext): Promise<{ keys: Set<string>; boundToThisIdentity: boolean }> {
+    const [row] = await manager.query<Array<{ keys: string[] | null; bound_org: string | null; bound_workspace: string | null }>>(
+      `WITH role_perms AS (
+         SELECT DISTINCT p.key
+           FROM core.user_role ur
+           JOIN core.role r ON r.id = ur.role_id
+           JOIN core.role_permission rp ON rp.role_id = ur.role_id
+           JOIN core.permission p ON p.id = rp.permission_id
+          WHERE ur.user_id = $1
+       ),
+       overrides AS (
+         SELECT p.key, upo.effect
+           FROM core.user_permission_override upo
+           JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1
+       ),
+       effective AS (
+         SELECT key FROM role_perms WHERE key NOT IN (SELECT key FROM overrides WHERE effect = 'revoke')
+         UNION
+         SELECT key FROM overrides WHERE effect = 'grant'
+       )
+       SELECT (SELECT array_agg(key) FROM effective) AS keys,
+              current_setting('rab.organisation_id', true) AS bound_org,
+              current_setting('rab.workspace_id', true) AS bound_workspace`,
+      [ctx.userId],
+    );
+    const boundToThisIdentity =
+      (row?.bound_org ?? '') === (ctx.organisationId ?? '') && (row?.bound_workspace ?? '') === (ctx.workspaceId ?? '') && (ctx.organisationId ?? '') !== '';
+    return { keys: new Set(row?.keys ?? []), boundToThisIdentity };
+  }
+
+  /** The original per-flag lookup (2 queries): override first, then role grants visible under RLS. */
+  private async userHasPermissionUncachedTx(
     manager: EntityManager,
     ctx: AuthContext,
     permission: PermissionFlagType,

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../../engine/core-modules/auth/auth.module';
+import { EntityCacheModule } from '../../engine/core-modules/entity-cache/entity-cache.module';
 import { RateLimitModule } from '../../engine/core-modules/rate-limit/rate-limit.module';
 import { IdentityModule } from '../identity/identity.module';
 import { ManagerWorkspaceModule } from '../manager-workspace/manager-workspace.module';
@@ -15,7 +16,7 @@ import { OrganisationOnboardingService } from './services/organisation-onboardin
 import { VenueManagerService } from './services/venue-manager.service';
 
 @Module({
-  imports: [AuthModule, IdentityModule, ManagerWorkspaceModule, RateLimitModule],
+  imports: [AuthModule, EntityCacheModule, IdentityModule, ManagerWorkspaceModule, RateLimitModule],
   controllers: [ManagerController, VenueManagerController, OrgAdminVenueManagerController, OrgAdminVenueTeamController, OrganisationOnboardingController, OrganisationInvitationController, LeadershipCapabilitiesController],
   providers: [ManagerService, VenueManagerService, OrganisationOnboardingService],
   // Reused by MembershipModule (email-first invitations) so identity creation stays in one place.

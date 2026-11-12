@@ -6079,6 +6079,28 @@ still-approved checks and the UNIQUE `worker_event` `shift-statement:<id>` are u
 - **Rollback:** remove the value on both services in the three compose files and the gate (the API re-registers the
   scheduler at 5 s on its next start).
 
+## CONFIG — production refuses global claims and event dispatch at env validation (branch phase-x/sj05-refuse-global-claims, 2026-11-11, not merged)
+
+Phase X SJ-05, owner decision 2026-11-11 (P1-10). Before: only the compose gate (`compose-owner-login.cjs`
+FORBIDDEN_NAMES) refused `WORKER_CLAIM_MODE` / `WORKER_DISPATCH_MODE`; a Worker started outside the gated compose path
+booted in global mode (the boot gate accepts the owner login under `global`). Not an exposure (global mode keeps FORCE
+RLS, the definers and lease fencing), but a governance gap.
+
+- **Control:** `productionConfigurationProblems` refuses `WORKER_CLAIM_MODE=global` and `WORKER_DISPATCH_MODE=event` when
+  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers, and the CLI, whose own production
+  marker is `DB_TARGET`; no CLI command runs dispatch claims). The approval is
+  the code constant `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false` (the `WORKER_INVITE_AUTO_DELETE` pattern): enabling
+  global claims in production is a reviewed code change that records the owner's J5 decision, never a setting.
+  Development and test are unchanged (CI's Phase D suites run global mode). A gate test re-reads the source so the two
+  layers cannot drift apart.
+- **Staging:** staging runs `NODE_ENV=production`, so it is refused there too. The runbook's staging rehearsal of global
+  activation and rollback (phase-d-deployment-runbook §5.2) therefore needs the J5 change (the constant flipped in a reviewed
+  PR) FIRST, and that change then applies to staging and production at the same time. Rehearse on staging before any
+  production deploy of that release.
+- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision). Unlike the invite rule,
+  the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
+  compose gate remains the other).
+
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
 Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
@@ -6398,3 +6420,138 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   F5 token mode, N1 on the legacy and CLI paths.
 - **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
   U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).
+
+## CONFIG — the push and realtime sweep rule is enforced by the deployment gates (branch phase-x/j2-push-realtime-gate, 2026-11-11, PR #97)
+
+Phase X J2 (S0-J SJ-03). Gate-only: no runtime, code default, migration, role, grant or RLS change; push and realtime stay
+off. Before this, the owner rule "push's sweep goes to 30 s on both services when `PUSH_ENABLED` is turned on" (2026-11-06)
+was a compose comment, so switching push on in `runtime.env` silently registered a 2 s push scheduler.
+
+- **Asset:** the delivery cadence of other people's push notifications and live updates. **Actor:** an operator enabling
+  push or realtime, or an override that configures one service differently from the other.
+- **Control:** `scripts/compose-owner-login.cjs` (full mode, and `--lint-env-file runtime`, which renders the committed
+  compose with the file's switches) and `staging/verify-image-compose.cjs` (static and `--environment`) refuse: a
+  `PUSH_ENABLED` / `REALTIME_ENABLED` value that differs between rab-api and rab-worker; `PUSH_ENABLED=true` without
+  `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"` committed on both; `REALTIME_ENABLED=true` with a realtime interval that
+  differs between the services; either interval in an env file. "On" is exactly the string `true` (the environment's own
+  parse). The verifier's env-file reader records only those two non-secret switch values in addition to names.
+- **Residual:** the realtime interval value is not pinned (no owner decision yet); the gate guarantees only that both
+  services agree. Deciding it is a precondition of turning realtime on.
+
+## SC-01 — notification email is addressed from the live user row, never from the display cache (branch phase-x/c-fix-1-recipient-email, 2026-11-11, PR #96)
+
+Phase X Stage 0 finding SC-01 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env
+default or cache flag change. `CORE_ENTITY_CACHE_ENABLED` stays off in every deploy file.
+
+- **Asset:** delivery of another person's notification email (offer, shift and request mail, PII included).
+  **Actor:** an administrator or the account owner changing an email address (often a takeover-recovery action), and any
+  write path that changes `user.email` without clearing `CoreEntityCacheService` (operator SQL, a crash after commit, a
+  failed Redis INCR).
+- **Before:** `NotificationService.notify()` took the recipient from `CoreEntityCacheService.getUserDisplay().email`. That
+  cache's epoch lives in Redis and is bumped only after commit, and most `user.email` writers never bumped it. With the
+  flag on, mail kept going to the OLD address for up to 300 s after an email change. Latent (flag off in production).
+- **Control 1 (the decision):** `notify()` reads `user.email` LIVE, in the notifying transaction, under the caller's RLS
+  context (one narrow SELECT; the cache-off path already issued one). The recipient no longer depends on any Redis state.
+  This also removes the SC-02 path (a planted entity-cache value redirecting mail): the entity cache is display-only again.
+- **Control 2 (display freshness):** every service writer of a field in the `user` display projection (first/last name,
+  email, avatar) or of the row's existence clears the entry AFTER its transaction commits; a failed transaction clears
+  nothing: `EmailChangeService.confirm`; `ManagerService.update` (name), `changePendingEmail`, `changeEmail` (direct
+  path), `deleteUser`; `StaffService.update` (name), `changePendingEmail`, `changeEmail` (direct path), `deleteUser`,
+  `uploadAvatar`, `removeAvatar`; `VenueManagerService.uploadAvatar`, `removeAvatar` (`ProfileService` already did).
+- **Tests:** `sc01-notification-recipient-live.integration.spec.ts` (cache ON, real PostgreSQL/RLS, Redis, HTTP): a
+  confirmed email change sends the next notification to the new address; a stale cache entry (row changed by SQL, cache
+  not cleared) still sends to the live address (fails on the previous code: it sent to the old one); each writer above
+  bumps the epoch exactly once; a failed (409) change and a phone-only update bump nothing.
+- **Residual:** the display cache itself keeps its documented bounded staleness (≤ 300 s) for writes outside these
+  services (operator SQL, the Worker's invite-expiry DELETE, a failed INCR). It is display-only: names and avatars.
+
+## SC-05 — `/auth/capabilities` answers from the request's resolved permission set (branch phase-x/c-fix-2-capabilities, 2026-11-11, PR #99)
+
+Phase X Stage 0 finding SC-05 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env or
+cache change.
+
+- **Asset:** availability of the API connection pool (9 connections); correctness of permission display hints.
+  **Actor:** any signed-in client (the VM app refresh, `usePayroll`, `VenueOfferPipeline`) and an Admin Inspect session.
+- **Before:** 18 concurrent `userHasPermission` calls, each its own tenant transaction: 19 transactions and 115 SQL
+  statements per call (measured), enough for one client to occupy the whole pool.
+- **Control:** `PermissionsService.displayHints` answers from `request.authContext.security.effectivePermissions`, the
+  set every `PermissionGuard` of the same request authorises from (same REPEATABLE READ snapshot, built once per request,
+  never stored across requests). It is used ONLY when the snapshot describes exactly this identity: same user,
+  organisation and workspace, and no Admin Inspect. Otherwise (Admin Inspect, where `security` is still the ADMIN's
+  snapshot, or any mismatch, or no snapshot) the TARGET's set is read live in ONE tenant transaction with ONE query
+  (`effectivePermissionsTx`: role grants visible under RLS, minus `revoke` overrides, plus `grant` overrides, the same
+  precedence as `userHasPermissionTx`). It never falls back to another identity's set and never defaults to `true`; a
+  failed read errors the request.
+- **Not an authorisation decision:** these are display hints; every action keeps its own route guard and service-layer
+  re-check. A missing permission is `false`, never a 403/404 (the endpoint has no route permission). Unauthenticated: 401.
+  A non-admin sending someone else's inspect header gets only their own hints (the guard ignores the header).
+- **Freshness:** unchanged: a grant or revoke is visible on the next request (proven with an override revoke, the route
+  guard agreeing).
+- **Tests:** `sc05-capabilities.integration.spec.ts` (response identical to one `userHasPermission` per flag for role,
+  few-grant, override-grant, override-revoke, venue-manager, platform-admin and inspected identities;
+  `effectivePermissionsTx` ≡ per-flag `userHasPermissionTx` for all 46 flags; 1 transaction / 0 tenant transactions;
+  inspect: one effective-set query for the target; next-request revoke; 401; inspect-header disclosure);
+  `permissions.service.spec.ts` (routing: snapshot of this identity → 0 transactions; inspect / mismatched user,
+  organisation or workspace / no snapshot → one live read; a failed read propagates).
+
+## SC-03 — permission overrides are part of the auth-context version vector (branch phase-x/c-fix-3-override-fingerprint, 2026-11-11, PR #101)
+
+Phase X Stage 0 finding SC-03 (`docs/plans/phase-x0/S0-C-caches.md`). Owner decision: the code fingerprint option, no
+database triggers. No migration, role, grant, RLS or env change; `AUTH_CONTEXT_CACHE_ENABLED` stays off everywhere.
+
+- **Asset:** the cached request security snapshot (effective permissions) when the auth-context cache is switched on.
+  **Actor:** anyone who changes a `core.user_permission_override` row: a future service writer, operator SQL, a
+  migration. (No production writer exists today.)
+- **Before:** the cache key is the PostgreSQL version vector (session, user, SUM(role permission_version), workspace
+  membership, platform admin, organisation). Overrides decide effective permissions (an override beats every role) but
+  had no version column, so a revoke by override kept the cached grant for up to 900 s.
+- **Control:** `SecurityVersionService.readVector` reads, in its single statement and under RLS, a CONTENT fingerprint of
+  the user's override rows: `<count>-<md5 of (permission_id, effect) ordered by permission_id | 0>`. It is part of the
+  auth-context cache key and of the realtime connection's vector comparison. Any INSERT, UPDATE of `effect` or DELETE, by
+  any path, changes it: there is no bump for a writer to forget. An unreadable value is `'x'`, which no cached key has.
+  Same mechanism as the AI access fingerprint.
+- **Revocation guarantee:** the vector is read from PostgreSQL inside the request's own transaction before any lookup, so
+  the next request after a committed override change computes a new key and rebuilds from PostgreSQL, with the cache warm,
+  with the cache's Redis unreachable (a miss, never a stale hit), and after Redis returns (the old granting entry stays
+  under the old, unreachable key).
+- **Writers:** a static test lists every writer of `core.user_permission_override` in the whole repository (production:
+  none; one e2e fixture seed) and every SECURITY DEFINER function in migrations that writes it (none), with a fixture
+  test per write form, so a new writer is reviewed as a permission write path (layer-2 check, audit, step-up). It also
+  proves the fingerprint feeds the cache key (vectors differing only in it give different keys) and pins it into
+  readVector and the realtime comparison.
+- **Status:** SC-03 is only PARTLY closed: the override half. See Residual.
+- **Residual:** role grants (`user_role`, `role_permission`) still rely on the in-transaction version bumps every service
+  writer makes; operator SQL on those tables without a bump, and the two bump-less additive grants (SC-04, a stale DENY
+  only), keep a ≤ 900 s window once the cache is on. A content hash of the role grants is a possible follow-up (owner call).
+
+## C5 — layer-2 permission checks share a transaction-local effective-permission set (branch phase-x/c5-tx-permission-set, 2026-11-11, PR #103)
+
+Phase X Stage 0 §C5 / XP-04 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env or
+cache change. The layer-2 service checks stay in the services; this changes only how many statements they cost.
+
+- **Asset:** every layer-2 authorisation decision made through `PermissionsService.userHasPermissionTx`.
+  **Actor:** any request or Worker job that checks permissions inside a tenant transaction; any code that changes
+  roles, grants or overrides in that same transaction.
+- **Control:** inside an OPEN transaction on the PRIMARY DataSource, the first check for an identity reads that identity's
+  whole effective set in one statement (role grants visible under RLS, minus `revoke` overrides, plus `grant`
+  overrides) and memoises it on that transaction's QueryRunner. Rules:
+  - never across transactions (per QueryRunner, dropped on TypeORM commit/rollback events, savepoints included, and on
+    any raw statement starting with ROLLBACK, RELEASE, COMMIT, ABORT or END, so a raw `ROLLBACK TO SAVEPOINT` sent
+    through `manager.query` also drops it);
+  - keyed by user, organisation, workspace, actor type and inspected-by;
+  - memoised only when the transaction's bound `rab.organisation_id` / `rab.workspace_id` (what role RLS reads) equal the
+    identity's, read in the same statement; a rebound transaction answers but memoises nothing;
+  - never filled on the read replica;
+  - cleared by every in-transaction security-version bump and by every ORM write to `user_role`, `role_permission`,
+    `role`, `user_permission_override`, `permission`;
+  - account status and workspace membership are not in the set and stay live (request snapshot guards,
+    `resolve_membership_for_session`).
+- **Not a cache:** nothing outlives the transaction, nothing is in Redis, and the guard snapshot is never reused.
+- **Tests:** `tx-permission-memo.spec.ts` (unit) and `c5-tx-permission-set.integration.spec.ts` (46-flag equivalence with
+  the per-flag lookup; isolation across transactions and identities; ORM write, raw SQL + bump and savepoint rollback all
+  seen by the next check; rebound workspace not memoised; one fill on `/dashboard/summary`).
+- **Known (no change):** a memo read does not re-check the binding after a LATER rebind in the same transaction
+  (`assignOwnWorkspace`, `manager-workspace.service.ts:468`); no current path checks a permission after a rebind.
+- **Residual:** a raw-SQL write to an authority table inside a transaction WITHOUT the in-transaction version bump would
+  not clear the memo for later checks in that transaction. Every service writer bumps (P1D); a writer that does not is
+  already a revocation defect for the auth-context cache.
