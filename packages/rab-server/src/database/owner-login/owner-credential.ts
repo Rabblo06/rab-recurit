@@ -2,7 +2,7 @@
  * Database setup like Twenty (DB-SETUP-PLAN §2.1, §4, §5.1): the crewflow_owner credential, derived from APP_SECRET.
  *
  * PURE: no I/O, no logging, never imports `pg`. Every value this module returns that carries a secret (the derived
- * password, a runtime URL) is a non-enumerable property, so a stray `JSON.stringify` or `console.log(plan)` never
+ * password, a runtime URL) is a non-enumerable property, so a stray `JSON.stringify` or a logged plan object never
  * prints it. Every error message is fixed text: it never contains a URL, a user, a host, a password or a verifier.
  *
  * One deployment variable, two modes (`planOwnerLogin`):
