@@ -45,25 +45,25 @@ result holds at v0.9.8 and HEAD for every row.
 |---|---|---|---|---|
 | `image` (`repository@sha256:…`) | all | HONOURED | `compose-parser.ts:195-209` (interpolated); `docker.ts:6385-6409` (pulled before the old container is removed; a digest reference is re-inspected) | The digest is what runs. |
 | `command` (argv) | all | HONOURED | `compose-parser.ts:518`, `adapters/src/runtime/compose-cmd.ts:11-17` | — |
-| `entrypoint` | rab-ops | HONOURED | `compose-parser.ts:604`, `compose-cmd.ts:31-35` | — |
+| `entrypoint` | — (not used: no service sets it since PR 2 #<PR2> removed the operations container) | HONOURED | `compose-parser.ts:604`, `compose-cmd.ts:31-35` | — |
 | `environment`, `${VAR:?}`, `${VAR:-default}` | all | HONOURED; a missing required variable is listed for the operator to fill, not refused | `compose-parser.ts:405-430`, `packages/core/src/compose-interpolation.ts:341-370`, `prepare.service.ts:1280-1283` | An empty digest would be prompted for, not rejected. |
 | YAML anchors / merge keys | — (not used) | HONOURED | `compose-parser.ts:167-171` | — |
 | `ports` with a host IP | rab-api | HONOURED (an unpinned port defaults to loopback) | `docker.ts:666-705` | `${CREWFLOW_API_BIND}` is applied. |
 | `volumes`: named volume, read-only bind | rab-redis | HONOURED | `compose-parser.ts:495-509` | — |
-| `volumes`: `type: tmpfs` (long form) | rab-migrate | **REJECTED** (blocking) | `packages/core/src/compose-spec.ts:240-255`; enforced at `prepare.service.ts:1310-1316` and `modules/migration/migrate.service.ts:109` | **The variant cannot be imported** (§4). |
+| `volumes`: `type: tmpfs` (long form) | rab-api (`/tmp`, `docker-compose.image.yml` only) | **REJECTED** (blocking) | `packages/core/src/compose-spec.ts:240-255`; enforced at `prepare.service.ts:1310-1316` and `modules/migration/migrate.service.ts:109` | **The variant cannot be imported** (§4). |
 | `healthcheck` | rab-redis, rab-api, rab-worker | HONOURED | `compose-parser.ts:569-570`, `docker.ts:805-835`, `6377`, `6496` | — |
 | `restart` (incl. `"no"`) | all | HONOURED | `compose-parser.ts:250-253`, `docker.ts:281-286`, `527-532` | — |
 | `stop_grace_period` | rab-api, rab-worker | HONOURED (`StopTimeout`, whole seconds) | `compose-parser.ts:615-640`, `docker.ts:838-860`, `6378` | The drains are kept (rab-api 40 s since 2026-11-11, rab-worker 45 s). |
 | `mem_limit`, `cpus` | rab-redis, rab-api, rab-worker | HONOURED (`Memory`, `NanoCpus`) | `compose-parser.ts:572`, `877-900`; `adapters/src/runtime/resource-limits.ts:29-48`; `docker.ts:6502` | — |
 | `depends_on` with `condition:` | rab-api, rab-worker | **PARTIAL**: names only; `service_healthy` and `service_completed_successfully` are discarded without a warning; a dependency only has to be *running* | `compose-parser.ts:399-403` (`parseDependsOn` keeps the keys), `deploy.service.ts:290-306` / `293-309` ("Every service that must be RUNNING before this one is created"), `2732` / `2740` (a dependency that failed blocks its dependents) | rab-api could start while rab-migrate is still running. The application gates still hold: `api-prestart.sh` refuses pending migrations and the Worker refuses them too. |
-| `env_file` | rab-migrate, rab-ops | **DROPPED (silent)**: not parsed and not in the unsupported list | `compose-parser.ts` (no `env_file` handling; table at `683-730` does not list it) | rab-migrate would start without its credential and refuse (no `PG_DATABASE_URL`): fail closed, but not reported at import. |
-| `profiles` | rab-ops | DROPPED (warning): "every service in the file is imported" | `compose-parser.ts:729` | rab-ops would be started (prints `--help`, exits 0, restart "no"). |
+| `env_file` | rab-api, rab-worker (`docker-compose.image.yml`: `database.env`, `runtime.env`) | **DROPPED (silent)**: not parsed and not in the unsupported list | `compose-parser.ts` (no `env_file` handling; table at `683-730` does not list it) | rab-api and rab-worker would start without `PG_DATABASE_URL` and their runtime settings, and refuse to boot: fail closed, but not reported at import. `docker-compose.production.yml` uses per-service `environment` instead, which is honoured. |
+| `profiles` | — (not used since PR 2 #<PR2>) | DROPPED (warning): "every service in the file is imported" | `compose-parser.ts:729` | None today. A service behind a profile would be started on OpenShip. `compose-one-image.cjs` refuses an operations service or an `ops` profile coming back. |
 | `user` | rab-api, rab-worker, rab-migrate | **DROPPED (warning)** | `compose-parser.ts:708`; no `User` at `docker.ts:6475-6521` | API: the image's `USER node` (1000) still applies. **Worker: the image's `USER root`** (`rab/Dockerfile.worker-bundle:103`) applies, which is what the launcher expects. |
-| `read_only` | rab-api, rab-worker, rab-migrate, rab-ops | **DROPPED (warning)** | `compose-parser.ts:715` | Writable root filesystem. |
-| `tmpfs` (service key) | rab-worker, rab-ops | **DROPPED (warning)** | `compose-parser.ts:716` | No per-child tmpfs. The launcher's preflight needs its directories; the Worker would fail or run without the isolation. |
-| `cap_drop` | rab-api, rab-worker, rab-migrate, rab-ops | **DROPPED (warning)** | `compose-parser.ts:687` | Docker's default capability set (14 capabilities, including CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, NET_RAW). |
+| `read_only` | rab-api, rab-worker | **DROPPED (warning)** | `compose-parser.ts:715` | Writable root filesystem. |
+| `tmpfs` (service key) | rab-worker | **DROPPED (warning)** | `compose-parser.ts:716` | No per-child tmpfs. The launcher's preflight needs its directories; the Worker would fail or run without the isolation. |
+| `cap_drop` | rab-api, rab-worker | **DROPPED (warning)** | `compose-parser.ts:687` | Docker's default capability set (14 capabilities, including CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, NET_RAW). |
 | `cap_add` | rab-worker | DROPPED (warning) | `compose-parser.ts:686` | No effect on its own, because the defaults already include SETUID/SETGID/KILL. |
-| `security_opt: no-new-privileges` | rab-api, rab-worker, rab-migrate, rab-ops | **DROPPED (warning)** | `compose-parser.ts:690` | `NoNewPrivs=0`. |
+| `security_opt: no-new-privileges` | rab-api, rab-worker | **DROPPED (warning)** | `compose-parser.ts:690` | `NoNewPrivs=0`. |
 | `pids_limit` | rab-api, rab-worker | **DROPPED (warning)** | `compose-parser.ts:699` | No PID/thread cap. |
 | `name` (top level) | — | Not used; OpenShip names its own projects | — | — |
 
@@ -74,7 +74,7 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 
 ## 4. How the variant behaves on OpenShip
 
-1. **Import refused.** rab-ops's `/tmp` (rab-migrate's before O3 removed it) is a long-form `type: tmpfs` volume. OpenShip classifies that as blocking
+1. **Import refused.** rab-api's `/tmp` in `docker-compose.image.yml` (16 MiB, mode 0555 on a root-owned tmpfs, so it adds no path the API can write) is a long-form `type: tmpfs` volume. It moved there in PR 2 #<PR2> from the removed operations container, which had it since O3 removed rab-migrate. OpenShip classifies that as blocking
    ("would be created as a persistent volume on disk rather than in memory") and refuses the whole file with
    `ComposeConfigurationError`. This is deliberate: the file cannot be deployed there with its security keys silently
    dropped.
@@ -103,7 +103,7 @@ memory/CPU limits. No OpenShip setting or feature applies the dropped keys to a 
 | (a) Enforce mode | `CREWFLOW_RUNTIME_ISOLATION=enforce`: the API and Worker refuse to start when any declared control is missing. | **The safe default; always on in this variant.** It turns a silent weakening into an outage that cannot be missed. It is not a deployment method: on OpenShip, nothing would run. |
 | (b) Plain `docker compose` on a VM | Run `docker-compose.image.yml` with the Docker Compose CLI on a VM the operator controls. Compose applies every key. | **Recommended for staging and for the DigitalOcean production.** It matches the Infrastructure agent's topology A (one VM, self-hosted PostgreSQL 16, Redis, Caddy edge). Use a VM that OpenShip does not manage. Running a second, unmanaged stack on OpenShip's Oracle VM would compete with OpenShip's edge proxy for ports 80/443, and OpenShip does not know about the stack. |
 | (c) An OpenShip feature or setting | A supported way to pass these keys. | **Not available** at v0.9.8 or HEAD. The keys are explicitly "not modeled", and the runtime has no per-service security settings. It would need an upstream change: the parser would have to map the keys and `docker.ts` would have to send them in `HostConfig`. |
-| (d) Import guard | A long-form `type: tmpfs` mount, which OpenShip classifies as blocking. | **Included** (rab-ops `/tmp`; rab-migrate's until O3). It refuses the import before anything runs. It depends on OpenShip's current classification, which is why (a) stays as the runtime backstop. |
+| (d) Import guard | A long-form `type: tmpfs` mount, which OpenShip classifies as blocking. | **Included** (rab-api `/tmp` in `docker-compose.image.yml` since PR 2 #<PR2>; before that, the operations container's, and rab-migrate's until O3). It refuses the import before anything runs. It depends on OpenShip's current classification, which is why (a) stays as the runtime backstop. `staging/verify-image-compose.cjs` fails if the guard is missing. |
 
 **Recommendation: (b) plain `docker compose` on a dedicated VM**, with (a) and (d) kept as safeguards. Do not deploy
 this variant through OpenShip. The temporary OpenShip deployment stays as it is: not redeployed, not migrated, and
