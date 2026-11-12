@@ -10,7 +10,10 @@
  * happen to be equal, and fails when:
  *   - rab-api, rab-worker (and rab-ops, when present) do not use the IDENTICAL image reference;
  *   - that reference is not <repository>@${CREWFLOW_IMAGE_TAG...} (one variable, a digest, never a tag), or names any other
- *     image variable (a separate API or Worker tag variable is exactly what this forbids);
+ *     image variable (a separate API or Worker tag variable is exactly what this forbids). Only docker-compose.production.yml
+ *     may carry a DEFAULT (owner decision 2026-11-12: the release is pinned in the file so OpenShip deploys without anyone
+ *     typing CREWFLOW_IMAGE_TAG), and only a full digest: `${CREWFLOW_IMAGE_TAG:-sha256:<64 lowercase hex>}`. A tag,
+ *     `latest`, a short or malformed digest, or any other default is refused; every other deploy combination has none;
  *   - a deploy service has a `build:` section (a server never builds; local builds are docker-compose.local-build.yml);
  *   - rab-worker does not wait for a HEALTHY rab-api with `restart: true` (Compose then stops the old Worker before it
  *     replaces the API, so an old Worker never runs beside a new API), or for a healthy rab-redis;
@@ -38,6 +41,11 @@ const IMAGE_VAR = 'CREWFLOW_IMAGE_TAG';
 const MIN_API_STOP_GRACE_S = 40;
 // <repository or ${CREWFLOW_IMAGE_REPOSITORY...}>@${CREWFLOW_IMAGE_TAG...}: the digest form; a `:` tag cannot appear.
 const ONE_IMAGE_REF = /^(\$\{CREWFLOW_IMAGE_REPOSITORY(:-[a-z0-9./_-]+)?\}|[a-z0-9./_:-]+)@\$\{CREWFLOW_IMAGE_TAG(:\?[^}]*)?\}$/;
+// The same reference with the ONE allowed default: a full release index digest (docker-compose.production.yml only).
+const PINNED_DIGEST_IMAGE_REF = /^(\$\{CREWFLOW_IMAGE_REPOSITORY(:-[a-z0-9./_-]+)?\}|[a-z0-9./_:-]+)@\$\{CREWFLOW_IMAGE_TAG:-sha256:[0-9a-f]{64}\}$/;
+/** The deploy combinations whose image line may carry the pinned release digest as its default (owner decision 2026-11-12). */
+const DEFAULT_DIGEST_COMBOS = Object.freeze(['docker-compose.production.yml']);
+const allowsDefaultDigest = (combo) => combo.length === 1 && DEFAULT_DIGEST_COMBOS.includes(combo[0]);
 
 function durationSeconds(v) {
   if (v === undefined || v === null) return NaN;
@@ -48,8 +56,11 @@ function durationSeconds(v) {
   return { ms: n / 1000, s: n, m: n * 60, h: n * 3600, undefined: n }[m[2]];
 }
 
-/** Pure check of one rendered (non-interpolated) model. Returns a list of problems. */
-function checkModel(model, label) {
+/**
+ * Pure check of one rendered (non-interpolated) model. Returns a list of problems. `allowDefaultDigest`: the image line may
+ * be `${CREWFLOW_IMAGE_TAG:-sha256:<64 hex>}` (docker-compose.production.yml only); otherwise it must have no default.
+ */
+function checkModel(model, label, { allowDefaultDigest = false } = {}) {
   const problems = [];
   const p = (msg) => problems.push(`${label}: ${msg}`);
   const services = model?.services ?? {};
@@ -64,7 +75,11 @@ function checkModel(model, label) {
     const s = services[name];
     if (s.build !== undefined) p(`${name}: has a build section (a server never builds; use the gated image)`);
     const image = String(s.image ?? '');
-    if (!ONE_IMAGE_REF.test(image)) p(`${name}: image must be <repository>@\${${IMAGE_VAR}} (one variable, a digest), got ${JSON.stringify(image)}`);
+    if (!(ONE_IMAGE_REF.test(image) || (allowDefaultDigest && PINNED_DIGEST_IMAGE_REF.test(image)))) {
+      p(allowDefaultDigest
+        ? `${name}: image must be <repository>@\${${IMAGE_VAR}} with no default or a full sha256:<64 hex> default (never a tag or latest), got ${JSON.stringify(image)}`
+        : `${name}: image must be <repository>@\${${IMAGE_VAR}} (one variable, a digest, no default), got ${JSON.stringify(image)}`);
+    }
     const vars = [...image.matchAll(/\$\{([A-Z0-9_]+)/g)].map((m) => m[1]);
     for (const v of vars) {
       if (v !== IMAGE_VAR && v !== 'CREWFLOW_IMAGE_REPOSITORY') p(`${name}: image names ${v} (only ${IMAGE_VAR} and CREWFLOW_IMAGE_REPOSITORY)`);
@@ -115,7 +130,7 @@ function main() {
       problems.push(`${label}: docker compose config failed: ${String(e.stderr || e.message).trim().slice(0, 400)}`);
       continue;
     }
-    const found = checkModel(model, label);
+    const found = checkModel(model, label, { allowDefaultDigest: allowsDefaultDigest(combo) });
     console.log(`[compose-one-image] ${found.length ? 'FAIL' : 'PASS'} ${label}`);
     problems = problems.concat(found);
   }
@@ -124,5 +139,5 @@ function main() {
   console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after`);
 }
 
-module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF };
+module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest, render };
 if (require.main === module) main();

@@ -4,12 +4,16 @@
 # DEPLOY = ONE COMMAND (owner decision 2026-11-11, "deploy exactly like Twenty"):
 #   docker compose pull && docker compose up -d
 # rab-api, rab-worker and rab-ops all run ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_TAG}: ONE variable, the release's
-# multi-platform INDEX digest (sha256:<64 hex>) from the gated publish-image run. A plain tag is refused (the `@` form only
-# accepts a digest, and scripts/compose-owner-login.cjs refuses anything else in compose.env). This file never builds:
-# the server always runs an image that passed the image security gate. Building from source is docker-compose.local-build.yml
-# (LOCAL/DEV ONLY). The API starts first, migrates, registers the job schedulers and becomes healthy; the Worker starts only
-# after that (depends_on rab-api: service_healthy, restart: true — Compose stops the old Worker BEFORE it replaces the API,
-# so an old Worker never runs beside a new API). Rollback: CREWFLOW_IMAGE_TAG=<previous digest>, then the same command.
+# multi-platform INDEX digest (sha256:<64 hex>) from the gated publish-image run. THE RELEASE IS PINNED IN THIS FILE (owner
+# decision 2026-11-12): the default after `:-` is the published, gate-verified release digest, so OpenShip deploys without
+# anyone typing CREWFLOW_IMAGE_TAG; a release bump is a reviewed PR that changes that digest on all three lines. OpenShip
+# (or `docker compose`) can override it by setting CREWFLOW_IMAGE_TAG to another sha256 digest. The default is only ever a
+# full digest, never a tag or `latest` (scripts/compose-one-image.cjs refuses anything else; docker-compose.image.yml stays
+# strict with no default). This file never builds: the server always runs an image that passed the image security gate.
+# Building from source is docker-compose.local-build.yml (LOCAL/DEV ONLY). The API starts first, migrates, registers the job
+# schedulers and becomes healthy; the Worker starts only after that (depends_on rab-api: service_healthy, restart: true —
+# Compose stops the old Worker BEFORE it replaces the API, so an old Worker never runs beside a new API).
+# Rollback: set CREWFLOW_IMAGE_TAG=<previous release digest> (or revert the digest bump on main), then the same command.
 #
 # !!! OPENSHIP CANNOT RUN THIS STACK SAFELY (M0 D11) !!!
 # OpenShip drops `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on`
@@ -314,7 +318,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
     command: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
@@ -384,7 +388,7 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
     # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
@@ -464,7 +468,7 @@ services:
   # rab-ops — SUPERSEDED (separated mode), kept unchanged and never started by `up` until the final clean-up PR (#9, owner
   # approval). Do not run it against an owner-login deployment.
   rab-ops:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
     profiles: ["ops"]
     env_file:
       - .env.ops

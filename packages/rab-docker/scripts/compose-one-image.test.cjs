@@ -156,3 +156,88 @@ test('DENIAL (rendered): a real compose file with two image variables fails the 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Owner decision 2026-11-12: docker-compose.production.yml pins the release digest as the image default, so OpenShip
+// deploys without anyone typing CREWFLOW_IMAGE_TAG. Only a full sha256 digest; every other deploy file keeps no default.
+const { allowsDefaultDigest, DEPLOY_COMBOS, PINNED_DIGEST_IMAGE_REF } = require('./compose-one-image.cjs');
+const DIGEST = `sha256:${'d7'.repeat(32)}`;
+const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
+const allImages = (m, image) => {
+  for (const n of ['rab-api', 'rab-worker', 'rab-ops']) m.services[n].image = image;
+  return m;
+};
+const PROD = { allowDefaultDigest: true };
+
+test('production.yml: a full sha256 release digest as the default passes', () => {
+  assert.deepEqual(checkModel(allImages(good(), withDefault(DIGEST)), 'fixture', PROD), []);
+  // The strict form (no default) is still accepted there too.
+  assert.deepEqual(checkModel(good(), 'fixture', PROD), []);
+});
+
+test('DENIAL: any default on a file that must stay strict (docker-compose.image.yml and its overlays)', () => {
+  refused(allImages(good(), withDefault(DIGEST)), /image must be .*no default/);
+});
+
+for (const [label, value] of [
+  ['latest', 'latest'],
+  ['a tag', 'v1.2.3'],
+  ['a short digest', `sha256:${'d7'.repeat(16)}`],
+  ['63 hex characters', `sha256:${'a'.repeat(63)}`],
+  ['65 hex characters', `sha256:${'a'.repeat(65)}`],
+  ['upper-case hex', `sha256:${'D7'.repeat(32)}`],
+  ['another algorithm', `sha512:${'a'.repeat(128)}`],
+  ['a bare hex string', 'a'.repeat(64)],
+  ['an empty default', ''],
+  ['a nested variable', '${OTHER_TAG}'],
+]) {
+  test(`DENIAL: production.yml default that is ${label}`, () => {
+    const problems = checkModel(allImages(good(), withDefault(value)), "fixture", PROD);
+    assert.ok(problems.some((p) => /rab-api: .*never a tag or latest/.test(p)), JSON.stringify(problems));
+    // ...and with allowDefaultDigest off as well.
+    refused(allImages(good(), withDefault(value)), /image must be/);
+  });
+}
+
+test('DENIAL: production.yml default without the colon (`-`) or with `:+` / `?`', () => {
+  for (const op of ['-', ':+', '?']) {
+    const image = `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG${op}${DIGEST}}`;
+    const problems = checkModel(allImages(good(), image), 'fixture', PROD);
+    assert.ok(problems.some((p) => /never a tag or latest/.test(p)), `${op}: ${JSON.stringify(problems)}`);
+  }
+});
+
+test('DENIAL: rab-api and rab-worker with different default digests (one expression for both)', () => {
+  const m = allImages(good(), withDefault(DIGEST));
+  m.services['rab-worker'].image = withDefault(`sha256:${'e8'.repeat(32)}`);
+  const problems = checkModel(m, 'fixture', PROD);
+  assert.ok(problems.some((p) => /rab-worker: image differs from rab-api/.test(p)), JSON.stringify(problems));
+});
+
+test('DENIAL: one service with the default, another without (one expression for both)', () => {
+  const m = good();
+  m.services['rab-api'].image = withDefault(DIGEST);
+  const problems = checkModel(m, 'fixture', PROD);
+  assert.ok(problems.some((p) => /rab-worker: image differs from rab-api/.test(p)), JSON.stringify(problems));
+});
+
+test('only the production.yml combination may carry a default', () => {
+  const allowed = DEPLOY_COMBOS.filter(allowsDefaultDigest).map((c) => c.join(' + '));
+  assert.deepEqual(allowed, ['docker-compose.production.yml']);
+  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'docker-compose.local-db.yml']), false);
+  assert.ok(PINNED_DIGEST_IMAGE_REF.test(withDefault(DIGEST)));
+});
+
+test('committed files: production.yml pins one full digest on every app service; image.yml has no default', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
+  const prod = imageLines(read('docker-compose.production.yml'));
+  assert.equal(prod.length, 3, 'rab-api, rab-worker and rab-ops');
+  assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
+  assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
+  const image = imageLines(read('docker-compose.image.yml'));
+  assert.ok(image.length >= 3, 'the image compose app services');
+  for (const line of image) {
+    assert.ok(!/CREWFLOW_IMAGE_TAG:?-/.test(line), `docker-compose.image.yml must keep no default: ${line}`);
+    assert.ok(/CREWFLOW_IMAGE_TAG:\?/.test(line), `docker-compose.image.yml must require the digest: ${line}`);
+  }
+});
