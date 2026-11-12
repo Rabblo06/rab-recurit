@@ -98,6 +98,31 @@ describe('AllExceptionsFilter', () => {
       expect(captureExceptions).not.toHaveBeenCalled();
     });
 
+    it.each<[number, string, unknown]>([
+      [413, 'Payload too large.', Object.assign(new Error('request entity too large'), { expose: true, status: 413, statusCode: 413, type: 'entity.too.large' })],
+      [415, 'Unsupported media type.', Object.assign(new Error('unsupported charset "EVIL-x32"'), { expose: true, status: 415, statusCode: 415, type: 'charset.unsupported' })],
+      [400, 'Bad request.', Object.assign(new SyntaxError('Unexpected end of JSON input'), { expose: true, status: 400, statusCode: 400, type: 'entity.parse.failed' })],
+      [429, 'Request rejected.', Object.assign(new Error('x'), { expose: true, statusCode: 429 })],
+    ])('an http-errors client error (%i) keeps its status with a fixed body and is not reported (F2)', (code, message, exception) => {
+      const captureExceptions = jest.fn(() => []);
+      const { status, json } = run(exception, { captureExceptions });
+      expect(status).toHaveBeenCalledWith(code);
+      expect(json).toHaveBeenCalledWith({ statusCode: code, message });
+      expect(JSON.stringify(json.mock.calls)).not.toContain('EVIL-x32');
+      expect(captureExceptions).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, unknown]>([
+      ['no expose flag (an upstream SDK error carrying a status)', Object.assign(new Error('upstream 403'), { status: 403 })],
+      ['expose but a 5xx status', Object.assign(new Error('x'), { expose: true, status: 502 })],
+      ['expose with a non-integer status', Object.assign(new Error('x'), { expose: true, status: '413' })],
+    ])('%s stays a reported generic 500', (_label, exception) => {
+      const captureExceptions = jest.fn(() => []);
+      const { status } = run(exception, { captureExceptions });
+      expect(status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR);
+      expect(captureExceptions).toHaveBeenCalledTimes(1);
+    });
+
     it('a throwing handler never changes the response: still the same generic 500 body', () => {
       const throwing = { captureExceptions: jest.fn(() => { throw new Error('sentry down'); }) };
       const { status, json } = run(new Error('boom'), throwing);

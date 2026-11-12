@@ -10,6 +10,7 @@ import { schemaCompatibilityPostCheckProblems } from '../../database/typeorm/scr
 import { runLockedMigrations } from '../../database/typeorm/scripts/migrate/locked-migration-runner';
 import { PROVISION_FUNCTION_MODULE_VERSIONS, readProvisionFunctionState } from '../../database/typeorm/workspace-schema/provision-function-versions';
 import { LATEST_WORKSPACE_MODULE_VERSION, MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
+import type { ExceptionHandlerService } from '../../engine/core-modules/exception-handler/exception-handler.service';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { AllExceptionsFilter } from '../../engine/filters/all-exceptions.filter';
 import { assertNoPendingMigrations } from '../../engine/utils/assert-no-pending-migrations';
@@ -333,7 +334,7 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
         expect((error as WorkspaceRoutingError).code).toBe('incompatible-module');
         const json = jest.fn();
         const status = jest.fn(() => ({ json }));
-        new AllExceptionsFilter().catch(error, { switchToHttp: () => ({ getResponse: () => ({ status }) }) } as unknown as ArgumentsHost);
+        new AllExceptionsFilter({ captureExceptions: () => [] } as unknown as ExceptionHandlerService).catch(error, { switchToHttp: () => ({ getResponse: () => ({ status }) }) } as unknown as ArgumentsHost);
         expect(status).toHaveBeenCalledWith(HttpStatus.SERVICE_UNAVAILABLE);
 
         await expect(resolveAsApp(current)).resolves.toBe(current.schema);

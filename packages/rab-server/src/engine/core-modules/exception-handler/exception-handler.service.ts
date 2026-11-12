@@ -5,11 +5,27 @@ import { createExceptionHandlerDriver } from './exception-handler-driver.factory
 import type { ExceptionHandlerDriverInterface, ExceptionHandlerOptions } from './interfaces/exception-handler-driver.interface';
 
 /**
+ * The 4xx status of a client error that is not a Nest `HttpException`: the `http-errors` shape used by body-parser and
+ * raw-body (`expose: true` and an integer `status`/`statusCode` in 400–499), for example an oversized body (413) or an
+ * unsupported charset or content-encoding (415). These are thrown by Express middleware before
+ * any guard or throttler runs, so an unauthenticated caller can trigger them at will. `undefined` for anything else.
+ */
+export function clientErrorStatus(exception: unknown): number | undefined {
+  if (exception === null || typeof exception !== 'object' || exception instanceof HttpException) return undefined;
+  const candidate = exception as { expose?: unknown; status?: unknown; statusCode?: unknown };
+  if (candidate.expose !== true) return undefined;
+  const status = typeof candidate.status === 'number' ? candidate.status : candidate.statusCode;
+  return typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 499 ? status : undefined;
+}
+
+/**
  * Twenty's `shouldCaptureException` (engine/utils/global-exception-handler.util.ts): only server faults are reported. A
- * client error (an `HttpException` below 500, or a known status below 500) never reaches Sentry.
+ * client error (an `HttpException` below 500, a body-parser/http-errors 4xx, or a known status below 500) never reaches
+ * Sentry.
  */
 export function shouldCaptureException(exception: unknown, statusCode?: number): boolean {
   if (exception instanceof HttpException && exception.getStatus() < 500) return false;
+  if (clientErrorStatus(exception) !== undefined) return false;
   if (statusCode !== undefined && statusCode < 500) return false;
   return true;
 }

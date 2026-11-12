@@ -42,6 +42,14 @@ const SECRETS = {
   recoveryCode: 'X32R-ECOV-ERY0',
   otpauthSecret: 'OTPAUTHX32SECRETVALUE',
   challengeToken: 'x32-CHALLENGE-TOKEN-SECRET-ch',
+  // Review F3 shapes, through the real path.
+  newPassword: 'HUNTER2X32SECRET', // gitleaks:allow (synthetic scrubber marker)
+  camelRefresh: 'RT-x32-CAMEL-REFRESH-SECRET', // gitleaks:allow (synthetic scrubber marker)
+  jsonCurrentPassword: 'x32-JSON-CURRENT-PASSWORD-SECRET', // gitleaks:allow (synthetic scrubber marker)
+  jsonAccessToken: 'x32-JSON-ACCESS-TOKEN-SECRET', // gitleaks:allow (synthetic scrubber marker)
+  jsonMfaCode: '123987',
+  encodedEmailUser: 'dave.x32-encoded-marker',
+  dbPassword: 'p@X32DBSECRET', // gitleaks:allow (synthetic scrubber marker)
 };
 
 function expectNoSecrets(value: unknown): void {
@@ -128,6 +136,9 @@ describe('shouldCaptureException (Twenty: global-exception-handler.util.ts)', ()
     expect(shouldCaptureException(new NotFoundException())).toBe(false);
     expect(shouldCaptureException(new Error('boom'), 404)).toBe(false);
     expect(shouldCaptureException(new Error('boom'), 500)).toBe(true);
+    // F2: a body-parser / http-errors client error is never reported, whatever status the caller passes.
+    expect(shouldCaptureException(Object.assign(new Error('too large'), { expose: true, status: 413 }), 500)).toBe(false);
+    expect(shouldCaptureException(Object.assign(new Error('x'), { expose: true, status: 502 }))).toBe(true);
   });
 });
 
@@ -195,7 +206,10 @@ describe('Sentry egress: a 500 is reported as a scrubbed event (instrument.ts be
     const service = new ExceptionHandlerService(new ExceptionHandlerSentryDriver());
     const { host, status, json } = hostFor(loginRequest);
     const error = new Error(
-      `login failed for ${SECRETS.email} password=${SECRETS.password} Authorization: Bearer ${JWT} refresh_token=${SECRETS.refreshToken}`,
+      `login failed for ${SECRETS.email} password=${SECRETS.password} Authorization: Bearer ${JWT} refresh_token=${SECRETS.refreshToken}` +
+        ` newPassword=${SECRETS.newPassword} refreshToken: ${SECRETS.camelRefresh}` +
+        ` body {"currentPassword":"${SECRETS.jsonCurrentPassword}","accessToken":"${SECRETS.jsonAccessToken}","mfaCode":"${SECRETS.jsonMfaCode}"}` +
+        ` invite ${SECRETS.encodedEmailUser}%40example.com db postgres://crewflow:${SECRETS.dbPassword}@localhost:5432/rab`,
     );
 
     new AllExceptionsFilter(service).catch(error, host);

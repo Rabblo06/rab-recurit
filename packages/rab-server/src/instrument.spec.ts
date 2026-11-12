@@ -755,9 +755,37 @@ describe('instrument.ts — Sentry privacy options', () => {
       // 3. a truncated JWT (header + part of the payload)
       ['jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1 cut', 'jwt [Filtered] cut'],
       ['header only eyJhbGciOiJIUzI1NiJ9', 'header only [Filtered]'],
+      // 4. X3.2 review F3: camelCase / snake_case compound names, bare and as JSON keys
+      ['newPassword=HUNTER2SECRET', 'newPassword=[Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['change failed: currentPassword = "cp-SECRET-x32"', 'change failed: currentPassword = [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['refreshToken: RT-x32-SECRET-value', 'refreshToken: [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['access_token=AT-x32-SECRET', 'access_token=[Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['clientSecret: cs-x32-SECRET', 'clientSecret: [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['mfaCode=123987 mfa_code: 456123 totpCode=789456', 'mfaCode=[Filtered] mfa_code: [Filtered] totpCode=[Filtered]'],
+      ['totp: 482913', 'totp: [Filtered]'],
+      ['recoveryCode=ABCD-EFGH backup_codes: WXYZ-1234', 'recoveryCode=[Filtered] backup_codes: [Filtered]'],
+      [
+        'body {"currentPassword":"cp-SECRET-x32","accessToken":"at-SECRET-x32","mfaCode":"123987","shiftId":"s-1"}', // gitleaks:allow (synthetic scrubber marker)
+        'body {"currentPassword":"[Filtered]","accessToken":"[Filtered]","mfaCode":"[Filtered]","shiftId":"s-1"}',
+      ],
+      // 5. X3.2 review F3: a URL-encoded @ in an email, also inside an otpauth:// label
+      ['invite for bob%40example.com failed', 'invite for [Filtered] failed'],
+      [
+        'otpauth://totp/Crewflow:bob%40example.com?secret=JBSWX32OTPAUTH&issuer=Crewflow', // gitleaks:allow (synthetic scrubber marker)
+        'otpauth://totp/Crewflow:[Filtered]?secret=[Filtered]&issuer=Crewflow',
+      ],
+      // 6. X3.2 review F3: a password containing `@`, a host without a TLD — everything up to the LAST @ goes
+      ['connect postgres://user:p@SECRET@localhost:5432/rab failed', 'connect postgres://localhost:5432/rab failed'], // gitleaks:allow (synthetic scrubber marker)
+      ['redis://:pw@x32@SECRET@10.0.0.7:6379', 'redis://10.0.0.7:6379'], // gitleaks:allow (synthetic scrubber marker)
     ])('redactString(%j)', (input, expected) => {
       expect(redactString(input)).toBe(expected);
       expect(redactString(redactString(input))).toBe(expected);
+    });
+
+    it('keeps ordinary diagnostics readable (no over-matching from the compound names, X3.2)', () => {
+      for (const text of ['code: 23505', 'state: DRAFT', 'tokens issued: 3', 'shiftId=s-1 status=PUBLISHED', 'https://example.test/a@b/c']) {
+        expect(redactString(text)).toBe(text);
+      }
     });
 
     it.each([
