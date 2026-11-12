@@ -28,7 +28,11 @@
  *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
  *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
  *     service must not come back unnoticed. The render enables every profile (`--profile '*'`) so a profile-gated
- *     service is never hidden from this check.
+ *     service is never hidden from this check;
+ *   - ANY service has a non-empty `profiles` (security review of PR #124, MEDIUM): a deploy file starts every service with
+ *     `docker compose up`, so a profile-gated service is a hidden extra container. A re-added operations container under
+ *     another name and profile (e.g. `rab-maint`, `profiles: ["maint"]`, reading .env.ops) is refused here whatever it is
+ *     called. Profiles, not a service allowlist, so a new always-on service (the coming `db` service) needs no gate change.
  * Scope (owner decision D): the DEPLOY files only. The test-only compose files (system e2e, H6 runtime test, cost harness,
  * BullMQ integration, the weakened rehearsal) and the dev stacks (docker-compose.yml, docker-compose.qa.yml,
  * docker-compose.local-build.yml) are deliberately not checked.
@@ -85,6 +89,8 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
   if (services['rab-ops']) p('rab-ops: service must not exist (removed; operations run as one-off owner-login commands of rab-api)');
   for (const [name, s] of Object.entries(services)) {
     if (Array.isArray(s?.profiles) && s.profiles.includes('ops')) p(`${name}: an "ops" profile service must not exist (the rab-ops container was removed)`);
+    // Review of PR #124 (MEDIUM): no profile-gated service at all in a deploy file (a hidden extra container).
+    if (Array.isArray(s?.profiles) && s.profiles.length) p(`${name}: has profiles ${JSON.stringify(s.profiles)} (a deploy file has no profile-gated service; every service starts with the stack)`);
   }
 
   const appServices = ['rab-api', 'rab-worker'];

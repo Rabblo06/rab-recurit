@@ -486,6 +486,9 @@ test('DENIAL bundled db: internal network only, its own volumes, rab-api waits f
     assertRefused(problemsAfter((s) => { s[svc].volumes.push({ type: 'volume', source: 'crewflow-db-data', target: '/x', read_only: true }); }), new RegExp(`${svc}: (mounts the bundled db's data volume|unexpected named volume)`));
   }
   assertRefused(problemsAfter((s) => { delete s.db; }), /db: missing/);
+  // PR #124's any-profile rule: the committed db has none; a profiled db is refused.
+  assert.equal(fresh().services.db.profiles, undefined);
+  assertRefused(problemsAfter((s) => { s.db.profiles = ['db']; }), /db: has profiles/);
 });
 
 test('SJ-05: the gate and production env validation refuse the same claim / dispatch switches (two layers, one rule)', () => {

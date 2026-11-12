@@ -9,7 +9,8 @@
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --static   # templates + the bundled-database (`db`) rules only
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file <database|runtime|compose> <path>
  *
- * FULL mode renders, with `docker compose --env-file <throw-away> --project-directory <throw-away> config --format json`,
+ * FULL mode renders, with every profile enabled (`docker compose --env-file <throw-away> --project-directory <throw-away>
+ *   --profile '*' config --format json`; a profile-gated service is rendered and refused, review of PR #124),
  *   docker-compose.image.yml                                   (bundled db: compose.env sets only PG_DATABASE_PASSWORD)
  *   docker-compose.image.yml                                   (external: compose.env also sets PG_DATABASE_URL)
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
@@ -395,6 +396,8 @@ function bundledDbProblems(services, model, p) {
   const db = services[DB_SERVICE];
   if (!db) { p(`${DB_SERVICE}: missing (the bundled database)`); return; }
   hardeningProblems(DB_SERVICE, db, p, { longRunning: true });
+  // PR #124's rule for every deploy service: no profile (a profile-gated db would not start with the stack, or would hide).
+  if (Array.isArray(db.profiles) && db.profiles.length) p(`${DB_SERVICE}: has profiles (it would not start with the stack)`);
   if (!DB_IMAGE.test(String(db.image ?? ''))) p(`${DB_SERVICE}: image is not the official postgres repository pinned by digest (postgres@sha256:<64 hex>)`);
   const env = db.environment ?? {};
   const superuser = String(env.POSTGRES_USER ?? 'postgres');
@@ -801,8 +804,11 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
       const args = ['compose', '--env-file', combo.external ? externalEnv : composeEnv, '--project-directory', project];
-      for (const f of combo.files) args.push('-f', FILES[f]);
-      args.push('config', '--format', 'json');
+      // A combo names FILES keys; a test may pass a compose file path instead (a weakened copy of a committed file).
+      for (const f of combo.files) args.push('-f', FILES[f] ?? f);
+      // Every profile (security review of PR #124, MEDIUM): a profile-gated service is rendered, so the exact service list
+      // and the "has profiles" check refuse it, never a service hidden behind `profiles:` that `up --profile x` would start.
+      args.push('--profile', '*', 'config', '--format', 'json');
       models[combo.name] = JSON.parse(execFileSync('docker', args, { env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 }));
     }
     return models;

@@ -163,7 +163,7 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     const [r1, o, w] = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-0000000000a1'];
     await publish({ payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w });
     expect(shiftStatementQueue.add).toHaveBeenCalledWith('generate-shift-statement', { payrollRecordId: r1, generation: 4, organisationId: o, workspaceId: w }, {
-      jobId: `shift-statement.${r1}.gen.4`, attempts: 1, removeOnComplete: { age: 604800 }, removeOnFail: { age: 2592000 },
+      jobId: `shift-statement.${r1}.gen.4`, attempts: 1, removeOnComplete: { age: 14400, count: 1000 }, removeOnFail: { age: 604800, count: 1000 },
     });
   });
 

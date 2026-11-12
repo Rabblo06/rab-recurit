@@ -265,12 +265,24 @@ const importGuardMount = (v) => longFormTmpfs(v)
   && Number(v.tmpfs?.mode) === IMPORT_GUARD_MODE;
 /** The variant's volumes for the production comparison: the CA bind, and on rab-api the exact import guard, left out. */
 const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols);
-/** rab-ops removal (PR 2): the retired operations container must not come back, by name or under the "ops" profile. */
+/**
+ * rab-ops removal (PR 2): the retired operations container must not come back, by name, under the "ops" profile, or under
+ * ANY name and profile (security review of PR #124, MEDIUM: a `rab-maint` with `profiles: ["maint"]` reading .env.ops
+ * passed every gate). Every render enables every profile (`--profile '*'`), and on EVERY service: no profile at all (a
+ * deploy file starts every service with the stack; profiles, not a service allowlist, so a new always-on service needs no
+ * gate change), no value of the .env.ops sentinel and none of the retired ops names. `env` is each service's RESOLVED
+ * environment, so a service that reads .env.ops is caught by its values whatever the Compose version.
+ */
 const retiredOpsProblems = (services, where = '') => {
   const out = [];
   if (services['rab-ops']) out.push(`rab-ops: present${where} (removed; operations run as one-off owner-login commands of rab-api)`);
   for (const [name, svc] of Object.entries(services)) {
     if (Array.isArray(svc?.profiles) && svc.profiles.includes('ops')) out.push(`${name}: has the "ops" profile${where} (the rab-ops container was removed)`);
+    if (Array.isArray(svc?.profiles) && svc.profiles.length) out.push(`${name}: has profiles ${JSON.stringify(svc.profiles)}${where} (a deploy file has no profile-gated service)`);
+    const env = svc?.environment ?? {};
+    if (Object.values(env).some((v) => String(v ?? '').includes(SENTINEL_OPS_PW))) out.push(`${name}: carries a value of the retired .env.ops${where}`);
+    const held = OPS_ONLY.filter((k) => Object.prototype.hasOwnProperty.call(env, k));
+    if (held.length) out.push(`${name}: sets the retired ${held.join(', ')}${where}`);
   }
   return out;
 };
@@ -284,8 +296,8 @@ const redisFlagProblems = (redis, where) => {
 /**
  * Pure checks on the rendered models (`docker compose config --format json` output). `variant`: env files resolved with
  * the sentinels (compose then inlines their values and drops the env_file key); `variantFiles`: the same file rendered
- * with --no-env-resolution (keeps the env_file names); `production`: docker-compose.production.yml, --no-env-resolution.
- * Returns failure messages.
+ * with --no-env-resolution (keeps the env_file names); `production`: docker-compose.production.yml, env files resolved
+ * (it names none, so only a re-added one, such as the retired .env.ops, contributes values). Returns failure messages.
  */
 function checkVariant(variant, production, variantFiles = variant) {
   const problems = [];
@@ -309,6 +321,8 @@ function checkVariant(variant, production, variantFiles = variant) {
   }
   // DB-SETUP T-5 / PID 1: the cleaning scripts are the entrypoints (no process keeps the admin URL).
   for (const pr of pid1Problems(services)) fail(pr);
+  // docker-compose.production.yml (the file OpenShip imports) gets the same refusals.
+  for (const pr of retiredOpsProblems(production?.services ?? {}, ' in docker-compose.production.yml')) fail(pr);
 
   // 1. Image-based and digest-pinned only.
   for (const [name, svc] of Object.entries(services)) {
@@ -582,7 +596,8 @@ function checkDeployment(merged, production, envFileKeys = {}) {
 
 function render(files, { projectDirectory, env, resolveEnvFiles }) {
   const args = ['compose', '-p', 'crewflow-image-verify', '--project-directory', projectDirectory, ...files.flatMap((f) => ['-f', f]),
-    '--profile', 'ops', 'config', '--format', 'json', ...(resolveEnvFiles ? [] : ['--no-env-resolution'])];
+    // Every profile (review of PR #124): a profile-gated service is rendered and refused, never hidden.
+    '--profile', '*', 'config', '--format', 'json', ...(resolveEnvFiles ? [] : ['--no-env-resolution'])];
   const out = execFileSync('docker', args, { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   return JSON.parse(out);
 }
@@ -613,7 +628,7 @@ function attachEnvFilesFromMarkers(files, resolved, dir) {
 }
 
 /** Renders the three models checkVariant takes (throw-away project directory with sentinel env files). */
-function renderModels(variantPath = VARIANT) {
+function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crewflow-image-verify-'));
   try {
     // Owner login: the shared database.env and runtime.env in a sentinel secret directory. A separated-mode .env.migrate
@@ -638,7 +653,8 @@ function renderModels(variantPath = VARIANT) {
     // Whether this Compose reports env_file under --no-env-resolution (rab-migrate declares one in the committed file).
     const composeReportsEnvFiles = (rawFiles.services?.['rab-migrate']?.env_file ?? []).length > 0;
     const variantFiles = attachEnvFilesFromMarkers(rawFiles, variant, dir);
-    const production = render([PRODUCTION], { projectDirectory: dir, env, resolveEnvFiles: false });
+    // Resolved: production.yml names no env file, so only a re-added one (the retired .env.ops sentinel) adds values.
+    const production = render([productionPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     return { variant, production, variantFiles, composeReportsEnvFiles };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

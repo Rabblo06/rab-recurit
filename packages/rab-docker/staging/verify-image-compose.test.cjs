@@ -284,6 +284,60 @@ const renderWeakened = (edit, check) => {
   }
 };
 
+// Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
+// `profiles: ["maint"]`, reading .env.ops) passed every gate. Every profile is now rendered and any profile is refused, in
+// the variant, in the deployed model and in docker-compose.production.yml (the reference model, the file OpenShip imports).
+const addMaint = (src) => src.replace(/\nnetworks:\n/, [
+  '',
+  '  rab-maint:',
+  '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+  '    profiles: ["maint"]',
+  '    env_file:',
+  '      - .env.ops',
+  '',
+  'networks:',
+  '',
+].join('\n'));
+
+test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service reading .env.ops fails', { skip }, () => {
+  renderWeakened(addMaint, (m) => {
+    const problems = checkVariant(m.variant, m.production, m.variantFiles);
+    assertRefused(problems, /services are .*rab-maint.*; expected exactly db,rab-api,rab-redis,rab-worker/);
+    assertRefused(problems, /rab-maint: has profiles \["maint"\]/);
+    assertRefused(problems, /rab-maint: carries a value of the retired \.env\.ops/);
+    assertRefused(problems, /rab-maint: sets the retired CREWFLOW_OPS_RUN/);
+    assertRefused(checkDeployment(m.variantFiles, m.production), /rab-maint: has profiles \["maint"\] in the deployed model/);
+  });
+});
+
+test('DENIAL (rendered): docker-compose.production.yml with a "maint"-profile service reading .env.ops fails', { skip }, () => {
+  const fsx = require('node:fs');
+  const os = require('node:os');
+  const pathx = require('node:path');
+  const src = fsx.readFileSync(pathx.join(__dirname, '../docker-compose.production.yml'), 'utf8');
+  const weakened = addMaint(src);
+  assert.notEqual(weakened, src, 'the fixture edit did not apply');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'crewflow-image-verify-prod-'));
+  try {
+    const copy = pathx.join(dir, 'docker-compose.production.yml');
+    fsx.writeFileSync(copy, weakened);
+    const m = renderModels(undefined, copy);
+    const problems = checkVariant(m.variant, m.production, m.variantFiles);
+    assertRefused(problems, /rab-maint: has profiles \["maint"\] in docker-compose\.production\.yml/);
+    assertRefused(problems, /rab-maint: carries a value of the retired \.env\.ops in docker-compose\.production\.yml/);
+    assertRefused(problems, /rab-maint: sets the retired CREWFLOW_OPS_RUN.* in docker-compose\.production\.yml/);
+  } finally {
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('DENIAL: a profile-gated service under any name, in the variant, production.yml and the deployed model', { skip }, () => {
+  assertRefused(problemsAfter((v) => { v.services['rab-maint'] = { ...structuredClone(v.services['rab-redis']), profiles: ['maint'] }; }), /rab-maint: has profiles/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.services['rab-maint'] = { image: 'x', profiles: ['maint'] }; }), /rab-maint: has profiles \["maint"\] in docker-compose\.production\.yml/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.services['rab-api'].environment.CREWFLOW_OPS_RUN = 'one-off'; }), /rab-api: sets the retired CREWFLOW_OPS_RUN in docker-compose\.production\.yml/);
+  assertRefused(deployed((v) => { v.services['rab-maint'] = { ...structuredClone(v.services['rab-redis']), profiles: ['maint'] }; }), /rab-maint: has profiles \["maint"\] in the deployed model/);
+});
+
 test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, statically and in the deployed model', { skip }, () => {
   renderWeakened(
     // The first top-level key after `services:` (DB-SETUP added `networks:` before `volumes:`).

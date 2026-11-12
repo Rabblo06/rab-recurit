@@ -332,3 +332,63 @@ test('committed files: production.yml and image.yml pin the SAME bundled db imag
   assert.ok(DB_IMAGE_REF.test(prod[0]), prod[0]);
   assert.ok(!fs.existsSync(path.join(__dirname, '..', 'docker-compose.local-db.yml')), 'docker-compose.local-db.yml is retired (DB-SETUP D3)');
 });
+
+// ---- Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
+// `profiles: ["maint"]`, reading .env.ops) passed every gate. Any profile-gated service in a deploy file is now refused.
+test('DENIAL: a service with any non-empty profiles, whatever its name or profile', () => {
+  for (const profiles of [['maint'], ['db'], ['ops', 'maint']]) {
+    const m = good();
+    m.services['rab-maint'] = { image: 'redis@sha256:x', profiles };
+    refused(m, /rab-maint: has profiles/);
+  }
+  const m = good();
+  m.services['rab-db'] = { image: 'postgres@sha256:x' }; // an always-on service is not refused by the profile rule
+  assert.ok(!checkModel(m, 'fixture').some((p) => /has profiles/.test(p)));
+});
+
+/** A copy of a committed deploy file with `rab-maint` (profile "maint", reading .env.ops) added before the top-level `networks:` (DB-SETUP added it before `volumes:`). */
+function withMaintService(file) {
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const weakened = src.replace(/\nnetworks:\n/, [
+    '',
+    '  rab-maint:',
+    '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+    '    profiles: ["maint"]',
+    '    env_file:',
+    '      - .env.ops',
+    '',
+    'networks:',
+    '',
+  ].join('\n'));
+  assert.notEqual(weakened, src, `${file}: the fixture edit did not apply`);
+  return weakened;
+}
+
+for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+  test(`DENIAL (rendered): ${file} with a "maint"-profile service reading .env.ops fails the CLI render`, { skip: !dockerCompose() && 'docker compose not available' }, () => {
+    const { render } = require('./compose-one-image.cjs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-maint-'));
+    try {
+      const copy = path.join(dir, file);
+      fs.writeFileSync(copy, withMaintService(file));
+      const problems = checkModel(render([path.relative(path.resolve(__dirname, '..'), copy)]), file, { allowDefaultDigest: file === 'docker-compose.production.yml' });
+      assert.ok(problems.some((p) => /rab-maint: has profiles \["maint"\]/.test(p)), JSON.stringify(problems));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+// DB-SETUP + PR #124: the bundled db is an always-on service (no profile), so the any-profile rule accepts it; a profiled db
+// is refused like every other profile-gated service.
+test('DB-SETUP + PR #124: the bundled db has no profile and passes the any-profile rule; a profiled db is refused', () => {
+  assert.ok(!checkModel(good(), 'fixture').some((p) => /has profiles/.test(p)));
+  const m = good();
+  m.services.db.profiles = ['db'];
+  refused(m, /db: has profiles/);
+  for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    const dbBlock = text.slice(text.indexOf('\n  db:\n'), text.indexOf('\n  rab-', text.indexOf('\n  db:\n')));
+    assert.ok(dbBlock.length > 100 && !/^\s+profiles\s*:/m.test(dbBlock), `${f}: the committed db has no profiles key`);
+  }
+});
