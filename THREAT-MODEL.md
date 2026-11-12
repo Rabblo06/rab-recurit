@@ -6210,7 +6210,7 @@ server or network that fails at any stage; a database fault during revalidation.
 - **Changed — no address in logs (owner requirement 3):** nodemailer appends the server reply to its error message and
   SMTP replies echo the refused mailbox. A retryable attempt now throws `EmailSendAttemptError` (outbox id, code, reply
   code, sanitized reply) instead of the provider's error object, so the Worker's `failed` log line, BullMQ's
-  `failedReason` and the job stacktrace kept in Redis (30 days) carry no address. The sanitizer (also used for
+  `failedReason` and the job stacktrace kept in Redis (7 days, at most 1,000 failed jobs per queue since X3.4) carry no address. The sanitizer (also used for
   `last_error_message_sanitized`) bounds the input first (2 000 characters), removes the row's own recipient exactly
   (case-insensitive, any form: quoted or apostrophe local parts), removes keyword-labelled credentials with their
   separator and `Bearer`/`Basic` scheme, then replaces every other token containing `@` with `[address]`, and stores at
@@ -6635,3 +6635,13 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   service started with RAB_DISABLE_RATE_LIMIT=true runs unthrottled (before, it also needed JEST_WORKER_ID). Staging is not a
   declared production value here unless it sets NODE_ENV / RAB_RUNTIME_ENV / DB_TARGET=production. No compose file, env
   template or workflow sets the flag today (checked with git grep).
+
+### X3.4: BullMQ retention like Twenty (2026-11-12)
+- **Changed:** every BullMQ queue (5 consumers, 7 scan queues) keeps completed jobs 4 h / at most 1,000 and failed jobs
+  7 days / at most 1,000 (Twenty's QUEUE_RETENTION). Before: email/push/statements 7 d / 30 d with no count cap;
+  rab-ai and timer triggers 1 h / 1000 and 7 d / 5000; scan queues 1 h / 1000 and 7 d with no failed cap.
+- **Control:** a retained job is never the record and never decides correctness. Every consumer re-reads its row under
+  RLS and claims it with a compare-and-set. Email/push recovery republishes under a bumped generation. Statement claims
+  bump the generation. Timer triggers have the backstop scan.
+- **Residual:** failed BullMQ jobs, and manual admin retry of them, are available for 7 days instead of 30, for the newest
+  1,000 per queue. The outbox and worker_event rows remain the long-term record.
