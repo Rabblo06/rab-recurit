@@ -54,8 +54,8 @@ export const ADMIN_MFA_RESET_LIMIT = { capacity: 5, windowMs: 60 * 60 * 1000 } a
  *
  * Keys: `crewflow:{NODE_ENV}:login-rate:{scope}:{sha256(identifier)}` — no email address or IP appears in Redis.
  *
- * Bypass: skipped through the same one switch as `RabThrottlerModule` (`isRateLimitBypassEnabled`, X1.2: RAB_DISABLE_RATE_LIMIT
- * exactly 'true', never in a production runtime, and production refuses to boot with it set). The Jest setup sets it because
+ * Bypass: skipped through the same one switch as `RabThrottlerModule` (`isRateLimitBypassEnabled`, X1.2: the explicit
+ * switch named in rate-limit-bypass.ts, never in a production runtime, and production refuses to boot with it set). The Jest setup sets it because
  * the integration suite shares one client IP across hundreds of logins; `login-attempt-limiter.integration.spec.ts` turns the
  * real limiter on.
  */

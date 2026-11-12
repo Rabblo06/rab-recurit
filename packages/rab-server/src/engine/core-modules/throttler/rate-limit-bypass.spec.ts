@@ -57,19 +57,32 @@ describe('the one rate-limit switch (X1.2, audit XA-01 / DUP-03)', () => {
     });
   });
 
-  it('is the only reader of the switch: no server or Worker source reads RAB_DISABLE_RATE_LIMIT or JEST_WORKER_ID', () => {
+  it('is the only reader of the switch: neither name appears in any other server or Worker source, in any syntax', () => {
+    // A plain-text search (not a `process.env.X` pattern), so destructuring, computed keys spelled out as a string,
+    // EnvironmentService.get('...'), shell scripts and comments that would invite a copy all count. Test code (specs,
+    // __tests__) is excluded: suites set the flag to 'false' to exercise real throttling. Allow-listed: this helper, the two
+    // Jest setups that set the flag, and env validation (the production boot refusal).
     const packages = path.resolve(__dirname, '../../../../..');
-    const roots = [path.join(packages, 'rab-server', 'src'), path.join(packages, 'rab-worker', 'src')];
+    const roots = [path.join(packages, 'rab-server'), path.join(packages, 'rab-worker')];
+    const allowed = new Set(
+      [
+        'rab-server/src/engine/core-modules/throttler/rate-limit-bypass.ts',
+        'rab-server/src/jest-setup.ts',
+        'rab-worker/src/jest-setup.ts',
+        'rab-server/src/engine/core-modules/environment/env.validation.ts',
+      ].map((file) => path.join(packages, file)),
+    );
+    const skippedDirs = new Set(['node_modules', '__tests__', 'dist', 'dist-cjs', 'dist-esm', 'coverage', '.nx']);
     const names = [RATE_LIMIT_BYPASS_ENV_NAME, 'JEST_WORKER_ID'];
     const offenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          if (entry.name !== 'node_modules' && entry.name !== '__tests__') walk(full);
-        } else if (/\.ts$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name) && !/^jest-/.test(entry.name)) {
+          if (!skippedDirs.has(entry.name)) walk(full);
+        } else if (/\.(ts|js|cjs|mjs|sh|json|ya?ml|env|example)$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name) && !allowed.has(full)) {
           const text = fs.readFileSync(full, 'utf8');
-          if (names.some((name) => new RegExp(`(process\\.)?env(\\.${name}\\b|\\[\\s*['"]${name}['"]\\s*\\])`).test(text))) offenders.push(path.relative(packages, full));
+          if (names.some((name) => text.includes(name))) offenders.push(path.relative(packages, full));
         }
       }
     };
@@ -80,7 +93,7 @@ describe('the one rate-limit switch (X1.2, audit XA-01 / DUP-03)', () => {
   it('the three limiters use it', () => {
     const src = path.resolve(__dirname, '../../..');
     for (const file of [
-      'engine/core-modules/throttler/throttler.module.ts',
+      'engine/core-modules/throttler/throttler-options.factory.ts',
       'engine/core-modules/auth/services/login-attempt-limiter.service.ts',
       'modules/attendance/guards/attendance-per-user-throttle.guard.ts',
     ]) {

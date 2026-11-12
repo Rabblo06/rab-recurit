@@ -54,8 +54,8 @@ export class AttendancePerUserThrottleGuard implements CanActivate {
   constructor(private readonly redis: ThrottlerRedisClientProvider) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    // The ONE rate-limit switch, shared with `RabThrottlerModule` (rate-limit-bypass.ts, X1.2): RAB_DISABLE_RATE_LIMIT exactly
-    // 'true', never in a production runtime (and production refuses to boot with it set). The Jest setup sets it because the
+    // The ONE rate-limit switch, shared with `RabThrottlerModule` (rate-limit-bypass.ts, X1.2): on only when
+    // explicitly set, never in a production runtime (and production refuses to boot with it set). The Jest setup sets it because the
     // integration suite exercises the same seeded Staff account well beyond 10 clock actions across one spec file;
     // `attendance-abuse-cases.integration.spec.ts` sets it to 'false' to exercise this guard for real.
     if (isRateLimitBypassEnabled(process.env)) {

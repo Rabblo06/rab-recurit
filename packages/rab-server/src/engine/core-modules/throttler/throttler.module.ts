@@ -1,11 +1,9 @@
-import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
 
 import { EnvironmentService } from '../environment/environment.service';
-import { resolveClientIp } from '../../utils/client-ip.util';
-import { isRateLimitBypassEnabled } from './rate-limit-bypass';
+import { rabThrottlerOptions } from './throttler-options.factory';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
 import { RabThrottlerGuard } from './rab-throttler.guard';
@@ -39,23 +37,8 @@ import { RabThrottlerGuard } from './rab-throttler.guard';
     ThrottlerModule.forRootAsync({
       imports: [ThrottlerRedisClientModule],
       inject: [ThrottlerRedisClientProvider, EnvironmentService],
-      useFactory: (redis: ThrottlerRedisClientProvider, environmentService: EnvironmentService) => ({
-        throttlers: [{ name: 'default', ttl: 60_000, limit: 120 }],
-        storage: new ThrottlerStorageRedisService(redis.client),
-        // SEC-03 / PHASE 11 EDGE-01: the tracker's identity is only as
-        // trustworthy as `resolveClientIp`'s own trusted-proxy check — see
-        // that function's doc comment. Typed `Record<string, any>` to match
-        // Nest's own (transport-agnostic) `ThrottlerGetTrackerFunction`
-        // signature — an actual Express request is what's passed at
-        // runtime; `resolveClientIp` only reads the fields it declares.
-        getTracker: (req: Record<string, any>) =>
-          resolveClientIp(req as { headers: Record<string, any>; ip?: string; socket?: { remoteAddress?: string } }, environmentService.trustedProxyCidrs),
-        // The ONE rate-limit switch (rate-limit-bypass.ts, X1.2): RAB_DISABLE_RATE_LIMIT exactly 'true', never in a production
-        // runtime, and production refuses to boot with it set. The Jest setup sets it because the integration suite shares one
-        // IP (the local supertest client) across many spec files that each call /auth/login, /auth/refresh etc. repeatedly
-        // within the same 60s window; `rate-limiting.integration.spec.ts` sets it to 'false' to exercise the real throttle.
-        skipIf: () => isRateLimitBypassEnabled(process.env),
-      }),
+      // X1.2: the options live in throttler-options.factory.ts so the skip predicate has a behavioural unit test.
+      useFactory: rabThrottlerOptions,
     }),
   ],
   // CF-17: explicit Redis-outage policy (credential routes fail closed, ordinary routes stay available).
