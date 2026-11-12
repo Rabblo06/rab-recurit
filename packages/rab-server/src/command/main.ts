@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import '../instrument';
-// Phase B (ops): declares `ops` (one-off operations container) or `cli` BEFORE the command module graph is imported, so the
-// import-time environment validation resolves the database configuration as the right process. Keep it above command.module.
+// Declares the `cli` process role BEFORE the command module graph is imported, so the import-time environment validation
+// resolves the database configuration as the CLI (not the default `api`). Keep it above command.module.
 import './ops/declare-cli-process';
 
 import { CommandFactory } from 'nest-commander';
@@ -14,20 +14,17 @@ import { CommandModule } from './command.module';
 
 async function bootstrap(): Promise<void> {
   const cliCommand = cliCommandFromArgv(process.argv);
-  // ---- Phase B (ops): the three owner commands run in the one-off operations container (CREWFLOW_OPS_RUN=one-off), and
-  // that container runs ONLY them. Phase X2.2: on the ordinary CLI path they run only when PG_DATABASE_URL names the owner
-  // login crewflow_owner (no legacy or ops variable); every other login is refused here, before any connection. Declares
-  // the process role (`ops` or `cli`). ----
+  // ---- Phase X2.2: the three owner ops commands run only when PG_DATABASE_URL names the owner login crewflow_owner (no
+  // legacy, libpq or replica variable); every other login is refused here, before any connection. Every command refuses the
+  // retired rab-ops variables (CREWFLOW_OPS_*, PG_OPS_*). Declares the process role (`cli`). ----
   const processRole = assertOpsPlacement(cliCommand, process.env);
-  // ---- Phase B (A1): declare the process (application_name `crewflow-cli` / `crewflow-ops`, pooler policy) before any
-  // DataSource exists, and refuse a bad database configuration (pg-config.ts: PG_DATABASE_URL, legacy names, URL policy, TLS,
-  // the ops variables) before anything connects. ----
+  // ---- Phase B (A1): declare the process (application_name `crewflow-cli`, pooler policy) before any DataSource exists,
+  // and refuse a bad database configuration (pg-config.ts: PG_DATABASE_URL, legacy names, URL policy, TLS, the retired ops
+  // variables) before anything connects. ----
   resolvePgEnvironmentCached(process.env, { processRole });
   // ---- end Phase B (A1) ----
   // Every CLI command (seed, bootstrap-admin, grant-platform-admin, storage-reconcile, ...) runs against an explicitly
-  // resolved and probed target, or not at all. Fails before Nest boots, before any command body runs. In the ops container
-  // the primary is PG_OPS_APP_DATABASE_URL (crewflow_app) and the elevated endpoint PG_DATABASE_URL (migration identity):
-  // both are probed and must name the same database and cluster.
+  // resolved and probed target, or not at all. Fails before Nest boots, before any command body runs.
   await assertDbTarget('command');
   // ---- Phase B (A2): database boot gates — login per command, version, extensions, deployment identity, FORCE RLS, TLS,
   // pending migrations. Before Nest boots and before any command body runs. Gate 1 expects the owner login crewflow_owner
@@ -52,7 +49,7 @@ bootstrap().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : 'unknown error';
   const isGuardRefusal = error instanceof Error && (error.name === 'DbTargetError' || error.name === 'DatabaseBootGateError'); // Phase B (A2)
   const isPgRefusal = error instanceof Error && error.name === 'PgConfigError'; // Phase B (A1)
-  const isOpsRefusal = error instanceof Error && error.name === 'OpsRunError'; // Phase B (ops)
+  const isOpsRefusal = error instanceof Error && error.name === 'OpsRunError'; // Phase X2.2 (ops commands)
   // eslint-disable-next-line no-console
   console.error(
     isGuardRefusal ? `[db-target] refused: ${message}` : isPgRefusal ? `[pg-config] refused: ${message}` : isOpsRefusal ? `[ops] refused: ${message}` : message,

@@ -1,28 +1,28 @@
-import { resolvePgEnvironment, setPgProcessRole } from '../../database/postgres/pg-config';
+import { currentPgProcessRole, resolvePgEnvironment, RETIRED_OPS_ENV_NAMES, setPgProcessRole } from '../../database/postgres/pg-config';
 import { assertHwsApplyAllowed } from './hws-cutover-policy';
 import {
   assertOpsPlacement,
   assertOpsRun,
-  assertOpsValuesNotFromDotenv,
   describeOpsLabel,
   OPS_COMMANDS,
   OPS_LABEL_NOTE,
   opsAuditMetadata,
   OpsRunError,
   readOpsLabelFromFlags,
-  readOpsOperationalLabel,
 } from './ops-run';
 
-// Phase B ops container: placement, the operator label, the .env rule and the minimum-privilege endpoint rule. Pure.
+// The ops commands (X2.2 owner-login path, the only path since rab-ops was removed): placement, the operator label and the
+// one-login endpoint rule. Pure.
 const APP = 'postgres://crewflow_app:pw-app-1@localhost:5432/rab';
-const MIGRATOR = 'postgres://crewflow_migrator:pw-mig-1@localhost:5432/rab';
-const LABEL = {
+// Every variable of the removed rab-ops container, with the value it used to carry.
+const RETIRED_OPS_ENV: Record<(typeof RETIRED_OPS_ENV_NAMES)[number], string> = {
+  CREWFLOW_OPS_RUN: 'one-off',
+  PG_OPS_APP_DATABASE_URL: APP,
   CREWFLOW_OPS_ACTOR_SOURCE: 'github-actions',
   CREWFLOW_OPS_ACTOR_ID: 'repo:crewflow/rab:environment:production',
   CREWFLOW_OPS_CHANGE_REF: 'crewflow/rab#1234',
 };
-const OPS_ENV = { CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP, ...LABEL };
-// X2.2 owner-login path: the one login, and the label as flags.
+// The one login, and the label as flags.
 const OWNER = 'postgres://crewflow_owner:pw-own-1@localhost:5432/rab';
 const OWNER_ENV = { PG_DATABASE_URL: OWNER, DB_TARGET: 'local' };
 const FLAGS = { operator: 'Jane O\'Neil (on-call)', changeRef: 'OPS-42' };
@@ -70,14 +70,17 @@ describe('ops placement (command/main.ts)', () => {
     }
   });
 
-  it('X2.2: the owner-login path refuses a legacy database variable and every operations-container variable', () => {
+  it('X2.2: the owner-login path refuses a legacy database variable and every retired operations-container variable', () => {
     for (const command of OPS_COMMANDS) {
       expect(() => assertOpsPlacement(command, { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw@localhost/rab' })).toThrow(
         /remove the legacy database variable\(s\) DATABASE_URL_UNPOOLED/,
       );
       expect(() => assertOpsPlacement(command, { ...OWNER_ENV, DATABASE_URL: OWNER })).toThrow(/legacy database variable\(s\) DATABASE_URL/);
-      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, CREWFLOW_OPS_ACTOR_ID: 'x' })).toThrow(/refuses the operations-container variable\(s\) CREWFLOW_OPS_ACTOR_ID/);
-      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, PG_OPS_APP_DATABASE_URL: APP })).toThrow(/PG_OPS_APP_DATABASE_URL/);
+      for (const name of RETIRED_OPS_ENV_NAMES) {
+        expect(() => assertOpsPlacement(command, { ...OWNER_ENV, [name]: RETIRED_OPS_ENV[name] })).toThrow(
+          new RegExp(`"${command}" refuses the retired operations-container variable\\(s\\) ${name}: the rab-ops container was removed`),
+        );
+      }
     }
   });
 
@@ -86,54 +89,43 @@ describe('ops placement (command/main.ts)', () => {
     expect(assertOpsPlacement('user-session:backfill', { PG_DATABASE_URL: 'postgresql://crewflow_owner:pw@db.internal:5432/crewflow?sslmode=verify-full' })).toBe('cli');
   });
 
-  it('the ops container runs only the three ops commands', () => {
-    expect(() => assertOpsPlacement('seed', OPS_ENV)).toThrow(/runs only containment:suspend-test-accounts, hws:backfill, user-session:backfill/);
-    expect(() => assertOpsPlacement(undefined, OPS_ENV)).toThrow(OpsRunError);
-    expect(assertOpsPlacement('hws:backfill', OPS_ENV)).toBe('ops');
+  it('rab-ops removed: the old ops-container invocation (CREWFLOW_OPS_RUN=one-off and the rest) is refused for every command, not run as "ops"', () => {
+    for (const command of [...OPS_COMMANDS, 'seed', 'bootstrap-admin', undefined]) {
+      // The exact old rab-ops environment, with and without the owner login next to it.
+      expect(() => assertOpsPlacement(command, RETIRED_OPS_ENV)).toThrow(OpsRunError);
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, ...RETIRED_OPS_ENV })).toThrow(/refuses the retired operations-container variable\(s\) CREWFLOW_OPS_RUN, PG_OPS_APP_DATABASE_URL/);
+      // CREWFLOW_OPS_RUN alone, with its old value or any other.
+      for (const value of ['one-off', 'true', 'x']) {
+        expect(() => assertOpsPlacement(command, { ...OWNER_ENV, CREWFLOW_OPS_RUN: value })).toThrow(/refuses the retired operations-container variable\(s\) CREWFLOW_OPS_RUN/);
+      }
+    }
+    // The refusal names the replacement, and never declares a process role.
+    expect(() => assertOpsPlacement('hws:backfill', { ...OWNER_ENV, CREWFLOW_OPS_RUN: 'one-off' })).toThrow(/one-off CLI commands under the owner login crewflow_owner.*--operator, --change-ref, --operator-source/);
+    setPgProcessRole('api');
+    expect(() => assertOpsPlacement('hws:backfill', { ...OWNER_ENV, CREWFLOW_OPS_RUN: 'one-off' })).toThrow(OpsRunError);
+    expect(currentPgProcessRole()).toBe('api');
   });
 
-  it('an ordinary CLI command refuses any ops variable; without them it is `cli`', () => {
-    expect(() => assertOpsPlacement('seed', { CREWFLOW_OPS_ACTOR_ID: 'x' })).toThrow(/refuse the operations-container variable\(s\) CREWFLOW_OPS_ACTOR_ID/);
+  it('an ordinary CLI command refuses every retired ops variable; without them it is `cli`', () => {
+    for (const name of RETIRED_OPS_ENV_NAMES) {
+      expect(() => assertOpsPlacement('seed', { [name]: RETIRED_OPS_ENV[name] })).toThrow(
+        new RegExp(`the CLI command "seed" refuses the retired operations-container variable\\(s\\) ${name}`),
+      );
+    }
+    // Empty means unset.
+    expect(assertOpsPlacement('seed', { CREWFLOW_OPS_RUN: '', PG_OPS_APP_DATABASE_URL: '  ' })).toBe('cli');
     expect(assertOpsPlacement('seed', {})).toBe('cli');
-  });
-
-  it('a malformed CREWFLOW_OPS_RUN is refused', () => {
-    expect(() => assertOpsPlacement('hws:backfill', { ...OPS_ENV, CREWFLOW_OPS_RUN: 'true' })).toThrow(/must be exactly "one-off"/);
+    expect(currentPgProcessRole()).toBe('cli');
   });
 });
 
 describe('the operator label (operational, not database-verified)', () => {
-  it('is required: each missing variable is named', () => {
-    for (const name of Object.keys(LABEL)) {
-      const env: Record<string, string | undefined> = { ...LABEL, [name]: '' };
-      expect(() => readOpsOperationalLabel(env, 'hws:backfill', 'dry-run')).toThrow(new RegExp(`missing: ${name}`));
-    }
-  });
-
-  it('refuses an unknown source and malformed id / change reference (no whitespace, no control characters)', () => {
-    expect(() => readOpsOperationalLabel({ ...LABEL, CREWFLOW_OPS_ACTOR_SOURCE: 'laptop' }, 'hws:backfill', 'dry-run')).toThrow(/must be one of github-actions, gitlab-ci, manual-console/);
-    expect(() => readOpsOperationalLabel({ ...LABEL, CREWFLOW_OPS_ACTOR_ID: 'alice smith' }, 'hws:backfill', 'dry-run')).toThrow(/CREWFLOW_OPS_ACTOR_ID must be/);
-    expect(() => readOpsOperationalLabel({ ...LABEL, CREWFLOW_OPS_ACTOR_ID: 'a\nb' }, 'hws:backfill', 'dry-run')).toThrow(/CREWFLOW_OPS_ACTOR_ID must be/);
-    expect(() => readOpsOperationalLabel({ ...LABEL, CREWFLOW_OPS_CHANGE_REF: '-rf' }, 'hws:backfill', 'dry-run')).toThrow(/CREWFLOW_OPS_CHANGE_REF must be/);
-  });
-
   it('is recorded verbatim with its fixed note, a run id, and the verified database facts kept apart', () => {
-    const label = readOpsOperationalLabel(LABEL, 'user-session:backfill', 'apply');
-    expect(label).toMatchObject({
-      kind: 'operational-label',
-      note: OPS_LABEL_NOTE,
-      actorSource: 'github-actions',
-      actorId: 'repo:crewflow/rab:environment:production',
-      changeRef: 'crewflow/rab#1234',
-      command: 'user-session:backfill',
-      mode: 'apply',
-      path: 'ops-container',
-    });
+    const label = readOpsLabelFromFlags({ ...FLAGS, operatorSource: 'github-actions' }, 'user-session:backfill', 'apply');
     expect(label.runId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(OPS_LABEL_NOTE).toBe('operational label, not database-verified identity');
-    const metadata = opsAuditMetadata(label, { appLogin: 'crewflow_app', elevatedLogin: 'crewflow_migrator', elevatedRole: 'rab_secure_owner', identity: 'unbound' });
+    const metadata = opsAuditMetadata(label, { appLogin: 'crewflow_owner', elevatedLogin: 'crewflow_owner', elevatedRole: 'rab_secure_owner', identity: 'unbound' });
     expect(metadata.operationalLabel).toEqual(label);
-    expect(metadata.databaseVerified).toMatchObject({ appLogin: 'crewflow_app', elevatedRole: 'rab_secure_owner' });
+    expect(metadata.databaseVerified).toMatchObject({ appLogin: 'crewflow_owner', elevatedLogin: 'crewflow_owner', elevatedRole: 'rab_secure_owner' });
   });
 });
 
@@ -207,24 +199,12 @@ describe('X2.2: the operator label as flags (owner-login path; owner decision G1
   });
 });
 
-describe('ops values never come from a .env file', () => {
-  it('refuses any ops name or PG_DATABASE_URL defined in <cwd>/.env; no file is fine', () => {
-    expect(() => assertOpsValuesNotFromDotenv('/x', () => 'PG_OPS_APP_DATABASE_URL=postgres://a@b/c\n')).toThrow(/present in a \.env file/);
-    expect(() => assertOpsValuesNotFromDotenv('/x', () => 'PG_DATABASE_URL=postgres://a@b/c\n')).toThrow(/PG_DATABASE_URL/);
-    expect(() => assertOpsValuesNotFromDotenv('/x', () => 'CREWFLOW_OPS_ACTOR_ID=me\n')).toThrow(/CREWFLOW_OPS_ACTOR_ID/);
-    expect(() => assertOpsValuesNotFromDotenv('/x', () => 'REDIS_URL=redis://x\n')).not.toThrow();
-    expect(() => assertOpsValuesNotFromDotenv('/x', () => null)).not.toThrow();
-  });
-});
-
 describe('assertOpsRun (layer 2, every ops command body)', () => {
-  const withElevated = { ...OPS_ENV, PG_DATABASE_URL: MIGRATOR };
-
   it('X2.2: on the CLI path, refuses any login but crewflow_owner even when called directly (every ops command)', () => {
     setPgProcessRole('cli');
     for (const command of OPS_COMMANDS) {
       const env = { PG_DATABASE_URL: APP };
-      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: false }, resolvePgEnvironment(env, { processRole: 'cli' }), env, FLAGS)).toThrow(
+      expect(() => assertOpsRun(command, 'dry-run', resolvePgEnvironment(env, { processRole: 'cli' }), env, FLAGS)).toThrow(
         /runs only under the owner login crewflow_owner/,
       );
     }
@@ -234,8 +214,8 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
     setPgProcessRole('cli');
     const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
     for (const command of OPS_COMMANDS) {
-      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: true }, resolved, OWNER_ENV)).toThrow(/requires the operator label --operator, --change-ref/);
-      expect(() => assertOpsRun(command, 'apply', { needsElevated: false }, resolved, OWNER_ENV, { ...FLAGS, changeRef: undefined })).toThrow(/missing: --change-ref/);
+      expect(() => assertOpsRun(command, 'dry-run', resolved, OWNER_ENV)).toThrow(/requires the operator label --operator, --change-ref/);
+      expect(() => assertOpsRun(command, 'apply', resolved, OWNER_ENV, { ...FLAGS, changeRef: undefined })).toThrow(/missing: --change-ref/);
     }
   });
 
@@ -244,7 +224,7 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
       setPgProcessRole(role);
       const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: role });
       for (const command of OPS_COMMANDS) {
-        expect(() => assertOpsRun(command, 'dry-run', { needsElevated: false }, resolved, OWNER_ENV, FLAGS)).toThrow(new RegExp(`never inside the ${role} process`));
+        expect(() => assertOpsRun(command, 'dry-run', resolved, OWNER_ENV, FLAGS)).toThrow(new RegExp(`never inside the ${role} process`));
       }
     }
   });
@@ -252,7 +232,7 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
   it('X2.2: refuses the legacy second-endpoint variable DATABASE_URL_UNPOOLED in layer 2 (the environment rule)', () => {
     setPgProcessRole('cli');
     const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
-    expect(() => assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolvePgEnvironment(withUnpooled, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
+    expect(() => assertOpsRun('user-session:backfill', 'apply', resolvePgEnvironment(withUnpooled, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
       /remove the legacy database variable\(s\) DATABASE_URL_UNPOOLED/,
     );
   });
@@ -262,45 +242,36 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
     const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
     const resolved = resolvePgEnvironment(withUnpooled, { processRole: 'cli' });
     expect(resolved.elevated).not.toBeNull();
-    expect(() => assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolved, OWNER_ENV, FLAGS)).toThrow(
+    expect(() => assertOpsRun('user-session:backfill', 'apply', resolved, OWNER_ENV, FLAGS)).toThrow(
       /uses the one login only; a second database endpoint \(DATABASE_URL_UNPOOLED\) is refused/,
     );
   });
 
-  it('X2.2: accepts crewflow_owner with the label; needsElevated asks for no second credential there', () => {
+  it('X2.2: accepts crewflow_owner with the label (every mode; no mode asks for a second credential)', () => {
     setPgProcessRole('cli');
     const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
-    expect(assertOpsRun('containment:suspend-test-accounts', 'execute', { needsElevated: true }, resolved, OWNER_ENV, FLAGS)).toMatchObject({ path: 'owner-login', mode: 'execute' });
-    expect(assertOpsRun('user-session:backfill', 'verify', { needsElevated: false }, resolved, OWNER_ENV, FLAGS).path).toBe('owner-login');
-    expect(assertOpsRun('hws:backfill', 'apply', { needsElevated: false }, resolved, OWNER_ENV, FLAGS).command).toBe('hws:backfill');
+    expect(assertOpsRun('containment:suspend-test-accounts', 'execute', resolved, OWNER_ENV, FLAGS)).toMatchObject({ path: 'owner-login', mode: 'execute' });
+    expect(assertOpsRun('user-session:backfill', 'verify', resolved, OWNER_ENV, FLAGS).path).toBe('owner-login');
+    expect(assertOpsRun('hws:backfill', 'apply', resolved, OWNER_ENV, FLAGS).command).toBe('hws:backfill');
   });
 
-  it('the ops container refuses the label flags (its label comes from its variables only)', () => {
-    setPgProcessRole('ops');
-    expect(() => assertOpsRun('hws:backfill', 'dry-run', { needsElevated: false }, resolvePgEnvironment(OPS_ENV, { processRole: 'ops' }), OPS_ENV, FLAGS)).toThrow(
-      /remove --operator \/ --change-ref \/ --operator-source/,
-    );
+  it('rab-ops removed: a retired ops variable in the environment handed to layer 2 is refused (a command body reached without main.ts)', () => {
+    setPgProcessRole('cli');
+    const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
+    for (const command of OPS_COMMANDS) {
+      for (const name of RETIRED_OPS_ENV_NAMES) {
+        expect(() => assertOpsRun(command, 'dry-run', resolved, { ...OWNER_ENV, [name]: RETIRED_OPS_ENV[name] }, FLAGS)).toThrow(
+          new RegExp(`refuses the retired operations-container variable\\(s\\) ${name}`),
+        );
+      }
+    }
   });
 
-  it('minimum privilege: PG_DATABASE_URL present exactly when the mode needs the elevated session', () => {
-    setPgProcessRole('ops');
-    const resolvedWith = resolvePgEnvironment(withElevated, { processRole: 'ops' });
-    const resolvedWithout = resolvePgEnvironment(OPS_ENV, { processRole: 'ops' });
-    expect(() => assertOpsRun('user-session:backfill', 'verify', { needsElevated: false }, resolvedWith, withElevated)).toThrow(/Remove PG_DATABASE_URL/);
-    expect(() => assertOpsRun('hws:backfill', 'apply', { needsElevated: false }, resolvedWith, withElevated)).toThrow(/Remove PG_DATABASE_URL/);
-    expect(() => assertOpsRun('containment:suspend-test-accounts', 'dry-run', { needsElevated: true }, resolvedWithout, OPS_ENV)).toThrow(
-      /needs the verified elevated session/,
-    );
-    expect(assertOpsRun('user-session:backfill', 'verify', { needsElevated: false }, resolvedWithout, OPS_ENV).command).toBe('user-session:backfill');
-    expect(assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolvedWith, withElevated).mode).toBe('apply');
-  });
-
-  it('refuses a missing operator label', () => {
-    setPgProcessRole('ops');
-    const env = { CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP };
-    expect(() => assertOpsRun('hws:backfill', 'dry-run', { needsElevated: false }, resolvePgEnvironment(env, { processRole: 'ops' }), env)).toThrow(
-      /requires the operator label/,
-    );
+  it('rab-ops removed: the old ops-container label variables are no substitute for the flags', () => {
+    setPgProcessRole('cli');
+    const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
+    const env = { ...OWNER_ENV, CREWFLOW_OPS_ACTOR_SOURCE: 'github-actions', CREWFLOW_OPS_ACTOR_ID: 'me', CREWFLOW_OPS_CHANGE_REF: 'OPS-1' };
+    expect(() => assertOpsRun('hws:backfill', 'dry-run', resolved, env)).toThrow(/retired operations-container variable\(s\) CREWFLOW_OPS_ACTOR_SOURCE, CREWFLOW_OPS_ACTOR_ID, CREWFLOW_OPS_CHANGE_REF/);
   });
 });
 

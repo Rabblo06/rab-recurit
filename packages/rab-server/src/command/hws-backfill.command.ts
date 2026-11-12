@@ -48,23 +48,19 @@ export interface HwsBackfillReport {
  * (`WORKSPACE_TABLE_COPY_ORDER`, derived from the live V1 catalog — see `fk-graph.ts`). The source
  * `core` rows are never modified or deleted by this command, under any mode.
  *
- * Phase B (ops container, owner decision): runs ONLY in the one-off operations container (command/ops/ops-run.ts) with the
- * operator label required, and EVERY mode runs as the restricted runtime login crewflow_app (PG_OPS_APP_DATABASE_URL):
- * discovery through `core.worker_list_workspaces()`, the tenant-bound reads, the checkpoint upserts, AND the physical-schema
- * copy (`writePhysical`). The copy no longer uses an owner connection: every workspace table is FORCE'd (so the owner had no
- * RLS advantage), crewflow_app holds INSERT on each of them, and the `attendance_post_shift_reset` trigger and the generated
- * columns behave the same — proven on a disposable database (runbook ops section). PG_DATABASE_URL (the migration
- * identity) is therefore REFUSED for this command. The six runtime-actor tables stay with the one-off privileged migration.
+ * Phase X2.2 (owner decision 2026-11-12): runs ONLY as a one-off of the API service under the owner login crewflow_owner
+ * (command/ops/ops-run.ts), with the label flags required (--operator "<name>" and --change-ref; --operator-source
+ * optional). EVERY mode runs on the CLI's own owner-login DataSource: discovery through `core.worker_list_workspaces()`, the
+ * tenant-bound reads, the checkpoint upserts, AND the physical-schema copy (`writePhysical`). Every workspace table is
+ * FORCE'd, so FORCE RLS binds the owner login on each of them as it bound crewflow_app (the copy was proven equal under
+ * crewflow_app, crewflow and a superuser on a disposable database, runbook ops section); no narrowed session is opened for
+ * this command. The six runtime-actor
+ * tables stay with the one-off privileged migration. (The separated-mode rab-ops container is removed.)
  *
  * `--apply` / `--resume` while HWS runtime routing is OFF requires `--hws-cutover` (assertHwsApplyAllowed). Do not run it in
  * production while HWS is off. Each applied workspace gets one actor-less audit row (`ops.hws_backfill_applied`, its
  * organisation) carrying the operational label.
- *
- * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner,
- * with the label flags required (--operator "<name>" and --change-ref; --operator-source optional). Every mode then runs on the CLI's own
- * owner-login DataSource (FORCE RLS binds it on every workspace table, as it bound crewflow_app); no narrowed session is
- * opened for this command.
- *
+ * *
  * Modes (mutually exclusive; `--dry-run` is the default if none is given — report-only, zero writes):
  *   --dry-run   report only — workspace/registry status, row counts, conflicts, blocked rows
  *   --apply     copies rows (idempotent — a second run reports already-complete, never duplicates)
@@ -142,8 +138,8 @@ export class HwsBackfillCommand extends OpsCommandRunner {
     if (modesRequested > 1) throw new Error('--dry-run, --apply, --verify and --resume are mutually exclusive — pass exactly one.');
     const mode: 'dry-run' | 'apply' | 'verify' = options.verify ? 'verify' : options.apply || options.resume ? 'apply' : 'dry-run';
     const resolved = resolvePgEnvironmentCached(process.env);
-    // Layer 2: ops container, operator label, and no migration identity at all (every mode runs as crewflow_app).
-    const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, { needsElevated: false }, resolved, process.env, opsLabelFlagsOf(options));
+    // Layer 2: the CLI process, the owner login, the operator label (every mode runs on the one owner-login DataSource).
+    const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, resolved, process.env, opsLabelFlagsOf(options));
     const hwsRuntimeEnabled = this.environment.get('HWS_RUNTIME_ENABLED') === true;
     assertHwsApplyAllowed({ mode, hwsRuntimeEnabled, hwsCutover: options.hwsCutover === true, production: process.env.DB_TARGET?.trim() === 'production' });
 
@@ -193,8 +189,8 @@ export class HwsBackfillCommand extends OpsCommandRunner {
         }
       }
     } else if (mode === 'apply') {
-      // The physical copy runs on the injected restricted DataSource (crewflow_app), the same login as every read: no owner
-      // connection is opened at all. The service's binding (organisation, workspace, the workspace's owning manager, the
+      // The physical copy runs on the injected DataSource (the owner login, FORCE RLS-bound), the same login as every read: no
+      // second connection is opened at all. The service's binding (organisation, workspace, the workspace's owning manager, the
       // resolved schema) is what the FORCE'd insert policies check.
       this.backfill.ownerDataSource = this.dataSource;
       const metadata = opsAuditMetadata(label, { appLogin: app.login, identity: app.identity });
