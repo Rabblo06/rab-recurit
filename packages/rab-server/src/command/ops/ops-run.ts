@@ -23,14 +23,32 @@
  * Enforcement layers: main.ts refuses an ops command outside the ops container and any other command inside it
  * (assertOpsPlacement); every ops command's run() calls assertOpsRun again (layer 2: a command body can be reached without
  * main.ts, e.g. from a test or another module); pg-config.ts refuses every ops variable in every other process.
+ *
+ * Phase X2.2 (owner decision 2026-11-12, "the Twenty way": every command runs from the same image under the one login):
+ * the same three commands ALSO run on the ordinary CLI path, as a one-off of the API service
+ * (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command> ...`), under the owner
+ * login crewflow_owner and nothing else. This is the OWNER-LOGIN path (OpsRunPath 'owner-login'):
+ *   - layer 1 (main.ts, assertOpsPlacement, before any connection): PG_DATABASE_URL must name exactly crewflow_owner, and
+ *     no legacy database variable and no operations-container variable may be set. Any other login is refused;
+ *   - the CLI boot gates (gate 1: session_user = current_user = crewflow_owner, plus the owner-login posture) run before
+ *     any command body, as for every CLI command;
+ *   - layer 2 (assertOpsRun, the first statement of run()): the CLI process, PG_DATABASE_URL = crewflow_owner, no second
+ *     endpoint, and the operator label from the command's own flags (--operator-source / --operator-id / --change-ref,
+ *     the same values and validation as the container variables); then each command re-verifies the login ON the database
+ *     (elevated-ops-session.ts verifyOpsAppSession) before its first data statement.
+ * The cross-tenant steps keep the FROZEN statement lists (ops-statements.ts): crewflow_owner narrows itself with
+ * `SET LOCAL ROLE rab_secure_owner` (a role it already holds with SET; no grant is added) in a verified transaction on its
+ * own one-connection pool. The rab-ops container path above stays, unchanged, until the separated-mode clean-up (X5.1).
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import { OWNER_LOGIN_ROLE } from '../../database/boot-checks/owner-login-posture';
 import { nxDotenvPaths, readDotenvFilesValues, WORKSPACE_ROOT } from '../../database/typeorm/core/nx-dotenv-files';
 import {
   currentPgProcessRole,
+  LEGACY_PG_ENV_NAMES,
   OPS_ACTOR_ENV_NAMES,
   OPS_APP_DATABASE_URL_VAR,
   OPS_ONLY_ENV_NAMES,
@@ -49,6 +67,22 @@ export type OpsActorSource = (typeof OPS_ACTOR_SOURCES)[number];
 
 /** The fixed note every audit label carries, so no reader mistakes it for a verified identity. */
 export const OPS_LABEL_NOTE = 'operational label, not database-verified identity';
+
+/**
+ * Where an ops run executes: the separated-mode one-off operations container (rab-ops, until X5.1), or the ordinary CLI as
+ * a one-off of the API service under the owner login crewflow_owner (X2.2). Set by the code and recorded in every label.
+ */
+export type OpsRunPath = 'ops-container' | 'owner-login';
+
+/** The owner-login path's operator label flags (the same three values as OPS_ACTOR_ENV_NAMES, in the same order). */
+export const OPS_LABEL_FLAGS = ['--operator-source', '--operator-id', '--change-ref'] as const;
+
+/** The parsed label flags (nest-commander camel-cases the flag names). */
+export interface OpsLabelFlags {
+  operatorSource?: string;
+  operatorId?: string;
+  changeRef?: string;
+}
 
 /** A CI OIDC subject (`repo:org/repo:environment:production`), a run id, a deploy user: printable, no whitespace. */
 const ACTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/+=-]{0,199}$/;
@@ -92,15 +126,53 @@ export function assertOpsPlacement(command: string | undefined, env: Record<stri
       );
     }
   } else if (isOpsCommand(command)) {
-    throw new OpsRunError(
-      `"${command}" runs only in the one-off operations container (${OPS_RUN_VAR}=${OPS_RUN_VALUE}, ${OPS_APP_DATABASE_URL_VAR}, the operator label). See the ops section of docs/runbooks/database.md.`,
-    );
+    // X2.2 owner-login path: allowed only when the one login is crewflow_owner (verified on the database again by the boot
+    // gates and by the command itself before any data statement).
+    assertOwnerLoginOpsEnvironment(command, env);
   } else {
     const held = OPS_ONLY_ENV_NAMES.filter((name) => present(env, name) !== undefined);
     if (held.length > 0) throw new OpsRunError(`ordinary CLI commands refuse the operations-container variable(s) ${held.join(', ')}.`);
   }
   setPgProcessRole(role);
   return role;
+}
+
+/** The user named by a postgres URL, or undefined when it cannot be parsed (the value is never echoed). */
+function urlUser(raw: string): string | undefined {
+  try {
+    const url = new URL(raw.trim());
+    if (!/^postgres(ql)?:$/i.test(url.protocol)) return undefined;
+    return decodeURIComponent(url.username);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * X2.2, layer 1 (pure, before any connection): an ops command on the ordinary CLI path runs only under the owner login.
+ * PG_DATABASE_URL must name exactly crewflow_owner; no legacy database variable (DATABASE_URL, DATABASE_URL_UNPOOLED,
+ * DATABASE_DIRECT_URL, DB_POOL_MAX) and no operations-container variable may be set: the label comes from the command's
+ * flags, and there is exactly one endpoint. Throws OpsRunError; the message names variables and the login only.
+ */
+export function assertOwnerLoginOpsEnvironment(command: OpsCommand, env: Record<string, string | undefined>): void {
+  const held = OPS_ONLY_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+  if (held.length > 0) {
+    throw new OpsRunError(
+      `"${command}" on the owner-login path refuses the operations-container variable(s) ${held.join(', ')}: pass the operator label as ${OPS_LABEL_FLAGS.join(', ')}.`,
+    );
+  }
+  const legacy = LEGACY_PG_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+  if (legacy.length > 0) {
+    throw new OpsRunError(`"${command}" runs only on PG_DATABASE_URL (the owner login); remove the legacy database variable(s) ${legacy.join(', ')}.`);
+  }
+  const raw = present(env, 'PG_DATABASE_URL');
+  if (raw === undefined) throw new OpsRunError(`"${command}" requires PG_DATABASE_URL naming the owner login ${OWNER_LOGIN_ROLE}.`);
+  const user = urlUser(raw);
+  if (user !== OWNER_LOGIN_ROLE) {
+    throw new OpsRunError(
+      `"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE}; PG_DATABASE_URL names ${user === undefined ? 'an unparsable URL (value not shown)' : `"${user}"`}. Refusing.`,
+    );
+  }
 }
 
 /** The operational audit label, exactly as recorded in audit metadata (key `operationalLabel`). */
@@ -112,30 +184,40 @@ export interface OpsOperationalLabel {
   changeRef: string;
   command: OpsCommand;
   mode: string;
+  /** Which path ran the command (set by the code, not by the operator). */
+  path: OpsRunPath;
   /** Random per run: ties the run's audit rows, its log and its console output together. */
   runId: string;
 }
 
-/** Reads and validates the three label variables. Refuses absent or malformed values (names only in the message). */
-export function readOpsOperationalLabel(env: Record<string, string | undefined>, command: OpsCommand, mode: string): OpsOperationalLabel {
-  const [sourceVar, idVar, refVar] = OPS_ACTOR_ENV_NAMES;
-  const missing = OPS_ACTOR_ENV_NAMES.filter((name) => present(env, name) === undefined);
+/**
+ * Validates the three label values (the same rules on both paths). `names` are how the operator supplied them (the
+ * container variables or the flags) and appear in refusal messages; the values themselves are never echoed.
+ */
+function validateOpsLabel(
+  values: readonly [string | undefined, string | undefined, string | undefined],
+  names: readonly [string, string, string],
+  command: OpsCommand,
+  mode: string,
+  path: OpsRunPath,
+): OpsOperationalLabel {
+  const trimmed = values.map((v) => (v !== undefined && v.trim() !== '' ? v.trim() : undefined));
+  const missing = names.filter((_, i) => trimmed[i] === undefined);
   if (missing.length > 0) {
     throw new OpsRunError(
-      `every ops command requires the operator label ${OPS_ACTOR_ENV_NAMES.join(', ')} (missing: ${missing.join(', ')}). Set them from the deployment platform's job identity and the approved change reference.`,
+      `every ops command requires the operator label ${names.join(', ')} (missing: ${missing.join(', ')}). Set them from the deployment platform's job identity and the approved change reference.`,
     );
   }
-  const actorSource = present(env, sourceVar)!;
+  const [actorSource, actorId, changeRef] = trimmed as [string, string, string];
+  const [sourceName, idName, refName] = names;
   if (!(OPS_ACTOR_SOURCES as readonly string[]).includes(actorSource)) {
-    throw new OpsRunError(`${sourceVar} must be one of ${OPS_ACTOR_SOURCES.join(', ')}.`);
+    throw new OpsRunError(`${sourceName} must be one of ${OPS_ACTOR_SOURCES.join(', ')}.`);
   }
-  const actorId = present(env, idVar)!;
   if (!ACTOR_ID_PATTERN.test(actorId)) {
-    throw new OpsRunError(`${idVar} must be 1-200 printable characters without whitespace (letters, digits, . _ : @ / + = -), starting with a letter or digit.`);
+    throw new OpsRunError(`${idName} must be 1-200 printable characters without whitespace (letters, digits, . _ : @ / + = -), starting with a letter or digit.`);
   }
-  const changeRef = present(env, refVar)!;
   if (!CHANGE_REF_PATTERN.test(changeRef)) {
-    throw new OpsRunError(`${refVar} must be 1-120 characters (letters, digits, . _ : # / + -), starting with a letter or digit.`);
+    throw new OpsRunError(`${refName} must be 1-120 characters (letters, digits, . _ : # / + -), starting with a letter or digit.`);
   }
   return {
     kind: 'operational-label',
@@ -145,8 +227,24 @@ export function readOpsOperationalLabel(env: Record<string, string | undefined>,
     changeRef,
     command,
     mode,
+    path,
     runId: randomUUID(),
   };
+}
+
+/** The ops container: reads and validates the three label variables. Refuses absent or malformed values (names only in the message). */
+export function readOpsOperationalLabel(env: Record<string, string | undefined>, command: OpsCommand, mode: string): OpsOperationalLabel {
+  const [sourceVar, idVar, refVar] = OPS_ACTOR_ENV_NAMES;
+  return validateOpsLabel([env[sourceVar], env[idVar], env[refVar]], OPS_ACTOR_ENV_NAMES, command, mode, 'ops-container');
+}
+
+/** X2.2 owner-login path: reads and validates the label from the command's flags (the same rules as the container variables). */
+export function readOpsLabelFromFlags(flags: OpsLabelFlags, command: OpsCommand, mode: string): OpsOperationalLabel {
+  return validateOpsLabel([flags.operatorSource, flags.operatorId, flags.changeRef], OPS_LABEL_FLAGS, command, mode, 'owner-login');
+}
+
+function anyLabelFlag(flags: OpsLabelFlags): boolean {
+  return [flags.operatorSource, flags.operatorId, flags.changeRef].some((v) => v !== undefined);
 }
 
 /**
@@ -184,9 +282,16 @@ export function assertOpsRun(
   requirement: OpsElevatedRequirement,
   resolved: ResolvedPgEnvironment,
   env: Record<string, string | undefined> = process.env,
+  flags: OpsLabelFlags = {},
 ): OpsOperationalLabel {
+  if (!resolved.ops && resolved.processRole !== 'ops' && currentPgProcessRole() !== 'ops') {
+    return assertOwnerLoginOpsRun(command, mode, resolved, env, flags);
+  }
   if (currentPgProcessRole() !== 'ops' || !resolved.ops || resolved.processRole !== 'ops') {
-    throw new OpsRunError(`"${command}" runs only in the one-off operations container (${OPS_RUN_VAR}=${OPS_RUN_VALUE}).`);
+    throw new OpsRunError(`"${command}" runs only in the one-off operations container (${OPS_RUN_VAR}=${OPS_RUN_VALUE}) or on the owner-login CLI path.`);
+  }
+  if (anyLabelFlag(flags)) {
+    throw new OpsRunError(`in the one-off operations container the operator label comes from ${OPS_ACTOR_ENV_NAMES.join(', ')}; remove ${OPS_LABEL_FLAGS.join(' / ')}.`);
   }
   assertOpsValuesNotFromDotenv();
   const label = readOpsOperationalLabel(env, command, mode);
@@ -201,9 +306,35 @@ export function assertOpsRun(
   return label;
 }
 
+/**
+ * X2.2 layer 2 on the owner-login path: the ordinary CLI process (never the API, the Worker or the provisioner), the one
+ * endpoint PG_DATABASE_URL naming crewflow_owner (no second endpoint, no ops variable), and the label from the flags.
+ * The database facts (session_user = current_user = crewflow_owner) are verified next by verifyOpsAppSession, before the
+ * first data statement. `needsElevated` changes nothing here: the narrowed session uses the same login.
+ */
+function assertOwnerLoginOpsRun(
+  command: OpsCommand,
+  mode: string,
+  resolved: ResolvedPgEnvironment,
+  env: Record<string, string | undefined>,
+  flags: OpsLabelFlags,
+): OpsOperationalLabel {
+  if (currentPgProcessRole() !== 'cli' || resolved.processRole !== 'cli') {
+    throw new OpsRunError(`"${command}" runs only as a one-off CLI command (dist/command/main.js), never inside the ${resolved.processRole} process.`);
+  }
+  assertOwnerLoginOpsEnvironment(command, env);
+  if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE) {
+    throw new OpsRunError(`"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE} named by PG_DATABASE_URL. Refusing.`);
+  }
+  if (resolved.elevated !== null) {
+    throw new OpsRunError(`"${command}" on the owner-login path uses the one login only; a second database endpoint (${resolved.elevated.source}) is refused.`);
+  }
+  return readOpsLabelFromFlags(flags, command, mode);
+}
+
 /** One sanitised console line: the label (it is not secret) and the run id. */
 export function describeOpsLabel(label: OpsOperationalLabel): string {
-  return `[ops] command=${label.command} mode=${label.mode} run=${label.runId} actor_source=${label.actorSource} actor_id=${label.actorId} change_ref=${label.changeRef} (${OPS_LABEL_NOTE})`;
+  return `[ops] command=${label.command} mode=${label.mode} path=${label.path} run=${label.runId} actor_source=${label.actorSource} actor_id=${label.actorId} change_ref=${label.changeRef} (${OPS_LABEL_NOTE})`;
 }
 
 /** What the run verified on its database sessions (these ARE database facts, unlike the label). */

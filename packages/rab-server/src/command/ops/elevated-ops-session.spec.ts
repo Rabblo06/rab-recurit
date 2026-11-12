@@ -1,6 +1,7 @@
 import {
   assertOpsActingFacts,
   assertOpsLoginFacts,
+  assertOwnerLoginFacts,
   ElevatedOpsSessionError,
   OpsSessionExpectation,
   OpsSessionFacts,
@@ -50,6 +51,40 @@ describe('elevated ops session: before narrowing', () => {
     ['READ WRITE where READ ONLY is required', { readOnly: false }, {}, /requires READ ONLY/],
   ])('refuses %s', (_name, facts, expect_, pattern) => {
     expect(() => assertOpsLoginFacts({ ...BEFORE, ...facts }, { ...EXPECT, ...expect_ })).toThrow(pattern);
+  });
+});
+
+// X2.2 owner-login path: the same login, narrowed. crewflow_owner holds an ADMIN-only row on crewflow_app by design.
+const OWNER_EXPECT: OpsSessionExpectation = { ...EXPECT, expectedLogin: 'crewflow_owner' };
+const OWNER_BEFORE: OpsSessionFacts = { ...BEFORE, login: 'crewflow_owner', acting: 'crewflow_owner', loginAdminOption: true };
+
+describe('owner-login narrowed session (X2.2): before narrowing', () => {
+  it('accepts crewflow_owner (its bootstrap ADMIN-only row on crewflow_app is expected, the boot gate verifies its posture)', () => {
+    expect(() => assertOwnerLoginFacts(OWNER_BEFORE, OWNER_EXPECT)).not.toThrow();
+    // ...while the migration-identity check would refuse that same shape: the two paths do not share a rule by accident.
+    expect(() => assertOpsLoginFacts(OWNER_BEFORE, OWNER_EXPECT)).toThrow(/ADMIN option/);
+  });
+
+  it.each<[string, Partial<OpsSessionFacts>, Partial<OpsSessionExpectation>, RegExp]>([
+    ['any other login (the migration identity)', { login: 'crewflow_migrator', acting: 'crewflow_migrator' }, {}, /session_user is "crewflow_migrator", not the owner login crewflow_owner/],
+    ['any other login (crewflow_app)', { login: 'crewflow_app', acting: 'crewflow_app' }, { expectedLogin: 'crewflow_app' }, /not the owner login crewflow_owner/],
+    ['an expectation that is not the owner login', {}, { expectedLogin: 'crewflow_app' }, /not the owner login crewflow_owner/],
+    ['a non-LOGIN session user', { loginCanLogin: false }, {}, /not a LOGIN role/],
+    ['SUPERUSER / BYPASSRLS', { loginExempt: true }, {}, /SUPERUSER or BYPASSRLS/],
+    ['not the owner-login layout', { loginMemberSecureOwner: false }, {}, /not a member of both rab_secure_owner and crewflow/],
+    ['missing SET on the narrow role', { canSetRole: false }, {}, /may not SET ROLE rab_secure_owner/],
+    ['already acting as another role', { acting: 'rab_secure_owner' }, {}, /already acting as another role/],
+    ['PostgreSQL 15', { serverVersionNum: 150008 }, {}, /below 160000/],
+    ['another database', { database: 'other' }, {}, /differs from the app session/],
+    ['READ WRITE where READ ONLY is required', { readOnly: false }, {}, /requires READ ONLY/],
+  ])('refuses %s', (_name, facts, expect_, pattern) => {
+    expect(() => assertOwnerLoginFacts({ ...OWNER_BEFORE, ...facts }, { ...OWNER_EXPECT, ...expect_ })).toThrow(pattern);
+  });
+
+  it('after narrowing the unchanged acting-facts rule applies with crewflow_owner as the login', () => {
+    const after: OpsSessionFacts = { ...OWNER_BEFORE, acting: 'rab_secure_owner', actingHasCrewflow: false, actingHasSecureOwner: true };
+    expect(() => assertOpsActingFacts(after, OWNER_EXPECT)).not.toThrow();
+    expect(() => assertOpsActingFacts({ ...after, acting: 'crewflow_owner', actingHasCrewflow: true }, OWNER_EXPECT)).toThrow(/unnarrowed or wrong role/);
   });
 });
 

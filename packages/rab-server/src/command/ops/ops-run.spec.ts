@@ -4,9 +4,11 @@ import {
   assertOpsPlacement,
   assertOpsRun,
   assertOpsValuesNotFromDotenv,
+  OPS_COMMANDS,
   OPS_LABEL_NOTE,
   opsAuditMetadata,
   OpsRunError,
+  readOpsLabelFromFlags,
   readOpsOperationalLabel,
 } from './ops-run';
 
@@ -19,14 +21,40 @@ const LABEL = {
   CREWFLOW_OPS_CHANGE_REF: 'crewflow/rab#1234',
 };
 const OPS_ENV = { CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP, ...LABEL };
+// X2.2 owner-login path: the one login, and the label as flags.
+const OWNER = 'postgres://crewflow_owner:pw-own-1@localhost:5432/rab';
+const OWNER_ENV = { PG_DATABASE_URL: OWNER, DB_TARGET: 'local' };
+const FLAGS = { operatorSource: 'manual-console', operatorId: 'deploy-user@host-1', changeRef: 'OPS-42' };
 
 afterEach(() => setPgProcessRole('api'));
 
 describe('ops placement (command/main.ts)', () => {
-  it('an ops command outside the ops container is refused', () => {
-    expect(() => assertOpsPlacement('containment:suspend-test-accounts', { PG_DATABASE_URL: APP })).toThrow(/runs only in the one-off operations container/);
-    expect(() => assertOpsPlacement('hws:backfill', {})).toThrow(OpsRunError);
-    expect(() => assertOpsPlacement('user-session:backfill', {})).toThrow(OpsRunError);
+  it('X2.2: on the ordinary CLI path each ops command is refused under any login but crewflow_owner, before any connection', () => {
+    for (const command of OPS_COMMANDS) {
+      for (const user of ['crewflow_app', 'crewflow', 'crewflow_migrator', 'crewflow_worker', 'rab_secure_owner', 'postgres', 'crewflow_owner2']) {
+        const url = `postgres://${user}:pw-x-1@localhost:5432/rab`;
+        expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: url })).toThrow(new RegExp(`runs only under the owner login crewflow_owner; PG_DATABASE_URL names "${user}"`));
+      }
+      expect(() => assertOpsPlacement(command, {})).toThrow(/requires PG_DATABASE_URL naming the owner login crewflow_owner/);
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'not a url' })).toThrow(/an unparsable URL \(value not shown\)/);
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'mysql://crewflow_owner:pw@localhost/rab' })).toThrow(OpsRunError);
+    }
+  });
+
+  it('X2.2: the owner-login path refuses a legacy database variable and every operations-container variable', () => {
+    for (const command of OPS_COMMANDS) {
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw@localhost/rab' })).toThrow(
+        /remove the legacy database variable\(s\) DATABASE_URL_UNPOOLED/,
+      );
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, DATABASE_URL: OWNER })).toThrow(/legacy database variable\(s\) DATABASE_URL/);
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, CREWFLOW_OPS_ACTOR_ID: 'x' })).toThrow(/refuses the operations-container variable\(s\) CREWFLOW_OPS_ACTOR_ID/);
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, PG_OPS_APP_DATABASE_URL: APP })).toThrow(/PG_OPS_APP_DATABASE_URL/);
+    }
+  });
+
+  it('X2.2: under crewflow_owner each ops command is placed on the ordinary CLI path (`cli`)', () => {
+    for (const command of OPS_COMMANDS) expect(assertOpsPlacement(command, OWNER_ENV)).toBe('cli');
+    expect(assertOpsPlacement('user-session:backfill', { PG_DATABASE_URL: 'postgresql://crewflow_owner:pw@db.internal:5432/crewflow?sslmode=verify-full' })).toBe('cli');
   });
 
   it('the ops container runs only the three ops commands', () => {
@@ -70,12 +98,44 @@ describe('the operator label (operational, not database-verified)', () => {
       changeRef: 'crewflow/rab#1234',
       command: 'user-session:backfill',
       mode: 'apply',
+      path: 'ops-container',
     });
     expect(label.runId).toMatch(/^[0-9a-f-]{36}$/);
     expect(OPS_LABEL_NOTE).toBe('operational label, not database-verified identity');
     const metadata = opsAuditMetadata(label, { appLogin: 'crewflow_app', elevatedLogin: 'crewflow_migrator', elevatedRole: 'rab_secure_owner', identity: 'unbound' });
     expect(metadata.operationalLabel).toEqual(label);
     expect(metadata.databaseVerified).toMatchObject({ appLogin: 'crewflow_app', elevatedRole: 'rab_secure_owner' });
+  });
+});
+
+describe('X2.2: the operator label as flags (owner-login path)', () => {
+  it('is required: each missing flag is named, for every ops command', () => {
+    for (const command of OPS_COMMANDS) {
+      for (const [key, flag] of [['operatorSource', '--operator-source'], ['operatorId', '--operator-id'], ['changeRef', '--change-ref']] as const) {
+        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: undefined }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}`));
+        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: '   ' }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}`));
+      }
+      expect(() => readOpsLabelFromFlags({}, command, 'dry-run')).toThrow(/missing: --operator-source, --operator-id, --change-ref/);
+    }
+  });
+
+  it('applies the same value rules as the container variables', () => {
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, operatorSource: 'laptop' }, 'hws:backfill', 'dry-run')).toThrow(/--operator-source must be one of github-actions, gitlab-ci, manual-console/);
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, operatorId: 'alice smith' }, 'hws:backfill', 'dry-run')).toThrow(/--operator-id must be/);
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, changeRef: '-rf' }, 'hws:backfill', 'dry-run')).toThrow(/--change-ref must be/);
+  });
+
+  it('records the owner-login path in the label', () => {
+    expect(readOpsLabelFromFlags(FLAGS, 'containment:suspend-test-accounts', 'execute')).toMatchObject({
+      kind: 'operational-label',
+      note: OPS_LABEL_NOTE,
+      actorSource: 'manual-console',
+      actorId: 'deploy-user@host-1',
+      changeRef: 'OPS-42',
+      command: 'containment:suspend-test-accounts',
+      mode: 'execute',
+      path: 'owner-login',
+    });
   });
 });
 
@@ -92,10 +152,55 @@ describe('ops values never come from a .env file', () => {
 describe('assertOpsRun (layer 2, every ops command body)', () => {
   const withElevated = { ...OPS_ENV, PG_DATABASE_URL: MIGRATOR };
 
-  it('refuses outside the ops process even when called directly', () => {
+  it('X2.2: on the CLI path, refuses any login but crewflow_owner even when called directly (every ops command)', () => {
     setPgProcessRole('cli');
-    expect(() => assertOpsRun('hws:backfill', 'dry-run', { needsElevated: false }, resolvePgEnvironment({ PG_DATABASE_URL: APP }, { processRole: 'cli' }), {})).toThrow(
-      /runs only in the one-off operations container/,
+    for (const command of OPS_COMMANDS) {
+      const env = { PG_DATABASE_URL: APP };
+      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: false }, resolvePgEnvironment(env, { processRole: 'cli' }), env, FLAGS)).toThrow(
+        /runs only under the owner login crewflow_owner/,
+      );
+    }
+  });
+
+  it('X2.2: refuses a missing label on the owner-login path (every ops command)', () => {
+    setPgProcessRole('cli');
+    const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
+    for (const command of OPS_COMMANDS) {
+      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: true }, resolved, OWNER_ENV)).toThrow(/requires the operator label --operator-source, --operator-id, --change-ref/);
+      expect(() => assertOpsRun(command, 'apply', { needsElevated: false }, resolved, OWNER_ENV, { ...FLAGS, changeRef: undefined })).toThrow(/missing: --change-ref/);
+    }
+  });
+
+  it('X2.2: refuses inside the API, the Worker or the provisioner (a command body reached without main.ts)', () => {
+    for (const role of ['api', 'worker', 'provisioner'] as const) {
+      setPgProcessRole(role);
+      const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: role });
+      for (const command of OPS_COMMANDS) {
+        expect(() => assertOpsRun(command, 'dry-run', { needsElevated: false }, resolved, OWNER_ENV, FLAGS)).toThrow(new RegExp(`never inside the ${role} process`));
+      }
+    }
+  });
+
+  it('X2.2: refuses a second endpoint on the owner-login path', () => {
+    setPgProcessRole('cli');
+    const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
+    expect(() => assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolvePgEnvironment(withUnpooled, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
+      /DATABASE_URL_UNPOOLED/,
+    );
+  });
+
+  it('X2.2: accepts crewflow_owner with the label; needsElevated asks for no second credential there', () => {
+    setPgProcessRole('cli');
+    const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
+    expect(assertOpsRun('containment:suspend-test-accounts', 'execute', { needsElevated: true }, resolved, OWNER_ENV, FLAGS)).toMatchObject({ path: 'owner-login', mode: 'execute' });
+    expect(assertOpsRun('user-session:backfill', 'verify', { needsElevated: false }, resolved, OWNER_ENV, FLAGS).path).toBe('owner-login');
+    expect(assertOpsRun('hws:backfill', 'apply', { needsElevated: false }, resolved, OWNER_ENV, FLAGS).command).toBe('hws:backfill');
+  });
+
+  it('the ops container refuses the label flags (its label comes from its variables only)', () => {
+    setPgProcessRole('ops');
+    expect(() => assertOpsRun('hws:backfill', 'dry-run', { needsElevated: false }, resolvePgEnvironment(OPS_ENV, { processRole: 'ops' }), OPS_ENV, FLAGS)).toThrow(
+      /remove --operator-source \/ --operator-id \/ --change-ref/,
     );
   });
 

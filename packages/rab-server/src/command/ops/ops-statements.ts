@@ -15,6 +15,11 @@
  *                                                                               READ WRITE: bind its own identity + INSERT
  *   hws:backfill (every mode)            discovery, reads, checkpoint, writes   none (PG_DATABASE_URL refused) — the physical
  *                                        and the per-workspace ops audit row    copy runs as crewflow_app (proven, see runbook)
+ *
+ * Phase X2.2 owner-login path (one-off of the API service, ops-run.ts): "primary" is the owner login crewflow_owner (FORCE RLS
+ * and tenant context bind it as they bound crewflow_app), and "elevated" is the SAME login on its own one-connection pool,
+ * narrowed by the same `SET LOCAL ROLE` with the same plans and the same frozen names. X2.2 adds no statement and no plan: the
+ * owner-login path can run nothing the ops container could not.
  */
 import { CONTAINMENT_READ_STATEMENTS } from '../containment/suspend-test-accounts';
 import {

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 
-import { Command, CommandRunner, Option } from 'nest-commander';
+import { Command, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
 import { resolvePgEnvironmentCached } from '../database/postgres';
@@ -20,9 +20,10 @@ import {
 } from './containment/suspend-test-accounts';
 import { ElevatedOpsSession, verifyOpsAppSession } from './ops/elevated-ops-session';
 import { OPS_ELEVATED_PLANS } from './ops/ops-statements';
-import { assertOpsRun, describeOpsLabel, OPS_LABEL_NOTE, opsAuditMetadata } from './ops/ops-run';
+import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
+import { assertOpsRun, describeOpsLabel, OPS_LABEL_NOTE, opsAuditMetadata, OpsLabelFlags } from './ops/ops-run';
 
-interface ContainmentOptions {
+interface ContainmentOptions extends OpsLabelFlags {
   target?: string;
   expectOrgs?: string;
   expectUsers?: string;
@@ -54,9 +55,15 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * READ ONLY, frozen statements) — organisation and user rows are rab_secure_owner-owned and not FORCE'd, so only their
  * owner sees every tenant. Writes: the injected restricted DataSource (crewflow_app) and the tenant context, the same
  * RLS-bound path as the production deactivation service; never the elevated session.
+ *
+ * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner
+ * (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts
+ * --operator-source … --operator-id … --change-ref … …`). There the reads use crewflow_owner narrowed by `SET LOCAL ROLE
+ * rab_secure_owner` (READ ONLY, the same frozen statements, verified per transaction) and the writes use the CLI's own
+ * owner-login DataSource in each target's tenant context (FORCE RLS binds it). The label flags are required.
  */
 @Command({ name: 'containment:suspend-test-accounts', description: 'Incident 2026-10-05: deactivate active fixture accounts (dry-run by default)' })
-export class ContainmentSuspendCommand extends CommandRunner {
+export class ContainmentSuspendCommand extends OpsCommandRunner {
   constructor(
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
@@ -72,7 +79,7 @@ export class ContainmentSuspendCommand extends CommandRunner {
     const execute = options.execute === true;
     const resolved = resolvePgEnvironmentCached(process.env);
     // Layer 2: ops container, operator label, minimum-privilege endpoint rule — before any argument is even read.
-    const label = assertOpsRun('containment:suspend-test-accounts', execute ? 'execute' : 'dry-run', { needsElevated: true }, resolved);
+    const label = assertOpsRun('containment:suspend-test-accounts', execute ? 'execute' : 'dry-run', { needsElevated: true }, resolved, process.env, opsLabelFlagsOf(options));
 
     const required = ['target', 'expectOrgs', 'expectUsers', 'expectActive', 'actorUserId', 'log'] as const;
     for (const key of required) {
@@ -95,7 +102,8 @@ export class ContainmentSuspendCommand extends CommandRunner {
     // eslint-disable-next-line no-console
     console.log(describeOpsLabel(label));
 
-    // The restricted app session first: exactly crewflow_app, and its deployment identity (the elevated session must match it).
+    // The app session first: exactly crewflow_app (ops container) or crewflow_owner (owner-login path), and its deployment
+    // identity (the elevated session must match it).
     const app = await verifyOpsAppSession(this.dataSource, resolved, process.env, label.command);
     // The actor claim must name a real, ACTIVE platform admin (definer function, EXECUTE crewflow_app; no elevated read).
     const [admin] = (await this.dataSource.query(`SELECT core.is_active_platform_admin($1::uuid) AS ok`, [options.actorUserId])) as Array<{ ok: boolean }>;
