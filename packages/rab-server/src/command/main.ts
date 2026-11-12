@@ -14,8 +14,10 @@ import { CommandModule } from './command.module';
 
 async function bootstrap(): Promise<void> {
   const cliCommand = cliCommandFromArgv(process.argv);
-  // ---- Phase B (ops): the three owner commands run ONLY in the one-off operations container (CREWFLOW_OPS_RUN=one-off),
-  // and that container runs ONLY them. Declares the process role (`ops` or `cli`). ----
+  // ---- Phase B (ops): the three owner commands run in the one-off operations container (CREWFLOW_OPS_RUN=one-off), and
+  // that container runs ONLY them. Phase X2.2: on the ordinary CLI path they run only when PG_DATABASE_URL names the owner
+  // login crewflow_owner (no legacy or ops variable); every other login is refused here, before any connection. Declares
+  // the process role (`ops` or `cli`). ----
   const processRole = assertOpsPlacement(cliCommand, process.env);
   // ---- Phase B (A1): declare the process (application_name `crewflow-cli` / `crewflow-ops`, pooler policy) before any
   // DataSource exists, and refuse a bad database configuration (pg-config.ts: PG_DATABASE_URL, legacy names, URL policy, TLS,
@@ -28,8 +30,8 @@ async function bootstrap(): Promise<void> {
   // both are probed and must name the same database and cluster.
   await assertDbTarget('command');
   // ---- Phase B (A2): database boot gates — login per command, version, extensions, deployment identity, FORCE RLS, TLS,
-  // pending migrations. Before Nest boots and before any command body runs. In the ops container the gate connects to the
-  // primary, i.e. the restricted crewflow_app login (the ops commands are not in CLI_COMMAND_ROLES). ----
+  // pending migrations. Before Nest boots and before any command body runs. Gate 1 expects the owner login crewflow_owner
+  // for every CLI command, the three ops commands on the owner-login path included (X2.2). ----
   await runDatabaseBootGates('cli', { cliCommand });
   // ---- end Phase B (A2) ----
   await CommandFactory.run(CommandModule, {

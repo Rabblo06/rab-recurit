@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs';
 
-import { Command, CommandRunner, Option } from 'nest-commander';
+import { Command, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
 import { resolvePgEnvironmentCached } from '../database/postgres';
@@ -16,9 +16,10 @@ import { EnvironmentService } from '../engine/core-modules/environment/environme
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { verifyOpsAppSession } from './ops/elevated-ops-session';
 import { assertHwsApplyAllowed } from './ops/hws-cutover-policy';
-import { assertOpsRun, describeOpsLabel, opsAuditMetadata } from './ops/ops-run';
+import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
+import { assertOpsRun, describeOpsLabel, opsAuditMetadata, OpsLabelFlags } from './ops/ops-run';
 
-interface Options {
+interface Options extends OpsLabelFlags {
   workspaceId?: string;
   all?: boolean;
   batch?: number;
@@ -59,6 +60,11 @@ export interface HwsBackfillReport {
  * production while HWS is off. Each applied workspace gets one actor-less audit row (`ops.hws_backfill_applied`, its
  * organisation) carrying the operational label.
  *
+ * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner,
+ * with the label flags required (--operator "<name>" and --change-ref; --operator-source optional). Every mode then runs on the CLI's own
+ * owner-login DataSource (FORCE RLS binds it on every workspace table, as it bound crewflow_app); no narrowed session is
+ * opened for this command.
+ *
  * Modes (mutually exclusive; `--dry-run` is the default if none is given — report-only, zero writes):
  *   --dry-run   report only — workspace/registry status, row counts, conflicts, blocked rows
  *   --apply     copies rows (idempotent — a second run reports already-complete, never duplicates)
@@ -75,7 +81,7 @@ export interface HwsBackfillReport {
   name: 'hws:backfill',
   description: "Copy legacy core.<table> workspace-business rows into each workspace's physical schema (dry-run by default)",
 })
-export class HwsBackfillCommand extends CommandRunner {
+export class HwsBackfillCommand extends OpsCommandRunner {
   constructor(
     private readonly backfill: HwsBackfillService,
     private readonly environment: EnvironmentService,
@@ -137,7 +143,7 @@ export class HwsBackfillCommand extends CommandRunner {
     const mode: 'dry-run' | 'apply' | 'verify' = options.verify ? 'verify' : options.apply || options.resume ? 'apply' : 'dry-run';
     const resolved = resolvePgEnvironmentCached(process.env);
     // Layer 2: ops container, operator label, and no migration identity at all (every mode runs as crewflow_app).
-    const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, { needsElevated: false }, resolved);
+    const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, { needsElevated: false }, resolved, process.env, opsLabelFlagsOf(options));
     const hwsRuntimeEnabled = this.environment.get('HWS_RUNTIME_ENABLED') === true;
     assertHwsApplyAllowed({ mode, hwsRuntimeEnabled, hwsCutover: options.hwsCutover === true, production: process.env.DB_TARGET?.trim() === 'production' });
 

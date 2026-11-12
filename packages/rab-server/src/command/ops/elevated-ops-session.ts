@@ -27,12 +27,24 @@
  *   deployment identity     assertDeploymentIdentity (deployment-identity.ts) on THIS session, read-only, and its summary
  *                           must equal the restricted app session's (same database, same marker).
  * Any mismatch throws ElevatedOpsSessionError before the first data statement.
+ *
+ * Phase X2.2, the OWNER-LOGIN path (command/ops/ops-run.ts): there is no second credential. The app session is the CLI's own
+ * primary DataSource and must be exactly crewflow_owner (session_user = current_user, not narrowed, not SUPERUSER/BYPASSRLS,
+ * the URL's user and database). The elevated session is a separate one-connection pool on the SAME PG_DATABASE_URL
+ * (application_name crewflow-cli-<purpose>); every transaction runs the same sequence as above with crewflow_owner as the
+ * expected login: facts before narrowing (assertOwnerLoginFacts), `SET LOCAL ROLE rab_secure_owner` from the frozen literal,
+ * facts after narrowing (assertOpsActingFacts, unchanged), the deployment identity equal to the app session's, and only the
+ * plan's frozen statement names. crewflow_owner already holds rab_secure_owner WITH INHERIT TRUE, SET TRUE (the owner-login
+ * bootstrap): nothing is granted. `SET LOCAL` ends with the transaction, and the pool's RESET ROLE on checkout
+ * (session-role-reset.ts) still runs before every transaction.
  */
 import { DataSource, EntityManager } from 'typeorm';
 
 import { isProductionProcess } from '../../database/boot-checks/database-boot-gate-rules';
+import { OWNER_LOGIN_ROLE } from '../../database/boot-checks/owner-login-posture';
 import { assertDeploymentIdentity, Query } from '../../database/deployment-identity/deployment-identity';
 import { createPgDataSource, ResolvedPgEnvironment } from '../../database/postgres';
+import type { OpsRunPath } from './ops-run';
 import { OPS_STATEMENTS, OpsElevatedPlan, OpsStatementName } from './ops-statements';
 
 export const MIN_OPS_SERVER_VERSION_NUM = 160000;
@@ -159,6 +171,31 @@ export function assertOpsLoginFacts(facts: OpsSessionFacts, expect: OpsSessionEx
   if (facts.readOnly !== expect.readOnly) refuse(`the transaction is ${facts.readOnly ? 'READ ONLY' : 'READ WRITE'}; this step requires ${expect.readOnly ? 'READ ONLY' : 'READ WRITE'}.`);
 }
 
+/**
+ * X2.2 owner-login path: the pure decision BEFORE `SET LOCAL ROLE`. The login is the owner login itself (not a migration
+ * identity), so the migration-identity shape checks above do not apply as written: crewflow_owner deliberately holds an
+ * ADMIN-only membership row on crewflow_app (owner-login bootstrap) and its whole role posture (attributes, reachability,
+ * inventory) is verified by the CLI boot gate before any command body runs. What this step proves on THIS session: it is
+ * crewflow_owner, a LOGIN role, not SUPERUSER/BYPASSRLS, a member of both owner roles, allowed to SET the narrow role, not
+ * already acting as another role, PostgreSQL 16+, the app session's database, and the intended access mode.
+ */
+export function assertOwnerLoginFacts(facts: OpsSessionFacts, expect: OpsSessionExpectation): void {
+  const refuse = (why: string): never => {
+    throw new ElevatedOpsSessionError(`owner-login session refused before narrowing: ${why}`);
+  };
+  if (facts.login !== OWNER_LOGIN_ROLE || expect.expectedLogin !== OWNER_LOGIN_ROLE) refuse(`session_user is "${facts.login}", not the owner login ${OWNER_LOGIN_ROLE}.`);
+  if (!facts.loginCanLogin) refuse('the session user is not a LOGIN role.');
+  if (facts.loginExempt) refuse(`${OWNER_LOGIN_ROLE} is SUPERUSER or BYPASSRLS; refusing.`);
+  if (!facts.loginMemberSecureOwner || !facts.loginMemberCrewflow) refuse(`${OWNER_LOGIN_ROLE} is not a member of both rab_secure_owner and crewflow (not the owner-login layout).`);
+  if (!facts.canSetRole) refuse(`${OWNER_LOGIN_ROLE} may not SET ROLE ${expect.role}; refusing.`);
+  if (facts.acting !== facts.login) refuse('the session is already acting as another role before narrowing (a role from URL options or a prior SET ROLE).');
+  if (!Number.isFinite(facts.serverVersionNum) || facts.serverVersionNum < MIN_OPS_SERVER_VERSION_NUM) {
+    refuse(`server_version_num ${facts.serverVersionNum} is below ${MIN_OPS_SERVER_VERSION_NUM} (PostgreSQL 16 SET-option semantics are relied on).`);
+  }
+  if (facts.database !== expect.expectedDatabase) refuse(`current_database() "${facts.database}" differs from the app session's "${expect.expectedDatabase}".`);
+  if (facts.readOnly !== expect.readOnly) refuse(`the transaction is ${facts.readOnly ? 'READ ONLY' : 'READ WRITE'}; this step requires ${expect.readOnly ? 'READ ONLY' : 'READ WRITE'}.`);
+}
+
 /** Pure decision AFTER `SET LOCAL ROLE`. Throws ElevatedOpsSessionError. */
 export function assertOpsActingFacts(facts: OpsSessionFacts, expect: OpsSessionExpectation): void {
   const refuse = (why: string): never => {
@@ -177,6 +214,8 @@ export function assertOpsActingFacts(facts: OpsSessionFacts, expect: OpsSessionE
 
 /** What the restricted app session proved (the reference the elevated session must match). */
 export interface OpsAppSessionProof {
+  /** Which path verified this session: the ops container (crewflow_app + a migration identity) or the owner login. */
+  path: OpsRunPath;
   login: string;
   database: string;
   /** Sanitised marker summary (absent | unbound | <environment>/<deployment id>). */
@@ -188,8 +227,12 @@ function queryOf(manager: EntityManager): Query {
 }
 
 /**
- * The restricted app session (the injected primary DataSource, PG_OPS_APP_DATABASE_URL): exactly crewflow_app, not
- * narrowed, not SUPERUSER/BYPASSRLS, no owner-role membership, plus the deployment identity read on it. Read only.
+ * The app session (the injected primary DataSource), read only, plus the deployment identity read on it.
+ *  - ops container (resolved.ops): PG_OPS_APP_DATABASE_URL, exactly crewflow_app, not narrowed, not SUPERUSER/BYPASSRLS,
+ *    no owner-role membership;
+ *  - X2.2 owner-login path (every other process; ops-run.ts has already refused anything but the CLI): PG_DATABASE_URL,
+ *    exactly crewflow_owner (session_user = current_user, so not narrowed), not SUPERUSER/BYPASSRLS. Any other login is
+ *    refused here, on the database, before the command's first data statement.
  */
 export async function verifyOpsAppSession(
   dataSource: DataSource,
@@ -197,6 +240,7 @@ export async function verifyOpsAppSession(
   env: Record<string, string | undefined>,
   command: string,
 ): Promise<OpsAppSessionProof> {
+  if (!resolved.ops) return verifyOwnerLoginAppSession(dataSource, resolved, env, command);
   return dataSource.transaction(async (manager) => {
     await manager.query('SET TRANSACTION READ ONLY');
     const [row] = (await manager.query(OPS_APP_SESSION_FACTS_SQL)) as Array<Record<string, unknown>>;
@@ -219,7 +263,41 @@ export async function verifyOpsAppSession(
       connectionHost: resolved.primary.target.host,
       command: true,
     });
-    return { login, database, identity: identity.summary };
+    return { path: 'ops-container', login, database, identity: identity.summary };
+  });
+}
+
+/** X2.2: the owner-login app session (see verifyOpsAppSession). */
+async function verifyOwnerLoginAppSession(
+  dataSource: DataSource,
+  resolved: ResolvedPgEnvironment,
+  env: Record<string, string | undefined>,
+  command: string,
+): Promise<OpsAppSessionProof> {
+  return dataSource.transaction(async (manager) => {
+    await manager.query('SET TRANSACTION READ ONLY');
+    const [row] = (await manager.query(OPS_APP_SESSION_FACTS_SQL)) as Array<Record<string, unknown>>;
+    if (!row) throw new ElevatedOpsSessionError('the app session could not read its own role facts.');
+    const login = String(row.login);
+    const refuse = (why: string): never => {
+      throw new ElevatedOpsSessionError(`app session refused: ${why}`);
+    };
+    if (login !== OWNER_LOGIN_ROLE || String(row.acting) !== OWNER_LOGIN_ROLE) {
+      refuse(`the ops commands run only under the owner login ${OWNER_LOGIN_ROLE} (session_user "${login}", current_user "${String(row.acting)}").`);
+    }
+    if (resolved.primary.source !== 'PG_DATABASE_URL' || login !== resolved.primary.target.user) refuse('session_user is not the login named by PG_DATABASE_URL.');
+    if (row.exempt === true) refuse(`${OWNER_LOGIN_ROLE} is SUPERUSER or BYPASSRLS.`);
+    if (Number(row.server_version_num) < MIN_OPS_SERVER_VERSION_NUM) refuse('PostgreSQL 16 or later is required.');
+    const database = String(row.database);
+    if (database !== resolved.primary.target.database) refuse('current_database() differs from the database named by PG_DATABASE_URL.');
+    const identity = await assertDeploymentIdentity(queryOf(manager), {
+      processLabel: `ops command ${command} (owner-login session)`,
+      production: isProductionProcess('cli', env),
+      env,
+      connectionHost: resolved.primary.target.host,
+      command: true,
+    });
+    return { path: 'owner-login', login, database, identity: identity.summary };
   });
 }
 
@@ -255,15 +333,24 @@ export class ElevatedOpsSession {
     app: OpsAppSessionProof;
     onVerified?: (record: ElevatedTransactionRecord) => void;
   }): Promise<ElevatedOpsSession> {
-    const { plan, resolved } = options;
-    if (!resolved.ops || resolved.processRole !== 'ops') throw new ElevatedOpsSessionError('the elevated session exists only in the one-off ops container.');
-    if (!resolved.elevated || resolved.elevated.source !== 'PG_DATABASE_URL') {
-      throw new ElevatedOpsSessionError('the elevated session needs PG_DATABASE_URL (the migration identity) in the ops container.');
+    const { plan, resolved, app } = options;
+    if (app.path === 'owner-login') {
+      // X2.2: the same login on its own one-connection pool (no second credential exists on this path).
+      if (resolved.ops || resolved.processRole !== 'cli') throw new ElevatedOpsSessionError('the owner-login elevated session exists only in a one-off CLI process.');
+      if (resolved.elevated !== null) throw new ElevatedOpsSessionError('the owner-login path uses the one login only; a second database endpoint is refused.');
+      if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE || app.login !== OWNER_LOGIN_ROLE) {
+        throw new ElevatedOpsSessionError(`the owner-login elevated session needs PG_DATABASE_URL naming ${OWNER_LOGIN_ROLE}.`);
+      }
+    } else {
+      if (!resolved.ops || resolved.processRole !== 'ops') throw new ElevatedOpsSessionError('the elevated session exists only in the one-off ops container.');
+      if (!resolved.elevated || resolved.elevated.source !== 'PG_DATABASE_URL') {
+        throw new ElevatedOpsSessionError('the elevated session needs PG_DATABASE_URL (the migration identity) in the ops container.');
+      }
     }
     const dataSource = createPgDataSource(
       resolved,
       {
-        endpoint: 'elevated',
+        endpoint: app.path === 'owner-login' ? 'primary' : 'elevated',
         purpose: plan.purpose,
         max: 1,
         ...(plan.statementTimeoutMs !== undefined ? { statementTimeoutMs: plan.statementTimeoutMs, queryTimeoutMs: plan.statementTimeoutMs } : {}),
@@ -282,8 +369,10 @@ export class ElevatedOpsSession {
     const allowed = access === 'read-only' ? this.plan.readStatements : this.plan.writeStatements;
     if (allowed.length === 0) throw new ElevatedOpsSessionError(`plan ${this.plan.purpose} allows no ${access} elevated transaction.`);
     const readOnly = access === 'read-only';
+    const ownerLogin = this.app.path === 'owner-login';
+    const endpoint = ownerLogin ? this.resolved.primary : this.resolved.elevated!;
     const expect: OpsSessionExpectation = {
-      expectedLogin: this.resolved.elevated!.target.user,
+      expectedLogin: endpoint.target.user,
       expectedDatabase: this.app.database,
       role: this.plan.role,
       readOnly,
@@ -291,15 +380,16 @@ export class ElevatedOpsSession {
     return this.dataSource.transaction(async (manager) => {
       if (readOnly) await manager.query('SET TRANSACTION READ ONLY');
       const before = parseOpsSessionFacts(((await manager.query(OPS_SESSION_FACTS_SQL, [this.plan.role])) as Array<Record<string, unknown>>)[0]);
-      assertOpsLoginFacts(before, expect);
+      if (ownerLogin) assertOwnerLoginFacts(before, expect);
+      else assertOpsLoginFacts(before, expect);
       await manager.query(SET_LOCAL_ROLE_SQL[this.plan.role]);
       const after = parseOpsSessionFacts(((await manager.query(OPS_SESSION_FACTS_SQL, [this.plan.role])) as Array<Record<string, unknown>>)[0]);
       assertOpsActingFacts(after, expect);
       const identity = await assertDeploymentIdentity(queryOf(manager), {
-        processLabel: `ops command ${this.plan.purpose} (elevated session)`,
+        processLabel: `ops command ${this.plan.purpose} (${ownerLogin ? 'owner-login narrowed' : 'elevated'} session)`,
         production: isProductionProcess('cli', this.env),
         env: this.env,
-        connectionHost: this.resolved.elevated!.target.host,
+        connectionHost: endpoint.target.host,
         command: true,
       });
       if (identity.summary !== this.app.identity || identity.database !== this.app.database) {

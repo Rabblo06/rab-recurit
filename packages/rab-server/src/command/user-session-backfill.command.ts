@@ -1,4 +1,4 @@
-import { Command, CommandRunner, Option } from 'nest-commander';
+import { Command, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
 import { resolvePgEnvironmentCached } from '../database/postgres';
@@ -12,9 +12,10 @@ import {
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { ElevatedOpsSession, ElevatedOpsSessionError, verifyOpsAppSession } from './ops/elevated-ops-session';
 import { OPS_ELEVATED_PLANS } from './ops/ops-statements';
-import { assertOpsRun, describeOpsLabel, opsAuditMetadata } from './ops/ops-run';
+import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
+import { assertOpsRun, describeOpsLabel, opsAuditMetadata, OpsLabelFlags } from './ops/ops-run';
 
-interface Options {
+interface Options extends OpsLabelFlags {
   batch?: number;
   dryRun?: boolean;
   apply?: boolean;
@@ -40,12 +41,18 @@ interface Options {
  *               the operational label. Idempotent: re-running reports already-present, never duplicates.
  * Every elevated transaction is verified (elevated-ops-session.ts) and runs only the frozen statements of its plan
  * (ops-statements.ts). `DB_TARGET` and the boot gates already ran in `command/main.ts`.
+ *
+ * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner,
+ * with the label flags required (--operator "<name>" and --change-ref; --operator-source optional). --verify runs on that login; --dry-run
+ * and --apply use crewflow_owner narrowed by `SET LOCAL ROLE rab_secure_owner` (no second credential), with the same
+ * verification and the same frozen statements per transaction; the per-organisation audit rows go through the CLI's own
+ * owner-login DataSource in tenant context.
  */
 @Command({
   name: 'user-session:backfill',
   description: 'Backfill core.user_session rows for existing refresh_token families (dry-run by default)',
 })
-export class UserSessionBackfillCommand extends CommandRunner {
+export class UserSessionBackfillCommand extends OpsCommandRunner {
   constructor(
     private readonly backfill: UserSessionBackfillService,
     private readonly dataSource: DataSource,
@@ -82,7 +89,7 @@ export class UserSessionBackfillCommand extends CommandRunner {
     const batchSize = options.batch && options.batch > 0 ? options.batch : 500;
     const resolved = resolvePgEnvironmentCached(process.env);
     // Layer 2: ops container, operator label, and PG_DATABASE_URL present exactly when this mode needs it.
-    const label = assertOpsRun('user-session:backfill', mode, { needsElevated: mode !== 'verify' }, resolved);
+    const label = assertOpsRun('user-session:backfill', mode, { needsElevated: mode !== 'verify' }, resolved, process.env, opsLabelFlagsOf(options));
     // eslint-disable-next-line no-console
     console.log(describeOpsLabel(label));
     const app = await verifyOpsAppSession(this.dataSource, resolved, process.env, label.command);
