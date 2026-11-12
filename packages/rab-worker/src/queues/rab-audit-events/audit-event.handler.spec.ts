@@ -114,8 +114,7 @@ describe('pre-auth failed-login job (X1.1, owner decision 2026-11-12 b)', () => 
     await shipPreAuthEventJob({ data: { ...pre, email: 'alice@example.com' } }, h.deps);
     await shipPreAuthEventJob({ data: { ...pre, email: 'P@ss.word1' } }, h.deps);
     expect(h.lines.map((l) => JSON.parse(l.replace(/^CREWFLOW_SECURITY_AUDIT /, '')).detail.email)).toEqual(['a***@example.com', '[not-an-email]']);
-    expect(h.lines.join('
-')).not.toMatch(/alice@|P@ss/);
+    expect(h.lines.join(String.fromCharCode(10))).not.toMatch(/alice@|P@ss/);
   });
 
   it.each<[string, unknown]>([
