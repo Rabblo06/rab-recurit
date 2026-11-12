@@ -19,8 +19,8 @@
  * Replay: SECURITY INVOKER (the caller's RLS and grants apply), refuses scrubbed token-bearing bodies (F1 nulls them at
  * FAILED — the user must request a new link) and, unless explicitly allowed, a DELIVERY_UNCERTAIN failure (the provider
  * may already have sent it). The row goes to RETRY (NOT PENDING: the dispatcher publishes PENDING rows under the fixed
- * jobId `email-outbox.<id>.attempt.0`, which BullMQ would dedupe against the old failed job it still retains for 30
- * days — the replay would silently never run). A RETRY row with no provider call is "safe to recover": the dispatcher
+ * jobId `email-outbox.<id>.attempt.0`, which BullMQ would dedupe against the old failed job it may still retain (7
+ * days since X3.4) — the replay would silently never run). A RETRY row with no provider call is "safe to recover": the dispatcher
  * bumps `dispatch_generation` and republishes under `...attempt.<generation>`, a job id no earlier attempt used, once the
  * RETRY staleness window has passed. The replay itself also bumps the generation (fencing: any in-flight worker holding
  * the old generation/token can no longer write the row). The audit row is written in the same transaction.
