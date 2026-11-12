@@ -80,7 +80,7 @@ const check = (ok, label) => {
   if (!ok) failures += 1;
 };
 
-function render(rel) {
+function render(rel, exec = execFileSync) {
   // Project directory = a scratch copy location: env_file and `.env` resolve there, never against the real checkout.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-isolation-'));
   const project = path.join(tmp, 'rab-docker');
@@ -102,7 +102,7 @@ function render(rel) {
     { mode: 0o600 },
   );
   try {
-    const out = execFileSync(
+    const out = exec(
       'docker',
       ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', 'ops', 'config', '--format', 'json'],
       { env: { ...process.env, ...DUMMY_ENV, CREWFLOW_MIGRATION_DATABASE_URL: '', CREWFLOW_MIGRATION_APPROVED: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
@@ -139,9 +139,13 @@ function rawEnvFiles(rel, YAML) {
   return out;
 }
 
-/** Runs every check and returns the exit code. `options.loadYaml` is the test seam for the parser loader. */
+/**
+ * Runs every check and returns the exit code. Test seams: `options.loadYaml` (the parser loader) and `options.execFileSync`
+ * (every docker call: `docker compose version` and each render).
+ */
 function main(options = {}) {
   failures = 0;
+  const exec = options.execFileSync ?? execFileSync;
   // X1.9: fail closed BEFORE anything else when the parser is unavailable (never a silent skip of the env_file checks).
   const YAML = (options.loadYaml ?? loadYamlParser)();
   if (!YAML) {
@@ -150,7 +154,7 @@ function main(options = {}) {
     return 1;
   }
   try {
-    execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' });
+    exec('docker', ['compose', 'version'], { stdio: 'ignore' });
   } catch {
     console.error('[compose-isolation] docker compose is not available');
     return 2;
@@ -158,7 +162,7 @@ function main(options = {}) {
   for (const [rel, migrateName, runtimeNames, production] of FILES) {
     let model;
     try {
-      model = render(rel);
+      model = render(rel, exec);
     } catch (error) {
       check(false, `${rel}: docker compose config renders (${String(error.stderr ?? error.message).split('\n')[0].replace(SENTINEL_PASSWORD, '***')})`);
       continue;

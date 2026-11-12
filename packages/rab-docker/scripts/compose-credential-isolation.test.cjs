@@ -34,12 +34,19 @@ const throwingRequire = () => {
 };
 
 test('parser unavailable (the module cannot be loaded): a FAILED check and exit 1, never a skip', () => {
-  const { result, lines } = captureOutput(() => isolation.main({ loadYaml: () => isolation.loadYamlParser(throwingRequire) }));
+  const dockerCalls = [];
+  const recordingExec = (...args) => {
+    dockerCalls.push(args);
+    throw new Error('docker must not be called when the parser is missing');
+  };
+  const { result, lines } = captureOutput(() =>
+    isolation.main({ loadYaml: () => isolation.loadYamlParser(throwingRequire), execFileSync: recordingExec }),
+  );
   assert.equal(result, 1);
   assert.ok(lines.some((l) => /^\[compose-isolation\] FAIL the yaml parser/.test(l)), 'the parser failure is reported as a FAIL');
   assert.ok(lines.some((l) => /1 check\(s\) failed/.test(l)), 'the summary counts the failure');
   assert.ok(!lines.some((l) => /not checked|note |all checks passed/.test(l)), 'no "skipped" note and no pass summary');
-  assert.ok(!lines.some((l) => /docker compose is not available/.test(l)), 'refuses before docker is consulted');
+  assert.equal(dockerCalls.length, 0, 'refuses before docker is consulted (no docker call at all)');
 });
 
 test('parser present but broken (no parse function): also a failure', () => {
@@ -96,6 +103,24 @@ test('a compose file the parser cannot read is a FAILED check, not a skip', (t) 
   assert.equal(result, 1);
   for (const [rel] of isolation.FILES) {
     assert.ok(lines.some((l) => l.startsWith(`[compose-isolation] FAIL ${rel}: the committed YAML parses`)), `${rel}: a parse FAIL is reported`);
+  }
+  assert.ok(!lines.some((l) => /all checks passed/.test(l)));
+});
+
+test('a parser that returns no services is a FAILED input check for every file (the env_file checks would have no input)', (t) => {
+  const emptyParser = { parse: () => ({ services: {} }) };
+  const { result, lines } = captureOutput(() => isolation.main({ loadYaml: () => emptyParser }));
+  // Exit 2 = docker compose missing on this machine (the real check then exits 2 too; CI has docker compose).
+  if (result === 2) {
+    t.skip('docker compose is not available here');
+    return;
+  }
+  assert.equal(result, 1);
+  for (const [rel] of isolation.FILES) {
+    assert.ok(
+      lines.some((l) => l.startsWith(`[compose-isolation] FAIL ${rel}: the parsed YAML lists every rendered service`)),
+      `${rel}: the empty parse is reported as a FAIL`,
+    );
   }
   assert.ok(!lines.some((l) => /all checks passed/.test(l)));
 });
