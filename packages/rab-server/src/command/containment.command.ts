@@ -50,17 +50,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  *   --log <path>              JSON-lines outcome log (ids and results only)
  *   --execute                 without this flag nothing is written
  *
- * Phase B (ops container, owner decision): runs ONLY in the one-off operations container (command/ops/ops-run.ts), with the
- * operator label required. Reads: the verified elevated session (migration identity, `SET LOCAL ROLE rab_secure_owner`,
- * READ ONLY, frozen statements) — organisation and user rows are rab_secure_owner-owned and not FORCE'd, so only their
- * owner sees every tenant. Writes: the injected restricted DataSource (crewflow_app) and the tenant context, the same
- * RLS-bound path as the production deactivation service; never the elevated session.
- *
- * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner
+ * Phase X2.2 (owner decision 2026-11-12): runs ONLY as a one-off of the API service under the owner login crewflow_owner
  * (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts
- * --operator "<name>" --change-ref … …`). There the reads use crewflow_owner narrowed by `SET LOCAL ROLE
- * rab_secure_owner` (READ ONLY, the same frozen statements, verified per transaction) and the writes use the CLI's own
- * owner-login DataSource in each target's tenant context (FORCE RLS binds it). The label flags are required.
+ * --operator "<name>" --change-ref … …`; command/ops/ops-run.ts), with the operator label flags required. Reads:
+ * crewflow_owner narrowed by `SET LOCAL ROLE rab_secure_owner` (READ ONLY, frozen statements, verified per transaction) —
+ * organisation and user rows are rab_secure_owner-owned and not FORCE'd, so only their owner sees every tenant. Writes: the
+ * CLI's own owner-login DataSource in each target's tenant context (FORCE RLS binds it), the same RLS-bound path as the
+ * production deactivation service; never the narrowed session. (The separated-mode rab-ops container is removed.)
  */
 @Command({ name: 'containment:suspend-test-accounts', description: 'Incident 2026-10-05: deactivate active fixture accounts (dry-run by default)' })
 export class ContainmentSuspendCommand extends OpsCommandRunner {
@@ -78,8 +74,8 @@ export class ContainmentSuspendCommand extends OpsCommandRunner {
   async run(_passedParams: string[], options: ContainmentOptions = {}): Promise<void> {
     const execute = options.execute === true;
     const resolved = resolvePgEnvironmentCached(process.env);
-    // Layer 2: ops container, operator label, minimum-privilege endpoint rule — before any argument is even read.
-    const label = assertOpsRun('containment:suspend-test-accounts', execute ? 'execute' : 'dry-run', { needsElevated: true }, resolved, process.env, opsLabelFlagsOf(options));
+    // Layer 2: the CLI process, the owner login, the operator label — before any argument is even read.
+    const label = assertOpsRun('containment:suspend-test-accounts', execute ? 'execute' : 'dry-run', resolved, process.env, opsLabelFlagsOf(options));
 
     const required = ['target', 'expectOrgs', 'expectUsers', 'expectActive', 'actorUserId', 'log'] as const;
     for (const key of required) {
@@ -102,10 +98,9 @@ export class ContainmentSuspendCommand extends OpsCommandRunner {
     // eslint-disable-next-line no-console
     console.log(describeOpsLabel(label));
 
-    // The app session first: exactly crewflow_app (ops container) or crewflow_owner (owner-login path), and its deployment
-    // identity (the elevated session must match it).
+    // The app session first: exactly crewflow_owner, and its deployment identity (the narrowed session must match it).
     const app = await verifyOpsAppSession(this.dataSource, resolved, process.env, label.command);
-    // The actor claim must name a real, ACTIVE platform admin (definer function, EXECUTE crewflow_app; no elevated read).
+    // The actor claim must name a real, ACTIVE platform admin (definer function; no narrowed read).
     const [admin] = (await this.dataSource.query(`SELECT core.is_active_platform_admin($1::uuid) AS ok`, [options.actorUserId])) as Array<{ ok: boolean }>;
     if (admin?.ok !== true) throw new ContainmentRefusal('--actor-user-id is not an active platform admin; refusing');
 
