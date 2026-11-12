@@ -234,6 +234,16 @@ ${(error as Error).message}`);
  */
 export const WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED = false as boolean;
 
+/**
+ * Phase X SJ-05 (owner decision 2026-11-11): global claims (WORKER_CLAIM_MODE=global) and event dispatch
+ * (WORKER_DISPATCH_MODE=event) are NOT approved for production until the J3 benchmark and the owner's J5 decision. Before
+ * this, only the compose gate (scripts/compose-owner-login.cjs, FORBIDDEN_NAMES) refused them, so a Worker started outside
+ * the gated compose path booted in global mode. Like the invite rule above this is a code constant, never an environment
+ * variable: switching production to global claims is a reviewed code change that records the owner's J5 decision.
+ * Development and test (CI's Phase D suites run global mode) are untouched.
+ */
+export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;
+
 /** Exported for its unit test. Pure: reads only the validated configuration. */
 export function productionConfigurationProblems(env: EnvironmentVariables): string[] {
   const problems: string[] = [];
@@ -249,6 +259,19 @@ export function productionConfigurationProblems(env: EnvironmentVariables): stri
     problems.push(
       'WORKER_SCHEDULER=interval runs every scan on each replica\'s own timer, which is not the production path: the API registers the BullMQ job schedulers at start-up and the Worker consumes them. Remove WORKER_SCHEDULER (production defaults to bullmq) or set it to bullmq.',
     );
+  }
+  // Phase X SJ-05: per-scope polling is the only approved production dispatch until the owner's J5 decision.
+  if (!WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED) {
+    if (env.WORKER_CLAIM_MODE === 'global') {
+      problems.push(
+        'WORKER_CLAIM_MODE=global is not approved for production (owner decision 2026-11-11: global claims wait for the J3 benchmark and the J5 decision). Remove WORKER_CLAIM_MODE (production runs per_scope).',
+      );
+    }
+    if (env.WORKER_DISPATCH_MODE === 'event') {
+      problems.push(
+        'WORKER_DISPATCH_MODE=event is not approved for production (owner decision 2026-11-11: event dispatch needs global claims, which wait for the J3 benchmark and the J5 decision). Remove WORKER_DISPATCH_MODE (production runs poll).',
+      );
+    }
   }
   if (env.EMAIL_DRIVER === 'LOGGER') problems.push('EMAIL_DRIVER=LOGGER writes live reset and invitation links to the logs. Configure a real email driver.');
   if (env.STORAGE_DRIVER === 'LOCAL') problems.push('STORAGE_DRIVER=LOCAL keeps uploads on one container disk. Configure S3-compatible storage.');

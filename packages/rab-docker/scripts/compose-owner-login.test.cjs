@@ -412,6 +412,17 @@ test('bundled database: internal network only, and every app service waits for i
   }
 });
 
+test('SJ-05: the gate and production env validation refuse the same claim / dispatch switches (two layers, one rule)', () => {
+  // The gate refuses the names in every compose and env file.
+  for (const name of ['WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE']) assert.ok(forbiddenReason(name), name);
+  // Env validation refuses global claims and event dispatch in production (re-read from the TypeScript source).
+  const validation = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/env.validation.ts'), 'utf8');
+  // assert.ok, not assert.match: a failure must not print the whole source file.
+  assert.ok(/export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;/.test(validation), 'env.validation.ts lacks WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false');
+  assert.ok(/env\.WORKER_CLAIM_MODE === 'global'/.test(validation), 'env.validation.ts does not refuse WORKER_CLAIM_MODE=global in production');
+  assert.ok(/env\.WORKER_DISPATCH_MODE === 'event'/.test(validation), 'env.validation.ts does not refuse WORKER_DISPATCH_MODE=event in production');
+});
+
 // Phase X J2 (S0-J SJ-03): the push / realtime sweep rule once the feature is switched on.
 test('J2: the rule values (push 30 s by the owner rule 2026-11-06; realtime not pinned) and the verifier mirrors them', () => {
   assert.equal(gate.FEATURE_SWEEPS.PUSH_ENABLED.key, 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS');
