@@ -58,7 +58,8 @@ describe('account invite cleanup → audit events (X1.1)', () => {
           return [{ user_id: USER, organisation_id: ORG, cleanup_at: new Date(), blocking_reason: null }];
         }
         if (sql.includes('core.worker_delete_expired_invited_user')) return [{ outcome: 'deleted' }];
-        return [];
+        if (sql.startsWith('SELECT current_setting')) return [{ org: null, workspace: null }];
+        return []; // includes the audit INSERT: no id returned
       },
     };
     const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(manager), query: manager.query };
