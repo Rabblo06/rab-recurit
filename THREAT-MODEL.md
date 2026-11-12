@@ -6437,3 +6437,30 @@ was a compose comment, so switching push on in `runtime.env` silently registered
   parse). The verifier's env-file reader records only those two non-secret switch values in addition to names.
 - **Residual:** the realtime interval value is not pinned (no owner decision yet); the gate guarantees only that both
   services agree. Deciding it is a precondition of turning realtime on.
+
+## SC-01 — notification email is addressed from the live user row, never from the display cache (branch phase-x/c-fix-1-recipient-email, 2026-11-11, PR #96)
+
+Phase X Stage 0 finding SC-01 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env
+default or cache flag change. `CORE_ENTITY_CACHE_ENABLED` stays off in every deploy file.
+
+- **Asset:** delivery of another person's notification email (offer, shift and request mail, PII included).
+  **Actor:** an administrator or the account owner changing an email address (often a takeover-recovery action), and any
+  write path that changes `user.email` without clearing `CoreEntityCacheService` (operator SQL, a crash after commit, a
+  failed Redis INCR).
+- **Before:** `NotificationService.notify()` took the recipient from `CoreEntityCacheService.getUserDisplay().email`. That
+  cache's epoch lives in Redis and is bumped only after commit, and most `user.email` writers never bumped it. With the
+  flag on, mail kept going to the OLD address for up to 300 s after an email change. Latent (flag off in production).
+- **Control 1 (the decision):** `notify()` reads `user.email` LIVE, in the notifying transaction, under the caller's RLS
+  context (one narrow SELECT; the cache-off path already issued one). The recipient no longer depends on any Redis state.
+  This also removes the SC-02 path (a planted entity-cache value redirecting mail): the entity cache is display-only again.
+- **Control 2 (display freshness):** every service writer of a field in the `user` display projection (first/last name,
+  email, avatar) or of the row's existence clears the entry AFTER its transaction commits; a failed transaction clears
+  nothing: `EmailChangeService.confirm`; `ManagerService.update` (name), `changePendingEmail`, `changeEmail` (direct
+  path), `deleteUser`; `StaffService.update` (name), `changePendingEmail`, `changeEmail` (direct path), `deleteUser`,
+  `uploadAvatar`, `removeAvatar`; `VenueManagerService.uploadAvatar`, `removeAvatar` (`ProfileService` already did).
+- **Tests:** `sc01-notification-recipient-live.integration.spec.ts` (cache ON, real PostgreSQL/RLS, Redis, HTTP): a
+  confirmed email change sends the next notification to the new address; a stale cache entry (row changed by SQL, cache
+  not cleared) still sends to the live address (fails on the previous code: it sent to the old one); each writer above
+  bumps the epoch exactly once; a failed (409) change and a phone-only update bump nothing.
+- **Residual:** the display cache itself keeps its documented bounded staleness (≤ 300 s) for writes outside these
+  services (operator SQL, the Worker's invite-expiry DELETE, a failed INCR). It is display-only: names and avatars.
