@@ -194,6 +194,7 @@ function prepareVolumes(p, n) {
   const img = L.run('docker', ['inspect', '-f', '{{.Config.Image}}', p.container(L.DB_SERVICE)]).stdout.trim();
   const r = L.run('docker', ['run', '--rm', '--network', 'none', '-u', '0', '--entrypoint', 'chown', '-v', `${p.name}_crewflow-db-data:/d`, img, '999:999', '/d']);
   n(`WORKAROUND DOT_DB_VOLUME_CHOWN=1: chown 999:999 on ${p.name}_crewflow-db-data before the first start (exit ${r.code}); the production files alone do not start the db on this image`);
+  if (r.code !== 0) throw new Error(`the DOT_DB_VOLUME_CHOWN workaround failed (compose create exit ${c.code}, chown exit ${r.code})`);
 }
 
 function deploy(p, label) {
@@ -755,10 +756,10 @@ async function blockR256() {
   const d1 = L.derivedOwnerPassword(s.appSecret);
   L.writeSecrets(p.secretsDir); // PG_SSL_CA_CERT_PATH spelled out: R256 has no bundled-db CA rule
   await step('S7', '7', 'an R256 database upgrades unchanged with its crewflow_owner URL (pass-through), then with the admin URL (the password is reset once)', async (check, n) => {
-    prepareVolumes(p, n);
     // R256 on THIS release's compose files alone: what a rollback across DB-SETUP without the old files does.
     p.setPrev(false);
     use(p, { digest: R256, databaseUrl: L.ownerUrl() });
+    prepareVolumes(p, n);
     const d0 = deploy(p, 'S7-r256-new-files');
     await p.waitHealthy('rab-api', 600_000);
     await L.sleep(20_000);
