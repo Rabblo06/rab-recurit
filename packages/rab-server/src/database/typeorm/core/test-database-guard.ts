@@ -409,6 +409,34 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
 }
 
 /**
+ * X1.8 (audit XD-03): the Worker-login switch used by the Phase D worker specs
+ * (rab-worker/src/__tests__/integration/helpers/worker-login-env.ts). When PHASE_D_SQL_APPROVED=true and
+ * TEST_DATABASE_WORKER_URL is set it points DATABASE_URL at that login; before X1.8 it copied the value unchecked. Now the
+ * value goes through the same rules as the TEST pair FIRST, whatever NODE_ENV says (the switch never goes inert because
+ * NODE_ENV is unset or not "test"):
+ *   - the TEST pair is required and valid (loopback unless ALLOW_REMOTE_TEST_DATABASE=true, never the development database);
+ *   - TEST_DATABASE_WORKER_URL names its login and the TEST database on the same endpoint (resolveIntegrationTestDatabase);
+ *   - no inherited database URL or libpq variable redirects a connection (assertNoRedirectingDatabaseEnv, `.env` included);
+ *   - it is not the TEST admin login (the disposable cluster's bootstrap superuser): the Worker runtime never connects as it.
+ * On any refusal nothing is changed. Returns false (and changes nothing) when the switch is off. Errors never echo a URL.
+ */
+export function applyWorkerLoginTestDatabaseEnv(env: NodeJS.ProcessEnv): boolean {
+  const workerUrl = present(env, TEST_DATABASE_WORKER_URL);
+  if (env.PHASE_D_SQL_APPROVED !== 'true' || !workerUrl) return false;
+  const resolved = resolveIntegrationTestDatabase(env);
+  assertNoRedirectingProcessEnv(env, resolved);
+  const worker = describeDatabaseUrl(workerUrl, TEST_DATABASE_WORKER_URL);
+  if (worker.login === resolved.admin.login) {
+    throw new TestDatabaseConfigError(
+      `${TEST_DATABASE_WORKER_URL} uses the same login as ${TEST_DATABASE_URL_UNPOOLED} (the test admin / bootstrap superuser). The Worker runtime never connects as that login. Refusing to start.`,
+    );
+  }
+  env.DATABASE_URL = workerUrl;
+  env.WORKER_CLAIM_MODE = 'global';
+  return true;
+}
+
+/**
  * Jest globalSetup (the parent process, where JEST_WORKER_ID is not set): NODE_ENV=test, the TEST pair and the inherited
  * environment rules, before the live identity proof (assertSameDatabaseAtRuntime).
  */

@@ -5,6 +5,7 @@ import {
   TEST_DATABASE_WORKER_URL,
   TestDatabaseConfigError,
   applyIntegrationTestDatabaseEnv,
+  applyWorkerLoginTestDatabaseEnv,
   isLoopbackAlias,
   laterDotenvValues,
   resolveForJestGlobalSetup,
@@ -362,6 +363,112 @@ describe('integration test database guard', () => {
 
       it('finding 3: the alias list is not over-broad', () => {
         for (const host of ['10.0.0.1', '128.0.0.1', 'localhost.example.com', 'db', '::2', 'ep-x.neon.tech']) expect(isLoopbackAlias(host)).toBe(false);
+      });
+    });
+
+    // ---- X1.8 (audit XD-03): the guard does not depend on NODE_ENV=test to refuse a non-test database.
+    describe('X1.8 NODE_ENV-independent refusal', () => {
+      const NODE_ENVS: Array<string | undefined> = [undefined, '', 'development', 'production', 'staging'];
+
+      it.each(NODE_ENVS)('under Jest with NODE_ENV=%p the development database is refused, and nothing is routed', (nodeEnv) => {
+        expectApplyRefused(
+          jestEnv({ NODE_ENV: nodeEnv, [TEST_DATABASE_URL]: DEV_DB, [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab`, DATABASE_URL: DEV_DB }),
+          /Refusing to start/,
+        );
+      });
+
+      it.each(NODE_ENVS)('globalSetup with NODE_ENV=%p refuses the development database before any probe', (nodeEnv) => {
+        expect(() =>
+          resolveForJestGlobalSetup({ NODE_ENV: nodeEnv, [TEST_DATABASE_URL]: DEV_DB, [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab` }),
+        ).toThrow(TestDatabaseConfigError);
+      });
+    });
+
+    // ---- X1.8 (audit XD-03): worker-login-env.ts used to copy TEST_DATABASE_WORKER_URL into DATABASE_URL unchecked.
+    describe('X1.8 Worker-login switch (applyWorkerLoginTestDatabaseEnv)', () => {
+      const WORKER_ON_TEST_DB = `postgres://crewflow_worker:${SECRET}@127.0.0.1:55462/rab_test_a`;
+      const workerEnv = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+        PHASE_D_SQL_APPROVED: 'true',
+        [TEST_DATABASE_URL]: LOCAL_APP,
+        [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
+        [TEST_DATABASE_WORKER_URL]: WORKER_ON_TEST_DB,
+        DATABASE_URL: LOCAL_APP,
+        ...over,
+      });
+      function expectWorkerRefused(env: NodeJS.ProcessEnv, pattern: RegExp): void {
+        const before = { url: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE };
+        let message = '';
+        try {
+          applyWorkerLoginTestDatabaseEnv(env);
+        } catch (error) {
+          expect(error).toBeInstanceOf(TestDatabaseConfigError);
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(pattern);
+        expect(message).not.toContain(SECRET);
+        expect(message).not.toMatch(/postgres(ql)?:\/\//);
+        expect({ url: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE }).toEqual(before);
+      }
+
+      it('is off (returns false, changes nothing) without the Phase D opt-in or without a worker URL', () => {
+        for (const env of [workerEnv({ PHASE_D_SQL_APPROVED: undefined }), workerEnv({ PHASE_D_SQL_APPROVED: 'yes' }), workerEnv({ [TEST_DATABASE_WORKER_URL]: '  ' })]) {
+          expect(applyWorkerLoginTestDatabaseEnv(env)).toBe(false);
+          expect(env.DATABASE_URL).toBe(LOCAL_APP);
+          expect(env.WORKER_CLAIM_MODE).toBeUndefined();
+        }
+      });
+
+      it.each([undefined, 'development', 'test'])('accepts a worker login on the TEST database (NODE_ENV=%p) and routes DATABASE_URL to it', (nodeEnv) => {
+        const env = workerEnv({ NODE_ENV: nodeEnv });
+        expect(applyWorkerLoginTestDatabaseEnv(env)).toBe(true);
+        expect(env.DATABASE_URL).toBe(WORKER_ON_TEST_DB);
+        expect(env.WORKER_CLAIM_MODE).toBe('global');
+      });
+
+      it.each([undefined, 'development', 'production'])(
+        'with NODE_ENV=%p, a worker URL on the development database or another database is refused, nothing routed',
+        (nodeEnv) => {
+          expectWorkerRefused(workerEnv({ NODE_ENV: nodeEnv, [TEST_DATABASE_WORKER_URL]: DEV_DB }), /TEST_DATABASE_WORKER_URL names "rab"/);
+          expectWorkerRefused(workerEnv({ NODE_ENV: nodeEnv, [TEST_DATABASE_WORKER_URL]: OTHER_LOCAL }), /TEST_DATABASE_WORKER_URL names "rab_dev_other"/);
+        },
+      );
+
+      it('refuses when the TEST pair itself is missing or the development database (the worker URL alone is never trusted)', () => {
+        expectWorkerRefused(workerEnv({ [TEST_DATABASE_URL]: undefined }), /TEST_DATABASE_URL is required/);
+        expectWorkerRefused(
+          workerEnv({
+            [TEST_DATABASE_URL]: DEV_DB,
+            [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab`,
+            [TEST_DATABASE_WORKER_URL]: `postgres://crewflow_worker:${SECRET}@127.0.0.1:15432/rab`,
+          }),
+          /development database \(rab-devdb\)/,
+        );
+      });
+
+      it('refuses a remote worker database without the explicit override', () => {
+        expectWorkerRefused(
+          workerEnv({ [TEST_DATABASE_URL]: NEON_POOLED, [TEST_DATABASE_URL_UNPOOLED]: NEON_DIRECT, [TEST_DATABASE_WORKER_URL]: NEON_POOLED }),
+          /Remote test database/,
+        );
+      });
+
+      it('refuses a worker URL without a login, and the test admin (bootstrap superuser) login, without naming the login', () => {
+        expectWorkerRefused(workerEnv({ [TEST_DATABASE_WORKER_URL]: 'postgres://127.0.0.1:55462/rab_test_a' }), /TEST_DATABASE_WORKER_URL must name its login/);
+        let message = '';
+        try {
+          applyWorkerLoginTestDatabaseEnv(workerEnv({ [TEST_DATABASE_WORKER_URL]: LOCAL_ADMIN }));
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(/same login as TEST_DATABASE_URL_UNPOOLED/);
+        expect(message).not.toContain('rab_owner');
+        expectWorkerRefused(workerEnv({ [TEST_DATABASE_WORKER_URL]: LOCAL_ADMIN }), /same login as TEST_DATABASE_URL_UNPOOLED/);
+      });
+
+      it('refuses a redirecting inherited URL or libpq variable, as the setupFiles guard does', () => {
+        expectWorkerRefused(workerEnv({ PG_DATABASE_URL: DEV_DB }), /PG_DATABASE_URL is set/);
+        expectWorkerRefused(workerEnv({ PGHOST: 'elsewhere' }), /libpq variable\(s\) PGHOST are set/);
+        expectWorkerRefused(workerEnv({ DATABASE_DIRECT_URL: LOCAL_ADMIN }), /DATABASE_DIRECT_URL is set/);
       });
     });
   });

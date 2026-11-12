@@ -19,17 +19,38 @@ AI_E2E_STRIPPED_NAMES=(
 # Additionally never in a client process (Vite, Playwright): it needs no database URL and no application secret.
 AI_E2E_CLIENT_STRIPPED_NAMES=(PG_DATABASE_URL APP_SECRET)
 
-# Replaces the current (sub)shell with "$@", minus AI_E2E_STRIPPED_NAMES. For the API and the Worker.
+# X1.8: the admin (superuser) connection values. Any OTHER exported name holding exactly one of these values (the superuser
+# URL copied under a name this file does not list, e.g. in the caller's env file) is removed from every child but the seed
+# too, so the deny-list above is not the only line.
+AI_E2E_STRIPPED_VALUE_SOURCES=(TEST_DATABASE_URL_UNPOOLED MIGRATION_SECURITY_ADMIN_URL)
+
+# Prints, one per line, every exported name whose value equals a non-empty AI_E2E_STRIPPED_VALUE_SOURCES value. Values are
+# compared, never printed.
+ai_e2e_admin_value_aliases() {
+  local src value name
+  for src in "${AI_E2E_STRIPPED_VALUE_SOURCES[@]}"; do
+    value="${!src:-}"
+    [ -n "$value" ] || continue
+    while IFS= read -r name; do
+      [ "${!name:-}" = "$value" ] && printf '%s\n' "$name"
+    done < <(compgen -e)
+  done
+  return 0
+}
+
+# Replaces the current (sub)shell with "$@", minus AI_E2E_STRIPPED_NAMES and any admin-value alias. For the API and the Worker.
 ai_e2e_runtime_exec() {
   local unset_args=() name
   for name in "${AI_E2E_STRIPPED_NAMES[@]}"; do unset_args+=(-u "$name"); done
+  while IFS= read -r name; do unset_args+=(-u "$name"); done < <(ai_e2e_admin_value_aliases)
   exec env "${unset_args[@]}" "$@"
 }
 
-# Replaces the current (sub)shell with "$@", minus AI_E2E_STRIPPED_NAMES and AI_E2E_CLIENT_STRIPPED_NAMES. For Vite and
-# Playwright.
+# Replaces the current (sub)shell with "$@", minus AI_E2E_STRIPPED_NAMES, AI_E2E_CLIENT_STRIPPED_NAMES and any admin-value
+# alias. For Vite and Playwright.
 ai_e2e_client_exec() {
   local unset_args=() name
   for name in "${AI_E2E_STRIPPED_NAMES[@]}" "${AI_E2E_CLIENT_STRIPPED_NAMES[@]}"; do unset_args+=(-u "$name"); done
+  while IFS= read -r name; do unset_args+=(-u "$name"); done < <(ai_e2e_admin_value_aliases)
   exec env "${unset_args[@]}" "$@"
 }

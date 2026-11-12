@@ -12,11 +12,16 @@
  *    the child reports names only.
  * 2. Asserts run-ai-e2e.sh starts the API and the Worker only through ai_e2e_runtime_exec, and Vite and Playwright only
  *    through ai_e2e_client_exec, so the functions under test are the ones the harness really uses.
+ * 3. X1.8: runs the REAL run-ai-e2e.sh end to end with `node`, `curl` and `powershell.exe` replaced on PATH by stubs that
+ *    record the environment each child was spawned with (seed, API, Worker, Vite, Playwright) and exit. Asserts on those
+ *    spawned environments: the superuser URL reaches the seed only, under any name (including an alias the deny-list does
+ *    not list), and the API and Worker get only the restricted PG_DATABASE_URL. Synthetic values only; nothing is printed.
  * Needs bash (Git Bash on Windows) and node; no database, no network.
  */
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 
@@ -98,6 +103,23 @@ test('runtime-env.sh strips exactly the names this test plants (no silent shrink
   };
   assert.deepEqual(list('AI_E2E_STRIPPED_NAMES'), [...RUNTIME_STRIPPED].sort());
   assert.deepEqual(list('AI_E2E_CLIENT_STRIPPED_NAMES'), [...CLIENT_ONLY_STRIPPED].sort());
+  assert.deepEqual(list('AI_E2E_STRIPPED_VALUE_SOURCES'), ['MIGRATION_SECURITY_ADMIN_URL', 'TEST_DATABASE_URL_UNPOOLED']);
+});
+
+test('X1.8: a name the deny-list does not know, holding the superuser URL, is stripped by value from both launchers', () => {
+  const alias = { X18_ALIAS_OF_ADMIN_URL: planted.TEST_DATABASE_URL_UNPOOLED, X18_ALIAS_OF_MIGRATION_ADMIN: planted.MIGRATION_SECURITY_ADMIN_URL };
+  const run = (launcher) => {
+    const script = ['set -euo pipefail', `source "${bashPath(RUNTIME_ENV)}"`, `(${launcher} node -e "$PROBE")`].join('\n');
+    const result = spawnSync('bash', ['-c', script], { env: { ...process.env, ...planted, ...alias, PROBE: NAMES_PROBE }, encoding: 'utf8' });
+    assert.equal(result.status, 0, `bash launcher failed (exit ${result.status})`);
+    return new Set(JSON.parse(result.stdout));
+  };
+  for (const launcher of ['ai_e2e_runtime_exec', 'ai_e2e_client_exec']) {
+    const names = run(launcher);
+    assert.ok(!names.has('X18_ALIAS_OF_ADMIN_URL') && !names.has('X18_ALIAS_OF_MIGRATION_ADMIN'), `${launcher} child inherited an admin-URL alias`);
+  }
+  // Control: a value that is NOT an admin value stays (PG_DATABASE_URL in the runtime child).
+  assert.ok(run('ai_e2e_runtime_exec').has('PG_DATABASE_URL'));
 });
 
 test('run-ai-e2e.sh starts the API and Worker through ai_e2e_runtime_exec and Vite and Playwright through ai_e2e_client_exec', () => {
@@ -117,4 +139,104 @@ test('run-ai-e2e.sh starts the API and Worker through ai_e2e_runtime_exec and Vi
   assert.deepEqual(bare, [], 'no bare exec of a node child');
   const seed = lines.filter((l) => l.includes('seed-ai-e2e.ts'));
   assert.ok(seed.length >= 1, 'the seed still runs (it keeps the admin connection)');
+});
+
+// ---- 3. X1.8: the real harness, end to end, with the spawned environments recorded by PATH stubs.
+
+const ADMIN_SENTINEL = 'postgres://x18_superuser:x18-sentinel-admin-pw@127.0.0.1:15436/x18_ai_e2e';
+const APP_SENTINEL = 'postgres://x18_owner:x18-sentinel-app-pw@127.0.0.1:15436/x18_ai_e2e';
+const ROLES = ['seed', 'api', 'worker', 'vite', 'playwright'];
+
+/** Runs run-ai-e2e.sh with stubbed node/curl/powershell.exe; returns { role: { NAME: value } } for each spawned child. */
+function runHarnessWithStubs() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'x18-ai-e2e-env-'));
+  try {
+    const bin = path.join(tmp, 'bin');
+    const probe = path.join(tmp, 'probe');
+    const work = path.join(tmp, 'work');
+    fs.mkdirSync(bin);
+    fs.mkdirSync(probe);
+    // `node` stub: classifies the child by its script argument, writes its environment NUL-separated, and prints the line
+    // the harness waits for (the seed log marker, the Worker ready line). It never runs anything else.
+    const nodeStub = [
+      '#!/usr/bin/env bash',
+      'role=other',
+      'for a in "$@"; do case "$a" in',
+      '  *seed-ai-e2e.ts) role=seed ;; *boot-api.e2e.ts) role=api ;; *boot-worker.e2e.ts) role=worker ;;',
+      '  *vite/bin/vite.js) role=vite ;; *@playwright/test/cli.js) role=playwright ;;',
+      'esac; done',
+      'env -0 > "$X18_PROBE_DIR/$role.env"',
+      'case "$role" in seed) echo "[ai-e2e-seed] stub" ;; worker) echo "rab-ai consumer ready" ;; esac',
+      'exit 0',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(bin, 'node'), nodeStub, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'curl'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    // The harness's Windows cleanup ends node.exe processes by command line; the stub keeps this test away from real ones.
+    fs.writeFileSync(path.join(bin, 'powershell.exe'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+    const envFile = path.join(tmp, 'ai-e2e.env');
+    const lines = [
+      `TEST_DATABASE_URL=${APP_SENTINEL}`,
+      `TEST_DATABASE_URL_UNPOOLED=${ADMIN_SENTINEL}`,
+      'TEST_DATABASE_CREWFLOW_URL=postgres://x18_crewflow:x18-sentinel-crewflow-pw@127.0.0.1:15436/x18_ai_e2e',
+      `TEST_DATABASE_WORKER_URL=${APP_SENTINEL}`,
+      `MIGRATION_SECURITY_ADMIN_URL=${ADMIN_SENTINEL}`,
+      // A name no list knows, holding the superuser URL: only the value rule can catch it.
+      `X18_UNLISTED_SUPERUSER_URL=${ADMIN_SENTINEL}`,
+      'CREWFLOW_BOOTSTRAP_PASSWORD=x18-sentinel-bootstrap',
+      'REDIS_URL=redis://127.0.0.1:16391/0',
+      'APP_SECRET=x18-sentinel-app-secret-0123456789abcdef',
+      '',
+    ];
+    fs.writeFileSync(envFile, lines.join('\n'));
+    const env = {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+      AI_E2E_ENV: bashPath(envFile),
+      AI_E2E_WORK: bashPath(work),
+      AI_E2E_API_PORT: '49898',
+      AI_E2E_WEB_PORT: '49899',
+      X18_PROBE_DIR: bashPath(probe),
+    };
+    for (const name of [...RUNTIME_STRIPPED, ...CLIENT_ONLY_STRIPPED, 'X18_UNLISTED_SUPERUSER_URL']) delete env[name];
+    const result = spawnSync('bash', [bashPath(HARNESS)], { env, encoding: 'utf8', timeout: 90_000 });
+    assert.equal(result.status, 0, `harness failed (exit ${result.status}); stdout tail: ${String(result.stdout ?? '').slice(-400)}`);
+    const out = {};
+    for (const role of ROLES) {
+      const file = path.join(probe, `${role}.env`);
+      assert.ok(fs.existsSync(file), `the harness never spawned the ${role} child`);
+      out[role] = Object.fromEntries(
+        fs
+          .readFileSync(file, 'utf8')
+          .split('\0')
+          .filter(Boolean)
+          .map((entry) => [entry.slice(0, entry.indexOf('=')), entry.slice(entry.indexOf('=') + 1)]),
+      );
+    }
+    return out;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+test('X1.8: the real run-ai-e2e.sh spawns no child but the seed with the superuser URL (asserted on each spawned env)', () => {
+  const spawned = runHarnessWithStubs();
+  const holdingAdmin = (vars) => Object.keys(vars).filter((name) => vars[name].includes('x18-sentinel-admin-pw'));
+
+  // Control: the seed is the one child that keeps the admin connection (fixtures, the disposable-marker proof).
+  assert.equal(spawned.seed.TEST_DATABASE_URL_UNPOOLED, ADMIN_SENTINEL, 'the seed keeps TEST_DATABASE_URL_UNPOOLED');
+  assert.equal(spawned.seed.PG_DATABASE_URL, undefined, 'the seed is started without PG_DATABASE_URL');
+
+  for (const role of ['api', 'worker']) {
+    const vars = spawned[role];
+    assert.deepEqual(holdingAdmin(vars), [], `${role} child holds the superuser URL (names only)`);
+    assert.deepEqual(RUNTIME_STRIPPED.filter((name) => name in vars), [], `${role} child inherited a stripped name`);
+    assert.equal(vars.PG_DATABASE_URL, APP_SENTINEL, `${role} child connects through the restricted PG_DATABASE_URL only`);
+    assert.equal(vars.NODE_ENV, 'test');
+  }
+  for (const role of ['vite', 'playwright']) {
+    const vars = spawned[role];
+    const secrets = Object.keys(vars).filter((name) => vars[name].includes('x18-sentinel'));
+    assert.deepEqual(secrets, [], `${role} child holds a database URL or secret (names only)`);
+  }
 });
