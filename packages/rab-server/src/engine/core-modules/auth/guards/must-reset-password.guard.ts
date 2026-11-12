@@ -5,10 +5,11 @@ import { User } from '../../../../modules/identity/entities';
 import { AuthenticatedRequest } from './jwt-auth.guard';
 
 /**
- * Global guard (registered as APP_GUARD in app.module.ts) — runs on every
- * request, but only has anything to check once `JwtAuthGuard` has already
- * attached `request.authContext` (a route with no auth guard at all, e.g.
- * `/auth/login`, has nothing to enforce here and passes through).
+ * NOT a global guard: it is an AuthModule provider that `JwtAuthGuard` calls
+ * right after it attaches `request.authContext` (see that guard's own comment
+ * for why it cannot be an APP_GUARD). So it runs on every route `JwtAuthGuard`
+ * protects; a route with no auth guard at all, e.g. `/auth/login`, never
+ * reaches it.
  *
  * This is the actual server-side control behind "staff acceptance does not
  * mean confirmation"'s sibling rule for accounts: "temporary credentials do
