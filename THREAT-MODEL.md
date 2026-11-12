@@ -6575,6 +6575,67 @@ cache change. The layer-2 service checks stay in the services; this changes only
   `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
   10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
 
+## CONFIG — OpenShip deploy: pinned default release digest and the full env listing (PR #122, 2026-11-12)
+- **Change.** `packages/rab-docker/docker-compose.production.yml` (the file OpenShip imports) now:
+  - pins a default release on the rab-api, rab-worker and rab-ops image lines,
+    `${CREWFLOW_IMAGE_TAG:-sha256:<64 hex>}`, so a deploy needs no `CREWFLOW_IMAGE_TAG`;
+  - lists every production environment variable with no secret value: 13 required (`:?`, so the platform refuses the
+    deploy before boot), the optional ones with their exact code defaults or no value, and the existing pinned values
+    unchanged.
+  - The three files uploaded directly to main on 2026-11-12 (`docker-compose.prod.yml`, `postgres-init-prod/*`) are
+    removed; they re-created the retired two-login model on PG17.
+- **Accepted risk (owner, 2026-11-12): the release is chosen by the commit on main.**
+  - Anyone who can merge to main picks what is deployed, and a deploy-from-main platform redeploys on that merge.
+  - The default is still an immutable, gate-verified index digest, never a mutable tag.
+  - `compose-one-image.cjs` accepts a default only in production.yml, only as a full `sha256:<64 lowercase hex>`, and
+    the same expression on every service. `docker-compose.image.yml` stays strict (`:?`, no default).
+  - Branch protection on `main` (changes only through reviewed PRs, required gates) is the control this relies on.
+    **It is NOT enabled yet** (2026-11-12: no protection rule or ruleset; a write collaborator pushed the reverted files
+    directly). Until the owner enables it, any write account can change the pinned digest without CI.
+  - The pinned default is the newest published release (`0e0a6edd`, 2026-11-11), which predates later fixes (#31, #93,
+    #96, #98, #99, #101, #103). It is meant for a fresh install; publish a new image from main and bump the default.
+- **Accepted risk: OpenShip service-scoped values override any committed value, pinned ones included.** No repository
+  gate can see that. The listing only makes more names visible; it is how OpenShip already worked.
+- **Residual.**
+  - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
+    (verified against env validation and the direct readers).
+  - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
+- **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
+  wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
+
+## Phase X1.2 — one explicit rate-limit switch, refused in production (cleanup audit XA-01 / DUP-03)
+
+LOW (defence in depth)
+Failure:      whoever controls a service's environment (misconfiguration, a compromised deploy config or platform) sets
+              JEST_WORKER_ID (any value) → the API boots normally → the global per-IP throttle, the per-route auth tiers,
+              the login / MFA / admin-MFA-reset limiter and the attendance per-user throttle are all skipped, silently →
+              credential stuffing and brute force unthrottled.
+Actor:        the service environment (already high privilege; not an anonymous attacker).
+Location:     throttler.module.ts:63, login-attempt-limiter.service.ts:203, attendance-per-user-throttle.guard.ts:63 (main
+              843bd3fd): three copies of `JEST_WORKER_ID !== undefined && RAB_DISABLE_RATE_LIMIT !== 'false'`.
+Root cause:   the bypass treated an environment variable as proof of a Jest run, an UNSET flag satisfied `!== 'false'`, and
+              nothing refused it at boot. The comments claimed it "can never be true outside an actual Jest run".
+Fix:          one explicit switch, engine/core-modules/throttler/rate-limit-bypass.ts isRateLimitBypassEnabled:
+              RAB_DISABLE_RATE_LIMIT exactly 'true', never active when NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says
+              production. JEST_WORKER_ID plays no part. env.validation.ts refuses to boot a production process while
+              RAB_DISABLE_RATE_LIMIT holds anything but unset, blank or false (name only). The three limiters use the helper;
+              both Jest setups set the flag to 'true'. Comments corrected.
+Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass abuse cases, the production refusal, a
+              source scan that no server/Worker source reads RAB_DISABLE_RATE_LIMIT or JEST_WORKER_ID outside the helper, and
+              that the three limiters call it); rate-limit-bypass.limiters.spec.ts and
+              attendance-per-user-throttle.bypass.spec.ts (flag unset with JEST_WORKER_ID set, flag '1', and flag 'true' in a
+              production runtime → the login/MFA/admin-MFA-reset limiter and the attendance guard reach their store);
+              env.validation.rate-limit-bypass.spec.ts (production + the flag → refused; RAB_RUNTIME_ENV=production →
+              refused; unset/blank/false/JEST_WORKER_ID accepted; development / test keep it); rate-limiting.integration.spec.ts
+              (flag 'true' still skips the auth throttle; flag UNSET under Jest → the 6th forgot-password gets 429).
+
+- **Unchanged:** every rate-limit value, key, 429 / 503 contract and Redis failure policy; InvitationRateLimitService and
+  AiQuotaService still have no bypass.
+- **Residual (accepted design, owner prompt §3):** outside production the switch is one variable. A development, QA or staging
+  service started with RAB_DISABLE_RATE_LIMIT=true runs unthrottled (before, it also needed JEST_WORKER_ID). Staging is not a
+  declared production value here unless it sets NODE_ENV / RAB_RUNTIME_ENV / DB_TARGET=production. No compose file, env
+  template or workflow sets the flag today (checked with git grep).
+
 ### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
 - **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
   a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
