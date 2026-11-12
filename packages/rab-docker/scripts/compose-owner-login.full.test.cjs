@@ -169,6 +169,25 @@ test('notification delivery (owner decision 2026-11-06): fast publish on and the
   }
 });
 
+test('pay-statement sweep (owner decision 2026-11-11, J1a): 30 s, identical on both services', { skip }, () => {
+  for (const c of COMBOS) {
+    for (const svc of APP) {
+      assert.equal(fresh(c.name).services[svc].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS, '30', `${c.name} ${svc}`);
+    }
+  }
+  const KEY = 'WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS';
+  for (const svc of APP) {
+    // Missing = the 5 s code default on that service.
+    assertRefused(problemsAfter(DEF, (s) => { delete s[svc].environment[KEY]; }), new RegExp(`${svc}: ${KEY} is "", expected "30"`));
+    for (const other of ['5', '60', '300']) {
+      assertRefused(problemsAfter(DEF, (s) => { s[svc].environment[KEY] = other; }), new RegExp(`${svc}: ${KEY} is "${other}", expected "30"`));
+    }
+  }
+  // A Worker value that differs from the API's would never be noticed at runtime (the Worker's verify checks presence only).
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].environment[KEY] = '60'; }), new RegExp(`${KEY} differs between rab-api and rab-worker`));
+  assertRefused(problemsAfter(DEF, (s) => { delete s['rab-api'].environment[KEY]; }), new RegExp(`${KEY} differs between rab-api and rab-worker`));
+});
+
 test('Phase D switches (owner decision 2026-11-06): triggers on for all four kinds and the safety sweeps, identical on both services', { skip }, () => {
   for (const c of COMBOS) {
     for (const svc of APP) {
@@ -254,4 +273,100 @@ test('bundled database under the full contract: superuser login refused, every a
     for (const svc of APP) s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_URL.replace('crewflow_owner', 'postgres');
   }), /logs in as the bundled superuser/);
   for (const svc of APP) assertRefused(problemsAfter(REL, (s) => { delete s[svc].depends_on['rab-postgres']; }), new RegExp(`${svc}: does not wait for a healthy rab-postgres`));
+});
+
+// Phase X J2 (S0-J SJ-03): the committed compose files rendered with push / realtime switched ON in runtime.env.
+test('J2: push switched on in runtime.env against the committed compose is refused until 30 s is committed on both services', { skip }, () => {
+  const on = renderModels(COMBOS, [], ['PUSH_ENABLED=true']);
+  for (const c of COMBOS) {
+    const problems = checkModel(on[c.name], c);
+    assertRefused(problems, new RegExp(`${c.name}: rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed`));
+    assertRefused(problems, new RegExp(`${c.name}: rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed`));
+    // With the owner value committed on both services the rule holds.
+    const fixed = structuredClone(on[c.name]);
+    for (const svc of APP) fixed.services[svc].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30';
+    assert.ok(!checkModel(fixed, c).some((p) => /PUSH_/.test(p)), c.name);
+    // 30 on the API only: the Worker's 2 s default would never be noticed at runtime.
+    const half = structuredClone(on[c.name]);
+    half.services['rab-api'].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30';
+    assertRefused(checkModel(half, c), /rab-worker: PUSH_ENABLED=true needs/);
+  }
+  // A compose override switching push on for one service only.
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].environment.PUSH_ENABLED = 'true'; }), /PUSH_ENABLED differs between rab-api and rab-worker/);
+});
+
+test('J2: realtime switched on in runtime.env renders the same (2 s default on both) and passes; a one-sided interval is refused', { skip }, () => {
+  const on = renderModels([combo(DEF)], [], ['REALTIME_ENABLED=true']);
+  assert.ok(!checkModel(on[DEF], combo(DEF)).some((p) => /REALTIME/.test(p)));
+  const skew = structuredClone(on[DEF]);
+  skew.services['rab-api'].environment.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS = '10';
+  assertRefused(checkModel(skew, combo(DEF)), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs between rab-api and rab-worker/);
+});
+
+test('J2: `--lint-env-file runtime` refuses PUSH_ENABLED=true while the committed compose files lack the 30 s sweep', { skip }, () => {
+  const fsx = require('node:fs');
+  const os = require('node:os');
+  const pathx = require('node:path');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'owner-login-j2-'));
+  const file = pathx.join(dir, 'runtime.env');
+  const logs = [];
+  const original = console.log;
+  try {
+    console.log = (m) => logs.push(String(m));
+    fsx.writeFileSync(file, 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=true\n');
+    assert.equal(gate.main(['--lint-env-file', 'runtime', file]), 1);
+    assert.ok(logs.some((l) => /FAIL runtime env file: default: rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/.test(l)), logs.join('\n'));
+    logs.length = 0;
+    fsx.writeFileSync(file, 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\n');
+    assert.equal(gate.main(['--lint-env-file', 'runtime', file]), 0);
+  } finally {
+    console.log = original;
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Review of #97, finding J2-1 (reproduced by the reviewer): `PUSH_ENABLED=true # on` reaches the app as "true", so the
+// lint must treat it as ON; quoted values likewise; garbage is refused (fail closed), never read as off.
+test('J2-1: `--lint-env-file runtime` reads switches as Compose does: commented / quoted true = ON, garbage refused', { skip }, () => {
+  const fsx = require('node:fs');
+  const os = require('node:os');
+  const pathx = require('node:path');
+  const dir = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'owner-login-j2-1-'));
+  const file = pathx.join(dir, 'runtime.env');
+  const original = console.log;
+  const lint = (line) => {
+    const logs = [];
+    console.log = (m) => logs.push(String(m));
+    try {
+      fsx.writeFileSync(file, `CREWFLOW_AUDIT_SINK=stdout\n${line}\n`);
+      return { code: gate.main(['--lint-env-file', 'runtime', file]), out: logs.join('\n') };
+    } finally {
+      console.log = original;
+    }
+  };
+  try {
+    for (const line of ['PUSH_ENABLED=true # on', 'PUSH_ENABLED="true"', "PUSH_ENABLED='true' # on", 'export PUSH_ENABLED=true']) {
+      const r = lint(line);
+      assert.equal(r.code, 1, line);
+      assert.match(r.out, /default: rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/, line);
+    }
+    for (const line of ['PUSH_ENABLED=yes', 'PUSH_ENABLED=TRUE', 'PUSH_ENABLED="true', 'REALTIME_ENABLED=1']) {
+      const r = lint(line);
+      assert.equal(r.code, 1, line);
+      assert.match(r.out, /_ENABLED: must be exactly true or false/, line);
+    }
+    assert.equal(lint('PUSH_ENABLED=false # off').code, 0);
+    assert.equal(lint('REALTIME_ENABLED="false"').code, 0);
+  } finally {
+    console.log = original;
+    fsx.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('J2-1: the committed compose rendered with a commented runtime.env switch: Compose gives "true", the gate refuses', { skip }, () => {
+  const on = renderModels([combo(DEF)], [], ['PUSH_ENABLED=true # on']);
+  assert.equal(on[DEF].services['rab-api'].environment.PUSH_ENABLED, 'true'); // what the app really receives
+  assertRefused(checkModel(on[DEF], combo(DEF)), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  // A compose value outside true/false is refused too (it would be read as off).
+  assertRefused(problemsAfter(DEF, (s) => { for (const svc of APP) s[svc].environment.PUSH_ENABLED = 'yes'; }), /rab-api: PUSH_ENABLED must be exactly true or false/);
 });

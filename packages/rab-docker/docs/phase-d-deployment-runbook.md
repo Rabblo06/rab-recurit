@@ -46,8 +46,8 @@ credential at any point in this procedure.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. |
-| `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). |
+| `WORKER_CLAIM_MODE` | `per_scope` | `global` is the controlled activation in §5. **Production refuses `global` at env validation** (Phase X SJ-05, owner decision 2026-11-11) until the J3 benchmark and the owner's J5 decision; that decision is recorded by flipping `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED` in `env.validation.ts` in a reviewed change (never an environment variable). Staging also runs `NODE_ENV=production`, so the §5.2 staging rehearsal needs that change first; it then applies to staging and production together. The compose gate refuses the name as before. |
+| `WORKER_DISPATCH_MODE` | `poll` | `event` requires `global` (boot refuses otherwise) and is a separate approval (§5.4). Production refuses `event` at env validation too (SJ-05). |
 | `REALTIME_ENABLED` | `false` | Enabling it in production is a separate decision. |
 | `PUSH_ENABLED` | `false` | Enabling it in production is a separate decision. Owner rule (2026-11-06) for that day: push's immediate send is `WORKER_FAST_PUBLISH_NOTIFY` (already `true`), and `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS` goes to 30 s on the API and the Worker (`docs/release/OWNER-LOGIN-DEPLOYMENT.md`, "Notification delivery"). |
 | `WORKER_FAST_PUBLISH_NOTIFY` | `false` | **Production: `true`** on rab-api and rab-worker (owner decision 2026-11-06), committed in the compose files. |
@@ -58,6 +58,7 @@ credential at any point in this procedure.
 | `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` | `60` | **Production: `120`** (bounds 10–300) on both services. A standard withdrawal is due at start − 30 min, so a lost trigger costs at most 2 min of that notice. |
 | `WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS` | `120` | **Production: `300`** (bounds 30–600) on both services. Even a lost trigger lands the late flag before the 30-minute no-show. |
 | `WORKER_SHIFT_MONITOR_INTERVAL_SECONDS` | `300` | **Unchanged** (owner decision 2026-11-06): it also sends the clock-in reminders and arms the no-show / late clock-in triggers (horizon two intervals). Not committed; the gate refuses any other value in the compose files and env files. |
+| `WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` | `5` | **Production: `30`** (bounds 1–300) on rab-api and rab-worker (owner decision 2026-11-11, Phase X J1a), committed in the compose files; the gate refuses a missing or different value on either service and any value in an env file. A pay statement is generated 0–30 s after approval; the 10-minute lease recovery and the failed-retry backoff each gain at most 25 s. Payroll rules, `core.payroll_record_guard`, the generation fence and the consumer are unchanged. |
 | `WORKER_SHIFT_SCAN_MODE` | `separate` | **Production: `separate`** (unset). The D-Q4a combined scan stays off (owner decision 2026-11-06) until it is measured; the gate refuses `combined` in the compose files and env files. |
 | `WORKER_INVITE_AUTO_DELETE_ENABLED` | `false` | **Production refuses to boot with `true`** until the owner approves a retention policy (enforced in `packages/rab-server/src/engine/core-modules/environment/env.validation.ts`). |
 | `WORKER_DISPATCH_RECONCILE_SECONDS` | `900` | Boot refuses values outside 60–900. A longer interval needs evidence and a separate approval. |

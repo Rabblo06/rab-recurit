@@ -41,7 +41,7 @@ const idle = {};
 for (const l of ['O0', 'O5', 'O20']) { const s = R(`idle-${l}/summary.json`); if (s) idle[l] = s; }
 const O = { O0: 0, O5: 5, O20: 20 };
 for (const [l, s] of Object.entries(idle)) {
-  add('idle', `Idle runtime SQL/min, O=${O[l]} (old-audit definition: all statements as crewflow_app/crewflow)`, s.sql.topLevelCallsPerMin, 'statements/min', 'MEASURED', `pg_stat_statements delta over ${s.windowMinutes} min, worker only, no HTTP`, OLD.idleSqlPerMin[l]);
+  add('idle', `Idle runtime SQL/min, O=${O[l]} (old-audit definition: all statements as the runtime login, crewflow_owner since P0-H)`, s.sql.topLevelCallsPerMin, 'statements/min', 'MEASURED', `pg_stat_statements delta over ${s.windowMinutes} min, worker only, no HTTP`, OLD.idleSqlPerMin[l]);
   add('idle', `Idle client-sent SQL/min, O=${O[l]} (pg_stat_statements toplevel=true)`, s.sql.clientStatementsPerMin, 'statements/min', 'MEASURED', 'same window, toplevel rows only', null);
   add('idle', `Idle nested SQL/min inside SECURITY DEFINER functions, O=${O[l]}`, s.sql.nestedInsideDefinerFunctionsPerMin, 'statements/min', 'MEASURED', 'same window, role rab_secure_owner', OLD.idleNested[l]);
   add('idle', `DB CPU at idle, O=${O[l]}`, s.cpuFromCgroupPctOfOneCore['costaudit-pg'], '% of one core', 'MEASURED', 'cgroup v2 cpu.stat usage_usec delta / window', l === 'O20' ? OLD.dbCpuIdleO20Pct : null);
@@ -82,8 +82,8 @@ if (load) for (const s of load) {
   add('load', `${s.scenario}: latency p50/p95/p99`, `${s.latencyExact?.p50} / ${s.latencyExact?.p95} / ${s.latencyExact?.p99}`, 'ms', 'MEASURED', 'per-response latency from autocannon (exact percentiles over all responses)', o.p50 != null ? `${o.p50} / ${o.p95} / ${o.p99}` : null);
   add('load', `${s.scenario}: API / DB CPU per request`, `${s.apiCpuMsPerRequest} / ${s.pgCpuMsPerRequest}`, 'ms CPU', 'MEASURED', 'cgroup CPU delta of costaudit-api / costaudit-pg divided by requests', o.apiMs != null ? `${o.apiMs} / ${o.dbMs ?? '-'}` : null);
   add('load', `${s.scenario}: API memory peak`, s.apiMemPeakMiB_cgroup, 'MiB', 'MEASURED', 'cgroup memory.current sampled every 3 s (indicative: VM swapping)', o.apiRss ?? null);
-  add('load', `${s.scenario}: peak DB connections by role`, JSON.stringify(s.peakDbConnectionsByRole), 'connections', 'MEASURED', 'pg_stat_activity sampled every 3 s', '14-22 (crewflow_app)');
-  if (s.pgss) add('load', `${s.scenario}: DB execution per request`, `${s.pgss.dbExecMsPerRequest_toplevel} ms exec, ${s.pgss.statementsPerRequest} statements (+${s.pgss.nestedDefinerStatementsPerRequest} nested)`, 'ms / statements', 'MEASURED', 'pg_stat_statements total_exec_time (toplevel, crewflow_app) / requests, during the load window', o.dbMs != null ? `${o.dbMs} ms DB CPU (cgroup)` : null);
+  add('load', `${s.scenario}: peak DB connections by role`, JSON.stringify(s.peakDbConnectionsByRole), 'connections', 'MEASURED', 'pg_stat_activity sampled every 3 s', '14-22 (crewflow_app, pre-owner-login)');
+  if (s.pgss) add('load', `${s.scenario}: DB execution per request`, `${s.pgss.dbExecMsPerRequest_toplevel} ms exec, ${s.pgss.statementsPerRequest} statements (+${s.pgss.nestedDefinerStatementsPerRequest} nested)`, 'ms / statements', 'MEASURED', 'pg_stat_statements total_exec_time (toplevel, crewflow_owner) / requests, during the load window', o.dbMs != null ? `${o.dbMs} ms DB CPU (cgroup)` : null);
 }
 
 // ---- pdf / redis / storage / shift cycle ---------------------------------------------------------------------------
