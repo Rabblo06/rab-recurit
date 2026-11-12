@@ -6574,3 +6574,49 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Regression tests:** `attendance-per-user-throttle.guard.spec.ts` against real Redis (CI's service; skipped without
   `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
   10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
+
+## Phase X3.2: server errors to Sentry through an exception handler (Twenty's exception-handler module)
+
+### P0-sentry addendum (X3.2): 500s and failed Worker cycles are now reported; nothing new leaves the process
+- **Asset:** the same as P0-sentry: session cookies, `Authorization` headers, request bodies (passwords, reset and
+  activation tokens, MFA codes), refresh tokens, TOTP secrets and recovery codes, email addresses.
+  **Actor → action → consequence considered:** anyone with access to the third-party Sentry project reads those values
+  from a reported server error; or a Sentry outage or SDK fault changes an API response or stops the Worker.
+- **Before:** the API's unhandled-exception branch (`engine/filters/all-exceptions.filter.ts`) and the Worker cycle catch
+  (`core/runtime/worker-runtime.ts`) only logged; 5xx never reached Sentry (audit XR-03). Only uncaught exceptions,
+  unhandled rejections and the provisioning-health `captureMessage` did.
+- **Control:** `engine/core-modules/exception-handler/` (Twenty's exception-handler module, re-implemented):
+  `ExceptionHandlerService` over one driver, the Sentry driver when `SENTRY_DSN` is set and `instrument.ts` initialised a
+  client, otherwise a no-op driver. Called from the generic 500 branch of `AllExceptionsFilter` only (every 4xx branch
+  returns first; `shouldCaptureException` refuses an `HttpException` < 500) and from the Worker cycle catch (same
+  predicate). Every event still leaves through the P0-sentry `beforeSend` (request headers, cookies, body, query string
+  and env deleted; user reduced to its opaque id; JWTs, bearer values, `password=` / `token=` / `secret=` values and
+  emails redacted; dropped if scrubbing throws). What the handler itself adds is fixed: the operation kind and a data-free
+  name (HTTP method + Express route pattern, or the Worker loop name). It copies nothing off the exception object. The
+  scrubbers' sensitive-key list now also covers MFA enrolment fields whose names it missed (`otpauthUri`, `manualKey`,
+  `qrDataUrl`, `recoveryCodes` / `backupCodes`, `totpCode`), free-text redaction also catches camelCase / snake_case
+  credential names (`newPassword=`, `refreshToken:`, `"currentPassword":`, `"accessToken":`, `"mfaCode":`, `totpCode`,
+  `recoveryCode`), URL-encoded emails (`bob%40example.com`, also in an otpauth label) and connection strings whose
+  password contains `@` (stricter only; every pattern stays bounded and linear). Body-parser client errors (oversized
+  body, unsupported charset or content-encoding) are thrown before any guard or throttler, so they are
+  answered with their 4xx and a fixed body and are never reported: an unauthenticated caller cannot flood Sentry with
+  them or get an attacker-chosen charset name into an event (they used to be a generic 500). Reporting is best effort: the service and
+  both callers swallow any driver or SDK error, so the 500 body, the cycle outcome, its failure counter and the next cycle
+  are unchanged, and Sentry's transport sends asynchronously.
+- **Tests:** `all-exceptions.filter.http.spec.ts` (real HTTP, Nest default body parser: 200 KB body → 413, attacker
+  charset → 415 without echo, `content-encoding: evil-enc` → 415, malformed JSON → 400 (unchanged), none reported; a real
+  500 still reported), `exception-handler.service.spec.ts` (a 500 through the real filter → Sentry driver → the production
+  `beforeSend` → an in-memory transport: no header, cookie, body, token, password, email or MFA value in the envelope;
+  4xx sends nothing; no DSN / no client → no-op; a rejecting transport and a throwing SDK leave the response unchanged),
+  `all-exceptions.filter.spec.ts` (500 calls the handler with the route pattern; nine 4xx/404/409/503 paths do not; a
+  throwing handler or hostile request object leaves the 500 body unchanged), `worker-runtime.exception-handler.spec.ts`
+  (failed cycle reported in both stats modes and interval mode; succeeded/idle/skipped and client errors not; a throwing
+  handler leaves outcome, failure count, next cycle unchanged with no unhandled rejection; default with no DSN is a
+  no-op), `instrument.spec.ts` (MFA fields filtered; MFA status counts kept).
+- **Residual:** the error message (free text) and stack frames are sent, redacted by pattern only; a secret in a message
+  that matches no pattern is sent — in particular a BARE recovery or TOTP code with no key name next to it ("recovery
+  code ABCD-EFGH", "totp 482913"). The event's `request.url` and `transaction` keep the raw request PATH (query string and
+  fragment removed): today those path segments are internal UUIDs only, but a future route with an email, token or other
+  personal value in the path would send it (review F4, not fixed in this PR). Thrown `HttpException`s with status >= 500
+  are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
+  segments are kept, as in P0-sentry). No user or organisation is attached to these events.
