@@ -27,6 +27,7 @@ import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_LOCK_KEY,
   OWNER_BOOTSTRAP_Q2_FACTS,
+  OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
@@ -235,13 +236,45 @@ function fakeIo(facts: OwnerFacts[], probes: Array<{ ok: true } | { ok: false; c
 
 describe('owner bootstrap: the admin session', () => {
   it('fresh: one write transaction; the verifier travels only as bind parameter $1', async () => {
-    const { io, sent } = fakeIo([base, existing], [{ ok: true }]);
+    const { io, sent } = fakeIo([base, base, existing], [{ ok: true }]);
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toMatchObject({ outcome: 'created', exitCode: 0, created: true, passwordSet: true, grantAdded: true });
     const bind = sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS);
     expect(bind?.values).toEqual(['SCRAM-SHA-256$4096:c2FsdA==$stored:server', 'true']);
     for (const s of sent) expect(s.text).not.toContain('SCRAM-SHA-256$');
     expect(sent.map((s) => s.text)).toContain(OWNER_BOOTSTRAP_Q4C_DO);
+  });
+
+  it('re-plans under the lock: a concurrent first start that created the role first makes this one report the password reset, not "created"', async () => {
+    // Pre-lock read: no crewflow_owner (plan: create). Post-lock read: another start created it meanwhile, with a password
+    // this start's probe rejects (28P01), so the post-lock plan is "set the password". Post-commit read: exact.
+    const { io, sent, lines } = fakeIo([base, existing, existing], [{ ok: false, code: '28P01' }, { ok: true }]);
+    const result = await bootstrapOwnerWithIo(io);
+    expect(result).toEqual({ outcome: 'updated', exitCode: 0, created: false, passwordSet: true, grantAdded: false, code: null });
+    const texts = sent.map((s) => s.text);
+    // The second facts read happens AFTER the advisory lock, inside the transaction.
+    const lockAt = texts.indexOf(OWNER_BOOTSTRAP_Q4A_LOCK);
+    expect(lockAt).toBeGreaterThan(texts.indexOf(OWNER_BOOTSTRAP_BEGIN));
+    expect(texts.indexOf(OWNER_BOOTSTRAP_Q2_FACTS, lockAt)).toBeGreaterThan(lockAt);
+    expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values?.[1]).toBe('true');
+    expect(lines).toEqual([]); // no "created" claim, no D2 note twice
+  });
+
+  it('re-plans under the lock: when the other start already did everything, this one writes nothing and reports "unchanged"', async () => {
+    const { io, sent } = fakeIo([base, existing], [{ ok: true }]);
+    expect(await bootstrapOwnerWithIo(io)).toEqual({ outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null });
+    const texts = sent.map((s) => s.text);
+    expect(texts).toContain(OWNER_BOOTSTRAP_Q4A_LOCK);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_Q4B_SET_INPUTS);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
+    expect(texts[texts.length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it('re-plans under the lock: a refusal decided under the lock keeps its own message and rolls back', async () => {
+    const { io, sent } = fakeIo([base, { ...existing, oBypassRls: true }], [{ ok: true }]);
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(['BYPASSRLS']));
+    expect(sent.map((s) => s.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(sent.map((s) => s.text)).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
   });
 
   it('restart with everything in place: no transaction at all', async () => {
@@ -251,14 +284,14 @@ describe('owner bootstrap: the admin session', () => {
   });
 
   it('grant only: the verifier is not sent (empty), need_password false', async () => {
-    const { io, sent } = fakeIo([{ ...existing, oHasDbGrant: false }, existing], [{ ok: true }]);
+    const { io, sent } = fakeIo([{ ...existing, oHasDbGrant: false }, { ...existing, oHasDbGrant: false }, existing], [{ ok: true }]);
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: false, grantAdded: true });
     expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values).toEqual(['', 'false']);
   });
 
   it('a CREATE ROLE race is retried from the facts', async () => {
     let first = true;
-    const { io, sent, lines } = fakeIo([base, existing, existing], [{ ok: true }]);
+    const { io, sent, lines } = fakeIo([base, base, existing], [{ ok: true }]);
     const query = io.openAdmin;
     io.openAdmin = async () => {
       const s = await query();
@@ -285,7 +318,7 @@ describe('owner bootstrap: the admin session', () => {
   });
 
   it('fails closed when the post-commit probe does not log in', async () => {
-    const { io } = fakeIo([base, existing], [{ ok: false, code: '28P01' }]);
+    const { io } = fakeIo([base, base], [{ ok: false, code: '28P01' }]);
     await expect(bootstrapOwnerWithIo(io)).rejects.toBeInstanceOf(OwnerBootstrapFailure);
   });
 

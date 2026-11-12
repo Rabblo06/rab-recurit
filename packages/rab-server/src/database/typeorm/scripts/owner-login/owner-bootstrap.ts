@@ -13,7 +13,8 @@
  *      Q0, Q1 (session hardening), Q2 (facts). Decisions (§3.3) — a refusal is exit 64 with a fixed message.
  *   5. Q3 probe (only when the role exists): a second, short connection as crewflow_owner with the derived password.
  *      Success => the password is NOT touched (idempotent restart: the stored verifier, salt included, stays byte-identical).
- *   6. Only when something is missing: the write transaction (Q4a lock, Q4b inputs as bind parameters, Q4c DO block,
+ *   6. Only when something is missing: the write transaction (Q4a lock; Q2 + probe AGAIN under the lock, so the write and
+ *      the reported outcome follow what a concurrent start already committed; Q4b inputs as bind parameters, Q4c DO block,
  *      Q4d re-verify), COMMIT; then the probe again (must succeed) and Q2 again (must be exact), else exit 70.
  *
  * Exit codes: 0 ok (incl. pass-through), 64 refusal (configuration / rights / a privileged crewflow_owner), 70 unexpected.
@@ -290,10 +291,11 @@ export function classifyAdminConnectError(error: unknown, retriesExhausted: bool
 
 /** The write transaction's failure: a privilege / provider refusal (64), a race (retried by the caller), else 70. */
 export function classifyWriteError(error: unknown): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' {
+  // A decision taken under the lock (it may carry a probe SQLSTATE such as 42501) keeps its own message.
+  if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) return error;
   const code = errorCode(error);
   if (RACE_SQLSTATES.has(code)) return 'race';
   if (code === '42501' || code === '22023' || code === '28P01') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeRefused(code), code);
-  if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) return error;
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.writeFailed(code), code);
 }
 
@@ -342,19 +344,39 @@ async function readFacts(session: SqlSession): Promise<OwnerFacts> {
   return factsFromRow(rows[0]);
 }
 
-/** One attempt: facts, decisions, probe, write. Returns 'race' when a concurrent CREATE ROLE won (re-run from the facts). */
-async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race'> {
+/** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
+async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan> {
   const facts = await readFacts(session);
-  for (const note of decideBeforeProbe(facts)) io.log(note);
+  const notes = decideBeforeProbe(facts);
+  if (logNotes) for (const note of notes) io.log(note);
   const probe = facts.ownerExists ? await io.probeOwner() : null;
-  const plan = planWrite(facts, probe);
-  if (!plan.write) return { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
+  return planWrite(facts, probe);
+}
 
-  // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
-  const verifier = plan.needPassword ? io.verifier() : '';
+const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
+
+/**
+ * One attempt. The facts are read twice: once WITHOUT the lock (a restart with everything in place opens no transaction at
+ * all), and again UNDER the advisory lock, after any concurrent start on this database has committed. Only the post-lock
+ * plan decides what is written AND the outcome reported: a second replica that started at the same moment as the first
+ * reports what it really did ("unchanged", or "password set"), never the "created" its pre-lock read suggested.
+ * Returns 'race' when a concurrent start on another database of the cluster collided (re-run from the facts).
+ */
+async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race'> {
+  const preLock = await planFromDatabase(session, io, true);
+  if (!preLock.write) return { ...UNCHANGED };
+
+  let plan: WritePlan;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
   try {
     await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
+    plan = await planFromDatabase(session, io, false);
+    if (!plan.write) {
+      await session.query(OWNER_BOOTSTRAP_ROLLBACK);
+      return { ...UNCHANGED };
+    }
+    // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
+    const verifier = plan.needPassword ? io.verifier() : '';
     await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
     await session.query(OWNER_BOOTSTRAP_Q4C_DO);
     const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
