@@ -165,7 +165,8 @@ services:
       # transaction commits; the dispatcher stays the safety net. The email sweep runs every 30 s (code default 2 s, bounds
       # 1-60): the API registers the BullMQ scheduler with ITS value; the Worker only consumes it, and is set identically.
       # Push and realtime sweeps keep the 2 s default (not set here). When PUSH_ENABLED is turned on, set
-      # WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" here on both services (owner rule; its immediate send is this flag).
+      # WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" here on both services (owner rule; its immediate send is this flag). The
+      # gate and the verifier refuse PUSH_ENABLED=true without it (Phase X J2, SJ-03).
       # Committed (scripts/compose-owner-login.cjs and staging/verify-image-compose.cjs enforce both, on both services).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
@@ -183,6 +184,13 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, Phase X J1a), the SAME value on rab-api and rab-worker:
+      # 30 s (code default 5 s, bounds 1-300). An approved pay record's statement is generated within one sweep (0-30 s);
+      # the 10-minute lease recovery and the failed-retry backoff each gain at most 25 s. Payroll rules, the
+      # core.payroll_record_guard trigger, the generation fence and the consumer are unchanged. The API registers the
+      # BullMQ scheduler with ITS value and the consume-only Worker never compares intervals, hence one value on both.
+      # Committed; the gate and the verifier enforce it on both services.
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
 
     depends_on:
       rab-redis:
@@ -278,6 +286,8 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, J1a): identical to rab-api (see its comment there).
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
       # What the retired launcher gave the jobs child (H1-M1): HOME a path the process can neither write nor create (Node
       # searches $HOME/.node_modules), temp and XDG caches in its own 0700 tmpfs, and the per-instance heartbeat file.
       HOME: /nonexistent

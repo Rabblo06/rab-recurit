@@ -280,8 +280,30 @@ test('Phase D switches: the committed values are valid for the code (bounds, mod
   assert.deepEqual(gate.PHASE_D_SWITCHES.WORKER_TIMER_TRIGGER_KINDS.split(','), codeKinds);
 });
 
+test('pay-statement sweep (owner decision 2026-11-11, J1a): committed in compose, never re-entered in an env file', () => {
+  assert.deepEqual({ ...gate.STATEMENT_DISPATCH }, { WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: '30' });
+  // Every value, the committed one and the 5 s code default included: an env-file copy would duplicate or silently undo it.
+  for (const value of ['1', '5', '30', '300']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
+WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: committed in the compose files/);
+    assertRefused(lintEnvText('database', `${DATABASE_OK}
+WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=${value}`), /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: committed in the compose files/);
+  }
+});
+
+test('pay-statement sweep: 30 s is valid for the code (bounds read from the TypeScript source; the 5 s default stays)', () => {
+  const intervals = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/worker-scan-intervals.ts'), 'utf8');
+  const m = /WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:\s*s\('shift-statement-dispatch',\s*([\d_]+),\s*([\d_]+),\s*([\d_]+)\)/.exec(intervals);
+  assert.ok(m, 'shift-statement-dispatch interval setting not found in worker-scan-intervals.ts');
+  const [def, min, max] = m.slice(1).map((x) => Number(x.replace(/_/g, '')));
+  const committed = Number(gate.STATEMENT_DISPATCH.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS);
+  assert.ok(Number.isInteger(committed) && committed >= min && committed <= max, `30 s must lie within the code bounds ${min}-${max}`);
+  assert.equal(def, 5, 'development and tests keep the 5 s code default');
+});
+
 test('Phase D switches: the gate and the image-compose verifier enforce the same values', () => {
   const verifier = require('../staging/verify-image-compose.cjs');
+  assert.deepEqual({ ...verifier.STATEMENT_DISPATCH }, { ...gate.STATEMENT_DISPATCH });
   assert.deepEqual({ ...verifier.PHASE_D_SWITCHES }, { ...gate.PHASE_D_SWITCHES });
   assert.deepEqual({ ...verifier.PHASE_D_UNCHANGED }, { ...gate.PHASE_D_UNCHANGED });
   assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
@@ -388,4 +410,99 @@ test('bundled database: internal network only, and every app service waits for i
     assertRefused(problemsAfter((s) => { delete s[svc].depends_on['rab-postgres']; }), new RegExp(`${svc}: does not wait for a healthy rab-postgres`));
     assertRefused(problemsAfter((s) => { delete s[svc].networks['crewflow-db']; }), new RegExp(`${svc}: is not on the crewflow-db network`));
   }
+});
+
+test('SJ-05: the gate and production env validation refuse the same claim / dispatch switches (two layers, one rule)', () => {
+  // The gate refuses the names in every compose and env file.
+  for (const name of ['WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE']) assert.ok(forbiddenReason(name), name);
+  // Env validation refuses global claims and event dispatch in production (re-read from the TypeScript source).
+  const validation = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/env.validation.ts'), 'utf8');
+  // assert.ok, not assert.match: a failure must not print the whole source file.
+  assert.ok(/export const WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false as boolean;/.test(validation), 'env.validation.ts lacks WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false');
+  assert.ok(/env\.WORKER_CLAIM_MODE === 'global'/.test(validation), 'env.validation.ts does not refuse WORKER_CLAIM_MODE=global in production');
+  assert.ok(/env\.WORKER_DISPATCH_MODE === 'event'/.test(validation), 'env.validation.ts does not refuse WORKER_DISPATCH_MODE=event in production');
+});
+
+// Phase X J2 (S0-J SJ-03): the push / realtime sweep rule once the feature is switched on.
+test('J2: the rule values (push 30 s by the owner rule 2026-11-06; realtime not pinned) and the verifier mirrors them', () => {
+  assert.equal(gate.FEATURE_SWEEPS.PUSH_ENABLED.key, 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS');
+  assert.equal(gate.FEATURE_SWEEPS.PUSH_ENABLED.value, '30');
+  assert.equal(gate.FEATURE_SWEEPS.REALTIME_ENABLED.key, 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS');
+  assert.equal(gate.FEATURE_SWEEPS.REALTIME_ENABLED.value, null);
+  const verifier = require('../staging/verify-image-compose.cjs');
+  assert.deepEqual(JSON.parse(JSON.stringify(verifier.FEATURE_SWEEPS)), JSON.parse(JSON.stringify(gate.FEATURE_SWEEPS)));
+});
+
+test('J2: 30 s lies within the push sweep bounds read from the TypeScript source; the switches parse exactly as the code does', () => {
+  const src = (rel) => fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment', rel), 'utf8');
+  const m = /WORKER_PUSH_DISPATCH_INTERVAL_SECONDS:\s*s\('push-dispatch',\s*(\d+),\s*(\d+),\s*(\d+)\)/.exec(src('worker-scan-intervals.ts'));
+  assert.ok(m, 'push-dispatch interval setting not found');
+  const [, , min, max] = m.map(Number);
+  assert.ok(30 >= min && 30 <= max);
+  const vars = src('environment-variables.ts');
+  for (const flag of ['PUSH_ENABLED', 'REALTIME_ENABLED']) {
+    assert.match(vars, new RegExp(`@Transform\\(\\(\\{ value \\}\\) => value === 'true'\\)\\s*@IsBoolean\\(\\)\\s*${flag}: boolean = false;`), flag);
+  }
+});
+
+test('J2 featureSweepProblems: push on needs 30 s on BOTH services; the switch must match; off enforces nothing', () => {
+  const f = gate.featureSweepProblems;
+  assert.deepEqual(f({}, {}), []);
+  assert.deepEqual(f({ PUSH_ENABLED: 'false' }, { PUSH_ENABLED: 'false' }), []);
+  // Review J2-1 (fail closed): anything but exactly true / false is refused, never silently read as off.
+  for (const bad of ['TRUE', '1', 'yes', ' true', 'true # on', '']) {
+    assertRefused(f({ PUSH_ENABLED: bad }, { PUSH_ENABLED: bad }), /rab-api: PUSH_ENABLED must be exactly true or false/);
+    assertRefused(f({ PUSH_ENABLED: 'false' }, { REALTIME_ENABLED: bad }), /rab-worker: REALTIME_ENABLED must be exactly true or false/);
+  }
+  const on = { PUSH_ENABLED: 'true' };
+  assertRefused(f(on, on), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the compose files \(owner rule 2026-11-06\); it is ""/);
+  assertRefused(f(on, on), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  assertRefused(f({ ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }, { ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '2' }), /rab-worker: PUSH_ENABLED=true needs .*it is "2"/);
+  assertRefused(f(on, {}), /PUSH_ENABLED differs between rab-api and rab-worker/);
+  assert.deepEqual(f({ ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }, { ...on, WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: '30' }), []);
+  const rt = { REALTIME_ENABLED: 'true' };
+  assertRefused(f({ ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '2' }, { ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '10' }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs between rab-api and rab-worker/);
+  assertRefused(f({ ...rt, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS: '5' }, rt), /WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs/);
+  assert.deepEqual(f(rt, rt), []); // unset on both = the same 2 s default on both (the value itself is the owner's decision)
+  assertRefused(f(rt, {}), /REALTIME_ENABLED differs between rab-api and rab-worker/);
+});
+
+test('J2: the push and realtime sweep intervals are never accepted from an env file', () => {
+  for (const key of ['WORKER_PUSH_DISPATCH_INTERVAL_SECONDS', 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS']) {
+    for (const value of ['2', '30']) {
+      assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=${value}`), new RegExp(`${key}: commit it in the compose files on rab-api and rab-worker`));
+    }
+  }
+  // The switches themselves stay runtime.env values (off by default; turning one on is the owner's decision).
+  assert.deepEqual(lintEnvText('runtime', 'CREWFLOW_AUDIT_SINK=stdout\nPUSH_ENABLED=false\nREALTIME_ENABLED=false'), []);
+});
+
+// Review of #97, finding J2-1: switch values are read the way Docker Compose reads them, and anything but true/false fails closed.
+test('J2-1: composeEnvValue reads a value the way Docker Compose does (quotes, inline # comments); ambiguous → null', () => {
+  const v = gate.composeEnvValue;
+  assert.equal(v('true # on'), 'true');
+  assert.equal(v('true\t# on'), 'true');
+  assert.equal(v('"true"'), 'true');
+  assert.equal(v("'true' # on"), 'true');
+  assert.equal(v('"true" # on'), 'true');
+  assert.equal(v('  false  '), 'false');
+  assert.equal(v('a#b'), 'a#b'); // a # not preceded by a blank is part of the value
+  assert.equal(v('"a # b"'), 'a # b'); // inside quotes it is not a comment
+  assert.equal(v('"true'), null); // unterminated quote
+  assert.equal(v('"true" yes'), null); // text after the closing quote
+  const verifier = require('../staging/verify-image-compose.cjs');
+  for (const raw of ['true # on', '"true"', "'true' # x", 'a#b', '"a # b"', '"true', '"true" yes', '', 'yes']) assert.equal(verifier.composeEnvValue(raw), v(raw), raw);
+});
+
+test('J2-1: lintEnvText refuses a switch that is not exactly true or false once read as Compose reads it', () => {
+  for (const line of ['PUSH_ENABLED=yes', 'PUSH_ENABLED=TRUE', 'PUSH_ENABLED=1', 'PUSH_ENABLED=', 'PUSH_ENABLED="true', 'PUSH_ENABLED="true" x', 'REALTIME_ENABLED=on # enabled']) {
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), /(PUSH|REALTIME)_ENABLED: must be exactly true or false/);
+  }
+  for (const line of ['PUSH_ENABLED=false # off for now', 'PUSH_ENABLED="false"', "REALTIME_ENABLED='false'", 'export PUSH_ENABLED=false']) {
+    assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${line}`), [], line);
+  }
+  // parseEnvText now gives every rule the value Compose gives the app.
+  const [entry] = gate.parseEnvText('PUSH_ENABLED=true # on');
+  assert.deepEqual([entry.key, entry.value, entry.unreadable], ['PUSH_ENABLED', 'true', false]);
+  assert.equal(gate.parseEnvText('PUSH_ENABLED="true')[0].unreadable, true);
 });

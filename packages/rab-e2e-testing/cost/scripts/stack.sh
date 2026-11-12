@@ -2,7 +2,8 @@
 # Lifecycle of the disposable crewflow-cost stack. Every step is idempotent-or-refusing; none touches anything outside
 # the crewflow-cost compose project.
 #   COST_TAG=<tag> scripts/stack.sh infra      start pg + redis + minio (+ bucket)
-#   COST_TAG=<tag> scripts/stack.sh migrate    phase A as rab_owner (expected to stop at the role split), phase B as the bootstrap superuser
+#   COST_TAG=<tag> scripts/stack.sh migrate    start the api, which migrates on start (api-prestart.sh, owner login), and record
+#                                              the applied chain (there is no separate migrate service any more)
 #   COST_TAG=<tag> scripts/stack.sh seed       deterministic 20-org / 1,000-user seed + history backfill (real PDF renderer)
 #   COST_TAG=<tag> scripts/stack.sh app        start api + worker and wait for health
 #   COST_TAG=<tag> scripts/stack.sh down       remove containers, volumes and network of this project only, after
@@ -38,22 +39,19 @@ case "${1:?usage: stack.sh infra|migrate|seed|app|down}" in
     log "infra up"
     ;;
   migrate)
+    # Owner-login lifecycle (Phase X P0-H): the api's own start runs the migration child under the migration lock (fresh
+    # install: bootstrap + the whole chain + post-checks; a first-install failure never serves), then registers the BullMQ
+    # schedulers. Nothing here logs in as anything but crewflow_owner; the superuser psql below only reads the result.
     assert_disposable
-    log "migration phase A (rab_owner; expected to stop at CrewflowSingleCredentialRoleArchitecture1786682000000)"
-    set +e
-    CREWFLOW_MIGRATION_PHASE=A CREWFLOW_MIGRATION_DATABASE_URL="postgres://rab_owner:${RAB_OWNER_PW}@pg:5432/rab" \
-      dc --profile ops run --rm -T migrate > "$OUT/migrate-phaseA.log" 2>&1
-    a=$?
-    set -e
-    sed -E 's#postgres(ql)?://[^ ]+#<url>#g' -i "$OUT/migrate-phaseA.log"
-    if [ "$a" -ne 0 ] && ! grep -q "refuses to run as 'rab_owner'" "$OUT/migrate-phaseA.log"; then die "phase A failed unexpectedly (see $OUT/migrate-phaseA.log)"; fi
-    log "migration phase B (bootstrap superuser)"
-    CREWFLOW_MIGRATION_PHASE=B CREWFLOW_MIGRATION_DATABASE_URL="postgres://rab:${PG_SUPER_PW}@pg:5432/rab" \
-      dc --profile ops run --rm -T migrate > "$OUT/migrate-phaseB.log" 2>&1 || { sed -E 's#postgres(ql)?://[^ ]+#<url>#g' -i "$OUT/migrate-phaseB.log"; die "phase B failed (see $OUT/migrate-phaseB.log)"; }
-    sed -E 's#postgres(ql)?://[^ ]+#<url>#g' -i "$OUT/migrate-phaseB.log"
+    log "api start = migrate on start (crewflow_owner)"
+    t0=$SECONDS
+    dc up -d api
+    wait_healthy costaudit-api 900
+    docker logs costaudit-api 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g; s#(postgres(ql)?|redis)://[^ ]+#<url>#g' > "$OUT/api-start.log"
     q "select count(*) from core.migrations" > "$OUT/migrations-count.txt"
     q "select name from core.migrations order by id desc limit 1" >> "$OUT/migrations-count.txt"
-    log "migrations applied: $(head -1 "$OUT/migrations-count.txt") (latest $(tail -1 "$OUT/migrations-count.txt"))"
+    q "select string_agg(rolname, ',' order by rolname) from pg_roles where rolcanlogin" >> "$OUT/migrations-count.txt"
+    log "migrations applied in $((SECONDS - t0)) s: $(head -1 "$OUT/migrations-count.txt") (latest $(sed -n 2p "$OUT/migrations-count.txt")); login roles: $(sed -n 3p "$OUT/migrations-count.txt")"
     ;;
   seed)
     assert_disposable
@@ -66,16 +64,32 @@ case "${1:?usage: stack.sh infra|migrate|seed|app|down}" in
     ;;
   api)
     dc up -d api
-    wait_healthy costaudit-api 240
+    wait_healthy costaudit-api 900
     log "api healthy"
     ;;
   worker)
-    # COST_WORKER_ENV_FILE / COST_REALTIME_ENABLED / COST_PUSH_ENABLED (see docker-compose.cost.yml) select the worker
-    # configuration; a changed configuration makes compose recreate the container.
+    # COST_WORKER_ENV_FILE / COST_REALTIME_ENABLED / COST_PUSH_ENABLED / COST_WORKER_* (see docker-compose.cost.yml) select
+    # the configuration of the api AND the worker: the api registers the BullMQ schedulers with its environment, the worker
+    # only consumes them, so both are converged together (compose recreates whichever changed; a recreated api re-runs
+    # api-prestart.sh, whose registration reconciles intervals and removes disabled scans).
+    dc up -d api
+    wait_healthy costaudit-api 900
     dc up -d worker
-    # Interval mode runs every scan once at boot; wait until the jobs child reports its runtime is up.
-    for _ in $(seq 1 60); do docker logs costaudit-worker 2>&1 | grep -qF "[jobs]" && break; sleep 2; done
-    log "worker running ($(docker inspect -f '{{.State.Status}}' costaudit-worker))"
+    # Consume-only (bullmq): wait until the Worker reports it is up (its consume-only scheduler check runs at boot).
+    for _ in $(seq 1 60); do docker logs costaudit-worker 2>&1 | grep -qiE "rab-worker ready|consume only" && break; sleep 2; done
+    st="$(docker inspect -f '{{.State.Status}}' costaudit-worker 2>/dev/null || echo missing)"
+    log "worker $st"
+    # FAIL the run when what the api registered is not what this worker's configuration expects (missing, unexpected or a
+    # different interval): an arm must never measure another schedule than the one it names. A worker that did not stay up
+    # is left to the caller (measure.sh worker_up records it as REFUSED).
+    if [ "$st" = running ]; then
+      sched="$(docker exec -i costaudit-worker node - < "$(hostpath "$COST_DIR/lib/verify-schedulers.cjs")")" || {
+        echo "$sched" > "$OUT/schedulers-MISMATCH.json"
+        die "registered BullMQ schedulers differ from the worker's plan: $sched"
+      }
+      echo "$(date -u +%FT%TZ) $sched" >> "$OUT/schedulers.log"
+      log "schedulers verified: $(node -e 'const j=JSON.parse(process.argv[1]);console.log(Object.keys(j.expected).length+" registered = worker plan (shift scans "+j.shiftScanMode+", claim "+j.dispatch.claimMode+"/"+j.dispatch.dispatchMode+")")' "$sched")"
+    fi
     ;;
   app)
     "$0" api

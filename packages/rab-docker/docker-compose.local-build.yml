@@ -89,7 +89,8 @@ services:
       # none by default (C4); token is an opt-in (BC-11), entered as the interpolation value (docker-compose.image.yml).
       CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}
       # Notification delivery (owner decision 2026-11-06), identical on rab-api and rab-worker: see docker-compose.image.yml.
-      # When PUSH_ENABLED is turned on, also set WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" on both (owner rule).
+      # When PUSH_ENABLED is turned on, also set WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30" on both (owner rule; the gates
+      # refuse PUSH_ENABLED=true without it, Phase X J2).
       WORKER_FAST_PUBLISH_NOTIFY: "true"
       WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: "30"
       # Phase D switches (owner decision 2026-11-06), identical on rab-api and rab-worker: see docker-compose.image.yml.
@@ -100,6 +101,9 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, J1a), identical on rab-api and rab-worker: 30 s (code
+      # default 5 s): see docker-compose.image.yml.
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
     depends_on:
       rab-redis:
         condition: service_healthy
@@ -174,6 +178,8 @@ services:
       WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: "300"
       WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: "120"
       WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: "300"
+      # Pay-statement dispatch sweep (owner decision 2026-11-11, J1a): identical to rab-api.
+      WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: "30"
       HOME: /nonexistent
       TMPDIR: /tmp/crewflow-jobs
       XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config

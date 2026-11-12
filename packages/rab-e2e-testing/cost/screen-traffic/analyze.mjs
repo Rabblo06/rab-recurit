@@ -108,7 +108,7 @@ L.push('', '| Endpoint (2xx only) | n | client p50/p95/p99 ms | API p50/p95/p99 
 for (const [k, v] of Object.entries(latency)) L.push(`| ${k} | ${v.n} | ${v.clientMs.p50}/${v.clientMs.p95}/${v.clientMs.p99} | ${v.serverMs.p50}/${v.serverMs.p95}/${v.serverMs.p99} |`);
 if (result.server) {
   const s = result.server;
-  L.push('', `Server (MEASURED, harness window): SQL/min toplevel(crewflow_app+crewflow)=${s.sqlStatementsPerMin.topLevelCallsPerMin}, client statements=${s.sqlStatementsPerMin.clientStatementsPerMin}, nested in SECURITY DEFINER=${s.sqlStatementsPerMin.nestedInsideDefinerFunctionsPerMin}; exec ms/min=${s.sqlStatementsPerMin.topLevelExecMsPerMin}.`);
+  L.push('', `Server (MEASURED, harness window): SQL/min toplevel(runtime login)=${s.sqlStatementsPerMin.topLevelCallsPerMin}, client statements=${s.sqlStatementsPerMin.clientStatementsPerMin}, nested in SECURITY DEFINER=${s.sqlStatementsPerMin.nestedInsideDefinerFunctionsPerMin}; exec ms/min=${s.sqlStatementsPerMin.topLevelExecMsPerMin}.`);
   L.push(`CPU % of one core (cgroup): ${Object.entries(s.cpuPctOfOneCore).map(([k, v]) => `${k.replace('costaudit-', '')}=${v}`).join(', ')}.`);
   if (s.memory) L.push(`Memory MiB avg/max (docker stats): ${Object.entries(s.memory).map(([k, v]) => `${k.replace('costaudit-', '')}=${v.memMiBAvg}/${v.memMiBMax}`).join(', ')}.`);
   L.push(`Host contention (other containers' CPU % avg sum): ${s.hostContention?.totalCpuPctAvg}.`);
