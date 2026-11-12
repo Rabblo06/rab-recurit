@@ -46,9 +46,11 @@ import { resolve } from 'node:path';
 
 import { OWNER_LOGIN_ROLE } from '../../database/boot-checks/owner-login-posture';
 import { nxDotenvPaths, readDotenvFilesValues, WORKSPACE_ROOT } from '../../database/typeorm/core/nx-dotenv-files';
+import { parsePgUrl } from '../../database/postgres/pg-url-policy';
 import {
   currentPgProcessRole,
   LEGACY_PG_ENV_NAMES,
+  LIBPQ_ENV_NAMES,
   OPS_ACTOR_ENV_NAMES,
   OPS_APP_DATABASE_URL_VAR,
   OPS_ONLY_ENV_NAMES,
@@ -137,22 +139,28 @@ export function assertOpsPlacement(command: string | undefined, env: Record<stri
   return role;
 }
 
-/** The user named by a postgres URL, or undefined when it cannot be parsed (the value is never echoed). */
-function urlUser(raw: string): string | undefined {
+/**
+ * The user PG_DATABASE_URL connects as, read by THE SAME parser pg-config.ts uses for the connection (parsePgUrl: the user
+ * the pool will send, after its query-parameter refusals such as `?user=` and `options=-c role=`). One parser, so this
+ * check can never disagree with the login actually used. Throws OpsRunError with the parser's credential-free reason.
+ */
+function urlUser(command: OpsCommand, raw: string): string {
   try {
-    const url = new URL(raw.trim());
-    if (!/^postgres(ql)?:$/i.test(url.protocol)) return undefined;
-    return decodeURIComponent(url.username);
-  } catch {
-    return undefined;
+    return parsePgUrl(raw, 'PG_DATABASE_URL').user;
+  } catch (error) {
+    const reason = error instanceof Error && error.name === 'PgConfigError' ? error.message : 'PG_DATABASE_URL could not be parsed (value not shown).';
+    throw new OpsRunError(`"${command}" refuses PG_DATABASE_URL: ${reason}`);
   }
 }
 
 /**
  * X2.2, layer 1 (pure, before any connection): an ops command on the ordinary CLI path runs only under the owner login.
- * PG_DATABASE_URL must name exactly crewflow_owner; no legacy database variable (DATABASE_URL, DATABASE_URL_UNPOOLED,
- * DATABASE_DIRECT_URL, DB_POOL_MAX) and no operations-container variable may be set: the label comes from the command's
- * flags, and there is exactly one endpoint. Throws OpsRunError; the message names variables and the login only.
+ * PG_DATABASE_URL must name exactly crewflow_owner. Refused in EVERY environment (pg-config.ts refuses some of these in
+ * production only): any operations-container variable (the label comes from the command's flags), any legacy database
+ * variable (DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX), any libpq variable (PGOPTIONS, PGUSER,
+ * ...: node-postgres reads some of them as silent fallbacks, e.g. a session role), and PG_DATABASE_REPLICA_URL (the ops
+ * commands have no replica path, as the ops container: pg-config.ts). Exactly one endpoint. Throws OpsRunError; the
+ * message names variables and the login only.
  */
 export function assertOwnerLoginOpsEnvironment(command: OpsCommand, env: Record<string, string | undefined>): void {
   const held = OPS_ONLY_ENV_NAMES.filter((name) => present(env, name) !== undefined);
@@ -165,13 +173,18 @@ export function assertOwnerLoginOpsEnvironment(command: OpsCommand, env: Record<
   if (legacy.length > 0) {
     throw new OpsRunError(`"${command}" runs only on PG_DATABASE_URL (the owner login); remove the legacy database variable(s) ${legacy.join(', ')}.`);
   }
+  const libpq = LIBPQ_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+  if (libpq.length > 0) {
+    throw new OpsRunError(`"${command}" refuses libpq environment variable(s) ${libpq.join(', ')} in every environment: put everything in PG_DATABASE_URL.`);
+  }
+  if (present(env, 'PG_DATABASE_REPLICA_URL') !== undefined) {
+    throw new OpsRunError(`"${command}" refuses PG_DATABASE_REPLICA_URL: the ops commands have no replica path.`);
+  }
   const raw = present(env, 'PG_DATABASE_URL');
   if (raw === undefined) throw new OpsRunError(`"${command}" requires PG_DATABASE_URL naming the owner login ${OWNER_LOGIN_ROLE}.`);
-  const user = urlUser(raw);
+  const user = urlUser(command, raw);
   if (user !== OWNER_LOGIN_ROLE) {
-    throw new OpsRunError(
-      `"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE}; PG_DATABASE_URL names ${user === undefined ? 'an unparsable URL (value not shown)' : `"${user}"`}. Refusing.`,
-    );
+    throw new OpsRunError(`"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE}; PG_DATABASE_URL names "${user}". Refusing.`);
   }
 }
 
@@ -326,6 +339,10 @@ function assertOwnerLoginOpsRun(
   if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE) {
     throw new OpsRunError(`"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE} named by PG_DATABASE_URL. Refusing.`);
   }
+  // Defence in depth: outside the ops container the only source of `resolved.elevated` is DATABASE_URL_UNPOOLED, which
+  // assertOwnerLoginOpsEnvironment above already refuses, so this is reachable only when a caller passes a `resolved`
+  // built from a different environment than `env` (a direct call from other code or a test). Kept so a second endpoint
+  // can never reach the run whatever the caller passes.
   if (resolved.elevated !== null) {
     throw new OpsRunError(`"${command}" on the owner-login path uses the one login only; a second database endpoint (${resolved.elevated.source}) is refused.`);
   }

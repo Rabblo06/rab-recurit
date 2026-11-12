@@ -18,8 +18,13 @@
  *
  * Phase X2.2 owner-login path (one-off of the API service, ops-run.ts): "primary" is the owner login crewflow_owner (FORCE RLS
  * and tenant context bind it as they bound crewflow_app), and "elevated" is the SAME login on its own one-connection pool,
- * narrowed by the same `SET LOCAL ROLE` with the same plans and the same frozen names. X2.2 adds no statement and no plan: the
- * owner-login path can run nothing the ops container could not.
+ * narrowed by the same `SET LOCAL ROLE` with the same plans and the same frozen names. X2.2 adds no statement and no plan:
+ * the NARROWED session gains nothing.
+ * What does change (security review L2): the NON-narrowed command code (RefreshTokenService, SecurityVersionService,
+ * AuditService, the HWS physical copy, the tenant-context writes) now runs as crewflow_owner instead of crewflow_app. That is
+ * the privilege the API already runs with (PT-01), but a bug in these commands has the owner login's larger blast radius,
+ * not the restricted login's. And these lists limit the COMMAND CODE, not the operator: whoever runs the one-off holds a
+ * login that can `SET ROLE rab_secure_owner` directly (G-02).
  */
 import { CONTAINMENT_READ_STATEMENTS } from '../containment/suspend-test-accounts';
 import {

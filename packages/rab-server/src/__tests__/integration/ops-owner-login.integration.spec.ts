@@ -253,16 +253,33 @@ function userOf(url: string): string {
       await asOneOffCli(async () => {
         const records: ElevatedTransactionRecord[] = [];
         const session = await openNarrowed(OPS_ELEVATED_PLANS.containment, records);
+        // The session's own one-connection pool (private): the SAME backend serves every transaction of this session.
+        const sessionPool = (session as unknown as { dataSource: DataSource }).dataSource;
+        const backend = async () =>
+          (await sessionPool.query('SELECT pg_backend_pid() AS pid, current_user::text AS acting, session_user::text AS login'))[0] as {
+            pid: number;
+            acting: string;
+            login: string;
+          };
         try {
+          const before = await backend();
           const orgs = await session.transaction('read-only', (run) => run('containment.test-pattern-organisations', ['^test-[0-9a-f-]{36}$']));
           expect(orgs.map((o) => o.id)).toContain(orgId);
-          expect(records).toEqual([expect.objectContaining({ access: 'read-only', login: OWNER_LOGIN, acting: 'rab_secure_owner' })]);
+          // Between the two transactions, on the same backend: the login itself, not rab_secure_owner.
+          const between = await backend();
+          expect(between).toEqual({ pid: before.pid, acting: OWNER_LOGIN, login: OWNER_LOGIN });
+          // The second transaction on the SAME session and backend starts as crewflow_owner: its pre-narrowing check
+          // (assertOwnerLoginFacts) refuses a session already acting as another role, so success proves it, and the
+          // record shows it was narrowed again from the login.
+          await session.transaction('read-only', (run) => run('containment.test-pattern-organisations', ['^test-[0-9a-f-]{36}$']));
+          expect(records).toEqual([
+            expect.objectContaining({ access: 'read-only', login: OWNER_LOGIN, acting: 'rab_secure_owner' }),
+            expect.objectContaining({ access: 'read-only', login: OWNER_LOGIN, acting: 'rab_secure_owner' }),
+          ]);
+          expect(await backend()).toEqual({ pid: before.pid, acting: OWNER_LOGIN, login: OWNER_LOGIN });
         } finally {
           await session.destroy();
         }
-        // The narrowing never leaks: the CLI's own DataSource is still the login itself.
-        const [row] = await dataSource.query('SELECT current_user::text AS acting, session_user::text AS login');
-        expect(row).toEqual({ acting: OWNER_LOGIN, login: OWNER_LOGIN });
       });
     });
 

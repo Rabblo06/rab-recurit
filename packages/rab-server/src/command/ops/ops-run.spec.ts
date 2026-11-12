@@ -36,8 +36,36 @@ describe('ops placement (command/main.ts)', () => {
         expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: url })).toThrow(new RegExp(`runs only under the owner login crewflow_owner; PG_DATABASE_URL names "${user}"`));
       }
       expect(() => assertOpsPlacement(command, {})).toThrow(/requires PG_DATABASE_URL naming the owner login crewflow_owner/);
-      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'not a url' })).toThrow(/an unparsable URL \(value not shown\)/);
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'not a url' })).toThrow(/refuses PG_DATABASE_URL: .*\(value not shown\)/);
       expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'mysql://crewflow_owner:pw@localhost/rab' })).toThrow(OpsRunError);
+    }
+  });
+
+  it('X2.2: the login is read by the same parser as the connection (pg-url-policy parsePgUrl), so URL tricks cannot disagree with it', () => {
+    for (const command of OPS_COMMANDS) {
+      // A query-parameter user override is refused outright (it would change the login the pool sends).
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: `${OWNER}?user=postgres` })).toThrow(/refuses PG_DATABASE_URL: .*sets "user" as a query parameter/);
+      // A session role in the startup options is refused for the CLI (it would make current_user differ from the login).
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: `${OWNER}?options=-c%20role%3Drab_secure_owner` })).toThrow(/refuses PG_DATABASE_URL: .*sets "options"/);
+      // Percent-encoding decodes to the login the pool really sends: crewflow%5Fowner IS crewflow_owner.
+      expect(assertOpsPlacement(command, { PG_DATABASE_URL: 'postgres://crewflow%5Fowner:pw-own-1@localhost:5432/rab' })).toBe('cli');
+      // The parser trims the user and the pool connects with that trimmed user: accepted, and it is the login used.
+      expect(assertOpsPlacement(command, { PG_DATABASE_URL: 'postgres://crewflow_owner%20:pw-own-1@localhost:5432/rab' })).toBe('cli');
+      // A different user hidden by encoding is still that different user.
+      expect(() => assertOpsPlacement(command, { PG_DATABASE_URL: 'postgres://crewflow%5Fapp:pw-x-1@localhost:5432/rab' })).toThrow(/PG_DATABASE_URL names "crewflow_app"/);
+    }
+  });
+
+  it('X2.2: refuses every libpq variable and the replica URL in every environment (not only production)', () => {
+    for (const command of OPS_COMMANDS) {
+      for (const name of ['PGOPTIONS', 'PGUSER', 'PGPASSWORD', 'PGHOST', 'PGSERVICE', 'PGSSLMODE']) {
+        expect(() => assertOpsPlacement(command, { ...OWNER_ENV, [name]: 'x' })).toThrow(new RegExp(`refuses libpq environment variable\\(s\\) ${name} in every environment`));
+      }
+      expect(() => assertOpsPlacement(command, { ...OWNER_ENV, PG_DATABASE_REPLICA_URL: 'postgres://crewflow_owner:pw@replica:5432/rab' })).toThrow(
+        /refuses PG_DATABASE_REPLICA_URL: the ops commands have no replica path/,
+      );
+      // Empty means unset (the runbook's `-e PG_DATABASE_REPLICA_URL=` on the one-off run).
+      expect(assertOpsPlacement(command, { ...OWNER_ENV, PG_DATABASE_REPLICA_URL: '' })).toBe('cli');
     }
   });
 
@@ -181,11 +209,21 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
     }
   });
 
-  it('X2.2: refuses a second endpoint on the owner-login path', () => {
+  it('X2.2: refuses the legacy second-endpoint variable DATABASE_URL_UNPOOLED in layer 2 (the environment rule)', () => {
     setPgProcessRole('cli');
     const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
     expect(() => assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolvePgEnvironment(withUnpooled, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
-      /DATABASE_URL_UNPOOLED/,
+      /remove the legacy database variable\(s\) DATABASE_URL_UNPOOLED/,
+    );
+  });
+
+  it('X2.2: refuses a resolved second endpoint even when the environment handed to layer 2 does not show it (defence in depth)', () => {
+    setPgProcessRole('cli');
+    const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
+    const resolved = resolvePgEnvironment(withUnpooled, { processRole: 'cli' });
+    expect(resolved.elevated).not.toBeNull();
+    expect(() => assertOpsRun('user-session:backfill', 'apply', { needsElevated: true }, resolved, OWNER_ENV, FLAGS)).toThrow(
+      /uses the one login only; a second database endpoint \(DATABASE_URL_UNPOOLED\) is refused/,
     );
   });
 
