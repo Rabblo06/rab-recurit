@@ -51,6 +51,18 @@ describe('security audit redaction (X1.1 review)', () => {
     expect(maskEmailForAudit("O'Brien@Example.ie")).toBe('o***@example.ie');
     expect(maskEmailForAudit('😀x@example.com')).toBe('😀***@example.com');
     expect(maskEmailForAudit('not an email')).toBe('[not-an-email]');
+    expect(maskEmailForAudit('a b@example.com')).toBe('[not-an-email]');
+    expect(maskEmailForAudit('user@example.')).toBe('[not-an-email]');
+    expect(maskEmailForAudit('user@.example')).toBe('[not-an-email]');
+  });
+
+  it('hostile input stays fast (no backtracking): login e-mail field and free-text metadata', () => {
+    const hostile = `!@!.${'!.'.repeat(100_000)}`;
+    const started = Date.now();
+    expect(maskEmailForAudit(hostile)).toBe('[not-an-email]');
+    expect(redactString(hostile).length).toBeLessThanOrEqual(256);
+    expect(redactString('x'.repeat(200_000)).length).toBe(256);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('redacts private keys, JWTs, bearer values and named one-time codes by key', () => {

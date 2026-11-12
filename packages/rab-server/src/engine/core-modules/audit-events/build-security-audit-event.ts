@@ -58,16 +58,26 @@ export function buildAuditRowSecurityEvent(row: AuditLogShippingRow, processLabe
   };
 }
 
-/** Unicode-aware (IDN domains, apostrophes, accented local parts); the first CODE POINT is kept, never half a pair. */
-const EMAIL_SHAPE = /^([^\s@])[^\s@]*@([^\s@]+\.[^\s@]+)$/u;
+/** Longest address accepted (RFC 5321 path limit); anything longer is not treated as an e-mail. */
+const MAX_EMAIL_LENGTH = 320;
 
-/** `a***@example.com` for an e-mail shape; `[not-an-email]` for anything else (never the raw input). */
+/**
+ * `a***@example.com` for an e-mail shape; `[not-an-email]` for anything else (never the raw input). Plain string checks,
+ * no regular expression (no backtracking on attacker-supplied input — the login e-mail field). Unicode-aware: IDN domains,
+ * apostrophes and accented local parts are accepted, and the first CODE POINT is kept, never half a surrogate pair.
+ */
 export function maskEmailForAudit(raw: unknown): string {
   if (typeof raw !== 'string') return '[none]';
   const value = raw.trim().toLowerCase();
   if (!value) return '[none]';
-  const m = EMAIL_SHAPE.exec(value);
-  return m ? `${m[1]}***@${m[2]!.slice(0, 128)}` : '[not-an-email]';
+  if (value.length > MAX_EMAIL_LENGTH) return '[not-an-email]';
+  const at = value.indexOf('@');
+  if (at <= 0 || at !== value.lastIndexOf('@')) return '[not-an-email]';
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  const dot = domain.indexOf('.');
+  if (/\s/u.test(value) || dot <= 0 || domain.endsWith('.')) return '[not-an-email]';
+  return `${Array.from(local)[0]}***@${domain.slice(0, 128)}`;
 }
 
 export type LoginFailureReason = 'invalid_credentials' | 'ambiguous_accounts' | 'provider_sign_in_refused';

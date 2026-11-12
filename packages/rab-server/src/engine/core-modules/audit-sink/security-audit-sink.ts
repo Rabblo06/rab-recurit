@@ -124,8 +124,12 @@ const BEARER = /\bbearer\s+[^\s,;]+/gi;
 const JWT = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g;
 
 /** The string redaction every shipped value goes through (exported for its unit test). */
+/** Inputs are cut before any pattern runs (bounded work per value); the result is cut again at 256 characters. */
+const MAX_REDACT_INPUT = 2_048;
+
 export function redactString(value: string): string {
   return value
+    .slice(0, MAX_REDACT_INPUT)
     .replace(PG_URL, '[url]')
     .replace(SECRET_QUERY, '$1[REDACTED]')
     .replace(BEARER, '[bearer]')
