@@ -1,6 +1,6 @@
 import { PermissionFlagType } from '@rab/shared';
-import { Injectable } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
@@ -11,6 +11,7 @@ import {
   UserPermissionOverride,
   UserRole,
 } from '../../../modules/identity/entities';
+import { memoRunnerFor, readTxPermissions, storeTxPermissions, txPermissionIdentity } from './tx-permission-memo';
 
 /**
  * Resolved server-side per request, never read off the JWT (§5.2) — a
@@ -27,6 +28,15 @@ import {
 @Injectable()
 export class PermissionsService {
   constructor(private readonly tenantContext: TenantContextService) {}
+
+  /**
+   * C5: the PRIMARY DataSource; only a transaction on it may memoise a permission set (never the read replica). Property-
+   * injected and optional so the constructor is unchanged; absent (unit construction, a CLI without one), nothing is
+   * memoised and every check is the uncached two-query lookup.
+   */
+  @Optional()
+  @Inject(DataSource)
+  private readonly primaryDataSource?: DataSource;
 
   /**
    * Phase X SC-05: display hints for many flags at once (`GET /auth/capabilities`), never an authorisation decision — every
@@ -92,7 +102,62 @@ export class PermissionsService {
     );
   }
 
+  /**
+   * Phase X C5: inside an open transaction on the primary, the FIRST check for an identity reads that identity's whole
+   * effective set in one statement (`effectivePermissionsTx`'s precedence) and memoises it on the transaction
+   * (`tx-permission-memo.ts`: never across transactions, keyed by identity, cleared by in-transaction authority writes,
+   * never filled from the replica or under a mismatched tenant binding). Every later check for the same identity in the
+   * same transaction is a set lookup. Outside a transaction: the original two-query lookup, unchanged.
+   */
   async userHasPermissionTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    permission: PermissionFlagType,
+  ): Promise<boolean> {
+    const runner = memoRunnerFor(manager, this.primaryDataSource);
+    if (!runner) return this.userHasPermissionUncachedTx(manager, ctx, permission);
+    const identity = txPermissionIdentity(ctx);
+    const memoised = readTxPermissions(runner, identity);
+    if (memoised) return memoised.has(permission);
+    const filled = await this.loadEffectivePermissionsTx(manager, ctx);
+    if (filled.boundToThisIdentity) storeTxPermissions(runner, identity, filled.keys);
+    return filled.keys.has(permission);
+  }
+
+  /** One statement: the identity's effective set plus the tenant this transaction is bound to (what role RLS reads). */
+  private async loadEffectivePermissionsTx(manager: EntityManager, ctx: AuthContext): Promise<{ keys: Set<string>; boundToThisIdentity: boolean }> {
+    const [row] = await manager.query<Array<{ keys: string[] | null; bound_org: string | null; bound_workspace: string | null }>>(
+      `WITH role_perms AS (
+         SELECT DISTINCT p.key
+           FROM core.user_role ur
+           JOIN core.role r ON r.id = ur.role_id
+           JOIN core.role_permission rp ON rp.role_id = ur.role_id
+           JOIN core.permission p ON p.id = rp.permission_id
+          WHERE ur.user_id = $1
+       ),
+       overrides AS (
+         SELECT p.key, upo.effect
+           FROM core.user_permission_override upo
+           JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1
+       ),
+       effective AS (
+         SELECT key FROM role_perms WHERE key NOT IN (SELECT key FROM overrides WHERE effect = 'revoke')
+         UNION
+         SELECT key FROM overrides WHERE effect = 'grant'
+       )
+       SELECT (SELECT array_agg(key) FROM effective) AS keys,
+              current_setting('rab.organisation_id', true) AS bound_org,
+              current_setting('rab.workspace_id', true) AS bound_workspace`,
+      [ctx.userId],
+    );
+    const boundToThisIdentity =
+      (row?.bound_org ?? '') === (ctx.organisationId ?? '') && (row?.bound_workspace ?? '') === (ctx.workspaceId ?? '') && (ctx.organisationId ?? '') !== '';
+    return { keys: new Set(row?.keys ?? []), boundToThisIdentity };
+  }
+
+  /** The original per-flag lookup (2 queries): override first, then role grants visible under RLS. */
+  private async userHasPermissionUncachedTx(
     manager: EntityManager,
     ctx: AuthContext,
     permission: PermissionFlagType,
