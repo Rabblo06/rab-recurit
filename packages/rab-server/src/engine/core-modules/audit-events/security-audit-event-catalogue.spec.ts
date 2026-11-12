@@ -61,6 +61,16 @@ describe('security audit event catalogue (X1.1)', () => {
     for (const { shippedBy } of Object.values(DIRECT_WRITERS)) if (shippedBy) expect([shippedBy, repoFile(shippedBy).includes('shipAuditRowAfterCommit(')]).toEqual([shippedBy, true]);
   });
 
+  it('owner decision 2026-11-12 (a): privileged-copy.ts is excluded from shipped events (code AND catalogue)', () => {
+    const file = 'packages/rab-server/src/database/typeorm/workspace-schema/backfill/privileged-copy.ts';
+    expect(DIRECT_WRITERS[file]).toEqual({ shippedBy: null });
+    expect(repoFile(file)).not.toContain('shipAuditRowAfterCommit');
+    for (const action of [PRIVILEGED_COPY_AUDIT_ACTION, PRIVILEGED_COPY_SKIPPED_AUDIT_ACTION]) {
+      expect(classifyAuditAction(action)).toBeNull();
+      expect(NOT_SHIPPED_AUDIT_ACTIONS).toContain(action);
+    }
+  });
+
   it('the actions the Worker and SQL write directly (not AuditAction constants) are classified too', () => {
     const direct = new Set<string>();
     for (const file of ['packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts', 'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts']) {

@@ -1,10 +1,8 @@
-import { AuditSinkError, SecurityAuditSink } from '../audit-sink/security-audit-sink';
 import { AuditAction } from '../audit/audit.service';
-import { AUDIT_EVENT_QUEUE_NAME, auditEventJobId } from '../../worker-shared/audit-event.contract';
+import { AUDIT_BACKLOG_CACHE_MS, AUDIT_EVENT_QUEUE_NAME, AUDIT_PREAUTH_BACKLOG_LIMIT, auditEventJobId } from '../../worker-shared/audit-event.contract';
 import { bullmqJobOptionsOf } from '../../worker-shared/queue-registry';
-import { currentAuditEventShipperForTests, shipAuditRowAfterCommit, shipPreAuthSecurityEvent } from './audit-event-shipping';
+import { currentAuditEventShipperForTests, shipAuditRowAfterCommit, shipPreAuthLoginFailure } from './audit-event-shipping';
 import { AuditEventProducer, AuditEventQueueService } from './audit-event-queue.service';
-import { buildLoginFailedSecurityEvent } from './build-security-audit-event';
 
 /**
  * X1.1 producer contract (no database, no reachable Redis):
@@ -37,13 +35,16 @@ function tx() {
   };
 }
 
-function producer(over: { publish?: jest.Mock; sink?: SecurityAuditSink } = {}) {
+function producer(over: { publish?: jest.Mock; readBacklog?: jest.Mock; incrementDrops?: jest.Mock } = {}) {
   const publish = over.publish ?? jest.fn(async () => undefined);
+  const readBacklog = over.readBacklog ?? jest.fn(async () => 0);
+  const incrementDrops = over.incrementDrops ?? jest.fn(async () => 1);
   const warnings: string[] = [];
-  const sink: SecurityAuditSink = over.sink ?? { mode: 'stdout', emit: jest.fn(async () => undefined) };
-  const p = new AuditEventProducer({ publish, sink, logger: { warn: (m) => void warnings.push(m) } });
-  return { p, publish, sink, warnings };
+  let clock = 1_800_000_000_000;
+  const p = new AuditEventProducer({ publish, readBacklog, incrementDrops, now: () => clock, logger: { warn: (m) => void warnings.push(m) } });
+  return { p, publish, readBacklog, incrementDrops, warnings, advance: (ms: number) => (clock += ms) };
 }
+const FAILURE = { email: 'Alice.Smith@Example.com', reason: 'invalid_credentials' as const, provider: 'password' };
 
 describe('AuditEventQueueService (X1.1 producer)', () => {
   const saved = { ...process.env };
@@ -65,7 +66,7 @@ describe('AuditEventQueueService (X1.1 producer)', () => {
       expect(currentAuditEventShipperForTests()).toBeNull();
       const t = tx();
       expect(shipAuditRowAfterCommit(t.manager, { organisationId: ORG, auditLogId: ROW, action: AuditAction.USER_DELETED })).toBe(false);
-      expect(() => shipPreAuthSecurityEvent(buildLoginFailedSecurityEvent({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' }, 'api'))).not.toThrow();
+      expect(() => shipPreAuthLoginFailure(FAILURE)).not.toThrow();
       await service.onModuleDestroy();
     }
   });
@@ -154,27 +155,109 @@ describe('AuditEventQueueService (X1.1 producer)', () => {
     expect(warnings.join('\n')).not.toContain('redis down');
   });
 
-  it('pre-auth event: written to the sink detached; a sink failure (refuse) is swallowed', async () => {
-    const emit = jest.fn(async () => {
-      throw new AuditSinkError('the security audit sink (stdout) could not record auth.login_failed (code EPIPE)');
-    });
-    const { p, warnings } = producer({ sink: { mode: 'stdout', emit } });
-    expect(() => p.shipPreAuth(buildLoginFailedSecurityEvent({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' }, 'api'))).not.toThrow();
-    await p.drain(1_000);
-    expect(emit).toHaveBeenCalledTimes(1);
-    expect(warnings.join('\n')).toMatch(/pre-auth security event not written \(AuditSinkError\)/);
+  it('pre-auth failed login: one system-scoped job, masked address, never awaited (synchronous return)', async () => {
+    const { p, publish } = producer();
+    expect(p.shipPreAuthLoginFailure(FAILURE)).toBeUndefined();
+    await flush();
+    expect(publish).toHaveBeenCalledTimes(1);
+    const job = publish.mock.calls[0]![0];
+    expect(job).toMatchObject({ queue: AUDIT_EVENT_QUEUE_NAME, name: 'audit-preauth-login-failed', data: { v: 1, reason: 'invalid_credentials', provider: 'password', email: 'a***@example.com' } });
+    expect(job.opts.jobId).toMatch(/^audit-preauth\.[0-9a-f-]{36}$/);
+    expect(JSON.stringify(job)).not.toMatch(/alice|smith/i);
   });
 
-  it('a sink that throws synchronously is swallowed too', () => {
-    const { p } = producer({
-      sink: {
-        mode: 'stdout',
-        emit: () => {
-          throw new Error('sync');
-        },
-      },
+  it(`backlog ≤ ${AUDIT_PREAUTH_BACKLOG_LIMIT}: failed-login events are sent`, async () => {
+    const { p, publish } = producer({ readBacklog: jest.fn(async () => AUDIT_PREAUTH_BACKLOG_LIMIT - 1) });
+    p.shipPreAuthLoginFailure(FAILURE); // first call starts the reading; the event is sent
+    await flush();
+    p.shipPreAuthLoginFailure(FAILURE); // backlog 9,999 → sent (now 10,000)
+    p.shipPreAuthLoginFailure(FAILURE); // 10,000 is not over the limit → sent (now 10,001)
+    p.shipPreAuthLoginFailure(FAILURE); // 10,001 > 10,000 → dropped
+    await flush();
+    expect(publish).toHaveBeenCalledTimes(3);
+    expect(p.preAuthDropStats.sinceProcessStart).toBe(1);
+  });
+
+  it(`backlog > ${AUDIT_PREAUTH_BACKLOG_LIMIT}: new failed-login events are DROPPED and counted (process counter + batched INCRBY)`, async () => {
+    const { p, publish, incrementDrops, readBacklog, advance } = producer({ readBacklog: jest.fn(async () => AUDIT_PREAUTH_BACKLOG_LIMIT + 1) });
+    p.shipPreAuthLoginFailure(FAILURE); // before the first reading completes: sent (unknown → send)
+    await flush();
+    for (let i = 0; i < 5; i++) p.shipPreAuthLoginFailure(FAILURE);
+    await flush();
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(p.preAuthDropStats).toEqual({ sinceProcessStart: 5, lastBacklog: AUDIT_PREAUTH_BACKLOG_LIMIT + 1 });
+    expect(readBacklog).toHaveBeenCalledTimes(1); // cached: one count per interval, never one per login
+    advance(AUDIT_BACKLOG_CACHE_MS);
+    p.shipPreAuthLoginFailure(FAILURE); // refresh: the 5 pending drops go in ONE INCRBY; this one is dropped too
+    await flush();
+    expect(readBacklog).toHaveBeenCalledTimes(2);
+    expect(incrementDrops).toHaveBeenCalledWith(5);
+    await p.drain(1_000); // shutdown flushes the rest
+    expect(incrementDrops).toHaveBeenLastCalledWith(1);
+  });
+
+  it('a failed INCRBY keeps the drops for the next flush', async () => {
+    const incrementDrops = jest.fn().mockRejectedValueOnce(new Error('redis down')).mockResolvedValue(1);
+    const { p, advance } = producer({ readBacklog: jest.fn(async () => AUDIT_PREAUTH_BACKLOG_LIMIT + 1), incrementDrops });
+    p.shipPreAuthLoginFailure(FAILURE);
+    await flush();
+    p.shipPreAuthLoginFailure(FAILURE);
+    p.shipPreAuthLoginFailure(FAILURE);
+    advance(AUDIT_BACKLOG_CACHE_MS);
+    p.shipPreAuthLoginFailure(FAILURE); // flush of 2 fails → kept; this event dropped → 3 pending
+    await flush();
+    await p.drain(1_000);
+    expect(incrementDrops.mock.calls.map((c) => c[0])).toEqual([2, 3]);
+  });
+
+  it('backlog unreadable: the event is SENT (documented choice), and the login path never waits for the read', async () => {
+    let rejectRead!: (e: Error) => void;
+    const readBacklog = jest.fn(() => new Promise<number>((_, reject) => (rejectRead = reject)));
+    const { p, publish } = producer({ readBacklog });
+    p.shipPreAuthLoginFailure(FAILURE); // the read is still pending: returns at once, event sent
+    expect(publish).toHaveBeenCalledTimes(1);
+    rejectRead(new Error('timeout'));
+    await flush();
+    p.shipPreAuthLoginFailure(FAILURE);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(p.preAuthDropStats.lastBacklog).toBeNull();
+  });
+
+  it('a hung or failing queue add never delays or fails the caller', async () => {
+    const hung = producer({ publish: jest.fn(() => new Promise(() => undefined)) });
+    const started = Date.now();
+    expect(() => hung.p.shipPreAuthLoginFailure(FAILURE)).not.toThrow();
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(hung.p.inFlightCount).toBe(1); // still pending, the caller already returned
+    const failing = producer({
+      publish: jest.fn(async () => {
+        throw Object.assign(new Error('Redis is unavailable'), { name: 'QueuePublishUnavailableError' });
+      }),
     });
-    expect(() => p.shipPreAuth(buildLoginFailedSecurityEvent({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' }, 'api'))).not.toThrow();
+    expect(() => failing.p.shipPreAuthLoginFailure(FAILURE)).not.toThrow();
+    await flush();
+    expect(failing.warnings.join('\n')).toMatch(/pre-auth audit event publish failed \(QueuePublishUnavailableError\)/);
+    const throwingRead = producer({
+      readBacklog: jest.fn(() => {
+        throw new Error('sync');
+      }),
+    });
+    expect(() => throwingRead.p.shipPreAuthLoginFailure(FAILURE)).not.toThrow();
+  });
+
+  it('the backlog guard drops ONLY failed-login events: audit-row events are queued whatever the backlog', async () => {
+    const { p, publish } = producer({ readBacklog: jest.fn(async () => AUDIT_PREAUTH_BACKLOG_LIMIT * 5) });
+    p.shipPreAuthLoginFailure(FAILURE);
+    await flush();
+    publish.mockClear();
+    p.shipPreAuthLoginFailure(FAILURE); // dropped
+    const t = tx();
+    expect(p.afterCommit(t.manager, { organisationId: ORG, auditLogId: ROW, action: AuditAction.PLATFORM_ADMIN_GRANTED })).toBe(true);
+    expect(p.afterCommit({ queryRunner: undefined } as never, { organisationId: ORG, auditLogId: ROW2, action: AuditAction.USER_DELETED })).toBe(true);
+    t.commit();
+    await flush();
+    expect(publish.mock.calls.map((c) => c[0].name)).toEqual(['audit-event-ship', 'audit-event-ship']);
+    expect(p.preAuthDropStats.sinceProcessStart).toBe(1);
   });
 
   it('drain waits (bounded) for publishes in flight', async () => {

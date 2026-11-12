@@ -111,6 +111,11 @@ describe('security audit event builder + sink redaction (X1.1)', () => {
     assertRedacted(line);
   });
 
+  it('login failure queued by the API keeps its occurrence time (occurredAt)', async () => {
+    const event = buildLoginFailedSecurityEvent({ email: 'a***@example.com', reason: 'provider_sign_in_refused', provider: 'google', detailReason: 'state_invalid', occurredAt: 1_800_000_000_000 }, 'api');
+    expect(event.detail).toMatchObject({ email: 'a***@example.com', providerReason: 'state_invalid', occurredAt: new Date(1_800_000_000_000).toISOString() });
+  });
+
   it('login failure: a password typed into the e-mail field is never shipped', async () => {
     const line = await written(buildLoginFailedSecurityEvent({ email: SECRETS.password, reason: 'invalid_credentials', provider: 'password' }, 'api'));
     expect(line).not.toContain(SECRETS.password);

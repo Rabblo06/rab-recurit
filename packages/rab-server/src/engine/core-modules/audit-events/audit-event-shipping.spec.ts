@@ -1,6 +1,5 @@
 import { AuditAction, AuditService } from '../audit/audit.service';
-import { AuditEventShipper, registerAuditEventShipper, shipAuditRowAfterCommit, shipPreAuthSecurityEvent, unregisterAuditEventShipper } from './audit-event-shipping';
-import { buildLoginFailedSecurityEvent } from './build-security-audit-event';
+import { AuditEventShipper, registerAuditEventShipper, shipAuditRowAfterCommit, shipPreAuthLoginFailure, unregisterAuditEventShipper } from './audit-event-shipping';
 
 /**
  * X1.1 review (LOW 3b): the process-wide hand-off NEVER throws into the writer. A shipper that throws (synchronously) is
@@ -14,7 +13,7 @@ describe('audit-event shipping hand-off (X1.1)', () => {
     afterCommit: () => {
       throw new Error('shipper exploded');
     },
-    shipPreAuth: () => {
+    shipPreAuthLoginFailure: () => {
       throw new Error('shipper exploded');
     },
   };
@@ -24,7 +23,7 @@ describe('audit-event shipping hand-off (X1.1)', () => {
     registerAuditEventShipper(throwing);
     expect(() => shipAuditRowAfterCommit({} as never, { organisationId: ORG, auditLogId: ROW, action: AuditAction.USER_DELETED })).not.toThrow();
     expect(shipAuditRowAfterCommit({} as never, { organisationId: ORG, auditLogId: ROW, action: AuditAction.USER_DELETED })).toBe(false);
-    expect(() => shipPreAuthSecurityEvent(buildLoginFailedSecurityEvent({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' }, 'api'))).not.toThrow();
+    expect(() => shipPreAuthLoginFailure({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' })).not.toThrow();
   });
 
   it('AuditService.record still resolves (the action is never failed) when the shipper throws', async () => {
@@ -46,6 +45,6 @@ describe('audit-event shipping hand-off (X1.1)', () => {
 
   it('with no shipper registered (no sink configured) both calls are no-ops', () => {
     expect(shipAuditRowAfterCommit({} as never, { organisationId: ORG, auditLogId: ROW, action: AuditAction.USER_DELETED })).toBe(false);
-    expect(() => shipPreAuthSecurityEvent(buildLoginFailedSecurityEvent({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' }, 'api'))).not.toThrow();
+    expect(() => shipPreAuthLoginFailure({ email: 'a@b.co', reason: 'invalid_credentials', provider: 'password' })).not.toThrow();
   });
 });

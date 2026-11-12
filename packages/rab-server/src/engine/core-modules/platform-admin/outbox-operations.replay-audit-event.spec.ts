@@ -32,7 +32,7 @@ function build(replayResult: string) {
 
 describe('admin e-mail replay → audit events (X1.1)', () => {
   const calls: Array<{ manager: unknown; row: { organisationId: string; auditLogId: string; action: string } }> = [];
-  const shipper: AuditEventShipper = { afterCommit: (manager, row) => (calls.push({ manager, row }), true), shipPreAuth: () => undefined };
+  const shipper: AuditEventShipper = { afterCommit: (manager, row) => (calls.push({ manager, row }), true), shipPreAuthLoginFailure: () => undefined };
   beforeEach(() => {
     calls.length = 0;
     registerAuditEventShipper(shipper);

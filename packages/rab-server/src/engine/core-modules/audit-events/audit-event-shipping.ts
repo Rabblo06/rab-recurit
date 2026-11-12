@@ -1,6 +1,5 @@
 import type { EntityManager } from 'typeorm';
 
-import type { SecurityAuditEvent } from '../audit-sink/security-audit-sink';
 
 /**
  * Phase X Part 2, X1.1: the ONE entry point every `core.audit_log` writer calls after its insert, and the pre-auth
@@ -22,9 +21,19 @@ export interface AuditRowToShip {
   action: string;
 }
 
+/** A pre-authentication failed login (no audit row, no organisation). The raw address is masked before it leaves. */
+export interface PreAuthLoginFailure {
+  email: unknown;
+  reason: 'invalid_credentials' | 'ambiguous_accounts' | 'provider_sign_in_refused';
+  provider: string;
+  /** A provider refusal code (`state_invalid`, `ambiguous_accounts`, ...), never an error message. */
+  providerReason?: string;
+}
+
 export interface AuditEventShipper {
   afterCommit(manager: EntityManager, row: AuditRowToShip): boolean;
-  shipPreAuth(event: SecurityAuditEvent): void;
+  /** Queued fire-and-forget (owner guard: dropped and counted above the audit-queue backlog limit). Never awaited. */
+  shipPreAuthLoginFailure(failure: PreAuthLoginFailure): void;
 }
 
 let current: AuditEventShipper | null = null;
@@ -54,10 +63,13 @@ export function shipAuditRowAfterCommit(manager: EntityManager, row: AuditRowToS
   }
 }
 
-/** Writes a pre-authentication security event (no organisation, no audit row) to the sink, detached. */
-export function shipPreAuthSecurityEvent(event: SecurityAuditEvent): void {
+/**
+ * Hands a pre-authentication failed login to the audit queue: synchronous, fire-and-forget. The caller (the login path)
+ * never awaits anything here, and nothing here can change its response, timing class or status.
+ */
+export function shipPreAuthLoginFailure(failure: PreAuthLoginFailure): void {
   try {
-    current?.shipPreAuth(event);
+    current?.shipPreAuthLoginFailure(failure);
   } catch {
     // best effort: never into the caller
   }

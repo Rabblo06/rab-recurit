@@ -35,3 +35,35 @@ export interface AuditEventJobData {
 
 /** Deterministic: a second publish for the same row (a retry of the producer) is a BullMQ no-op. */
 export const auditEventJobId = (auditLogId: string): string => `audit-event.${auditLogId}`;
+
+/**
+ * X1.1 owner decision 2026-11-12 (b): the pre-authentication FAILED LOGIN (no audit row, no organisation) also rides this
+ * queue, as a SYSTEM-scoped job (registry `systemScopedJobs`). Its payload is small scalars only: the already-masked
+ * address (`a***@domain` / `[not-an-email]`), the reason and provider codes and the time — never a password, a raw
+ * address, an IP or a user id. jobId `audit-preauth.<random uuid>` (every failure is its own event).
+ */
+export const AUDIT_PREAUTH_JOB_NAME = 'audit-preauth-login-failed';
+export const AUDIT_PREAUTH_PAYLOAD_KEYS = Object.freeze(['v', 'reason', 'provider', 'providerReason', 'email', 'at'] as const);
+
+export interface AuditPreAuthJobData {
+  v: 1;
+  reason: 'invalid_credentials' | 'ambiguous_accounts' | 'provider_sign_in_refused';
+  provider: string;
+  providerReason?: string;
+  /** Masked by maskEmailForAudit before it is queued, at most 128 characters. */
+  email: string;
+  /** Epoch milliseconds of the failure. */
+  at: number;
+}
+
+export const auditPreAuthJobId = (id: string): string => `audit-preauth.${id}`;
+
+/**
+ * The owner's guard: above this audit-queue backlog (waiting + delayed + prioritized jobs), NEW failed-login events are
+ * dropped and counted (visible on the platform-admin Health tab). Every other audit event is unaffected.
+ */
+export const AUDIT_PREAUTH_BACKLOG_LIMIT = 10_000;
+/** How long one backlog reading is reused (one Redis count per process per interval, never one per login). */
+export const AUDIT_BACKLOG_CACHE_MS = 2_000;
+/** Redis key of the durable drop total (INCRBY, batched per backlog refresh). A dedicated key; nothing else is touched. */
+export const auditPreAuthDropsKey = (nodeEnv: string): string => `crewflow:${nodeEnv}:audit-events:preauth-login-dropped`;

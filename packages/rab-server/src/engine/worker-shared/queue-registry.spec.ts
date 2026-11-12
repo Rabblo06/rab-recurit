@@ -22,7 +22,7 @@ import {
   SCAN_QUEUE_NAMES,
   UnknownQueueError,
 } from './queue-registry';
-import { registeredJob, QueueEnqueueRefusedError } from './queue-enqueue';
+import { registeredJob, registeredSystemScopedJob, QueueEnqueueRefusedError } from './queue-enqueue';
 import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
 import { AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
 
@@ -188,7 +188,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-shift-statements', ['generate-shift-statement']],
       ['rab-ai', ['ai-turn', 'ai-title']],
       ['crewflow-timer-triggers', ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger']],
-      ['crewflow-audit-events', ['audit-event-ship']],
+      ['crewflow-audit-events', ['audit-event-ship', 'audit-preauth-login-failed']],
     ]);
     expect(acceptsJobName('rab-email', 'send-push')).toBe(false);
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
@@ -295,6 +295,42 @@ describe('queue registry (Phase D-Q1)', () => {
       ['an unknown job name', () => job(data, undefined, 'audit-event')],
     ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, build) => {
       expect(build).toThrow(QueueEnqueueRefusedError);
+    });
+
+    describe('owner decision 2026-11-12 (b): the system-scoped pre-auth failed-login job', () => {
+      const pre = { v: 1, reason: 'invalid_credentials', provider: 'password', email: 'a***@example.com', at: 1_800_000_000_000 };
+      const build = (d: object) => registeredSystemScopedJob(AUDIT_EVENT_QUEUE_NAME, 'audit-preauth-login-failed', d, { jobId: `audit-preauth.${ROW}` });
+
+      it('is declared as a system-scoped job of the (organisation-scoped) audit queue, with its own scalar keys', () => {
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].jobNames).toEqual(['audit-event-ship', 'audit-preauth-login-failed']);
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].systemScopedJobs).toEqual({ 'audit-preauth-login-failed': ['v', 'reason', 'provider', 'providerReason', 'email', 'at'] });
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].tenantScope).toBe('organisation');
+      });
+
+      it('a valid job: system scope, the registry options', () => {
+        expect(build(pre)).toEqual({ queue: AUDIT_EVENT_QUEUE_NAME, name: 'audit-preauth-login-failed', data: pre, opts: { jobId: `audit-preauth.${ROW}`, ...bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME) } });
+      });
+
+      it.each<[string, () => unknown]>([
+        ['an organisationId in its payload', () => build({ ...pre, organisationId: ORG })],
+        ['an unknown key (a raw password field)', () => build({ ...pre, password: 'x' })],
+        ['a nested object', () => build({ ...pre, email: { raw: 'x@y.z' } })],
+        ['a long string', () => build({ ...pre, email: 'x'.repeat(200) })],
+        ['an organisation scope through registeredJob', () => registeredJob(AUDIT_EVENT_QUEUE_NAME, 'audit-preauth-login-failed' as never, { kind: 'organisation', organisationId: ORG }, pre, { jobId: 'x' })],
+        ['the org-scoped job name through registeredSystemScopedJob', () => registeredSystemScopedJob(AUDIT_EVENT_QUEUE_NAME, 'audit-event-ship', { organisationId: ORG, auditLogId: ROW }, { jobId: 'x' })],
+      ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, run) => {
+        expect(run).toThrow(QueueEnqueueRefusedError);
+      });
+
+      it('the boot check refuses a system-scoped job that names organisationId or is not a job of the queue', () => {
+        const clone = (): Record<string, QueueSettings> => JSON.parse(JSON.stringify(QUEUE_SETTINGS));
+        const withOrg = clone();
+        (withOrg[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'audit-preauth-login-failed': ['v', 'organisationId'] };
+        expect(() => assertQueueRegistryValid(withOrg)).toThrow(/never organisationId/);
+        const stray = clone();
+        (stray[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'not-a-job': ['v'] };
+        expect(() => assertQueueRegistryValid(stray)).toThrow(/not a job of this consumer queue/);
+      });
     });
   });
 

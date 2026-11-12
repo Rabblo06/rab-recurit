@@ -12,7 +12,7 @@ const AUDIT_ID = '00000000-0000-4000-8000-0000000000f1';
 
 describe('account invite cleanup → audit events (X1.1)', () => {
   const calls: Array<{ manager: unknown; row: { organisationId: string; auditLogId: string; action: string } }> = [];
-  const shipper: AuditEventShipper = { afterCommit: (manager, row) => (calls.push({ manager, row }), true), shipPreAuth: () => undefined };
+  const shipper: AuditEventShipper = { afterCommit: (manager, row) => (calls.push({ manager, row }), true), shipPreAuthLoginFailure: () => undefined };
   beforeEach(() => {
     calls.length = 0;
     registerAuditEventShipper(shipper);

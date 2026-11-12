@@ -105,7 +105,10 @@ export function maskEmailForAudit(raw: unknown): string {
 export type LoginFailureReason = 'invalid_credentials' | 'ambiguous_accounts' | 'provider_sign_in_refused';
 
 /** The pre-authentication login failure: no organisation, no user id (the response is uniform; so is this event). */
-export function buildLoginFailedSecurityEvent(input: { email: unknown; reason: LoginFailureReason; provider: string; detailReason?: string }, processLabel: string): SecurityAuditEvent {
+export function buildLoginFailedSecurityEvent(
+  input: { email: unknown; reason: LoginFailureReason; provider: string; detailReason?: string; occurredAt?: number },
+  processLabel: string,
+): SecurityAuditEvent {
   return {
     type: LOGIN_FAILED_EVENT_TYPE,
     severity: 'warning',
@@ -119,6 +122,7 @@ export function buildLoginFailedSecurityEvent(input: { email: unknown; reason: L
       ...(input.detailReason ? { providerReason: String(input.detailReason).slice(0, 64) } : {}),
       provider: String(input.provider).slice(0, 32),
       email: maskEmailForAudit(input.email),
+      ...(typeof input.occurredAt === 'number' && Number.isFinite(input.occurredAt) ? { occurredAt: new Date(input.occurredAt).toISOString() } : {}),
     },
   };
 }

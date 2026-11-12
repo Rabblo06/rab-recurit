@@ -5,7 +5,8 @@ import { runScopedForOrg } from '../../core/database/scoped-job';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
-import { AuditEventShipOutcome, readAuditRowForShipping, shipAuditEventJob } from './audit-event.handler';
+import { AUDIT_PREAUTH_JOB_NAME } from '@rab/server/engine/worker-shared/audit-event.contract';
+import { AuditEventShipOutcome, readAuditRowForShipping, shipAuditEventJob, shipPreAuthEventJob } from './audit-event.handler';
 
 /**
  * Phase X Part 2, X1.1: the `crewflow-audit-events` consumer (legacy `bull` prefix, concurrency 2). main.ts creates its
@@ -22,6 +23,8 @@ export class AuditEventConsumer {
   async ship(job: Job<unknown>): Promise<{ outcome: AuditEventShipOutcome }> {
     const { tenantContext, logger } = this.deps.get();
     this.sink ??= createSecurityAuditSink(securityAuditSinkConfig(process.env), { log: (line) => logger.warn(line) });
+    // X1.1 (b): the system-scoped pre-auth failed login (every accepted job name of this queue reaches this one method).
+    if (job.name === AUDIT_PREAUTH_JOB_NAME) return shipPreAuthEventJob(job, { sink: this.sink });
     return shipAuditEventJob(job, {
       readRow: (organisationId, auditLogId) =>
         readAuditRowForShipping((org, fn) => runScopedForOrg(tenantContext, org, null, (manager) => fn(manager)), organisationId, auditLogId),

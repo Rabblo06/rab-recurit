@@ -31,7 +31,7 @@ describe('consumer unknown job name (D-Q1)', () => {
     // Phase D-Q4b: the four timer-trigger job names (one handler dispatches on job.name).
     'crewflow-timer-triggers': ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger'],
     // Phase X Part 2, X1.1: the one audit-event job name.
-    'crewflow-audit-events': ['audit-event-ship'],
+    'crewflow-audit-events': ['audit-event-ship', 'audit-preauth-login-failed'],
   };
 
   it.each(Object.values(CONSUMER_QUEUES).map((d) => [d.name, d] as const))('%s: an unregistered job name is failed closed, never handled', async (_name, def) => {

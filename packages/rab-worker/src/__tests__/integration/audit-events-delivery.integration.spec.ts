@@ -15,12 +15,12 @@ import { AuditAction, AuditActionType, AuditService } from '@rab/server/engine/c
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
-import { AUDIT_EVENT_QUEUE_NAME } from '@rab/server/engine/worker-shared/audit-event.contract';
+import { AUDIT_EVENT_QUEUE_NAME, AUDIT_PREAUTH_BACKLOG_LIMIT, AUDIT_PREAUTH_JOB_NAME, auditPreAuthDropsKey } from '@rab/server/engine/worker-shared/audit-event.contract';
 import { bullmqWorkerOptionsOf } from '@rab/server/engine/worker-shared/queue-registry';
 import { runScopedForOrg } from '../../core/database/scoped-job';
 import { createConsumerJobProcessor } from '../../core/scheduler/bullmq-scheduler';
 import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
-import { AuditEventShipOutcome, readAuditRowForShipping, shipAuditEventJob } from '../../queues/rab-audit-events/audit-event.handler';
+import { AuditEventShipOutcome, readAuditRowForShipping, shipAuditEventJob, shipPreAuthEventJob } from '../../queues/rab-audit-events/audit-event.handler';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -37,6 +37,8 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  E3 a rolled-back transaction ships no event — a TypeORM rollback and a raw ROLLBACK TO SAVEPOINT alike.
  *  E4 a sink failure neither blocks nor rolls back the action, and the Worker's BullMQ retry delivers once the sink is back.
  *  E5 a queue (Redis) failure neither blocks nor rolls back the action.
+ *  E7 owner guard: a hung or failing queue add never delays or fails a failed login; above the 10,000 backlog failed-login
+ *     events are dropped and counted (process + Redis total); other event types are unaffected.
  *  E6 ABUSE (real RLS): a forged organisationId / auditLogId pair ships nothing (both cross-tenant directions, unknown id).
  */
 jest.setTimeout(120_000);
@@ -70,7 +72,6 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
   let worker: Worker;
   /** The Worker's sink lines, parsed, and the API's pre-auth sink lines. */
   const workerLines: Array<{ raw: string; event: SinkLine }> = [];
-  const apiLines: Array<{ raw: string; event: SinkLine }> = [];
   const outcomes: Array<{ jobId: string; attemptsMade: number; outcome?: AuditEventShipOutcome; error?: string }> = [];
   let sinkDown = false;
 
@@ -94,8 +95,6 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
     auditService = moduleRef.get(AuditService);
     producerService = moduleRef.get(AuditEventQueueService);
     expect(producerService.enabled).toBe(true);
-    // The API's pre-auth sink: the real FailurePolicySink, only its stdout writer captured.
-    (producerService.producer as unknown as { deps: { sink: SecurityAuditSink } }).deps.sink = capture(apiLines, false);
 
     connection = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
     queue = new Queue(AUDIT_EVENT_QUEUE_NAME, { connection });
@@ -105,7 +104,7 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
       const run: (typeof outcomes)[number] = { jobId: String(job.id), attemptsMade: job.attemptsMade };
       outcomes.push(run);
       try {
-        const { outcome } = await shipAuditEventJob(job, {
+        const { outcome } = job.name === AUDIT_PREAUTH_JOB_NAME ? await shipPreAuthEventJob(job, { sink }) : await shipAuditEventJob(job, {
           readRow: (org, id) => readAuditRowForShipping((o, fn) => runScopedForOrg(tenantContext, o, null, (m) => fn(m)), org, id),
           sink,
           processLabel: 'worker',
@@ -185,7 +184,7 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
     expect((await factory.loginRaw(owner, { password: wrong })).status).toBe(401);
     expect((await factory.loginRaw(owner, { email: `nobody-${randomUUID()}@example.test`, password: wrong })).status).toBe(401);
     const failed = await eventually(
-      () => apiLines.filter((l) => l.event.type === 'auth.login_failed'),
+      () => workerLines.filter((l) => l.event.type === 'auth.login_failed'),
       (v) => v.length >= 2,
     );
     expect(failed).toHaveLength(2);
@@ -357,6 +356,62 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
       expect(linesWithMarker(marker)).toEqual([]); // best effort: this event is lost, the row stays the record
     } finally {
       deps.publish = realPublish;
+    }
+  });
+  it('E7 owner guard: a hung or failing queue add never delays or fails a failed login; over the 10,000 backlog failed-login events are dropped and counted', async () => {
+    const producer = producerService.producer as unknown as {
+      deps: { publish: (job: unknown) => Promise<unknown> };
+      backlog: number | null;
+      lastBacklogReadAt: number;
+      inFlightCount: number;
+      preAuthDropStats: { sinceProcessStart: number };
+      drain(ms?: number): Promise<void>;
+    };
+    const realPublish = producer.deps.publish;
+    const wrong = `Wrong-${randomUUID()}`;
+    try {
+      // (1) The add hangs: the 401 comes back while the add is still pending.
+      let releaseHung!: () => void;
+      producer.deps.publish = () => new Promise((resolve) => (releaseHung = () => resolve(undefined)));
+      const before = producer.inFlightCount;
+      const started = Date.now();
+      expect((await factory.loginRaw(owner, { password: wrong })).status).toBe(401);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(producer.inFlightCount).toBe(before + 1); // the add is still pending: the response did not wait for it
+      releaseHung();
+      // (2) The add rejects: the same 401, nothing thrown into the login.
+      producer.deps.publish = async () => {
+        throw Object.assign(new Error('Redis is unavailable'), { name: 'QueuePublishUnavailableError' });
+      };
+      expect((await factory.loginRaw(owner, { password: wrong })).status).toBe(401);
+      // (3) Backlog over the limit: the event is dropped and counted (process counter + the durable Redis total).
+      producer.deps.publish = realPublish;
+      const dropsKey = auditPreAuthDropsKey(process.env.NODE_ENV?.trim() || 'development');
+      const totalBefore = Number((await connection.get(dropsKey)) ?? 0);
+      const localBefore = producer.preAuthDropStats.sinceProcessStart;
+      producer.backlog = AUDIT_PREAUTH_BACKLOG_LIMIT + 1;
+      producer.lastBacklogReadAt = Date.now() + 60_000; // keep this reading for the test
+      const linesBefore = workerLines.filter((l) => l.event.type === 'auth.login_failed').length;
+      expect((await factory.loginRaw(owner, { password: wrong })).status).toBe(401);
+      expect(producer.preAuthDropStats.sinceProcessStart).toBe(localBefore + 1);
+      await producer.drain(3_000); // flushes the pending drop count (INCRBY on the dedicated key)
+      expect(Number(await connection.get(dropsKey))).toBe(totalBefore + 1);
+      const report = await producerService.preAuthDropReport();
+      expect(report).toMatchObject({ enabled: true, total: totalBefore + 1, sinceProcessStart: localBefore + 1 });
+      await sleep(1_500);
+      expect(workerLines.filter((l) => l.event.type === 'auth.login_failed').length).toBe(linesBefore); // nothing shipped
+      // Other event types are not dropped under the same backlog.
+      const marker = `e7-${randomUUID()}`;
+      await record(AuditAction.PLATFORM_ADMIN_GRANTED, marker);
+      const [line] = await eventually(
+        () => linesWithMarker(marker),
+        (v) => v.length > 0,
+      );
+      expect(line!.event.type).toBe('platform_admin.granted');
+    } finally {
+      producer.deps.publish = realPublish;
+      producer.backlog = null;
+      producer.lastBacklogReadAt = -Infinity;
     }
   });
 });

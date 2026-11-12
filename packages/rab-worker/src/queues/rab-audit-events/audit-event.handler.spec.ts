@@ -3,7 +3,7 @@ import { UnrecoverableError } from 'bullmq';
 
 import { AuditSinkError, createSecurityAuditSink } from '@rab/server/engine/core-modules/audit-sink/security-audit-sink';
 import type { AuditLogShippingRow } from '@rab/server/engine/core-modules/audit-events/build-security-audit-event';
-import { parseAuditEventJobData, shipAuditEventJob } from './audit-event.handler';
+import { parseAuditEventJobData, parseAuditPreAuthJobData, shipAuditEventJob, shipPreAuthEventJob } from './audit-event.handler';
 
 /**
  * X1.1 Worker side (no database, no Redis): the ids-only payload is checked before any read; the row is re-read and
@@ -95,5 +95,47 @@ describe('audit-event Worker job (X1.1)', () => {
     h.setDown(false);
     await expect(shipAuditEventJob({ data: { organisationId: ORG, auditLogId: ROW } }, h.deps)).resolves.toEqual({ outcome: 'shipped' });
     expect(h.lines).toHaveLength(1);
+  });
+});
+
+describe('pre-auth failed-login job (X1.1, owner decision 2026-11-12 b)', () => {
+  const pre = { v: 1, reason: 'invalid_credentials', provider: 'password', email: 'a***@example.com', at: 1_800_000_000_000 };
+
+  it('writes the masked, redacted auth.login_failed event to the sink (no organisation, no user)', async () => {
+    const h = harness();
+    await expect(shipPreAuthEventJob({ data: pre }, h.deps)).resolves.toEqual({ outcome: 'shipped' });
+    const event = JSON.parse(h.lines[0]!.replace(/^CREWFLOW_SECURITY_AUDIT /, ''));
+    expect(event).toMatchObject({ type: 'auth.login_failed', severity: 'warning', process: 'api', organisationId: null, actorUserId: null });
+    expect(event.detail).toMatchObject({ category: 'login', reason: 'invalid_credentials', provider: 'password', email: 'a***@example.com', occurredAt: new Date(pre.at).toISOString() });
+  });
+
+  it('an address that somehow arrives unmasked is masked again; a password-shaped one becomes [not-an-email]', async () => {
+    const h = harness();
+    await shipPreAuthEventJob({ data: { ...pre, email: 'alice@example.com' } }, h.deps);
+    await shipPreAuthEventJob({ data: { ...pre, email: 'P@ss.word1' } }, h.deps);
+    expect(h.lines.map((l) => JSON.parse(l.replace(/^CREWFLOW_SECURITY_AUDIT /, '')).detail.email)).toEqual(['a***@example.com', '[not-an-email]']);
+    expect(h.lines.join('
+')).not.toMatch(/alice@|P@ss/);
+  });
+
+  it.each<[string, unknown]>([
+    ['an organisationId', { ...pre, organisationId: '11111111-1111-4111-8111-111111111111' }],
+    ['an unknown reason', { ...pre, reason: 'whatever' }],
+    ['a provider with spaces', { ...pre, provider: 'pass word' }],
+    ['a raw password field', { ...pre, password: 'x' }],
+    ['a long address', { ...pre, email: 'x'.repeat(200) }],
+    ['a time out of range', { ...pre, at: 1e20 }],
+    ['the wrong version', { ...pre, v: 2 }],
+  ])('ABUSE: %s fails without a retry', async (_label, data) => {
+    const h = harness();
+    await expect(shipPreAuthEventJob({ data }, h.deps)).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(() => parseAuditPreAuthJobData(data)).toThrow(UnrecoverableError);
+    expect(h.lines).toEqual([]);
+  });
+
+  it('a sink failure throws (BullMQ retries)', async () => {
+    const h = harness();
+    h.setDown(true);
+    await expect(shipPreAuthEventJob({ data: pre }, h.deps)).rejects.toBeInstanceOf(AuditSinkError);
   });
 });

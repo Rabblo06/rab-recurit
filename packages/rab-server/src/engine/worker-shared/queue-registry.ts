@@ -4,7 +4,7 @@ import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-st
 import { AI_TITLE_JOB_NAME } from './ai-jobs.contract';
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
 import { TIMER_TRIGGER_JOB_NAMES, TIMER_TRIGGER_KINDS, TIMER_TRIGGER_PAYLOAD_KEYS, TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
-import { AUDIT_EVENT_JOB_NAME, AUDIT_EVENT_PAYLOAD_KEYS, AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
+import { AUDIT_EVENT_JOB_NAME, AUDIT_EVENT_PAYLOAD_KEYS, AUDIT_EVENT_QUEUE_NAME, AUDIT_PREAUTH_JOB_NAME, AUDIT_PREAUTH_PAYLOAD_KEYS } from './audit-event.contract';
 
 /**
  * CANONICAL queue registry (Admin Panel plan §3; Phase D-Q1 "queue registry"). The worker (consumers, scan scheduler) and
@@ -105,6 +105,12 @@ export interface QueueSettings {
   readonly tenantScope: QueueTenantScopeKind;
   /** The ONLY top-level payload keys a job may carry (identifiers and small scalars — never content). */
   readonly payloadKeys: readonly string[];
+  /**
+   * X1.1 (owner decision 2026-11-12): job names of an organisation-scoped consumer queue that carry NO tenant (a
+   * `{ kind: 'system' }` scope) and their own payload keys — today only the audit queue's pre-auth failed-login event.
+   * Such a payload must not name an organisation; every other job name of the queue keeps the queue's scope and keys.
+   */
+  readonly systemScopedJobs?: Readonly<Record<string, readonly string[]>>;
   readonly worker: QueueWorkerSettings;
   readonly job: QueueJobSettings;
 }
@@ -244,9 +250,11 @@ export const QUEUE_SETTINGS = Object.freeze({
   [AUDIT_EVENT_QUEUE_NAME]: Object.freeze({
     kind: 'consumer' as const,
     prefix: 'legacy-bull' as const,
-    jobNames: Object.freeze([AUDIT_EVENT_JOB_NAME] as const),
+    jobNames: Object.freeze([AUDIT_EVENT_JOB_NAME, AUDIT_PREAUTH_JOB_NAME] as const),
     tenantScope: 'organisation' as const,
     payloadKeys: Object.freeze([...AUDIT_EVENT_PAYLOAD_KEYS]),
+    // Owner decision 2026-11-12 (b): the pre-auth failed login has no organisation — a system-scoped job of this queue.
+    systemScopedJobs: Object.freeze({ [AUDIT_PREAUTH_JOB_NAME]: Object.freeze([...AUDIT_PREAUTH_PAYLOAD_KEYS]) }),
     worker: Object.freeze({ concurrency: 2, ...DEFAULT_STALL }),
     job: Object.freeze({
       attempts: 10,
@@ -378,6 +386,10 @@ export function assertQueueRegistryValid(registry: Readonly<Record<string, Queue
       }
     }
     if (!s.payloadKeys.length || new Set(s.payloadKeys).size !== s.payloadKeys.length) p('payload keys must be non-empty and unique');
+    for (const [jobName, keys] of Object.entries(s.systemScopedJobs ?? {})) {
+      if (s.kind !== 'consumer' || !s.jobNames.includes(jobName)) p(`system-scoped job ${jobName} is not a job of this consumer queue`);
+      if (!keys.length || new Set(keys).size !== keys.length || keys.includes('organisationId')) p(`system-scoped job ${jobName}: payload keys must be non-empty, unique and never organisationId`);
+    }
     if (!posInt(s.worker.concurrency)) p('worker.concurrency must be a positive integer');
     if (!posInt(s.worker.lockDurationMs)) p('worker.lockDurationMs must be a positive integer');
     if (!nonNegInt(s.worker.maxStalledCount)) p('worker.maxStalledCount must be an integer >= 0');

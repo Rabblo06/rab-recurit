@@ -3,8 +3,7 @@ import { Request, Response } from 'express';
 import { DataSource } from 'typeorm';
 
 import { resolveClientIp } from '../../../utils/client-ip.util';
-import { shipPreAuthSecurityEvent } from '../../audit-events/audit-event-shipping';
-import { buildLoginFailedSecurityEvent } from '../../audit-events/build-security-audit-event';
+import { shipPreAuthLoginFailure } from '../../audit-events/audit-event-shipping';
 import { EnvironmentService } from '../../environment/environment.service';
 import {
   AuthCookieMode,
@@ -318,7 +317,7 @@ export class OAuthSignInFlowService {
     } catch {
       // Observability must never turn a refused sign-in into a 500.
     }
-    // X1.1: the pre-auth provider sign-in failure — no organisation, no audit row: straight to the sink (detached, best effort).
-    shipPreAuthSecurityEvent(buildLoginFailedSecurityEvent({ email, reason: 'provider_sign_in_refused', provider, detailReason: reason }, 'api'));
+    // X1.1: the pre-auth provider sign-in failure — no organisation, no audit row: queued fire-and-forget (never awaited).
+    shipPreAuthLoginFailure({ email, reason: 'provider_sign_in_refused', provider, providerReason: reason });
   }
 }
