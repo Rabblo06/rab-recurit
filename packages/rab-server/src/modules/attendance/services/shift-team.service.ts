@@ -43,6 +43,7 @@ export class ShiftTeamService {
       // The additive SELECT policy rechecks confirmed membership and live shift.
       await manager.query(`SELECT set_config('rab.team_shift_id', $1, true), set_config('rab.team_staff_id', $2, true)`, [shiftId, caller.id]);
       const time = assignmentTimeSql();
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const rows = await manager.query(`
         SELECT COALESCE(NULLIF(trim(u.first_name), ''), 'Team member') AS "displayName",
                ${time.start} AS "startsAt", ${time.end} AS "endsAt",

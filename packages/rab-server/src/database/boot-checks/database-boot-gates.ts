@@ -9,13 +9,13 @@
  *              privileged provisioning connection (the elevated endpoint when one is configured), expecting `crewflow`
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
- *   1. role      current_user AND session_user are the expected login (API: crewflow_app, never crewflow_worker; Worker:
- *                crewflow_app or crewflow_worker with WORKER_CLAIM_MODE=per_scope, crewflow_worker only with global;
- *                provisioner: crewflow; CLI: per command, see CLI_COMMAND_ROLES, never crewflow_worker) — code constants,
- *                never env; neither is SUPERUSER or BYPASSRLS, and the login is not a member (any membership, with
- *                or without INHERIT/SET — pg_has_role MEMBER, PG16) of rab_secure_owner, crewflow (unless it IS crewflow) or rab_owner;
- *                a non-Worker login is not a member of crewflow_worker. A crewflow_worker login must also have the reviewed
- *                shape (member of crewflow_app WITH INHERIT TRUE, SET FALSE only; no CREATEROLE/CREATEDB/REPLICATION; owns nothing).
+ *   1. role      (owner-login architecture, owner's final decision 2026-11-04) current_user AND session_user are the owner
+ *                login `crewflow_owner` for EVERY process, CLI command and WORKER_CLAIM_MODE — a code constant, never env; a
+ *                legacy schema-role login (crewflow_app, crewflow_worker, crewflow) is refused; the login is not SUPERUSER,
+ *                BYPASSRLS, REPLICATION or CREATEDB and not a member of crewflow_worker. After gate 2: a MEMBER-semantics
+ *                walk (INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) reaches nothing
+ *                SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION or dangerous, and the role layout is exactly the reviewed
+ *                owner-login inventory (owner-login-posture.ts). Membership of the owner roles is expected (catalogue BC-01).
  *   2. version   server_version_num >= 160000 (PostgreSQL 16; PG16 role-membership semantics are relied on).
  *   3. extensions  the extensions the migrations create are installed: btree_gist, citext, pg_trgm, pgcrypto, unaccent.
  *                (uuid-ossp is NOT required: no column default uses it — verified on a migrations-only database.)
@@ -34,12 +34,21 @@
  *                API/Worker/CLI and refuses the provisioner; the core.provision_workspace body is checked against the code's
  *                workspace module (API/Worker: unknown refuses in production, behind refuses, ahead warns; provisioner:
  *                anything but equal refuses) and the provisioner also refuses a READY workspace above its module.
+ *                C3 (owner decision 2026-11-05, like Twenty): for the API only, when CREWFLOW_UPGRADE_INCOMPLETE names the
+ *                FIRST pending migration (set by api-prestart after a failed, non-first-install upgrade), `pending` and
+ *                `provision-function-behind` are warnings and the semantic-posture golden comparison is skipped (the boot
+ *                snapshot is still the runtime baseline). The Worker ("starts too, like Twenty") applies the same two
+ *                warnings and the same skip when the pending set is a contiguous, in-order tail of its chain, decided from
+ *                the database alone. CLI and provisioner unchanged; every other gate and verdict is unchanged.
  *   1c. dispatch-notify  (Phase D wave 3) no PERSISTENT crewflow.dispatch_notify in pg_db_role_setting (this database or
  *                all; every role or a role the login is a member of), and the gate session's own value is 'on' for an
  *                event-mode API/Worker (its startup option) and absent for every other process/mode. Runs after gate 1.
- *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions (refused otherwise: after the D5 cutover only
- *                crewflow_worker can — a mixed-version rollout is visible, not silently broken) and, in global mode, the
- *                dispatch-claim functions; every other process can EXECUTE none of the dispatch-claim functions.
+ *   objects      (after gate 7) FORCE on every core tenant table, the 16 pre-auth tables (M-T1, each with its exact
+ *                owner-only definer policy) and the deployment-identity tables; expected ownership; nothing unexpected owned
+ *                by the login or the owner roles in core / public / other schemas (owner-login-posture.ts).
+ *   8. grants    (Phase D) the Worker can EXECUTE the due-work functions and, in global mode, the dispatch-claim functions.
+ *                A non-Worker process CAN execute the dispatch-claim functions with one login: recorded as a boot WARNING
+ *                on every start (BC-08, DBA-01 lost — accepted by the owner 2026-11-05), not a refusal.
  *
  * Connection: a short-lived DataSource from the connection factory (src/database/postgres: createPgDataSource for the
  * process's primary endpoint (the provisioner: its privileged endpoint), one session, the process's own role, pool max 1, application_name `crewflow-<process>-boot-gates`), so
@@ -52,10 +61,44 @@ import { DataSourceOptions } from 'typeorm';
 
 import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
-import { BootGateReport, BootProcess, DatabaseBootGateError, evaluateBootGates, RetryOptions, withDatabaseRetry } from './database-boot-gate-rules';
-import { checkSchemaCompatibility } from './schema-compatibility';
+import {
+  BootGateReport,
+  BootProcess,
+  DatabaseBootGateError,
+  evaluateBootGates,
+  isProductionProcess,
+  RetryOptions,
+  withDatabaseRetry,
+} from './database-boot-gate-rules';
+import { checkSchemaCompatibility, UPGRADE_INCOMPLETE_VAR } from './schema-compatibility';
+import { classifyDatabaseState, readFreshInstallProof } from '../owner-login/install-state';
+import { assertSemanticPostureAtBoot, SemanticPostureError } from '../posture-drift/semantic-posture-monitor';
+import type { SemanticPosture } from '../posture-drift/semantic-posture';
 
 export * from './database-boot-gate-rules';
+
+/**
+ * C3: the failed upgrade migration api-prestart named in CREWFLOW_UPGRADE_INCOMPLETE, for the API only. No other process
+ * reads it: the Worker decides from the database alone (in-order pending tail), the CLI and provisioner are unchanged.
+ */
+/**
+ * C3: "an upgrade stopped here" — Agent 1's classifier says CHAIN-PARTIAL (every ledger name is this code's, migrations
+ * pending) AND its fresh-install proof says NOT fresh, read physically (pg_relation_size of organisation / manager_workspace /
+ * workspace_schema_registry, workspace schemas, the bootstrap-role ADMIN row): an RLS-bound count reads 0 for this login
+ * after M-T1 whatever the tables hold. EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install and FOREIGN are not.
+ */
+export async function readUpgradeEvidence(query: (sql: string, params?: unknown[]) => Promise<unknown[]>, expected: readonly string[]): Promise<boolean> {
+  const { state } = await classifyDatabaseState(query, expected);
+  if (state !== 'CHAIN-PARTIAL') return false;
+  const proof = await readFreshInstallProof(query, state);
+  return proof.fresh === false;
+}
+
+export function upgradeIncompleteFor(processName: string, env: NodeJS.ProcessEnv): string | undefined {
+  if (processName !== 'api') return undefined;
+  const value = env[UPGRADE_INCOMPLETE_VAR]?.trim();
+  return value ? value : undefined;
+}
 export * from './schema-compatibility';
 
 // ------------------------------------------------------------------------------------------------ real entrypoint
@@ -125,22 +168,43 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
         await session.connect();
         const query = (sql: string, params?: unknown[]) => session.query(sql, params) as Promise<Array<Record<string, unknown>>>;
         const expectedMigrations = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
+        // C3 (owner decision 2026-11-05): set by api-prestart only after a failed, non-first-install upgrade under the
+        // continue policy. Read for the API only; gate 7 decides whether the relaxation applies (API or Worker).
+        const upgradeIncomplete = upgradeIncompleteFor(processName, env);
+        let c3Applied: string | null = null;
         const gateReport = await evaluateBootGates({
           processName,
           env,
           cliCommand: options.cliCommand,
           connectionHost: endpointTarget.target.host,
           query,
-          checkPendingMigrations: ({ production }) =>
-            checkSchemaCompatibility(query, {
+          checkPendingMigrations: async ({ production }) => {
+            const assessment = await checkSchemaCompatibility(query, {
               process: processName,
               production,
               expected: expectedMigrations,
               label,
               workspaces: processName === 'provisioner',
-            }),
+              upgradeIncomplete,
+              // C3: Agent 1's classifier + physical fresh-install proof (not defeated by FORCE RLS). Only CHAIN-PARTIAL and
+              // NOT fresh lets an in-order pending tail serve (API with the signal) or start the Worker.
+              readUpgradeEvidence: () => readUpgradeEvidence(query, expectedMigrations),
+            });
+            c3Applied = assessment.upgradeIncomplete;
+            return assessment;
+          },
         });
-        return { ...gateReport, expectedMigrations };
+        // Semantic posture (M0 §6.4 control 4): the database's security objects equal the reviewed golden for this major.
+        // Production refuses when no golden exists for the major; elsewhere that is a warning. The snapshot is the
+        // baseline for the posture monitor (SemanticPostureMonitor, started by the API / Worker after boot).
+        let semantic: { posture: SemanticPosture; warnings: string[] };
+        try {
+          semantic = await assertSemanticPostureAtBoot(query, { production: isProductionProcess(processName, env), label, upgradeIncomplete: c3Applied });
+        } catch (error) {
+          if (error instanceof SemanticPostureError) throw new DatabaseBootGateError('semantic-posture', error.message);
+          throw error;
+        }
+        return { ...gateReport, warnings: [...gateReport.warnings, ...semantic.warnings], expectedMigrations, semanticBaseline: semantic.posture };
       } finally {
         await session.release().catch(() => undefined);
         await dataSource.destroy().catch(() => undefined);

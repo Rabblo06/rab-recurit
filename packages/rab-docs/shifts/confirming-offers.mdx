@@ -87,20 +87,23 @@ Rejecting from the batch drawer does not ask for a reason.
   <img src="/images/web/offers/reject-offer-drawer.webp" alt="Reject accepted offer drawer with an optional reason field" />
 </Frame>
 
-## Automatic confirmation
+## Confirmation deadline
 
-| Shift came from | When staff accept |
+Crewflow never confirms an acceptance automatically, including on shifts from a venue manager's staffing request you approved. Only the manager who sent the offer can confirm it, before its approval deadline:
+
+| Offer | Confirm before |
 | --- | --- |
-| A **venue manager's staffing request** you approved | Confirmed straight away — you already chose these people when you approved. |
-| A shift **you created** | Waits for you. If nobody confirms or rejects within **60 minutes**, Crewflow confirms automatically and sends you "Shift auto-confirmed". |
+| A **standard** offer | 30 minutes before the staff member's start time. |
+| A **replacement** or **standby** offer | The end of its booked window. |
 
-Automatic confirmation never applies to a cancelled shift. Offers can't be confirmed more than 5 hours after the shift's scheduled end.
+At the deadline, an acceptance that is still unconfirmed is withdrawn. Its status shows **Not confirmed in time**, the staff member sees **Withdrawn**, and you and the venue managers of that venue get "Confirmation deadline passed". The history is kept, there is no attendance or pay consequence, and the offer can never be confirmed afterwards. Crewflow does not find a replacement for you — fill the place through your usual [replacement or staffing steps](/shifts/sending-offers#replacing-someone-who-drops-out). The deadline is fixed and measured by Crewflow's clock, not your device's.
 
 ## Common errors
 
 | Message | Fix |
 | --- | --- |
 | "Could not confirm — the shift may already be full or this offer may have changed status." | Refresh the list. The shift may be full, or the offer may have been withdrawn or expired. |
+| "The manager-confirmation deadline has passed, so this acceptance can no longer be confirmed." | The approval deadline has passed and the acceptance has been withdrawn. Fill the place another way. |
 | "This shift ended more than 5 hours ago, so this offer can no longer be confirmed." | The confirmation window has closed. |
 | "Could not reject this offer. Try again." | Refresh and try again. |
 

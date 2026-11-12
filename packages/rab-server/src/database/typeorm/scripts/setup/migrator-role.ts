@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Creates (or, with --drop, removes) the migration-only login `crewflow_migrator` on a DISPOSABLE cluster, by running the
  * reviewed create-migrator-role.sql / drop-migrator-role.sql next to this file. Phase B (P7).

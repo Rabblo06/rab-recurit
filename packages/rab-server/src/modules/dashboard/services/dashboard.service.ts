@@ -127,10 +127,12 @@ export class DashboardService {
   private async countStaff(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<{ total: number; active: number }> {
     const filter = this.memberAccess.rawWhere(policy, 'staff_profile', 3);
     const [{ total }] = await manager.query(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`,
       [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
     const [{ active }] = await manager.query(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active' AND (${filter.sql})`,
       [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
@@ -143,6 +145,7 @@ export class DashboardService {
       return manager.count(Venue, { where: { id: In(scope.venueIds) } });
     }
     const filter = this.memberAccess.rawWhere(policy, 'venue', 3);
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
     const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`, [
       ctx.workspaceId,
       this.ownerOf(ctx, scope),
@@ -168,6 +171,7 @@ export class DashboardService {
       // A member counts only offers on shifts their role's Shift record filter allows.
       const filter = this.memberAccess.rawWhere(policy, 's', 4);
       const [{ count }] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT COUNT(*)::int AS count
            FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id

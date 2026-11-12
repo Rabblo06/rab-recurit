@@ -13,6 +13,7 @@ import 'confirmed_staff.dart';
 import 'review_staff_report_screen.dart';
 import 'sent_shift.dart';
 import 'venue_manager_provider.dart';
+import 'vm_offer_status.dart';
 
 /// Venue Manager "Sent shift" (one sent request) and "Confirmed staff" (its
 /// confirmed seats) screens, plus the small row pieces they share with Event
@@ -385,22 +386,16 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
   }
 
   List<Widget> _content(SentShift s) {
-    final sent = s.count('sent');
     final r = roster;
     final p = context.read<VenueManagerProvider>();
     final responses = r == null ? const <(String, String)>[] : _responses(p, r);
     return [
-      _SentSummaryCard(shift: s, sent: sent),
+      _SentSummaryCard(shift: s),
       const SizedBox(height: 12),
       Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Flexible(
-            child: Text(
-              sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
-              style: ScheduleType.caption,
-            ),
-          ),
+          Flexible(child: Text(s.sentSummary, style: ScheduleType.caption)),
           if (s.submittedAt != null) ...[
             const SizedBox(width: 12),
             Flexible(
@@ -493,7 +488,7 @@ class _VenueSentShiftDetailState extends State<VenueSentShiftDetail> {
         // was later cancelled. Never shown as "Confirmed".
         o.status == 'manager_confirmed' && r.hasAttendance
             ? 'No longer booked'
-            : _offerLabel(o.status),
+            : vmOfferLabel(o, _offerLabel),
       ));
     }
     rows.sort((a, b) => a.$1.compareTo(b.$1));
@@ -513,9 +508,8 @@ String _offerLabel(String status) => switch (status) {
 };
 
 class _SentSummaryCard extends StatelessWidget {
-  const _SentSummaryCard({required this.shift, required this.sent});
+  const _SentSummaryCard({required this.shift});
   final SentShift shift;
-  final int sent;
   @override
   Widget build(BuildContext context) {
     final style = ShiftVisualStyle.forShift(shift.id);
@@ -586,9 +580,7 @@ class _SentSummaryCard extends StatelessWidget {
           const SizedBox(height: 12),
           Divider(height: 1, color: style.divider),
           const SizedBox(height: 10),
-          ShiftCardFooterLine(
-            text: sent == 0 ? 'Not sent yet' : 'Sent to $sent staff',
-          ),
+          ShiftCardFooterLine(text: shift.sentSummary),
         ],
       ),
     );

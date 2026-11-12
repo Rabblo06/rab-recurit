@@ -153,6 +153,7 @@ export class StaffReviewInsightsService {
   ): Promise<StaffReviewRow[]> {
     const t = assignmentTimeSql();
     const raw = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT r.id, r.shift_id AS "shiftId", r.reviewer_user_id AS "reviewerUserId",
               ru.first_name || ' ' || ru.last_name AS "reviewerName", v.name AS "venueName", jr.name AS "roleName",
               ${t.start} AS "startsAt", ${t.end} AS "endsAt",

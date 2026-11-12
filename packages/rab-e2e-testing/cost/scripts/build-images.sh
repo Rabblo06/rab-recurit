@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Builds crewflow-cost/server:<tag> and crewflow-cost/worker:<tag>. Never touches rab-server:latest / rab-worker:latest.
+# O1 (one image): ONE build of rab/Dockerfile, tagged under both names (the API and the Worker differ only by command).
 #
 #   scripts/build-images.sh <commit> [tag]
 #       commit mode: build context = a CLEAN `git archive <commit>` (the working tree, uncommitted files and this harness
@@ -17,13 +18,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 build_pair() { # <context dir> <tag> <label args...>
   local wctx; wctx="$(hostpath "$1")"; local tag="$2"; shift 2
-  log "building crewflow-cost/server:$tag"
+  log "building crewflow-cost/server:$tag (also tagged crewflow-cost/worker:$tag)"
   docker build --progress=plain --target rab "$@" \
-    -f "$wctx/packages/rab-docker/rab/Dockerfile" -t "crewflow-cost/server:$tag" "$wctx"
-  log "building crewflow-cost/worker:$tag"
-  docker build --progress=plain \
-    --build-arg "CREWFLOW_BASE_IMAGE=crewflow-cost/server:$tag" "$@" \
-    -f "$wctx/packages/rab-docker/rab/Dockerfile.worker-bundle" -t "crewflow-cost/worker:$tag" "$wctx"
+    -f "$wctx/packages/rab-docker/rab/Dockerfile" -t "crewflow-cost/server:$tag" -t "crewflow-cost/worker:$tag" "$wctx"
   docker image inspect "crewflow-cost/server:$tag" "crewflow-cost/worker:$tag" --format '{{index .RepoTags 0}} {{.Id}} {{.Created}}'
 }
 

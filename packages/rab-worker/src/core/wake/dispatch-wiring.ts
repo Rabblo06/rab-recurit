@@ -1,12 +1,13 @@
 import type { ProcessHandler, HandlerRegistry } from '../scheduler/processor-explorer';
 import type { ScanJobDefinition } from '../scheduler/scan-jobs';
 import type { WorkerJobDependencies } from '../scheduler/worker-dependencies';
-import { DispatchQueue } from '../database/dispatch-claims';
 import { dispatchEmailScope } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
-import { dispatchStatementScope, shiftStatementJobOptions } from '../../queues/rab-reports/shift-statement.job';
+import { enqueueShiftStatement } from '../../queues/rab-reports/shift-statement-enqueue';
+import { dispatchStatementScope } from '../../queues/rab-reports/shift-statement.job';
 import type { DispatchCoordinator, DispatchQueueBinding } from './dispatch-coordinator';
+import { DISPATCH_SCAN_JOBS } from './dispatch-config';
 
 /**
  * Phase D (D1/D2) wiring between main.ts, the scan registry and the dispatch coordinator.
@@ -18,66 +19,10 @@ import type { DispatchCoordinator, DispatchQueueBinding } from './dispatch-coord
  * due + global claim). event mode additionally sets those four scans' interval to the backstop and starts the listener.
  */
 
-export type WorkerClaimMode = 'per_scope' | 'global';
-export type WorkerDispatchMode = 'poll' | 'event';
-
-export interface DispatchConfig {
-  claimMode: WorkerClaimMode;
-  dispatchMode: WorkerDispatchMode;
-  backstopSeconds: number;
-  reconcileSeconds: number;
-  claimBatch: number;
-}
-
-/** The four dispatch scans → their pointer queue labels (contract). */
-export const DISPATCH_SCAN_JOBS: Readonly<Record<string, DispatchQueue>> = Object.freeze({
-  'email-dispatch': 'email',
-  'push-dispatch': 'push',
-  'realtime-outbox-publish': 'realtime',
-  'shift-statement-dispatch': 'statement',
-});
-
-export class DispatchConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'DispatchConfigError';
-  }
-}
-
-function intSetting(env: { get(key: string): unknown }, key: string, fallback: number, min: number, max: number): number {
-  const raw = env.get(key);
-  if (raw === undefined || raw === null || raw === '') return fallback;
-  const value = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isInteger(value) || value < min || value > max) throw new DispatchConfigError(`${key} must be a whole number ${min}–${max}`);
-  return value;
-}
-
-/**
- * Reads the Phase D switches (validated by env.validation.ts — Agent C — and re-checked here, fail closed). Defaults never
- * change behaviour: per_scope + poll. event without global is refused (the same combination rule the boot validation has).
- */
-export function resolveDispatchConfig(env: { get(key: string): unknown }): DispatchConfig {
-  const claimRaw = env.get('WORKER_CLAIM_MODE') ?? 'per_scope';
-  if (claimRaw !== 'per_scope' && claimRaw !== 'global') throw new DispatchConfigError('WORKER_CLAIM_MODE must be exactly per_scope or global');
-  const dispatchRaw = env.get('WORKER_DISPATCH_MODE') ?? 'poll';
-  if (dispatchRaw !== 'poll' && dispatchRaw !== 'event') throw new DispatchConfigError('WORKER_DISPATCH_MODE must be exactly poll or event');
-  if (dispatchRaw === 'event' && claimRaw !== 'global') {
-    throw new DispatchConfigError('WORKER_DISPATCH_MODE=event requires WORKER_CLAIM_MODE=global');
-  }
-  return {
-    claimMode: claimRaw,
-    dispatchMode: dispatchRaw,
-    backstopSeconds: intSetting(env, 'WORKER_DISPATCH_BACKSTOP_SECONDS', 30, 10, 120),
-    reconcileSeconds: intSetting(env, 'WORKER_DISPATCH_RECONCILE_SECONDS', 900, 60, 900), // wave 3: capped at 900 s (server env config)
-    claimBatch: intSetting(env, 'WORKER_DISPATCH_CLAIM_BATCH', 100, 1, 200),
-  };
-}
-
-/** A scan's interval under the dispatch config: event mode → the four dispatch scans tick at the backstop; else unchanged. */
-export function dispatchIntervalOf(def: Pick<ScanJobDefinition, 'jobName'>, baseMs: number, config: DispatchConfig): number {
-  if (config.dispatchMode === 'event' && def.jobName in DISPATCH_SCAN_JOBS) return config.backstopSeconds * 1000;
-  return baseMs;
-}
+// O3 C2: the pure dispatch switches live in dispatch-config.ts (shared with the API's one-shot scheduler registration);
+// re-exported here unchanged so every existing import keeps working.
+export { DISPATCH_SCAN_JOBS, DispatchConfigError, dispatchIntervalOf, resolveDispatchConfig } from './dispatch-config';
+export type { DispatchConfig, WorkerClaimMode, WorkerDispatchMode } from './dispatch-config';
 
 /** The registry the schedulers use in global mode: the bound dispatch scans → coordinator.tick; everything else unchanged. */
 export function withGlobalDispatch(registry: HandlerRegistry, coordinator: Pick<DispatchCoordinator, 'queues' | 'tick'>): HandlerRegistry {
@@ -122,8 +67,9 @@ export function buildDispatchBindings(
             (id, orgId) => emailQueue.publish(id, orgId),
             (id, orgId, generation) => emailQueue.republish(id, orgId, generation),
             emailService.ambiguousDeliverySafeToRetry,
+            (id, generation) => emailQueue.isLive(id, generation),
           );
-          if (r.claimed) logger.log(`email dispatch (global): claimed=${r.claimed} published=${r.published} recovered=${r.recovered} deliveryUncertain=${r.deliveryUncertain}`);
+          if (r.claimed) logger.log(`email dispatch (global): claimed=${r.claimed} published=${r.published} recovered=${r.recovered} deliveryUncertain=${r.deliveryUncertain} generationsExhausted=${r.generationsExhausted}`);
           return r.claimed;
         };
         break;
@@ -146,7 +92,8 @@ export function buildDispatchBindings(
         processScope = async (scope) => {
           if (!environmentService.get('REALTIME_ENABLED')) return 0; // defence in depth, as the processor
           const r = await publishRealtimeScope(tenantContext, realtimePublish, environmentService.get('NODE_ENV'), scope, { ids: scope.subjectIds });
-          if (r.claimed) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed}`);
+          // D-Q5a: also log a cycle whose only outcome was a lease reclaim that exhausted max_attempts (failed, none claimed).
+          if (r.claimed || r.failed || r.lostLease) logger.log(`realtime outbox publish (global): claimed=${r.claimed} published=${r.published} invalid=${r.invalid} retried=${r.retried} failed=${r.failed} lostLease=${r.lostLease}`);
           return r.claimed;
         };
         break;
@@ -154,7 +101,7 @@ export function buildDispatchBindings(
         processScope = async (scope) => {
           if (scope.workspaceId === null) return 0; // statements are per workspace (runGlobalDispatch already filters these)
           const r = await dispatchStatementScope(tenantContext, scope.organisationId, scope.workspaceId, scope.subjectIds, async (data) => {
-            await shiftStatementQueue.add(...shiftStatementJobOptions(data));
+            await enqueueShiftStatement(shiftStatementQueue, data); // D-Q1: the same registered builder as per_scope
           });
           if (r.claimed) {
             logger.log(`shift statement dispatch (global): claimed=${r.claimed} published=${r.published} reconciledMissing=${r.reconciledMissing} requeued=${r.requeued} publishFailed=${r.publishFailed}`);

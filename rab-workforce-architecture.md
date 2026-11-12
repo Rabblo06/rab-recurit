@@ -56,7 +56,7 @@ I read the repo. These are the decisions taken from it, so `rab` feels like the 
 
 ## 1. Assumptions (accepted 2026-08-13)
 
-The brief says never to invent a business rule silently where payroll, compliance, permissions or attendance are affected. These twelve change the schema.
+The brief says never to invent a business rule silently where payroll, compliance, permissions or attendance are affected. These thirteen change the schema or a business rule (A13 added 2026-11-06 by the owner).
 
 | #   | Area              | Assumption                                                                                                                                                                                                                                                                                                                                              | Impact if wrong                                                                                                                                                 |
 | --- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -72,19 +72,23 @@ The brief says never to invent a business rule silently where payroll, complianc
 | A10 | Missing clock-out | Auto-closed at `scheduled_end + 2h`, status `missing_clock_out`, **never paid without approval**.                                                                                                                                                                                                                                                       | Open records otherwise run forever and inflate hours.                                                                                                           |
 | A11 | Retention         | Attendance/payroll/audit kept 6 years. GDPR erasure = **anonymise PII, retain financial records**.                                                                                                                                                                                                                                                      | Erasure vs statutory retention must be resolved in schema, not later.                                                                                           |
 | A12 | Tenancy           | ~~Single tenant per deployment~~ **Revised 2026-08-14: shared database, multiple organisations, isolated by Postgres Row-Level Security** (§5.7) on top of the `organisationId`-scoping already planned. `organisationId` still lives on every table and every query — RLS is the second, DB-level line of defence behind it, not a replacement for it. | Cheap now, near-impossible to retrofit. RLS specifically only earns its keep in a shared-DB model — a true single-tenant-per-deployment setup wouldn't need it. |
+| A13 | Manager confirmation | **Owner rule 2026-11-06 — the system never confirms an offer.** Only an authorised Internal Manager (the offer's sender holding `offer.confirm`) confirms, strictly before the **approval deadline**: a standard offer's individual assignment start − 30 min; a replacement/standby offer's booked-window end. At the deadline an unconfirmed `staff_accepted` offer is withdrawn automatically (`manager_rejected`, `rejected_by` NULL, reason `confirmation_deadline_passed`; assignment `rejected`) — no attendance or payroll consequence, no automatic re-allocation. Deadline judged by PostgreSQL (`clock_timestamp()`), never a device clock; fixed, not configurable (`MANAGER_CONFIRMATION_LEAD_MINUTES`). | An automatic confirmation would book (and later pay) someone no manager ever approved; a later confirm would book a shift with no time left to prepare. |
 
 ### 1.1 State machines
 
 Declared once in `rab-shared/src/state/`, enforced in every service that mutates status, backed by the `CHECK` constraints already in §11's schema. **No endpoint ever accepts a raw `status` value from a client** — mutations name the action (`publishShift`, `acceptOffer`), never `updateShift({ status: 'PUBLISHED' })`. `assertTransition(machine, from, to)` throws a typed `InvalidTransitionError` (→ 409) on an unknown or disallowed transition; unknown state is deny, not pass-through. Keyed on the status enums already defined in `rab-shared/src/types/*` (not renamed to match any external reference — these are `rab`'s own).
 
 ```ts
+// Authoritative copy: packages/rab-shared/src/state/shift-transitions.ts (this block is a summary; the code wins).
 export const SHIFT_TRANSITIONS: Record<ShiftStatusType, ShiftStatusType[]> = {
   draft: ['open', 'cancelled'],
+  pending_manager_approval: ['open', 'declined'], // Venue Manager request awaiting an Internal Manager
+  declined: [],
   open: ['offered', 'cancelled'],
   offered: ['partially_filled', 'fully_filled', 'cancelled'],
-  partially_filled: ['fully_filled', 'in_progress', 'cancelled'],
-  fully_filled: ['confirmed', 'in_progress', 'cancelled'],
-  confirmed: ['in_progress', 'cancelled'],
+  partially_filled: ['offered', 'fully_filled', 'in_progress', 'cancelled'],
+  fully_filled: ['offered', 'partially_filled', 'confirmed', 'in_progress', 'cancelled'],
+  confirmed: ['offered', 'partially_filled', 'in_progress', 'cancelled'],
   in_progress: ['completed', 'cancelled'],
   completed: [],
   cancelled: [],
@@ -105,6 +109,23 @@ export const OFFER_TRANSITIONS: Record<OfferStatusType, OfferStatusType[]> = {
   declined: [],
   expired: [],
   withdrawn: [],
+};
+// Manager-confirmation DEADLINE (owner rule 2026-11-06, A13) — no new state, no new edge: at the deadline an unconfirmed
+// `staff_accepted` offer takes the existing `staff_accepted -> manager_rejected` edge with `rejected_by = NULL` and
+// `rejection_reason = 'confirmation_deadline_passed'`; `manager_rejected` is terminal, so it can never be confirmed later.
+// `staff_accepted -> manager_confirmed` is reachable ONLY by an Internal Manager's confirm, and only while
+// `clock_timestamp() < deadline` (§8.4). Nothing in the system — accept, Worker, timer, AI — ever takes that edge itself.
+
+export const SHIFT_ASSIGNMENT_TRANSITIONS: Record<ShiftAssignmentStatusType, ShiftAssignmentStatusType[]> = {
+  offered: ['staff_accepted', 'declined', 'withdrawn', 'cancelled'],
+  staff_accepted: ['confirmed', 'rejected', 'cancelled'], // confirmed: manager only; rejected: manager reject or the deadline
+  confirmed: ['cancelled', 'no_show', 'completed'],
+  no_show: ['completed'], // a provisional no-show superseded by recorded attendance
+  declined: [],
+  rejected: [],
+  withdrawn: [],
+  cancelled: [],
+  completed: [],
 };
 
 export const ATTENDANCE_TRANSITIONS: Record<
@@ -273,7 +294,7 @@ packages/rab-server/src/
 │   │   ├── secret-encryption/        # SecretEncryptionService (APP_SECRET, decryptAndMask)
 │   │   ├── audit/                    # append-only audit writer + interceptor
 │   │   ├── file-storage/             # S3 driver, presigned URLs, MIME allowlist
-│   │   ├── pdf/                      # Playwright renderer (payslips)
+│   │   ├── pdf/                      # native renderer, @react-pdf/renderer (payslips)
 │   │   ├── email/                    # transactional sender
 │   │   ├── push/                     # Expo push driver + token pruning
 │   │   ├── message-queue/            # BullMQ abstraction + outbox dispatcher
@@ -366,7 +387,12 @@ Render `type: worker` service** (`packages/rab-docker/rab/start-worker.sh` →
 image (`packages/rab-docker/rab/Dockerfile`) as `rab-server`. An equivalent
 split exists for the OpenShip/Docker-Compose production target
 (`packages/rab-docker/docker-compose.production.yml`). Payslip rendering
-must never compete with API request handling for CPU.
+must never compete with API request handling for CPU. No image contains a
+browser: since Docker hardening H2 the shared image has no Chromium, and since
+P5 (PDF renderer migration) neither has the Worker bundle image
+(`packages/rab-docker/rab/Dockerfile.worker-bundle`, built on the shared
+image), which renders PDFs natively; `start-worker.sh` in the shared image is retired
+and refuses to start (exit 1), pointing to the Worker bundle image.
 
 ---
 
@@ -384,7 +410,7 @@ must never compete with API request handling for CPU.
 | Web           | React 18, Vite, TypeScript, TanStack Query + Table, React Hook Form + Zod, Tailwind + Radix         |
 | Mobile        | React Native via Expo (expo-router, expo-secure-store, expo-location, expo-notifications)           |
 | Files         | S3-compatible private buckets, presigned 60s downloads                                              |
-| PDF           | Playwright Chromium in the worker                                                                   |
+| PDF           | `@react-pdf/renderer` (native, no browser) in the worker                                            |
 | Email         | react-email templates in `rab-emails` — transactional provider                                      |
 | Observability | Sentry + OpenTelemetry, structured logs with `requestId`, `actorId`, `organisationId`               |
 
@@ -856,6 +882,31 @@ COMMIT;
 
 The loser of a race gets `409 SHIFT_FULL` — _"This shift is now full. Another offer may already be confirmed."_ Never a duplicate booking, never a silent failure. The manager's alternative to confirming is `staff_accepted -> manager_rejected` (`OfferService.managerReject`) — never claims a seat, so there is no capacity bookkeeping to undo.
 
+**Approval deadline (owner rule 2026-11-06, A13).** The system never confirms. The confirm claims the offer row only
+before its deadline, on the database clock, in the same statement (`applyOfferConfirmation`, the only writer of
+`manager_confirmed`; one caller, `OfferService.confirmOne`):
+
+```sql
+-- deadline = CASE offer_kind WHEN 'standard' THEN COALESCE(lower(sa.period), s.starts_at) - 30 min
+--                            ELSE COALESCE(upper(sa.period), s.ends_at) END        (confirmationDeadlineSql)
+UPDATE job_offer o SET status = 'manager_confirmed', manager_confirmed_at = clock_timestamp(), confirmed_by = $manager
+  FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+ WHERE o.id = $1 AND o.organisation_id = $org AND o.status = 'staff_accepted' AND sa.id = o.shift_assignment_id
+   AND clock_timestamp() < <deadline>;
+-- zero rows and still staff_accepted past the deadline (or already withdrawn at it)
+--   => 409 { code: 'CONFIRMATION_DEADLINE_PASSED' }, then the API withdraws lazily in a second, committing transaction
+```
+
+At the deadline the Worker withdraws (`withdrawUnconfirmedOffer`, shared with the API's lazy path): the mirror CAS
+`... AND o.status = 'staff_accepted' AND s.status <> 'cancelled' AND clock_timestamp() >= <deadline>` sets the offer to
+`manager_rejected` (`rejected_by` NULL, reason `confirmation_deadline_passed`) and the assignment to `rejected`, audits
+`offer.rejected_by_worker` (actor NULL) and notifies, once, the staff member, the responsible manager and the Venue
+Managers of that venue. Both CASes claim the same `job_offer` row first, so exactly one wins; a late Worker still applies
+the original deadline. Discovery: the due-work pointer armed at accept with the database-computed deadline, a backstop scan
+of past-deadline `staff_accepted` offers, and the optional timer trigger (a wake). Standard offers are also refused at send
+and at accept once the recipient's deadline has passed (409, same code). Judging the deadline at the claiming statement,
+not at COMMIT, is a recorded SECURITY TRADE-OFF (THREAT-MODEL, "No automatic confirmation").
+
 ### 8.5 Clock in / out
 
 ```
@@ -902,6 +953,11 @@ Venue Manager → Request staff (role, dates, times, headcount, notes) → submi
 Manager → Approve (converts to shifts, request linked) | Modify | Reject (reason required)
 Venue Manager sees live progress: requested 8 / assigned 6 / confirmed 5
 ```
+
+Approving a request sends offers; it confirms nobody. Every acceptance on a request-born shift waits for the approving
+Internal Manager's explicit confirmation before the approval deadline, exactly like a directly created shift (owner rule
+2026-11-06 removed the old auto-confirm on accept, A13). The Venue Manager is notified if an acceptance at their venue is
+withdrawn at the deadline.
 
 ### 8.10 Staff review
 

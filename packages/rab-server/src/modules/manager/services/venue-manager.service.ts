@@ -4,6 +4,7 @@ import { DataSource, In } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -50,6 +51,10 @@ export class VenueManagerService {
 
   @Inject(FileService)
   private readonly fileService!: FileService;
+
+  /** Phase X SC-01: the avatar writers below clear CoreEntityCacheService's `user` entry after commit. */
+  @Inject(CoreEntityCacheService)
+  private readonly entityCache!: CoreEntityCacheService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -378,7 +383,8 @@ export class VenueManagerService {
    */
   async uploadAvatar(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ avatarKey: string }> {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let avatarChangedFor: string | null = null;
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Venue Manager not found.');
       const before = profile.user!.avatarFileId;
@@ -392,24 +398,31 @@ export class VenueManagerService {
         createdBy: ctx.userId,
       });
       await manager.update(User, profile.userId, { avatarFileId: file.id });
+      avatarChangedFor = profile.userId;
       await this.retireAvatar(manager, before);
       await this.auditService.record(manager, ctx, AuditAction.FILE_UPLOADED, { entityType: 'stored_file', entityId: file.id, metadata: { kind: file.kind, sizeBytes: file.sizeBytes } });
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, { targetUserId: profile.userId, metadata: { fields: ['avatar'] } });
       return { avatarKey: file.id };
     });
+    if (avatarChangedFor) await this.entityCache.invalidate('user', avatarChangedFor);
+    return result;
   }
 
   async removeAvatar(ctx: AuthContext, id: string): Promise<{ avatarKey: string | null }> {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+    let avatarChangedFor: string | null = null;
+    const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Venue Manager not found.');
       const before = profile.user!.avatarFileId;
       await manager.update(User, profile.userId, { avatarFileId: null });
+      avatarChangedFor = profile.userId;
       await this.retireAvatar(manager, before);
       await this.auditService.record(manager, ctx, AuditAction.PROFILE_UPDATED, { targetUserId: profile.userId, metadata: { fields: ['avatar'] } });
       return { avatarKey: null };
     });
+    if (avatarChangedFor) await this.entityCache.invalidate('user', avatarChangedFor);
+    return result;
   }
 
   private async retireAvatar(manager: EntityManager, fileId: string | null | undefined): Promise<void> {

@@ -11,12 +11,10 @@ import { FileService } from '@rab/server/engine/core-modules/storage/file.servic
 import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
-import { renderFinalTimesheetHtml } from '@rab/server/modules/attendance/templates/final-timesheet.html';
-import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderHtmlToPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { renderFinalTimesheetEmail } from './report-email-content';
@@ -47,14 +45,16 @@ export interface FinalTimesheetResult {
   failed: number;
 }
 
-export async function runFinalTimesheetCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  emailOutbox: EmailOutboxService,
-  files: FileService,
-  options: { organisationId?: string; audit?: AuditService } = {},
-): Promise<FinalTimesheetResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, manager => manager.query<ScanCandidate[]>(`
+/**
+ * D-Q4a (refactor only, no behaviour change): discovery for ONE workspace, then the unchanged per-report processing
+ * (`processFinalTimesheetCandidates`: per shift the session advisory lock `final_timesheet:<id>` on `lockDataSource`, which
+ * the Worker gives as the DIRECT DataSource). The combined shift scan calls the same two functions and keeps the direct
+ * DataSource for the lock; `runFinalTimesheetCycle` stays the separate-mode entry.
+ */
+export type FinalTimesheetCandidate = ScanCandidate;
+
+export function discoverFinalTimesheetCandidates(manager: EntityManager): Promise<FinalTimesheetCandidate[]> {
+  return manager.query<ScanCandidate[]>(`
     SELECT sr.id AS report_id, s.id AS shift_id, s.organisation_id, s.workspace_id
     FROM shift s LEFT JOIN shift_report sr ON sr.shift_id = s.id
     WHERE (sr.status = 'finalised' AND sr.final_pdf_sent_at IS NULL)
@@ -64,8 +64,28 @@ export async function runFinalTimesheetCycle(
           WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show')
           AND (a.status IN ('clocked_in','on_break') OR (sa.status <> 'no_show' AND a.clock_out_at IS NULL))))
     ORDER BY s.ends_at, s.id LIMIT 200
-  `), options.organisationId);
+  `);
+}
 
+export async function runFinalTimesheetCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  options: { organisationId?: string; audit?: AuditService } = {},
+): Promise<FinalTimesheetResult> {
+  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, discoverFinalTimesheetCandidates, options.organisationId);
+  return processFinalTimesheetCandidates(ownerDataSource, tenantContext, emailOutbox, files, candidates, options.audit);
+}
+
+export async function processFinalTimesheetCandidates(
+  lockDataSource: DataSource,
+  tenantContext: TenantContextService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  candidates: readonly FinalTimesheetCandidate[],
+  audit?: AuditService,
+): Promise<FinalTimesheetResult> {
   let sent = 0;
   let skippedLocked = 0;
   let failed = 0;
@@ -73,14 +93,14 @@ export async function runFinalTimesheetCycle(
   for (const candidate of candidates) {
     // One failing report (bad data, renderer down) must not block every report behind it.
     try {
-      const outcome = await withAdvisoryLock(ownerDataSource, `final_timesheet:${candidate.shift_id}`, () =>
-        deliverFinalTimesheet(candidate, tenantContext, emailOutbox, files, options.audit),
+      const outcome = await withAdvisoryLock(lockDataSource, `final_timesheet:${candidate.shift_id}`, () =>
+        deliverFinalTimesheet(candidate, tenantContext, emailOutbox, files, audit),
       );
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) sent += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 
@@ -183,14 +203,15 @@ async function deliverFinalTimesheet(
         finalisedAt: report.finalisedAt ? new Date(report.finalisedAt).toISOString() : new Date().toISOString(),
       };
 
-      return { html: renderFinalTimesheetHtml(template), originalHtml: renderFinalTimesheetHtml({ ...template, unsigned: true }), footerTemplate: documentFooterTemplate(info), needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, venueName };
+      // The data, not HTML (D1): renderReportPdf derives either renderer's output from it through the shared view-model.
+      return { template, needsOriginal: !report.originalFileId, needsSigned: report.status === 'finalised' && !report.finalPdfSentAt, venueName };
     },
   );
 
   if (!prepared || !candidate.report_id) return false;
 
   if (prepared.needsOriginal) {
-    const originalBuffer = await renderHtmlToPdf(prepared.originalHtml, { footerTemplate: prepared.footerTemplate, landscape: true });
+    const originalBuffer = await renderReportPdf({ kind: 'final-timesheet', data: { ...prepared.template, unsigned: true } });
     const originalUpload = await files.putObject({ kind: FileKind.FINAL_TIMESHEET_PDF, organisationId: candidate.organisation_id,
       workspaceId: candidate.workspace_id ?? null, resourceType: 'shift_report', resourceId: candidate.report_id!,
       buffer: originalBuffer, filename: 'original-timesheet.pdf' });
@@ -213,7 +234,7 @@ async function deliverFinalTimesheet(
   }
   if (!prepared.needsSigned) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
+  const pdfBuffer = await renderReportPdf({ kind: 'final-timesheet', data: prepared.template });
   // Bytes go to SHARED object storage (validated, SHA-256'd, HEAD-verified) before anything claims them. Each
   // attempt writes its own immutable object: a final report is never overwritten in place.
   const uploaded = await files.putObject({

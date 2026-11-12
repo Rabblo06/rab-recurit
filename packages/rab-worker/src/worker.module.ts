@@ -9,6 +9,7 @@ import { EnvironmentModule } from '@rab/server/engine/core-modules/environment/e
 import { PermissionsModule } from '@rab/server/engine/core-modules/permissions/permissions.module';
 import { PlatformAdminModule } from '@rab/server/engine/core-modules/platform-admin/platform-admin.module';
 import { PushModule } from '@rab/server/engine/core-modules/push/push.module';
+import { TimerTriggerModule } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger.module';
 import { RealtimeEventModule } from '@rab/server/engine/core-modules/realtime/realtime-event.module';
 import { ResourceScopeModule } from '@rab/server/engine/core-modules/resource-scope/resource-scope.module';
 import { SecretEncryptionModule } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.module';
@@ -35,6 +36,7 @@ import { RealtimeScanProcessor } from './queues/rab-realtime/realtime.processors
 import { ReportScanProcessor, ShiftStatementConsumer } from './queues/rab-reports/report.processors';
 import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
 import { AiMaintenanceProcessor, AiTurnConsumer } from './queues/rab-ai/ai.processors';
+import { TimerTriggerConsumer } from './queues/rab-timer-triggers/timer-trigger.processors';
 
 /**
  * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 20 scans and the 4 consumers (AI Phase 1 added the
@@ -56,6 +58,8 @@ export const WORKER_PROCESSORS = [
   // AI Phase 1: the rab-ai consumer and the AI retention scan (queues/rab-ai).
   AiTurnConsumer,
   AiMaintenanceProcessor,
+  // Phase D-Q4b: the crewflow-timer-triggers consumer (its BullMQ Worker exists only when WORKER_TIMER_TRIGGERS is not off).
+  TimerTriggerConsumer,
 ];
 
 /**
@@ -105,10 +109,10 @@ export const WORKER_PROCESSORS = [
  *  - `AttendanceModule` — the shared Shift-QR signing and QR-image services
  *    used by the pre-shift report (imported, never re-implemented here).
  *  - `RealtimeEventModule` — `RealtimeEventService`, needed by
- *    `applyOfferConfirmation()` via `offer-expiry.job.ts`'s manager-
- *    confirmation-timeout cycle (Stage 5) so the SAME shared confirm path a
- *    real Manager's click uses also raises `offer.confirmed` when the
- *    worker auto-confirms on timeout — never a second notification path.
+ *    `withdrawUnconfirmedOffer()` via `offer-expiry.job.ts`'s manager-
+ *    confirmation-deadline cycle, so the SAME shared withdrawal the API's
+ *    lazy path uses raises `offer.rejected` (the Worker never confirms an
+ *    offer — owner rule 2026-11-06).
  *  - `StorageReconcileCommand` — the existing, already-safe storage
  *    reconciliation logic, reused on a schedule (see storage-cleanup.job.ts).
  *
@@ -135,6 +139,9 @@ export const WORKER_PROCESSORS = [
     AttendanceModule,
     RealtimeEventModule,
     PushModule,
+    // Phase D-Q4b: the timer-trigger producer (no-show / late clock-in arming) and the consumer's settings. Off by default:
+    // no Redis connection, no job.
+    TimerTriggerModule,
     // Waves 4+5 integration: the API's global MemberAccessModule provides FieldPolicyService, which AttendanceService,
     // ShiftReportService, PayrollService and PayrollRunService now inject (wave 5 DATA, "money follows payroll.view").
     // The worker loads those services through AttendanceModule -> PayrollModule, so it needs the same global provider,

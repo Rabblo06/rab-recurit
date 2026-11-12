@@ -1,7 +1,7 @@
 import { effectiveAssignmentBreakMinutes, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
 import { EmailOutboxJobType, ShiftStatus } from '@rab/shared';
 import { Logger } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -12,12 +12,11 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
-import { renderPreShiftReportHtml } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
-import { documentFooterTemplate } from '@rab/server/modules/attendance/templates/adolphus-document';
+import { PreShiftReportData } from '@rab/server/modules/attendance/templates/pre-shift-report.html';
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
-import { renderHtmlToPdf } from './render-pdf.util';
+import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { renderRosterEmail } from './report-email-content';
 import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
@@ -29,9 +28,9 @@ const logger = new Logger('ShiftReportSchedulerJob');
  * `shift-monitor.job.ts` — a read-only crewflow workspace scan finds candidates, each
  * candidate is then re-loaded and processed under its own `crewflow`-scoped
  * transaction via `runScopedForOrg`... except this job's actual work
- * (Playwright render + email enqueue) needs its OWN transaction boundary
+ * (PDF render + email enqueue) needs its OWN transaction boundary
  * separate from the read that finds the assignments/venue, since a long
- * Playwright render should not hold a Postgres transaction open. The scoped
+ * PDF render should not hold a Postgres transaction open. The scoped
  * read/write here is therefore split into two short `runInTenantContext`
  * calls per candidate (load data, then persist result) rather than one
  * long one wrapping the render — deliberate, not an oversight.
@@ -60,24 +59,24 @@ export interface ShiftReportSchedulerResult {
   failed: number;
 }
 
-export async function runShiftReportSchedulerCycle(
-  ownerDataSource: DataSource,
-  tenantContext: TenantContextService,
-  attendanceQr: AttendanceQrService,
-  qrImage: QrImageService,
-  emailOutbox: EmailOutboxService,
-  files: FileService,
-  reportAvailableBeforeMinutes: number,
-  options: { organisationId?: string; audit?: AuditService } = {},
-): Promise<ShiftReportSchedulerResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
-      return await manager.query<ScanCandidate[]>(
-        `
+/**
+ * D-Q4a (refactor only, no behaviour change): discovery for ONE workspace, then the unchanged per-shift processing
+ * (`processShiftReportCandidates`: per shift the session advisory lock `shift_report:<id>` on `lockDataSource`, which the
+ * Worker gives as the DIRECT DataSource, then the render/persist). The combined shift scan calls the same two functions
+ * and keeps the direct DataSource for the lock; `runShiftReportSchedulerCycle` stays the separate-mode entry.
+ */
+export type ShiftReportCandidate = ScanCandidate;
+
+export async function discoverShiftReportCandidates(manager: EntityManager, reportAvailableBeforeMinutes: number, organisationId?: string): Promise<ShiftReportCandidate[]> {
+  // SQL-injection lint (owner login): the window is a bound integer parameter, never text spliced into the interval literal.
+  if (!Number.isInteger(reportAvailableBeforeMinutes) || reportAvailableBeforeMinutes < 0) throw new Error('reportAvailableBeforeMinutes must be a non-negative integer.');
+  return await manager.query<ScanCandidate[]>(
+    `
         SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
         FROM shift s
         LEFT JOIN shift_report sr ON sr.shift_id = s.id
         WHERE s.status NOT IN ('cancelled', 'completed', 'draft')
-          AND s.starts_at <= now() + interval '${reportAvailableBeforeMinutes} minutes'
+          AND s.starts_at <= now() + make_interval(mins => $2::int)
           AND s.ends_at > now()
           AND ($1::uuid IS NULL OR s.organisation_id = $1::uuid)
           AND (
@@ -88,10 +87,39 @@ export async function runShiftReportSchedulerCycle(
         ORDER BY s.starts_at ASC
         LIMIT 200
       `,
-        [options.organisationId ?? null],
-      );
-  }, options.organisationId);
+    [organisationId ?? null, reportAvailableBeforeMinutes],
+  );
+}
 
+export async function runShiftReportSchedulerCycle(
+  ownerDataSource: DataSource,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  reportAvailableBeforeMinutes: number,
+  options: { organisationId?: string; audit?: AuditService } = {},
+): Promise<ShiftReportSchedulerResult> {
+  const candidates = await discoverInWorkspaces(
+    ownerDataSource,
+    tenantContext,
+    (manager) => discoverShiftReportCandidates(manager, reportAvailableBeforeMinutes, options.organisationId),
+    options.organisationId,
+  );
+  return processShiftReportCandidates(ownerDataSource, tenantContext, attendanceQr, qrImage, emailOutbox, files, candidates, options.audit);
+}
+
+export async function processShiftReportCandidates(
+  lockDataSource: DataSource,
+  tenantContext: TenantContextService,
+  attendanceQr: AttendanceQrService,
+  qrImage: QrImageService,
+  emailOutbox: EmailOutboxService,
+  files: FileService,
+  candidates: readonly ShiftReportCandidate[],
+  audit?: AuditService,
+): Promise<ShiftReportSchedulerResult> {
   let generated = 0;
   let skippedLocked = 0;
   let failed = 0;
@@ -99,14 +127,14 @@ export async function runShiftReportSchedulerCycle(
   for (const candidate of candidates) {
     // One failing shift (bad data, renderer down) must not block every shift behind it.
     try {
-      const outcome = await withAdvisoryLock(ownerDataSource, `shift_report:${candidate.shift_id}`, () =>
-        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, options.audit),
+      const outcome = await withAdvisoryLock(lockDataSource, `shift_report:${candidate.shift_id}`, () =>
+        generatePreShiftReport(candidate, tenantContext, attendanceQr, qrImage, emailOutbox, files, audit),
       );
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) generated += 1;
     } catch (error) {
       failed += 1;
-      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}`);
+      logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
   }
 
@@ -168,7 +196,8 @@ async function generatePreShiftReport(
       const qrToken = attendanceQr.sign(shift);
       const qrPng = await qrImage.generatePng(qrToken);
 
-      const html = renderPreShiftReportHtml({
+      // The data, not HTML (D1): renderReportPdf derives either renderer's output from it through the shared view-model.
+      const data: PreShiftReportData = {
         ...info,
         staff: staffRows.map((r: { period: string; assignment_break_minutes: number | null; staff_ref: string | null; first_name: string; last_name: string }) => ({
           name: `${r.first_name} ${r.last_name}`,
@@ -179,13 +208,11 @@ async function generatePreShiftReport(
           breakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignment_break_minutes }, shift),
         })),
         qrPngBase64: qrPng.toString('base64'),
-      });
-      const footerTemplate = documentFooterTemplate(info);
+      };
 
       return {
         shift,
-        html,
-        footerTemplate,
+        data,
         venueName,
       };
     },
@@ -193,7 +220,7 @@ async function generatePreShiftReport(
 
   if (!prepared) return false;
 
-  const pdfBuffer = await renderHtmlToPdf(prepared.html, { footerTemplate: prepared.footerTemplate, landscape: true });
+  const pdfBuffer = await renderReportPdf({ kind: 'pre-shift', data: prepared.data });
   // Every generation is a NEW immutable object in shared storage; the report row points at the latest.
   const uploaded = await files.putObject({
     kind: FileKind.SHIFT_ROSTER_PDF,

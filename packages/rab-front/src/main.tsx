@@ -6,6 +6,7 @@ import './shared/motion.css'
 import App from './App'
 import { initTheme } from './shared/lib/theme'
 import { canonicalLoopbackUrl } from './shared/lib/loopback-host'
+import { installChunkPreloadErrorReload } from './shared/lib/lazyWithPreload'
 
 // Local development only: keep the page on the same loopback alias as the API so the session cookie is same-site
 // (see loopback-host.ts). Production builds never include this branch.
@@ -17,6 +18,8 @@ if (loopbackTarget) {
   window.location.replace(loopbackTarget)
 } else {
   initTheme()
+  // A tab left open across a deploy may ask for a chunk that no longer exists: reload once (guarded) to the new build.
+  installChunkPreloadErrorReload()
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

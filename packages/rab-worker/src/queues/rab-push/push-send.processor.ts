@@ -12,6 +12,7 @@ import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { PushQueueJobData } from '@rab/server/engine/core-modules/push/push-queue.constants';
+import { claimedAttemptFrom } from '../claimed-attempt';
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -38,6 +39,10 @@ function sanitizeErrorMessage(error: unknown): string {
  * carries only `notificationId`/`type` — enough for the app to deep-link and then fetch the real
  * content through the ALREADY-AUTHENTICATED `/notifications` API, never from the push payload
  * itself.
+ *
+ * D-Q5b (owner confirmation OC-1, 2026-11-04): `attempt_count` is cumulative across dispatch generations — the claim adds 1
+ * and returns it, ACCEPTED/RETRY/FAILED record it, and a row already at `max_attempts` is not claimed (see
+ * `claimed-attempt.ts`). Before, every write used `job.attemptsMade + 1`, which restarted at 1 on each republish.
  */
 export function createPushSendProcessor(deps: PushSendProcessorDeps) {
   return async function processPushSendJob(job: Job<PushQueueJobData>): Promise<void> {
@@ -55,13 +60,16 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
       if (!row) throw new Error(`push delivery row ${pushDeliveryId} is not visible yet — retrying`);
       if (row.status === 'ACCEPTED' || row.status === 'CANCELLED') return { skip: true as const };
 
+      // D-Q5b (OC-1): the same CAS counts this attempt and returns the cumulative count; a row at its cap is not claimed.
       const claim = await manager
         .createQueryBuilder()
         .update(PushDelivery)
-        .set({ status: 'PROCESSING', processingAt: () => 'now()', processingToken })
-        .where('id = :id AND status IN (:...open)', { id: row.id, open: ['PENDING', 'RETRY'] })
+        .set({ status: 'PROCESSING', processingAt: () => 'now()', processingToken, attemptCount: () => 'attempt_count + 1' })
+        .where('id = :id AND status IN (:...open) AND attempt_count < max_attempts', { id: row.id, open: ['PENDING', 'RETRY'] })
+        .returning(['attemptCount', 'maxAttempts'])
         .execute();
       if (!claim.affected) return { skip: true as const };
+      const attempt = claimedAttemptFrom(claim.raw, 'attempt_count', 'max_attempts');
 
       // Revalidate authoritative state immediately before sending (A9/A10-style, same discipline
       // as email's own revalidate()): the device may have been deactivated, or the notification
@@ -94,11 +102,11 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
         .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
         .execute();
 
-      return { skip: false as const, row, device, notification };
+      return { skip: false as const, row, device, notification, attempt };
     });
 
     if (outcome.skip) return;
-    const { row, device, notification } = outcome;
+    const { row, device, notification, attempt } = outcome;
 
     let result: PushSendResult;
     try {
@@ -114,14 +122,14 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
       if (pushError.invalidToken) {
         await deps.tenantContext.runInTenantContext(ctx, (manager) => deps.pushDeviceService.deactivateInvalidToken(manager, device.id));
       }
-      const isFinal = !pushError.retryable || job.attemptsMade + 1 >= row.maxAttempts;
+      const isFinal = !pushError.retryable || attempt.count >= attempt.max;
       const write = await deps.tenantContext.runInTenantContext(ctx, (manager) =>
         manager
           .createQueryBuilder()
           .update(PushDelivery)
           .set({
             status: isFinal ? 'FAILED' : 'RETRY',
-            attemptCount: job.attemptsMade + 1,
+            attemptCount: attempt.count,
             lastErrorCode: pushError.code ?? null,
             lastErrorMessageSanitized: sanitizeErrorMessage(pushError),
             ...(isFinal ? { failedAt: () => 'now()' } : {}),
@@ -136,7 +144,7 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
 
     // Completion correctness: the provider ACCEPTED the push. A failure from here on is a persistence failure, never a
     // provider failure — classifying it as RETRY (as the single try/catch used to) would send a second real push.
-    await persistAccepted(deps, ctx, row.id, processingToken, job.attemptsMade + 1, result);
+    await persistAccepted(deps, ctx, row.id, processingToken, attempt.count, result);
   };
 }
 

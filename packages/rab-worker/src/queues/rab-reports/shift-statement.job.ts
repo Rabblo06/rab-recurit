@@ -1,4 +1,4 @@
-import { formatPence, NotificationType } from '@rab/shared';
+import { assertSafePence, formatPence, NotificationType } from '@rab/shared';
 import { Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -12,13 +12,13 @@ import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_MAX_ATTEMPTS, ShiftStatementJ
 import {
   ApprovedShiftStatementData,
   breakPaidFromFigures,
-  renderApprovedShiftStatementHtml,
   shiftStatementReference,
-} from '@rab/server/modules/payroll/templates/approved-shift-statement.html';
+} from '@rab/server/modules/payroll/templates/approved-shift-statement.view-model';
 import { allocateRecords, paydayLabel, periodLabel } from '@rab/server/modules/payroll/services/payroll-allocation';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
-import { renderHtmlToPdf } from './render-pdf.util';
+import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
+import { renderReportPdf, ReportDocument } from './render-pdf.util';
 
 const logger = new Logger('ShiftStatementJob');
 
@@ -47,6 +47,9 @@ export interface ShiftStatementDispatchResult {
   publishFailed: number;
 }
 
+/** The per-workspace discovery bound of the per_scope sweep (the `LIMIT 200` in its SQL). */
+const STATEMENT_DISCOVERY_LIMIT = 200;
+
 const workerCtx = (organisationId: string, workspaceId: string) => ({ organisationId, workspaceId, userId: '', role: '', actorType: 'worker' as const });
 
 /**
@@ -64,9 +67,13 @@ export async function runShiftStatementDispatchCycle(
   options: { organisationId?: string } = {},
 ): Promise<ShiftStatementDispatchResult> {
   const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
-  const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, (m) =>
-    m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`),
-  options.organisationId);
+  const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, async (m) => {
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
+    const rows = await m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`);
+    // #24: a full discovery page (200) means more due records may remain in this workspace (global-mode follow-up sweep).
+    if (rows.length >= STATEMENT_DISCOVERY_LIMIT) noteLegacyBatchLimitReached();
+    return rows;
+  }, options.organisationId);
   await claimAndPublishCandidates(tenantContext, candidates, publish, result);
   return result;
 }
@@ -91,6 +98,7 @@ export async function dispatchStatementScope(
   const candidates = await tenantContext.runInTenantContext(workerCtx(organisationId, workspaceId), async (m) => {
     await m.query('SET TRANSACTION READ ONLY');
     return m.query<Candidate[]>(
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
       [[...ids]],
     );
@@ -125,6 +133,7 @@ async function claimAndPublishCandidates(
   for (const c of candidates) {
     const generation = await tenantContext.runInTenantContext(workerCtx(c.organisation_id, c.workspace_id), async (m) => {
       const [rows] = (await m.query(
+        // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
         `UPDATE payroll_record SET statement_status = 'queued', statement_dispatch_generation = statement_dispatch_generation + 1,
                 statement_queued_at = now(), statement_processing_at = NULL, updated_at = now()
           WHERE id = $1 AND ${DUE_SQL}
@@ -153,8 +162,11 @@ export interface ShiftStatementProcessorDeps {
   files: FileService;
   notifications: NotificationService;
   audit?: AuditService;
-  /** Test seam: replaces the Playwright renderer. Production never passes it. */
-  render?: (html: string) => Promise<Buffer>;
+  /**
+   * Test seam: replaces the renderer. It receives the same data-in document production passes to `renderReportPdf`
+   * (owner decision D1). Production never passes it.
+   */
+  render?: (doc: ReportDocument) => Promise<Buffer>;
 }
 
 export type ShiftStatementOutcome = 'generated' | 'stale' | 'failed';
@@ -181,8 +193,9 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
     });
     if (!prepared) return 'stale';
 
-    const html = renderApprovedShiftStatementHtml(prepared.data);
-    const buffer = deps.render ? await deps.render(html) : await renderHtmlToPdf(html);
+    // Data in, PDF out: renderReportPdf builds the ONE view-model and renders it with the renderer PDF_RENDERER selects.
+    const doc: ReportDocument = { kind: 'approved-shift-statement', data: prepared.data };
+    const buffer = deps.render ? await deps.render(doc) : await renderReportPdf(doc);
     uploaded = await deps.files.putObject({
       kind: FileKind.APPROVED_SHIFT_STATEMENT_PDF, organisationId: data.organisationId, workspaceId: data.workspaceId,
       resourceType: 'payroll_record', resourceId: data.payrollRecordId, buffer,
@@ -225,6 +238,7 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
 
 async function loadStatementData(m: EntityManager, recordId: string): Promise<{ data: ApprovedShiftStatementData; staffUserId: string }> {
   const [r] = await m.query(
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT pr.id, pr.organisation_id, pr.workspace_id, pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, pr.approved_at,
             a.clock_in_at, a.clock_out_at, COALESCE(a.break_minutes, sa.break_minutes, s.break_minutes) AS break_minutes,
             sp.staff_ref, sp.user_id AS staff_user_id, u.first_name, u.last_name, v.name AS venue_name, jr.name AS role_name,
@@ -270,8 +284,10 @@ async function loadStatementData(m: EntityManager, recordId: string): Promise<{ 
       breakMinutes,
       breakPaid: breakPaidFromFigures(iso(r.clock_in_at), iso(r.clock_out_at), breakMinutes, payableMinutes),
       payableMinutes,
-      payRatePence: Number(r.pay_rate_pence),
-      amountPence: Number(r.amount_pence),
+      // bigint columns arrive as strings: enter pence through money.ts's assertSafePence, so a value outside Number's
+      // exact range fails the statement closed (retried and audited as a failure) instead of printing a rounded amount.
+      payRatePence: assertSafePence(Number(r.pay_rate_pence), 'payroll_record.pay_rate_pence'),
+      amountPence: assertSafePence(Number(r.amount_pence), 'payroll_record.amount_pence'),
       approvedAt: iso(r.approved_at)!,
       approvedByName: r.approved_by_name ?? null,
       payrollPeriodLabel: period ? `${periodLabel(period)}${late}` : null,
@@ -298,9 +314,22 @@ async function notifyStaff(m: EntityManager, notifications: NotificationService,
   return rows.length > 0;
 }
 
+/**
+ * The fixed, non-personal code stored in `statement_error` and the SHIFT_STATEMENT_FAILED audit metadata for a failed
+ * generation: `error_<CODE>` for an error carrying an upper-case `code` (a driver code such as "23505", or a renderer
+ * code), the renderer's own code when it already has that shape (the native renderer's `error_PDF_NATIVE_*`,
+ * `error_PDF_RENDER_TIMEOUT`, …: a native failure stays visible and attributable, never a silent Chromium fallback), and
+ * `generation_failed` for anything else. Never a message, never caller-controlled free text.
+ */
+export function statementFailureCode(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  if (typeof code !== 'string') return 'generation_failed';
+  if (/^error_[A-Z0-9_]{1,40}$/.test(code)) return code;
+  return /^[A-Z0-9_]{1,40}$/.test(code) ? `error_${code}` : 'generation_failed';
+}
+
 async function recordFailure(job: ShiftStatementJobData, deps: ShiftStatementProcessorDeps, error: unknown): Promise<void> {
-  const code = (error as { code?: string })?.code;
-  const safe = typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? `error_${code}`.slice(0, 64) : 'generation_failed';
+  const safe = statementFailureCode(error);
   await deps.tenantContext.runInTenantContext(workerCtx(job.organisationId, job.workspaceId), async (m) => {
     const [, n] = (await m.query(
       `UPDATE payroll_record SET statement_status = 'failed', statement_attempts = statement_attempts + 1, statement_error = $3, updated_at = now()

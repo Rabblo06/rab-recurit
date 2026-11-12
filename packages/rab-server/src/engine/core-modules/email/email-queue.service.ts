@@ -2,7 +2,9 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 
+import { enqueueRegisteredJob, registeredJob } from '../../worker-shared/queue-enqueue';
 import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+import { bullmqJobOptionsOf, OutboxJobOptions } from '../../worker-shared/queue-registry';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from './email-queue.constants';
@@ -10,15 +12,12 @@ import { EMAIL_QUEUE_JOB_NAME, EMAIL_QUEUE_NAME, EmailQueueJobData } from './ema
 /**
  * D5: the same 5 attempts and 5 s exponential base, now with JITTER — each retry waits a random 50–100 % of its
  * exponential step (BullMQ 5.81 `backoff.jitter`), so the retries of many jobs that failed together (a provider or network
- * outage) do not all hit the provider again in the same second.
+ * outage) do not all hit the provider again in the same second. D-Q1: read from the queue registry (values unchanged:
+ * 5 attempts, exponential 5 s, jitter 0.5, 7 d completed, 30 d failed — pinned by queue-registry.spec.ts).
  */
-export const EMAIL_QUEUE_JOB_OPTIONS = {
-  attempts: 5,
-  backoff: { type: 'exponential' as const, delay: 5_000, jitter: 0.5 },
-  removeOnComplete: { age: 7 * 24 * 60 * 60 },
-  removeOnFail: { age: 30 * 24 * 60 * 60 },
-};
-const QUEUE_OPTIONS = EMAIL_QUEUE_JOB_OPTIONS;
+const LIVE_JOB_STATES: ReadonlySet<string> = new Set(['waiting', 'delayed', 'active', 'prioritized', 'waiting-children']);
+
+export const EMAIL_QUEUE_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(EMAIL_QUEUE_NAME) as OutboxJobOptions);
 
 /**
  * API-process side of the queue — publish only, never consumes. Bounded,
@@ -70,7 +69,7 @@ export class EmailQueueService implements OnModuleDestroy {
    * separate string with no such constraint and is unaffected.
    */
   async publish(emailOutboxId: string, organisationId: string): Promise<void> {
-    await boundedPublish(this.connection, 'email-outbox publish', () => this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.0`, ...QUEUE_OPTIONS }));
+    await this.add(emailOutboxId, organisationId, 0);
   }
 
   /**
@@ -83,7 +82,33 @@ export class EmailQueueService implements OnModuleDestroy {
    * "new" generation for the same row.
    */
   async republish(emailOutboxId: string, organisationId: string, generation: number): Promise<void> {
-    await boundedPublish(this.connection, 'email-outbox publish', () => this.queue.add(EMAIL_QUEUE_JOB_NAME, { emailOutboxId, organisationId }, { jobId: `email-outbox.${emailOutboxId}.attempt.${generation}`, ...QUEUE_OPTIONS }));
+    await this.add(emailOutboxId, organisationId, generation);
+  }
+
+  /**
+   * D-Q1: every publish names its tenant scope — the outbox row's own organisation (the caller just wrote or claimed the
+   * row; never a client value). The job (name, ids-only payload, registry options, jobId format) is validated BEFORE the
+   * bounded publish, so a refusal is never mistaken for a Redis outage.
+   */
+  private async add(emailOutboxId: string, organisationId: string, generation: number): Promise<void> {
+    const data: EmailQueueJobData = { emailOutboxId, organisationId };
+    const job = registeredJob(EMAIL_QUEUE_NAME, EMAIL_QUEUE_JOB_NAME, { kind: 'organisation', organisationId }, data, {
+      jobId: `email-outbox.${emailOutboxId}.attempt.${generation}`,
+    });
+    await boundedPublish(this.connection, 'email-outbox publish', () => enqueueRegisteredJob(this.queue, job));
+  }
+
+  /**
+   * email-twenty Decision 2: whether the job of a row's CURRENT generation is still live in BullMQ (waiting, delayed, active,
+   * prioritized, waiting-children). The dispatcher asks before failing a row at its re-queue cap, so a row that is only waiting
+   * in a backlog is never failed. Bounded like a publish: throws QueuePublishUnavailableError when Redis cannot answer.
+   */
+  async isLive(emailOutboxId: string, generation: number): Promise<boolean> {
+    return boundedPublish(this.connection, 'email-outbox liveness probe', async () => {
+      const job = await this.queue.getJob(`email-outbox.${emailOutboxId}.attempt.${generation}`);
+      if (!job) return false;
+      return LIVE_JOB_STATES.has(await job.getState());
+    });
   }
 
   async onModuleDestroy(): Promise<void> {

@@ -24,16 +24,23 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { assertRuntimeDbRole } from '@rab/server/engine/utils/assert-runtime-db-role';
 import { assertHwsStartupInvariants } from '@rab/server/database/typeorm/core/hws-startup-guard';
 import { assertRuntimeDatabaseIdentity } from '@rab/server/database/typeorm/core/runtime-database-guard';
-import { runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { isProductionProcess, runDatabaseBootGates } from '@rab/server/database/boot-checks/database-boot-gates';
+import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
+import { installSessionRoleResetOnDataSource } from '@rab/server/database/postgres/session-role-reset';
+import { securityReady, startSecurityPostureMonitoring } from '@rab/server/engine/core-modules/health/security-readiness';
 import { createPgDataSource, pgClientConfig, probePgSessionAffinity, resolvePgEnvironmentCached, setPgProcessRole } from '@rab/server/database/postgres/index';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { StorageReconcileCommand } from '@rab/server/command/storage-reconcile.command';
 import {
+  PROVISIONER_CYCLE_DURATIONS_KEY,
+  PROVISIONER_HEARTBEAT_KEY,
+  PROVISIONER_STATS_KEY,
   WORKER_CYCLE_DURATIONS_KEY,
   WORKER_HEARTBEAT_KEY,
   WORKER_HEARTBEAT_TTL_SECONDS,
+  WORKER_SCAN_TICKS_KEY,
   WORKER_STATS_KEY,
 } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { SHIFT_STATEMENT_QUEUE_NAME, ShiftStatementJobData } from '@rab/server/modules/payroll/constants/shift-statement';
@@ -41,23 +48,36 @@ import { boundedPublish, createQueueProducerConnection, QUEUE_PRODUCER_REDIS_OPT
 import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
+import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
+import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
+import { resolveSchemaWaitMs, waitForWorkerSchemaOn } from './core/runtime/schema-wait';
+import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
+import { resolveInProcessProvisioningInterval } from './workspace-provisioner.config';
 import { WorkerRuntime } from './core/runtime/worker-runtime';
+import type { ScanLock } from './core/locking/scan-lock';
 import { BullmqScheduler, closeWorkersBounded, createConsumerWorkers, firstRunDelayFromStamp, registerIntervalScans, startBullmqScheduler } from './core/scheduler/bullmq-scheduler';
+import { dailyScansMissingStamp, recordDailyFirstSeen } from './core/scheduler/daily-first-seen';
 import { ProcessorExplorer, ProcessorRegistrationError, validateHandlerRegistry } from './core/scheduler/processor-explorer';
-import { resolveScanPrefix } from './core/scheduler/queue-registry';
+import { pdfNativeMemoryPlan, prewarmRenderPool } from './queues/rab-reports/native/runtime/render-pool';
+import { describePdfRendering, pdfRendererMode } from './queues/rab-reports/render-pdf.util';
+import { assertQueueRegistryValid } from './core/scheduler/queue-registry';
+import { buildSchedulerPlan, resolveWorkerSchedulerRole } from './core/scheduler/scheduler-plan';
 import { RedisPreflightError } from './core/scheduler/redis-preflight';
-import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { SCAN_JOBS } from './core/scheduler/scan-jobs';
+import { COMBINED_SHIFT_SCAN_JOB, combinedMemberLock, createCombinedShiftScan, withCombinedShiftScan } from './queues/rab-shifts/shift-scan-combined.job';
 import { WorkerDependencies } from './core/scheduler/worker-dependencies';
 import { DispatchCoordinator } from './core/wake/dispatch-coordinator';
 import { DispatchWakeListener } from './core/wake/dispatch-listener';
 import { createNotificationQueueMonitor, NotificationQueueMonitor } from './core/wake/notification-queue-monitor';
 import { resolveInviteAutoDeleteEnabled } from './queues/rab-maintenance/account-invite-cleanup.job';
-import { buildDispatchBindings, DISPATCH_SCAN_JOBS, dispatchIntervalOf, resolveDispatchConfig, withGlobalDispatch } from './core/wake/dispatch-wiring';
+import { buildDispatchBindings, DISPATCH_SCAN_JOBS, resolveDispatchConfig, withGlobalDispatch } from './core/wake/dispatch-wiring';
 import { WorkerModule } from './worker.module';
 import { WORKER_DIRECT_POOL_MAX_BUDGET } from '@rab/server/database/runtime/connection-budget';
 import { registerDataSourcePoolMetrics } from '@rab/server/database/runtime/database-metrics';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
+import { TimerTriggerQueueService } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
+import { redisTimerTriggerOutcomeRecorder } from './queues/rab-timer-triggers/timer-trigger-arming';
 
 /**
  * ONE `rab-worker` process, multiple job categories — its own deployable
@@ -77,14 +97,18 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  * every business rule lives in the shared services the API also uses
  * (`WorkerModule` imports them; nothing here re-implements one).
  *
- * Worker credential isolation checkpoint (P2/P3): this process authenticates to PostgreSQL ONLY as
- * the restricted `crewflow_app` login — the exact same identity the API uses, same as `DATABASE_URL`.
- * It never reads, requires or initialises `DATABASE_URL_UNPOOLED`. Two `crewflow_app` connections,
- * not two identities: `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
+ * Worker credential isolation checkpoint (P2/P3, updated for Phase D): this process authenticates to
+ * PostgreSQL only as a restricted, RLS-bound runtime login — `crewflow_app` (the API's identity) or
+ * `crewflow_worker` (Phase D: a member of `crewflow_app` WITH INHERIT TRUE, SET FALSE, and the only
+ * holder of the dispatch-claim grants). `assertRuntimeDbRole` accepts either under
+ * `WORKER_CLAIM_MODE=per_scope` and ONLY `crewflow_worker` under `global` (assert-runtime-db-role.ts);
+ * neither is an owner or BYPASSRLS role. It never reads, requires or initialises
+ * `DATABASE_URL_UNPOOLED`. Two connections, one identity (whichever of the two it is):
+ * `runtimeDataSource` (pooled, via the shared TypeORM module) for discovery,
  * scans and most cycles; `directDataSource` (a direct connection) only where a session advisory
  * lock needs connection affinity (final timesheet, shift-report scheduler). Workspace discovery
  * reads `core.worker_list_workspaces`, a narrow SECURITY DEFINER function (owned by the separate
- * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`); token cleanup runs through
+ * NOLOGIN `rab_secure_owner`, granted EXECUTE to `crewflow_app`, which `crewflow_worker` inherits); token cleanup runs through
  * `core.worker_cleanup_auth_tokens` the same way. Neither function returns or touches a staff,
  * business or identity row. Account-invite cleanup and storage reconciliation's catalogue
  * enumeration also now run on `runtimeDataSource` — both were audited and found to need only
@@ -99,14 +123,14 @@ import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-run
  *
  * Business mutations (an email send, a shift reminder, a no-show flag, an offer
  * expiry, a report, a replacement request, a cancellation follow-up) run
- * through `TenantContextService` as `crewflow_app`, bound to that SPECIFIC row's
+ * through `TenantContextService` as the runtime login (above), bound to that SPECIFIC row's
  * real organisation/workspace — see `core/database/scoped-job.ts`. A job's
  * Redis/queue payload is never treated as authorisation: every job reloads
  * the authoritative row first.
  *
  * Lifecycle: no loop overlaps itself; on SIGTERM/SIGINT the worker stops
  * scheduling, lets BullMQ finish its active email jobs, waits (bounded) for
- * in-flight cycles — including a Playwright render — and only then closes
+ * in-flight cycles — including a PDF render — and only then closes
  * Nest, Postgres and Redis. Report jobs hold per-report session advisory
  * locks, which Postgres releases automatically if the process is killed
  * before it can drain, so a hard kill can never wedge a report.
@@ -143,12 +167,60 @@ function refuseStartup(error: unknown): never {
           ? '[worker-scheduler] refused: '
           : error instanceof Error && error.name === 'DispatchConfigError'
             ? '[worker-dispatch] refused: '
+            : error instanceof Error && error.name === 'TimerTriggerConfigError'
+              ? '[worker-timer-triggers] refused: '
             : error instanceof Error && error.name === 'InviteAutoDeleteConfigError'
               ? '[worker-retention] refused: '
+            : error instanceof Error && (error.name === 'ProvisionerConfigError' || error.name === 'ProvisioningIdentityError')
+              ? '[workspace-provisioning] refused: '
+            : error instanceof Error && error.name === 'WatchdogConfigError'
+              ? '[worker-watchdog] refused: '
+            : error instanceof Error && error.name === 'RuntimeIsolationError'
+              ? '[worker-isolation] refused: '
+            : error instanceof Error && (error.name === 'SchemaWaitConfigError' || error.name === 'SchemaCompatibilityError')
+              ? '[worker-schema-wait] refused: '
+            : error instanceof Error && error.name === 'PdfNativeMemoryBudgetError'
+              ? '[worker-pdf] refused: '
               : '';
   // eslint-disable-next-line no-console
   console.error(`${prefix}${message}`);
   process.exit(1);
+}
+
+/**
+ * The Worker's bounded wait for "schema current" (core/runtime/schema-wait.ts), on one short-lived boot-gate connection of
+ * its own login, with the same expected-migration list and policy the pending-migration boot gate uses.
+ */
+async function waitForWorkerSchema(pg: ReturnType<typeof resolvePgEnvironmentCached>): Promise<void> {
+  const maxWaitMs = resolveSchemaWaitMs(process.env);
+  const dataSource = createPgDataSource(
+    pg,
+    { endpoint: 'primary', purpose: 'boot-gates', max: 1 },
+    {
+      name: 'worker-schema-wait',
+      entities: [],
+      subscribers: [],
+      logging: false,
+      migrations: coreDataSourceOptions.migrations,
+      migrationsTableName: coreDataSourceOptions.migrationsTableName,
+    },
+  );
+  await dataSource.initialize();
+  try {
+    const expected = dataSource.migrations.map((m) => m.name ?? m.constructor.name);
+    const production = isProductionProcess('worker', process.env);
+    // O3 T8a-WORKER: the same check gate 7 makes for the Worker, WITH the C3 upgrade evidence (schema-wait.ts
+    // checkWorkerSchema) — so after a failed upgrade the wait lets the Worker start exactly when gate 7 does.
+    await waitForWorkerSchemaOn((sql, params) => dataSource.query(sql, params) as Promise<unknown[]>, {
+      expected,
+      production,
+      maxWaitMs,
+      // eslint-disable-next-line no-console
+      log: (line) => console.log(line),
+    });
+  } finally {
+    await dataSource.destroy().catch(() => undefined);
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -163,12 +235,26 @@ async function bootstrap(): Promise<void> {
       return refuseStartup(error);
     }
   })();
+  // Owner-login architecture (no root launcher): the Worker itself now reports the container isolation it received (H6,
+  // CREWFLOW_RUNTIME_ISOLATION warn|enforce) and runs the event-loop watchdog the launcher used to provide (a stalled
+  // event loop is SIGKILLed so the restart policy replaces it; refused as PID 1, where the kernel ignores the kill — run
+  // the container with init: true). Both before any connection.
+  try {
+    enforceRuntimeIsolation(process.env, console);
+    startEventLoopWatchdog({ staleMs: resolveWatchdogStaleMs(process.env) });
+  } catch (error) {
+    refuseStartup(error);
+  }
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
   await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
+  // Owner-login architecture: the Worker NEVER migrates (the API start or the release step does). While the only schema
+  // finding is "pending" — that migration still running — it waits, bounded (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS), instead
+  // of the boot gate refusing it; anything else is refused exactly as before, by the wait or by the boot gates below.
+  await waitForWorkerSchema(pg).catch(refuseStartup);
   // ---- Phase B (A2): database boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending
   // migrations), before any queue consumer or pool. ----
-  await runDatabaseBootGates('worker').catch(refuseStartup);
+  const gateReport = await runDatabaseBootGates('worker').catch(refuseStartup);
   // ---- end Phase B (A2) ----
   // Phase B (P4): the session-lock connection must be session-stable — a live two-connection probe (pg-session-probe.ts),
   // run even when PG_DATABASE_URL_IS_DIRECT=true. Strong evidence, not proof; the URL denylist already ran above.
@@ -197,18 +283,39 @@ async function bootstrap(): Promise<void> {
   // ioredis reconnects on its own; without a listener every failed reconnect during a Redis outage printed
   // "[ioredis] Unhandled error event" (found by the Lane A outage harness). A failed PUBLISH still fails its cycle.
   realtimePublisherRedis.on('error', () => undefined);
+  // D-Q1 missed-tick record (rab:worker:scan-ticks): best-effort writes on their own fail-fast client (same options).
+  const scanTicksRedis = new Redis(redisUrl, { ...QUEUE_PRODUCER_REDIS_OPTIONS });
+  scanTicksRedis.on('error', () => undefined);
 
   const appContext = await NestFactory.createApplicationContext(WorkerModule, { logger: ['error', 'warn', 'log'] });
   // The worker's tenant-scoped work runs on this DataSource — it must be the restricted, RLS-bound role, exactly like the API.
-  // Worker credential isolation checkpoint: the worker authenticates as `crewflow_app`, like the API. Two pools, one identity,
-  // NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED` identity — see this file's own top doc comment.
-  //   runtimeDataSource — pooled crewflow_app (DATABASE_URL, via the shared TypeORM module). Discovery, scans, token/invite
+  // Worker credential isolation checkpoint: the worker authenticates as a restricted runtime login — `crewflow_app` (like the
+  // API) or, since Phase D, `crewflow_worker` (inherits crewflow_app; REQUIRED under WORKER_CLAIM_MODE=global) — checked by
+  // assertRuntimeDbRole below. Two pools, one identity, NEITHER of which is ever the privileged `DATABASE_URL_UNPOOLED`
+  // identity — see this file's own top doc comment.
+  //   runtimeDataSource — pooled runtime login (via the shared TypeORM module). Discovery, scans, token/invite
   //                       cleanup, storage-catalogue enumeration, email.
-  //   directDataSource  — direct crewflow_app connection (the factory's lock endpoint: PG_DATABASE_URL; legacy
+  //   directDataSource  — direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL; legacy
   //                       DATABASE_DIRECT_URL / DATABASE_URL outside production). Used ONLY where a session advisory lock
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');
+  // Owner-login architecture (Agent 3's pool safety): this pool comes from TypeOrmModule.forRoot, not the connection
+  // factory, so RESET ROLE on checkout is installed here explicitly (idempotent).
+  installSessionRoleResetOnDataSource(runtimeDataSource);
+  // Owner decision 2026-11-05 ("the Worker starts too, like Twenty"): after a failed upgrade gate 7 accepts an in-order
+  // pending tail on a stopped UPGRADE for the Worker and logs the ONE loud partly-upgraded WARNING naming the first pending
+  // migration (above, `[db-boot-gates] WARNING`); every consumer and scan then starts normally — a job that needs the
+  // missing schema fails and retries under its own rules.
+  // Agent 3's external security audit sink and semantic posture monitor (boot baseline from the gates above). An invalid
+  // audit-sink configuration refuses to start; posture drift is acted on below, once the runtime exists.
+  const securityMonitoring = (() => {
+    try {
+      return startSecurityPostureMonitoring({ dataSource: runtimeDataSource, baseline: gateReport.semanticBaseline, processLabel: 'worker process' });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   // HWS runtime cutover (Part 26): same invariant check as the API (same coreDataSourceOptions, same TenantContextService),
   // run against the worker's own runtimeDataSource — it's the one whose entity metadata and migrationsTableName matter.
   await assertHwsStartupInvariants(runtimeDataSource, appContext.get(EnvironmentService).get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
@@ -226,6 +333,17 @@ async function bootstrap(): Promise<void> {
 
   const environmentService = appContext.get(EnvironmentService);
   const schedulerMode = environmentService.get('WORKER_SCHEDULER');
+  // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): interval (development/test only) | register (bullmq, this
+  // Worker registers the schedulers — development) | consume (bullmq + DISABLE_CRON_JOBS_REGISTRATION=true — production:
+  // the API registers them at start-up; this Worker never upserts/removes one and never starts an interval timer).
+  // Re-checked here, fail closed, behind env.validation.ts.
+  const schedulerRole = (() => {
+    try {
+      return resolveWorkerSchedulerRole({ get: (key: string) => environmentService.get(key as never) });
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
   const realtimePublish = (channel: string, message: string) =>
     boundedPublish(realtimePublisherRedis, 'realtime publish', () => realtimePublisherRedis.publish(channel, message));
   // Approved Shift Statement producer (legacy `bull` prefix): the dispatcher adapter publishes through it.
@@ -259,6 +377,9 @@ async function bootstrap(): Promise<void> {
     storageReconcileCommand: appContext.get(StorageReconcileCommand),
     realtimePublish,
     shiftStatementQueue,
+    // Phase D-Q4b: trigger outcome counters on the fail-fast client (a Redis outage rejects at once, never queues).
+    timerTriggerOutcomes: redisTimerTriggerOutcomeRecorder(scanTicksRedis),
+    timerTriggers: appContext.get(TimerTriggerQueueService),
   });
 
   // Processor discovery (BullMQ migration M2): every scan and consumer handler is a `@Process` method on a `@Processor`
@@ -295,31 +416,77 @@ async function bootstrap(): Promise<void> {
   logger.log(
     inviteAutoDelete
       ? 'account-invite cleanup: WORKER_INVITE_AUTO_DELETE_ENABLED=true — automatic deletion of expired invited accounts is ENABLED (non-production only)'
-      : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the pre-Phase-D cycle runs unchanged; no account is deleted automatically',
+      : 'account-invite cleanup: automatic invite deletion is disabled (WORKER_INVITE_AUTO_DELETE_ENABLED=false) — the cleanup cycle does nothing (no invite is expired, no account is deleted)',
   );
-  // event mode: the four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS (the backstop); every other interval as before.
-  const intervalOf = (def: (typeof SCAN_JOBS)[number]) => dispatchIntervalOf(def, resolveIntervalMs(def, environmentService), dispatchConfig);
-  // Phase A pa-intervals: push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true.
-  const isEnabled = (def: (typeof SCAN_JOBS)[number]) => isScanJobEnabled(def, environmentService);
-  // Fail closed before any consumer, scheduler or loop exists: every scan interval must resolve (validated env + bounds).
+  // PDF renderer P1: which report kinds render natively (PDF_RENDERER, validated above; re-checked here, fail closed).
+  // Native mode: start the render threads now (PDF_NATIVE_PREWARM), in the background — never awaited, so neither boot
+  // nor the health heartbeat waits on the pool; an invalid PDF_NATIVE_PREWARM throws here and refuses to start, and so
+  // does a pool whose threads' heap caps would not fit PDF_NATIVE_MEMORY_BUDGET_MB (review M-3, fail closed).
   try {
-    for (const def of SCAN_JOBS) intervalOf(def);
+    logger.log(describePdfRendering());
+    if (pdfRendererMode() === 'native') {
+      const plan = pdfNativeMemoryPlan();
+      logger.log(`native PDF render pool: ${plan.size} thread(s) × ${plan.heapLimitMb} MB heap cap ≤ PDF_NATIVE_MEMORY_BUDGET_MB=${plan.budgetMb}`);
+      prewarmRenderPool();
+    }
   } catch (error) {
     refuseStartup(error);
   }
+  // O3 C2: the scan schedule from the ONE plan builder the API's start-up registration (register-schedulers.ts) uses too, so
+  // both compute identical cadences. Unchanged rules: event mode's four dispatch scans tick at WORKER_DISPATCH_BACKSTOP_SECONDS;
+  // push-dispatch only with PUSH_ENABLED=true, realtime-outbox-publish only with REALTIME_ENABLED=true (Phase A); every scan
+  // interval must resolve; WORKER_SHIFT_SCAN_MODE (Phase D-Q4a, default separate) — an unknown value, or combined mode with a
+  // common tick under 30 s, refuses to start. Fail closed before any consumer, scheduler or loop exists.
+  const schedulerPlan = (() => {
+    try {
+      return buildSchedulerPlan({ get: (key: string) => environmentService.get(key as never) }, dispatchConfig);
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const { intervalOf, isEnabled, shiftScanMode } = schedulerPlan;
 
-  // The three existing consumers — one Worker each, both modes, legacy `bull` prefix, concurrency 5 / 10 / 2.
-  const consumers = createConsumerWorkers(registry, redis, logger);
+  // D-Q1: the queue registry must be complete and valid (every queue's options explicit and acceptable to BullMQ) before
+  // any consumer exists — fail closed.
+  try {
+    assertQueueRegistryValid();
+  } catch (error) {
+    refuseStartup(error);
+  }
+  // Phase D-Q4b: WORKER_TIMER_TRIGGERS (off | shadow | on, default off) and WORKER_TIMER_TRIGGER_KINDS, re-checked here,
+  // fail closed. The producer service resolved them already (one source); `off` = no trigger consumer, no arming.
+  const timerTriggers = (() => {
+    try {
+      return appContext.get(TimerTriggerQueueService).settings;
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  logger.log(
+    timerTriggers.mode === 'off'
+      ? 'timer triggers: WORKER_TIMER_TRIGGERS=off — no trigger consumer, no arming (the backstop scans run unchanged)'
+      : `timer triggers: WORKER_TIMER_TRIGGERS=${timerTriggers.mode} kinds=${timerTriggers.kinds.join(',')} — consumer concurrency 2; the backstop scans run unchanged`,
+  );
+  // The consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4, and
+  // D-Q4b's timer triggers 2 only when WORKER_TIMER_TRIGGERS is not off).
+  const consumers = createConsumerWorkers(registry, redis, logger, (def) => def.key !== 'timerTriggers' || timerTriggers.mode !== 'off');
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).
     statsWrite: schedulerMode === 'bullmq' ? 'fields' : 'whole',
     durationsKey: WORKER_CYCLE_DURATIONS_KEY,
+    // D-Q1 missed-tick record: when each scan's trigger last fired, whatever the outcome (rab:worker:scan-ticks).
+    ticksKey: WORKER_SCAN_TICKS_KEY,
+    // Its own fail-fast client: during a Redis outage a tick write is rejected at once, never queued in the blocking
+    // main client's offline queue (CodeRabbit on #34).
+    ticksRedis: scanTicksRedis,
   });
   // Per-instance heartbeat file — a no-op unless CREWFLOW_INSTANCE_HEALTH_FILE is set (the Worker bundle sets it). The
   // global Redis key below can be refreshed by another replica; see instance-heartbeat.ts.
   const instanceHeartbeat = createInstanceHeartbeat('jobs', runtime);
   let scheduler: BullmqScheduler | null = null;
+  // Phase D-Q4a Lane A: the scan lock as soon as startBullmqScheduler opens it (onScanLock), before its first scan Worker.
+  let memberScanLock: ScanLock | null = null;
 
   // Phase D (D1): global claim mode. The four dispatch scans call the coordinator (reconciliation sweep when due + global
   // claim through core.worker_claim_*); wake-ups (event mode) run through runtime.runOnce so they take a scan slot, are
@@ -342,13 +509,14 @@ async function bootstrap(): Promise<void> {
         runtime.metrics.increment(jobName, 'claimsRepeated', stats.repeatedClaims);
         runtime.metrics.increment(jobName, 'claimsOver20', stats.highClaimCount);
       },
-      executeWake: (queue, run) => {
+      // `trigger`: 'wake' (NOTIFY hint, claim follow-up) or 'reconcile' (#24 follow-up reconciliation sweep).
+      executeWake: (queue, run, trigger) => {
         const def = defByQueue.get(queue)!;
         return runtime.runOnce({
-          name: `${def.name} (wake)`,
+          name: `${def.name} (${trigger})`,
           intervalMs: 0,
           statKeys: { lastRunAt: def.statKeys.lastRunAt, failures: def.statKeys.failures },
-          metricKey: `${def.jobName}:wake`,
+          metricKey: `${def.jobName}:${trigger}`,
           run: () => run(),
         });
       },
@@ -361,6 +529,23 @@ async function bootstrap(): Promise<void> {
     );
   }
 
+  // Phase D-Q4a: combined mode only. The four members are not registered (isScanJobEnabled); `shift-scan-combined` is,
+  // and runs the shared walk + each member's own processing as its own runtime cycle. Lane A: each member's processing
+  // also takes that member's own scan lock once the bullmq scheduler exists. separate (default): nothing installed here.
+  if (shiftScanMode === 'combined') {
+    const combinedDef = SCAN_JOBS.find((d) => d.jobName === COMBINED_SHIFT_SCAN_JOB)!;
+    const combined = createCombinedShiftScan(() => appContext.get(WorkerDependencies).get(), {
+      intervalOf,
+      tickMs: intervalOf(combinedDef),
+      runtime,
+      // Lane A: the member's own scan lock, from onScanLock (set before any scan Worker exists); fail closed
+      // (skipped-locked) if a job ever arrives before it. Interval mode: no member lock, as today.
+      memberLock: combinedMemberLock(schedulerMode === 'bullmq' ? 'bullmq' : 'interval', () => memberScanLock ?? scheduler?.scanLock),
+    });
+    scanRegistry = withCombinedShiftScan(scanRegistry, combined);
+    logger.log(`shift scans: WORKER_SHIFT_SCAN_MODE=combined tick=${intervalOf(combinedDef) / 1000}s members=shift-monitor,attendance-monitor,shift-report-scheduler,final-timesheet`);
+  }
+
   // Heartbeat: unchanged in both modes (the liveness signal Admin Health and invitation sends read).
   const beat = () => {
     if (scheduler?.consumersRunning()) runtime.markConsumersReady();
@@ -371,11 +556,59 @@ async function bootstrap(): Promise<void> {
   };
   beat();
   runtime.interval(beat, HEARTBEAT_INTERVAL_MS);
+  // Security readiness: the Worker has no readiness endpoint, so on posture drift it shuts down (exit 1). Its restart then
+  // meets the boot-time semantic check, which refuses while the drift is there — it never keeps running jobs on a database
+  // whose security objects changed under it.
+  runtime.interval(() => {
+    if (!securityReady()) {
+      logger.error('SECURITY: the database security posture changed since boot (posture monitor) — shutting the Worker down');
+      void shutdown('SECURITY-POSTURE-DRIFT', 1);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 
-  if (schedulerMode === 'bullmq') {
+  // ---- Owner-login architecture (T4): workspace provisioning IN-PROCESS, on the one owner login. ----
+  // The SAME loops the superseded separate provisioner ran (workspace-provisioning.loops.ts): its own session-affine
+  // ReconnectingPgClient acting as crewflow (SET ROLE), the per-cycle provisioner-strict schema check, the bounded
+  // provisioning advisory lock with shouldAbort, the daily drift check; ledger / readiness / createFor unchanged. Its own
+  // WorkerRuntime keeps the provisioner's own stats and heartbeat keys (Admin queue health, E2E 5.3 read them) and its own
+  // drain on shutdown. Two Worker replicas exclude each other through the provisioning advisory lock.
+  const provisioningInterval = (() => {
+    try {
+      return resolveInProcessProvisioningInterval(process.env);
+    } catch (error) {
+      return refuseStartup(error);
+    }
+  })();
+  const provisioningRuntime = new WorkerRuntime(redis, {
+    statsKey: PROVISIONER_STATS_KEY,
+    mirrorKey: WORKER_STATS_KEY,
+    durationsKey: PROVISIONER_CYCLE_DURATIONS_KEY,
+  });
+  const provisioningBeat = () => {
+    redis.set(PROVISIONER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30).catch(() => undefined);
+  };
+  provisioningBeat();
+  provisioningRuntime.interval(provisioningBeat, 15_000);
+  const provisioningLoops: WorkspaceProvisioningLoopsHandle = await startWorkspaceProvisioningLoops({
+    pg,
+    endpoint: 'primary',
+    runtime: provisioningRuntime,
+    logger,
+    intervalMs: provisioningInterval.intervalMs,
+    expectedMigrations: gateReport.expectedMigrations ?? [],
+    production: isProductionProcess('worker', process.env),
+    actAsCrewflow: true,
+  }).catch(refuseStartup);
+  logger.log(`workspace provisioning: in-process on the owner login (interval ${provisioningInterval.intervalSeconds}s)`);
+  // ---- end T4 ----
+
+  if (schedulerRole !== 'interval') {
     // ONE cluster-wide job scheduler per scan; this replica consumes whichever ticks it wins. Redis preflight
     // (noeviction, API support) and the dedicated scan-lock connection come first — any failure refuses to start.
-    const prefix = resolveScanPrefix(environmentService.get('NODE_ENV'), environmentService.get('BULLMQ_PREFIX'));
+    // O3 C2: `consume` (DISABLE_CRON_JOBS_REGISTRATION=true, production) never registers — the API did at start-up; this
+    // Worker only verifies, read-only, that every enabled scheduler exists. `register` keeps today's reconcile loop.
+    const prefix = schedulerPlan.prefix;
+    if (schedulerRole === 'consume') logger.log('bullmq scheduler: consume only (DISABLE_CRON_JOBS_REGISTRATION=true) - the API registers the job schedulers at start-up');
     scheduler = await startBullmqScheduler({
       redis,
       redisUrl,
@@ -390,15 +623,27 @@ async function bootstrap(): Promise<void> {
       intervalOf,
       isEnabled,
       logger,
+      onScanLock: (lock) => {
+        memberScanLock = lock;
+      },
+      registerSchedulers: schedulerRole === 'register',
     }).catch(refuseStartup);
     beat();
   } else {
-    // interval (default): the historical behaviour — every ENABLED loop on this process's own timer, in the original
-    // order, registered exactly once.
+    // interval (development and test only — O3 C2: refused in production and with DISABLE_CRON_JOBS_REGISTRATION=true): the
+    // historical behaviour — every ENABLED loop on this process's own timer, in the original order, registered exactly once.
     // Phase D (D3): the daily scans (firstRunAfterInterval) are timed from their persisted cluster stamp — a restart neither
     // re-runs them nor postpones an overdue one. An unreadable stats hash → one full interval (never an extra run).
-    const stamps: Record<string, string> = await redis.hgetall(WORKER_STATS_KEY).catch(() => ({}));
-    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) => firstRunDelayFromStamp(stamps[def.statKeys.lastRunAt], intervalMs);
+    // D-Q5a (audit §13 #9): a daily scan whose stamp is MISSING (Redis lost its data) is timed from the first boot that
+    // found it missing (recordDailyFirstSeen: SET NX, one value for every replica, expires after two intervals), not from
+    // each restart — so a Worker restarting more often than daily still runs it within one interval of that boot. A present
+    // stamp always wins; an unreadable stats hash, or Redis failing / hanging on the record, → one full interval as before.
+    const stamps: Record<string, string> | null = await redis.hgetall(WORKER_STATS_KEY).catch(() => null);
+    const firstSeen = stamps
+      ? await recordDailyFirstSeen(redis, dailyScansMissingStamp(SCAN_JOBS, stamps, intervalOf, isEnabled), Date.now())
+      : new Map<string, number>();
+    const firstRunDelayOf = (def: (typeof SCAN_JOBS)[number], intervalMs: number) =>
+      firstRunDelayFromStamp(stamps?.[def.statKeys.lastRunAt], intervalMs, Date.now(), firstSeen.get(def.statKeys.lastRunAt));
     const { disabled } = registerIntervalScans(runtime, scanRegistry, SCAN_JOBS, intervalOf, isEnabled, firstRunDelayOf);
     if (disabled.length) logger.log(`interval scheduler: not registered (disabled by their enable switch): ${disabled.join(', ')}`);
   }
@@ -453,7 +698,7 @@ async function bootstrap(): Promise<void> {
   const aiTurns = appContext.get(AiTurnRunnerService);
   const aiTitles = appContext.get(AiTitleService);
   let shutdownStarted = false;
-  const shutdown = async (signal: string): Promise<void> => {
+  const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (shutdownStarted) return;
     shutdownStarted = true;
     const timeoutMs = Number(process.env.WORKER_SHUTDOWN_TIMEOUT_MS ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
@@ -469,6 +714,8 @@ async function bootstrap(): Promise<void> {
     hardExit.unref();
     try {
       runtime.beginShutdown(); // 1. no new cycle can start (interval timers stop; a bullmq job delivered now is skipped)
+      securityMonitoring.stop();
+      provisioningRuntime.beginShutdown(); // the in-process provisioner too (a waiting provisioning lock is abandoned at once)
       // Phase D: no new wake-up or claim run; the LISTEN session closes (its in-flight runs are runtime cycles → drained below).
       coordinator?.stop();
       notificationQueueMonitor?.stop();
@@ -496,20 +743,24 @@ async function bootstrap(): Promise<void> {
       }
       await shiftStatementQueue.closeBounded();
       const remaining = scheduler ? Math.max(0, timeoutMs - (Date.now() - startedAt)) : timeoutMs;
-      const { drained, pending } = await runtime.drain(remaining); // 3. in-flight cycles (a PDF render, an email claim)
+      const [{ drained, pending }, provisioningDrain] = await Promise.all([runtime.drain(remaining), provisioningRuntime.drain(remaining)]); // 3. in-flight cycles (a PDF render, an email claim, a workspace being provisioned)
       if (!drained) logger.warn(`${pending} cycle(s) still running after ${timeoutMs}ms — closing anyway (their locks release with the connection)`);
+      if (!provisioningDrain.drained) logger.warn(`${provisioningDrain.pending} provisioning cycle(s) still running — closing anyway (the advisory lock releases with the connection; CREATING/FAILED states make the retry safe)`);
+      await provisioningRuntime.flushMetrics();
+      await provisioningLoops.close();
       await runtime.flushMetrics();
       if (scheduler) {
         await scheduler.manager.close();
         await scheduler.scanLock.close(); // releases every scan lock this replica held (session-scoped)
       }
-      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, crewflow_app pool
+      await appContext.close(); // 4. Nest providers: BullMQ queue, Redis clients, runtime pool
       await directDataSource.destroy();
       await realtimePublisherRedis.quit().catch(() => realtimePublisherRedis.disconnect());
+      await scanTicksRedis.quit().catch(() => scanTicksRedis.disconnect());
       await redis.quit();
       // eslint-disable-next-line no-console
       console.log('Worker shut down cleanly');
-      process.exit(0);
+      process.exit(exitCode);
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Worker shutdown failed:', error);

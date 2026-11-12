@@ -43,6 +43,7 @@ Earlier statements that have since been superseded (do not rely on the older wor
 | "Multi-factor authentication is not available" | TOTP plus recovery codes for every web user. Enforcement flags default off, and mobile is exempt | "Wave 4 Lane MFA" |
 | Organisation settings (name, slug, logo, sign-in methods) changed by holders of `settings.edit` on `/rest/v1/workspace…` ("Settings", P1C.1B) | Platform administrators only, on `/rest/v1/admin/organisations/:id/settings…`; the tenant routes were removed (404); the tenant reads them (`settings.view`: CEO, Manager) | "Wave 6 E2E fixes" W6X-1 (owner decision 2026-10-23) |
 | A platform admin creates an organisation (name + CEO names) and invites its CEO (P2.9B, `POST /admin/organisations`) | Email-only CEO invitation from Settings → Members → Add; the organisation is created when the CEO accepts with their own details; the old route is gone (404) | "Wave 6 E2E fixes" W6X-6 (owner correction 2026-10-23) |
+| Replacement/standby acceptances "still follow the existing manager-confirmation timeout (system auto-confirm …)" ("Replacement & standby offers", trade-off (1)); `applyOfferConfirmation` "shared by the manager click, auto-confirm and the timeout worker"; Phase 7.1 "timeout = system auto-confirm"; Venue-Manager-request "auto-confirm on accept" | The system never confirms. One writer, one caller (the sender's manual confirm), before the approval deadline (standard: start − 30 min; replacement/standby: window end); unconfirmed acceptances are withdrawn at the deadline | "No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min" (owner rule 2026-11-06) |
 
 Heading levels: every feature entry is `##`, and its sub-threats are `###`. The one entry that had been written as `#`
 ("Staff same-shift Teams read") was demoted to `##` in this pass. Its text is unchanged.
@@ -1301,7 +1302,7 @@ Migration `1786719400000-OfferKind`: `job_offer.offer_kind text NOT NULL DEFAULT
   - *Duplicate sends / retries.* Per-recipient "already offered this shift" (shift row lock serialises concurrent submits); worker retries go through the existing `worker_event` claim + offer-status CAS. Tests: R5 (two concurrent submits → one offer, one notification), W2 (timeout cycle run 3× incl. 2 concurrent → one confirmation, one audit, one notification, one seat).
   - *Erasing the absent person's record.* The no-show assignment is never updated, deleted or re-statused; the replacement is a separate assignment + offer on the same shift id. Tests: R4, R7, W2.
   - *Paying unworked time.* A replacement sent after the shift started is booked from the database time of sending, re-anchored to the approval time if later; attendance (and pay) still come only from their own check-in/clock-in. Test: R7 (period starts after the original start, no attendance row at booking).
-- **Security trade-offs (for owner veto):** (1) Replacement/standby acceptances on a directly-created shift still follow the existing manager-confirmation timeout (system auto-confirm after the configured minutes) — standby is excluded; (2) the manager may send more replacement offers than vacancies (as for ordinary sends) — capacity is enforced at approval, losers stay `staff_accepted` until rejected/expired; (3) sending is allowed until the original shift's scheduled end (stricter than the generic end + 5 h offer window), with no minimum remaining time beyond the break length.
+- **Security trade-offs (for owner veto):** (1) ~~Replacement/standby acceptances on a directly-created shift still follow the existing manager-confirmation timeout (system auto-confirm after the configured minutes) — standby is excluded;~~ **SUPERSEDED 2026-11-06** (owner rule: no automatic confirmation; see the entry "No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min"); (2) the manager may send more replacement offers than vacancies (as for ordinary sends) — capacity is enforced at approval, losers stay `staff_accepted` until rejected/expired; (3) sending is allowed until the original shift's scheduled end (stricter than the generic end + 5 h offer window), with no minimum remaining time beyond the break length.
 - **Residual:** `reopen-no-show` (attendance module) does not yet check whether a replacement has taken that seat — reopening after a replacement was booked can leave occupied > required for that shift (no double pay without real attendance, but the seat count is over). `job_offer.offer_kind` has no staff-own second RLS predicate (pre-existing table posture).
 - **Amendment (same day):** reopening a confirmed no-show is refused (409 `SEAT_TAKEN_BY_REPLACEMENT`) once a replacement holds the freed seat — decided under the shift row lock with agent R's `loadShiftVacancy`, so concurrent replacement approvals and reopens serialise (test: `manual-attendance` › Reopen no-show is refused once a replacement holds the freed seat…).
 
@@ -1453,6 +1454,7 @@ topology is unchanged. Report: `CREWFLOW_TWENTY_ARCHITECTURE_PARITY_REPORT.md`. 
               fail closed (main.js never starts after a failed step or with migrations pending); exec env -u scrub proven
               on /proc/1/environ; runtime-database-guard refuses any migration variable in api/worker.
   Reversal:   Do not adopt it; keep the one-shot rab-migrate service as the only migration path.
+  Superseded 2026-11-05: the owner adopted API migrate-on-start for production ("EXACTLY LIKE TWENTY", G-07 accepted).
   ```
 
 ## HWS dev cutover: backfill fidelity fixes + one-off privileged copy (2026-10-22, rab-devdb ONLY, owner-approved)
@@ -4112,6 +4114,9 @@ databases only.
 
 ### B6: migration isolation (one-off `rab-migrate`, never the API or the Worker)
 
+> **Superseded 2026-11-05** by the owner decision "EXACTLY LIKE TWENTY" (the API migrates on start in production; G-07
+> accepted). See the owner-login section, consequence item 13. Kept below as the history of the earlier control.
+
 - **Threats:** a long-running API or Worker holding a migration-capable credential (any RCE or SSRF then reaches DDL); an
   API that migrates at start (concurrent starts racing, a bad release migrating production before review); a release
   promoted onto a schema behind its code; the migration credential baked into an image layer or committed.
@@ -4522,7 +4527,15 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   (`pg_db_role_setting`, this or all databases, own or inherited role) or a session value that does not match its mode;
   the security posture and the CI RLS gate also fail. Residual: `postgresql.conf` / `ALTER SYSTEM` (superuser) is only
   caught by poll-mode processes.
-- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode.
+- Reconcile interval capped at 900 s (owner decision): a missing pointer delays work by at most 15 min in global mode,
+  for a queue-and-scope pointerless backlog of up to 31 batches. #24 (follow-up sweeps when a legacy sweep returns a full
+  batch; bounded to 30 per window and queue per Worker, fair one-batch-per-scope sweeps, idle-neutral) closes the earlier
+  gap where a backlog above ONE batch drained a single batch per 15 min. The bound holds while each sweep takes well under
+  about 24 s (re-measure at production scale); push drains at its consumer's pace (a published push row stays PENDING, so
+  only a batch that moved rows asks for a follow-up). A larger backlog (an availability concern only: delay, never loss or
+  cross-tenant processing) drains 31 batches per window and logs `follow-up budget exhausted`.
+  Tests: `legacy-batch-limit.spec.ts`, `dispatch-coordinator.spec.ts` (#24 block),
+  `phase-d-backlog-reconciliation.integration.spec.ts`.
 
 ### D-e: account-invite cleanup (F-1) and automatic deletion
 - Redemption refuses expired, revoked and consumed links whether or not cleanup runs (tested). Today's cleanup is a no-op
@@ -4610,34 +4623,1873 @@ unchanged: `WORKER_CLAIM_MODE=per_scope`, `WORKER_DISPATCH_MODE=poll`, `WORKER_S
   timeout after DATA can resend), push timeouts and realtime PUBLISH, and at-most-once for an interrupted push call
   (`DELIVERY_UNCERTAIN`). The SMTP post-DATA policy is an open owner decision.
 
-## Phase X1.4 — the Jest rate-limit bypass cannot reach production (cleanup audit DUP-03)
+## Phase D-Q1 — one complete queue registry, a required tenant scope on every enqueue (branch phase-d/dq1-queue-registry, not merged)
+
+Structural change; no option value, job name, jobId format, prefix, payload or business rule changed (pinned by
+`queue-registry.spec.ts` and `queue-enqueue.spec.ts` against the pre-D-Q1 literals). No migration, role, grant, RLS or
+posture change.
+
+- **Tenant scope at enqueue (new control, producer side).** Every BullMQ job is built by `registeredJob` /
+  `scanJobTemplate` (`engine/worker-shared/queue-enqueue.ts`) with a REQUIRED scope: `{ kind: 'organisation',
+  organisationId }` (a UUID, equal to the payload's `organisationId`) for the four consumer queues, `{ kind: 'system' }`
+  for the seven scan queues. Missing, malformed or wrong-kind scopes, a scope naming another organisation than the
+  payload, unknown payload keys and non-identifier values (objects, arrays, booleans, strings over 128 chars) are refused
+  with `QueueEnqueueRefusedError` before Redis. The scope always comes from a committed row or the server tenant context
+  (outbox row, claimed payroll_record, the AI turn's verified ids), never a client value.
+  **This is not a new tenant boundary.** For every current producer, the scope's `organisationId` and the payload's
+  `organisationId` come from the same argument, so "scope must equal payload" cannot fail today. What the check adds is
+  validation of shape, UUID format and payload keys, plus a guard for future producers that might build the two
+  separately. Tenant isolation is still enforced by the consumers: `SET LOCAL` plus the RLS re-read, described next.
+- **Consumer side (unchanged, verified):** every consumer binds the payload's `organisationId` with `SET LOCAL`
+  (`TenantContextService.runInTenantContext`) and re-reads its row by id under FORCE RLS before any side effect:
+  `email-send.processor.ts` (`EmailOutbox` by id), `push-send.processor.ts` (`PushDelivery` by id),
+  `shift-statement.job.ts processShiftStatementJob` (`payroll_record ... FOR UPDATE` in `workerCtx(org, workspace)`),
+  `AiTurnRunnerService` / `AiTitleService` (turn / conversation rows under the job's org + workspace). A forged id
+  combination matches no row.
+- **Unknown job name on an existing queue — finding, FIXED (Low, integrity).** Actor → action → consequence: anything
+  able to add a job to `rab-email` / `rab-push` / `rab-shift-statements` (only Crewflow processes hold the Redis
+  credentials; production Redis is unauthenticated, see Phase D-Q plan §7) under ANY job name → the consumer handed it
+  to the one send / generate handler → the email/push/statement for the id in the payload was processed as if it had
+  been published under the registered name. `rab-ai` completed an unknown name silently. Where:
+  `rab-worker/src/core/scheduler/bullmq-scheduler.ts` `createConsumerWorkers` (`(job) => handler(job)`). Fix: a job
+  whose name the registry does not list for the queue is failed closed (`UnrecoverableError`: failed set after one
+  attempt, a warning naming the queue and job id only, the handler never runs). Regression tests:
+  `queue-registry-worker.spec.ts` (all four queues) and `queue-registry-consumers.integration.spec.ts` (real Redis:
+  a `bogus-job` with `attempts: 5` ends failed after one attempt, handler not called; registered names still handled).
+  The tenant re-read above already bounded the impact to the job's own organisation's rows.
+- **Unknown queue name:** `queueSettingsOf` throws `UnknownQueueError`; the Worker refuses to start on an invalid or
+  incomplete registry (`assertQueueRegistryValid`), on a `@Processor` naming an unregistered queue (unchanged) and, in
+  bullmq mode, on scan settings that drifted from `SCAN_JOBS` (`assertScanQueueSettings`). No queue name is read from the
+  environment (`BULLMQ_PREFIX` is a validated prefix, not a queue name); the Admin queue view answers 404 for an
+  unregistered queue name (unchanged).
+- **Missed-tick record:** `rab:worker:scan-ticks` (one epoch-ms field per scan, 7-day TTL) — timestamps only, no ids,
+  no configuration, no tenant data.
+- **Residual (unchanged):** Redis is not authenticated in production compose (D-Q plan §13 #11, an Infrastructure
+  decision); the producer-side checks are defence in depth, not an authentication boundary.
+
+## Phase D-Q3b — account invites always queued (branch phase-d/dq3-invites-always-queued, not merged)
+
+Owner decision (2026-11-02, D-Q plan §12.1 #3): Staff and Manager account invites are always written to the outbox at
+creation; the Worker heartbeat key in Redis no longer decides it. No migration, no role, grant, RLS or posture change.
+
+- **Asset:** a person's account-activation link (a bearer token that sets their first password) and the timing of the
+  email that carries it. **Actor:** a Manager creating, cancelling or resending an invite; anyone able to wipe or stall
+  Redis or the Worker.
+- **Before:** `StaffService.create` / `ManagerService.create` queued the invite only if `EMAIL_DELIVERY_ENABLED` was true
+  **and** a fresh Worker heartbeat key was present in Redis. A Redis wipe or a stalled Worker made creation skip the invite
+  silently (`emailQueued:false`, no `account_invite`/`email_outbox` row) until a Manager pressed "Resend".
+- **After:** only `EMAIL_DELIVERY_ENABLED` decides (`AccountLifecycleService.isEmailDeliveryEnabled()`, synchronous, no
+  Redis read). `EMAIL_DELIVERY_ENABLED=false` still queues no invite at creation (**assumption flagged for the owner**). It
+  gates only that creation-time decision — it is not a global email kill switch: Resend invite, change-pending-email,
+  password reset and notify() emails do not read it (unchanged by this PR). The audit's `emailQueued` and the API's `emailQueued` now record what actually happened (an invite row was
+  written), not a Redis read.
+- **New risk (accepted by the owner's decision): a late invite.** An invite queued while the Worker is down is sent when it
+  returns, possibly hours later than the Manager expected. **Controls (fail closed, enforced in the Worker at send time,
+  `email-send.processor.ts` `revalidate`):** the target user must still exist; the invite must not be revoked
+  ("Cancel invitation"), accepted, or superseded by a newer invite (a resend rotates the token and revokes the older one,
+  and the latest-invite check catches an un-revoked older row); **new in this PR: the invite must not be expired** — an
+  expired invite is cancelled, never sent (before, the consumer did not check `expires_at`; the activation endpoint already
+  refused an expired link, so the risk was a confusing dead-link email, not account takeover). Redemption keeps refusing
+  expired, revoked and consumed links independently of delivery.
+- **Organisation suspension:** unchanged. `sendAccountInvite` refuses to mint an invite for a suspended organisation; an
+  invite queued before a suspension is still governed by the same revalidation (no new behaviour in this PR).
+- **Tenant isolation:** the job payload is `{emailOutboxId, organisationId}` taken from the committed row; the consumer
+  re-reads the row under that organisation's RLS context. A job naming another organisation sees no row and sends nothing
+  (tested, `account-invite-delivery` I5); with no tenant context the outbox returns zero rows (tested).
+- **Tests:** `account-invite-abuse-cases` (heartbeat missing ⇒ invite queued; heartbeat stale ⇒ queued for staff and
+  managers; `EMAIL_DELIVERY_ENABLED=false` ⇒ nothing queued; RLS isolation), `account-invite-delivery` (Worker-side: a
+  current invite queued while the Worker was down is delivered once; cancelled, superseded and expired invites are never
+  delivered; cross-tenant job sends nothing), `account-lifecycle-email-enabled.spec` (unit).
+- **Residual:** an invite queued during a long Worker outage may arrive after the Manager has already chased the person by
+  other means; the email is still valid (or is cancelled if expired/revoked/superseded). The informational "Worker
+  offline" signal in the admin panel (`AdminPanelService.checkWorker`) is unchanged and does not block queueing.
+
+## Phase D-Q3a — after-commit fast publish of notify() email/push rows (branch phase-d/dq3-fast-publish, not merged)
+
+Flag `WORKER_FAST_PUBLISH_NOTIFY` (default false = today). No migration, no role, grant, RLS or posture change; no
+payroll, attendance or staffing rule change; email preferences untouched (notify() email stays default-off).
+
+- **Asset:** delivery of another person's notification email/push (the `email_outbox` / `push_delivery` rows notify()
+  writes in a business transaction). **Actor:** the API process acting on a committed business change; anyone able to
+  make the transaction roll back, stall Redis, or forge a job.
+- **Change:** with the flag on, `NotifyFastPublishService` adds the SAME BullMQ jobs the dispatcher's first publish adds
+  (`email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0`, existing producers, same options) right after the
+  transaction's OUTERMOST commit (TypeORM `AfterTransactionCommit`; savepoint releases ignored). Any rollback — of the
+  transaction or a savepoint in it — discards everything registered on it. Outside a transaction nothing is registered.
+- **Controls:** never published before commit (a rolled-back business change publishes nothing — tested). The fast path
+  writes nothing to the database: no status, `queued_at` or generation; the dispatcher's later add of the same jobId is
+  deduplicated by BullMQ and the consumers' fenced compare-and-set allows one delivery (tested: one job, one send).
+  `provider_call_started_at`, `DELIVERY_UNCERTAIN`, the idempotency key, attempts, backoff and leases are untouched.
+  Redis down or slow: publishes run detached from the request and are bounded by the producers' fail-fast connection;
+  failures are swallowed and the row is published later by the dispatcher (tested). Job payload = the committed row's id
+  and its `organisation_id` only (server values); consumers re-read the row under that organisation's RLS context and
+  revalidate before sending (tested: other organisation's context and no context see zero rows; a job naming another
+  organisation sends nothing). Suspended organisation: notify() writes nothing, so nothing is published (tested).
+- **Push dispatcher fix (no flag):** an already-published, non-stale PENDING row is no longer re-added every tick, and a
+  publish error is caught per row instead of aborting the cycle; the failed row's `queued_at` stamp is withdrawn (fenced
+  on status + generation, in its organisation's context) so it is retried on the next tick, as before. per_scope only:
+  in global claim mode a publish error propagates exactly as before (the run releases the remaining claims and ends) —
+  withdrawing the stamp there would re-time the pointer to "due now" and the same run would re-claim it every batch. The claim SQL is byte-identical; FAILED /
+  DELIVERY_UNCERTAIN / stale-recovery outcomes are unchanged. A push job lost inside its first 2 minutes is now re-published
+  only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
+- **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
+  dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
+  lease instead of the 5 s dispatcher, a lease-outcome change.
+- **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
+  to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
+
+## Phase D-Q5a — realtime lease-reclaim cap, daily-stamp recovery after a Redis wipe (branch phase-d/dq5a-recovery, not merged)
+
+No business record and no payroll / attendance / staffing / permission rule changes. No migration, role, grant, RLS
+policy or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §5.2, §5.3, §5.5; audit §13 #6 realtime half, #9, #13).
+**One delivery-policy change, for class-A realtime hints only — NEEDS OWNER APPROVAL (independent review F47-1):** a
+reclaim after claimant death now counts toward the existing `max_attempts` (10); a hint whose claimant dies (or stalls
+past the 60 s lease) 10 times is dropped (`failed`, `LEASE_RECLAIM_EXHAUSTED`) instead of being re-claimed forever.
+Before, redelivery after claimant death was unbounded; only publish failures were capped. Impact: every realtime event
+type is an ids-only UI hint (`attendance.changed`, `notification.created`, `offer.*`, `payroll.record_changed`,
+`shift.*`, `shift_request.*`, `navigation_layout.saved`); clients refetch, none is a security signal (authorisation is
+resolved server-side per request), and dropping one takes about 10 consecutive claimant deaths at 60 s each (≥ ~10
+minutes of crash-looping while that row is held). It removes an availability risk: one tenant's poison row could be
+re-claimed every cycle on every replica. `WORKER_CLAIM_MODE=per_scope` no longer reproduces the pre-Phase-D realtime
+claim statement byte for byte; undoing D-Q5a is an image rollback (review F47-2).
+
+- **Realtime lease reclaim is now counted and capped (§13 #6, realtime half).** `claimRealtimeEvents`
+  (`rab-worker/src/core/database/realtime-event.ts`, both the per_scope and the global `ids` statement): a row that was
+  `processing` with an expired lease (its claimant died or hung) counts as an attempt; when `attempt_count + 1 >=
+  max_attempts` (the existing column, default 10, the same arithmetic `markRealtimeEventRetry` already used for a failed
+  publish) the row ends `failed` / `LEASE_RECLAIM_EXHAUSTED` with its claim and lease cleared and is not returned or
+  published. Before, a poison row whose publisher crashed every time was re-claimed forever — every cycle, every replica
+  — an availability risk one tenant's bad row could impose on the shared Worker. Actor → action → consequence after the
+  fix: a realtime hint (ids only; clients refetch) for a row whose publisher keeps dying is dropped after `max_attempts`
+  claims; no business record is touched. **Tenant isolation unchanged:** the same RLS-bound statement under the scope's
+  `SET LOCAL` (FORCE RLS on `core.realtime_event`); the MATERIALIZED CTE (eligibility, order, LIMIT, `FOR UPDATE SKIP
+  LOCKED`) is byte-identical to before (pinned by sha256 in `publish-outbox.job.spec.ts`). Abuse cases, real PostgreSQL
+  (`dq5-realtime-lease-reclaim.integration.spec.ts`): another organisation's context neither sees nor counts the row (per
+  scope and global); a claim with no tenant context bound returns zero rows and counts nothing; three concurrent
+  reclaimers of one row → exactly one wins, counted once. The global-mode pointer of a `failed` row is deleted by the
+  existing trigger (`failed` is terminal for realtime; tested). So that a LIVE claimant is never counted against (a batch
+  of up to 25 sequential publishes, 3 s each, can outlast the 60 s lease), `publishRealtimeScope` renews the lease of
+  the rows it still holds once half the lease has elapsed (`renewRealtimeEventLeases`: fenced on `status = 'processing'
+  AND claim_token`, under the same scope; only `lease_expires_at` changes; a normal batch never renews). Tested: wrong
+  token, other organisation and no tenant context renew nothing; a competing claim during a slow batch gets nothing; a
+  row another claimant already reclaimed (renewal did not keep it) is skipped, never published twice by the old claimant,
+  and counted as `lostLease` in the cycle log (not `failed`: the other claimant holds and publishes it).
+- **Daily scans after a Redis wipe (§13 #9).** In interval mode, when a daily (`firstRunAfterInterval`) scan's
+  `last<Loop>At` stamp is MISSING, `main.ts` records once `rab:worker:daily-first-seen:<statKey>` (`SET NX PX <2 ×
+  interval>`, one MULTI with the read-back; `core/scheduler/daily-first-seen.ts`) and times the first run from it, so token
+  cleanup, storage cleanup and the provisioning-health alert run within one interval of the first boot instead of never
+  (when restarts are more frequent than the interval). A present stamp always decides exactly as before; Redis failing or
+  hanging (2 s bound) → one full interval, as before. The key holds a stat-key name and an epoch-ms number — no tenant
+  data — and is deliberately outside `rab:worker:stats`, which Admin Health lists as "last runs". **Residual:** production
+  Redis is unauthenticated (§13 #11): a party able to write Redis could plant an old first-seen value and make these
+  three idempotent housekeeping scans run at the next boot instead of a day later (a future or malformed value is
+  ignored), or delete it — the same reach it already has over the stamps themselves. bullmq scheduler mode is unchanged.
+- **§13 #13:** the `main.ts` comments that said the Worker authenticates "ONLY as `crewflow_app`" now describe the
+  Phase D rule `assertRuntimeDbRole` already enforces (`crewflow_app` or `crewflow_worker` under per_scope,
+  `crewflow_worker` only under global). Comment-only.
+
+## Docker hardening H1 — patched base, security floors, root-owned code, no compiled tests (branch build/docker-hardening, not merged)
+
+Owner-approved plan (Docker consolidated plan 2026-11-02, R1/R2/R5 + compiled tests). Dockerfile-level only: no source,
+`package.json` or `yarn.lock` change; the application JavaScript and `node_modules` in the image are byte-identical to the
+unchanged Dockerfile's (only the compiled test helpers are gone).
+
+- **Unpatched Chromium / Node / expat shipped silently (scanners blind).** Threat: a stale apk layer or base digest ships
+  Chromium 155 (5 Critical / 65 High fixed in 156.0.8078.73/.79), Node 24.20.0 (24.22.1 security release) or libexpat
+  2.9.0 (4 High), and neither Trivy nor Docker Scout can flag Chromium (Alpine's secdb stops at 144) or the tarball Node.
+  Control: `packages/rab-docker/rab/security-floors.env` is the one place for the floors (Node 24.22.1, Chromium
+  156.0.8078.79-r0, libexpat 2.10.0-r0, Alpine v3.24 only); `security-floors.sh` runs at build time and FAILS the build on
+  any version below a floor, a missing package, an unparsable version, or any apk repository other than the stable
+  v3.24 main/community (no edge, no tagged repository). A build argument can only raise a floor. Base:
+  `node:24-alpine` index digest with Node 24.22.2 (amd64 + arm64). Residual: a floor is only as current as the last edit
+  of that file (H5 release scanning re-checks against Chrome/Node releases).
+- **Runtime process rewrites its own code (persistence).** Threat: before H1 every file under `/app/node_modules` and
+  `/app/packages` in the API image was owned by `node`, the API's own runtime user (≈109k writable paths), so a code
+  execution bug could persist by editing code the process later loads. Control: application code is copied root-owned
+  and not group/other-writable; the build fails if anything under `/app` other than `/app/storage` (node, 0750) is not
+  root-owned or is group/other-writable. The Worker bundle no longer needs its recursive `chown -R`/`chmod -R` (−1.08 GB
+  layer) and refuses a base image that does not meet the rule; the launcher's start-time check is unchanged.
+- **Test helpers in production images.** rab-worker compiled `src/__tests__/**` helpers (fixture passwords, fake SMTP
+  sink, test identities) into `dist`; the build stage now deletes compiled tests and fails if any remain or if runtime
+  code imports one.
+- **Security review fixes (2026-11-03).**
+  - *H1-M1 (Medium, confirmed by a planted-file proof):* Node's CommonJS `globalPaths` include `$HOME/.node_modules` and
+    `$HOME/.node_libraries`; `/home/node` was node-owned (2755), so uid 1000 in the API could plant
+    `$HOME/.node_modules/pg-native/index.js`, which TypeORM's Postgres driver try-loads on every start (reproduced: the
+    planted file executes as uid 1000). Control: `/home/node` is root-owned 0555 in the image; the Worker launcher gives
+    both children `HOME=/nonexistent` (with Chromium's `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` inside the child's own 0700
+    TMPDIR) and refuses to start if that HOME or its parent is child-writable; `module-paths-gate.cjs` runs at build time as
+    `node` (API) and as uid 1000 and 10001 (Worker) and fails the build if any module search path is writable or the
+    pg-native plant succeeds. Regression: `launcher.test.cjs` 3b and the image gate (CI `trivy` job builds it).
+  - *H1-L1:* the Alpine gate also refuses `repositories.d` drop-ins, `/etc/apk/config`, `name@tag` pins in
+    `/etc/apk/world`, and any repository host other than `dl-cdn.alpinelinux.org`; CI rejects `-X`, `--repository`,
+    `--repositories-file` and `--allow-untrusted` in `packages/rab-docker/**/Dockerfile*`. `publish-image.yaml` builds the
+    runtime stage with `no-cache-filters: rab` so a release never reuses an old `apk upgrade` layer.
+  - *H1-L2:* the setuid-root `chrome-sandbox` helper (never used: the renderer always passes `--no-sandbox`) loses its
+    setuid bit; the build fails if any setuid/setgid file remains in the API or Worker image.
+
+## Docker hardening H2 — Chromium only in the Worker image (branch build/docker-hardening-h2, stacked on H1, not merged)
+
+- **Browser attack surface in the API.** Threat: the API image carried Alpine Chromium and its whole dependency tree
+  (ffmpeg, libxml2, cjson, libsndfile, cups-libs, pulse, …) although no API code path launches a browser; every
+  Chromium/library advisory therefore applied to the internet-facing service too. Evidence: the only launcher is
+  `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts`; rab-server has no Playwright import, no dynamic
+  require of the renderer, and its report endpoints only serve PDFs the Worker already stored. Control: the API stage of
+  `packages/rab-docker/rab/Dockerfile` installs no browser, fonts or CHROMIUM_* settings and FAILS the build if
+  `chromium` is installed (`apk-absent:chromium`); `Dockerfile.worker-bundle` adds Chromium on top of the API image and
+  runs the Chromium/libexpat/Node floors there. CI builds the Worker image too, so the gates stay exercised.
+- **Unchanged:** tenant isolation, database identities and the Worker's privilege model (root launcher under tini,
+  jobs uid 1000, provisioner uid 10001, renderer still `--no-sandbox` with JavaScript, network and navigation off).
+- **Fail closed instead of failing late (review H2-L1):** the legacy `start-worker.sh` (Render-style Worker from the
+  shared image; no committed compose file, CI job or test uses it) would have started a Worker without Chromium whose PDF
+  jobs fail one by one. It now refuses to start (exit 1) and names the Worker bundle image.
+
+## Docker hardening H6 — API and Worker runtime isolation (branch build/docker-hardening-h6, stacked on H2, not merged)
+
+Compose-level only, plus a report line in the Worker launcher and an explicit (unchanged) Chromium launch option. Evidence:
+the H6 PR, `packages/rab-docker/rab/runtime-isolation-test/` (runtime matrix on the committed production file).
+
+- **Compromised API process persists, escalates or exhausts the host.** Threat: before H6 the production `rab-api` ran
+  with Docker's default capability bounding set (14 capabilities), `no_new_privs` off, a writable root filesystem and no
+  memory/CPU/PID limit — so a code-execution bug could write anywhere the `node` user owns, regain privileges through any
+  future setuid/file-capability binary, or fork/allocate until the host fails. Control (`docker-compose.production.yml`,
+  rab-api): explicit `user: "1000:1000"`, `cap_drop: [ALL]` (bounding set 0; the API binds unprivileged port 3000),
+  `no-new-privileges:true`, `read_only: true` with NO tmpfs (the API writes nothing to its filesystem: uploads are
+  buffered in memory and stored in R2/S3, `STORAGE_DRIVER=LOCAL` is refused in production; measured by the runtime matrix
+  in `development` mode with push, Sentry, OIDC and AI off — those paths are covered by the code review only. Docker's
+  default 64 MiB noexec `/dev/shm` stays writable; the API never uses it),
+  `pids_limit`, `mem_limit`, `cpus`, `stop_grace_period` above the measured Nest drain. Regression:
+  `deployment-provisioner.test.cjs` "H6 rab-api" (fails on the pre-H6 file) and the runtime matrix.
+- **Worker settings already declared, now measured and bounded.** The Worker keeps root → tini → launcher with ONLY
+  CAP_SETUID/CAP_SETGID (to give each child its own UID/GID; libuv calls setgroups/setgid/setuid) and CAP_KILL (to signal
+  and sweep children of other UIDs). Measured in the image under the production capability set: without SETUID or SETGID
+  every child launch fails with EPERM, without KILL the launcher cannot signal its children (forwarding, drain, sweep,
+  watchdog and crash handling fail; stops hang); CHOWN/FOWNER/DAC_OVERRIDE are needed only by the test fixtures, never by
+  the launcher (the tmpfs mounts arrive owned by each child): 60/60 launcher tests pass with SETUID/SETGID/KILL + those three. Children: CapEff/CapPrm/CapAmb 0, NoNewPrivs 1. H6 adds
+  `pids_limit: 1024` (one Chromium render ≈ 130 tasks; up to 4 renders run at once — shift reports, final timesheets,
+  two statement consumers — measured 551 tasks; with 512, 4 of 12 concurrent renders failed), `mem_limit` and `cpus`
+  (`cpus` above the host's CPU count stops the container from starting: planned hosts have ≥ 2 vCPUs). Regression: "H6 rab-worker" test, launcher tests,
+  runtime matrix.
+- **A platform silently drops the security keys.** Finding (deployment, NEEDS OWNER DECISION): the public source of
+  OpenShip's compose import (oblien/openship `packages/platform/src/engine/lib/compose-parser.ts`, HEAD 6a39623c,
+  2026-11-03) lists `user`, `read_only`, `tmpfs`, `cap_add`, `cap_drop`, `security_opt` and `pids_limit` as "not
+  modeled" (a non-blocking warning; the service deploys without them), honours `mem_limit`/`cpus`, `healthcheck` and
+  `stop_grace_period`, and refuses `build.additional_contexts`. Whether the deployed OpenShip is that version was NOT
+  verified. Control: the Worker launcher and the API's `api-prestart.sh` now log one line at start — `runtime isolation as
+  declared: … CapBnd=… NoNewPrivs=… root=… pids.max=… memory.max=…` (Worker: also the per-child tmpfs count) or a
+  `WARNING runtime isolation weaker than … declares (<each gap>)` — so an operator can see from the logs which of those
+  controls a platform applied (CPU limits are not reported). Owner decision "never drop a security setting silently":
+  `CREWFLOW_RUNTIME_ISOLATION=enforce` makes both REFUSE to start when any declared control is missing (uid, bounding set,
+  no_new_privs, read-only root, PID/memory limits, the Worker's per-child tmpfs; an unreadable value counts as missing);
+  the value is strict (`warn` | `enforce`, unset = `warn`, anything else refuses) and never reaches a Worker child. The
+  production file leaves it unset (warn) so today's OpenShip deployment still starts and reports; a deployment definition
+  that must never run degraded (the staging/OpenShip variant) sets `enforce`. Tests: prestart 7a–7e, launcher H6-4..7.
+  What still holds without the keys: non-root children with no capabilities, root-owned non-writable code, no setuid
+  files, explicit env allowlists, `HOME=/nonexistent`, DB identity guards and RLS.
+- **Chromium OS sandbox (finding, LOW, corrected documentation).** `CHROMIUM_NO_SANDBOX` never controlled the sandbox:
+  Playwright adds `--no-sandbox` unless `chromiumSandbox: true`, so unset/`false` launched unsandboxed too (verified on the
+  real command line). `render-pdf.util.ts` now passes `chromiumSandbox: false` explicitly (no behaviour change) and says so.
+  The S-7 spec name "unset: Chromium keeps its sandbox" in `render-pdf-sandbox-footer.integration.spec.ts` is therefore
+  inaccurate (it inspects only the arguments handed to Playwright) — follow-up for that file's owner.
+  Evaluation: under the production settings `chromiumSandbox: true` aborts (Docker's seccomp refuses CLONE_NEWUSER; the
+  setuid helper has no setuid bit since H1-L2). With a seccomp profile = Docker's default + clone/unshare of
+  NEWUSER/NEWPID/NEWNET/NEWIPC only (mount/cgroup/UTS still refused) + chroot, `chromiumSandbox: true` and
+  `--disable-gpu-sandbox`, Chromium reports "You are adequately sandboxed" (namespace layer 1, PID + network namespaces,
+  seccomp-BPF); renderers run in their own user/PID/net namespaces with an extra seccomp filter; 15/15 renders, median
+  +3.5 % (amd64, Docker Desktop kernel 6.6). Without `--disable-gpu-sandbox` the GPU process's seccomp policy kills it on
+  musl's pwritev2 and the browser exits. NOT applied: it widens the kernel attack surface of every process in the Worker
+  container (unprivileged user namespaces), needs a host-provided profile file (OpenShip drops `security_opt`), is
+  unverified on ARM64 and on Ubuntu hosts that restrict unprivileged user namespaces through AppArmor.
+  ```
+  SECURITY TRADE-OFF
+  Decision:   Keep Chromium unsandboxed (--no-sandbox) in the Worker; do not ship the user-namespace seccomp delta.
+  Reason:     The only working sandbox needs unprivileged user namespaces for the whole Worker container (a kernel LPE
+              surface for the jobs process and the root launcher), a host seccomp file the current platform ignores, and
+              is unproven on ARM64 production.
+  Risk:       A memory-safety bug in Chromium's renderer/image decoders (e.g. a crafted organisation logo, embedded as a
+              data: URI) runs code as uid 1000 in the Worker container with no further sandbox layer.
+  Mitigation: JavaScript off, offline context, every non-data: request aborted, navigation refused, 30 s step bounds
+              (P0-pdf); uid 1000 with no capabilities and NoNewPrivs; read-only root-owned code; no provisioning
+              credential in the jobs environment; per-child 0700 tmpfs; Chromium/Node floors (H1); PID/memory caps (H6).
+  Reversal:   Owner approval → add the profile (packages/rab-docker), security_opt seccomp=<profile> on rab-worker,
+              chromiumSandbox: true + --disable-gpu-sandbox in render-pdf.util.ts, re-run the runtime matrix on amd64 AND
+              native arm64.
+  ```
+- **The API's PID 1 does not reap orphaned processes (finding, LOW, pre-existing, not fixed in H6).** `api-prestart.sh`
+  execs `node` as PID 1 with no init. The API itself spawns no child process, but anything orphaned inside the container
+  (a `docker exec` shell's background jobs, or code run by an attacker) stays a zombie: measured 5 of 5 orphans left as
+  zombies under the production flags. Each holds a PID slot, and H6 now caps the API at 256, so a compromised process
+  could exhaust the cap and stop the API from creating threads (denial of service of that container only). Fix options for
+  the owner: `init: true` on rab-api (Docker's tini as PID 1; NOT tested here, and OpenShip's compose import does not model
+  `init`), or tini in the API image (Dockerfile owner, H3). The runtime matrix's PID probe now uses a process that reaps its
+  own children and asserts no zombie is left.
+- **The browser process inherited the Worker's credentials (finding, MEDIUM, fixed in H6).** Actor → action → consequence:
+  a hostile document that reaches a Chromium memory-safety bug (renderer, image/font/media decoder) → code as uid 1000 with
+  no OS sandbox → reads the browser process's environment, which held the jobs child's whole `process.env`
+  (`PG_DATABASE_URL`, `REDIS_URL`, `APP_SECRET`, S3/SMTP/push secrets, `SENTRY_DSN`) because `chromium.launch` passed no
+  `env` (Playwright's default is `process.env`). Measured (Worker image, synthetic markers): 3 browser processes carried
+  all six markers. Location: `packages/rab-worker/src/queues/rab-reports/render-pdf.util.ts` (`chromium.launch`). Fix: an
+  ALLOWLISTED launch environment (`CHROMIUM_ENV_KEYS`: PATH, HOME, TMPDIR, XDG_*, LANG/LC_*, TZ, FONTCONFIG_*; Windows
+  system directories for local development only) — after the fix 0 Chromium processes carry any marker, and PDF output is
+  unchanged (identical bytes apart from the timestamps). Regression: `render-pdf.util.spec.ts` (launch env ⊆ allowlist,
+  nothing URL/SECRET/KEY/TOKEN/PASSWORD-shaped) and `render-pdf-browser-env.integration.spec.ts` (real render, every
+  Chromium `/proc/<pid>/environ` free of the markers); both fail on the previous code. Residual: with the OS sandbox off
+  (owner decision above), a same-uid renderer can still read the Node jobs process's own `/proc/<pid>/environ`, which holds
+  those credentials — the browser environment fix removes one copy, not the exposure; only the sandbox (or moving the
+  credentials out of the jobs process's environment) closes it.
+
+## H4b — Sentry 8 → 10 (supported major; removes the OpenTelemetry advisories) (branch deps/h4b-sentry, not merged)
+
+### H4b-sentry: the SDK upgrade adds no telemetry source and keeps every P0-sentry control
+- **Actor → action → consequence considered:** an SDK major upgrade silently widens what leaves the process to the
+  third-party Sentry project. Measured on 10.78.0 before any code change: `enableLogs` now defaults to `true`, and 13
+  default integrations appear that 8.55 did not run, among them `VercelAI` (Sentry 10 patches `ai` < 7, so it would
+  switch on telemetry for every model call of the server's `ai` 6; Sentry 8 only patched `ai` < 5), `Anthropic_AI`,
+  `OpenAI`, `Google_GenAI`, `LangChain`, `LangGraph`, `Firebase`, `Prisma`, `PostgresJs`, `NodeSystemError` and
+  `ProcessSession` (release-health session envelopes). Separately, the advisory GHSA-qqmp-wf37-98f9 (DB login name in
+  a `db.user` span attribute) is **not** fixed by the upgrade: Sentry 10 vendors copies of the older DB
+  instrumentations, so scanners stop matching the `@opentelemetry/instrumentation-*` packages while the pg span still
+  carries `db.user` (measured against a disposable PostgreSQL: present on 8.55.2 and on unpatched 10.78.0).
+- **Control:** `packages/rab-server/src/instrument.ts`. `integrations` is a function over Sentry's defaults that keeps
+  only `ALLOWED_DEFAULT_INTEGRATIONS` (the 8.55 default set under 10.x names, `ChildProcess` being the renamed
+  `ProcessAndThreadBreadcrumbs`) plus the restricted `RequestData`; anything a later 10.x minor adds is dropped (fail
+  closed). `enableLogs: false` and `enableMetrics: false` explicitly (Sentry 10 defaults both to on; neither channel
+  has a scrubber here). `dataCollection`, `defaultIntegrations`, `openTelemetryInstrumentations`, `tracesSampler` and
+  profiling are pinned after the test-only `overrides`, so no override can widen collection or sampling. `spotlight:
+  false` and `debug: false` are pinned the same way: Spotlight is added after the `integrations` function and POSTs every
+  envelope over plain HTTP to its sidecar URL, and `false` also stops Sentry reading `SENTRY_SPOTLIGHT` / `SENTRY_DEBUG`
+  from the environment (review F5; Sentry 8.55 behaved the same, so this closes a pre-existing path). The SDK is
+  pinned to exactly 10.78.0: the name allow-list cannot catch a new default-on option in a later minor. `db.user` is
+  added to the dropped span attributes (the only scrubber change; stricter). Sentry 10's `http.server` span now copies
+  request headers that its own deny lists keep (referer with its query string, custom headers) into
+  `http.request.header.*`; the existing `DROPPED_KEY_RE` already drops them, now proven by the envelope test. Unchanged: `sendDefaultPii: false` (Sentry 10 maps it to its restrictive data-collection mapping:
+  `userInfo: false`, `httpBodies: []`, `genAI` inputs/outputs off, `databaseQueryData: false`), `includeLocalVariables:
+  false` (Sentry 10's local-variables integration still returns early on it), the RequestData include list, the four
+  fail-closed scrubbing hooks, and `tracesSampleRate` (0.01 in production, 0 elsewhere, `SENTRY_TRACES_SAMPLE_RATE`
+  override). No DSN: no client, no module, `http` or `require` patching (measured identical on 8.55.2 and 10.78.0).
+- **Not chosen:** Sentry 11. It replaces `sendDefaultPii` with a `dataCollection` option whose unset default collects
+  user/IP, cookies, headers, bodies, query strings and stack-frame locals, and streams spans by default so
+  `beforeSendTransaction` no longer runs. Moving there is a separate privacy review.
+- **Tests:** `instrument.spec.ts` (exact integration set against the real Sentry 10 defaults, fail-closed for an
+  unknown default, overrides cannot re-add integrations or enable logs/local variables, RequestData attaches nothing
+  even under the most permissive data-collection mapping, `db.user` dropped and connection-string userinfo masked) and
+  `instrument.envelope.spec.ts` (real `Sentry.init` in a child: installed integrations, effective options and resolved
+  data collection, by name and by the client's full installed set; a custom header and a referer token never reach an
+  envelope; only `event`, `transaction` and `client_report` items leave the process when no release is set).
+- **Residual:** API request exceptions handled by Nest's exception layer are not reported to Sentry (pre-existing: the
+  server never called `setupNestErrorHandler`, and Sentry 8's `Nest` integration only produced spans); uncaught
+  exceptions, unhandled rejections and the Worker's explicit `captureMessage` are. Sentry 8's `Nest` spans are gone
+  (fewer spans, no new data). As in Sentry 8, the allowed `Http` integration records request sessions (counts,
+  release, environment), sent only when a release is configured (`SENTRY_RELEASE` or an auto-detected commit
+  variable). With tracing sampled, `baggage`/`sentry-trace` still go to every outgoing host (`tracePropagationTargets`
+  unset, as before); Sentry 10 adds the Sentry `org_id` to that baggage. `@opentelemetry/sdk-trace-base` 2.x carries
+  an npm deprecation notice (not an advisory). Independent review (2026-11-03, read-only): no Critical / High / Medium;
+  Low items 1-4 fixed here, 5-6 documented above. Programme review F5 (Low, Spotlight / debug via
+  environment or override) fixed: proven by a child process with `SENTRY_SPOTLIGHT` pointing at the stub ingest.
+
+## seed-qa runs as the restricted runtime role (branch fix/qa-seed-org-provisioning, not merged)
+
+`seed-qa` (manual-QA fixture CLI) used to INSERT into `core.organisation` directly, which only an owner/superuser
+connection could do. After Phase B the runtime role `crewflow_app` cannot (the `organisation_self` RLS predicate,
+`id = current_org()`, never holds for a row that does not exist yet), and the superuser is refused by the CLI boot gates,
+so the fixture failed everywhere (Worker-bundle integration harness case 10 and its dependents).
+
+- **Now:** the command runs as `crewflow_app` and creates its organisation only through `core.create_organisation()`
+  (the production path, CF-13), under the authority of an active platform administrator named by `--admin-email`, then
+  writes the `organisation.created` audit entry with that administrator as actor. Existing organisation is found through
+  `core.list_organisations_for_admin()` (same authority), so a re-run creates nothing new.
+- **Abuse cases (refused before any write):** no `--admin-email`; an email that is not an unrevoked platform
+  administrator (ordinary account, unknown address, revoked grant, more than one account, any status other than
+  active/invited); and the database refuses the definer call again for anyone else.
+- **No privilege change:** no new grant, role, policy, migration, BYPASSRLS or owner connection. On a fresh database the
+  administrator comes from `bootstrap-admin` (the existing one-time operator step, `crewflow`).
+- **Assumption, flagged:** an INVITED (never activated) platform administrator may authorise the QA organisation. That
+  matches what `core.create_organisation()` itself accepts (an unrevoked `platform_admin` row) and is what
+  `bootstrap-admin` produces on a fresh deploy; `seed-ai-demo` is stricter (ACTIVE only).
+- **Regression test:** `seed-qa-restricted-runtime.integration.spec.ts` (fails on the old direct insert).
+
+## PDF renderer P1 — native final timesheet behind `PDF_RENDERER` (branch worker/pdf-without-chromium, not merged)
+
+Owner decisions D1–D11, T1–T3 (`docs/PDF_RENDERER_P0_PLAN_2026-11-03.md` §14). The final timesheet (original and
+finalised) can be rendered in pure JavaScript (`@react-pdf/renderer` 4.9.0, pinned exactly) instead of
+Chromium. `PDF_RENDERER=chromium` (default) keeps today's path byte-for-byte. No endpoint, table, queue, storage key, file
+kind, policy or email changes: only the bytes' producer differs, and they still go through `FileService` (validated,
+SHA-256'd) to the same `stored_file` row and `ReportFilePolicy`.
+
+- **Markup / script injection through staff, venue or note text.** Threat: a name like `<script>…`, `<img src=http…>`
+  or `javascript:` is interpreted. Control: the native layout passes every value as a string child of `Text`; react-pdf
+  has no HTML/CSS/script engine, so it prints literally. The Chromium path keeps `escapeHtml` and its hardening. Both
+  render from ONE rab-server view-model (`buildFinalTimesheetViewModel`), so neither renderer re-implements a label,
+  date, minute or total. Tests: `native-pdf.spec.ts` (hostile text in every field: tags, entities, URLs, RTL/bidi
+  overrides, zero-width, emoji, a 315-character token; the PDF has no `/URI`, `/JavaScript`, `/OpenAction`, `/Launch`,
+  `/Annots`, `/AA`), `final-timesheet-renderer-parity.integration.spec.ts`.
+- **Renderer fetching remote or local resources (SSRF / file read).** Control: images enter only as in-memory bytes
+  (`ImageBytes`; `imageBytesFromDataUri` refuses URLs, paths, SVG and HTML); fonts are vendored files checked against
+  `fonts.sha256` (fail closed); no emoji source is registered (react-pdf would fetch emoji images). Tests: socket,
+  http(s) and DNS spies stay untouched while rendering, with a positive control proving the detector sees a real fetch.
+- **Silent fallback hiding native defects (T3).** A native failure fails the job and is retried like any render
+  failure; there is no retry in Chromium. Rollback is the explicit `PDF_RENDERER=chromium`.
+- **Misconfiguration.** `PDF_RENDERER` accepts exactly `chromium` / `native` (empty = default); anything else refuses to
+  boot (env validation) and is re-checked at render time. The worker-bundle launcher forwards it to the jobs child only.
+- **Dependency surface.** No native addon, no install script, no Chromium, no network (VERIFIED dependency walk; the
+  image gate's worker-delta refuses install scripts and `binding.gyp`). The H3 forbid list keeps every SWC compiler
+  package banned by name and allows only the runtime helper `@swc/helpers` (D5/T2).
+- **Residual (T1, accepted):** P1 renders in the jobs process (in-process until the worker_threads pool with an empty
+  env lands, plan §4.2). A parser bug in fontkit / png-js / jay-peg would run with the jobs child's privileges; the
+  inputs are server-produced bytes (vendored font, our logo JPEG, our QR PNG) and text strings. Same residual class as
+  today's same-uid, no-sandbox Chromium, with a far smaller parser surface.
+- **Visible delta (owner to confirm):** a token longer than 24 characters with no space may now break across lines, and
+  react-pdf draws a "-" at each such break (Chromium instead shrinks the whole page). No character is lost.
+
+## Phase D-Q2 — AI stale-queued-turn sweep (branch phase-d/dq2-ai-stale-turn-sweep, not merged)
+
+Flag `AI_STALE_TURN_SWEEP` (default false: the scan is not even registered). No migration, no new definer, no role,
+grant, RLS or posture change.
+
+- **Asset:** another person's AI turn (a CEO's or Initial Manager's `core.ai_message` row), their organisation's AI token
+  budget and org slot. **Actor:** the Worker, acting without a request; an attacker able to forge or replay ids.
+- **Change:** a Worker scan finalises turns that have been `queued` longer than `AI_STALE_TURN_THRESHOLD_MINUTES`
+  (default 15, floor 11) as `failed` / `AI_WORKER_INTERRUPTED`. Their BullMQ job was evidently lost (Redis data loss, a
+  dropped promotion/deferral). Owner rule: **fail-and-user-retry only** — never re-run, requeue or replay (possibly
+  completed) AI work.
+- **Controls:** discovery uses only the existing catalogue definers (`worker_list_organisations` /
+  `worker_list_workspaces`) and, per workspace, that workspace's own tenant context (owner and CEO/Initial-Manager
+  profiles placed there). Each user's turns are read and written only under that user's own (organisation, workspace,
+  user) binding — the same binding the turn runner uses for a delivered job — so `ai_message`'s owner-scoped FORCE RLS
+  applies unchanged; an organisation-only context sees zero rows, no context sees zero rows, a forged (other tenant)
+  binding finalises nothing (tested). One compare-and-set on `status = 'queued'` **and** age, with the usage counter and
+  `AI_TURN_FAILED` audit (stage `stale_queued`) in the same transaction: with several replicas exactly one finalises a
+  turn (tested with concurrent calls and concurrent cycles). The threshold must exceed the longest legitimate queued
+  wait (org-slot TTL = turn timeout + 5 min; a deferred successor gives up at timeout + 60 s) — checked at boot (floor)
+  and again at run time (fail closed), so a legitimately delayed deferred claim is never swept (tested).
+- **Effects after commit (same as the existing queued → failed paths):** reservation refunded (a queued turn never called
+  the model), org slot released only if the conversation has nothing else queued or running, `done` (failed) on the
+  turn's stream. No email/push/notification is produced.
+- **Suspended organisation:** the turn is finalised like the runner does today when such a job is delivered (it ends the
+  turn failed); nothing is sent (tested).
+- **Residual / limitations:** a turn whose job is merely stuck in a BullMQ backlog longer than the threshold (far beyond
+  the slot TTL the design already assumes) is finalised and the user must ask again; turns of a user who is not the
+  workspace owner and has no CEO/Initial-Manager profile in that workspace are not discovered (they cannot create AI
+  turns today); a `running` turn whose lease expired and whose job was also lost is not swept (out of scope; reported).
+
+## PDF renderer P2 — native pre-shift attendance sheet (roster) behind `PDF_RENDERER` (branch worker/pdf-native-roster, not merged)
+
+Extends the P1 entry above to the pre-shift roster (`SHIFT_ROSTER_PDF`), which carries the signed Shift QR. Same job
+(`shift-report-scheduler.job.ts`), same two short tenant transactions around the render, same file kind, filename
+(`shift-attendance-sheet.pdf`), `ReportFilePolicy`, recipient selection and email attachment. The job now passes the
+template's data to `renderReportPdf({ kind: 'pre-shift', data })` instead of HTML.
+
+- **QR integrity / substitution.** Threat: the native path prints a different or re-encoded QR (a token for another
+  shift, a placeholder, or a payload rebuilt from data). Control: the token is still `AttendanceQrService.sign(shift)`
+  and the image still `QrImageService.generatePng(token)`, both in the job, unchanged; the view-model carries those PNG
+  bytes as-is and the native layout only decodes the base64 back into a Buffer for `QrCode` (`pngBytes` refuses
+  anything that is not a PNG). Nothing in the renderer encodes a payload. Tests: `pre-shift-report.native.spec.ts`
+  decodes the QR image out of the native PDF (jsQR) and gets the signed token byte-for-byte; the renderer comparison
+  decoded it from both PDFs (embedded image and 200/300 dpi raster) for every fixture and verified it with
+  `QrTokenService.verify` (an altered token is refused).
+- **Markup injection through venue, contact, notes, staff names or references.** Control: as P1 — text only; the
+  Chromium template still escapes every value. Test: the native element tree's text equals the Chromium HTML's text
+  for hostile fixtures (tags, entities, `javascript:`, quotes, accented names); only the logo and the QR are embedded;
+  no `/URI`, `/Launch`, `/JavaScript`, `/OpenAction`, `/AA`.
+- **Chromium path unchanged.** `renderPreShiftReportHtml` now renders from the shared view-model
+  (`buildPreShiftReportViewModel`); golden HTML captured from origin/main before the refactor is byte-identical
+  (`pre-shift-report-view-model.spec.ts`), and Chromium PDFs of the old and new HTML are identical after normalisation.
+- **No new exposure.** The QR is a shift-scoped bearer code exactly as before (no account token); who receives the PDF
+  is decided by the unchanged `selectReportRecipients` in the row-locked writing transaction.
+
+## PDF renderer P2 — Approved Shift Statement on the data-in seam, native layout; pence entry hardened (branch worker/pdf-native-payroll, not merged)
+
+The Approved Shift Statement job (`shift-statement.job.ts`) now hands the renderer **data**, not HTML: `renderReportPdf({ kind: 'approved-shift-statement', data })` (owner decision D1). Both renderers print ONE view-model, `buildApprovedShiftStatementViewModel` (rab-server, `payroll/templates/approved-shift-statement.view-model.ts`): money via `@rab/shared` `formatPence` from the record's frozen pence, payable minutes as stored, dates in the organisation timezone. The Chromium template prints from it and is byte-identical to before (sha256 golden, `approved-shift-statement.view-model.spec.ts`). The native layout (`native/approved-shift-statement.native.ts`) only lays it out. Same job, queue, file kind, filename, `stored_file` row, download policy and notification; no new endpoint, table or migration.
+
+- *Mis-stated pay (rounded bigint).* `pay_rate_pence` / `amount_pence` are `bigint` and arrive as strings. They were converted with a bare `Number()`, so a value outside ±2^53 printed a neighbouring, plausible amount (failing-first: `-9007199254740993` reached the renderer as `-9007199254740992`). They now enter through `assertSafePence` (money.ts, the same rule as the server's `bigintAsNumber` transformer). Such a statement fails closed (`generation_failed`, retried, audited) and is never rendered. Tested: `shift-statement.render.spec.ts`.
+- *Markup / script / fetch through user text (native).* Staff, venue, role, employer, workspace, approver and period strings are `<Text>` children only: no HTML, CSS or script engine. Images are the logo bytes only, and nothing is fetched (socket / DNS spies). The output contains no `/JavaScript`, `/OpenAction`, `/URI`, `/Launch` or `/AcroForm`. Tested: `approved-shift-statement.native.spec.ts`. The Chromium path keeps its Phase 0 hardening unchanged.
+- *Money drift between renderers.* There is none by construction: one view-model, and the native layout does no arithmetic. Measured on 10 synthetic fixtures (0p, 1p, £1,234,567,890.12, long and hostile text, multi-page): every printed amount is identical in both PDFs and parses back (bigint, no float) to the source pence.
+- *Visible delta (owner-approved D9).* The native statement has 12 mm margins; Chromium's has 0 mm.
+- *Residual (open).* `formatPence` divides by 100 as a float. It prints `£90,071,992,547,409.90` for `9007199254740991` (exact value `.91`). This affects both renderers identically and only values far beyond any real amount; it is a `money.ts` change, reported and not made here. Native: a single token longer than its cell overflows instead of wrapping (kit hyphenation callback). That is a readability defect, not a disclosure; a fix is proposed to the kit owner.
+
+## PDF renderer migration: native security coverage that replaces the Chromium-only tests (branch worker/pdf-test-harness, #51, not merged)
+
+When P5 removes Chromium (`integration/pdf-native`, #61), five Chromium-only specs go with it: `render-pdf.util.spec`,
+`render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and `final-timesheet-renderer-parity`.
+Their security and correctness assertions are kept, against the native renderer, so no control loses its test.
+
+- **Where:** `packages/rab-worker/src/__tests__/pdf-equality/pdf-native-security.spec.ts`. It renders real fixture documents,
+  hostile ones included, through the production seam: `renderReportPdf` → `renderNativePdf` → the render pool. The pool
+  call goes to a pool of the same class, with the production document registry and thread entry, and test-only
+  `allowProbe`. Correctness (every value, footer and "Page n of N", repeated headers, QR, logo, D4) stays in
+  `pdf-equality.native.spec.ts`, which in native-only mode compares against the document's own text, never Chromium.
+- **Asserted:**
+  - the render thread's environment is empty while the jobs process holds credential-shaped values;
+  - hostile URLs in the body, notes, footer and meta-refresh text cause zero connections to a local listener; the thread
+    guard refuses nothing and loads no network builtin;
+  - `file://` URLs and absolute paths print literally: no file content, and no image except the logo and the QR (a
+    positive control proves a 1×1 image would be seen);
+  - script, handler and `javascript:` text is printed, not run, and creates no PDF action, URI, form or attachment;
+  - the same data gives byte-identical output, dated `generatedAt` (D7);
+  - a real document past the deadline is terminated (`PdfRenderTimeoutError`), and one past a lowered heap cap kills only
+    its own thread; neither returns a PDF, and the pool recovers;
+  - on the native-only tree, no browser package is in the seam's import closure.
+- **Not equivalent, by design:** Chromium's sandbox flags (S-7) and launch environment allowlist (H6) have no native
+  counterpart, because there is no browser process. They are replaced by the thread isolation above. "No file access" is
+  proven by construction and content (images are bytes only; fonts are registered from memory), not by a syscall trace in
+  this suite. The image gate's strace (F5) covers that.
+- **Harness strictness (owner decisions, FINAL brief 2026-11-04):**
+  - D6 hyphen wraps are accepted only when the rejoined text is identical and every other check passes;
+  - notes must keep their line breaks;
+  - values printed as F1 □ markers are counted exactly, as whole fields;
+  - text drawn over other text fails the native renderer.
+  Regressions for each are in `pdf-harness.unit.spec.ts`.
+
+## Phase D-Q4a — combined shift scan behind `WORKER_SHIFT_SCAN_MODE` (branch phase-d/dq4a-combined-scan, not merged)
+
+No business record, rule, threshold, deadline, recipient or transition changes; no migration, role, grant, RLS policy
+or posture change (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §1, owner approval 2026-11-04 OD-1). Default `separate` is
+today's four scans, byte for byte (the refactor commit only moved each scan's discovery and processing into named
+functions; SQL template text unchanged). `combined` changes HOW the four 300-s scans (shift monitor, attendance monitor,
+shift report scheduler, final timesheet) find their work: ONE workspace walk per tick instead of four.
+
+- **Tenant isolation (unchanged primitives).** The walk (`discoverMembersInWorkspaces`) uses the same
+  `core.worker_list_workspaces` catalogue pages (ids only, READ ONLY) and, per workspace, ONE READ ONLY
+  `runInTenantContext` transaction with the same server-derived worker context (organisation + workspace bound with
+  `SET LOCAL`, `actorType: 'worker'`, no user, no role; FORCE RLS). Each member's own discovery query runs inside that
+  transaction under its own `SAVEPOINT` (a constant identifier, never data). The callbacks receive only the RLS-bound
+  manager. Every mutation is still one `runScopedForOrg` transaction per candidate inside the member's unchanged
+  processing; the report members still take their per-shift session advisory locks on the direct DataSource. Abuse
+  cases (real PostgreSQL, `dq4-shift-scan-equivalence.integration.spec.ts`): no tenant context bound → every member
+  discovery returns zero rows or is refused; organisation A cannot read organisation B's events after a combined tick;
+  every event carries its own organisation and workspace.
+- **Failure containment.** A member whose query fails in any workspace rolls back to its savepoint, its cycle fails
+  for that tick (`<loop>Failures` + 1, nothing of it processed — what a failing separate scan does) and the other
+  members in the same transaction still run. A workspace-level or catalogue failure fails every due member (fail closed;
+  no partial discovery is ever processed). A not-yet-routable workspace is skipped, as today.
+- **Timing (owner rule §12.1/5).** The tick is the greatest common divisor of the member intervals; combined mode
+  refuses to boot under 30 s (env validation and the Worker boot check). Each member runs only when its own interval
+  has passed, so none runs less often than in separate mode. Each member's processing is its own runtime cycle with
+  its own overlap guard and Health keys, so a slow member never delays another.
+- **Multi-replica.** Interval mode: each replica runs the combined scan, as each scan today; cross-replica safety is the
+  same worker_event UNIQUE keys, compare-and-sets and per-shift advisory locks (two concurrent combined scanners → each
+  key exactly once, tested). Lane A (`WORKER_SCHEDULER=bullmq`): one cluster scheduler and scan lock for the walk, plus
+  each member's own scan lock for its processing. The scan lock reaches the combined scan (`onScanLock`) before any
+  scan Worker exists, and a member that finds no lock under bullmq is `skipped-locked`, never run unlocked (fail
+  closed; `cf56382d`, unit + integration tested). The earlier first-tick residual is closed.
+- **Redis.** Interval mode needs no Redis to find or process work (tested with Redis unreachable); stats writes stay
+  best-effort. Lane A after a Redis wipe: the combined scheduler is re-upserted by the next periodic reconcile, within
+  one `WORKER_SCHEDULER_RECONCILE_SECONDS` (default 60 s, configurable up to 3 600 s). In Lane A a member's scan lock
+  is taken after the shared walk, so a second replica may repeat a member's read-only discovery and then skip it.
+- **Rollback.** `WORKER_SHIFT_SCAN_MODE=separate` and restart: no data change; the separate scans meet the same
+  worker_event keys and do nothing twice (tested).
+## Phase D-Q4b — delayed-job timer triggers, scans unchanged as backstop (branch phase-d/dq4b-timer-triggers, stacked on phase-d/dq4a-combined-scan, not merged)
+
+Flags `WORKER_TIMER_TRIGGERS=off|shadow|on` (default off = today exactly) and `WORKER_TIMER_TRIGGER_KINDS` (OD-3: on one
+kind at a time). No migration, no role, grant, RLS, definer or posture change; no payroll, attendance, staffing or
+permission rule change (same windows, same outcomes; with `on` a transition may happen EARLIER inside its existing window,
+plan §2.3 A2 — that is what `shadow` measures). Owner approval OD-3 / OD-4, 2026-11-04.
+
+- **Asset:** the timed transitions on another person's records — offer expiry (`job_offer`), manager-confirmation
+  auto-confirm, provisional no-show and late clock-in (`shift_assignment`, `core.worker_event`) and the notifications /
+  audit rows they produce. **Actor:** the API and Worker producers acting on committed rows; anyone able to roll a
+  transaction back, stall or wipe Redis, replay or forge a BullMQ job, or run two Workers.
+- **Change:** a new consumer queue `crewflow-timer-triggers` (legacy `bull` prefix, OD-4; organisation scope; payload
+  `{organisationId, workspaceId, subjectId, dueAtEpochMs}`; jobId `<kind>.<subjectId>.<dueAtEpochMs>`; concurrency 2).
+  Producers: `OfferService.sendOne` (offer expiry) and `staffAccept` (manager-confirmation wake) through the engine
+  `AfterCommitPublisher` (#35's mechanism, generalised — the notify fast path delegates to it unchanged); the Worker arms
+  no-show / late clock-in from shift-monitor's existing discovery rows (no API scheduling, withdraw or cancel code changed).
+- **Controls:** published only after the outermost commit; any rollback (or savepoint rollback) arms nothing (tested). A
+  refused job (bad id, mismatched scope) never throws into the business transaction. `registeredJob` refuses a missing,
+  system or mismatched organisation scope, extra payload keys and non-scalar values before Redis (tested). The consumer
+  re-checks the payload shape (exactly four keys, three UUIDs, an integer epoch) before any database access and fails
+  closed with UnrecoverableError (tested); it then binds the PAYLOAD organisation/workspace with SET LOCAL
+  (`runScopedForOrg`) and re-reads the subject under FORCE RLS in a READ ONLY transaction — a forged organisation sees no
+  row, another organisation's workspace fails routing or sees no row (ABUSE tests: no-op, offer untouched). Stale (row due
+  time ≠ payload), early (DB clock), duplicate (two replicas, re-adds) triggers are no-ops: `on` runs the scan's OWN
+  per-candidate body (`expireOfferCandidate`, `flagNoShowCandidate`, `flagLateClockInCandidate`; manager confirmation is a
+  wake of the existing definer claim cycle from the Worker only — DBA-01 grants untouched) with the same compare-and-set
+  and `worker_event` UNIQUE key (tested: three concurrent firings → one expiry, one audit row). `shadow` writes nothing
+  (tested: no status, audit, notification, realtime or worker_event row). `off`: no Redis connection, no consumer, no job
+  (tested). Rolling deploy: a new queue name, so a Worker without the consumer never takes a trigger (tested).
+- **Redis:** a lost trigger (wipe, publish failure, Redis down at commit) changes nothing — every backstop scan keeps its
+  interval and code (tested: wipe → scan expires once; Redis down → the business commit is not delayed, nothing armed).
+  Delayed jobs add Redis memory (≈ one job per pending offer / accepted offer / upcoming assignment × 2; ids only).
+- **Residual:** triggers ADD database work (one READ ONLY decision transaction per fired trigger, plus the action
+  transaction in `on`); no load reduction is claimed (owner rule §14.4). Bulk send: its per-recipient savepoints are
+  plain SQL (`SAVEPOINT sp_bulk_send`), which TypeORM does not broadcast, so one recipient's rollback does NOT drop the
+  other recipients' triggers (tested: BULK SEND). If a recipient failed after its trigger was registered, that trigger is
+  still published after the outer commit and is a `noop` on consume (its offer row was rolled back; the consumer re-reads
+  under RLS). Only a TypeORM nested-transaction rollback discards the transaction's triggers (the scan handles those).
+  The Admin Panel lists `crewflow-timer-triggers` read-only (counts, metrics, failed job ids; retry/delete → 409, tested),
+  like `rab-ai`. Counters (`rab:worker:timer-triggers`) hold counts only; the shadow log line
+  carries the subject UUID (no personal data).
+
+
+## Phase D-Q5b — cumulative email/push attempt cap, no BullMQ resend after a confirmed send (branch phase-d/dq5b-attempts-sent-write, not merged)
+
+Owner approval 2026-11-04 (`docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md` §10: OC-1 confirmed, OD-5 Option B, OD-6 no change;
+audit §13 #3 and #4). No migration, column, role, grant, RLS policy or posture change; no payroll / attendance /
+staffing / permission rule. **Asset:** another person's email or push notification (its delivery count, and whether it
+is delivered twice). **Actor:** the Worker, without a request; a replica racing another; a forged job payload.
+
+- **Cumulative cap (OC-1, §13 #4).** The claim CAS that moves an `email_outbox` / `push_delivery` row to PROCESSING now
+  adds one to the row's existing `infrastructure_attempt_count` / `attempt_count` and returns it (`RETURNING`); SENT /
+  ACCEPTED / RETRY / FAILED record that value and the attempt is final at the row's own max (5). The claim refuses a row
+  already at its max (`… AND count < max`), and a claim that reports no count fails closed (the claim rolls back, nothing
+  is sent). Before, every write used the BullMQ job's `attemptsMade + 1`, which restarted at 1 for each republished
+  generation, so the cap applied per generation and a row republished after lease/RETRY recovery could be retried for
+  ever. Actor → action → consequence after the fix: a delivery that keeps failing stops at 5 attempts in total (FAILED,
+  audited) instead of looping; a row recovered after a Redis loss has fewer attempts left (accepted under OC-1). A
+  provider-throttled email attempt (Resend 429 Retry-After, D5) still gives its count back, as before; an operator replay
+  (`core.replay_failed_email`) still resets the count to 0 (unchanged).
+- **No resend after a confirmed send (OD-5 Option B, §13 #3).** When the provider accepted an email and every local try
+  to persist SENT fails, the processor no longer routes the error to the RETRY/FAILED path (RETRY made BullMQ call the
+  provider again: a duplicate email, reproduced). It writes nothing more, throws `UnrecoverableError` (BullMQ does not
+  retry the job; tested with a real BullMQ job: one provider call, `attemptsMade` 1) and leaves the row PROCESSING under its
+  token with `provider_call_started_at` set. After the 10-minute lease the existing dispatcher recovery resolves it:
+  SMTP → FAILED `DELIVERY_UNCERTAIN` (manual review; replay needs the explicit allow-uncertain flag); Resend → one
+  re-presentation under the SAME idempotency key `email-outbox:<id>` (Resend returns the original message instead of
+  sending again; its key window is 24 h, the lease 10 min) → SENT. The log line now states that behaviour (it used to say
+  the row "remains PROCESSING" while the code wrote RETRY); it carries ids, provider and provider message id only.
+  Push already left the row PROCESSING after a failed ACCEPTED write (no RETRY write); unchanged.
+- **Exhausted ambiguous lease.** Because the count now includes the in-flight attempt, a PROCESSING row whose lease
+  expired at the cap means the last allowed attempt died. With the provider-call marker set (the message may have gone
+  out — including the OD-5 case on the 5th attempt) both dispatchers now mark it `DELIVERY_UNCERTAIN` (email: for every
+  driver, with its own "attempt cap reached" reason text) instead of `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, so a replay cannot resend it without the allow-uncertain flag and
+  it is never re-presented past the cap. Without the marker nothing was sent: `STUCK_LEASE_ATTEMPTS_EXHAUSTED`, unchanged.
+  For push this keeps the pre-change outcome (with the job-relative count that row sat one below the cap → uncertain).
+- **Unchanged (OD-6):** SMTP definite-rejection handling (the marker is still not cleared on RETRY), push uncertain
+  delivery (at-most-once), the payroll statement lease cap; the dispatcher claim SQL (sha256-pinned), jobIds, leases and
+  backoff.
+- **Tenant isolation:** every changed statement runs under the same organisation-bound `SET LOCAL` and FORCE RLS as
+  before; the count is never taken from the job payload. Abuse cases on real PostgreSQL
+  (`dq5b-email-cumulative-attempts.integration.spec.ts`, `dq5b-push-cumulative-attempts.integration.spec.ts`): a job naming
+  another organisation sees, claims and counts nothing (no send); another organisation's dispatcher does not reclassify the
+  row; a query with no tenant context returns zero rows. **Replicas:** two consumers (old and republished generation) race
+  one row → one claim, one provider call, count +1 once; five dispatchers race one exhausted ambiguous row → one
+  `DELIVERY_UNCERTAIN` transition and one audit row.
+- **Residual:** this is not exactly-once delivery. An SMTP email whose SENT write failed after a confirmed send now needs
+  manual review instead of going out twice (owner-accepted trade-off of Option B). A Resend row is re-presented once under
+  the same idempotency key; Resend deduplicates only inside its key window (24 h), so a recovery delayed past that window
+  (the Worker down for a day, the row untouched) could still send a second email. The log line for this case carries the
+  error name/code only, never the error object (a `QueryFailedError` holds the bound fencing token). A job whose own BullMQ attempts run out before the cumulative cap (attempts
+  spent before any claim, e.g. a row not yet visible) leaves the row RETRY for the 5-minute stale-RETRY recovery, which
+  republishes it until the cumulative cap.
+- **Independent verification (2026-11-04, "V" tests in the same two integration specs).** A real crash loop (every claim
+  dies after the provider call; a restart's redelivery inside the lease claims, counts and sends nothing; lease recovery
+  republishes) stops at the 5th cumulative attempt with `DELIVERY_UNCERTAIN` and five provider calls on one key, and the
+  dead Workers' late outcomes are fenced out; the `DELIVERY_UNCERTAIN` rows this change produces (SMTP below the cap,
+  Resend at the cap) are refused by `core.replay_failed_email` without the allow-uncertain flag; the counting claim and
+  the reclassification UPDATE change nothing with no tenant context or another organisation bound (email and push).
+
+## formatPence exact; bigint pence enter a number only through assertSafePence (branch fix/format-pence-exact, not merged)
+
+Formatting and range guards only. No payroll, rate-resolution, rounding, pay-period or pay-date rule changes. There is
+no migration and no change to roles, grants or RLS.
+
+- **Asset:** money printed or returned to people: payroll views, payslip and run totals, offers, attendance pay, the
+  approved shift statement, and the assistant's payroll answers.
+- **Finding 1 (Low, integrity):**
+  - **What:** `@rab/shared` `formatPence` divided pence by 100 as a float, so `formatPence(2^53 - 1)` printed
+    `£90,071,992,547,409.90` instead of `.91`.
+  - **Scope:** the first wrong value found in a 32,000-value sweep was about 7.0 × 10^15 pence (£70 trillion), so no
+    real amount is affected today. The function is still the single money formatter, and it must be exact by
+    construction.
+  - **Fix:** split pounds and pence with integer arithmetic (number: `% 100` and an exact division; bigint: `/ 100n` and
+    `% 100n`). Format the same way as before: `-£1,234.56`, `£0.00`, `£0.01`, and `-£0.00` for `-0` as before.
+  - **New behaviour:** accepts a `bigint` of any size. A `number` must now be a safe integer (`assertSafePence`) rather
+    than any integer, because past 2^53 a number no longer holds the exact pence. That case is refused rather than
+    printed wrong. An unsupported currency code is refused.
+- **Finding 2 (Low, integrity, control at one layer only):**
+  - **What:** entity columns convert bigint pence through `bigintAsNumber`, which calls `assertSafePence`. Raw
+    `manager.query` rows did not: 22 sites ran `Number(r.x_pence)` directly, so a stored value past 2^53 - 1 would
+    have been silently rounded into a different, plausible amount.
+  - **Where:** attendance, shift-report, offer and offer-confirmation services; payroll and payroll-run services.
+  - **Write paths affected:** two of the sites write the rounded value back. `preparePayrollRecords` inserts
+    `pay_rate_pence`, and run preparation inserts `payroll_run_line`.
+  - **Fix:** each site now calls `assertSafePence(Number(...), '<column>')`, and JS-side gross sums are guarded the same
+    way. A corrupt or out-of-range value now fails that request or job closed (RangeError → 500 / job failure). It
+    never produces a wrong amount.
+- **Regression tests:**
+  - `money.spec.ts`: `formatPence` matches an exact BigInt reference for all boundaries (±(2^53 − 1), 0, ±1, ±99, ±100,
+    …) and 20,000 random safe integers. It matches the previous implementation wherever that one was exact. The bigint
+    form equals the number form. Unsafe or non-integer numbers are refused.
+  - `pence-number-boundary.spec.ts`: an AST scan of server and Worker source. Any new `Number(...)` on a pence or gross
+    value outside `assertSafePence` fails. On main's code it lists all 21 money sites it can see.
+- **Residual (reported, not changed here):**
+  - **Statement:** the approved shift statement's loader (`shift-statement.job.ts`, 2 sites) is guarded on the PDF
+    integration branches (#57) and is baselined here.
+  - **Assistant totals:** `payroll-assistant.service.ts` guards with `Number.isSafeInteger`.
+  - **Scan pattern:** the scan matches identifiers containing `pence` or `gross` only. A pence value under another name
+    (e.g. `row.rate`, guarded by hand here) is not caught automatically.
+  - **Precision before the guard:** `payForMinutes` computes `rate × minutes` as a float, which is exact only while the
+    product is ≤ 2^53. Rate DTOs have `@Min(0)` but no `@Max`, so an absurd rate is refused only later, at the column
+    transformer (500, not 400).
+
+## F-PDF-1 — PDF sign-off and total silently dropped; notes keep their line breaks (branch fix/pdf-notes-column-and-line-breaks, not merged)
+
+Chromium (current production renderer) templates only. There is no migration, and nothing changes for data, roles,
+grants, RLS, the renderer's isolation, or any money or worked-minutes value.
+
+- **Asset:** the final timesheet. It is the record of the manager's sign-off ("Reviewed by … Finalised at …", the typed
+  "Signed off as …") and of the shift's "Total worked hours". The pre-shift roster's BEFORE-SHIFT DOCUMENT column is
+  also affected.
+- **Actor:** anyone who can write shift notes, a free-text field. This can also be accidental: a pasted URL, reference
+  or token.
+- **Finding (Medium, integrity):**
+  - **Actor → action → consequence:** notes holding one long unbroken token → the NOTES column grows to the token's
+    width → the right-hand column is pushed off the page → Chromium omits it from the PDF.
+  - **What is lost:** MANAGER SIGN-OFF and the total disappear without any error or warning, and only 237 of a
+    1,000-character token print.
+  - **Where:** `adolphus-document.ts` `DOCUMENT_CSS`, `.bottom > div { flex: 1 }`.
+  - **Root cause:** a flex item's `min-width: auto` means its smallest width is its longest unbreakable word.
+- **Fix:** `.bottom > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }`. Both columns keep half the width, and a
+  token too long for its column breaks at the column edge. Every character is printed.
+- **Owner decision applied in the same change:** notes keep their line breaks. The notes paragraph only (class
+  `notes-text`) gets `white-space: pre-line`. The native renderer applies the same rule to the same field (agreed
+  field list: shift notes in both final-timesheet variants and in the pre-shift roster). Every other field still
+  collapses whitespace, including names, so a line break typed into a name cannot reshape the sign-off block.
+- **Unchanged otherwise:** for ordinary notes the PDF is byte-identical to the pre-fix stylesheet (tested), and values
+  are still escaped (`escapeHtml`). `pre-line` changes whitespace handling only; it cannot turn text into markup.
+- **Regression test:** `render-pdf-notes-layout.integration.spec.ts` (real Chromium via `renderHtmlToPdf`).
+  - A 1,000-character token prints in full.
+  - The sign-off, the total and the before-shift column are each printed exactly once.
+  - Chromium's print layout places nothing past the printable width.
+  - Paragraphs stay on separate lines, with blank lines kept.
+  - Run against main's templates, the token and line-break cases fail.
+- **Test-helper fix:** the PDF text reader (`__tests__/helpers/pdf-inspect.ts`) now honours a stream's direct `/Length`.
+  Before, it stripped a final 0x0d data byte as if it were an end-of-line marker. That made a font's ToUnicode map
+  unreadable, so every glyph of that font decoded as U+FFFD, which hides text from assertions. The fuller reader on
+  `worker/pdf-inspectors` (#54) already uses the same rule.
+- **Residual:**
+  - **Already-stored PDFs:** final timesheets generated before the fix whose notes held such a token remain without
+    their sign-off and total. Regenerating them is an owner decision.
+  - **Form feed:** a U+000C character in notes prints as a visible glyph in Chromium. This is unchanged and was
+    reported to the native-renderer owner.
+
+## PDF renderer migration P5 — Chromium and Playwright removed from the Worker (branch worker/remove-chromium, not merged)
+
+Prepared only. It merges after the native renderer (P1/P2) passes every test (P3), staging signs off (P4) and the owner
+approves; the renderer-source half is a separate follow-up patch (native only, `PDF_RENDERER` accepts only `native`).
+
+- **Chromium (and its dependency tree) silently comes back.** Threat: a later change re-adds `chromium`, a font package
+  or Playwright to the Worker, and with it the 180-odd OS packages Chromium pulled in (ffmpeg and every codec, the
+  X11/Wayland/Mesa/GTK stack, `libxml2`, `glib`, `libsndfile`, `alsa-lib`, `cups-libs`, `cjson`, …) and their unfixable
+  advisories, without anyone deciding it. Controls, each failing closed: `Dockerfile.worker-bundle` runs
+  `apk-absent:chromium` (as the API image does) and refuses the browser-stack packages by name; its H3 `--forbid` now
+  includes `playwright playwright-core chromium-bidi`; `image_gate.py` `fs` FAILS (every mode, not HOLD) on any apk
+  matching `policy.json` `forbidden_apk` (110 names/prefixes derived from the MEASURED delta between the main 824f0824
+  Worker and API images) or npm package matching `forbidden_npm`, and `attest` fails on an SBOM naming `chromium`,
+  `playwright` or `playwright-core`; `static` fails if a role loses those lists or `MIN_CHROMIUM_VERSION` returns;
+  `tools/check-no-browser-in-worker.cjs` (ci-worker and the gate's static job) fails if `@rab/worker` / `@rab/server`
+  declares or imports a browser package (tests included, because the monorepo still installs playwright for the web
+  e2e suite, so such an import would resolve locally). Scope is deliberately the runtime images and those two packages:
+  the web e2e suite's `@playwright/test` is unaffected.
+- **Chromium-specific controls disappear with Chromium.** JavaScript off, the offline context, request interception, the
+  navigation refusal and the launch-environment allowlist (P0-pdf, H6 "browser env") contained a browser. The native
+  renderer interprets no markup, executes no document-supplied code and opens no URL or file path; the P3 native
+  security tests replace `render-pdf-hardening`, `render-pdf-sandbox-footer`, `render-pdf-browser-env` and
+  `render-pdf.util.spec.ts`, which the follow-up patch deletes only after those tests are merged. The H5 `pdf` gate and
+  the bundle/H6 harnesses still render the hostile synthetic names (`<script>`, `<img src=http://…>`) and require them as
+  literal text; the H6 M21 case now requires an unknown document kind to be refused.
+- **Launcher.** `CHROMIUM_EXECUTABLE_PATH`, `CHROMIUM_NO_SANDBOX` and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` are no longer
+  forwarded to the jobs child (launcher test 3c); the H5 `pdf` gate fails if the launcher plan carries any `CHROMIUM_*` /
+  `PLAYWRIGHT_*` key. The XDG directories and the detached-descendant sweep stay as generic hygiene.
+- **Superseded:** the Chromium floor (H1), the Chromium-version check, the `--no-sandbox` residual (P0-pdf, H6 "Chromium OS
+  sandbox" trade-off) and the scanner-blind watch-list entries for Chromium-only packages no longer apply to any image.
+- **Residual (unchanged from T1, accepted):** the native renderer's font and image parsers (fontkit, png-js, jay-peg) run
+  in the jobs process with its credentials; they only ever receive vendored fonts and server-produced images, and user
+  data reaches them only as text. Remaining image findings are listed in the P5 PR body; none is claimed to be zero.
+- **Regression tests:** launcher test 3c (fails on main); `test_image_gate.py` `P5NoBrowser` (forbidden lists, retired
+  floor, PDF gate refusing a role without `pdf_render`) and `Pdf.test_native_renderer_shape` (the gate's PDF oracle reads
+  the native renderer's indirect `/Resources`; MEASURED: it extracted no text from a react-pdf PDF before this fix);
+  `check-no-browser-in-worker.cjs` (fails on main: the manifest and six imports).
+
+---
+
+## Owner-login architecture (Option A, permanent): PT-01 and the controls that replace the restricted login (2026-11-04)
+
+**Owner decision (2026-11-04, final):** one schema-owning login, `crewflow_owner`, serves the API, the Worker, the CLI and
+the short-lived migration child. Its shape is M0 §5.1: NOSUPERUSER, NOBYPASSRLS, NOREPLICATION, NOCREATEDB, CREATEROLE.
+There is no mode switch.
+
+The legacy roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`, `crewflow_app` and `crewflow_worker` remain as
+**schema roles**: historical migrations and SECURITY DEFINER functions need them. None of them is a runtime login.
+
+Sources: `docs/TWENTY_MODE_M0_DECISION_2026-11-04.md`, the Option A brief and the permanent-owner-login addendum.
+
+Who can call this? — Every request and job, through the one login.
+Whose data is involved? — Every tenant's. The login owns every table through `rab_secure_owner` and `crewflow`.
+What if that identity is compromised? — Whole-database read and write, DDL and role creation (PT-01 below).
+What if it's malicious? — Same as compromised, plus persistence through roles and definers (G-04).
+What if the request is tampered with? — On normal paths, RLS (FORCE everywhere), the guards below and bound parameters
+apply. One SQL injection runs with owner privileges.
+What if two callers race? — Unchanged per feature. The pool-safety reset stops one request's SET ROLE reaching another.
+What if the DB returns data written by a lower-trust actor? — The posture monitor compares the security objects with the
+reviewed golden at boot and on a timer. Drift turns readiness off.
+What if a third party is compromised? — A leaked `PG_DATABASE_URL` is the schema owner (BC-16).
+What happens when authorisation fails? — Guards refuse with 42501 or 404 as before. The boot gates refuse to serve.
+What happens when the operation fails halfway? — Migrations run in transactions with self-checks. A failure rolls back.
+
+### PT-01: owner-accepted architectural risk (recorded 2026-11-04)
+
+> One SQL-injection bug, a compromised dependency, code execution or a leaked credential gives **whole-database**
+> access: every tenant, not one. It also cancels Phase D's API/Worker separation (DBA-01).
+
+Correction to the plan's wording: "one tenant → whole database" understates the baseline. RLS keys on a GUC the runtime
+can set, so injection already crossed tenants on FORCE tables in the separated design (G-13, pre-existing).
+
+PT-01 was **not** in this file before today. This entry records it.
+
+**Accepted by the owner in the final prompt §2.** These are owner-accepted risks, listed separately on purpose. None of
+them is a control that "passed".
+
+| Accepted consequence | Catalogue | Severity |
+|---|---|---|
+| Cross-organisation authentication data (password hashes, TOTP ciphertext, token hashes) | BC-03 / G-01 | CRITICAL |
+| SQL injection with owner privileges (DDL, NO FORCE, policy rewrite) | BC-01 / G-02 | CRITICAL |
+| Account takeover and MFA bypass, platform admins included | BC-04 / G-03 | CRITICAL |
+| Policy modification that a FORCE-only check cannot see | BC-05 / G-02 | CRITICAL |
+| Object deletion (`DROP SCHEMA core CASCADE`) | BC-06 | CRITICAL |
+| Audit tampering (`audit_log` insert-only cannot be enforced in the database) | BC-07 / G-05 | HIGH |
+| Persistence through roles or definers that survives credential rotation | BC-09 / G-04 | CRITICAL |
+| Credential-exposure impact (the one URL is the owner) | BC-16 | HIGH |
+| Direct writes to 7 pre-auth tables within one tenant (X2; owner decision 2026-11-04, below) | BC-18 | MEDIUM |
+
+**Not listed in §2, then accepted by the owner on 2026-11-05 ("like Twenty").** Each one keeps its catalogue entry
+(status `accepted-owner`, dated) and its reproducing test. An accepted loss is never reported as a passing control.
+
+| Protection lost | Catalogue | Severity | Recorded |
+|---|---|---|---|
+| DBA-01: the API can run the Worker-only dispatch-claim functions | BC-08 / G-08 | MEDIUM | Accepted 2026-11-05. Boot gate 8 still writes a `BC-08 …` warning on every API and CLI start. |
+| Direct access to `worker_due_work` and the dispatch pointers | BC-10 | MEDIUM | Accepted 2026-11-05. `check-rls-coverage` expects 0 rows (restrictive deny). |
+| Production deployment ID and per-release approval token no longer required (see below) | BC-11 / G-06 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
+| Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
+| Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
+| The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
+
+**BC-17 (MEDIUM), MITIGATED (owner decision 2026-11-05; Agent 1 80686512 and f91f1038):** the legacy schema roles
+kept their old passwords on an upgraded database. `crewflow` and `crewflow_app` are now NOLOGIN with PASSWORD NULL, on
+the transition and on fresh installs; `crewflow_migrator` too, on the transition, when the role exists. **Residual:** `crewflow_worker` remains a LOGIN role with no password; it can
+authenticate only via non-password methods, which the provider's `pg_hba` must not grant. It stays LOGIN because
+migrations 1786721300000 and 1786721340000 assert its LOGIN, and `crewflow_owner` cannot administer it. Proving test:
+the PG16 lifecycle check "transition: BC-17 the old logins are disabled (crewflow, crewflow_app, crewflow_migrator
+NOLOGIN without a password; crewflow_worker LOGIN without a password)" (the goldens show `login=false` on the fresh,
+reference, interrupted and transition paths), plus catalogue test BC-17. No catalogue entry waits for the owner any
+more.
+
+- **`crewflow_worker`:** stays LOGIN without a password. Only a `trust`, `peer` or `cert` rule in the provider's
+  `pg_hba` could admit it; the provider must not grant one.
+- **Fresh install, residual (detection only):** `crewflow_owner` keeps CREATEROLE plus ADMIN on `crewflow` and
+  `crewflow_app`. Injected SQL could run `ALTER ROLE crewflow_app LOGIN PASSWORD '…'` and regain a persistent,
+  less-privileged login that survives credential rotation. The privilege-drift snapshot and the posture golden catch
+  `login=true`; nothing prevents it. A transitioned database is not exposed: there `crewflow_owner` is NOCREATEROLE.
+- **Rollback:** roles are cluster-wide. Only a fresh-cluster restore of `roles.sql` plus the dump brings LOGIN back.
+- **`crewflow_migrator` (f91f1038):** NOLOGIN PASSWORD NULL on the transition, but it keeps its memberships
+  (`rab_secure_owner` and `crewflow`, SET + INHERIT). A NOLOGIN member is inert. Removing it (REVOKE or DROP ROLE)
+  would need a separate owner decision. The transition passed the second-boot posture check with it present.
+
+**BC-11 / G-06, owner-accepted 2026-11-05 (HIGH):**
+
+> "Production no longer requires a deployment ID or a per-release approval token. A wrong or old image, or a staging
+> config pointed at the production URL, migrates production with no second check. Recovery from a mistaken upgrade is
+> restore-from-backup only (old images fail closed on an upgraded database). Accepted by the owner 2026-11-05, like
+> Twenty."
+
+The production safeguards become optional and are off by default. Remaining controls:
+
+- the migration lock;
+- the identity and refusal gates;
+- the posture and semantic goldens;
+- RLS;
+- the mandatory pre-upgrade backup in the runbook;
+- the optional, opt-in deployment ID and approval token.
+
+Also accepted with BC-11 (Agent 1, 0074cecb): a production deployment that declares no deployment ID skips the marker and
+location checks. It therefore does not detect the wrong database, a restored database or a cloned database. Every boot
+writes a warning instead.
+
+### The ten consequences PT-01's wording did not cover (M0 §6.2)
+
+1. **Cross-tenant pre-auth exposure without injection.** Closed on normal paths by M-T1 (below). The injection case is
+   accepted (BC-03).
+2. **Account takeover with MFA bypass, platform admins included.** Accepted (BC-04).
+3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
+4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
+   sink is required.
+5. **The deployment identity is effectively removable; the N1 approval list no longer gates the owner-login path.**
+   Accepted by the owner 2026-11-05 (BC-11, above). Phase X U-1 (owner decision 2026-11-11): on the owner-login path
+   (the migrate-on-start child and the owner-login release step) N1 is REPLACED by the upgrade floor
+   (`scripts/migrate/owner-login/release-floor.ts`): an existing production database may be upgraded only when its
+   `core.migrations` ledger contains every migration of a supported release (R254 = rab/v0.4.0 = cd7c7e32 = 4c38aa1a, or
+   R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
+   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
+   `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
+   until the clean-up PR retires them.
+6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
+   backdoors. Accepted by the owner 2026-11-05 (BC-12).
+7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
+8. **The integrity gate is blind to policy and function rewrites that keep FORCE on.** The semantic posture monitor
+   detects them afterwards (BC-05).
+9. **One statement can destroy everything.** Accepted (BC-06). PITR is the only recovery.
+10. **CLAUDE.md's own rules became false.** CLAUDE.md was rewritten for the single architecture the same day. Every
+    changed rule is flagged in the PR.
+11. **Owner-accepted, 2026-11-04 (X2, catalogue BC-18):**
+
+    > "Under the owner login, the app can delete or change member invitations, login sessions and email-change requests
+    > within one tenant (7 tables). Accepted, like Twenty."
+
+    The 7 tables are `login_handoff`, `organisation_invitation`, `released_host_label`, `user_auth_identity`,
+    `user_session`, `member_invitation` and `email_change_request`.
+
+    - **Why:** `crewflow_app` held no DELETE on them, and on some of them no (or only column-level) INSERT or UPDATE, so
+      the database refused a direct write and SECURITY DEFINER functions were the only write path. The owner login
+      inherits the table owner `rab_secure_owner`, so on a normal code path the database no longer refuses such a write.
+      M-T1 (FORCE) still confines it to the bound tenant, and with no tenant context it affects 0 rows.
+    - **Decision:** no database guard (the proposed migration 1786721440000 was dropped by the owner). The protection is
+      app-level only, like Twenty: every write to these tables must stay in its reviewed owning service.
+      `tools/check-protected-table-writes.cjs` (CI job `protected-table-writes`) fails on any new direct write outside
+      the allow-list.
+    - **Write audit (27 sites, all in owning code):**
+      - the definer SQL in `host-label-namespace-sql.ts` and `login-handoff-sql.ts`;
+      - `RefreshTokenService`, `SessionValidityService` and `UserSessionBackfillService` for `user_session`;
+      - `UserAuthIdentityService`, `EmailChangeService` and `MemberInvitationService`.
+    - **Finding PTW-1 (LOW):** three security revocations write `user_session` directly instead of through
+      `RefreshTokenService`: `mfa-management.service.ts:220`, `admin-users.service.ts:181` and
+      `privileged-grant-session-reset.ts:28`. They touch `revoked_at`, `revoked_reason` and `security_version` only, are
+      scoped to one user and bound to the tenant. They are allow-listed so they stay visible; consolidation is
+      recommended.
+    - **Tests:** the member-invitation X2 test documents the difference per connected login. `crewflow_app` is still
+      refused (42501), the owner login is not, and RLS still leaves 0 rows without context. Catalogue test BC-18
+      reproduces it.
+12. **Owner-accepted, 2026-11-04 (REF-1):**
+
+    > "Under the owner login, a bug or injected SQL can change the global permission-flag table and the migration ledger
+    > (no tenant boundary; affects every tenant). Accepted, like Twenty."
+
+    The tables are `core.permission` and `core.migrations`. They stay outside the grant-parity guards on purpose: the
+    seed commands write the permission catalogue, and the migration runner writes the ledger, both as the owner login.
+    No database guard is added. Agent 5 updates the catalogue entry and the CF-09 test to record the accepted difference.
+
+13. **Owner-accepted, 2026-11-05: "EXACTLY LIKE TWENTY"** (one image; the API migrates on start). Each risk below is
+    accepted, like Twenty. Nothing claims it is a passing control.
+
+    - **G-07 (HIGH): unreviewed DDL at start-up in production.**
+      - The API migrates on start, with no per-migration approval list and no `rab-migrate` release step. A new image's
+        DDL reaches production when the API starts.
+      - Controls kept: the migration lock; the check-first classifier; the refusals (identity, wrong or unknown ledger,
+        version, roles); the UPGRADE FLOOR (Phase X U-1, 2026-11-11: a non-fresh production database upgrades only from
+        a supported release, R254 or later, a resumed partial upgrade included; older or unknown histories refuse with
+        exit 65 and nothing applied); FORCE RLS; the mandatory backup before each upgrade (runbook).
+      - After an upgrade that applied migrations, the child bumps the allow-listed `entitycache` epochs (one INCR per
+        cached entity; never `bull:*`, throttler keys or `rab:*`). A Redis failure there is a WARNING only: stale entity
+        projections then live until their TTL (at most 300 s).
+    - **C3 (HIGH): serving after a failed upgrade, with a partly-applied schema.**
+      - The default `CREWFLOW_UPGRADE_FAILURE=continue` logs an ERROR naming the failed migration and keeps starting.
+      - A first-install failure still exits non-zero (an empty or bootstrap-partial database never serves).
+      - Residual: the code can be served against a schema that lacks the failed migration's objects. For example, a
+        missing RLS policy or function. A transactional migration rolls back whole, so its tables never appear without
+        their policies; one of the `transaction = false` migrations can stop half-way.
+      - Trigger: api-prestart sets `CREWFLOW_UPGRADE_INCOMPLETE=<migration>` only after the migrate child exits 70 with
+        `"policy":"continue"` on a database that is not a first install, and strips any inherited value. The boot gates
+        honour it for the API process only, only when the first pending migration is exactly the named one, and only
+        on a stopped UPGRADE (see the first-install rule below)
+        (`schema-compatibility.ts` `UPGRADE_INCOMPLETE_VAR`; unit tests `schema-compatibility.c3.spec.ts`,
+        `semantic-posture-monitor.c3.spec.ts`). Unset, every gate refuses exactly as before.
+      - **Owner-accepted 2026-11-05 (decision changed the same day): "After a failed upgrade, the Worker runs all jobs,
+        including payroll timers, on a partly-applied schema (like Twenty)."**
+        - The Worker cannot see the API's variable (another container), so it decides from the database alone: when the
+          database is a stopped upgrade (below) and the pending set is a contiguous, in-order tail of its chain, gate 7
+          writes a loud WARNING ("running on a
+          partly-upgraded schema: <first> and N more not applied"), `provision-function-behind` is a warning too, and
+          the semantic golden comparison is skipped (the boot snapshot is still the baseline).
+        - Residual: jobs that touch the missing tables or functions fail and retry under the normal BullMQ and outbox
+          rules.
+        - Still refused for the Worker: interleaved or out-of-order ledgers, unknown or foreign names, a different
+          chain, retired names, and an unknown provision function in production. The ahead rules are unchanged. The CLI
+          and the provisioner are unchanged.
+      - **A first install never serves and never starts the Worker.** Both relaxations need Agent 1's classifier to say
+        CHAIN-PARTIAL and its fresh-install proof to say NOT fresh (`database/owner-login/install-state.ts`; read
+        physically: `pg_relation_size` of `core.organisation`, `core.manager_workspace` and
+        `core.workspace_schema_registry`, workspace schemas, and the bootstrap-role ADMIN row; never an RLS-bound count).
+        EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install (CHAIN-PARTIAL, fresh), FOREIGN and an empty ledger refuse
+        exactly as before (`readUpgradeEvidence` in `database-boot-gates.ts`).
+      - **Known behaviour, kept (coordinator decision 2026-11-05):** the in-process workspace provisioner's per-cycle
+        provisioner-strict check keeps refusing on a partly-upgraded schema. Provisioning of NEW workspaces waits (it
+        does not crash) until the fix is deployed. This stops new workspace schemas being built from an incomplete
+        template. It is data integrity, not an extra block on running jobs.
+      - Detection:
+        - the ERROR log naming the migration, written on every start while the ledger is behind;
+        - these boot gates still run and still REFUSE: role (1), version (2), extensions (3), deployment identity (4),
+          force-rls spot check (5), tls (6), dispatch-notify (1c), objects (FORCE on every core tenant table, the 16
+          pre-auth tables with their definer policies, ownership), grants (8);
+        - gate 7 (pending / schema-compatibility) still refuses unknown or interleaved ledger names, a ledger ahead for
+          the provisioner, and every case that is not the declared failed upgrade; for that one case it warns;
+        - the semantic-posture golden comparison is skipped in that case only (the golden describes the new release, so
+          a rolled-back upgrade always differs), and a WARNING says so;
+        - the runtime posture monitor still compares every timer tick with the boot snapshot: any later policy,
+          function, trigger or RLS change turns readiness off.
+    - **C5 (MEDIUM): one API server.** Deploys stop the API, then start the new one. No rolling or blue-green update:
+      two versions would race for the migration lock and old code would serve intermediate schemas.
+
+    - **One image (O1, PR #76; MEDIUM): the API container now carries the Worker-only PDF packages.** About 55 npm
+      packages, including `@react-pdf/*`, pdfkit, fontkit, pako 0.2.9, png-js, jay-peg, yoga-layout and `@noble/*`
+      (+30.8 MB uncompressed; 0 high or critical CVEs at O1). This is an owner-accepted attack-surface increase (one image
+      like Twenty, owner decision 2026-11-05).
+      - Open proof (`SHARED-IMAGE-PLAN.md`): nothing yet proves the API never LOADS them. There is no static
+        import-graph gate and no runtime `require.cache` check on the API.
+      - Recommended follow-up: add both, failing CI when an API entrypoint can reach one of the PDF packages or when a
+        started API process has one in `require.cache`. Until then a vulnerability in those packages is reachable from
+        the API only through code that imports them, which is not proven absent.
+    - **Stop signal during the migrate step (O3 fix T8a-TMP; LOW): owner-accepted 2026-11-05.** The read-only rab-api
+      has no writable path, so `api-prestart.sh` takes the failed migration's name back from the migrate child through
+      a command substitution instead of a temp file. A POSIX shell runs its trap only after a command substitution
+      returns, so a `docker compose stop rab-api` that arrives while migrations are being applied is handled when the
+      child ends, or becomes Docker's SIGKILL after `stop_grace_period` (35 s). Every other prestart step still reacts
+      immediately.
+      - Measured (O3 container test T10, PG16, with a transactional test migration): both a stop and a direct SIGKILL
+        mid-migration left the database consistent. The session ended, the advisory lock was released, there was no
+        ledger row, the change was rolled back, and the next documented start applied it (outcome ok).
+      - Residual: 10 migrations in the chain set `transaction = false` (several use `CREATE INDEX CONCURRENTLY`):
+        1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
+        1786721430000, 1786721440000 and 1786721450000 (`NON_TRANSACTIONAL_MIGRATIONS`, checked against the migration
+        sources by `release-floor.spec.ts`). A kill inside one of them is not rolled back. For example, an interrupted concurrent build
+        can leave an INVALID index, and its re-run depends on that migration's own idempotence. This was already true
+        before the change (the stop then reached the child immediately and interrupted it the same way); the grace
+        period only changes when the kill lands. NOT measured by T10. Operators must not stop rab-api during the
+        migrate step; the deployment guide's backup step is the recovery path.
+      - Stricter alternatives, declined by the owner: a /tmp tmpfs on rab-api (breaks the H6 "API has no writable path"
+        rule), or a larger prestart rework.
+
+    Design changes recorded with this decision (not risks):
+
+    - **C1:** `DISABLE_DB_MIGRATIONS` is accepted again (Twenty's name). It is the Worker's switch: the Worker never
+      migrates.
+    - **C2:** the API registers the BullMQ schedulers and the Worker only consumes them (Twenty's split; Crewflow's
+      Worker registered them before).
+      - Accepted risk (MEDIUM, owner-accepted 2026-11-05 as part of C2, like Twenty): a BullMQ Job Scheduler lost from
+        Redis stays lost until the next API start. Examples are Redis data loss without AOF, or a manual `FLUSHALL`.
+        The timed jobs it drives pause until then, payroll and attendance timers included.
+      - Mitigations in place:
+        - the Worker's read-only reconcile check logs an ERROR naming the missing scheduler ids and turns Worker health
+          unhealthy;
+        - production Redis runs AOF with `noeviction`;
+        - the API's registration step is idempotent, so any API start restores every scheduler.
+      - Recommended follow-up: alert on Worker unhealthy.
+      - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
+        decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
+
+### Ranked findings G-01 … G-13 (independent review G, M0 §6.1) and their state
+
+| Id | Sev | Finding | State after this change |
+|---|---|---|---|
+| G-01 | CRITICAL | The runtime owns the 16 pre-auth tables, so a logic bug alone exposes every tenant's auth secrets | **Mitigated on normal paths** by M-T1 (FORCE plus an owner-only definer policy). The injection case is accepted (BC-03). Agent 5's INV-1 (a member invitation disclosed to another workspace) is this class. |
+| G-02 | CRITICAL | Injection gets full DDL, and the posture gate cannot see policy or body rewrites | Accepted (BC-01, BC-05). **Detected** by the semantic posture monitor (at boot and on a timer). |
+| G-03 | CRITICAL | Cross-tenant account takeover with MFA bypass | Accepted (BC-04). The monitor detects a disabled trigger. |
+| G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
+| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
+| G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
+| G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Accepted by the owner 2026-11-05, like Twenty (item 13 above): the API migrates on start in production |
+| G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
+| G-09 | MED | Pool poisoning: a session-level SET ROLE survives COMMIT | **Mitigated:** RESET ROLE on checkout and at the start of every tenant transaction, plus a `current_user = session_user` assertion |
+| G-10 | MED | The workspace registry and bound constraints are writable | **Mitigated on normal paths** by M-T2 and the grant-parity guards. The injection case is accepted. |
+| G-11 | MED | No logical backup by the app login | Accepted by the owner 2026-11-05 (BC-12) |
+| G-12 | LOW | The reachability walk must count ADMIN-only memberships and predefined roles | **Done.** The MEMBER-semantics walk follows every `pg_auth_members` edge, is cross-checked with `pg_has_role(…, 'MEMBER')`, and refuses predefined and provider-admin roles. |
+| G-13 | HIGH (pre-existing) | RLS keys on a GUC the runtime can set | Unchanged. Out of scope (it needs its own design). |
+
+### Controls added
+
+Each control below is tested. None of them prevents injection.
+
+- **M-T1** (`PreAuthTablesForceOwnerOnly1786721400000`):
+  - It adds FORCE plus `<table>_secure_owner_definer` (TO rab_secure_owner, `CURRENT_USER = 'rab_secure_owner'`) to the
+    16 pre-auth tables.
+  - Definers keep every row. The owner login gets only the tenant policies.
+  - `NOT_FORCED_ALLOWLIST` is now empty.
+  - Consequence for later migrations and scripts: to read those tables as the owner login, use `SET LOCAL ROLE
+    rab_secure_owner`. An "is the database empty?" row count run as the owner login would wrongly answer yes.
+  - Fixed in place on 2026-11-04 (owner-approved; M-T1 had run only on disposable databases). Under FORCE,
+    `core.platform_admin`'s three TO PUBLIC policies (`_select`, `_write`, `_update`) called
+    `core.is_active_platform_admin()`. That definer reads `core.platform_admin`, so policy and function called each other
+    until "stack depth limit exceeded", and every login failed once a second admin row existed (HIGH, fail-closed,
+    found on PR #72). Those policies are now `CASE WHEN CURRENT_USER = 'rab_secure_owner' THEN false ELSE <previous
+    predicate> END`, applied before FORCE. Definers keep every row through the owner-only policy. Every other role
+    keeps the previous predicate. No other policy on `core.platform_admin` calls the function, and a static scan of
+    the other 15 tables found no such loop. Test: `platform-admin-force-rls.integration.spec.ts`.
+- **M-T2** (`WorkspaceRegistryGuardAllowList1786721410000`): the registry versioning guard becomes an allow-list
+  (crewflow, rab_secure_owner, superuser). The workspace migrator takes `SET LOCAL ROLE crewflow`.
+- **Grant parity, for PAY-1** (`OwnerLoginGrantParityGuards1786721420000`):
+  - BEFORE INSERT, UPDATE, DELETE and TRUNCATE triggers give the owner login exactly crewflow_app's write privileges on
+    36 crewflow-owned core tables.
+  - Those tables cover payroll immutability, definer-only AI, registry and ledger writes, and outbox retention.
+  - The workspace-schema copies of the payroll tables (HWS runtime) get the same guards through workspace module v20
+    (`WorkspaceGrantParityGuards1786721430000`).
+  - Fixed in place on 2026-11-04 (owner-approved; both migrations had run only on disposable databases):
+    - **PAY-1b (MEDIUM, found by Agent 5 on `deploy/twenty-mode-a`):** the DELETE guards, and the UPDATE guards of
+      tables with no updatable column, were row-level. These tables have no DELETE (or UPDATE) policy, so as the owner
+      login such a statement matched 0 rows, no row trigger fired, and it "succeeded" without an error. No data
+      changed, but nothing refused or recorded the attempt (`payroll-runs.integration.spec.ts:410`,
+      `payroll-approval.integration.spec.ts:440`). Every operation `crewflow_app` lacked entirely is now refused per
+      statement (INSERT, DELETE, and UPDATE with no updatable column), like a missing privilege. The column allow-list
+      UPDATE guards stay per row.
+    - **Trigger order (functional regression, Agent 5 `ai-agents.integration.spec.ts:163`):** the allow-list guard ran
+      after `ai_agent_config_version`, saw the server-maintained `config_version` change and refused a legitimate
+      prompt edit. Every guard name now starts with `_`, so it fires before any other BEFORE UPDATE row trigger, and
+      the migration refuses a table where another one would fire first.
+    - **MFA-SESS-1 (fixed, not accepted; owner decision 2026-11-04):** `core.user_session.mfa_verified_at` is set at
+      INSERT only. No app path updates it: refresh-token, backfill and handoff INSERTs never set it, and no UPDATE
+      names it. A statement-level `BEFORE UPDATE OF mfa_verified_at` trigger now refuses any UPDATE that names the
+      column, for every role, the superuser included. The INSERT-time check (an enabled factor, not in the future) is
+      unchanged.
+    - Tests: `owner-login-guards.integration.spec.ts` (PAY-1b, trigger order and MFA-SESS-1 cases). The payroll and
+      ai-agents suites pass unchanged, and `w45-db5-schema` stays strict.
+- **Boot, runtime and CI guards** (updated in place): they accept the owner login only, run the MEMBER-semantics
+  reachability walk, enforce the exact role inventory, check FORCE and ownership, and refuse PostgreSQL below 16.
+- **Pool safety:** RESET ROLE on every pool checkout and at the start of every tenant transaction. A transaction fails
+  closed when `current_user <> session_user`. Never `DISCARD ALL`.
+- **Semantic posture monitor:**
+  - It hashes a canonical form of policies, function bodies and config, triggers, RLS flags, the audit ACL, owners,
+    settings and role memberships.
+  - At boot it compares with the committed golden for the PG major. On the timer it compares with the boot snapshot.
+  - Drift turns readiness off and raises an alert. The monitor never rewrites anything.
+- **External audit sink:** an interface plus redacted, structured events. Production requires it and fails closed
+  without it. Deployment dependency: an off-host append-only log shipper (not created here).
+- **SQL-injection lint** (`tools/check-sql-injection.cjs`) plus adversarial tests. The lint is a text scan, **not a
+  complete defence**.
+
+### Residual risks (no control above covers these)
+
+- Everything injection can do inside its own request (PT-01): read, rewrite, drop, persist.
+- Session-level settings other than the role (for example a session `rab.organisation_id`) that injected SQL leaves on
+  a pooled connection. Tenant-context calls re-bind theirs transaction-locally.
+- A rewrite made and undone between two monitor checks is not seen. The record for that is pgaudit or provider logs
+  shipped off the database (a deployment dependency).
+- Passwords of the LOGIN schema roles cannot be seen without superuser (BC-17).
+- PG18 has no semantic golden yet, so production on PG18 refuses at boot until one is generated and reviewed.
+- The workspace-schema copies of the payroll tables have no grant-parity guards yet (open; needs a workspace module).
+- The lint cannot follow SQL built across functions, or ORM `.where(string)` fragments.
+
+## PDF renderer review fixes M-3 and L-6 (branch integration/pdf-native-pre-removal, #62, not merged)
+
+No migration, role, grant, RLS or posture change; no money or worked-minutes value changes.
+
+- **M-3 — render memory bounded by the Worker container.** Asset: the Worker's availability for every tenant (all
+  consumers and scans share one container). Actor: any user whose text reaches a PDF (long notes, large rosters), or a
+  layout bug. Before: each native render thread could grow to a 512 MB old generation, independent of
+  `PDF_NATIVE_CONCURRENCY` and of the 1536m `mem_limit`, so concurrent oversized renders could get the whole container
+  OOM-killed instead of failing one thread with `error_PDF_NATIVE_OUT_OF_MEMORY`. Now: 384 MB per thread, and
+  `PDF_NATIVE_CONCURRENCY × 384 MB ≤ PDF_NATIVE_MEMORY_BUDGET_MB` (default 768 = half the default `mem_limit`; strict
+  integer 384–16384) is enforced, fail closed, by boot validation in both processes (every renderer mode), again at Worker
+  boot in native mode, and again by the process-wide pool before it creates any thread
+  (`engine/worker-shared/pdf-native-memory.contract.ts`, one rule). The launcher forwards the variable to the jobs child
+  only. Residual: the budget is a configured number, not read from the cgroup; an operator who raises it without raising
+  `mem_limit` defeats it (documented beside `mem_limit` in both compose files). Tests: `env.validation.pdf-renderer.spec`,
+  `render-pool.spec` (plan, process pool refuses), `pool-env-consistency.spec`, a 500-row roster at the default cap,
+  launcher test 34. The image-level OOM run (H6 M09 with two oversized renders) is still to be re-measured.
+- **L-6 — line separators in notes.** A lone CR, U+2028 and U+2029 are normalised to LF with CRLF in the render
+  thread's glyph guard (and in `collapsePreLine`), so notes keep their author's line breaks instead of printing □. Every
+  other control or format character keeps F1's □ and its count-only log. Tests: `render-pool.spec`, `native-pdf.spec`,
+  harness `pdf-harness.unit.spec` (transform and the `line-breaks` check).
+
+## Review L-4 — the Worker image bans the whole `@swc/*` scope again, with one exact exception (branch integration/pdf-native, #61/#63, not merged)
+
+- **Threat:** the P5 change had replaced `--forbid '@swc/*'` by an enumerated list of SWC compilers so that the runtime
+  helper library `@swc/helpers` (fontkit) could ship; a future SWC package not on that list (`@swc/html`, `@swc/css`,
+  their per-platform `.node` binaries, `@swc/minifier`) would then have reached the Worker runtime image unnoticed.
+- **Control:** `Dockerfile.worker-bundle` forbids `'@swc/*'` again and names one exception, `--allow @swc/helpers`.
+  `runtime-deps.cjs` exempts an allowed entry only when its directory name and its package.json name are both exactly
+  the allowed name; refuses a wildcard `--allow` and an `--allow` no `--forbid` entry covers; nested packages under the
+  allowed one are still checked. Regression: `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security
+  deployment-config job): `@swc/html-linux-x64-musl` and seven other SWC names fail, `@swc/helpers` passes, a disguised
+  package fails, and the Dockerfile gate keeps exactly one exception.
+
+## HOTFIX — the semantic-posture boot gate refused every real database (branch fix/posture-test-marker, 2026-11-05)
+
+**Security finding (§5.8).**
+
+- **Severity:** HIGH (availability). Plus a secondary security risk from the operator workaround (below).
+- **Actor → action → consequence:** any operator installs or upgrades on a real (unmarked) database → the API and
+  Worker boot gates read the semantic posture and compare it with the committed golden → the golden contains
+  `setting|*|this|crewflow.disposable_test_database=true`, which only CI's throwaway databases carry → every real
+  database "differs from the reviewed posture" → `semantic-posture refused …` → a fresh install applies all 254
+  migrations and then restart-loops. Nothing serves.
+- **Secondary risk:** the obvious operator workaround is to mark the production database disposable
+  (`ALTER DATABASE … SET crewflow.disposable_test_database = 'true'`) so that it matches the golden. That marker relaxes
+  test-only allowances (unmarked-remote-host acceptance for NODE_ENV=test, test seams, seeds). Before this fix nothing
+  refused production on a marked database.
+- **Where:**
+  - `packages/rab-server/src/database/posture-drift/semantic-golden.pg16.ts:539` and `semantic-golden.pg18.ts:540`
+    (the captured line);
+  - `packages/rab-server/src/database/posture-drift/semantic-posture.ts:89-93` (the reader includes every per-database
+    and per-role setting).
+  - On main since 53595f02 (2026-11-04). **The published v0.4.0 images carry the defect.**
+- **Root cause:** the goldens were generated by `check-semantic-posture.ts --write` from CI databases that are marked
+  disposable by design. The reader treated that test-infrastructure setting as security posture.
+- **Fix:**
+  1. The reader excludes the setting by EXACT name (`POSTURE_EXCLUDED_SETTING = 'crewflow.disposable_test_database'`,
+     whatever its value; no `crewflow.*` wildcard). Every other per-database or per-role setting is still compared.
+     The line is removed from both goldens; they carry no hash or count.
+  2. Fail closed separately: `assertDeploymentIdentity` (boot gate 4 "identity", the runtime guard and production
+     commands) now refuses a PRODUCTION process on a database whose catalog carries the marker
+     (`pg_db_role_setting`, database level). The message names the remedy (`ALTER DATABASE <name> RESET …`). Excluding
+     the marker from the posture therefore does not make it undetectable, and the workaround above now fails closed.
+- **Regression tests:**
+  - `posture-drift/semantic-posture-test-marker.spec.ts`:
+    - no golden line names the setting;
+    - the reader's exclusion is by exact name;
+    - production plus the marker is refused;
+    - test plus the marker is allowed;
+    - production without the marker is not refused by this rule.
+  - `__tests__/integration/semantic-posture-test-marker.integration.spec.ts`: the posture reads the same with the
+    marker `true`, `false` and reset (rolled back).
+- **Operators on v0.4.0:**
+  - Do NOT mark production disposable.
+  - Deploy the release carrying this fix. On a test database the old images keep working (it carries the marker).
+
+## No automatic confirmation; withdraw unconfirmed acceptances at start − 30 min (branch feat/no-autoconfirm, 2026-11-06, not merged)
+
+Owner business-rule change (2026-11-06). Plan and binding owner decisions: Q1–Q15 in the PR description and in
+`rab-workforce-architecture.md` A13 / §1.1 / §8.4. No migration. No new table, status, transition, permission or
+notification type.
+
+**What changed**
+- The system never confirms an offer. Two automatic paths are removed:
+  - the staff-accept auto-confirm on Venue-Manager-requested shifts (`OfferService.staffAccept`);
+  - the Worker's manager-confirmation timeout auto-confirm (`runManagerConfirmationTimeoutCycle`, Phase 7.1).
+- `applyOfferConfirmation` is the only writer of `manager_confirmed`. It has one caller, `OfferService.confirmOne`, and
+  takes a required human `confirmedBy`. A static spec pins both facts: `apply-offer-confirmation-callers.spec.ts`.
+- **Approval deadline** (one SQL expression, `confirmationDeadlineSql`, evaluated by PostgreSQL):
+  - a STANDARD offer: assignment start − 30 min;
+  - a REPLACEMENT/STANDBY offer: the end of its booked window (Q1b).
+- Enforcement points:
+  - The confirm CAS requires `clock_timestamp() < deadline`. Otherwise the API returns 409
+    `CONFIRMATION_DEADLINE_PASSED` and then withdraws lazily.
+  - At the deadline the Worker withdraws through the shared CAS (`withdrawUnconfirmedOffer`), which requires
+    `clock_timestamp() >= deadline`. The result: offer `manager_rejected`, `rejected_by` NULL, reason
+    `confirmation_deadline_passed`; assignment `rejected`.
+  - A STANDARD send or accept after the recipient's deadline is a 409 with the same code (Q1a, Q2).
+- `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` is removed (Q12).
+- Notifications are sent once, in the withdrawal's own transaction:
+  - the staff member gets `offer_rejected`;
+  - the responsible manager and the Venue Managers of that venue get `manager_confirmation_timeout` (Q9).
+
+Who can call this? — Confirm (`POST /offers/:id/confirm`, `/offers/batches/:id/confirm-all`):
+`PermissionGuard(offer.confirm)` → `assertOfferOwned` (the sender only, 404 otherwise) → the org-scoped CAS → `job_offer` RLS.
+The audited Admin Inspect path is unchanged; there is no new bypass (Q6). Nobody can call the withdrawal. The Worker
+reaches it from its due-work pointer, from its backstop scan and from the optional timer trigger. The API reaches it
+only after the offer's own sender has had a confirm refused at the deadline.
+
+Whose data is involved? — The staff member's booking (whether they are booked, and therefore paid), the venue's staffing,
+and the sender's pipeline. Every withdrawal is audited (`offer.rejected_by_worker`, actor NULL, `metadata.reason`
+`confirmation_deadline_passed`, `deadlineAt`, `processedLagMs`, `notified`). History is kept: the offer and assignment rows
+are never deleted.
+
+What if that identity is compromised? — A compromised manager account can confirm only its own offers, only before the
+deadline, as before. It cannot extend a deadline. No request field carries one: the confirm action reads no body, and the
+deadline is recomputed from `shift_assignment.period` by the database. A compromised staff account can at most accept
+before the deadline; that never books anyone.
+
+What if it's malicious? — A Venue Manager has no `offer.confirm` → 403, a categorical lack of permission, on an offer they
+may see. Another workspace's or organisation's manager → 404. A forged Worker pointer naming another organisation's offer
+is read under that pointer's own organisation context (SET LOCAL + FORCE RLS), finds nothing, and is completed as a no-op.
+
+What if the request is tampered with? — No client-supplied status, deadline or organisation is read. The deadline is
+judged by `clock_timestamp()` on the database, never a device clock. Projections (`approvalDeadlineAt`,
+`awaitingManagerConfirmation`, `canConfirm`, `canAccept`, `closedReason`) are computed in SQL. They are display only: every
+mutation re-checks them in its CAS.
+
+What if two callers race? — Every competitor claims the `job_offer` row FIRST with `status = 'staff_accepted'`:
+- confirm (`< deadline`);
+- the withdrawal (`>= deadline`);
+- manager reject;
+- pipeline cancel;
+- the shift-cancellation follow-up;
+- two Workers (SKIP LOCKED pointer + `worker_event` `manager-confirmation-deadline:{offerId}:{deadlineIso}`);
+- the API lazy path.
+
+Exactly one wins and the others match zero rows. The withdrawal locks offer → assignment and never locks `shift`, so it
+cannot deadlock with confirm (shift → offer → assignment). The withdrawal skips a cancelled shift: the cancellation
+follow-up closes those with the truthful reason.
+
+What if the DB returns data written by a lower-trust actor? — The only values read are the offer's own status, kind and the
+assignment's period, written by the manager at send. No staff-written value feeds the deadline.
+
+What if a third party (email/push/storage provider) is compromised? — Unchanged: the notification outbox rows are created
+exactly once (CAS-gated); provider delivery stays at-least-once (existing entries).
+
+What happens when authorisation fails? — 403 (no `offer.confirm`) / 404 (not the sender, other workspace or
+organisation). A refused foreign confirm never triggers the lazy withdrawal, which runs only after the owner's own refused
+confirm.
+
+What happens when the operation fails halfway? — The withdrawal, its audit, notifications and realtime envelope are one
+transaction. A rollback leaves the offer `staff_accepted`. Retries:
+- the pointer reschedules with bounded backoff (60 s × 2^attempt, at most 15 min; the old fixed-60 s-forever loop is gone);
+- the backstop scan retries on its next tick.
+
+Manual confirms are refused from the deadline onward whether or not the Worker has run.
+
+**Abuse cases (tests):**
+- **AC1** — a late confirm is a 409 with the code; the acceptance is withdrawn, never booked; one audit, the exact
+  notification. `offer-confirmation-deadline` AC1; worker `manager-confirmation-deadline-correctness` C2.
+- **AC2** — a Venue Manager gets 403 and staff cannot confirm. AC2.
+- **AC3** — other organisations and workspaces get 404 (AC3; worker C4), including a forged pointer (X1).
+- **AC4** — smuggled body fields change nothing. AC4.
+- **AC5** — late accept and late send are refused. AC5; worker S1, S2.
+- **Races:** R1a, R1b, R2, R3, R4, R5.
+- **Zero automatic confirms:** Z1 (no `manager_confirmed` without a human `confirmed_by` in any suite organisation), Z3,
+  Z4, and the static T-Z2 pin.
+- **No penalty, no pay:** A1–A4.
+- **No double booking:** DB1.
+- **No tenant context → zero rows:** X4.
+
+**Superseded:** this entry supersedes the 2026-10-21 "Replacement & standby offers" entry's trade-off (1)
+("Replacement/standby acceptances … still follow the existing manager-confirmation timeout (system auto-confirm …)").
+That trade-off is withdrawn. Replacement and standby are never confirmed by the system; they keep their window and are
+withdrawn at its end. That entry's control text ("shared by the manager click, auto-confirm and the timeout worker",
+"Standby … gets no manager-confirmation-timeout pointer") is also superseded: there is one caller, and every kind now
+gets a deadline pointer that withdraws.
 
 ```
-LOW (defence in depth)
-Failure:      whoever controls a service's environment (misconfiguration, a compromised deploy config or platform) sets
-              JEST_WORKER_ID (any value) → the API boots normally → the global per-IP throttle, the per-route auth tiers,
-              the login / MFA / admin-MFA-reset limiter and the attendance per-user throttle are all skipped, silently →
-              credential stuffing and brute force unthrottled.
-Actor:        the service environment (already high privilege; not an anonymous attacker).
-Location:     throttler.module.ts:63, login-attempt-limiter.service.ts:203, attendance-per-user-throttle.guard.ts:47 (main
-              8aacdddb): three copies of `JEST_WORKER_ID !== undefined && RAB_DISABLE_RATE_LIMIT !== 'false'`.
-Root cause:   the bypass treated an environment variable as proof of a Jest run, an UNSET flag satisfied `!== 'false'`, and
-              nothing refused either variable at boot. The comments (jest-setup.ts:8-10, throttler.module.ts:56-60) claimed
-              it "can never be true outside an actual Jest run".
-Fix:          one predicate, engine/core-modules/throttler/rate-limit-test-bypass.ts isTestRateLimitBypassActive: needs
-              RAB_DISABLE_RATE_LIMIT exactly 'true' AND a non-empty JEST_WORKER_ID, and is never active when NODE_ENV, DB_TARGET (X1.9) or
-              RAB_RUNTIME_ENV says production. env.validation.ts refuses to boot a production process (NODE_ENV, DB_TARGET or
-              RAB_RUNTIME_ENV production) while either variable is present, even blank or 'false' (names only). The
-              three call sites use the predicate; rab-worker's jest-setup now sets the flag explicitly. Comments corrected.
-Regression:   rate-limit-test-bypass.spec.ts (truth table incl. the old-copy abuse cases, production refusal, and a source
-              scan that no `process.env.JEST_WORKER_ID` / `RAB_DISABLE_RATE_LIMIT` read survives outside the helper);
-              env.validation.rate-limit-bypass.spec.ts (production + either variable → refused; RAB_RUNTIME_ENV=production
-              → refused; development / test keep it); rate-limiting.integration.spec.ts (the Jest bypass still skips the
-              auth throttle with the flag 'true'; with the flag UNSET under Jest the 6th forgot-password gets 429).
+SECURITY TRADE-OFF (Q11 — presented to the owner for veto; implemented as planned unless vetoed)
+Decision:   The deadline is judged at the row-claiming CAS statement (clock_timestamp()), not at COMMIT.
+Reason:     PostgreSQL offers no commit-timestamp predicate; a deferred constraint trigger could re-check at commit
+            but adds a per-schema migration and still races the clock by microseconds.
+Risk:       A confirm whose CAS runs at deadline−ε can commit at deadline+δ (δ = the rest of the confirm transaction,
+            normally milliseconds). The seat claim and booking are then valid although committed just after the deadline.
+Mitigation: The CAS holds the job_offer row lock, so the withdrawal cannot interleave (test R1a); the window is the
+            remaining statements of one transaction; audit records manager_confirmed_at = clock_timestamp() at the CAS.
+Reversal:   Optional migration A (plan §4) as a DEFERRABLE INITIALLY DEFERRED constraint trigger re-checking clock_timestamp().
 ```
 
-- **Unchanged:** every rate-limit value, key, 429 / 503 contract and Redis failure policy; InvitationRateLimitService and
-  AiQuotaService still have no bypass.
-- **Residual:** outside production the switch still exists by design (the suite shares one IP); a development or staging
-  service started with both variables set runs unthrottled. Staging is not a declared runtime value here (production is
-  decided by NODE_ENV / RAB_RUNTIME_ENV only).
+```
+SECURITY TRADE-OFF (coordinator default for the Q4 / Q1b conflict — open to owner veto)
+Decision:   Notifications for a withdrawal are sent only while the assignment has not ended OR within 1 hour of the
+            deadline (withdraw-unconfirmed-offer.ts NOTIFY_GRACE). Otherwise the withdrawal is audited (notified=false) and
+            silent.
+Reason:     Q4 says "notify only where the assignment has not yet ended", but a replacement/standby deadline IS its window
+            end, so that test alone would never notify them. The extra hour covers normal Worker cadence and short outages.
+Risk:       After a Worker outage of more than 1 hour that outlasts a replacement/standby window, nobody is told the
+            acceptance was withdrawn (state, audit and realtime refresh still happen).
+Mitigation: Realtime offer.rejected still reaches staff, the sender and the venue's Venue Managers; projections show
+            closedReason; the audit row records notified=false for operational follow-up.
+Reversal:   Change NOTIFY_GRACE / the predicate (one SQL line) once the owner rules.
+```
+
+```
+SECURITY TRADE-OFF (no migration, per the owner's instruction)
+Decision:   No database-level backstop: no trigger refusing a late → manager_confirmed write, and no
+            "confirmed_by IS NOT NULL" CHECK (plan §4 options A and C).
+Reason:     The owner ruled that no migration file is written or run without separate approval.
+Risk:       A future code path that writes manager_confirmed directly, bypassing applyOfferConfirmation, would not be
+            stopped by the database.
+Mitigation: The static spec pins the single writer and its single caller; the T-Z1 suite check finds any system
+            confirmation; code review of `SET status = 'manager_confirmed'` (grep-pinned).
+Reversal:   Owner-approved migrations A and C (exact SQL in the plan §4).
+```
+
+**Residual:**
+- (1) The deadline cannot move today, because published-shift times are not editable. A future feature that edits
+  `shift_assignment.period` of an awaiting offer must re-arm the pointer. This is documented on `confirmationDeadlineSql`,
+  and the backstop scan catches a missed re-arm.
+- (2) Pre-deploy `staff_accepted` offers past their deadline are withdrawn on the first tick after deploy (Q4). Those
+  whose assignment ended long ago close silently.
+- (3) Rollout order (superseded 2026-11-11 by "deploy exactly like Twenty", below): Deploy the API and Worker together,
+  from the same image tag, with `docker compose pull && docker compose up -d`. The API starts first and migrates; the
+  Worker starts when the API is healthy. Never update the API alone while an older Worker keeps running (an old Worker
+  with the new API would still auto-confirm offers the new API refuses). Take a provider snapshot/restore point before
+  each production deploy.
+
+## FIX — native PDF output depended on what the render thread printed before (fontkit glyph cache; branch fix/pdf-native-determinism, 2026-11-06)
+
+**Security finding (§5.8).** Found as the intermittent `pdf-equality` CI failure on hostile fixtures (PR #78 run
+42055102259, PR #80 run 42206763876; both passed on re-run). The PDF bytes differed between runs, not only the
+harness's reading of them.
+
+- **Severity:** HIGH (integrity of generated attendance and payroll documents, silently; triggered across tenants; no
+  disclosure of content).
+- **Actor → action → consequence:** any user whose text reaches a native PDF (a staff name, venue, note or approver
+  with "Ż", "Å", "Ö", "é", ...) → the Worker renders that document on a pool thread that has not yet laid out the plain
+  base letter in that weight → every LATER document on that thread, for any tenant, until the thread is recycled
+  (200 renders or idle), lays that letter out with no code points. MEASURED on the harness fixtures: after the unicode
+  roster, an ordinary one-staff final timesheet PRINTED its status "Approved" as "pproved", the review "Attendance" as
+  "ttendance" and the footer workspace "Adolphus Events" as "dolphus Events" (glyphs not drawn), and its text layer lost
+  every regular capital "A" ("SW1A 1AA" reads "SW1 1"); after the unicode statement, the hostile timesheet broke its
+  note one glyph late ("<<" split over two lines) and lost "Z" from the text layer (ToUnicode `<>`); 16 of the 132
+  ordered pairs of the hostile, unicode and one-row documents differed. Which document corrupts which later one depends
+  only on pool scheduling, hence the intermittent CI failures. Digits are no composite's component in Liberation Sans,
+  so hours, times and amounts were not observed to change; "." and "-" are components, so a dropped decimal point or
+  hyphen cannot be ruled out.
+- **Where:** `packages/rab-worker/src/queues/rab-reports/native/runtime/render-thread.ts` (font objects kept for the
+  thread's lifetime, no isolation between renders). Mechanism in the pinned dependencies: fontkit 2.0.4
+  `TTFFont.getGlyph(glyph, characters = [])` (`dist/main.cjs:12708`) caches a glyph by id with the code points of its
+  FIRST request; its TrueType subsetter fetches composite components with none (`main.cjs:12180`); textkit 7.0.1 maps
+  glyphs to string indices by `glyph.codePoints.length` (`textkit.js:1046-1077`); pdfkit 0.20.1 writes ToUnicode from
+  them (`pdfkit.js:3482`). Every Latin letter, `<`, `>`, `-`, `.`, `;`, `'`, `"` is a composite component in Liberation
+  Sans.
+- **Root cause:** per-thread mutable font state shared between renders; a render was not a function of its input.
+- **Fix:** the render thread empties fontkit's glyph cache in every parsed font object before every render
+  (`runtime/glyph-cache.ts`), so each render starts from the same state. Fail closed: a fontkit whose font objects lack
+  the resettable cache refuses to start the thread (primary font) or the render (a font found later).
+- **Regression tests (fail on every run without the fix):** `runtime/glyph-cache.spec.ts` (the poisoning, the reset, fail
+  closed); `runtime/render-pool.spec.ts` "render isolation" (a "Łucja Żak" render first on a thread, then the same
+  request must equal a fresh thread's bytes and keep "Z" in the text layer); harness
+  `pdf-native-determinism.spec.ts` (hostile documents after the unicode documents on one thread equal a fresh thread;
+  every hostile, unicode and one-row document is byte-identical in any order). The harness CMap reader also no longer
+  shifts the entries after an empty `<>` destination (`helpers/pdf-layout.ts`, `pdf-harness.unit.spec.ts`), which had
+  turned one missing "Z" into "%W[", "JPDF-1.4", "/MavaScript" and a dropped "Missing clock-outs".
+
+## CONFIG — notification fast publish on and the email sweep at 30 s in production (branch config/dispatch-sweeps, 2026-11-06, not merged)
+
+Owner decision 2026-11-06. Configuration only: `WORKER_FAST_PUBLISH_NOTIFY=true` and
+`WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS=30`, committed on rab-api and rab-worker in `docker-compose.image.yml` and
+`docker-compose.production.yml`, enforced by `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`. No
+code default, migration, role, grant, RLS, posture, payroll, attendance, staffing or permission change. Push and realtime
+stay off, and their sweeps keep the 2 s default.
+
+- **Asset:** delivery of another person's notification email (the D-Q3a path above, now switched on in production).
+  **Actor:** the API and Worker processes acting on a committed business change.
+- **Controls unchanged:** the D-Q3a controls apply as written there. Nothing is published before commit, a rollback
+  publishes nothing, the job carries only the committed row's id and organisation, the consumer re-reads the row under
+  that organisation's RLS context, and the dispatcher stays the safety net.
+- **Interval:** the API registers the email scheduler with its own value. The consume-only Worker verifies that the
+  scheduler exists, not its interval, so the gate requires the same value on both services. A different Worker value could
+  not reach the runtime unnoticed by CI.
+- **Residual (user-visible, accepted by the owner):** rows with no fast path (the Worker's report emails, rows written by
+  SQL) and rows whose fast publish failed now wait up to 30 s instead of up to 2 s. That includes a password-reset email
+  whose after-commit publish failed while the Worker can still reach Redis. A Redis outage stops both paths at any
+  interval. The recovery rules (stale QUEUED 2 min, stale RETRY 5 min, PROCESSING lease 10 min) each gain at most 28 s.
+  DELIVERY_UNCERTAIN and the D-Q5b attempt cap keep their outcomes.
+
+## CONFIG — pay-statement sweep at 30 s in production (branch phase-x/j1a-statement-30s, 2026-11-11, not merged)
+
+Owner decision 2026-11-11 (Phase X Part 1, J1a / P1-7). Configuration only:
+`WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS=30` (code default 5, bounds 1–300), committed on rab-api and rab-worker
+in `docker-compose.image.yml`, `docker-compose.production.yml` and `docker-compose.local-build.yml`, enforced by
+`scripts/compose-owner-login.cjs` (`STATEMENT_DISPATCH`) and `staging/verify-image-compose.cjs`. No code default,
+migration, role, grant, RLS, posture, payroll calculation or approval rule change; `core.payroll_record_guard`, the
+dispatcher's compare-and-set to `queued` (generation + 1), the consumer's generation / `statement_file_id IS NULL` /
+still-approved checks and the UNIQUE `worker_event` `shift-statement:<id>` are untouched.
+
+- **Asset:** generation of another person's pay statement (a payroll document). **Actor:** the Worker acting on a
+  committed approval; anyone able to configure one service differently from the other.
+- **Interval (both services):** the API registers the scheduler with its own value and the consume-only Worker verifies
+  scheduler ids, never intervals, so the gate requires the same value on both and refuses it in any env file.
+- **Residual (payroll-adjacent latency, accepted by the owner):** a statement is generated 0–30 s after approval (was
+  0–5 s). Lease recovery (10 min) and the failed-retry backoff (1 min × attempts) each gain at most 25 s. A slower sweep
+  never changes which statement is generated or how many: the guards above decide that, not the interval.
+- **Rollback:** remove the value on both services in the three compose files and the gate (the API re-registers the
+  scheduler at 5 s on its next start).
+
+## CONFIG — production refuses global claims and event dispatch at env validation (branch phase-x/sj05-refuse-global-claims, 2026-11-11, not merged)
+
+Phase X SJ-05, owner decision 2026-11-11 (P1-10). Before: only the compose gate (`compose-owner-login.cjs`
+FORBIDDEN_NAMES) refused `WORKER_CLAIM_MODE` / `WORKER_DISPATCH_MODE`; a Worker started outside the gated compose path
+booted in global mode (the boot gate accepts the owner login under `global`). Not an exposure (global mode keeps FORCE
+RLS, the definers and lease fencing), but a governance gap.
+
+- **Control:** `productionConfigurationProblems` refuses `WORKER_CLAIM_MODE=global` and `WORKER_DISPATCH_MODE=event` when
+  `NODE_ENV=production`, in every process that validates the environment (API, Worker, register-schedulers, and the CLI, whose own production
+  marker is `DB_TARGET`; no CLI command runs dispatch claims). The approval is
+  the code constant `WORKER_GLOBAL_CLAIMS_PRODUCTION_APPROVED = false` (the `WORKER_INVITE_AUTO_DELETE` pattern): enabling
+  global claims in production is a reviewed code change that records the owner's J5 decision, never a setting.
+  Development and test are unchanged (CI's Phase D suites run global mode). A gate test re-reads the source so the two
+  layers cannot drift apart.
+- **Staging:** staging runs `NODE_ENV=production`, so it is refused there too. The runbook's staging rehearsal of global
+  activation and rollback (phase-d-deployment-runbook §5.2) therefore needs the J5 change (the constant flipped in a reviewed
+  PR) FIRST, and that change then applies to staging and production at the same time. Rehearse on staging before any
+  production deploy of that release.
+- **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision). Unlike the invite rule,
+  the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
+  compose gate remains the other).
+
+## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
+
+Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
+`WORKER_TIMER_TRIGGER_KINDS=offer-expiry,manager-confirmation,no-show,late-clock-in`,
+`WORKER_OFFER_EXPIRY_INTERVAL_SECONDS=300`, `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS=120` and
+`WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS=300`, committed on rab-api and rab-worker in `docker-compose.image.yml` and
+`docker-compose.production.yml`, enforced by `scripts/compose-owner-login.cjs` (`PHASE_D_SWITCHES`, `PHASE_D_UNCHANGED`)
+and `staging/verify-image-compose.cjs`. The shift monitor stays at 300 s and the D-Q4a combined scan stays off
+(`WORKER_SHIFT_SCAN_MODE` unset = separate); the gate refuses any other value for either. No code default, migration, role,
+grant, RLS, posture, payroll calculation, staffing or permission change; the D-Q4b controls above apply as written.
+
+- **OWNER DECISION (recorded here because it touches attendance and payroll):** no-show and late clock-in triggers are
+  `on` in production. With `on`, the Worker runs the scan's own per-candidate compare-and-set (`flagNoShowCandidate`,
+  `flagLateClockInCandidate`: same `worker_event` key, notifications and audit) at the due time instead of at the next
+  scan. A provisional no-show feeds attendance and, through it, payroll review; a late flag is attendance evidence. The
+  windows and outcomes are unchanged; only WHEN inside the window changes (plan §2.3 A2). OD-3 asked for "on one kind at a
+  time, each separately approved": the owner approved all four together on this evidence. **Evidence:** the D-Q4b shadow
+  run on main 85332cc6 (scratchpad `shadow-run/RESULTS.md`, 4 h 15 min, real clock-ins with the real roster QR): 336
+  decisions, 0 wrong, 0 early, 0 missed for every kind; no-show 12/12 would-act and 42/42 correct no-ops (on time, late,
+  check-in only, cancelled after arming); late clock-in 30/30 and 24/24; offer expiry 24/24 and 102/102; manager
+  confirmation 36/36 and 66/66 under the #82 withdrawal rule; trigger lateness p95 ≤ 558 ms. Not reachable through the
+  API and covered only by the integration specs: a reschedule after arming (`stale`).
+- **Asset:** the timed transitions on another person's records (offer, shift assignment, attendance flag) and the
+  notifications / audit rows they write. **Actor:** the API and Worker acting on committed rows; anyone able to stall or
+  wipe Redis, or to configure one service differently from the other.
+- **Interval (both services):** the API registers every BullMQ scheduler with its own value and the consume-only Worker
+  verifies scheduler ids, never intervals, so the gate requires the same values on both (a Worker-only value could not
+  reach the runtime unnoticed by CI). The kind list is explicit: an unset list means every kind the code knows, so a kind
+  added later would switch itself on; a gate test compares the committed list with `TIMER_TRIGGER_KINDS` and fails first.
+- **Residual (accepted by the owner):** a lost trigger (Redis wipe, publish failure) is caught by the slower safety
+  sweep: offer expiry up to 5 min late (was 1 min), the start − 30 min withdrawal up to 2 min late (was 1 min) — that is
+  notice the staff member loses, late clock-in up to 5 min late (was 2 min; still before the 30-minute no-show), no-show
+  unchanged (shift monitor, 5 min). Triggers add database work (one READ ONLY decision plus the action per trigger); no
+  load reduction is claimed. Production Redis is AOF, `noeviction`, ACL-only and internal (gate-enforced; the Worker
+  refuses any other eviction policy), which is what keeps delayed trigger jobs from being evicted.
+- **Smoke on the final config (disposable `psw-` stack, image `shd-adolphus:85332cc6`, code-identical to main ce7fc76e):**
+  the Worker started consume-only with `WORKER_TIMER_TRIGGERS=on` and all four kinds; the API registered 17 schedulers,
+  read back from Redis with `every` = offer-expiry 300 s, manager-confirmation-timeout 120 s, late-clock-in 300 s,
+  shift-monitor 300 s, email-dispatch 30 s; a confirmed shift had its offer-expiry and manager-confirmation triggers armed
+  in `bull:crewflow-timer-triggers:delayed` at send / accept (the manager-confirmation trigger then fired at start − 30
+  and returned `noop` for the confirmed offer), and its no-show / late clock-in triggers were armed by the shift monitor.
+
+**D-Q5b email cap (owner: "test first, then on").** D-Q5b (#52, merged 2026-11-04) has **no switch**: the cumulative cap
+and the no-resend-after-a-confirmed-send rule are unconditional code in every image built since e8bb1343, including the
+published ones, so this change neither adds nor can add a D-Q5b flag. Fault injection on the disposable stack, SMTP driver
+against a sink that fails on command (every email produced by the real API, delivered by the real Worker):
+
+| Case | Fault | Outcome | Emails received |
+|---|---|---|---|
+| a | 451 at RCPT twice, then accept | SENT, attempt count 3 | 1 |
+| b1 | 451 at RCPT on every attempt | FAILED at count 5 (the cap); no later attempt | 0 |
+| b2 | 550 at RCPT | FAILED at count 1, not retried | 0 |
+| b3 | 451 twice, then the BullMQ job deleted from Redis | FAILED `DELIVERY_UNCERTAIN` at the 5 min stale-RETRY rule (the provider-call marker stays set on RETRY under SMTP, OD-6 §5.6.1); not retried | 0 |
+| c1b | the provider answers 250 while PostgreSQL is down, so the SENT write fails | "PROVIDER SUCCEEDED … left PROCESSING"; after the 10 min lease FAILED `DELIVERY_UNCERTAIN`; never re-sent | 1 |
+| c2 | the Worker process SIGKILLed while the sink holds the complete message | after the lease FAILED `DELIVERY_UNCERTAIN`; the redelivered job did not claim the row; never re-sent | 1 |
+| c3 | the connection dropped after the complete message (no reply) | `ECONNECTION`, RETRY, re-sent, SENT | **2 (duplicate)** |
+| c4 | no reply after the complete message (client deadline) | `ETIMEDOUT`, RETRY, re-sent, SENT | **2 (duplicate)** |
+
+Every D-Q5b path passed. Criterion (c) of the owner's test failed for c3 and c4: they are **not** D-Q5b paths but the
+pre-existing SMTP at-least-once behaviour already listed as open ("SMTP post-DATA duplicate policy",
+`packages/rab-docker/docs/phase-d-deployment-runbook.md` §10/§11; OD-6 "no default change"). Finding (not fixed here; a
+delivery-policy decision for the owner):
+
+- **Severity:** Low (integrity / user-visible; the duplicate goes to the same recipient with the same content, so no data
+  crosses a tenant or a person, but a second copy of a password-reset or invitation link is a second copy of the secret).
+- **Actor → action → consequence:** a network fault or an SMTP provider that accepts the message but drops or stalls the
+  connection before its final reply → the Worker classifies the error as retryable and BullMQ re-sends → the recipient gets
+  the email twice.
+- **Where:** `packages/rab-worker/src/queues/rab-email/email-send.processor.ts:74` (`classifyEmailSendError` falls through
+  to retryable for `ECONNECTION` / `ETIMEDOUT` with no reply code) and `:661` (`isFinal` only for permanent or capped
+  errors); documented as at-least-once at `packages/rab-server/src/engine/core-modules/email/drivers/smtp.driver.ts:33`.
+- **Root cause:** a failure after the DATA terminator is ambiguous (the provider may already have accepted the message),
+  but it is treated like a failure before the provider had the message.
+- **Fix options (owner decision; none applied):** treat a no-reply failure after the DATA terminator as ambiguous, leave the
+  row PROCESSING with its marker (the OD-5 path) so lease recovery ends it `DELIVERY_UNCERTAIN` (at-most-once, manual
+  review), or keep at-least-once (status quo).
+- **Regression test:** the psw fault sink's `drop_after_data` and `hang_after_data` modes (cases c3 and c4) must deliver
+  exactly one message; a worker integration spec against the existing SMTP sink helper should pin the chosen policy.
+
+**Migration 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`): OBSOLETE under the one-owner-login design** (owner decision
+2026-11-06: keep it excluded; the file is not edited or moved). Its cutover gate requires every Worker to authenticate as
+`crewflow_worker`; under owner-login every service connects as `crewflow_owner`, and `crewflow_worker` has zero members and
+no password (`packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/bootstrap.ts`, `legacy-logins.ts`;
+verified on the psw stack: members 0, `rolpassword` NULL, only `crewflow_owner` sessions, ledger 254 without it). The gate
+can therefore never hold, and the migration must not be applied anywhere. Retiring the file or keeping it for a possible
+return to separated logins is a later owner decision.
+
+## EMAIL — SMTP delivery aligned with Twenty CRM: at-least-once, never exactly-once (branch fix/email-smtp-twenty-style, 2026-11-06, not merged)
+
+Owner decision 2026-11-06: Twenty CRM-style email delivery. Compared against Twenty's source (twentyhq/twenty
+`cea08324`: `engine/core-modules/email/drivers/smtp.driver.ts`, `email-sender.job.ts`, `email.service.ts`,
+`constants/email-send-retry-backoff.constant.ts`, `message-queue/message-queue-worker-config.constant.ts`). No migration,
+column, role, grant, RLS policy, posture, queue option, backoff, lease or business-rule change (invitations, password
+resets, shift confirmations and payroll notifications send exactly what they sent before). **Asset:** another person's
+email (whether it arrives, how often, and what of it reaches logs). **Actor:** the Worker, without a request; an SMTP
+server or network that fails at any stage; a database fault during revalidation.
+
+- **Delivery guarantee: AT-LEAST-ONCE. Exactly-once is not claimed and is not achievable over SMTP** (it has no
+  deduplication; `SmtpDriver.ambiguousDeliverySafeToRetry = false`). `sendMail()` is awaited and the server's 250 after
+  DATA is success (SENT); any failure propagates to the existing outbox + BullMQ retry path.
+- **Classification (unchanged, verified against Twenty):** SMTP 5xx except 503 and local validation/config errors →
+  permanent: FAILED on that attempt (`UnrecoverableError`), never retried. 4xx, 503, network and timeout errors and
+  anything unrecognised → retryable: RETRY, BullMQ retries (5 attempts, exponential 5 s with jitter 0.5: 2.5-5 / 5-10 /
+  10-20 / 20-40 s), bounded by the row's CUMULATIVE cap of 5 (D-Q5b) across every generation; FAILED at the cap with
+  `last_error_code`, `failed_at` and an `email.delivery_failed` audit row. Twenty retries every error, 5xx included, 3
+  times; Crewflow keeps permanent rejections out of the retry loop.
+- **Changed — no address in logs (owner requirement 3):** nodemailer appends the server reply to its error message and
+  SMTP replies echo the refused mailbox. A retryable attempt now throws `EmailSendAttemptError` (outbox id, code, reply
+  code, sanitized reply) instead of the provider's error object, so the Worker's `failed` log line, BullMQ's
+  `failedReason` and the job stacktrace kept in Redis (30 days) carry no address. The sanitizer (also used for
+  `last_error_message_sanitized`) bounds the input first (2 000 characters), removes the row's own recipient exactly
+  (case-insensitive, any form: quoted or apostrophe local parts), removes keyword-labelled credentials with their
+  separator and `Bearer`/`Basic` scheme, then replaces every other token containing `@` with `[address]`, and stores at
+  most 500 characters. Twenty logs the recipient on every send and failure; Crewflow does not.
+- **Changed — no unbounded retry (owner requirement 11):** revalidation (target user, invite/reset token, member and
+  organisation invitations) ran inside the claim's transaction, so a database error there rolled the counted claim back:
+  the row stayed QUEUED/RETRY at its old count and BullMQ + the dispatcher's stale rules re-presented it for ever, never
+  FAILED. Revalidation now runs in its own transaction after the claim commits; such an error is a counted failed
+  attempt (RETRY, FAILED at 5). The provider-call marker is still written, fenced, before the provider is contacted, and
+  the claim now clears any marker left by an earlier attempt, so the marker always describes the current attempt: a
+  crash between claim and marker is a safe lease recovery (nothing sent), never a false `DELIVERY_UNCERTAIN`. Claim fencing (`processing_token`), the
+  organisation-bound tenant context and FORCE RLS are unchanged.
+- **Changed — re-queue cap (owner decision 2026-11-07, "CAP IT"):** an error in the claim statement itself cannot be
+  counted (nothing commits), so the stale-QUEUED rule used to re-present the row for ever. The dispatcher now fails a
+  stale QUEUED row that it has already re-queued 20 times (`dispatch_generation >= 20`, the existing column; no
+  migration): FAILED `DISPATCH_GENERATIONS_EXHAUSTED`, `failed_at`, an `email.delivery_failed` audit row with the
+  generation count; it is listed by the platform-admin outbox operations view (which selects `last_error_code` and
+  `dispatch_generation`) and never re-queued. Nothing was sent by those re-queues. Before failing a row at the cap
+  the dispatcher asks BullMQ whether the job of its CURRENT generation is still live (waiting, delayed, active,
+  prioritized; `EmailQueueService.isLive`, bounded like a publish): a row only waiting in a backlog is never failed (its
+  `queued_at` is refreshed), and an unanswerable probe (Redis down) also leaves it alone for that cycle. A re-queue whose
+  publication fails because Redis is unavailable (`QueuePublishUnavailableError`) gives its generation back (fenced on
+  `status = 'QUEUED'` and the generation it was given), so an outage does not spend the budget; a deterministic publish
+  refusal keeps the bump, so the cap still converges. RETRY and PROCESSING recoveries are not capped by this rule; they
+  follow a counted claim and stay bounded by the cumulative attempt cap of 5. The budget is the row's lifetime
+  generation count (RETRY/PROCESSING recoveries and operator replays bump it too): an operator replay of a row that
+  already used it (`core.replay_failed_email`) gets one real try, then is failed again at its next stale cycle with no
+  live job. Residual: below the cap a backlog still re-queues a waiting row every stale cycle (pre-existing duplicate
+  jobs, deduplicated by the claim; no duplicate email).
+- **Remaining duplicate-delivery risk (accepted, owner requirement 5):** (1) the connection drops or times out after
+  the DATA terminator, before the server's reply: retried, so the recipient may get the email twice (reproduced: sink
+  `drop_after_data` → 2 messages). (2) A provider that accepts but answers 4xx/timeout. (3) Since Decision 1(a): a
+  RETRY row whose last failure was ambiguous (no reply after DATA or a send-deadline timeout, recorded as retryable) and
+  whose BullMQ job was then lost from Redis is re-presented by the dispatcher, exactly as BullMQ itself would have
+  retried it (RETRY means "classified retryable", which includes these post-DATA cases, not only explicit 4xx refusals). (4) An operator
+  replay of a DELIVERY_UNCERTAIN row with the allow-uncertain flag. A duplicate is the same content to the same recipient (no tenant
+  or person boundary is crossed), but a duplicate password-reset or invitation email is a second copy of the same link.
+- **Changed — recorded refusals re-presented, true mid-send loss kept uncertain (owner decision 2026-11-07, "SPLIT",
+  replacing OD-6's "no change"):** (a) a RETRY row (and a QUEUED row recovered from one) carries a RECORDED outcome:
+  the processor classified that failure as retryable and BullMQ would have re-sent it. If its BullMQ job is lost (Redis
+  data loss, a removed job) the dispatcher now re-presents it automatically under a new generation, within the
+  cumulative cap of 5, even though the provider-call marker of that earlier attempt is still set. Before, it ended
+  FAILED `DELIVERY_UNCERTAIN` (fault case b3: 451 twice, job lost, never sent). (b) A PROCESSING row with the marker is
+  still FAILED `DELIVERY_UNCERTAIN` on SMTP (no resend): this attempt reached the provider and its outcome was lost
+  (Worker crash or loss mid-send). Because the claim clears an earlier attempt's marker, the marker on a PROCESSING row
+  always belongs to the attempt in flight; a crash between the claim and that attempt's own marker leaves none and is
+  re-presented safely. (c) Unchanged OD-5: when the provider confirmed the send and SENT could not be written, the row
+  stays PROCESSING with its marker and ends `DELIVERY_UNCERTAIN`; never re-sent. Twenty, by comparison, re-runs a
+  stalled email job once (`maxStalledCount: 1`) so a crash mid-send resends, and has no outbox, so a job lost from Redis
+  is an email lost.
+- **Tests:** `email-send.smtp-delivery.spec.ts` (unit, transactional fake: success, 451, 550, post-DATA loss, duplicate
+  delivery, crash, exhaustion, the revalidation-fault regression, redaction) and
+  `email-smtp-twenty-delivery.integration.spec.ts` (real PostgreSQL, Redis/BullMQ with the production job options, the
+  real SmtpDriver against a per-recipient fault sink, a real Worker process SIGKILLed mid-SMTP; b3 now sends exactly one
+  message after the lost job; a claim refused by a trigger ends FAILED `DISPATCH_GENERATIONS_EXHAUSTED` after 20 re-queues
+  and is never re-queued; asserts no address in any log line, BullMQ failure reason, stacktrace or stored error).
+  Dispatcher unit cases in `email-dispatch.job.spec.ts`; the OD-5 case stays covered by
+  `dq5b-email-cumulative-attempts.integration.spec.ts`.
+
+## FIX — a running shift stayed `in_progress` for ever after its last open seat was closed by an offer close (branch fix/shift-completion-after-withdrawal, 2026-11-06, not merged)
+
+**Security finding (§5.8).** Found by the timer-trigger shadow run (12 of 12 shifts with a pending STANDBY acceptance).
+
+- **Severity:** LOW (integrity of the canonical shift status and of every view derived from it; no money, attendance,
+  payroll, permission or cross-tenant effect).
+- **Actor → action → consequence:** the Worker (deadline withdrawal, owner rule #82), a manager (reject, withdraw) or a
+  staff member (decline) closes the last open seat of a running shift AFTER every confirmed staff member clocked out →
+  nothing re-runs the completion roll-up → the shift stays `in_progress` for ever: web Shifts lists it as in progress
+  and keeps its "Cancel shift" action (a completed shift cannot be cancelled; an `in_progress` one can, and a cancelled
+  shift drops out of the final-timesheet scan unless already finalised); Sent Shifts reads "Confirmed", then "Expired"
+  after end + 5 h, never "Completed"; the Venue Manager app keeps it "Live" in the calendar and leaves it out of History.
+  Not affected (verified): worked minutes and pay (snapshotted on the attendance at clock-out), the final timesheet
+  (generated once every booked seat has clocked out or is a no-show, independent of the shift status), finalise and
+  payroll_record creation (attendance-driven), the no-show and late scans (confirmed seats only), the action window
+  (time-driven), dashboard counts (offer-driven).
+- **Where:** the roll-up ran only in `AttendanceService.performClockOut` and `recordAttendance`
+  (`attendance.service.ts:709-724` and `:1520-1530` at ce7fc76e). `withdraw-unconfirmed-offer.ts` (and
+  `OfferService.managerReject` / `decline` / `withdraw`) moved the last open seat (`staff_accepted` / `offered`) to a
+  closed state without re-evaluating it; the withdrawal's doc comment assumed "no capacity or shift status to undo".
+  Second defect in the same roll-up: its count ran without a lock, so a clock-out and a withdrawal (or two last
+  clock-outs) committing together each saw the other's seat still open and neither completed the shift.
+- **Root cause:** the completion condition was evaluated at only one of the transitions that can make it true.
+- **Fix (no business rule changed):** one roll-up, `scheduling/utils/complete-shift-if-settled.ts` (the same condition:
+  `in_progress` and no seat `offered` / `staff_accepted` / `confirmed`; `assertTransition(in_progress → completed)`;
+  compare-and-set; returns true once), run by clock-out, recorded attendance, the deadline withdrawal (Worker pointer,
+  backstop scan, timer trigger and the API lazy path all call `withdrawUnconfirmedOffer`), manager reject, staff decline
+  and sender withdraw, in the same tenant transaction (SET LOCAL + FORCE RLS; explicit `organisation_id` filter). The
+  count runs under the shift row lock (`FOR UPDATE`). Offer closes take that lock FIRST (shift → offer → assignment, the
+  confirm/accept order); clock-out takes it LAST (after its own attendance and assignment rows), so it holds it only for
+  the final statements.
+- **SECURITY TRADE-OFF:** every clock-out now briefly takes the shift row lock (before: only the last one). A roster
+  clocking out at the same instant queues on it for the final statements only. A clock-out (attendance → assignment →
+  shift) can deadlock with a request that takes the shift lock and then the SAME seat's assignment lock (a duplicate
+  clock-in or a manager on-behalf clock-in for that staff member, or the manager's attendance review of that seat, at the
+  same moment); PostgreSQL aborts one of them (40P01) and the client retries. This existed before for the last clock-out.
+  The alternative (shift lock first in every clock-out) holds the lock for the whole clock-out and needs the on-behalf
+  path reordered.
+- **Not fixed here (owner questions):** an expired pending offer leaves its seat `offered` (there is no assignment edge
+  for expiry), so a running shift with an expired offer on it never completes, at the clock-out either; a shift where
+  nobody clocked in (all no-shows) never completes (the 2026-10-17 open decision); the 12 shifts already stuck on the
+  shadow-run stack (disposable, not repaired).
+- **Regression tests:** `shift-completion-after-withdrawal.integration.spec.ts` (fail without the fix): S1 the soak
+  scenario, completes exactly once, attendance unchanged, no payroll, no seat; S2 twelve shifts; P1 replacement through
+  the API lazy path; P2 standard at start − 30; P3–P5 reject, decline, withdraw; R1 a withdrawal holding its transaction
+  while the last clock-out runs (the clock-out waits, then completes); R2 clock-out and withdrawal fired together; R3 two
+  last clock-outs together; A1 no completion while a seat is still clocked in; A2 no completion of a shift that never
+  started; A3 another tenant's context and no context complete nothing; A4 a body with `status` / `organisationId` is a
+  400.
+
+## FOLLOW-UP — an expired offer closes its seat for shift completion; one-off repair command `shift:complete-settled` (branch fix/shift-completion-expired-seat, 2026-11-06, not merged)
+
+Owner decisions 2026-11-06 on the entry above: Q1 YES, Q3 YES (one-off, read first), Q2 (a shift nobody clocked into never
+completes) stays open and unchanged.
+
+- **Q1 (rule, decided by the owner):** an `offered` seat whose offer is `expired` (every offer on it) counts as closed for
+  completion. Only how the roll-up READS the seat changes (`openSeatSql` in `complete-shift-if-settled.ts`): no new state or
+  transition, the seat row is never written, and a `pending` offer past its `expires_at` but not yet swept still holds the
+  shift open (the persisted expiry counts). `claimExpiredOffer` (the ONE pending → expired claim: Worker scan, timer
+  trigger, the staff accept's lazy expiry) now takes the shift row lock first (shift → offer, the confirm / accept /
+  withdrawal order) and re-runs the roll-up after its CAS, so an expiry racing a clock-out cannot leave the shift
+  running. A shift that never started is still never completed.
+- **Q3 (one-off repair):** `shift:complete-settled` (`command/shift-complete-settled.command.ts`,
+  `modules/scheduling/services/shift-completion-repair.ts`). Never automatic (no job, schedule or endpoint).
+  - **Asset:** the canonical status of other tenants' shifts. **Actor:** an operator with CLI access to the production
+    database (DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS + deployment identity + the boot gates: the restricted owner login).
+  - `--list` (default) is READ-ONLY: a READ ONLY transaction per workspace in that tenant's context (SET LOCAL + FORCE
+    RLS), enumerated from the trusted registry (`core.worker_list_workspaces`), the same predicate as the roll-up.
+  - `--apply --ids <file>` completes ONLY the listed ids (UUIDs only, at most 5000, the whole file refused on one bad
+    line), each located in the registry, then completed by `completeShiftIfSettled` itself in its tenant transaction
+    (lock, predicate re-checked, `assertTransition`, CAS): a not-settled id is refused, an id in no (or another, with
+    `--organisation`) tenant is `not_found`, a repeat is `already_completed` with no second audit row. Each completion
+    writes `shift.completed_by_repair` in the same transaction; the actor must be an ACTIVE platform admin resolved from
+    `--actor-email` through the pre-auth lookup (as `outbox:replay`), so no anonymous apply; `--change-ref` is recorded.
+  - Layer 2 in the body: refuses a SUPERUSER / BYPASSRLS session even when the body is reached without `main.ts`.
+  - **SECURITY TRADE-OFF:** the listing prints venue names and shift times of every tenant to the operator console (the
+    owner reviews them before any apply). The alternative (ids only) makes the review blind. Ids, not names, are what
+    `--apply` accepts.
+- **Regression tests:** `shift-completion-expired-seat.integration.spec.ts`: E1 the soak's expired-only shifts (never
+  started) stay `offered` and their seats stay `offered`; E2 the last open seat expiring after the clock-out completes the
+  shift; E3 an already-expired seat does not hold the clock-out; E4 the lazy expiry on a late accept completes it; E5 an
+  expiry holding its transaction while the last clock-out runs (the clock-out waits, then completes); E6 both fired
+  together; E7 an unswept past-expiry offer still holds the shift open; C1 `--list` lists both tenants' stuck shifts and
+  changes nothing (shift, seat and audit snapshot equal); C2 `--apply` completes only the listed settled id, refuses a
+  not-settled one, reports a made-up one, audited once, idempotent; C3 another tenant's id under `--organisation` is
+  `not_found` and untouched; C4 no actor / non-admin actor / bad ids file / both modes refused; C5 a superuser session is
+  refused.
+
+## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, not merged)
+
+**What changed.** Production deploys like Twenty's `packages/twenty-docker`: `docker compose pull && docker compose up -d`
+updates rab-api and rab-worker together from ONE variable, `CREWFLOW_IMAGE_TAG`. The API starts first, migrates
+(check-first, `CREWFLOW_MIGRATE_ON_START=true`), registers the BullMQ job schedulers and becomes healthy; the Worker
+`depends_on: rab-api: {condition: service_healthy, restart: true}` (and a healthy rab-redis), so Compose stops the old
+Worker before it replaces the API and starts the new Worker only after the new API is healthy. rab-api's stop window is
+40 s. `docker-compose.production.yml` no longer builds: it pulls the published, gated image, like `docker-compose.image.yml`;
+building from source moved to `docker-compose.local-build.yml` (LOCAL/DEV ONLY, its own project name `rab-local-build`).
+
+**Threat addressed: a new API beside an old Worker (version skew).** Actor: the operator (no attacker needed). Action: an
+API-only update, or Compose ordering that leaves the old Worker running while the new API migrates. Consequence: old
+Worker code runs against a newer schema and newer rules (the #82 example: an old Worker would still auto-confirm offers the
+new API refuses). Controls: (1) one image variable for every application service, so there is no API-only tag to set;
+(2) `restart: true`, so the old Worker is stopped before the API is replaced; (3) the API is the only migrator and
+scheduler registrar; (4) `scripts/compose-one-image.cjs` fails CI when any deploy compose file (image, production,
+local-db and staging overlays, staging rehearsal) gives rab-api and rab-worker different image references, names any image
+variable other than `CREWFLOW_IMAGE_TAG`/`CREWFLOW_IMAGE_REPOSITORY`, has a `build:` section, or drops the
+healthy-API/restart dependency; `compose-owner-login.cjs` enforces the same plus the 40 s stop window and refuses
+`CREWFLOW_IMAGE_DIGEST` (the old name) and any per-role `*_IMAGE_TAG` in `compose.env`.
+
+**Threat addressed: a server running an image that never passed the gate.** The former build-based production file let a
+host build whatever commit it had checked out, skipping the image security gate, SBOM and provenance. Every deploy file
+now pulls `<repository>@${CREWFLOW_IMAGE_TAG}`; the compose check refuses `build:` in any of them.
+
+**Security trade-off (owner decision A, 2026-11-11), kept strict:** the variable is NAMED like Twenty's `TAG`, but it
+accepts ONLY a `sha256:<64 hex>` digest. A tag can be moved on the registry by anyone with push access; a digest cannot.
+The `@` in the compose image reference makes Docker reject a plain tag, and the env lint refuses one with a message.
+
+**Residual.**
+- Twenty-style deploys are stop-then-start: during the API's migration window neither the API nor the Worker serves
+  (unchanged from O3 C5). Jobs due in that window run when the Worker starts.
+- `restart: true` needs Docker Compose 2.17 or later (the runbook already requires 2.24+). An older Compose ignores the key
+  and could leave the old Worker running until the API is healthy; the compose checks cannot see the host's Compose
+  version.
+- OpenShip: it imports `docker-compose.production.yml` and drops the `depends_on` conditions (OPENSHIP-COMPATIBILITY.md),
+  so it cannot honour API-first/Worker-after; it was already unsupported. With this change the file also requires
+  `CREWFLOW_IMAGE_TAG`, so an OpenShip import without that value fails to render instead of building from source.
+- An operator can still bypass the one command by hand (`docker compose up -d --no-deps rab-api`). The runbook forbids it;
+  nothing technical can stop a root operator.
+- Regression tests: `scripts/compose-one-image.test.cjs` (13 denial cases, 1 rendered denial, 1 pass), `compose-owner-login*.test.cjs`
+  (renamed variable, plain tag, per-role tag, missing `restart: true`, a 35 s API stop window), and the real-container
+  deploy-order tests (`packages/rab-docker/deploy-order-tests/`, PostgreSQL 16 and 18, all four cases pass on both:
+  fresh deploy API-healthy-then-Worker; new digest with the old Worker stopped before the new API started; rollback with
+  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI.
+
+## UPGRADE — the upgrade floor replaces N1 on the owner-login path (Phase X U-1, PR #93, 2026-11-11)
+
+- **Actor → action → consequence (before):** an operator deploys any new image to a production database that holds a
+  tenant row → N1 refuses every pending migration after 1786719300000 → exit 65, restart loop, Worker never started: a full
+  outage until rollback (SU-01). **After:** the floor admits R254/R256 histories and resumes; refuses older/unknown.
+- **New risk (MEDIUM, accepted by the owner's P1-1/P1-3):** any migration merged into a release now reaches production
+  without a per-name approval; the review is the PR review. A wrong manifest fails CLOSED (exit 65; the image rollback
+  restores service; data untouched); the opposite error (admitting an unsupported history) is covered by the unknown /
+  older refusal tests (unit + integration). A spec fails if a newer release manifest is added without being supported.
+- **Stricter outcomes:** a wrong database (`MigrationSessionDatabaseError`, exit 67) and "still pending after the run"
+  (`MigrationsStillPendingError`, exit 68) used to count as migration failures that could serve under `continue`; they now
+  never serve.
+- **Not changed:** C3, the lock, the classifier, FOREIGN refusal, the ROW_COPY refusal on a non-fresh database (backstop),
+  F5 token mode, N1 on the legacy and CLI paths.
+- **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
+  U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).
+
+## CONFIG — the push and realtime sweep rule is enforced by the deployment gates (branch phase-x/j2-push-realtime-gate, 2026-11-11, PR #97)
+
+Phase X J2 (S0-J SJ-03). Gate-only: no runtime, code default, migration, role, grant or RLS change; push and realtime stay
+off. Before this, the owner rule "push's sweep goes to 30 s on both services when `PUSH_ENABLED` is turned on" (2026-11-06)
+was a compose comment, so switching push on in `runtime.env` silently registered a 2 s push scheduler.
+
+- **Asset:** the delivery cadence of other people's push notifications and live updates. **Actor:** an operator enabling
+  push or realtime, or an override that configures one service differently from the other.
+- **Control:** `scripts/compose-owner-login.cjs` (full mode, and `--lint-env-file runtime`, which renders the committed
+  compose with the file's switches) and `staging/verify-image-compose.cjs` (static and `--environment`) refuse: a
+  `PUSH_ENABLED` / `REALTIME_ENABLED` value that differs between rab-api and rab-worker; `PUSH_ENABLED=true` without
+  `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"` committed on both; `REALTIME_ENABLED=true` with a realtime interval that
+  differs between the services; either interval in an env file. "On" is exactly the string `true` (the environment's own
+  parse). The verifier's env-file reader records only those two non-secret switch values in addition to names.
+- **Residual:** the realtime interval value is not pinned (no owner decision yet); the gate guarantees only that both
+  services agree. Deciding it is a precondition of turning realtime on.
+
+## SC-01 — notification email is addressed from the live user row, never from the display cache (branch phase-x/c-fix-1-recipient-email, 2026-11-11, PR #96)
+
+Phase X Stage 0 finding SC-01 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env
+default or cache flag change. `CORE_ENTITY_CACHE_ENABLED` stays off in every deploy file.
+
+- **Asset:** delivery of another person's notification email (offer, shift and request mail, PII included).
+  **Actor:** an administrator or the account owner changing an email address (often a takeover-recovery action), and any
+  write path that changes `user.email` without clearing `CoreEntityCacheService` (operator SQL, a crash after commit, a
+  failed Redis INCR).
+- **Before:** `NotificationService.notify()` took the recipient from `CoreEntityCacheService.getUserDisplay().email`. That
+  cache's epoch lives in Redis and is bumped only after commit, and most `user.email` writers never bumped it. With the
+  flag on, mail kept going to the OLD address for up to 300 s after an email change. Latent (flag off in production).
+- **Control 1 (the decision):** `notify()` reads `user.email` LIVE, in the notifying transaction, under the caller's RLS
+  context (one narrow SELECT; the cache-off path already issued one). The recipient no longer depends on any Redis state.
+  This also removes the SC-02 path (a planted entity-cache value redirecting mail): the entity cache is display-only again.
+- **Control 2 (display freshness):** every service writer of a field in the `user` display projection (first/last name,
+  email, avatar) or of the row's existence clears the entry AFTER its transaction commits; a failed transaction clears
+  nothing: `EmailChangeService.confirm`; `ManagerService.update` (name), `changePendingEmail`, `changeEmail` (direct
+  path), `deleteUser`; `StaffService.update` (name), `changePendingEmail`, `changeEmail` (direct path), `deleteUser`,
+  `uploadAvatar`, `removeAvatar`; `VenueManagerService.uploadAvatar`, `removeAvatar` (`ProfileService` already did).
+- **Tests:** `sc01-notification-recipient-live.integration.spec.ts` (cache ON, real PostgreSQL/RLS, Redis, HTTP): a
+  confirmed email change sends the next notification to the new address; a stale cache entry (row changed by SQL, cache
+  not cleared) still sends to the live address (fails on the previous code: it sent to the old one); each writer above
+  bumps the epoch exactly once; a failed (409) change and a phone-only update bump nothing.
+- **Residual:** the display cache itself keeps its documented bounded staleness (≤ 300 s) for writes outside these
+  services (operator SQL, the Worker's invite-expiry DELETE, a failed INCR). It is display-only: names and avatars.
+
+## SC-05 — `/auth/capabilities` answers from the request's resolved permission set (branch phase-x/c-fix-2-capabilities, 2026-11-11, PR #99)
+
+Phase X Stage 0 finding SC-05 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env or
+cache change.
+
+- **Asset:** availability of the API connection pool (9 connections); correctness of permission display hints.
+  **Actor:** any signed-in client (the VM app refresh, `usePayroll`, `VenueOfferPipeline`) and an Admin Inspect session.
+- **Before:** 18 concurrent `userHasPermission` calls, each its own tenant transaction: 19 transactions and 115 SQL
+  statements per call (measured), enough for one client to occupy the whole pool.
+- **Control:** `PermissionsService.displayHints` answers from `request.authContext.security.effectivePermissions`, the
+  set every `PermissionGuard` of the same request authorises from (same REPEATABLE READ snapshot, built once per request,
+  never stored across requests). It is used ONLY when the snapshot describes exactly this identity: same user,
+  organisation and workspace, and no Admin Inspect. Otherwise (Admin Inspect, where `security` is still the ADMIN's
+  snapshot, or any mismatch, or no snapshot) the TARGET's set is read live in ONE tenant transaction with ONE query
+  (`effectivePermissionsTx`: role grants visible under RLS, minus `revoke` overrides, plus `grant` overrides, the same
+  precedence as `userHasPermissionTx`). It never falls back to another identity's set and never defaults to `true`; a
+  failed read errors the request.
+- **Not an authorisation decision:** these are display hints; every action keeps its own route guard and service-layer
+  re-check. A missing permission is `false`, never a 403/404 (the endpoint has no route permission). Unauthenticated: 401.
+  A non-admin sending someone else's inspect header gets only their own hints (the guard ignores the header).
+- **Freshness:** unchanged: a grant or revoke is visible on the next request (proven with an override revoke, the route
+  guard agreeing).
+- **Tests:** `sc05-capabilities.integration.spec.ts` (response identical to one `userHasPermission` per flag for role,
+  few-grant, override-grant, override-revoke, venue-manager, platform-admin and inspected identities;
+  `effectivePermissionsTx` ≡ per-flag `userHasPermissionTx` for all 46 flags; 1 transaction / 0 tenant transactions;
+  inspect: one effective-set query for the target; next-request revoke; 401; inspect-header disclosure);
+  `permissions.service.spec.ts` (routing: snapshot of this identity → 0 transactions; inspect / mismatched user,
+  organisation or workspace / no snapshot → one live read; a failed read propagates).

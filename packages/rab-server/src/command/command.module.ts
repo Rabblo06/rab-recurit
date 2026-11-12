@@ -20,6 +20,7 @@ import { HwsBackfillCommand } from './hws-backfill.command';
 import { PingCommand } from './ping.command';
 import { SecretRotationCommand } from './secret-rotation.command';
 import { OutboxReplayCommand } from './outbox-replay.command';
+import { ShiftCompleteSettledCommand } from './shift-complete-settled.command';
 import { OutboxOperationsService } from '../engine/core-modules/platform-admin/outbox-operations.service';
 import { ThrottlerRedisClientModule } from '../engine/core-modules/throttler/throttler-redis-client.module';
 import { SeedCommand } from './seed.command';
@@ -79,6 +80,7 @@ import { ResourceScopeModule } from '../engine/core-modules/resource-scope/resou
     // Wave 5 lane OPS: audited FAILED-email replay (same service as the platform-admin endpoint).
     OutboxOperationsService,
     OutboxReplayCommand,
+    ShiftCompleteSettledCommand,
   ],
 })
 export class CommandModule {}

@@ -26,7 +26,9 @@ const LABELS: Record<string, string> = {
   offer_accepted: 'A staff member accepts my offer',
   offer_declined: 'A staff member declines my offer',
   offer_confirmed: 'An offer I accepted is confirmed',
-  offer_rejected: 'An offer I accepted is rejected',
+  offer_rejected: 'An offer I accepted is rejected or withdrawn',
+  // Sent when an accepted offer was not confirmed before its approval deadline and the system withdrew it.
+  manager_confirmation_timeout: 'An accepted offer is not confirmed before its approval deadline',
 };
 
 const CHANNEL_LABEL: Record<Channel, string> = { inAppEnabled: 'In-app', emailEnabled: 'Email' };

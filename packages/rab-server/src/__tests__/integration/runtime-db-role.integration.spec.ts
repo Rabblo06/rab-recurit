@@ -29,7 +29,7 @@ describeIfDb('CF-43 runtime database role assertion (integration)', () => {
   });
 
   it('refuses a superuser login that switched to crewflow_app with SET ROLE', async () => {
-    await withSource(adminUrl, (ds) => expect(assertRuntimeDbRole(ds, 'api')).rejects.toThrow(/SET ROLE is not accepted|not "crewflow_app" itself/), 'crewflow_app');
+    await withSource(adminUrl, (ds) => expect(assertRuntimeDbRole(ds, 'api')).rejects.toThrow(/SET ROLE is not accepted|not "crewflow_app" itself|connects as "crewflow_app", not "crewflow_owner"/), 'crewflow_app'); // still refused; owner-login message (BC-02)
   });
 
   it('refuses the superuser login outright', async () => {

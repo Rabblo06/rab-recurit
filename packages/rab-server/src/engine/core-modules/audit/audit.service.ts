@@ -136,6 +136,8 @@ export const AuditAction = {
   /** Wave 5: the shift lifecycle's first two steps, recorded by SchedulingService.create / publish (timeline read model). */
   SHIFT_CREATED: 'shift.created',
   SHIFT_PUBLISHED: 'shift.published',
+  /** One-off repair (owner decision 2026-11-06, Q3): `shift:complete-settled --apply` completed a settled in_progress shift. Actor: an active platform admin. */
+  SHIFT_COMPLETED_BY_REPAIR: 'shift.completed_by_repair',
   VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
@@ -535,13 +537,16 @@ export class AuditService {
         params.push(exclusive);
         conditions.push(`al.created_at < $${params.length}`);
       }
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = `WHERE ${conditions.join(' AND ')}`;
       const direction = opts.direction === 'asc' ? 'ASC' : 'DESC';
 
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const [{ count }] = await manager.query(`SELECT count(*)::int AS count FROM core.audit_log al ${where}`, params);
 
       params.push(limit, offset);
       const rows = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `
           SELECT al.id, al.action, al.metadata, al.entity_type, al.entity_id, al.target_user_id, al.created_at,
                  u.first_name AS actor_first_name, u.last_name AS actor_last_name

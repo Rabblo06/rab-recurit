@@ -39,7 +39,7 @@ export const NX_PROJECT_TARGETS: Readonly<Record<string, readonly string[]>> = O
     'deploy:prepare',
     'cache:flush',
   ],
-  'packages/rab-worker': ['start', 'provision', 'build', 'lint', 'test'],
+  'packages/rab-worker': ['start', 'provision', 'build', 'lint', 'test-pdf-equality', 'test'],
 });
 
 /** The repository root, from this file's location (src/ or dist/ of packages/rab-server: the same depth). */

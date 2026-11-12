@@ -440,7 +440,8 @@ void main() {
         expect(find.text('Accept'), findsOneWidget);
         expect(find.text('Decline'), findsOneWidget);
       } else if (state == 'pending') {
-        expect(find.text('Pending'), findsOneWidget);
+        // staff_accepted: truthful, never "Pending" or "Confirmed".
+        expect(find.text('Awaiting manager confirmation'), findsOneWidget);
         expect(find.text('Waiting for confirmation'), findsNothing);
       } else if (state == 'ready') {
         expect(find.text('Be Ready'), findsNothing);

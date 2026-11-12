@@ -9,10 +9,18 @@ import { ScanLock } from '../locking/scan-lock';
 import type { AdvisoryLockResult } from '../locking/advisory-lock';
 import { CycleOutcome, WorkerLoopOptions, WorkerRuntime } from '../runtime/worker-runtime';
 import { HandlerRegistry, ProcessHandler } from './processor-explorer';
-import { CONSUMER_QUEUES, ConsumerQueueDefinition, SCAN_QUEUE_NAMES, ScanQueueName } from './queue-registry';
+import {
+  acceptsJobName,
+  bullmqWorkerOptionsOf,
+  CONSUMER_QUEUES,
+  ConsumerQueueDefinition,
+  QUEUE_SETTINGS,
+  SCAN_QUEUE_NAMES,
+  ScanQueueName,
+} from './queue-registry';
 import { assertRedisReadyForBullmq, assertSupportedBullmqApi } from './redis-preflight';
-import { CrewflowSchedulerManager, ReconcileReport } from './scheduler-manager';
-import { lockDurationMsFor, ScanJobDefinition, scanJobsOn, schedulerIdOf } from './scan-jobs';
+import { CrewflowSchedulerManager, ReconcileReport, VerifyReport } from './scheduler-manager';
+import { lockDurationMsFor, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from './scan-jobs';
 
 /** The loop options both scheduler modes hand to WorkerRuntime for one scan (same name, stats keys, metric key). */
 export function loopOptionsOf(def: ScanJobDefinition, handler: ProcessHandler, intervalMs: number): WorkerLoopOptions {
@@ -78,10 +86,21 @@ export function registerIntervalScans(
  * stamp (`last<Loop>At` in the Worker stats hash, epoch ms): the time left until one interval after the last successful
  * run, clamped to [0, interval]. No stamp, an unparsable one, or one in the future → one full interval. So a restart never
  * re-runs a daily scan early, and frequent deploys can never postpone it forever (an overdue scan runs at start).
+ *
+ * D-Q5a (audit §13 #9): `firstSeenAt` is when a boot first found the stamp MISSING (daily-first-seen.ts, shared by every
+ * replica). Only for a missing stamp, and only when it is a finite time not in the future, the delay is measured from it
+ * the same way (clamped to [0, interval]) — so after a Redis wipe, restarts can no longer push the first run out forever.
+ * A present stamp (valid, unparsable or future) always decides exactly as before; no `firstSeenAt` → exactly as before.
  */
-export function firstRunDelayFromStamp(stamp: string | null | undefined, intervalMs: number, now: number = Date.now()): number {
-  const last = stamp === null || stamp === undefined || stamp === '' ? NaN : Number(stamp);
-  if (!Number.isFinite(last) || last > now) return intervalMs;
+export function firstRunDelayFromStamp(stamp: string | null | undefined, intervalMs: number, now: number = Date.now(), firstSeenAt?: number): number {
+  const missing = stamp === null || stamp === undefined || stamp === '';
+  const last = missing ? NaN : Number(stamp);
+  if (!Number.isFinite(last) || last > now) {
+    if (missing && firstSeenAt !== undefined && Number.isFinite(firstSeenAt) && firstSeenAt <= now) {
+      return Math.min(intervalMs, Math.max(0, firstSeenAt + intervalMs - now));
+    }
+    return intervalMs;
+  }
   return Math.min(intervalMs, Math.max(0, last + intervalMs - now));
 }
 
@@ -150,21 +169,56 @@ export function createScanJobProcessor(deps: ScanJobProcessorDeps): (job: Pick<J
 export const WORKER_METRICS = Object.freeze({ maxDataPoints: MetricsTime.ONE_WEEK });
 
 /**
- * The three existing consumers (`rab-email` 5, `rab-push` 10, `rab-shift-statements` 2) — one Worker each, in BOTH
- * scheduler modes (never duplicated), on the legacy `bull` prefix, with the same connection, concurrency and event
- * logging main.ts always used. Producer-side options (attempts/backoff/jobIds/removeOn*) are untouched.
+ * D-Q1: a consumer queue's job processor. A job whose NAME the queue registry does not list for this queue is FAILED
+ * CLOSED before its handler runs: UnrecoverableError (BullMQ moves it straight to failed, no retry, whatever its
+ * attempts), a warning naming the queue and the job id (never its data), and no side effect. Before D-Q1 the three
+ * outbox consumers handed EVERY job on their queue to the one handler whatever its name (a `foo` job on `rab-email`
+ * carrying a valid outbox id would have sent that email), and `rab-ai` completed an unknown name as `skipped` with no
+ * warning. An accepted name reaches the handler exactly as before.
  */
-export function createConsumerWorkers(registry: HandlerRegistry, connection: Redis, logger: Logger): Map<ConsumerQueueDefinition['key'], Worker> {
+export function createConsumerJobProcessor(
+  def: Pick<ConsumerQueueDefinition, 'name' | 'logName'>,
+  handler: ProcessHandler,
+  logger: Pick<Logger, 'warn'>,
+): (job: Pick<Job, 'id' | 'name'>, token?: string) => Promise<unknown> {
+  // D-Q4b: the BullMQ lock token is passed through (the timer-trigger handler needs it to re-delay an early job); the
+  // other consumers' handlers take one argument and ignore it.
+  return async (job, token) => {
+    if (!acceptsJobName(def.name, job.name)) {
+      logger.warn(`${def.logName} job ${job.id} refused: job name is not registered for ${def.name} (failed closed, not run)`);
+      throw new UnrecoverableError(`unknown job name for ${def.name}`);
+    }
+    return handler(job, token);
+  };
+}
+
+/**
+ * The consumers (`rab-email` 5, `rab-push` 10, `rab-shift-statements` 2, `rab-ai` 4, and — D-Q4b, only when enabled —
+ * `crewflow-timer-triggers` 2) — one Worker each, in BOTH
+ * scheduler modes (never duplicated), on the legacy `bull` prefix, with the same connection and event logging main.ts
+ * always used. D-Q1: every Worker option comes from the queue registry and is explicit (concurrency, lockDuration,
+ * maxStalledCount, stalledInterval — the values BullMQ applied before, `rab-ai`'s 60 s lock included), and a job with an
+ * unregistered name is failed closed (createConsumerJobProcessor).
+ */
+export function createConsumerWorkers(
+  registry: HandlerRegistry,
+  connection: Redis,
+  logger: Logger,
+  /**
+   * D-Q4b: whether this process consumes the queue (default: every consumer). main.ts passes false for the timer-trigger
+   * queue when WORKER_TIMER_TRIGGERS=off, so `off` creates no extra BullMQ Worker and no extra Redis polling — today exactly.
+   */
+  isEnabled: (def: ConsumerQueueDefinition) => boolean = () => true,
+): Map<ConsumerQueueDefinition['key'], Worker> {
   const workers = new Map<ConsumerQueueDefinition['key'], Worker>();
   for (const def of Object.values(CONSUMER_QUEUES)) {
+    if (!isEnabled(def)) continue;
     const handler = registry.get(def.name, def.jobName)!.handler;
-    // Every job on the queue goes to its one handler, exactly as the single processor function did before.
-    const worker = new Worker(def.name, (job: Job) => handler(job), {
+    // Every ACCEPTED job name on the queue goes to its one handler, exactly as the single processor function did before.
+    const worker = new Worker(def.name, createConsumerJobProcessor(def, handler, logger), {
       connection,
-      concurrency: def.concurrency,
+      ...bullmqWorkerOptionsOf(def.name),
       metrics: WORKER_METRICS,
-      // AI Phase 1: only `rab-ai` overrides BullMQ's default lock (the other three keep the default).
-      ...(def.lockDurationMs ? { lockDuration: def.lockDurationMs } : {}),
     });
     if (def.key !== 'shiftStatements') {
       worker.on('failed', (job, err) => {
@@ -193,6 +247,20 @@ export interface BullmqSchedulerDeps {
   /** Phase A enable predicate (default: all enabled). `jobs` stays the FULL list so disabled scans' schedulers get removed. */
   isEnabled?: (def: ScanJobDefinition) => boolean;
   logger: Logger;
+  /**
+   * Phase D-Q4a (Lane A): receives the scan lock as soon as it is open, BEFORE any scan Worker is created, so the combined
+   * scan's member locks exist for the very first job this replica takes (main.ts `combinedMemberLock`).
+   */
+  onScanLock?: (scanLock: ScanLock) => void;
+  /**
+   * O3 C2 (owner decision 2026-11-05, "exactly like Twenty"). true (default — development, test, and a Worker without
+   * DISABLE_CRON_JOBS_REGISTRATION): this process registers the schedulers (one reconcile at start, then every
+   * `reconcileMs`), exactly as before. false (DISABLE_CRON_JOBS_REGISTRATION=true — production, where the API registers them
+   * at start-up): CONSUME ONLY — the scan lock and the scan Workers as before, but never an upsert or a removal; every
+   * `reconcileMs` a READ-ONLY verify that each enabled scheduler exists (a missing one is logged as an ERROR naming the ids,
+   * and the reconcile-health timestamp is not refreshed, so the Worker's health check turns unhealthy).
+   */
+  registerSchedulers?: boolean;
 }
 
 export interface BullmqScheduler {
@@ -221,34 +289,93 @@ function scanFailure(def: ScanJobDefinition): Error {
   return error;
 }
 
+/**
+ * D-Q1 (fail closed, before any scan Worker exists): the registry's explicit scan-queue settings still match the scan
+ * table — the job names on each queue are exactly SCAN_JOBS', concurrency is the number of scans on the queue and
+ * lockDuration is `lockDurationMsFor(queue)` (measured p99 × 3, floored at 30 s). A drift between the two refuses to start.
+ */
+export function assertScanQueueSettings(jobs: readonly ScanJobDefinition[] = SCAN_JOBS): void {
+  const problems: string[] = [];
+  for (const queue of SCAN_QUEUE_NAMES) {
+    const settings = QUEUE_SETTINGS[queue];
+    const names = jobs.filter((d) => d.queue === queue).map((d) => d.jobName).sort();
+    if (JSON.stringify([...settings.jobNames].sort()) !== JSON.stringify(names)) problems.push(`${queue}: registry job names differ from SCAN_JOBS`);
+    if (settings.worker.concurrency !== names.length) problems.push(`${queue}: registry concurrency ${settings.worker.concurrency} != ${names.length} scans`);
+    if (settings.worker.lockDurationMs !== lockDurationMsFor(queue)) problems.push(`${queue}: registry lockDuration != lockDurationMsFor(queue)`);
+  }
+  if (problems.length) throw new Error(`scan queue settings drifted from SCAN_JOBS: ${problems.join('; ')}`);
+}
+
 export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<BullmqScheduler> {
   const { redis, runtime, registry, logger } = deps;
+  assertScanQueueSettings();
   assertSupportedBullmqApi();
   const preflight = await assertRedisReadyForBullmq(redis, deps.redisUrl, logger);
   logger.log(`bullmq scheduler: Redis maxmemory-policy=${preflight.maxmemoryPolicy} version=${preflight.redisVersion ?? 'unknown'} authenticated=${preflight.authenticated}`);
   runtime.enableSchedulerProgress();
 
   const scanLock = await ScanLock.open(deps.lockConnection, logger);
+  deps.onScanLock?.(scanLock);
   const isEnabled = deps.isEnabled ?? (() => true);
   const manager = new CrewflowSchedulerManager({ connection: redis, prefix: deps.prefix, jobs: deps.jobs, intervalOf: deps.intervalOf, isEnabled, logger });
   const instance = `${os.hostname()}:${process.pid}`;
   const writeStatus = (report: ReconcileReport) =>
     redis
       .multi()
-      .hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', prefix: deps.prefix, reconciledAt: Date.now(), schedulers: report.upserted.length, instance })
+      .hset(WORKER_SCHEDULER_STATUS_KEY, { mode: 'bullmq', registration: 'worker', prefix: deps.prefix, reconciledAt: Date.now(), schedulers: report.upserted.length, missing: 0, instance })
       .expire(WORKER_SCHEDULER_STATUS_KEY, Math.max(180, Math.ceil((deps.reconcileMs * 3) / 1000)))
       .exec()
       .catch(() => undefined);
+  const writeVerifyStatus = (report: VerifyReport) =>
+    redis
+      .multi()
+      .hset(WORKER_SCHEDULER_STATUS_KEY, {
+        mode: 'bullmq',
+        registration: 'api',
+        prefix: deps.prefix,
+        reconciledAt: Date.now(),
+        schedulers: report.present.length,
+        missing: report.missing.length,
+        instance,
+      })
+      .expire(WORKER_SCHEDULER_STATUS_KEY, Math.max(180, Math.ceil((deps.reconcileMs * 3) / 1000)))
+      .exec()
+      .catch(() => undefined);
+  let lastMissing = '';
+  function onVerified(report: VerifyReport, first: boolean): void {
+    void writeVerifyStatus(report);
+    if (report.missing.length === 0) {
+      runtime.markReconcileOk();
+      if (first || lastMissing) {
+        logger.log(`bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all ${report.present.length} enabled Crewflow schedulers present under prefix ${deps.prefix}`);
+      }
+      lastMissing = '';
+      return;
+    }
+    lastMissing = report.missing.join(', ');
+    logger.error(
+      `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): ${report.missing.length} enabled Crewflow scheduler(s) MISSING under prefix ${deps.prefix}: ${lastMissing}. ` +
+        'Those scans do not run. This Worker never registers schedulers: restart the API (it registers them at start-up), and check Redis persistence.',
+    );
+  }
 
-  const first = await manager.reconcile();
-  runtime.markReconcileOk();
-  await writeStatus(first);
-  logger.log(
-    `bullmq scheduler: ${first.upserted.length} Crewflow schedulers reconciled under prefix ${deps.prefix}` +
-      (first.removedStale.length ? `, removed stale ${first.removedStale.join(', ')}` : '') +
-      (first.disabled.length ? `, ${first.disabled.length} disabled (not scheduled): ${first.disabled.join(', ')}` : '') +
-      (first.foreignUntouched.length ? `, ${first.foreignUntouched.length} foreign scheduler(s) left untouched` : ''),
-  );
+  const registers = deps.registerSchedulers !== false;
+  if (registers) {
+    const first = await manager.reconcile();
+    runtime.markReconcileOk();
+    await writeStatus(first);
+    logger.log(
+      `bullmq scheduler: ${first.upserted.length} Crewflow schedulers reconciled under prefix ${deps.prefix}` +
+        (first.removedStale.length ? `, removed stale ${first.removedStale.join(', ')}` : '') +
+        (first.disabled.length ? `, ${first.disabled.length} disabled (not scheduled): ${first.disabled.join(', ')}` : '') +
+        (first.foreignUntouched.length ? `, ${first.foreignUntouched.length} foreign scheduler(s) left untouched` : ''),
+    );
+  } else {
+    // O3 C2 consume-only: never registers. A missing scheduler does not refuse the start (the API may re-register it on its
+    // next start); it is an ERROR now and on every verify, and health stays unhealthy until it exists.
+    const first = await manager.verify();
+    onVerified(first, true);
+  }
 
   const byQueue = new Map<ScanQueueName, Map<string, ScanJobDefinition>>();
   for (const def of deps.jobs) {
@@ -278,10 +405,11 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
       {
         connection: redis,
         prefix: deps.prefix,
-        // One slot per distinct scan on the queue: different scans never wait for each other (as in interval mode,
-        // where every loop has its own timer); the same scan never overlaps (runtime guard + scan lock).
-        concurrency: scanJobsOn(queue).length,
-        lockDuration: lockDurationMsFor(queue),
+        // D-Q1: from the queue registry (asserted equal to SCAN_JOBS above). One slot per distinct scan on the queue:
+        // different scans never wait for each other (as in interval mode, where every loop has its own timer); the same
+        // scan never overlaps (runtime guard + scan lock). lockDuration / maxStalledCount / stalledInterval: BullMQ's
+        // defaults, now explicit.
+        ...bullmqWorkerOptionsOf(queue),
         metrics: WORKER_METRICS,
         // Recorded by BullMQ on each job (`processedBy`) — which replica ran which tick (host name + pid, no config).
         name: instance.replace(/[^A-Za-z0-9:._-]/g, '_'),
@@ -292,14 +420,21 @@ export async function startBullmqScheduler(deps: BullmqSchedulerDeps): Promise<B
     scanWorkers.push(worker);
   }
 
-  manager.startPeriodic(deps.reconcileMs, (result) => {
-    if (result.ok) {
-      runtime.markReconcileOk();
-      void writeStatus(result.report);
-    } else {
-      logger.warn(`bullmq scheduler reconcile failed: ${result.error.message}`);
-    }
-  });
+  if (registers) {
+    manager.startPeriodic(deps.reconcileMs, (result) => {
+      if (result.ok) {
+        runtime.markReconcileOk();
+        void writeStatus(result.report);
+      } else {
+        logger.warn(`bullmq scheduler reconcile failed: ${result.error.message}`);
+      }
+    });
+  } else {
+    manager.startPeriodicVerify(deps.reconcileMs, (result) => {
+      if (result.ok) onVerified(result.report, false);
+      else logger.warn(`bullmq scheduler verify failed (read-only; this Worker never registers): ${result.error.message}`);
+    });
+  }
 
   return {
     manager,

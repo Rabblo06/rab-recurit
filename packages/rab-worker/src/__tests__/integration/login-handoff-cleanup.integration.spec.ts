@@ -10,6 +10,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { LOGIN_HANDOFF_CLEANUP_LOCK, runLoginHandoffCleanupCycle } from '../../queues/rab-maintenance/login-handoff-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -117,14 +118,20 @@ describeIfDb('login handoff cleanup job (integration)', () => {
     expect(await exists(old)).toBe(false);
   });
 
-  it('crewflow_app has no direct privilege on core.login_handoff (only the definer function can purge)', async () => {
+  // P-class (owner-login architecture): kept as a SCHEMA-ROLE test. crewflow_app is no longer a login, but its grants are the
+  // reviewed boundary the definer function is written against; it still has no direct privilege on core.login_handoff.
+  it('schema role crewflow_app has no direct privilege on core.login_handoff (only the definer function can purge)', async () => {
     const id = await handoff(500);
-    await expect(
-      tenantContext.runInTenantContext({ organisationId: manager.organisationId, workspaceId: null, userId: manager.userId, role: '' }, (m) =>
-        m.query(`DELETE FROM core.login_handoff WHERE id = $1`, [id]),
-      ),
-    ).rejects.toMatchObject({ code: '42501' });
-    await expect(dataSource.query(`SELECT count(*) FROM core.login_handoff`)).rejects.toMatchObject({ code: '42501' });
+    const ctx = { organisationId: manager.organisationId, workspaceId: null, userId: manager.userId, role: '' };
+    expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql: `DELETE FROM core.login_handoff WHERE id = $1`, params: [id] }])).toBe('42501');
+    expect(await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', {}, [{ sql: `SELECT count(*) FROM core.login_handoff` }])).toBe('42501');
     expect(await exists(id)).toBe(true);
+  });
+
+  // The owner login's DIFFERENT behaviour, asserted and labelled (behaviour-change catalogue MFA-RC / BC-13; NOT a passed
+  // control): the runtime login now holds the table owner's privileges on core.login_handoff, so a direct read is answered
+  // (not refused). Rows stay bound by RLS (M-T1 FORCE) on normal paths.
+  it('OWNER-LOGIN DIFFERENCE (MFA-RC / BC-13): the runtime login is NOT refused a direct read of core.login_handoff', async () => {
+    await expect(dataSource.query(`SELECT count(*) FROM core.login_handoff`)).resolves.toBeDefined();
   });
 });

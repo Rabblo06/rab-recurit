@@ -62,4 +62,33 @@ export const WORKER_SCAN_INTERVAL_SETTINGS = Object.freeze({
 
 export type WorkerScanIntervalKey = keyof typeof WORKER_SCAN_INTERVAL_SETTINGS;
 
+/**
+ * Phase D-Q4a (owner decision OD-1, 2026-11-04): the interval keys of the four 300-s scans that
+ * WORKER_SHIFT_SCAN_MODE=combined folds into one workspace walk, in registration order. Late clock-in (120 s) is NOT a
+ * member (extending the set needs a new owner decision; OD-2 then fixes late clock-in before no-show).
+ */
+export const COMBINED_SHIFT_SCAN_MEMBER_KEYS = Object.freeze([
+  'WORKER_SHIFT_MONITOR_INTERVAL_SECONDS',
+  'WORKER_ATTENDANCE_MONITOR_INTERVAL_SECONDS',
+  'WORKER_SHIFT_REPORT_SCHEDULER_INTERVAL_SECONDS',
+  'WORKER_FINAL_TIMESHEET_INTERVAL_SECONDS',
+] as const satisfies readonly WorkerScanIntervalKey[]);
+
+/** The combined scan's tick may not be shorter than this (fail closed on degenerate settings such as 301 s and 300 s). */
+export const COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS = 30;
+
+/**
+ * The combined scan's tick in seconds: the greatest common divisor of the members' intervals, so every member interval is
+ * a whole number of ticks and no member ever runs less often than in separate mode. Throws on an empty list or a
+ * non-positive / non-integer interval (fail closed); the 30-s floor is checked by the callers that know the mode.
+ */
+export function combinedShiftScanTickSeconds(memberSeconds: readonly number[]): number {
+  if (!memberSeconds.length) throw new Error('combined shift scan: no member intervals');
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  return memberSeconds.reduce((acc, seconds) => {
+    if (!Number.isInteger(seconds) || seconds <= 0) throw new Error('combined shift scan: member intervals must be positive whole seconds');
+    return gcd(acc, seconds);
+  }, 0);
+}
+
 export const WORKER_SCAN_INTERVAL_KEYS = Object.freeze(Object.keys(WORKER_SCAN_INTERVAL_SETTINGS) as WorkerScanIntervalKey[]);

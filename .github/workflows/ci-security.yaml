@@ -62,43 +62,96 @@ jobs:
     env:
       NODE_ENV: test
       REDIS_URL: redis://localhost:6379
-    # PostgreSQL (M2 CI reliability, 2026-10-28): no longer a service with postgres-init mounted from the workspace (it
-    # starts before checkout, so Docker created that directory as root and checkout failed with EACCES), and no longer
-    # migrated as the rab_owner login (the role split refuses it under CF-41; rab_app is NOLOGIN since). The database is
-    # started after checkout and built by the M2 harness's restricted-migrator fresh install; the gate then runs as
-    # crewflow_app, the restricted NOBYPASSRLS runtime login, exactly as before in intent (check-rls-coverage.ts asserts
-    # current_user = crewflow_app and rolbypassrls = false).
+    # Owner-login architecture (owner's final decision 2026-11-04): the database is built the way production builds it - the
+    # provider-admin step (postgres-init/owner-login/01-crewflow-owner.sql) and then the migrate-on-start child
+    # (twenty-migrate.ts) as the ONE owner login crewflow_owner on an EMPTY database (bootstrap, chain, ROW_COPY shim). The
+    # RLS gate then runs AS crewflow_owner (check-rls-coverage.ts requires it and proves its role / object posture), the
+    # posture and semantic goldens are compared exactly, and the owner-login guard and behaviour-catalogue suites run as
+    # crewflow_owner (they skip - never pass - on any other login). Every credential is random and masked.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/disposable-postgres
-      - name: Build the workspace libraries the migration harness imports
+      - name: Build the workspace libraries the migration child imports
         run: npx nx run-many -t build -p rab-shared,rab-emails
-      - name: Build the database with the restricted migrator (fresh install, with its security checks)
-        run: |
-          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
-        env:
-          MIGRATION_SECURITY_SCENARIOS: fresh
-          MIGRATION_SECURITY_KEEP_DATABASES: 'true'
-          MIGRATION_SECURITY_DB_FILE: ${{ runner.temp }}/rls-database.env
-      - name: FORCE RLS coverage as crewflow_app
+      - name: Provider-admin step (crewflow_owner and the database grant; the committed SQL file)
         run: |
           set -euo pipefail
-          set -a; source "${RUNNER_TEMP}/rls-database.env"; set +a
-          test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
-          eval "$test_env"
-          # Phase B: the connection factory's one variable (the deprecated DATABASE_URL is no longer passed).
-          PG_DATABASE_URL="$TEST_DATABASE_URL" yarn check-rls
+          owner_pass="$(openssl rand -hex 32)"
+          echo "::add-mask::${owner_pass}"
+          db=crewflow_rls_gate
+          docker exec disposable-postgres psql -X -q -v ON_ERROR_STOP=1 -U ci_bootstrap -d postgres \
+            -c "CREATE DATABASE ${db}" -c "ALTER DATABASE ${db} SET crewflow.disposable_test_database = 'true'"
+          printf '%s' "${owner_pass}" | docker exec -i disposable-postgres sh -c 'umask 077; cat > /tmp/owner-pw'
+          docker exec -i disposable-postgres psql -X -q -U ci_bootstrap -d "${db}" -v owner_password_file=/tmp/owner-pw -f - \
+            < packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
+          docker exec disposable-postgres rm -f /tmp/owner-pw
+          admin="${MIGRATION_SECURITY_ADMIN_URL%/*}/${db}"
+          owner="postgres://crewflow_owner:${owner_pass}@127.0.0.1:5432/${db}"
+          echo "::add-mask::${admin}"
+          echo "::add-mask::${owner}"
+          { echo "RLS_OWNER_URL=${owner}"; echo "RLS_ADMIN_URL=${admin}"; } >> "$GITHUB_ENV"
+      - name: Fresh install by the migrate-on-start child as crewflow_owner
+        run: |
+          env -i PATH="$PATH" HOME="$HOME" NODE_ENV=development PG_DATABASE_URL="$RLS_OWNER_URL" CREWFLOW_MIGRATE_ON_START=true \
+            npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/migrate/twenty/twenty-migrate.ts
+      - name: FORCE RLS coverage and the owner-login posture as crewflow_owner
+        run: PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
+      - name: Security posture golden (exact)
+        run: |
+          POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/check-db-security-posture.ts
+      - name: Semantic posture golden for this PostgreSQL major (policies, function bodies, triggers, RLS, audit ACL)
+        run: |
+          POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+            packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts
+      - name: Owner-login guards and behaviour-change catalogue (real PostgreSQL, as crewflow_owner)
+        run: |
+          TEST_DATABASE_URL="$RLS_OWNER_URL" TEST_DATABASE_URL_UNPOOLED="$RLS_ADMIN_URL" DB_TARGET=local \
+            npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=120000 \
+            packages/rab-server/src/__tests__/integration/owner-login-guards.integration.spec.ts \
+            packages/rab-server/src/__tests__/integration/owner-login-behaviour-catalogue.integration.spec.ts
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
 
+  # Owner-login architecture: one injected statement runs with the schema owner's privileges (PT-01), so every dynamically
+  # built SQL site needs a reviewed allow-comment (tools/check-sql-injection.cjs). A text scan, not a complete defence: the
+  # adversarial tests and code review remain required. No dependencies needed (Node built-ins only).
+  sql-injection-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Dynamic SQL sites carry a reviewed allow-comment
+        run: node tools/check-sql-injection.cjs
+
+  # Owner decision 2026-11-04 (BC-18, accepted like Twenty): the database no longer refuses the owner login's direct writes
+  # to seven pre-auth tables, so the protection is app-level - every write must stay inside the reviewed owning code.
+  # Fails on any INSERT / UPDATE / DELETE / TRUNCATE / MERGE / COPY or TypeORM write to those tables outside the allow-list
+  # in tools/check-protected-table-writes.cjs. Node built-ins only.
+  protected-table-writes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: The check's own tests
+        run: node --test tools/check-protected-table-writes.test.cjs
+      - name: Writes to the seven owner-accepted pre-auth tables stay in their owning code
+        run: node tools/check-protected-table-writes.cjs
+
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
-  # never migrate, refuse migration credentials), the Worker bundle launcher (PG_* forwarding, legacy names refused in
-  # production, the provisioner child's own PG_DATABASE_URL), every committed compose definition fed to the real launcher,
-  # and the compose credential isolation (the migration login reaches rab-migrate only; rab-api / rab-worker wait for it).
+  # never migrate, refuse migration credentials), every committed compose definition that runs the Worker (O1: the one
+  # image, the Worker command, one non-root process under init, no CREWFLOW_PROVISIONER_*), the image's runtime-deps check,
+  # and the compose credential isolation (O3: the production files have no migration service and no .env.migrate; the
+  # dev/QA files keep their one-off migrate, which alone holds the migration login).
   deployment-config:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -109,27 +162,74 @@ jobs:
       - uses: ./.github/actions/yarn-install
       - name: API start shell tests (api-prestart.sh, start.sh)
         run: node packages/rab-docker/rab/api-prestart-test/run-prestart-shell-tests.cjs
-      - name: Worker bundle launcher and committed deployment definitions
-        run: node --test packages/rab-docker/rab/worker-bundle/test/launcher.test.cjs packages/rab-docker/rab/worker-bundle/test/deployment-provisioner.test.cjs
+      - name: Committed Worker deployment definitions and the image's runtime-deps check
+        run: node --test packages/rab-docker/rab/worker-bundle/test/deployment-worker.test.cjs packages/rab-docker/rab/test/runtime-deps.test.cjs
+      # Review G2 (#44): the image-based compose variant must not drift from docker-compose.production.yml. Runs as soon as
+      # #44's files are on the branch. A partial set of those files, or a missing `docker compose` (the test file would
+      # skip itself), fails; any check failure fails the job.
+      - name: Image compose variant matches production (staging/verify-image-compose, when present)
+        run: |
+          set -euo pipefail
+          files=(packages/rab-docker/staging/verify-image-compose.cjs packages/rab-docker/staging/verify-image-compose.test.cjs packages/rab-docker/docker-compose.image.yml)
+          present=0
+          for f in "${files[@]}"; do if [ -e "$f" ]; then present=$((present + 1)); fi; done
+          if [ "$present" -eq 0 ]; then
+            echo "image compose variant not on this branch yet (#44); nothing to verify"
+            exit 0
+          fi
+          if [ "$present" -ne "${#files[@]}" ]; then
+            echo "::error::only $present of ${#files[@]} image-compose files are present: ${files[*]}"
+            exit 1
+          fi
+          docker compose version || { echo "::error::docker compose is required to verify the image compose variant"; exit 1; }
+          node --test packages/rab-docker/staging/verify-image-compose.test.cjs
+          node packages/rab-docker/staging/verify-image-compose.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
+      # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
+      # in image-security-gate.yaml's static job, which the image-gate job below (and every release) calls.
 
-  trivy:
-    runs-on: ubuntu-latest
+  # Docker hardening H5: replaces the former `trivy` job. Builds THE image (O1: API + Worker) exactly as a release would
+  # (no cache, SBOM + provenance, nothing pushed) and gates the built images: floors, privileges, writable code paths,
+  # dev packages, Trivy + Grype, layer secrets, SBOM/provenance, manifest. Mode pr: fixable High/Critical and every
+  # structural check fail the PR; release-only items (unfixed High/Critical without an owner decision, H3's
+  # development packages, the unpinned Dockerfile frontend) are reported as HOLD (NEEDS OWNER APPROVAL) and block a
+  # release. arm64 (native runner) is added when the Docker inputs change; every release gates both architectures.
+  changes:
+    uses: ./.github/workflows/changed-files.yaml
+
+  image-gate:
+    needs: changes
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/image-security-gate.yaml
     permissions:
       contents: read
       security-events: write
+      actions: read # the gate can verify a candidate from another run (never used on PRs)
+    with:
+      mode: pr
+      platforms: ${{ needs.changes.outputs.docker == 'true' && '["linux/amd64","linux/arm64"]' || '["linux/amd64"]' }}
+
+  # One required status for the whole workflow: fails if any job above failed, was cancelled or was skipped.
+  ci-security-gate:
+    name: ci-security gate
+    # `changes` too: if change detection fails, the image gate falls back to amd64 only, which must not read as passed.
+    needs: [audit, constraints-and-licenses, gitleaks, codeql, rls-coverage, sql-injection-lint, protected-table-writes, deployment-config, changes, image-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Build image
-        run: docker build -f packages/rab-docker/rab/Dockerfile -t rab-server:ci --target rab .
-      - uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0 (was unpinned "0.24.0" with no leading v -- that ref does not exist upstream)
-        with:
-          image-ref: rab-server:ci
-          format: sarif
-          output: trivy-results.sarif
-          severity: HIGH,CRITICAL
-      - uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
-        if: always()
-        with:
-          sarif_file: trivy-results.sarif
+      - name: Every required ci-security job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ['RESULTS'])
+          bad = {k: v['result'] for k, v in needs.items() if v['result'] != 'success'}
+          for k, v in sorted(needs.items()):
+              print(f"{k}: {v['result']}")
+          if bad:
+              print(f"::error::ci-security: required jobs did not succeed: {bad}")
+              sys.exit(1)
+          EOF

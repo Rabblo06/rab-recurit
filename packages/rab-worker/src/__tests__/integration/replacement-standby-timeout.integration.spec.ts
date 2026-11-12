@@ -17,21 +17,22 @@ import { OfferService } from '@rab/server/modules/offer/services/offer.service';
 import { JobRole } from '@rab/server/modules/scheduling/entities/job-role.entity';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
-import { runManagerConfirmationTimeoutCycle } from '../../queues/rab-offers/offer-expiry.job';
+import { runConfirmationDeadlineBackstopScan, runManagerConfirmationDeadlineCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * Replacement & standby offers (2026-10-21) vs the manager-confirmation timeout worker. Real Postgres, RLS on, no mocks.
- *  - A STANDBY acceptance is never system-confirmed (no pointer is scheduled, and a stray/legacy pointer is ignored).
- *  - A REPLACEMENT acceptance keeps the existing timeout rule and goes through the same seat claim; re-running the cycle
- *    (retry / second replica) never confirms twice, never claims a second seat, never audits twice.
+ * Replacement & standby offers (2026-10-21) vs the manager-confirmation DEADLINE worker (owner rule 2026-11-06, Q1b).
+ * Real Postgres, RLS on, no mocks.
+ *  - No acceptance of any kind is ever system-confirmed (the Phase 7.1 timeout auto-confirm of replacements is gone).
+ *  - Replacement / standby keep their own window: their deadline is the END of the booked window, so they can still be
+ *    confirmed by the manager during a running shift (after start − 30 min), and are withdrawn only at window end.
+ *  - Re-running the cycle (retry / second replica) never duplicates anything.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 
-const TIMEOUT_MINUTES = 1;
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
@@ -64,7 +65,10 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     });
   }
 
-  const runCycle = () => runManagerConfirmationTimeoutCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService, TIMEOUT_MINUTES);
+  const runCycle = async () => {
+    await runManagerConfirmationDeadlineCycle(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService);
+    await runConfirmationDeadlineBackstopScan(adminDataSource, tenantContext, notificationService, auditService, realtimeEventService);
+  };
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -118,40 +122,57 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     const replacementOfferId = sent.results[0]!.offerId!;
     const accepted = await offerService.staffAccept(ctxOf(candidate, 'staff'), replacementOfferId);
     expect(accepted.status).toBe(OfferStatus.STAFF_ACCEPTED);
-    // Land the acceptance past the timeout deadline (the only thing under test is the worker's decision).
-    await withContext(mctx, (m) => m.query(`UPDATE job_offer SET staff_accepted_at = now() - interval '5 minutes' WHERE id = $1`, [replacementOfferId]));
     return { organisation, manager, mctx, shift, offerKind: sent.offerKind, replacementOfferId };
   }
 
   const read = (fx: { mctx: AuthContext }, sql: string, params: unknown[]) => withContext(fx.mctx, (m) => m.query(sql, params));
 
-  it('W1: a STANDBY acceptance gets no timeout pointer, and even a stray pointer never confirms it', async () => {
+  /** FIXTURE: end this offer's booked window `msAgo` ago (the replacement/standby deadline is the window end). */
+  async function endWindow(fx: { mctx: AuthContext }, offerId: string, msAgo: number) {
+    await withContext(fx.mctx, (m) =>
+      m.query(
+        `UPDATE shift_assignment sa SET period = tstzrange(now() - interval '2 hours', now() - make_interval(secs => $2::double precision / 1000), '[)')
+           FROM job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+        [offerId, msAgo],
+      ),
+    );
+  }
+
+  it('W1 (Q1b): a STANDBY acceptance is armed for its window END, is never confirmed by the Worker, and is withdrawn at window end', async () => {
     const fx = await seed('stbyT', 'provisional');
     expect(fx.offerKind).toBe('standby');
-    expect(await adminDataSource.query(`SELECT 1 FROM core.worker_due_work WHERE subject_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
-    // A stray/legacy pointer (e.g. scheduled before this change) is ignored by the worker's own guard.
-    await adminDataSource.query(
-      `INSERT INTO core.worker_due_work (organisation_id, workspace_id, job_type, subject_type, subject_id, due_at)
-       VALUES ($1, $2, 'manager_confirmation_timeout', 'job_offer', $3, now() - interval '1 minute')`,
-      [fx.organisation.id, fx.manager.workspaceId, fx.replacementOfferId],
-    );
+    const [pointer] = await adminDataSource.query(`SELECT due_at FROM core.worker_due_work WHERE subject_id = $1`, [fx.replacementOfferId]);
+    const [window] = await read(fx, `SELECT upper(sa.period) AS ends FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id WHERE o.id = $1`, [fx.replacementOfferId]);
+    expect(new Date(pointer.due_at).getTime()).toBe(new Date(window.ends).getTime());
+    // During the running shift (well after start − 30 min): nothing automatic happens.
     await runCycle();
     await runCycle();
-    const offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
+    let offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.STAFF_ACCEPTED);
     expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
+    // At window end: withdrawn (never confirmed), the original booked seat untouched.
+    await endWindow(fx, fx.replacementOfferId, 60_000);
+    await runCycle();
+    offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
+    expect(offer.status).toBe(OfferStatus.MANAGER_REJECTED);
+    expect(offer.rejectionReason).toBe('confirmation_deadline_passed');
+    expect(offer.confirmedBy ?? null).toBeNull();
     const [shift] = await read(fx, `SELECT filled_count FROM shift WHERE id = $1`, [fx.shift.id]);
     expect(Number(shift.filled_count)).toBe(1);
   });
 
-  it('W2: a REPLACEMENT acceptance follows the existing timeout rule exactly once — retries never duplicate the booking, seat or audit', async () => {
+  it('W2 (Q1b): a REPLACEMENT acceptance is NOT auto-confirmed; the manager can still confirm it mid-shift, exactly once, retries never duplicate', async () => {
     const fx = await seed('replT', 'confirmed');
     expect(fx.offerKind).toBe('replacement');
     await Promise.all([runCycle(), runCycle()]);
+    let offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
+    expect(offer.status).toBe(OfferStatus.STAFF_ACCEPTED); // previously: auto-confirmed by the timeout
+    // The shift started an hour ago (past any start − 30 deadline), yet the replacement's window is still running.
+    const confirmed = await offerService.managerConfirm(fx.mctx, fx.replacementOfferId);
+    expect(confirmed.confirmedBy).toBe(fx.manager.userId);
     await runCycle();
-    const offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
+    offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.MANAGER_CONFIRMED);
-    expect(offer.confirmedBy).toBeFalsy();
     expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(1);
     const seats = await read(fx, `SELECT status, attendance_reviewed_at IS NOT NULL AS reviewed FROM shift_assignment WHERE shift_id = $1 ORDER BY created_at`, [fx.shift.id]);
     expect(seats).toEqual([{ status: 'no_show', reviewed: true }, { status: 'confirmed', reviewed: false }]);
@@ -159,5 +180,16 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     expect(Number(shift.filled_count)).toBe(1);
     expect(Number(shift.required_count)).toBe(1);
     expect(await read(fx, `SELECT 1 FROM notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
+  });
+
+  it('W3 (Q1b): a REPLACEMENT confirm after its window ended is the deadline 409 and the acceptance is withdrawn', async () => {
+    const fx = await seed('replEnd', 'confirmed');
+    await endWindow(fx, fx.replacementOfferId, 1_000);
+    await expect(offerService.managerConfirm(fx.mctx, fx.replacementOfferId)).rejects.toMatchObject({
+      response: { statusCode: 409, code: 'CONFIRMATION_DEADLINE_PASSED', message: 'This shift has ended, so this replacement can no longer be confirmed.' },
+    });
+    const offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
+    expect(offer.status).toBe(OfferStatus.MANAGER_REJECTED);
+    expect(offer.rejectionReason).toBe('confirmation_deadline_passed');
   });
 });

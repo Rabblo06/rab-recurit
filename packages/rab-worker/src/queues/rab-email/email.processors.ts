@@ -26,8 +26,9 @@ export class EmailScanProcessor {
       (id, orgId) => emailQueue.publish(id, orgId),
       (id, orgId, generation) => emailQueue.republish(id, orgId, generation),
       emailService.ambiguousDeliverySafeToRetry,
+      (id, generation) => emailQueue.isLive(id, generation),
     );
-    if (result.claimed) logger.log(`email dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain}`);
+    if (result.claimed) logger.log(`email dispatch: claimed=${result.claimed} published=${result.published} recovered=${result.recovered} deliveryUncertain=${result.deliveryUncertain} generationsExhausted=${result.generationsExhausted}`);
     return Boolean(result.claimed); // only stamps lastEmailDispatchAt when it actually claimed rows
   }
 }

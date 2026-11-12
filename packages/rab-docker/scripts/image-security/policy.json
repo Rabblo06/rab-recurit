@@ -1,0 +1,71 @@
+{
+  "_comment": "Crewflow image release-gate policy (H5). Read by image_gate.py; never shipped in an image. Every rule here is enforced fail-closed: 'block' items fail in every mode, 'release' items fail a release-mode run and are shown as NEEDS OWNER APPROVAL (HOLD) on pull requests. How to change this file: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md.",
+  "schema": 1,
+  "scanners": {
+    "trivy": {
+      "image": "aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c",
+      "version": "0.76.1"
+    },
+    "grype": {
+      "image": "anchore/grype:v0.121.0@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea",
+      "version": "0.121.0"
+    },
+    "max_db_age_hours": 72
+  },
+  "dockerfiles": {
+    "_comment": "FROM references that are neither a digest-pinned image nor an earlier stage. Each needs a reason. O1: none (the single Dockerfile pins every external base image by digest).",
+    "arg_base_images": {}
+  },
+  "roles": {
+    "image": {
+      "_comment": "O1 (owner decision \"exactly like Twenty\", 2026-11-05): ONE image runs the API (default CMD), the Worker (`node packages/rab-worker/dist/main.js`) and the one-off rab-migrate / rab-ops. This role is the MERGE of the former api and worker roles and keeps the stricter value of every field: the native PDF render, min_sbom_packages 300, the union of required files, forbidden lists and module-path identities. Dropped only what the single image removes on purpose: the provisioner identity 10001 and its directories, the root default user, the launcher, and the image HEALTHCHECK (per-service health checks live in compose).",
+      "dockerfile": "packages/rab-docker/rab/Dockerfile",
+      "target": "rab",
+      "user": "node",
+      "entrypoint": ["/sbin/tini", "-s", "--"],
+      "cmd": ["./api-prestart.sh"],
+      "exposed_ports": ["3000/tcp"],
+      "healthcheck_required": false,
+      "_healthcheck_required": "No image-level HEALTHCHECK: it would apply to every command of the one image. Each service declares its own in compose (rab-api /healthz; rab-worker the per-instance heartbeat check), enforced by scripts/compose-owner-login.cjs.",
+      "floors_checks": ["node", "alpine", "apk-absent:chromium", "apk-if-installed:libexpat"],
+      "pdf_render": true,
+      "module_path_identities": [
+        { "user": "node", "home": null },
+        { "user": "1000:1000", "home": "/nonexistent" }
+      ],
+      "accounts": { "node": 1000 },
+      "home_dirs_root_owned": ["/home/node"],
+      "writable_dirs": { "/app/storage": 1000, "/tmp/crewflow-jobs": 1000, "/run/crewflow-health/jobs": 1000 },
+      "required_files": ["/app/packages/rab-server/dist/main.js", "/app/api-prestart.sh", "/app/packages/rab-worker/dist/main.js", "/app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js", "/opt/crewflow-bundle/worker-bundle-health.cjs"],
+      "sbom_must_include": ["musl", "@nestjs/core", "typeorm"],
+      "_forbidden": "P5 (PDF renderer migration): the Worker renders PDFs natively; Chromium, its driver and the OS packages only it pulled in must never return. forbidden_apk was derived from the MEASURED delta between the main 824f0824 Worker and API images (184 packages besides tini): it matches 149 of them (Chromium, ffmpeg and every codec, the X11/Wayland/Mesa/GTK stack, fonts, audio, libxml2, glib, cups-libs, cjson, ...); the 35 generic base libraries it does not name (libffi, pcre2, zstd-libs, xz-libs, sqlite-libs, libexpat, ...) are harmless alone and are not forbidden. fs FAILS (every mode) on any installed apk matching forbidden_apk or npm package matching forbidden_npm; attest FAILS if the SBOM names anything in sbom_must_not_include. Scoped to the runtime image only: the web e2e suite's own @playwright/test (rab-e2e-testing, CI runners) is untouched. Names ending in * are prefixes.",
+      "forbidden_apk": ["chromium", "chromium-*", "nss", "nspr", "ffmpeg-*", "libsndfile", "alsa-lib", "libpulse", "pulseaudio*", "glib", "libxml2", "libxslt", "cups-libs", "cjson", "librist", "mesa", "mesa-*", "libdrm", "libepoxy", "libva", "libvdpau", "libvpl", "llvm*", "spirv-tools", "wayland-*", "libx*", "xkeyboard-config", "xprop", "xset", "xdg-utils", "mkfontscale", "libfontenc", "libice", "libsm", "pixman", "cairo", "cairo-*", "pango", "gdk-pixbuf", "gtk+3.0", "at-spi2-*", "libatk-*", "librsvg", "glycin-*", "libglycin", "gobject-introspection", "shared-mime-info", "hwdata-*", "libpciaccess", "eudev-libs", "libcamera*", "avahi-libs", "dbus-libs", "bubblewrap", "fontconfig", "freetype", "harfbuzz", "harfbuzz-*", "fribidi", "graphite2", "font-*", "ttf-*", "icu-data-*", "aom-libs", "libdav1d", "rav1e-libs", "libSvtAv1Enc", "x264-libs", "x265-libs", "xvidcore", "openh264", "libvpx", "libtheora", "libvorbis", "libogg", "opus", "lame-libs", "mpg123-libs", "libflac", "libopenmpt", "soxr", "speexdsp", "webrtc-audio-processing-*", "roc-toolkit-libs", "pipewire-libs", "libbluray", "libdvd*", "libudfread", "libwebp", "libwebp*", "libsharpyuv", "libjxl", "libhwy", "libyuv", "libjpeg-turbo", "libpng", "lcms2", "orc", "libsrt", "libzmq", "libssh", "gnutls", "nettle", "libtasn1", "p11-kit", "libidn2", "libunistring", "gmp", "mbedtls*", "libsodium"],
+      "forbidden_npm": ["playwright", "playwright-core", "chromium-bidi", "@playwright/*", "puppeteer", "puppeteer-core"],
+      "sbom_must_not_include": ["chromium", "playwright", "playwright-core"],
+      "min_sbom_packages": 300
+    }
+  },
+  "filesystem": {
+    "_comment": "Code-loading paths: every non-symlink entry must be owned by 0:0 and not group/other-writable, except the listed runtime data directories (writable_dirs per role).",
+    "code_paths": ["/app", "/opt/crewflow-bundle", "/usr/local"],
+    "sticky_world_writable_dirs": ["/tmp", "/var/tmp", "/dev/shm", "/run/lock", "/var/lock"],
+    "ignore_prefixes": ["/proc/", "/sys/", "/dev/"],
+    "test_dir_names": ["__tests__", "__mocks__", "__fixtures__"],
+    "test_file_pattern": "\\.(spec|test)\\.(c|m)?(js|ts)$|(^|/)test-helpers\\.(c|m)?js$|(^|/)jest-[^/]*\\.(c|m)?js$",
+    "test_scan_roots": ["/app/packages", "/opt/crewflow-bundle"]
+  },
+  "packages": {
+    "_comment": "'block' = never in a runtime image (H1 already removes them). 'h3_target' = development-only packages H3 removes (production-only node_modules); release-blocking until then. 'h3_target_by_role' adds role-specific ones. Names ending in /* match a whole scope.",
+    "_prettier": "NOT a development-only package here, so it is not listed: @rab/server's email templates import @react-email/render, and both installed copies of it (1.4.0, and 1.0.4 under @react-email/components) declare prettier in dependencies and require('prettier/standalone') and 'prettier/plugins/html' at module top level; @fig/complete-commander (nest-commander, rab-ops / rab-migrate CLI) also depends on it. Verified 2026-11-03 in crewflow-h3h6/api:h3-9990a07b-amd64: loading the compiled email templates module loads 4 prettier modules from both copies (H3 #42, NEEDS-C).",
+    "block": ["esbuild", "@esbuild/*", "vite"],
+    "h3_target": ["jest", "ts-jest", "jest-environment-node", "jest-environment-jsdom", "@jest/*", "nx", "@nx/*", "typescript", "ts-node", "ts-node-dev", "tsx", "concurrently", "wait-on", "eslint", "@typescript-eslint/*", "react-email", "supertest", "aws-sdk-client-mock", "@nestjs/testing", "@yarnpkg/types", "@testing-library/*", "@vitejs/*", "@tabler/icons-react", "lucide-react", "react-router-dom", "recharts", "framer-motion", "react-phone-number-input", "country-flag-icons", "@tanstack/react-query"],
+    "h3_target_by_role": {
+      "image": []
+    }
+  },
+  "provenance": {
+    "_comment": "BuildKit provenance (mode=max) records build arguments; only these may appear, so no runner environment or credential can leak into a published attestation.",
+    "allowed_build_args": ["MIN_NODE_VERSION", "MIN_LIBEXPAT_VERSION", "BUILDKIT_SBOM_SCAN_CONTEXT", "BUILDKIT_SBOM_SCAN_STAGE"]
+  },
+  "secret_env_name_pattern": "(SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE|API_?KEY|ACCESS_?KEY|CREDENTIAL|DATABASE_URL|_DSN$|^DSN$)"
+}

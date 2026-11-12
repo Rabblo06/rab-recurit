@@ -42,7 +42,9 @@ import { createPushSendProcessor } from '../../queues/rab-push/push-send.process
 import { dispatchPushScope } from '../../queues/rab-push/push-dispatch.job';
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
 import { dispatchStatementScope, processShiftStatementJob } from '../../queues/rab-reports/shift-statement.job';
+import type { ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -107,7 +109,8 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     workerA = workerDs('a');
     workerB = workerDs('b');
     await Promise.all([workerA.initialize(), workerB.initialize()]);
-    for (const w of [workerA, workerB]) expect((await w.query<[{ u: string }]>('SELECT current_user AS u'))[0].u).toBe('crewflow_worker');
+    // BC-08 (Phase D under one login): both Worker runtimes run on crewflow_owner; crewflow_worker is a schema role.
+    for (const w of [workerA, workerB]) expect((await w.query<[{ u: string }]>('SELECT current_user AS u'))[0].u).toBe('crewflow_owner');
     orgs = [];
     for (let i = 0; i < 3; i += 1) orgs.push(await factory.createInternalManager(await factory.createOrganisation(`w4-${i}`), { label: `w4-${i}` }));
   });
@@ -628,7 +631,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     expect(c1).toMatchObject({ organisationId: m.organisationId, workspaceId: m.workspaceId });
     await dispatchStatementScope(tenantContext, m.organisationId, m.workspaceId!, [recordId], async (d) => void jobs.push(d));
     expect(jobs).toHaveLength(1);
-    const deps = (render: (html: string) => Promise<Buffer>) => ({
+    const deps = (render: (doc: ReportDocument) => Promise<Buffer>) => ({
       tenantContext, files: app.get(FileService), notifications: app.get(NotificationService), audit: app.get(AuditService), render,
     });
     expect(await processShiftStatementJob(jobs[0]!, deps(async () => { throw new Error('renderer crashed'); }))).toBe('failed');
@@ -667,9 +670,12 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
       tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, async (m) =>
         attendanceQr.sign(await m.findOneByOrFail(Shift, { id: shiftId })));
     expect((await http().post(`/rest/v1/shifts/${shiftId}/publish`).set(auth(tokenM))).status).toBe(201);
-    const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenM)).send({ staffProfileId: staff.profileId });
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokenS))).status).toBe(201);
-    expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenM))).status).toBe(201);
+    // Booked before the approval deadline (owner rule 2026-11-06), then moved back to the shift's window — fixture only.
+    await bookBeforeDeadline(admin, shiftId, async () => {
+      const offer = await http().post(`/rest/v1/shifts/${shiftId}/offers`).set(auth(tokenM)).send({ staffProfileId: staff.profileId });
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/accept`).set(auth(tokenS))).status).toBe(201);
+      expect((await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenM))).status).toBe(201);
+    });
     expect((await http().post('/rest/v1/attendance/check-in').set(auth(tokenS)).send({ shiftId })).status).toBe(200);
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokenS)).send({ shiftId, qrToken: await signQr() })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokenS)).send({ qrToken: await signQr() });

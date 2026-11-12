@@ -2,6 +2,7 @@ import { loadSystemRoleDefaultPermissions } from '../../identity/services/system
 import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { EntityManager, In } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
@@ -209,6 +210,14 @@ const MAX_SEND_ATTEMPTS = 3;
 export class ManagerService {
   @Inject(PermissionsService)
   private readonly permissions!: PermissionsService;
+
+  /**
+   * Phase X SC-01: every write below that changes a field of CoreEntityCacheService's `user` display projection (name,
+   * email, avatar) or removes the row clears that entry AFTER its transaction commits (the cache's own contract). A
+   * failed transaction never reaches the call. Property-injected so the constructor is unchanged.
+   */
+  @Inject(CoreEntityCacheService)
+  private readonly entityCache!: CoreEntityCacheService;
 
   constructor(
     private readonly tenantContext: TenantContextService,
@@ -567,15 +576,15 @@ export class ManagerService {
 
     // Account creation must never depend on, or fail because of, email
     // deliverability — see StaffService.create()'s identical comment for
-    // the full reasoning. Skipping cleanly here means no AccountInvite/
-    // EmailOutbox row is ever created that could fire stale once the
-    // worker comes back online.
-    const emailAvailable = opts.sendInvite === false ? false : await this.accountLifecycle.isEmailDeliveryAvailable();
+    // the full reasoning (owner decision "always queue": only the
+    // EMAIL_DELIVERY_ENABLED configuration, never Worker health, decides
+    // whether the invite is queued; the Worker revalidates before sending).
+    const emailEnabled = opts.sendInvite === false ? false : this.accountLifecycle.isEmailDeliveryEnabled();
     // P2.9B/C — an explicit override (Initial Manager invitation) wins; otherwise a CEO invite
     // gets its own subject line (same body, see templates.ts's own doc comment on why), and every
     // other type keeps the original generic template unchanged.
     const templateRenderer = opts.templateRenderer ?? (dto.type === ManagerType.CEO ? renderCeoInvitationEmail : undefined);
-    const invite = emailAvailable
+    const invite = emailEnabled
       ? await this.accountLifecycle.sendAccountInvite(
           manager,
           ctx,
@@ -585,7 +594,8 @@ export class ManagerService {
       : null;
     await this.auditService.record(manager, ctx, AuditAction.USER_CREATED, {
       targetUserId: userId,
-      metadata: { emailQueued: emailAvailable },
+      // What actually happened: true only when an invite outbox row was written in this transaction.
+      metadata: { emailQueued: invite !== null },
     });
 
     if (dto.type === ManagerType.CEO) {
@@ -600,13 +610,13 @@ export class ManagerService {
       // The invite row is now always durably committed before this
       // returns (A8) — delivery outcome is no longer known synchronously,
       // so this always reflects "queued", never a guess at delivered.
-      // Null throughout when email was skipped at creation time.
+      // Null throughout when no invite was queued (sendInvite: false, or email delivery configured off).
       pendingInvite: invite
         ? { sendNumber: invite.sendNumber, maxSendAttempts: MAX_SEND_ATTEMPTS, expiresAt: invite.expiresAt, cleanupAt: null }
         : null,
       invitationStatus: invite ? ('queued' as const) : null,
       invite: invite ? { sendNumber: invite.sendNumber, expiresAt: invite.expiresAt, queued: invite.queued } : null,
-      emailQueued: emailAvailable,
+      emailQueued: invite !== null,
     };
   }
 
@@ -654,12 +664,14 @@ export class ManagerService {
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateManagerDto): Promise<ManagerSummary> {
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    let displayChangedFor: string | null = null;
+    const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const { firstName, lastName, phone, jobTitle } = dto;
+      if (firstName !== undefined || lastName !== undefined) displayChangedFor = profile.userId;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
         await manager.update(User, profile.userId, {
           ...(firstName !== undefined && { firstName }),
@@ -675,6 +687,13 @@ export class ManagerService {
       refreshed.user = await manager.findOneByOrFail(User, { id: profile.userId });
       return this.toSummaryWithInvite(manager, refreshed);
     });
+    await this.invalidateUserDisplay(displayChangedFor);
+    return summary;
+  }
+
+  /** SC-01: after commit only; a no-op for null (nothing in the projection changed). Best-effort, never throws. */
+  private async invalidateUserDisplay(userId: string | null): Promise<void> {
+    if (userId) await this.entityCache.invalidate('user', userId);
   }
 
   /**
@@ -839,7 +858,8 @@ export class ManagerService {
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    let emailChangedFor: string | null = null;
+    const invite = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already the pending email for this account.');
@@ -859,6 +879,7 @@ export class ManagerService {
       // NULL is idempotent regardless of the column's current value.
       await manager.query('UPDATE core."user" SET password_hash = NULL WHERE id = $1', [profile.userId]);
       await manager.update(User, profile.userId, { email: newEmail });
+      emailChangedFor = profile.userId;
       await this.auditService.record(manager, ctx, AuditAction.INVITE_PENDING_EMAIL_CHANGED, {
         targetUserId: profile.userId,
         metadata: { from: profile.user!.email, to: newEmail },
@@ -866,6 +887,8 @@ export class ManagerService {
 
       return this.accountLifecycle.sendAccountInvite(manager, ctx, { userId: profile.userId, email: newEmail, createdBy: ctx.userId });
     });
+    await this.invalidateUserDisplay(emailChangedFor);
+    return invite;
   }
 
   /**
@@ -1028,11 +1051,13 @@ export class ManagerService {
         targetUserId: profile.userId,
         metadata: { field: 'email', from: profile.user!.email, to: newEmail },
       });
-      return { verify: false as const, email: newEmail };
+      return { verify: false as const, email: newEmail, userId: profile.userId };
     });
     if (outcome.verify) {
+      // The verified path changes nothing yet; EmailChangeService.confirm() clears the entry when it does.
       return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission });
     }
+    await this.invalidateUserDisplay(outcome.userId);
     return { email: outcome.email };
   }
 
@@ -1131,7 +1156,8 @@ export class ManagerService {
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
-    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+    let deletedUserId: string | null = null;
+    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
@@ -1147,6 +1173,8 @@ export class ManagerService {
 
       await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
       await this.userDeletion.deleteUser(manager, ctx, profile.userId, user.email);
+      deletedUserId = profile.userId;
     });
+    await this.invalidateUserDisplay(deletedUserId);
   }
 }

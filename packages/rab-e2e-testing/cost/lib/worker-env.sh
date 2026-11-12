@@ -5,20 +5,26 @@
 # ---- worker configuration per phase (Phase A measurement) -----------------------------------------------------------
 # make_worker_env <name> [ITEM ...]: writes $OUT/worker-env/<name>.env = base.env (run.sh: --worker-env-file, else
 # empty) changed by the items, and sets WENV (file), WRT / WPU (REALTIME_ENABLED / PUSH_ENABLED, which compose sets by
-# interpolation because `environment:` would override an env file) and WNOURL (1 = run compose WITHOUT the pass-through
-# CREWFLOW_PROVISIONER_DATABASE_URL, so the worker does not have that variable at all). Items:
+# interpolation because `environment:` would override an env file) and WNOURL (kept for older phase definitions: since O1
+# the worker never receives a provisioner URL, so `-CREWFLOW_PROVISIONER_DATABASE_URL` only records WNOURL=1). Items:
 #   KEY=VALUE   set KEY in the env file (replacing a base.env value)
-#   -KEY        remove KEY from the env file; `-CREWFLOW_PROVISIONER_DATABASE_URL` removes the compose-provided URL
-# A key that compose already sets for the worker is refused (an env-file value would be silently ignored), as is
-# anything malformed.
+#   -KEY        remove KEY from the env file
+# A key that compose already sets for the worker or the api is refused (an env-file value would be silently ignored), as
+# is anything malformed. The file reaches the api too (it registers the schedulers).
+# fixed_env_keys: every key compose sets in `environment:` for the worker OR the api. The per-phase env file reaches both
+# (the api registers the schedulers), and `environment:` wins over it on either, so such a key in the file would be ignored.
+fixed_env_keys() {
+  COST_WORKER_ENV_FILE="$(hostpath "$COST_DIR/init/empty.env")" dc config --format json api worker | node -e '
+    let r = ""; process.stdin.on("data", (d) => (r += d)).on("end", () => { const s = JSON.parse(r).services; console.log([...new Set([...Object.keys(s.worker.environment), ...Object.keys(s.api.environment)])].join(" ")); });'
+}
+
 make_worker_env() {
   local name="$1" kv k v dir="$OUT/worker-env" fixed; shift
   case "$name" in *[!A-Za-z0-9._-]*) die "worker env name '$name' must be [A-Za-z0-9._-]" ;; esac
   mkdir -p "$dir"; [ -f "$dir/base.env" ] || : > "$dir/base.env"
   WENV="$dir/$name.env"; WRT=false; WPU=false; WNOURL=0
   [ "$name" = base ] || cp "$dir/base.env" "$WENV"
-  fixed="$(COST_WORKER_ENV_FILE="$(hostpath "$COST_DIR/init/empty.env")" dc config --format json worker | node -e '
-    let r = ""; process.stdin.on("data", (d) => (r += d)).on("end", () => console.log(Object.keys(JSON.parse(r).services.worker.environment).join(" ")));')"
+  fixed="$(fixed_env_keys)"
   for kv in "$@"; do
     [ -n "$kv" ] || continue
     [ "$name" != base ] || die "worker env: base.env is written by run.sh (--worker-env-file), not by worker-up"
@@ -28,7 +34,7 @@ make_worker_env() {
         CREWFLOW_PROVISIONER_DATABASE_URL) WNOURL=1 ;;
         REALTIME_ENABLED | PUSH_ENABLED) die "worker env: $k cannot be removed (set it to false instead)" ;;
         *)
-          [[ " $fixed " != *" $k "* ]] || die "worker env: $k is set by docker-compose.cost.yml for the worker and cannot be removed"
+          [[ " $fixed " != *" $k "* ]] || die "worker env: $k is set by docker-compose.cost.yml for the worker or the api and cannot be removed"
           grep -v "^$k=" "$WENV" > "$WENV.tmp" || true; mv "$WENV.tmp" "$WENV" ;;
       esac
       continue
@@ -39,7 +45,7 @@ make_worker_env() {
       REALTIME_ENABLED) WRT="$v" ;;
       PUSH_ENABLED) WPU="$v" ;;
       *)
-        [[ " $fixed " != *" $k "* ]] || die "worker env: $k is set by docker-compose.cost.yml for the worker; an env-file value would be ignored"
+        [[ " $fixed " != *" $k "* ]] || die "worker env: $k is set by docker-compose.cost.yml for the worker or the api; an env-file value would be ignored"
         grep -v "^$k=" "$WENV" > "$WENV.tmp" || true; mv "$WENV.tmp" "$WENV"
         echo "$k=$v" >> "$WENV" ;;
     esac

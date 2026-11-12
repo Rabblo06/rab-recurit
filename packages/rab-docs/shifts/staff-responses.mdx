@@ -10,7 +10,7 @@ Staff answer offers in the mobile app. As a manager, you see their answer on the
 
 <PhoneShots shots={[
   { src: '/images/mobile/offer-details.webp', alt: 'Job Details screen with Decline and Accept buttons', caption: 'Job Details — Decline or Accept' },
-  { src: '/images/mobile/offers-waiting.webp', alt: 'Offers list with an offer waiting for manager confirmation', caption: 'Waiting for manager confirmation' },
+  { src: '/images/mobile/offers-waiting.webp', alt: 'Offers list with an offer waiting for manager confirmation', caption: 'Awaiting manager confirmation' },
 ]} />
 
 ## Accepting is not the same as being confirmed
@@ -19,8 +19,8 @@ A staff member accepting an offer is the **first** of two steps:
 
 | Step | Who | Offer status | What the staff member sees |
 | --- | --- | --- | --- |
-| **Staff acceptance** | The staff member taps **Accept** | Staff accepted | "Waiting for manager confirmation" |
-| **Manager confirmation** | A manager confirms, or Crewflow confirms automatically | Manager confirmed | **CONFIRMED** |
+| **Staff acceptance** | The staff member taps **Accept** | Staff accepted | "Awaiting manager confirmation" |
+| **Manager confirmation** | The manager who sent the offer confirms it. Crewflow never confirms automatically. | Manager confirmed | **CONFIRMED** |
 
 Only after the second step is the person on the shift and able to clock in.
 
@@ -28,7 +28,7 @@ Only after the second step is the person on the shift and able to clock in.
 
 The staff member opens the offer and taps **Accept**. On your Offers page the row shows a **Staff accepted** status with "Staff accepted *N minutes ago*" underneath. The offer is listed in the **Awaiting Confirmation** view until it is confirmed or rejected.
 
-Acceptance only succeeds if the offer is still pending and has not passed its deadline. If two things happen at once — for example you withdraw an offer as they tap Accept — only one of them wins.
+Acceptance only succeeds if the offer is still pending and has not passed its deadline. A standard offer can't be accepted less than 30 minutes before its start: the staff member sees "This shift starts too soon for a manager to confirm it, so it can no longer be accepted." and the offer stays pending until it expires. If two things happen at once — for example you withdraw an offer as they tap Accept — only one of them wins.
 
 ## Declining
 
@@ -46,7 +46,6 @@ If the staff member does nothing, the offer expires at its deadline (48 hours af
 | --- | --- |
 | **Confirm shift** | **CONFIRMED**. The shift appears under Upcoming Shift and in their calendar. |
 | **Reject** | The offer ends. It no longer appears as an upcoming shift. |
-| No action within 60 minutes (shifts you created) | Crewflow confirms automatically. |
-| Approved staffing request | Confirmed automatically as soon as they accept. |
+| No confirmation by the approval deadline (30 minutes before the start for a standard offer) | **Withdrawn**, with "Shift offer withdrawn". It never becomes confirmed. This applies to approved staffing requests too. |
 
 See the staff side in detail in [Offers (mobile)](/mobile/offers).

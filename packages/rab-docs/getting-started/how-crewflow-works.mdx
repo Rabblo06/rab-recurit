@@ -60,7 +60,7 @@ flowchart TB
 Crewflow runs background jobs so nothing depends on someone remembering to check:
 
 - **Offers expire** when nobody answers before the deadline (48 hours by default).
-- **Accepted offers are confirmed automatically** if no manager confirms or rejects them within the confirmation window (60 minutes by default). The responsible manager is told.
+- **Unconfirmed acceptances are withdrawn** at the approval deadline (30 minutes before the start for a standard offer). Crewflow never confirms an offer by itself. The staff member, the responsible manager and the venue's venue managers are told.
 - **Reminders** go to staff 24 hours, 2 hours and 30 minutes before a shift, and when clock-in opens.
 - **Late arrivals and missing clock-outs** are flagged and the right people are notified.
 - **Timesheet PDFs** are produced before the shift (the shift attendance sheet with its QR code) and after the timesheet is finalised.

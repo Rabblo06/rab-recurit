@@ -22,12 +22,8 @@ sequenceDiagram
     end
     C->>S: Offer (venue, time, estimated pay)
     S->>C: Accept or Decline
-    alt Shift came from a venue request
-        C-->>C: Acceptance confirms automatically
-    else Manager-created shift
-        M->>C: Confirm shift (or Reject)
-        Note over C: If nobody acts within 60 minutes,<br/>Crewflow confirms automatically
-    end
+    M->>C: Confirm shift (or Reject)
+    Note over C: Unconfirmed 30 minutes before the start,<br/>the acceptance is withdrawn
     C->>VM: Roster PDF with shift QR code (before the shift)
     S->>C: Clock in (location + QR scan)
     S->>C: Clock out (location + QR scan)
@@ -48,11 +44,11 @@ sequenceDiagram
     [Sending offers](/shifts/sending-offers)
   </Step>
   <Step title="Staff respond" icon="hand-pointer">
-    Staff open the offer in the mobile app and tap **Accept** or **Decline**. After accepting, they see "Waiting for manager confirmation".
+    Staff open the offer in the mobile app and tap **Accept** or **Decline**. After accepting, they see "Awaiting manager confirmation".
     [Staff responses](/shifts/staff-responses)
   </Step>
   <Step title="Confirm the team" icon="user-check">
-    The manager confirms or rejects each acceptance on the **Offers** page, in the **Awaiting Confirmation** view, one at a time with **Confirm shift** or together with **Confirm All Accepted**. Acceptances on shifts requested by a venue manager are confirmed automatically, because the manager already approved the request.
+    The manager confirms or rejects each acceptance on the **Offers** page, in the **Awaiting Confirmation** view, one at a time with **Confirm shift** or together with **Confirm All Accepted**. This applies to shifts requested by a venue manager too: Crewflow never confirms automatically. Confirm before the approval deadline (30 minutes before the start for a standard offer), or the acceptance is withdrawn.
     [Confirming offers](/shifts/confirming-offers)
   </Step>
   <Step title="Work the shift" icon="qrcode">

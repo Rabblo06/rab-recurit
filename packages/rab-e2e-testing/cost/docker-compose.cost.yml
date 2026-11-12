@@ -9,25 +9,45 @@ name: crewflow-cost
 #   COST_TAG                   image pair crewflow-cost/{server,worker}:$COST_TAG (scripts/build-images.sh)
 #
 # Resource limits mirror the 2026-10-26 audit harness: API 1 CPU / 768 MB, worker 1 CPU / 1 GB, Postgres no CPU limit.
-# Runtime flags mirror it too (production-like where it matters for cost): HWS_RUNTIME_ENABLED=false,
-# WORKER_SCHEDULER=interval, STORAGE_DRIVER=S3 (MinIO), EMAIL_DRIVER=LOGGER, PUSH/REALTIME/AI off. NODE_ENV=development
-# only because production mode refuses the LOGGER email driver and loopback URLs.
+# Runtime flags are production-like where it matters for cost: HWS_RUNTIME_ENABLED=false, WORKER_SCHEDULER=bullmq,
+# STORAGE_DRIVER=S3 (MinIO), EMAIL_DRIVER=LOGGER, PUSH/REALTIME/AI off. NODE_ENV=development only because production mode
+# refuses the LOGGER email driver and loopback URLs.
+#
+# DATABASE LIFECYCLE = PRODUCTION'S (owner-login architecture; Phase X P0-H; packages/rab-docker/docker-compose.image.yml):
+#   - pg: a fresh cluster whose init is pg_stat_statements (init/00-pgss.sql), the committed one-time provider-admin SQL
+#     packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql (the crewflow_owner password comes from the
+#     compose secret crewflow-owner-password, fed from CREWFLOW_OWNER_PW; never a command line) and the disposable marker
+#     every harness script checks (init/02-cost-marker.sql);
+#   - api: ./api-prestart.sh with CREWFLOW_MIGRATE_ON_START=true (migration child under the lock, the whole chain, then the
+#     BullMQ scheduler registration), then main.js;
+#   - worker (and worker2): consume-only (DISABLE_DB_MIGRATIONS, DISABLE_CRON_JOBS_REGISTRATION), after a healthy api;
+#   - ONE login, crewflow_owner, in ONE PG_DATABASE_URL for api, worker, worker2 and tool. No migrate service, no rab_owner /
+#     crewflow / crewflow_app / crewflow_worker login. pg_stat_statements windows count the application's roles
+#     (lib/sql-families.js APPLICATION_ROLES: crewflow_owner and `crewflow`, the role its provisioner sessions SET ROLE into).
+#
+# SCAN SETTINGS = PRODUCTION'S on the api AND the workers (x-scan-env below; drift guard system/lib/
+# production-parity.selftest.ts); every `stack.sh worker` FAILS the run when the registered schedulers differ from the
+# worker's plan (lib/verify-schedulers.cjs). Remaining deliberate differences from production: NODE_ENV development, no
+# TLS and the image's default pg_hba (superuser reads pgss), LOGGER email / FAKE push / MinIO, the harness's CPU and
+# memory limits, no CREWFLOW_RUNTIME_ISOLATION, TRUSTED_PROXY_CIDRS for the load generator (README "Known limitations").
 
 x-app-env: &app-env
   NODE_ENV: development
   RAB_RUNTIME_ENV: development
   TZ: UTC
   # Phase B (614796f0+): no DB_TARGET in the runtime env (command authority only; the API and the Worker refuse to start
-  # with it, never-in-runtime-env.ts). The migrate/tool services set it themselves. One PG_DATABASE_URL per process, on
+  # with it, never-in-runtime-env.ts). The tool service sets it itself. One PG_DATABASE_URL (crewflow_owner) everywhere, on
   # the compose service name `pg` (a listed local database service host, LOCAL_DATABASE_SERVICE_HOSTS).
   APP_SECRET: ${APP_SECRET:?run scripts/gen-secrets.sh}
   REDIS_URL: redis://:${REDIS_PW:?}@costaudit-redis:6379
   EMAIL_DRIVER: LOGGER
-  PUSH_ENABLED: 'false'
+  # PUSH_ENABLED / REALTIME_ENABLED are in x-scan-env (api and workers, switchable per phase). Not here: in a YAML merge
+  # list the FIRST anchor wins, so a value here would silently override the switch.
   PUSH_PROVIDER: FAKE
   AI_ENABLED: 'false'
   HWS_RUNTIME_ENABLED: 'false'
-  WORKER_SCHEDULER: interval
+  # O3 C2 (production's mode): the api registers the BullMQ job schedulers on start; the workers only consume them.
+  WORKER_SCHEDULER: bullmq
   STORAGE_DRIVER: S3
   STORAGE_KEY_PREFIX: ${STORAGE_KEY_PREFIX:-costaudit}
   S3_BUCKET: costaudit
@@ -46,9 +66,40 @@ x-app-env: &app-env
   TRUSTED_PROXY_CIDRS: ${COST_SUBNET:-172.31.70.0/24}
   APP_VERSION: costaudit-${COST_TAG:?}
 
+# SCAN AND DISPATCH SETTINGS = PRODUCTION'S, on the api AND the workers (Phase X P0-H review). Under WORKER_SCHEDULER=bullmq
+# the api registers every scan's BullMQ job scheduler with ITS environment and the consume-only workers run what is
+# registered, so a setting given to the workers alone would not be what runs. Values from
+# packages/rab-docker/docker-compose.image.yml (rab-api and rab-worker carry the same ones); system/lib/
+# production-parity.selftest.ts fails CI when they drift. A key production does not set is the code default. Phase-specific
+# values: the COST_* interpolations below, or the per-phase env file (COST_WORKER_ENV_FILE), which reaches the api too.
+x-scan-env: &scan-env
+  WORKER_FAST_PUBLISH_NOTIFY: 'true'
+  WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30'
+  WORKER_TIMER_TRIGGERS: 'on'
+  WORKER_TIMER_TRIGGER_KINDS: offer-expiry,manager-confirmation,no-show,late-clock-in
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300'
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120'
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300'
+  # Production sets 30 s (PR #92, merged 2026-11-11). Pass COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
+  # to measure another value (both services get it).
+  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: ${COST_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:-30}
+  # Same switches on both (Phase A acceptance: flags on = api AND worker). Default false/false = code defaults = production
+  # compose. Only `measure.sh flags-up` recreates them with both on.
+  REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
+  PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
+  # Phase D (D1/D2/E-1): poll vs event and per_scope vs global arms; defaults = the code defaults (production sets none and
+  # its gate refuses them). The api needs them too: event mode registers the dispatch scans at the backstop interval, and
+  # the api's own writes NOTIFY in event mode.
+  WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
+  WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
+  WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
+  WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
+  WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
+
 services:
   pg:
-    image: postgres:16-alpine
+    # COST_PG_IMAGE picks the PostgreSQL major (16 default; postgres:18-alpine works: PGDATA is pinned below).
+    image: ${COST_PG_IMAGE:-postgres:16-alpine}
     container_name: costaudit-pg
     command:
       - postgres
@@ -69,11 +120,9 @@ services:
       POSTGRES_PASSWORD: ${PG_SUPER_PW:?}
       POSTGRES_DB: rab
       POSTGRES_INITDB_ARGS: --data-checksums
-      COST_RAB_OWNER_PW: ${RAB_OWNER_PW:?}
-      # Phase D (D2): initdb pre-creates crewflow_app (the restricted-runtime migration accepts and re-passwords an existing
-      # role) and the operator-created crewflow_worker login, exactly like packages/rab-docker/postgres-init/01-roles.sql.
-      COST_CREWFLOW_APP_PW: ${CREWFLOW_APP_PW:?}
-      COST_CREWFLOW_WORKER_PW: ${CREWFLOW_WORKER_PW:?}
+      PGDATA: /var/lib/postgresql/data
+    secrets:
+      - crewflow-owner-password
     ports:
       - '127.0.0.1:${COST_PG_PORT:-25470}:5432'
     volumes:
@@ -81,12 +130,18 @@ services:
       # Mounted file by file: on Docker Desktop (Windows) a directory bind mount of this folder has been observed to
       # list as empty inside the container, so the entrypoint's glob found nothing and skipped initialisation.
       - ./init/00-pgss.sql:/docker-entrypoint-initdb.d/00-pgss.sql:ro
-      - ./init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+      # The committed provider-admin SQL itself, file by file (its directory also holds transition-from-separated.sql, which
+      # must never run on a fresh cluster). lib/check-compose.js allows exactly this one read-only bind outside this folder.
+      - ../../rab-docker/postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
+      - ./init/02-cost-marker.sql:/docker-entrypoint-initdb.d/02-cost-marker.sql:ro
     shm_size: 256m
     mem_limit: 1g
     networks: [cost]
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
+      # Ready AND the one-time owner step completed (a half-initialised volume stays unhealthy).
+      test:
+        - CMD-SHELL
+        - "pg_isready -U rab -d rab && psql -X -U rab -d rab -Atc \"select 1 from pg_roles where rolname = 'crewflow_owner' and rolcanlogin\" | grep -qx 1"
       interval: 5s
       timeout: 5s
       retries: 20
@@ -153,18 +208,20 @@ services:
   api:
     image: crewflow-cost/server:${COST_TAG:?}
     container_name: costaudit-api
+    # The SAME per-phase env file as the workers (scripts/measure.sh worker_up, dq6-bench.sh arms): a scan setting in it
+    # (e.g. WORKER_SHIFT_SCAN_MODE=combined) must reach the api, which registers the schedulers. `environment:` wins over it.
+    env_file:
+      - ${COST_WORKER_ENV_FILE:-./init/empty.env}
     environment:
-      <<: *app-env
+      <<: [*app-env, *scan-env]
       PORT: '3000'
-      PG_DATABASE_URL: postgres://crewflow_app:${CREWFLOW_APP_PW:?}@pg:5432/rab
-      # Same switches as the worker (Phase A acceptance: flags on = API AND worker). Default false/false = code defaults =
-      # production compose. Only `measure.sh flags-up` recreates the API with them on.
-      REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
-      PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
-      # Phase D (E-1): event-mode phases must set the same value on the API (its writes then NOTIFY; budget counts listeners).
-      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
-      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
-    command: ['node', 'packages/rab-server/dist/main.js']
+      # The ONE application login (owner-login architecture), identical for api, worker, worker2 and tool.
+      PG_DATABASE_URL: postgres://crewflow_owner:${CREWFLOW_OWNER_PW:?run scripts/gen-secrets.sh}@pg:5432/rab
+      # O3 C1: migrates on start (approval mode none, the production default) under the migration lock, then registers the
+      # BullMQ schedulers, then main.js.
+      CREWFLOW_MIGRATE_ON_START: 'true'
+      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+    command: ['./api-prestart.sh']
     ports:
       - '127.0.0.1:${COST_API_PORT:-23070}:3000'
     cpus: ${COST_API_CPUS:-1}
@@ -176,53 +233,62 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
+      # Production's interval (10 s): the health ping is part of the idle SQL a window measures.
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/healthz']
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 20s
+      # A fresh install applies the whole chain before main.js listens.
+      start_period: 600s
 
   worker: &worker-svc
     image: crewflow-cost/worker:${COST_TAG:?}
     container_name: costaudit-worker
-    # Phase A measurement (2026-10-27): extra worker variables for one phase (e.g. a provisioner opt-in switch) come from
-    # a harness-generated env file under the results directory (scripts/measure.sh worker_up); default: the empty
-    # init/empty.env. `environment:` below wins over it, so the realtime/push switches are set by interpolation instead.
+    # Phase A measurement (2026-10-27): extra variables for one phase (e.g. a provisioner opt-in switch) come from a
+    # harness-generated env file under the results directory (scripts/measure.sh worker_up); default: the empty
+    # init/empty.env. The api reads the same file. `environment:` below wins over it, so the realtime/push switches are set
+    # by interpolation instead.
     env_file:
       - ${COST_WORKER_ENV_FILE:-./init/empty.env}
     environment:
-      <<: *app-env
-      # Phase B: also the jobs child's session-lock connection (direct), as in the e2e/production compose.
-      # Phase D: a global-claim phase logs the jobs child in as crewflow_worker by exporting COST_WORKER_DB_USER=crewflow_worker
-      # and COST_WORKER_DB_PW (harness scripts); unset = crewflow_app with CREWFLOW_APP_PW, exactly as before.
-      PG_DATABASE_URL: postgres://${COST_WORKER_DB_USER:-crewflow_app}:${COST_WORKER_DB_PW:-${CREWFLOW_APP_PW:?}}@pg:5432/rab
+      <<: [*app-env, *scan-env]
+      # The same ONE owner login as the api (also the Worker's session-lock connection, direct). Every claim mode (per_scope
+      # and global) runs on it; there is no separate Worker login any more.
+      PG_DATABASE_URL: postgres://crewflow_owner:${CREWFLOW_OWNER_PW:?run scripts/gen-secrets.sh}@pg:5432/rab
       PG_POOL_MAX_CONNECTIONS: '12'
-      # Pass-through (no value here): lib/common.sh load_secrets exports postgres://crewflow:<CREWFLOW_PW>@costaudit-pg:5432/rab;
-      # a configuration with `-CREWFLOW_PROVISIONER_DATABASE_URL` (lib/worker-env.sh) runs compose without it, so the key is
-      # ABSENT from the worker (Phase A: a disabled provisioner must not hold the URL).
-      CREWFLOW_PROVISIONER_DATABASE_URL:
-      # Default false/false = the code defaults, which is also what the production compose runs (it sets neither key).
-      # The `idleflags` phase recreates the worker with both true (COST_REALTIME_ENABLED / COST_PUSH_ENABLED).
-      REALTIME_ENABLED: ${COST_REALTIME_ENABLED:-false}
-      PUSH_ENABLED: ${COST_PUSH_ENABLED:-false}
-      # Phase D (D1/D2): poll vs event and per_scope vs global phases; defaults = the code defaults (production sets none).
-      WORKER_CLAIM_MODE: ${COST_WORKER_CLAIM_MODE:-per_scope}
-      WORKER_DISPATCH_MODE: ${COST_WORKER_DISPATCH_MODE:-poll}
-      WORKER_DISPATCH_BACKSTOP_SECONDS: ${COST_WORKER_DISPATCH_BACKSTOP_SECONDS:-30}
-      WORKER_DISPATCH_RECONCILE_SECONDS: ${COST_WORKER_DISPATCH_RECONCILE_SECONDS:-900}
-      WORKER_DISPATCH_CLAIM_BATCH: ${COST_WORKER_DISPATCH_CLAIM_BATCH:-100}
-    command: ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']
-    user: '0:0'
+      # O3 C1/C2: never migrates, only consumes the schedulers the api registered, starts after a healthy api.
+      DISABLE_DB_MIGRATIONS: 'true'
+      DISABLE_CRON_JOBS_REGISTRATION: 'true'
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
+      # Production's in-process provisioner interval (the owner's 5 s onboarding pin; code default 60 s). O1: no
+      # CREWFLOW_PROVISIONER_* variable (the Worker refuses that prefix).
+      WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
+      # What the retired launcher gave its jobs child (H1-M1), as in production.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+      CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
+    # O1: the same image as `api` (scripts/build-images.sh tags one build as both), the Worker command, ONE process as
+    # uid 1000 under compose's init (the watchdog's SIGKILL is ignored for PID 1).
+    command: ['node', 'packages/rab-worker/dist/main.js']
+    init: true
+    user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
-    cap_add: [SETUID, SETGID, KILL]
     security_opt: ['no-new-privileges:true']
     tmpfs:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
-      - /tmp/crewflow-provisioner:uid=10001,gid=10001,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
-      - /run/crewflow-health/provisioner:uid=10001,gid=10001,mode=0755
-    stop_grace_period: 55s
+    stop_grace_period: 45s
+    # O1: the one image has no HEALTHCHECK of its own (the retired Worker image had one); the jobs-only per-instance check
+    # the production compose uses, so measure.sh docker_health keeps reporting.
+    healthcheck:
+      test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     cpus: ${COST_WORKER_CPUS:-1}
     mem_limit: ${COST_WORKER_MEM:-1g}
     networks: [cost]
@@ -230,6 +296,8 @@ services:
       pg:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      api:
         condition: service_healthy
 
   # Second Worker replica (profile `replica`; only the `replicas` phase starts it, together with a fresh `worker`, to show
@@ -240,48 +308,40 @@ services:
     profiles: ['replica']
 
   # ---- one-off ops containers (profile `ops`; never started by `up`) -------------------------------------------------
-  migrate:
-    profiles: ['ops']
-    image: crewflow-cost/server:${COST_TAG:?}
-    container_name: costaudit-migrate
-    environment:
-      NODE_ENV: development
-      RAB_RUNTIME_ENV: development
-      DB_TARGET: local
-      CREWFLOW_MIGRATION_PHASE: ${CREWFLOW_MIGRATION_PHASE:-}
-      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
-      CREWFLOW_BOOTSTRAP_PASSWORD: ${CREWFLOW_PW:?}
-      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${CREWFLOW_APP_PW:?}
-    restart: 'no'
-    networks: [cost]
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        url="$${CREWFLOW_MIGRATION_DATABASE_URL:-}"
-        [ -n "$$url" ] || { echo "migrate: REFUSED - no migration URL" >&2; exit 64; }
-        if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD; fi
-        echo "migrate: phase $${CREWFLOW_MIGRATION_PHASE:-?}"
-        unset CREWFLOW_MIGRATION_DATABASE_URL
-        exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/setup-db.js
-
   # Runs harness scripts that need the application's own compiled code/deps (seed, history backfill, storage CLI).
-  # The harness folder is mounted read-only at /cost.
+  # The harness folder is mounted read-only at /cost. The history backfill renders real PDFs (@react-pdf, no browser); O1:
+  # the server and worker tags are the same image, run as uid 1000 (the image's tini entrypoint just execs the command).
   tool:
     profiles: ['ops']
-    image: crewflow-cost/server:${COST_TAG:?}
+    image: crewflow-cost/worker:${COST_TAG:?}
+    user: '1000:1000'
     environment:
       <<: *app-env
       NODE_PATH: /app/node_modules
       DB_TARGET: local
-      PG_DATABASE_URL: postgres://crewflow_app:${CREWFLOW_APP_PW:?}@pg:5432/rab
+      PG_DATABASE_URL: postgres://crewflow_owner:${CREWFLOW_OWNER_PW:?run scripts/gen-secrets.sh}@pg:5432/rab
       SEED_URL: postgres://rab:${PG_SUPER_PW:?}@costaudit-pg:5432/rab
       SEED_PW: ${SEED_PW:?}
+      # Docker hardening H1-M1 (main 824f0824..2733c7fb): the image's HOME is not writable by uid 1000, and Chromium's
+      # crashpad handler then aborts the launch ("--database is required", SIGTRAP), so the backfill could not render.
+      # Same plan the production Worker runs with: HOME=/nonexistent (not creatable), TMPDIR a private 0700 tmpfs,
+      # fontconfig state in XDG_* directories inside it.
+      HOME: /nonexistent
+      TMPDIR: /tmp/crewflow-jobs
+      XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
+      XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
+    tmpfs:
+      - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
     volumes:
       - ./:/cost:ro
     restart: 'no'
     networks: [cost]
+
+secrets:
+  # The crewflow_owner password for 01-crewflow-owner.sql, mounted at /run/secrets/crewflow-owner-password (the file the SQL
+  # reads by default), from the operator env file ($COST_SECRETS); never on a command line.
+  crewflow-owner-password:
+    environment: CREWFLOW_OWNER_PW
 
 networks:
   cost:

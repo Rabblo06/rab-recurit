@@ -15,7 +15,8 @@ function side(name: string, failWith?: Error) {
   const manager = {
     query: jest.fn(async (sql: string) => {
       calls.push(sql);
-      return undefined;
+      // Owner-login pool safety (G-09): the GUC bind also returns current_user / session_user, which must be equal.
+      return sql.startsWith(`SELECT set_config('rab.organisation_id'`) ? [{ cu: 'crewflow_owner', su: 'crewflow_owner' }] : undefined;
     }),
   } as unknown as EntityManager;
   const dataSource = {
@@ -48,7 +49,8 @@ describe('TenantContextService useReplica (B4)', () => {
     const service = new TenantContextService(primary.dataSource, resolver(), env(false), replica);
     await service.runInTenantContext(CTX, async () => 1);
     expect(replica.routeRead).not.toHaveBeenCalled();
-    expect(primary.calls[0]).toMatch(/^SELECT set_config\('rab.organisation_id'/);
+    expect(primary.calls[0]).toBe('RESET ROLE'); // pool safety (G-09): first statement of every tenant transaction
+    expect(primary.calls[1]).toMatch(/^SELECT set_config\('rab.organisation_id'/);
     expect(primary.calls).not.toContain('SET TRANSACTION READ ONLY');
   });
 
@@ -63,8 +65,9 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(result).toBe('core');
     expect(primary.dataSource.transaction).not.toHaveBeenCalled();
     expect(rep.calls[0]).toBe('SET TRANSACTION READ ONLY');
-    expect(rep.calls[1]).toMatch(/set_config\('rab.organisation_id', \$1, true\).*set_config\('rab.admin_scope', '', true\)/);
-    expect(rep.calls[2]).toBe(`SELECT set_config('search_path', $1, true)`);
+    expect(rep.calls[1]).toBe('RESET ROLE'); // pool safety (G-09), allowed inside a READ ONLY transaction
+    expect(rep.calls[2]).toMatch(/set_config\('rab.organisation_id', \$1, true\).*set_config\('rab.admin_scope', '', true\)/);
+    expect(rep.calls[3]).toBe(`SELECT set_config('search_path', $1, true)`);
     expect(rep.calls.join()).not.toMatch(/\bSET (SESSION|ROLE)\b|set_config\([^)]*false\)/); // nothing session-scoped
     expect(databaseMetrics.snapshot().replica.reads).toBe(1);
   });

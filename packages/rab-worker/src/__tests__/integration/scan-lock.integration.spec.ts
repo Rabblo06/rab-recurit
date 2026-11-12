@@ -45,7 +45,8 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
       `SELECT a.usename FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.locktype = 'advisory' AND l.granted AND a.pid <> pg_backend_pid()`,
     );
     expect(holders.length).toBeGreaterThanOrEqual(1);
-    expect(new Set(holders.map((h) => h.usename))).toEqual(new Set(['crewflow_app']));
+    // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
+    expect(new Set(holders.map((h) => h.usename))).toEqual(new Set(['crewflow_owner']));
     release();
     await expect(held).resolves.toEqual({ acquired: true, value: 'done' });
     await expect(b.run(ID, async () => 'second')).resolves.toEqual({ acquired: true, value: 'second' });
@@ -68,8 +69,8 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
       [inner],
     );
     const outerKeys = new Set(rows.map((r) => r.k));
-    expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 21 distinct keys: no two scans share a lock
-    expect(outerKeys.size).toBe(21);
+    expect(outerKeys.size).toBe(EXPECTED_SCAN_SCHEDULER_IDS.length); // 22 distinct keys: no two scans share a lock
+    expect(outerKeys.size).toBe(23); // D-Q4a: + shift-scan-combined
     for (const r of innerRows) expect(outerKeys.has(r.k)).toBe(false);
   });
 
@@ -83,10 +84,10 @@ describeIfDb('scan lock (integration, crewflow_app)', () => {
     });
     await new Promise((r) => setTimeout(r, 100));
     await expect(b.run(ID, async () => 'nope')).resolves.toEqual({ acquired: false });
-    // Kill every crewflow_app backend holding an advisory lock (A's lock session).
+    // Kill every runtime-login (crewflow_owner, BC-02) backend holding an advisory lock (A's lock session).
     await admin.query(
       `SELECT pg_terminate_backend(l.pid) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-        WHERE l.locktype = 'advisory' AND l.granted AND a.usename = 'crewflow_app' AND a.pid <> pg_backend_pid()`,
+        WHERE l.locktype = 'advisory' AND l.granted AND a.usename = 'crewflow_owner' AND a.pid <> pg_backend_pid()`,
     );
     await new Promise((r) => setTimeout(r, 300));
     // B (a live session) can take it now: the server released A's lock with A's session.

@@ -795,6 +795,11 @@ describeIfDb('venue manager scoping (integration)', () => {
       const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[staffId]));
       await app.get(OfferService).staffAccept({...seed.ctx,userId:user.user_id,role:'staff'},offerId);
     }
+    /** Owner rule 2026-11-06: accepting never confirms (not even on a VM request) — the approving Internal Manager confirms. */
+    async function acceptAndConfirmPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>, offerId: string, staffId: string) {
+      await acceptPipeline(seed, offerId, staffId);
+      await app.get(OfferService).managerConfirm(seed.ctx as never, offerId);
+    }
     it('Sent Shifts: one request counts once however many staff it went to; All excludes expired, Expired holds them, totals and tabs agree', async () => {
       const seed = await pipelineSeed(5);
       await approvePipeline(seed);
@@ -851,7 +856,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const mine = await app.get(OfferService).listMine({...seed.ctx,userId:staff.user_id,role:'staff'},{});
         const own = mine.filter(o=>o.shiftId===seed.shiftId);
         expect(own).toHaveLength(1); expect(own[0].id).toBe(offers[i].offerId);
-        await acceptPipeline(seed,offers[i].offerId,offers[i].staffProfileId);
+        await acceptAndConfirmPipeline(seed,offers[i].offerId,offers[i].staffProfileId);
         const row = await read();
         expect(row.offerCounts.confirmed).toBe(i+1);
         expect(row.counters.accepted).toBe(true);
@@ -932,10 +937,10 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
     it('pipeline follows real staff acceptance, decline, late and attendance facts, including verified geofence clock-out',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const a=offers.find((o:any)=>o.staffProfileId===seed.staffA),b=offers.find((o:any)=>o.staffProfileId===seed.staffB);
-      await acceptPipeline(seed,a.offerId,seed.staffA);
+      await acceptAndConfirmPipeline(seed,a.offerId,seed.staffA);
       const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffB]));
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
-      // A Venue-Manager-request offer is confirmed on acceptance (OfferService.staffAccept): shown as Confirmed, not "accepted".
+      // Accepted and then confirmed by the Internal Manager (no auto-confirm on accept since 2026-11-06): shown as Confirmed.
       let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'confirmed',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'rejected',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
       await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
@@ -970,7 +975,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
     it('pipeline cancellation releases confirmed seat and replacement uses canonical send; active mobile projection is cancelled',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
-      await acceptPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.filled).toBe(1);
+      await acceptAndConfirmPipeline(seed,offer.offerId,seed.staffA);expect((await readPipeline(seed)).summary.filled).toBe(1);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
       const board=await readPipeline(seed);expect(board.summary.filled).toBe(0);expect(board.replacementPlaces).toBe(1);
       expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('cancelled');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
@@ -989,7 +994,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201),
       ]);
       expect(outcomes[1].status).toBe('fulfilled');
-      // Cancel first: the pending offer is withdrawn (Deleted Offer). Accept first: the confirmed booking is cancelled.
+      // Cancel first: the pending offer is withdrawn (Deleted Offer). Accept first: the (unconfirmed) acceptance is cancelled.
       const board=await readPipeline(seed);expect(['deleted','cancelled']).toContain(board.staff.find((r:any)=>r.offerId===offer.offerId).stage);expect(board.summary.filled).toBe(0);expectReconciled(board);
       const audits=await tenantContext.runInTenantContext(seed.ctx,m=>m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[offer.offerId]));expect(audits).toHaveLength(1);
     });

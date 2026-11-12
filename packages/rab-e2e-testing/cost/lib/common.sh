@@ -33,9 +33,9 @@ load_secrets() {
   # shellcheck disable=SC1090
   . "$COST_SECRETS"
   set +a
-  # The worker's provisioner URL is a compose pass-through (docker-compose.cost.yml); COST_NO_PROVISIONER_URL=1 leaves it out.
-  if [ "${COST_NO_PROVISIONER_URL:-0}" = 1 ]; then unset CREWFLOW_PROVISIONER_DATABASE_URL
-  else export CREWFLOW_PROVISIONER_DATABASE_URL="postgres://crewflow:${CREWFLOW_PW}@pg:5432/rab"; fi
+  # O1: the Worker provisions in-process and refuses CREWFLOW_PROVISIONER_*; nothing passes a provisioner URL any more
+  # (COST_NO_PROVISIONER_URL is accepted and has no effect).
+  unset CREWFLOW_PROVISIONER_DATABASE_URL
 }
 
 # COST_TAG selects the image pair crewflow-cost/{server,worker}:$COST_TAG.
@@ -55,6 +55,9 @@ node_env() { local s="$1"; shift; COST_SECRETS="$(hostpath "$COST_SECRETS")" COS
 # Superuser psql INSIDE the disposable Postgres container (unix socket; no host client needed, never another DB).
 psql_su() { docker exec -i costaudit-pg psql -X -v ON_ERROR_STOP=1 -U rab -d rab -Atq "$@"; }
 q() { psql_su -c "$1"; }
+# The application's roles as an SQL list ('crewflow_owner','crewflow',...): ONE definition, lib/sql-families.js
+# APPLICATION_ROLES, shared with every JS filter.
+app_roles_sql() { node -e 'process.stdout.write(require(process.argv[1]).APPLICATION_ROLES_SQL)' "$(hostpath "$COST_DIR/lib/sql-families.js")"; }
 
 redis_cli() { docker exec costaudit-redis redis-cli -a "$REDIS_PW" --no-auth-warning "$@"; }
 

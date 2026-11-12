@@ -14,6 +14,7 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { OrganisationOnboardingService } from '../../modules/manager/services/organisation-onboarding.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { sqlStateAsSchemaRole } from './helpers/schema-role';
 
 /**
  * P2.9 gap review, item 2 (owner-approved, corrected, non-destructive design) — the Initial
@@ -645,11 +646,29 @@ describeIfDb('workspace schema SUPERSEDED fencing (SQL-level, integration)', () 
     expect(row.schema_status).toBe('SUPERSEDED');
   });
 
-  it('the ordinary app runtime cannot call the provisioner-only functions AT ALL — a second, independent layer on top of the allow-list guard', async () => {
+  // P-class (owner-login architecture): the schema role crewflow_app still cannot call the provisioner-only functions at all
+  // (42501). The runtime login crewflow_owner CAN (it inherits their owner): OWNER-LOGIN DIFFERENCE PROV-1 (NEEDS OWNER
+  // APPROVAL), asserted inside a transaction that is always rolled back, so no workspace state changes.
+  it('the schema role crewflow_app cannot call the provisioner-only functions AT ALL (42501); the runtime login can (PROV-1, rolled back)', async () => {
     const ws = await createWorkspace();
-    await expect(run(ws.organisationId, ws.userId, 'SELECT core.begin_workspace_schema_attempt($1)', [ws.workspaceId])).rejects.toThrow(/permission denied/i);
-    await expect(run(ws.organisationId, ws.userId, 'SELECT core.mark_workspace_schema_ready($1, $2)', [ws.workspaceId, 1])).rejects.toThrow(/permission denied/i);
-    await expect(run(ws.organisationId, ws.userId, 'SELECT core.mark_workspace_schema_failed($1, $2)', [ws.workspaceId, 'x'])).rejects.toThrow(/permission denied/i);
+    const ctx = { organisationId: ws.organisationId, workspaceId: null, userId: ws.userId, role: '' };
+    for (const [sql, params] of [
+      ['SELECT core.begin_workspace_schema_attempt($1)', [ws.workspaceId]],
+      ['SELECT core.mark_workspace_schema_ready($1, $2)', [ws.workspaceId, 1]],
+      ['SELECT core.mark_workspace_schema_failed($1, $2)', [ws.workspaceId, 'x']],
+    ] as Array<[string, unknown[]]>) {
+      expect({ sql, code: await sqlStateAsSchemaRole(adminDataSource, 'crewflow_app', ctx, [{ sql, params }]) }).toEqual({ sql, code: '42501' });
+    }
+    const [before] = await adminDataSource.manager.query(`SELECT schema_status FROM core.manager_workspace WHERE id = $1`, [ws.workspaceId]);
+    const rollback = new Error('rollback');
+    await expect(
+      tenantContext.runInTenantContext(ctx, async (m) => {
+        await m.query('SELECT core.begin_workspace_schema_attempt($1)', [ws.workspaceId]);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    const [after] = await adminDataSource.manager.query(`SELECT schema_status FROM core.manager_workspace WHERE id = $1`, [ws.workspaceId]);
+    expect(after).toEqual(before);
   });
 
   it('mark_workspace_schema_superseded itself refuses READY (never destroys real provisioned data) and MIGRATING', async () => {

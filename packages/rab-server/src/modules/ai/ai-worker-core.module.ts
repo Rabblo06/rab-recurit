@@ -4,6 +4,7 @@ import { AiCoreModule } from './ai-core.module';
 import { AI_LANGUAGE_MODEL_FACTORY, defaultAiLanguageModelFactory, ModelGatewayService } from './gateway/model-gateway.service';
 import { AiTitleService } from './services/ai-title.service';
 import { AiTurnRunnerService } from './services/ai-turn-runner.service';
+import { AiStaleTurnSweepService } from './services/ai-stale-turn-sweep.service';
 
 /**
  * The ONLY module that can call a language model (docs/ai/PHASE2_TWENTY_PLAN.md P2-C11): the model gateway (the one
@@ -20,8 +21,9 @@ import { AiTurnRunnerService } from './services/ai-turn-runner.service';
     { provide: AI_LANGUAGE_MODEL_FACTORY, useValue: defaultAiLanguageModelFactory },
     ModelGatewayService,
     AiTurnRunnerService,
+    AiStaleTurnSweepService,
     AiTitleService,
   ],
-  exports: [AiCoreModule, ModelGatewayService, AiTurnRunnerService, AiTitleService],
+  exports: [AiCoreModule, ModelGatewayService, AiTurnRunnerService, AiTitleService, AiStaleTurnSweepService],
 })
 export class AiWorkerCoreModule {}

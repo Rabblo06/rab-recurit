@@ -1,6 +1,6 @@
 import { ValidationPipe } from '@nestjs/common';
 import { SubmitShiftRequestDto } from '../dto/submit-shift-request.dto';
-import { effectiveAssignmentTime, validateAssignmentTime, assignmentTimeSql, effectiveAssignmentBreakMinutes, assignmentEnvelope } from './assignment-time';
+import { effectiveAssignmentTime, validateAssignmentTime, assignmentTimeSql, effectiveAssignmentBreakMinutes, assignmentEnvelope, confirmationDeadlineSql, confirmationProjectionSql } from './assignment-time';
 const parent = { startsAt: new Date('2026-10-14T21:00:00Z'), endsAt: new Date('2026-10-15T05:00:00Z') };
 const midnight = { startsAt: new Date('2026-10-15T00:00:00Z'), endsAt: parent.endsAt };
 describe('canonical assignment time', () => {
@@ -51,5 +51,23 @@ describe('request assignment whitelist', () => {
   });
   it.each([-1, 0.5, '60'])('rejects invalid nested break %s', async breakMinutes => {
     await expect(parse({ ...payload, staffAssignments: [{ ...payload.staffAssignments[0], breakMinutes }] })).rejects.toThrow();
+  });
+});
+
+describe('manager-confirmation deadline SQL (owner rule 2026-11-06)', () => {
+  it('standard: assignment start − 30 minutes; replacement/standby: assignment end — on the database clock', () => {
+    const sql = confirmationDeadlineSql('o', 'sa', 's');
+    expect(sql).toContain(`COALESCE(o.offer_kind, 'standard') = 'standard'`);
+    expect(sql).toContain('COALESCE(lower(sa.period), s.starts_at) - make_interval(mins => 30)');
+    expect(sql).toContain('ELSE COALESCE(upper(sa.period), s.ends_at)');
+  });
+  it('the projection judges with clock_timestamp() and never accepts a client value', () => {
+    const sql = confirmationProjectionSql('o', 'sa', 's');
+    expect(sql).toContain("o.status = 'staff_accepted' AND clock_timestamp() <");
+    expect(sql).toContain('AS can_accept');
+    expect(sql).not.toMatch(/\$\d/);
+  });
+  it.each(['o; DROP TABLE x', 'O', '1o'])('rejects an untrusted alias %s', (alias) => {
+    expect(() => confirmationDeadlineSql(alias)).toThrow('Invalid SQL alias');
   });
 });

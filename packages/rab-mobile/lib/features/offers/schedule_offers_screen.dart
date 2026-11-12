@@ -25,8 +25,10 @@ class ScheduleOffersScreen extends StatelessWidget {
     final items = confirmed
         ? currentConfirmedShifts(provider.offers)
         : (provider.offers
+              // Open offers plus acceptances still awaiting a manager. A
+              // withdrawn (or past-deadline) acceptance leaves this list.
               .where(
-                (o) => o.status == 'pending' || o.status == 'staff_accepted',
+                (o) => o.status == 'pending' || o.isAwaitingManagerConfirmation,
               )
               .toList()
             ..sort((a, b) => a.startsAt.compareTo(b.startsAt)));
@@ -186,9 +188,18 @@ class _PastelOfferCardState extends State<_PastelOfferCard> {
     final badge = switch (offer.status) {
       'manager_confirmed' =>
         offer.presentation?.state == 'live' ? 'Live now' : 'Confirmed',
-      'staff_accepted' => 'Awaiting confirmation',
+      'staff_accepted' => ConfirmationDeadlineCopy.awaiting,
       _ => 'New Offer',
     };
+    final deadline = offer.approvalDeadlineAt;
+    final awaitingNote = offer.isAwaitingManagerConfirmation && deadline != null
+        ? Text(
+            'Needs manager confirmation by ${approvalDeadlineTime(deadline, offer.startsAt)}',
+            key: ValueKey('offer-deadline-${offer.id}'),
+            style: ScheduleType.secondary.copyWith(color: ScheduleTokens.ink),
+          )
+        : null;
+    final refused = offer.acceptRefused;
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Opacity(
@@ -208,7 +219,7 @@ class _PastelOfferCardState extends State<_PastelOfferCard> {
                 '${payRateLabel(offer.payRatePence)} · ${estimatedPayLabel(offer.payRatePence, offer.estimatedPayPence)}',
           ),
           actions: offer.status != 'pending'
-              ? null
+              ? awaitingNote
               : Column(
                   children: [
                     Row(
@@ -230,9 +241,11 @@ class _PastelOfferCardState extends State<_PastelOfferCard> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: SchedulePrimaryButton(
-                            label: 'Accept',
+                            // Server `canAccept: false`: display only, the
+                            // accept endpoint stays the authority.
+                            label: refused ? tooLateToAcceptLabel : 'Accept',
                             busy: busy && offers.busyAction == 'accept',
-                            onPressed: busy
+                            onPressed: busy || refused
                                 ? null
                                 : () => respondToOffer(
                                     context,

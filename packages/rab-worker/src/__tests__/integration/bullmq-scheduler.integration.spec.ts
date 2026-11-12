@@ -27,7 +27,7 @@ const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
 // Every scan interval at its real default: the three minutes keys (15 / 60 / 60) and, since Phase A pa-intervals, the 17
 // WORKER_<JOB>_INTERVAL_SECONDS keys (defaults = the historical constants).
 const env = defaultIntervalEnv();
-const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 21 = 19 pre-migration scans + ai-retention + workspace-provisioning-health
+const EXPECTED_COUNT = EXPECTED_SCAN_SCHEDULER_IDS.length; // 23 = 19 pre-migration scans + ai-retention + workspace-provisioning-health + ai-stale-turn-sweep (D-Q2) + shift-scan-combined (D-Q4a; no enable predicate here = all)
 const intervalOf = (def: ScanJobDefinition) => resolveIntervalMs(def, env);
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 const freshPrefix = () => `crewflow:it-${randomBytes(4).toString('hex')}:bull`;
@@ -254,9 +254,14 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
           { queue: defs[1]!.queue, jobName: defs[1]!.jobName, source: 'slow', handler: handler('shift-monitor', 2_500) },
           { queue: defs[2]!.queue, jobName: defs[2]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
         ]);
+        // D-Q4a Lane A: onScanLock hands main.ts the scan lock (combined-scan member locks) once, the same one returned.
+        const lockSeen: unknown[] = [];
         const scheduler = await startBullmqScheduler({
           redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
+          onScanLock: (lock) => lockSeen.push(lock),
         });
+        expect(lockSeen).toHaveLength(1);
+        expect(lockSeen[0]).toBe(scheduler.scanLock);
         replicas.push({ name, redis: conn, runtime, scheduler });
       }
       await new Promise((r) => setTimeout(r, 12_000));

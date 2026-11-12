@@ -29,8 +29,8 @@ const PROCESSES: CompatibilityProcess[] = ['api', 'worker', 'cli', 'provisioner'
 
 const CURRENT_FN: ProvisionFunctionState = {
   state: 'known',
-  // Phase D: module 19 (StatementDispatchPointer1786721320000) is the current body (final pending the owner's SQL approval).
-  literal: 'db:provision_workspace@StatementDispatchPointer1786721320000',
+  // Owner-login PAY-1: module 20 (WorkspaceGrantParityGuards1786721430000) is the current body (v20 fingerprint pending).
+  literal: 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000',
   moduleVersion: LATEST_WORKSPACE_MODULE_VERSION,
 };
 
@@ -81,6 +81,9 @@ describe('compatibility matrix per process type', () => {
   });
 
   it('(a) pending migrations: API, Worker, CLI and provisioner refuse; rab-migrate applies them (not a compatibility finding)', () => {
+    // C3 (owner decision 2026-11-05): the API (named failed migration) and the Worker relax ONLY with physical upgrade
+    // evidence (CHAIN-PARTIAL, not a fresh install) on an in-order pending tail — not given here, so both refuse as before.
+    // The relaxed cases are in schema-compatibility.c3.spec.ts.
     table(
       { api: 'refuse', worker: 'refuse', cli: 'refuse', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'ok' },
       { applied: CODE.slice(0, 2) },
@@ -179,15 +182,16 @@ describe('assertSchemaCompatible', () => {
 describe('provision function body → module version (frozen map)', () => {
   const body = (literal: string) => `BEGIN ... 'APPLIED', v_started, pg_catalog.clock_timestamp(), NULL, '${literal}' ... END`;
 
-  it('maps the five frozen literals; the newest equals LATEST_WORKSPACE_MODULE_VERSION (19, Phase D)', () => {
+  it('maps the six frozen literals; the newest equals LATEST_WORKSPACE_MODULE_VERSION (20, owner-login PAY-1)', () => {
     expect(PROVISION_FUNCTION_MODULE_VERSIONS).toEqual({
       'db:provision_workspace@AttendanceMoneyChecks1786719810000': 15,
       'db:provision_workspace@ArchiveAndSearchSchema1786719920000': 17,
       'db:provision_workspace@VenueTeamOrgAdmin1786721090000': 18,
       'db:provision_workspace@ProvisionWorkspaceGuards1786721210000': 18,
       'db:provision_workspace@StatementDispatchPointer1786721320000': 19,
+      'db:provision_workspace@WorkspaceGrantParityGuards1786721430000': 20,
     });
-    expect(LATEST_WORKSPACE_MODULE_VERSION).toBe(19);
+    expect(LATEST_WORKSPACE_MODULE_VERSION).toBe(20);
     expect(Math.max(...Object.values(PROVISION_FUNCTION_MODULE_VERSIONS))).toBe(LATEST_WORKSPACE_MODULE_VERSION);
     expect(Object.isFrozen(PROVISION_FUNCTION_MODULE_VERSIONS)).toBe(true);
   });
@@ -226,8 +230,8 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     };
     return { query, seen };
   }
-  // The current (module 19) body; the module-18 guards body is now "behind" for the API/Worker and refused for the provisioner.
-  const guards = `... 'db:provision_workspace@StatementDispatchPointer1786721320000' ...`;
+  // The current (module 20) body; older bodies are now "behind" for the API/Worker and refused for the provisioner.
+  const guards = `... 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000' ...`;
 
   it('an unreadable ledger and an empty migration list refuse (gate pending-migrations), never pass', async () => {
     const err = Object.assign(new Error('permission denied'), { code: '42501' });
@@ -275,7 +279,7 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     });
     await expect(
       checkSchemaCompatibility(f.query, { process: 'provisioner', production: false, expected: CODE, label: 'provisioner process', workspaces: true }),
-    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(/w3@20/) });
+    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(new RegExp(`w3@${LATEST_WORKSPACE_MODULE_VERSION + 1}`)) });
     expect(f.seen.filter((s) => s === 'BEGIN')).toHaveLength(3);
     expect(f.seen.filter((s) => s === 'COMMIT')).toHaveLength(3);
   });

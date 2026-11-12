@@ -38,6 +38,12 @@ import {
 } from './VenueOfferPipelineStages';
 import './venue-offer-pipeline.css';
 import { getApiErrorMessage } from '../../shared/lib/apiError';
+import {
+  formatApprovalDeadline,
+  isWithdrawnAtDeadline,
+  NOT_CONFIRMED_IN_TIME,
+  PIPELINE_DEADLINE_SOURCE,
+} from '../../shared/lib/offerConfirmation';
 
 export interface PipelineStaff {
   staffProfileId: string;
@@ -70,6 +76,11 @@ export interface PipelineStaff {
   checkedInAt?: string | null;
   /** Authoritative offer kind from the server; the card tags only `replacement` / `standby`. */
   offerKind?: string | null;
+  /** Manager-confirmation deadline (server, database clock; absent on an older API). Displayed, never computed here. */
+  approvalDeadlineAt?: string | null;
+  awaitingManagerConfirmation?: boolean;
+  /** `confirmation_deadline_passed` when the acceptance was withdrawn because no manager confirmed it in time. */
+  closedReason?: string | null;
 }
 interface ReportRow {
   roleName?: string;
@@ -162,12 +173,15 @@ function cardTime(row: PipelineStaff, stage: string, shift: Pipeline['shift']): 
 
 /** One short status note per card where the lane alone does not say enough. */
 function cardNote(row: PipelineStaff, stage: string, startsAt: string): string | null {
-  if (TERMINAL.has(stage)) return row.terminalSource;
+  if (TERMINAL.has(stage)) return row.terminalSource ?? (isWithdrawnAtDeadline(row) ? PIPELINE_DEADLINE_SOURCE : null);
   switch (stage) {
     case 'waiting':
       return 'Opened · awaiting response';
-    case 'staff_accepted':
-      return `Accepted ${time(row.acceptedAt)} · awaiting confirmation`;
+    case 'staff_accepted': {
+      // The server's approval deadline, in local time with its zone; no deadline from an older API → today's text.
+      const by = formatApprovalDeadline(row.approvalDeadlineAt);
+      return `Accepted ${time(row.acceptedAt)} · ${by ? `confirm by ${by}` : 'awaiting confirmation'}`;
+    }
     case 'late':
       return `Not clocked in · started ${time(startsAt)}`;
     case 'checked_in':
@@ -561,7 +575,9 @@ export default function VenueOfferPipeline() {
 
   const renderCard = (row: PipelineStaff, lane: StageDef, cardIndex: number) => {
     const note = cardNote(row, lane.key, data.shift.startsAt);
-    const reason = TERMINAL.has(lane.key) ? row.withdrawnReason || row.declineReason || row.rejectionReason : null;
+    const withdrawnAtDeadline = isWithdrawnAtDeadline(row);
+    // A deadline withdrawal's stored reason is a code, never shown: the note and the tag say it in words.
+    const reason = TERMINAL.has(lane.key) && !withdrawnAtDeadline ? row.withdrawnReason || row.declineReason || row.rejectionReason : null;
     const kind = row.offerKind === 'replacement' ? 'Replacement' : row.offerKind === 'standby' ? 'Standby' : null;
     const preview = row.avatarFileId ? avatars.data?.[row.avatarFileId] : undefined;
     return (
@@ -618,8 +634,9 @@ export default function VenueOfferPipeline() {
           <IconClock size={13} aria-hidden />
           <span>{cardTime(row, lane.key, data.shift)}</span>
         </p>
-        {(note || lane.key === 'clocked_out' || kind) && (
+        {(note || lane.key === 'clocked_out' || kind || withdrawnAtDeadline) && (
           <p className="pipeline-card-state">
+            {withdrawnAtDeadline && <span className="pipeline-tag is-deadline">{NOT_CONFIRMED_IN_TIME}</span>}
             {note}
             {lane.key === 'clocked_out' && (
               <span className={`pipeline-tag ${row.attendanceReviewed ? 'is-reviewed' : 'is-awaiting'}`}>
@@ -838,6 +855,11 @@ export default function VenueOfferPipeline() {
                       <span className={`pipeline-chip tone-${lane.tone}`}>{lane.label}</span>
                       {countLabel(cards.length, total)}
                     </h2>
+                    {lane.key === 'rejected' && (data.summary?.withdrawnAtDeadline ?? 0) > 0 && (
+                      <p className="pipeline-lane-note">
+                        {data.summary.withdrawnAtDeadline} {NOT_CONFIRMED_IN_TIME.toLowerCase()}
+                      </p>
+                    )}
                     {lane.key === 'offered' && canSendOffer && (
                       <button
                         type="button"

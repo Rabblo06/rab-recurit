@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Phase B / B3 (P3, owner-approved design: Option B primary, Option A secondary): provider-neutral deployment identity.
  *
@@ -144,12 +145,9 @@ export function assertDeclaredIdentityForProcess(
 ): DeclaredDeploymentIdentity | null {
   const declared = readDeclaredDeploymentIdentity(env);
   if (production) {
-    if (!declared) {
-      throw new DeploymentIdentityError(
-        `the production ${processLabel} requires ${DEPLOYMENT_ENVIRONMENT_VAR}=production and ${DEPLOYMENT_ID_VAR}=<uuid> from the deployment environment.`,
-      );
-    }
-    if (declared.environment !== 'production') {
+    // Owner decision BC-11 (2026-11-05): the declaration is OPTIONAL in production too (null = undeclared; the marker check
+    // is skipped with a loud warning, decideDeploymentIdentity). A partial or invalid declaration is still refused above.
+    if (declared && declared.environment !== 'production') {
       throw new DeploymentIdentityError(
         `the production ${processLabel} declares ${DEPLOYMENT_ENVIRONMENT_VAR}=${declared.environment}. A production process must declare production.`,
       );
@@ -227,14 +225,14 @@ export function isLoopbackHost(host: string): boolean {
  * compose files and harnesses, where Docker's embedded DNS resolves the name to a container on the same compose network:
  *   devdb     packages/rab-docker/docker-compose.yml (the development database)
  *   postgres  packages/rab-docker/docker-compose.qa.yml, packages/rab-e2e-testing/system/docker-compose.e2e.yml
- *   pg        packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.{bundle,bullmq}-test.yml
- *   pg-other  docker-compose.bundle-test.yml (step 27: a second cluster the bundle must refuse as a mismatch)
+ *   pg        packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml
+ * (O1, one image: `pg-other`, the second cluster of the retired launcher's bundle-test harness, is no longer listed.)
  * CI reaches its disposable cluster on 127.0.0.1 (.github/actions/disposable-postgres). Any OTHER single-label name is
  * remote: outside a compose network it is resolved through a DNS search domain or a Kubernetes namespace and may reach a
  * database on another network. Code, not configuration: there is deliberately no environment variable that widens it.
  * Adding a compose database service with another name means adding the name here (deployment-identity.spec.ts F4).
  */
-export const LOCAL_DATABASE_SERVICE_HOSTS: ReadonlySet<string> = new Set(['devdb', 'postgres', 'pg', 'pg-other']);
+export const LOCAL_DATABASE_SERVICE_HOSTS: ReadonlySet<string> = new Set(['devdb', 'postgres', 'pg']);
 
 /** A host name without a dot or a colon (not a dotted name, not an IP literal). Says nothing about where it resolves. */
 export function isSingleLabelHost(host: string): boolean {
@@ -338,11 +336,32 @@ const BIND_HINT =
   'Bind it with the audited migration-identity command `db:bind-identity` (docs: deployment identity runbook), then set ' +
   `${DEPLOYMENT_ENVIRONMENT_VAR} and ${DEPLOYMENT_ID_VAR} to the bound values.`;
 
+/**
+ * Owner decision BC-11 (2026-11-05): a production process that declares no identity is not checked against the marker.
+ * Logged as a warning on every boot (runtime-database-guard.ts / the boot gate / the migrate child print every warning).
+ */
+export const UNDECLARED_IDENTITY_WARNING =
+  `deployment identity not declared (${DEPLOYMENT_ID_VAR} / ${DEPLOYMENT_ENVIRONMENT_VAR} unset): the marker was not verified against an expected value`;
+
 /** The whole marker decision. Throws DeploymentIdentityError; never returns for a refusal. */
 export function decideDeploymentIdentity(input: DeploymentIdentityDecisionInput): DeploymentIdentityDecision {
   const { processLabel, production, declared, marker } = input;
   const bootstrapRequested = input.bootstrapRequested === true;
   const warnings: string[] = [];
+
+  // Owner decision BC-11 (2026-11-05): the deployment identity is optional, OFF by default, in production too. Undeclared:
+  // no marker check at all (absent, unbound or bound, any location), one loud warning. Declared: everything below, unchanged
+  // (exact match, location, bootstrap). Outside production the existing undeclared rules below still apply unchanged
+  // (H-1 remote-unmarked refusal, a production-bound marker refused, location checked).
+  if (production && !declared) {
+    if (bootstrapRequested) {
+      throw new DeploymentIdentityError(
+        `${IDENTITY_BOOTSTRAP_VAR} binds a DECLARED identity: set ${DEPLOYMENT_ENVIRONMENT_VAR}=production and ${DEPLOYMENT_ID_VAR} as well, or remove the flag.`,
+      );
+    }
+    warnings.push(`${UNDECLARED_IDENTITY_WARNING} (marker ${marker.state}).`);
+    return { warnings, summary: 'undeclared', bootstrap: false };
+  }
 
   if (marker.state === 'absent' || marker.state === 'unbound') {
     const what =
@@ -405,10 +424,7 @@ export function decideDeploymentIdentity(input: DeploymentIdentityDecisionInput)
     }
     return { warnings, summary: bound, bootstrap: false };
   }
-  // No declaration (non-production only: production without a declaration was refused by assertDeclaredIdentityForProcess).
-  if (production) {
-    throw new DeploymentIdentityError(`the production ${processLabel} has no declared deployment identity. Refusing.`);
-  }
+  // No declaration: non-production only (production without a declaration returned above, BC-11).
   if (marker.environment === 'production') {
     throw new DeploymentIdentityError(
       `the database is bound to production (${bound}) and this non-production ${processLabel} must not use it. ` +
@@ -518,6 +534,17 @@ export async function assertDeploymentIdentity(query: Query, options: AssertDepl
     throw new DeploymentIdentityError(`${IDENTITY_BOOTSTRAP_VAR} is honoured only by production database commands, never by the ${processLabel}. Remove it.`);
   }
   const { marker, database, disposableTestDatabase } = await readDeploymentMarker(query);
+  // Hotfix fix/posture-test-marker (2026-11-05): production never runs on a database marked as a disposable TEST
+  // database. The semantic posture no longer carries that setting (it is excluded by exact name so a real database
+  // compares cleanly), so this refusal is what keeps the marker detectable — including the tempting operator
+  // "workaround" of marking a production database disposable to get past the old posture refusal.
+  if (production && disposableTestDatabase) {
+    throw new DeploymentIdentityError(
+      `the production ${processLabel} refuses to run: database "${database}" is marked as a disposable TEST database ` +
+        `(${DISPOSABLE_TEST_DATABASE_SETTING_NAME} = 'true' in pg_db_role_setting). Production must never run on a database marked disposable. ` +
+        `If this IS production, remove the marker (ALTER DATABASE <name> RESET ${DISPOSABLE_TEST_DATABASE_SETTING_NAME}); otherwise point this process at the production database. Refusing.`,
+    );
+  }
   const expectedDatabaseNameSet = assertExpectedDatabaseName(env, database, processLabel);
   const decision = decideDeploymentIdentity({
     processLabel,

@@ -459,3 +459,141 @@ describe('final review F5: deploy-prepare check run prints the set and its token
     await expect(run({ CREWFLOW_MIGRATION_APPROVED: LEGACY_MIGRATION_APPROVAL }, []).result).rejects.toThrow(/no longer accepted/);
   });
 });
+
+describe('BC-11 (owner decision 2026-11-05): deploy-prepare follows CREWFLOW_MIGRATION_APPROVAL_MODE for the owner login', () => {
+  const OWNER_URL = 'postgres://crewflow_owner:x@127.0.0.1:5432/crewflow';
+  function fakeRunner(pendingNow: string[]) {
+    const applied: string[] = [];
+    const calls: LockedMigrationOptions[] = [];
+    const runner = (async (options: LockedMigrationOptions): Promise<LockedMigrationResult> => {
+      calls.push(options);
+      if (options.mode === 'apply') {
+        options.approvePending?.(pendingNow);
+        applied.push(...pendingNow);
+      }
+      return { target: 'production', pendingBefore: [...pendingNow], applied: [...applied], waitedMs: 0, currentUser: 'crewflow_owner' };
+    }) as typeof runLockedMigrations;
+    return { runner, applied, calls };
+  }
+  const run = (env: Record<string, string>) => {
+    const fake = fakeRunner(PENDING_AB);
+    const lines: string[] = [];
+    const result = deployPrepare({ env: { ...env }, argv: [], log: (l) => lines.push(l), runner: fake.runner, cacheFlush: async () => undefined, deriveGuardEnv: async () => null });
+    return { result, lines, ...fake };
+  };
+
+  it('mode none (the default): an apply run without a token; the runner gets approvalMode none (N1 still applies there)', async () => {
+    for (const env of [{ PG_DATABASE_URL: OWNER_URL }, { PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' }] as Array<Record<string, string>>) {
+      const r = run(env);
+      await expect(r.result).resolves.toBe(0);
+      expect(r.calls[0].mode).toBe('apply');
+      expect(r.calls[0].approvalMode).toBe('none');
+      expect(r.calls[0].approvePending).toBeUndefined();
+      expect(r.applied).toEqual(PENDING_AB);
+    }
+    // A token set in mode none is ignored, loudly.
+    const t = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVED: 'stale' });
+    await expect(t.result).resolves.toBe(0);
+    expect(t.lines.join(' ')).toMatch(/CREWFLOW_MIGRATION_APPROVAL_MODE is none: it is ignored/);
+  });
+
+  it('mode token: exactly the F5 flow (no token = check run, exit 3; the token applies exactly that set)', async () => {
+    const check = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' });
+    await expect(check.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(check.calls[0].mode).toBe('check');
+    expect(check.applied).toEqual([]);
+    const apply = run({ PG_DATABASE_URL: OWNER_URL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_MIGRATION_APPROVED: TOKEN_AB });
+    await expect(apply.result).resolves.toBe(0);
+    expect(apply.calls[0].approvalMode).toBe('token');
+    expect(apply.applied).toEqual(PENDING_AB);
+  });
+
+  it('the legacy CF-41 login keeps the F5 flow in every mode until PR #9', async () => {
+    const r = run({ PG_DATABASE_URL: 'postgres://crewflow_migrator:x@127.0.0.1:5432/crewflow', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' });
+    await expect(r.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(r.calls[0].mode).toBe('check');
+    expect(r.calls[0].approvalMode).toBeUndefined();
+  });
+});
+
+/**
+ * C-2 (M0 review, 2026-11-04): the post-checks used to run only on apply runs. After an apply run failed its post-checks
+ * (the migrations themselves committed), the next CHECK run found nothing pending and exited 0, so the release could be
+ * promoted onto a schema that had just failed them. The post-checks now run on every run that would otherwise succeed: an
+ * apply run, and a check run with nothing pending. A check run with something pending exits 3 anyway (the schema is behind
+ * its code, so the checks would judge a half-migrated state).
+ */
+describe('C-2: deploy-prepare runs the post-checks on check runs too', () => {
+  function fakeRunner(pendingNow: string[]) {
+    const calls: LockedMigrationOptions[] = [];
+    const runner = (async (options: LockedMigrationOptions): Promise<LockedMigrationResult> => {
+      calls.push(options);
+      const pendingBefore = [...pendingNow];
+      const applied: string[] = [];
+      if (options.mode === 'apply') {
+        options.approvePending?.(pendingBefore);
+        applied.push(...pendingBefore);
+      }
+      const queryRunner = { query: async () => [] } as unknown as Parameters<NonNullable<LockedMigrationOptions['afterMigrations']>>[0]['queryRunner'];
+      await options.afterMigrations?.({ queryRunner, dataSource: {} as never, applied, pendingBefore });
+      return { target: 'production', pendingBefore, applied, waitedMs: 0, currentUser: 'crewflow_migrator' };
+    }) as typeof runLockedMigrations;
+    return { runner, calls };
+  }
+  const run = (env: Record<string, string>, pendingNow: string[], problems: string[], argv: string[] = []) => {
+    const fake = fakeRunner(pendingNow);
+    const lines: string[] = [];
+    let postCheckRuns = 0;
+    const flushes: string[] = [];
+    const result = deployPrepare({
+      env: { ...env },
+      argv,
+      log: (l) => lines.push(l),
+      runner: fake.runner,
+      cacheFlush: async (ns) => {
+        flushes.push(ns);
+      },
+      postChecks: async () => {
+        postCheckRuns += 1;
+        return problems;
+      },
+    });
+    return { result, lines, flushes, get postCheckRuns() { return postCheckRuns; } };
+  };
+
+  it('a check run with nothing pending fails (exit 1) when a post-check fails, and flushes nothing', async () => {
+    const r = run({ REDIS_URL: 'redis://127.0.0.1:1/0' }, [], ['rls-disabled core.shift'], ['--cache-flush=entitycache']);
+    await expect(r.result).rejects.toThrow(/post-migration checks failed \(1\): rls-disabled core\.shift/);
+    expect(r.postCheckRuns).toBe(1);
+    expect(r.flushes).toEqual([]);
+  });
+
+  it('the regression: an apply run that failed its post-checks is not followed by a passing check run', async () => {
+    const problems = ['owned-by-migration-identity core.x'];
+    const apply = run({ CREWFLOW_MIGRATION_APPROVED: TOKEN_AB }, PENDING_AB, problems);
+    await expect(apply.result).rejects.toThrow(/post-migration checks failed/);
+    // The migrations committed; the next check run sees nothing pending and must still fail.
+    const check = run({}, [], problems);
+    await expect(check.result).rejects.toThrow(/post-migration checks failed \(1\): owned-by-migration-identity core\.x/);
+  });
+
+  it('a check run with nothing pending and clean post-checks passes (exit 0) after running them, then flushes', async () => {
+    const r = run({ REDIS_URL: 'redis://127.0.0.1:1/0' }, [], [], ['--cache-flush=entitycache']);
+    await expect(r.result).resolves.toBe(0);
+    expect(r.postCheckRuns).toBe(1);
+    expect(r.lines.join('\n')).toMatch(/post-checks passed/);
+    expect(r.flushes).toEqual(['entitycache']);
+  });
+
+  it('a check run with something pending still exits 3 with the token, without judging the half-migrated schema', async () => {
+    const r = run({}, PENDING_AB, ['would-fail']);
+    await expect(r.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
+    expect(r.postCheckRuns).toBe(0);
+    expect(r.lines).toEqual(expect.arrayContaining([`approval token for exactly this set: ${TOKEN_AB}`]));
+  });
+
+  it('the default post-checks are the real deployPostCheckProblems (no seam in production)', () => {
+    const source = readFileSync(join(__dirname, '..', 'deploy-prepare.ts'), 'utf8');
+    expect(source).toMatch(/const postChecks = deps\.postChecks \?\? deployPostCheckProblems;/);
+  });
+});

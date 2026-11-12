@@ -40,6 +40,14 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * was removed, not reconstructed from memory.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
+/**
+ * D-1 (Twenty Mode M0): these cases test what the cycle does when it DOES run, so they pass the retention flag ON
+ * explicitly (non-production only, as resolveInviteAutoDeleteEnabled allows). Before the D-1 fix they called the cycle with
+ * no option (= OFF) and still saw invites expire and accounts deleted, because this admin connection is the superuser:
+ * exactly the "OFF relies on the login being crewflow_app" bug. OFF is now proven to change nothing in
+ * account-invite-cleanup-off-means-off.integration.spec.ts.
+ */
+const AUTO_DELETE_ON = { autoDeleteEnabled: true } as const;
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 
@@ -186,7 +194,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
     for (let tick = 0; tick < maxTicks; tick++) {
       // eslint-disable-next-line no-await-in-loop
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
       totals.expired += result.expired;
       totals.deleted += result.deleted;
       totals.retained += result.retained;
@@ -208,7 +216,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
     for (let tick = 0; tick < maxTicks; tick++) {
       // eslint-disable-next-line no-await-in-loop
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
       totals.expired += result.expired;
       totals.deleted += result.deleted;
       totals.retained += result.retained;
@@ -223,7 +231,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const totals: AccountInviteCleanupResult = { expired: 0, deleted: 0, retained: 0 };
     for (let tick = 0; tick < maxTicks; tick++) {
       // eslint-disable-next-line no-await-in-loop
-      const result = await runAccountInviteCleanupCycle(adminDataSource);
+      const result = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
       totals.expired += result.expired;
       totals.deleted += result.deleted;
       totals.retained += result.retained;
@@ -252,9 +260,10 @@ describeIfDb('account invite cleanup job (integration)', () => {
   });
 
   beforeEach(async () => {
-    // No separate worker process runs during Jest — AccountLifecycleService.
-    // isEmailDeliveryAvailable() would otherwise see no heartbeat and skip
-    // every invite send, breaking every test that expects one queued.
+    // Fixture only: since the Phase D-Q "always queue" decision the Worker
+    // heartbeat no longer gates invite creation (AccountLifecycleService.
+    // isEmailDeliveryEnabled() reads only EMAIL_DELIVERY_ENABLED); kept so the
+    // stack looks like a normal running one.
     await redisClient.client.set(WORKER_HEARTBEAT_KEY, Date.now().toString(), 'EX', 30);
   });
 
@@ -289,7 +298,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [userRow.id],
     );
 
-    const result = await runAccountInviteCleanupCycle(adminDataSource);
+    const result = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
     expect(result.expired).toBeGreaterThanOrEqual(1);
 
     const updated = await adminDataSource.manager.findOneByOrFail(User, { id: userRow.id });
@@ -316,13 +325,13 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [userRow.id],
     );
 
-    const first = await runAccountInviteCleanupCycle(adminDataSource);
+    const first = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
     expect(first.deleted).toBe(0);
     const stillThere = await adminDataSource.manager.findOne(User, { where: { id: userRow.id } });
     expect(stillThere).not.toBeNull();
     expect(stillThere!.status).toBe('invite_expired');
 
-    const second = await runAccountInviteCleanupCycle(adminDataSource);
+    const second = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
     expect(second.expired).toBe(0); // already expired — idempotent, not re-counted
     expect(second.deleted).toBe(0);
   });
@@ -405,7 +414,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
     // on account_invite with send_number = 3), but assert the row is
     // untouched after a real cleanup cycle regardless.
     const before = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: ownerEmail });
-    await runAccountInviteCleanupCycle(adminDataSource);
+    await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
     const after = await adminDataSource.manager.findOneByOrFail(User, { id: before.id });
     expect(after.status).toBe('active');
   });
@@ -544,9 +553,9 @@ describeIfDb('account invite cleanup job (integration)', () => {
       await seedVenueAndRole(organisation.id, ownerUserId);
       const id = await seedCleanupCandidate(organisation.id, { retained: true, cleanupAtOffsetMs: 0 });
 
-      await runAccountInviteCleanupCycle(adminDataSource);
-      await runAccountInviteCleanupCycle(adminDataSource);
-      const result3 = await runAccountInviteCleanupCycle(adminDataSource);
+      await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
+      await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
+      const result3 = await runAccountInviteCleanupCycle(adminDataSource, AUTO_DELETE_ON);
       expect(result3.retained).toBeGreaterThanOrEqual(1);
       const row = await adminDataSource.manager.findOneByOrFail(User, { id });
       expect(row.status).toBe('invite_expired'); // still safely retained after 3 ticks, never deleted

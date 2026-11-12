@@ -15,13 +15,17 @@ enum OfferDetailUiState {
   expired,
   cancelled,
   declined,
-  rejected;
+  rejected,
+
+  /// Withdrawn at the approval deadline: a manager did not confirm in time.
+  withdrawn;
 
   String get label => switch (this) {
     loading => 'Loading',
     error => 'Unable to refresh',
     offer => 'Pending',
-    pending => 'Pending',
+    // An acceptance waiting for a manager (never confirmed automatically).
+    pending => ConfirmationDeadlineCopy.awaiting,
     ready || clockIn || clockOut => 'Confirmed',
     completed => 'Complete',
     clockedOut => 'Clocked Out',
@@ -30,6 +34,7 @@ enum OfferDetailUiState {
     cancelled => 'Cancelled',
     declined => 'Declined',
     rejected => 'Not confirmed',
+    withdrawn => ConfirmationDeadlineCopy.staffState,
   };
   static OfferDetailUiState resolve({
     required OfferSummary offer,
@@ -57,7 +62,7 @@ enum OfferDetailUiState {
         'expired' => expired,
         'cancelled' => cancelled,
         'declined' => declined,
-        'rejected' => rejected,
+        'rejected' => offer.withdrawnAtDeadline ? withdrawn : rejected,
         'ended' => ended,
         'pending' =>
           offer.status == 'pending' ? OfferDetailUiState.offer : pending,
@@ -73,7 +78,7 @@ enum OfferDetailUiState {
     }
     return switch (offer.status) {
       'pending' => OfferDetailUiState.offer,
-      'staff_accepted' => pending,
+      'staff_accepted' => offer.withdrawnAtDeadline ? withdrawn : pending,
       'manager_confirmed' =>
         (now ?? DateTime.now()).isAfter(offer.endsAt)
             ? ended
@@ -83,7 +88,7 @@ enum OfferDetailUiState {
       'expired' => expired,
       'withdrawn' => cancelled,
       'declined' => declined,
-      'manager_rejected' => rejected,
+      'manager_rejected' => offer.withdrawnAtDeadline ? withdrawn : rejected,
       _ => error,
     };
   }

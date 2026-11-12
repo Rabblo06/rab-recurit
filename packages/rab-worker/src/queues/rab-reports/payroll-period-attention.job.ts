@@ -35,6 +35,7 @@ export async function runPayrollPeriodAttentionCycle(
     const out: Candidate[] = [];
     for (const p of ended) {
       const [counts] = await m.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT
            (SELECT count(*)::int FROM payroll_record pr JOIN attendance a ON a.id = pr.attendance_id JOIN shift_assignment sa ON sa.id = a.shift_assignment_id JOIN shift s ON s.id = pr.shift_id
              WHERE pr.status = 'pending_approval' AND (${assignmentTimeSql().start} AT TIME ZONE 'Europe/London')::date BETWEEN $1::date AND $2::date) AS pending,

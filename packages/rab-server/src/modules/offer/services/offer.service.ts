@@ -1,10 +1,15 @@
-import { assignmentTimeSql, validateAssignmentTime, ScheduledWindow, effectiveAssignmentBreakMinutes, defaultAssignmentTime, assignmentEnvelope } from '../../scheduling/utils/assignment-time';
+import { assignmentTimeSql, validateAssignmentTime, ScheduledWindow, effectiveAssignmentBreakMinutes, defaultAssignmentTime, assignmentEnvelope, confirmationDeadlineSql, confirmationProjectionSql } from '../../scheduling/utils/assignment-time';
 import { UserNoteService } from '../../identity/services/user-note.service';
 import { canCancelVenueOffer } from './venue-offer-presentation';
 import { assertVenueTeamSelection } from '../../staff/services/venue-team-scope';
 import {
   assertTransition,
   computeWorkedMinutes,
+  CONFIRMATION_DEADLINE_MESSAGES,
+  CONFIRMATION_DEADLINE_PASSED,
+  MANAGER_CONFIRMATION_LEAD_MINUTES,
+  OFFER_CLOSED_REASON,
+  OfferClosedReasonType,
   OFFER_TRANSITIONS,
   OfferStatus,
   OfferStatusType,
@@ -16,8 +21,9 @@ import {
   ShiftStatus,
   ShiftStatusType,
   POST_SHIFT_EXPIRED_MS,
+  assertSafePence,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -50,10 +56,13 @@ import { RejectOfferDto } from '../dto/reject-offer.dto';
 import { SendBulkOfferDto } from '../dto/send-bulk-offer.dto';
 import { SendOfferDto } from '../dto/send-offer.dto';
 import { JobOffer } from '../entities/job-offer.entity';
-import { applyOfferConfirmation } from './apply-offer-confirmation';
+import { applyOfferConfirmation, ConfirmationDeadlinePassedException } from './apply-offer-confirmation';
+import { withdrawUnconfirmedOffer } from './withdraw-unconfirmed-offer';
+import { completeShiftIfSettled, lockShiftRow } from '../../scheduling/utils/complete-shift-if-settled';
 import { claimExpiredOffer } from './claim-expired-offer';
 import { resolveStaffShiftPresentation } from './staff-shift-presentation';
 import { schedulePointer } from '../../../engine/core-modules/due-work/schedule-due-work';
+import { TimerTriggerQueueService } from '../../../engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { OfferKind, OfferKindType } from '../constants/offer-kind';
 import { loadShiftVacancy, ShiftVacancy } from './shift-vacancy';
@@ -123,6 +132,17 @@ export interface OfferSummary {
   /** The venue enforces its geofence: Check In / Clock In / Clock Out need lat, lng, accuracyM and capturedAt. */
   geofenceEnforced: boolean;
   presentation: ReturnType<typeof resolveStaffShiftPresentation>;
+  /**
+   * Manager-confirmation deadline contract (`OfferConfirmationDeadlineFields` in @rab/shared), database clock. Standard:
+   * assignment start - 30 min; replacement/standby: assignment end.
+   */
+  approvalDeadlineAt: Date;
+  awaitingManagerConfirmation: boolean;
+  closedReason: OfferClosedReasonType | null;
+  /** Manager reads only (`GET /offers`, `GET /offers/batches/:id`): awaiting AND the caller sent it. Absent on `/offers/mine`. */
+  canConfirm?: boolean;
+  /** Staff read only (`GET /offers/mine`): the offer could be accepted right now (display only; the accept CAS decides). */
+  canAccept?: boolean;
 }
 
 export interface BulkOfferResult {
@@ -188,6 +208,7 @@ export interface OfferBatchSummary {
   recipients: OfferSummary[];
 }
 
+// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
 const OFFER_SUMMARY_SELECT = `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
@@ -199,7 +220,8 @@ const OFFER_SUMMARY_SELECT = `
     sa.status AS assignment_status, s.status AS shift_status,
     sa.check_in_required, sa.checked_in_at, sa.check_in_source, v.enforce_geofence,
     a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
-    org.timezone, now() AS presentation_now
+    org.timezone, now() AS presentation_now, o.created_by AS offer_created_by,
+    ${confirmationProjectionSql('o', 'sa', 's')}
   FROM job_offer o
   JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
   JOIN shift s ON s.id = sa.shift_id
@@ -212,7 +234,15 @@ const OFFER_SUMMARY_SELECT = `
     AND a.staff_profile_id = sp.id AND a.organisation_id = o.organisation_id
 `;
 
-function toOfferSummary(r: Record<string, unknown>): OfferSummary {
+/**
+ * `audience` 'manager' (with the caller's user id) adds `canConfirm` — the confirm endpoint's own ownership rule;
+ * 'staff' adds `canAccept` on the row and on `presentation`.
+ */
+function toOfferSummary(r: Record<string, unknown>, audience: { kind: 'manager'; viewerUserId: string } | { kind: 'staff' }): OfferSummary {
+  const viewerUserId = audience.kind === 'manager' ? audience.viewerUserId : undefined;
+  const canAccept = audience.kind === 'staff' ? r.can_accept === true : undefined;
+  const awaitingManagerConfirmation = r.awaiting_manager_confirmation === true;
+  const closedReason = (r.closed_reason as OfferClosedReasonType | null) ?? null;
   return {
     id: r.id as string,
     status: r.status as string,
@@ -224,7 +254,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     managerConfirmedAt: (r.manager_confirmed_at as Date) ?? null,
     managerRejectedAt: (r.manager_rejected_at as Date) ?? null,
     rejectionReason: (r.rejection_reason as string) ?? null,
-    estimatedPayPence: Number(r.estimated_pay_pence),
+    estimatedPayPence: assertSafePence(Number(r.estimated_pay_pence), 'job_offer.estimated_pay_pence'),
     offerBatchId: (r.offer_batch_id as string) ?? null,
     shiftId: r.shift_id as string,
     startsAt: r.starts_at as Date,
@@ -233,7 +263,7 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
     roleName: r.role_name as string,
     staffProfileId: r.staff_profile_id as string,
     staffName: `${r.first_name} ${r.last_name}`,
-    payRatePence: Number(r.pay_rate_pence),
+    payRatePence: assertSafePence(Number(r.pay_rate_pence), 'shift.pay_rate_pence'),
     venueAddress: (r.shift_address as string) ?? null,
     shiftNotes: (r.shift_notes as string) ?? null,
     venuePhotoFileId: (r.venue_photo_file_id as string) ?? null,
@@ -251,8 +281,27 @@ function toOfferSummary(r: Record<string, unknown>): OfferSummary {
       completedAt: r.post_shift_completed_at as Date, expiredAt: r.post_shift_expired_at as Date,
       startsAt: r.starts_at as Date, endsAt: r.ends_at as Date,
       serverNow: r.presentation_now as Date, timezone: r.timezone as string,
+      closedReason,
+      ...(canAccept !== undefined ? { canAccept } : {}),
     }),
+    approvalDeadlineAt: r.approval_deadline_at as Date,
+    awaitingManagerConfirmation,
+    closedReason,
+    ...(viewerUserId !== undefined ? { canConfirm: awaitingManagerConfirmation && r.offer_created_by === viewerUserId } : {}),
+    ...(canAccept !== undefined ? { canAccept } : {}),
   };
+}
+
+/** The persisted marker of a withdrawal at the manager-confirmation deadline (withdraw-unconfirmed-offer.ts). */
+function isWithdrawnAtDeadline(offer: JobOffer): boolean {
+  return offer.status === OfferStatus.MANAGER_REJECTED && offer.rejectedBy == null && offer.rejectionReason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED;
+}
+
+/** Every recipient was refused only because the deadline passed: answer with the coded 409 itself (rolls the whole action back). */
+function throwIfEveryRecipientPastDeadline(results: BulkOfferResult['results']): void {
+  if (results.length > 0 && results.every((r) => !r.ok && r.message === CONFIRMATION_DEADLINE_MESSAGES.SEND)) {
+    throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.SEND });
+  }
 }
 
 @Injectable()
@@ -267,6 +316,9 @@ export class OfferService {
     private readonly venueService: VenueService,
     private readonly userNotes: UserNoteService,
     private readonly permissions: PermissionsService,
+    // Phase D-Q4b: delayed timer triggers (WORKER_TIMER_TRIGGERS, default off ⇒ these arm nothing). Optional so a context
+    // without the producer behaves exactly as before; the backstop scans never depend on them.
+    @Optional() private readonly timerTriggers?: TimerTriggerQueueService,
   ) {}
 
   /**
@@ -327,11 +379,13 @@ export class OfferService {
         conditions.push(`o.sent_at < ${nextParam(exclusive)}`);
       }
 
+      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = `WHERE ${conditions.join(' AND ')}`;
       const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
       const [{ count }] = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT count(*)::int AS count FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
            JOIN shift s ON s.id = sa.shift_id
@@ -346,8 +400,9 @@ export class OfferService {
       const { skip, take } = paginationSkipTake(dto);
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
-      return { data: rows.map(toOfferSummary), total: count };
+      return { data: rows.map((r: Record<string, unknown>) => toOfferSummary(r, { kind: 'manager', viewerUserId: ctx.userId })), total: count };
     }, { useReplica: true });
   }
 
@@ -373,6 +428,7 @@ export class OfferService {
         `${assignmentTimeSql().start} < ${nextParam(range.to)}`,
       ];
       const rows: Array<{ status: string; n: number }> = await manager.query(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT o.status, count(*)::int AS n
            FROM job_offer o
            JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
@@ -443,6 +499,7 @@ export class OfferService {
       // Paged mode reads one extra key to know whether a next page exists; the cursor's timestamp is PostgreSQL's exact
       // (microsecond) text form of sent_at, which a JS Date would truncate.
       const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT o.id, ${keysetTimestampSql('o.sent_at')} AS keyset_ts FROM job_offer o
           WHERE ${conditions.join(' AND ')}
           ORDER BY o.sent_at DESC, o.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
@@ -456,13 +513,14 @@ export class OfferService {
       if (page.data.length) await manager.query(`SELECT set_config('jit', 'off', true)`);
       const rows: Array<Record<string, unknown>> = page.data.length
         ? await manager.query(
+            // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
             `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
                CROSS JOIN LATERAL (${OFFER_SUMMARY_SELECT} WHERE o.id = k.id AND o.staff_profile_id = $2 OFFSET 0) x
               ORDER BY x.sent_at DESC, x.id DESC`,
             [page.data.map((k) => k.id), staffProfile.id],
           )
         : [];
-      const data = rows.map(toOfferSummary);
+      const data = rows.map((r) => toOfferSummary(r, { kind: 'staff' }));
       return legacy ? data : { data, nextCursor: page.nextCursor };
     });
   }
@@ -528,6 +586,18 @@ export class OfferService {
     // shared by every offer-creation path via this one function. Per-recipient
     // failures here are tolerated by the batch loops that call `sendOne`,
     // same as before.
+    // Owner decision Q1a (2026-11-06): a STANDARD offer is refused once this recipient's manager-confirmation deadline
+    // (their assignment start - 30 min, database clock) has passed — it could never be confirmed. Every standard send path
+    // reaches this line (send, bulk, new shift, VM-request approval, pipeline replace, replacement-request approval).
+    // Replacement / standby offers keep their own window (Q1b) and are not refused here.
+    if (offerKind === OfferKind.STANDARD) {
+      const [{ past }] = await manager.query<Array<{ past: boolean }>>(
+        // sql-injection-reviewed: interpolates a module-level numeric constant from @rab/shared; the start is a bound $1 parameter.
+        `SELECT clock_timestamp() >= ($1::timestamptz - make_interval(mins => ${MANAGER_CONFIRMATION_LEAD_MINUTES})) AS past`,
+        [time.startsAt],
+      );
+      if (past) throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.SEND });
+    }
     const staffProfile = await assertStaffEligibleForOffer(manager, staffProfileId, shift.id, time);
     // Declared weekday availability, against THIS recipient's authoritative window, at the dispatch boundary every path
     // reaches. Multi-recipient callers pre-check all recipients first (so nobody is silently dropped from a batch); this
@@ -579,6 +649,18 @@ export class OfferService {
       createdBy: ctx.userId,
     });
     await manager.save(offer);
+    // Phase D-Q4b: arm the offer-expiry trigger AFTER this transaction commits (a rollback — of the whole send or of a
+    // bulk send's savepoint — arms nothing). Ids and the committed expires_at only; never throws into this transaction.
+    // An offer with no workspace is unreachable by the workspace-scoped Worker, so it gets no trigger (the scan ignores it too).
+    if (offer.workspaceId) {
+      this.timerTriggers?.afterCommit(manager, {
+        kind: 'offer-expiry',
+        organisationId: offer.organisationId,
+        workspaceId: offer.workspaceId,
+        subjectId: offer.id,
+        dueAt: expiresAt,
+      });
+    }
 
     await this.auditService.record(manager, ctx, AuditAction.OFFER_SENT, {
       entityType: 'offer',
@@ -958,6 +1040,7 @@ export class OfferService {
 
       const successCount = results.filter((r) => r.ok).length;
       if (successCount === 0) {
+        throwIfEveryRecipientPastDeadline(results);
         throw new ConflictException('No offer could be sent to any of the selected staff — see the errors above.');
       }
 
@@ -1063,6 +1146,7 @@ export class OfferService {
 
       const successCount = results.filter((r) => r.ok).length;
       if (successCount === 0) {
+        throwIfEveryRecipientPastDeadline(results);
         throw new ConflictException('No offer could be sent to any of the selected staff — see the errors above.');
       }
 
@@ -1160,6 +1244,8 @@ export class OfferService {
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.WITHDRAWN);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       // WHERE status = :priorStatus (the status we just read and validated
       // via assertTransition) — a concurrent duplicate request (double-tap,
@@ -1173,6 +1259,8 @@ export class OfferService {
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.WITHDRAWN });
+      // A pending offer is an open seat: withdrawing the last one on a running shift completes it (the clock-out roll-up).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_WITHDRAWN, {
         entityType: 'offer',
@@ -1221,7 +1309,7 @@ export class OfferService {
 
       // PHASE 5 (§4) — lock + reload the shift BEFORE claiming the offer.
       // Without this, a shift cancelled between send and accept let the
-      // accept through anyway on the common (non-auto-confirm) path below:
+      // accept through anyway:
       // this method never previously re-checked `shift.status` at all, only
       // `offer.status`/`assignment.status`. `pessimistic_write` serialises
       // this against `SchedulingService.cancel()`'s own row-level UPDATE on
@@ -1233,49 +1321,54 @@ export class OfferService {
       }
       await assertShiftActionWindowOpen(manager, shift.id, 'accept');
 
-      // A shift born from the Venue-Manager-request-and-Internal-Manager-
-      // approve flow (`requestedBy IS NOT NULL`) skips the old second
-      // manager-confirm step entirely (§G1) — that Internal Manager already
-      // made their one decision when they approved the request and chose
-      // who to send offers to; requiring a second click here would just be
-      // the same person confirming their own send. A directly-created shift
-      // (`requestedBy IS NULL`, e.g. via `createShiftAndSend`) keeps the
-      // original two-step flow untouched.
-      // Replacement / standby offers always wait for an explicit Initial Manager decision (owner workflow 2026-10-21:
-      // "staff accepts -> waiting for manager confirmation -> Initial Manager approves"), even on a request-born shift.
-      const autoConfirm = shift.requestedBy != null && (offer.offerKind ?? OfferKind.STANDARD) === OfferKind.STANDARD;
-
-      // PHASE 6 — ONE atomic claim: still PENDING AND not yet past its
-      // deadline, by REAL DB time (`now()`), never Node's `Date.now()` or
-      // any client-supplied time — this is the actual accept-vs-expire
-      // mutual-exclusion boundary. Whichever of this UPDATE or the worker's
-      // own `claimExpiredOffer` (offer-expiry.job.ts) reaches this row's
-      // lock first wins; the other's WHERE clause simply no longer matches
-      // once it re-evaluates against the post-commit row. A concurrent
-      // double-accept (double-tap, retry, a second device) hits the exact
-      // same guard — zero affected rows, clean 409, never a silently
-      // duplicated acceptance.
+      // Owner rule 2026-11-06: an acceptance ALWAYS ends at STAFF_ACCEPTED and waits for an explicit Internal Manager
+      // confirmation — including on a shift born from a Venue Manager request (the previous auto-confirm of those was
+      // removed). Nothing in this method can confirm.
+      //
+      // PHASE 6 — ONE atomic claim: still PENDING, not yet past its expiry (`now()`), and — owner decision Q2 — strictly
+      // before its manager-confirmation deadline (`clock_timestamp() < confirmationDeadlineSql`), all by REAL DB time,
+      // never Node's `Date.now()` or any client-supplied time. This is the accept-vs-expire mutual-exclusion boundary:
+      // whichever of this UPDATE or the worker's own `claimExpiredOffer` reaches this row's lock first wins. A concurrent
+      // double-accept (double-tap, retry, a second device) hits the same guard — zero affected rows, clean 409. The
+      // deadline comes back from the same statement, so the pointer and timer below are armed with the database's own
+      // instant.
       const now = new Date();
+      const deadlineSql = confirmationDeadlineSql('o', 'sa', 's');
       const [claimedRows] = (await manager.query(
-        `UPDATE job_offer
+        // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+        `UPDATE job_offer o
            SET status = $1, responded_at = $2, staff_accepted_at = $2
-           WHERE id = $3 AND status = $4 AND expires_at > now()
-           RETURNING id`,
+           FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+           WHERE o.id = $3 AND o.status = $4 AND o.expires_at > now()
+             AND sa.id = o.shift_assignment_id
+             AND clock_timestamp() < ${deadlineSql}
+           RETURNING o.id, ${deadlineSql} AS deadline_at`,
         [OfferStatus.STAFF_ACCEPTED, now, offer.id, OfferStatus.PENDING],
-      )) as [Array<{ id: string }>, number];
+      )) as [Array<{ id: string; deadline_at: Date }>, number];
 
       // An offer with no workspace is unreachable by the workspace-scoped worker either way, so it gets no pointer (and the accept is not refused).
-      // A standby acceptance gets no timeout pointer: the system must never turn a standby into a booking on its own.
-      if (claimedRows.length > 0 && offer.workspaceId && offer.offerKind !== OfferKind.STANDBY) {
-        // The manager-confirmation clock just started. Schedule its pointer in this same transaction, so the discovery record commits or rolls
-        // back with the acceptance. Due now: the worker recomputes the real deadline (staff_accepted_at + timeout) on its first claim.
+      // Every kind gets a pointer now (standby included): the Worker WITHDRAWS at the deadline, it never confirms.
+      if (claimedRows.length > 0 && offer.workspaceId) {
+        const deadlineAt = new Date(claimedRows[0].deadline_at);
+        // Schedule the deadline pointer in this same transaction, so the discovery record commits or rolls back with the
+        // acceptance. `job_type` 'manager_confirmation_timeout' is reused (no migration); it now means "manager-
+        // confirmation deadline".
         await schedulePointer(manager, {
           organisationId: offer.organisationId,
           workspaceId: offer.workspaceId,
           jobType: 'manager_confirmation_timeout',
           subjectType: 'job_offer',
           subjectId: offer.id,
-          dueAt: now,
+          dueAt: deadlineAt,
+        });
+        // Phase D-Q4b: WAKE the Worker's deadline cycle at the deadline, after this transaction commits. The pointer above
+        // stays the authority; the Worker re-reads the offer and recomputes the deadline itself. Never throws into this transaction.
+        this.timerTriggers?.afterCommit(manager, {
+          kind: 'manager-confirmation',
+          organisationId: offer.organisationId,
+          workspaceId: offer.workspaceId,
+          subjectId: offer.id,
+          dueAt: deadlineAt,
         });
       }
 
@@ -1292,6 +1385,19 @@ export class OfferService {
         // caller correctly saw "this offer has expired." The real claim
         // happens below, AFTER this transaction has returned (committed),
         // in its own separate transaction that does not end in a throw.
+        // Q2: a still-pending, unexpired offer whose deadline has passed is refused with the coded 409 and left exactly
+        // as it is (pending until its own expires_at). Read-only here, so throwing loses nothing.
+        const [late] = await manager.query<Array<{ past_deadline: boolean; offer_kind: string | null }>>(
+          // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+          `SELECT (o.status = 'pending' AND o.expires_at > now() AND clock_timestamp() >= ${deadlineSql}) AS past_deadline, o.offer_kind
+             FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+            WHERE o.id = $1`,
+          [offer.id],
+        );
+        if (late?.past_deadline) {
+          const message = (late.offer_kind ?? OfferKind.STANDARD) === OfferKind.STANDARD ? CONFIRMATION_DEADLINE_MESSAGES.ACCEPT : CONFIRMATION_DEADLINE_MESSAGES.ACCEPT_REPLACEMENT;
+          throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message });
+        }
         return { outcome: 'not-claimed' as const, assignmentAssignedBy: assignment.assignedBy };
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.STAFF_ACCEPTED });
@@ -1301,13 +1407,8 @@ export class OfferService {
         entityId: offer.id,
         metadata: { offerBatchId: offer.offerBatchId },
       });
-      // "…awaiting your confirmation" would be false for the auto-confirm
-      // path below — that manager already made their one decision at
-      // approval time, so there's nothing left for them to be told is
-      // pending. They still learn the seat filled via `offer_confirmed`
-      // (sent to the staff member) reflecting on the same Shift they can
-      // already see filled_count update on.
-      if (assignment.assignedBy && !autoConfirm) {
+      // The sender is always told: every acceptance now awaits their confirmation (Venue-Manager-requested shifts too).
+      if (assignment.assignedBy) {
         await this.notificationService.notify(manager, {
           organisationId: ctx.organisationId!,
           userId: assignment.assignedBy,
@@ -1331,18 +1432,6 @@ export class OfferService {
           entityType: 'offer',
           entityId: offer.id,
         });
-      }
-
-      if (autoConfirm) {
-        const acceptedOffer = await manager.findOneByOrFail(JobOffer, { id: offer.id });
-        const acceptedAssignment = await manager.findOneByOrFail(ShiftAssignment, { id: assignment.id });
-        // `confirmedBy: null` — no Internal Manager clicked confirm; the
-        // audit entry's actor stays this method's own ctx (the staff
-        // member), accurately reflecting who actually triggered it —
-        // `actorUserId` omitted so `applyOfferConfirmation` keeps that
-        // existing default, unlike the system-timeout caller.
-        const confirmed = await applyOfferConfirmation(manager, this.auditService, this.notificationService, this.realtimeEventService, ctx, acceptedOffer, acceptedAssignment, null);
-        return { outcome: 'accepted' as const, offer: confirmed };
       }
 
       return { outcome: 'accepted' as const, offer: await manager.findOneByOrFail(JobOffer, { id: offer.id }) };
@@ -1408,6 +1497,8 @@ export class OfferService {
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.DECLINED);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       // WHERE status = :priorStatus — see staffAccept's identical guard.
       const [, declinedCount] = (await manager.query(
@@ -1418,6 +1509,8 @@ export class OfferService {
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.DECLINED });
+      // A pending offer is an open seat: declining the last one on a running shift completes it (the clock-out roll-up).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_DECLINED, {
         entityType: 'offer',
@@ -1479,7 +1572,38 @@ export class OfferService {
   }
 
   async managerConfirm(ctx: AuthContext, offerId: string): Promise<JobOffer> {
-    return this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.confirmOne(manager, ctx, offerId));
+    try {
+      return await this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.confirmOne(manager, ctx, offerId));
+    } catch (error) {
+      if (error instanceof ConfirmationDeadlinePassedException) await this.withdrawPastDeadline(ctx, [error.offerId]);
+      throw error;
+    }
+  }
+
+  /**
+   * The API's lazy half of the deadline rule (like `staffAccept`'s lazy expiry): after a confirm was refused because the
+   * deadline passed, withdraw the acceptance in a SECOND transaction that commits, so the state, audit and notifications
+   * land even if the Worker is down. The shared CAS makes this idempotent with the Worker (only one side ever wins). Runs
+   * only for offers the caller already proved they own (the refused confirm checked ownership first). Never masks the
+   * caller's 409: a failure here is swallowed and left to the Worker.
+   */
+  private async withdrawPastDeadline(ctx: AuthContext, offerIds: string[]): Promise<void> {
+    if (offerIds.length === 0) return;
+    try {
+      await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+        for (const offerId of offerIds) {
+          await withdrawUnconfirmedOffer(
+            manager,
+            { auditService: this.auditService, notificationService: this.notificationService, realtimeEventService: this.realtimeEventService },
+            ctx.organisationId!,
+            offerId,
+            'api_confirm',
+          );
+        }
+      });
+    } catch {
+      // The Worker's pointer / backstop scan withdraws it within a minute; the caller still gets the 409.
+    }
   }
 
   /**
@@ -1495,6 +1619,7 @@ export class OfferService {
 
       const toConfirm = offers.filter((o) => o.status === OfferStatus.STAFF_ACCEPTED);
       const results: BulkOfferResult['results'] = [];
+      const pastDeadline: string[] = [];
       for (const offer of toConfirm) {
         await manager.query('SAVEPOINT sp_bulk_confirm');
         try {
@@ -1502,17 +1627,22 @@ export class OfferService {
           results.push({ staffProfileId: offer.staffProfileId, ok: true, offerId: confirmed.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_bulk_confirm');
+          if (error instanceof ConfirmationDeadlinePassedException) pastDeadline.push(error.offerId);
           results.push({ staffProfileId: offer.staffProfileId, ok: false, message: errorMessage(error) });
         }
       }
 
-      return { batchId, results };
+      return { batchId, results, pastDeadline };
+    }).then(async ({ batchId: id, results, pastDeadline }) => {
+      await this.withdrawPastDeadline(ctx, pastDeadline);
+      return { batchId: id, results };
     });
   }
 
   /** Batch summary for `BatchOfferDrawer` — one shift, N recipients, counted by status. RLS scopes the org filter. */
   async getBatch(ctx: AuthContext, batchId: string): Promise<OfferBatchSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
         batchId,
       ]);
@@ -1529,7 +1659,7 @@ export class OfferService {
         throw new NotFoundException('Offer batch not found.');
       }
 
-      const recipients = rows.map(toOfferSummary);
+      const recipients = rows.map((r: Record<string, unknown>) => toOfferSummary(r, { kind: 'manager', viewerUserId: ctx.userId }));
       const counts: Record<string, number> = {};
       for (const r of recipients) counts[r.status] = (counts[r.status] ?? 0) + 1;
 
@@ -1555,10 +1685,15 @@ export class OfferService {
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);
+      // Owner rule 2026-11-06: an acceptance already withdrawn at its deadline cannot be rejected again — the coded 409,
+      // nothing changes. Past the deadline but not yet withdrawn, a manual reject is still a valid manager decision.
+      if (isWithdrawnAtDeadline(offer)) throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.REJECT });
       assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
 
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: offer.shiftAssignmentId });
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.REJECTED);
+      // Shift row lock before the offer claim (shift → offer → assignment, as confirm and accept) — for the roll-up below.
+      await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       const now = new Date();
       // WHERE status = :priorStatus — see staffAccept's identical guard
@@ -1569,9 +1704,15 @@ export class OfferService {
         [OfferStatus.MANAGER_REJECTED, now, ctx.userId, dto.reason, offer.id, offer.status],
       )) as [unknown, number];
       if (rejectedCount === 0) {
+        // Lost the row to a concurrent deadline withdrawal: the same coded 409.
+        const current = await manager.findOne(JobOffer, { where: { id: offer.id } });
+        if (current && isWithdrawnAtDeadline(current)) throw new ConflictException({ statusCode: 409, code: CONFIRMATION_DEADLINE_PASSED, message: CONFIRMATION_DEADLINE_MESSAGES.REJECT });
         throw new ConflictException('This offer was already responded to — please refresh and try again.');
       }
       await manager.update(ShiftAssignment, assignment.id, { status: ShiftAssignmentStatus.REJECTED });
+      // An unconfirmed acceptance is an open seat: rejecting the last one on a running shift completes it (the clock-out
+      // roll-up, the same one the deadline withdrawal runs).
+      await completeShiftIfSettled(manager, ctx.organisationId!, assignment.shiftId);
 
       await this.auditService.record(manager, ctx, AuditAction.OFFER_REJECTED, {
         entityType: 'offer',

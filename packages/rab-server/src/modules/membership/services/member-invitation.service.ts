@@ -299,6 +299,7 @@ export class MemberInvitationService implements OnModuleInit {
         where += ` AND i.email::text ILIKE $${params.length}`;
       }
       // Status is derived (expiry + latest email row), so it is filtered after derivation within the live set.
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const rows = await manager.query<InvitationRow[]>(`${this.selectSql()} WHERE ${where} ORDER BY i.created_at DESC, i.id`, params);
       const items = rows.map((r) => this.toItem(r)).filter((item) => !filter.status || item.status === filter.status);
       const offset = (page - 1) * limit;
@@ -317,6 +318,7 @@ export class MemberInvitationService implements OnModuleInit {
   }
 
   private async loadItem(manager: EntityManager, id: string): Promise<MemberInvitationItem | null> {
+    // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     const [row] = await manager.query<InvitationRow[]>(`${this.selectSql()} WHERE i.id = $1`, [id]);
     return row ? this.toItem(row) : null;
   }
@@ -362,6 +364,7 @@ export class MemberInvitationService implements OnModuleInit {
     if (!UUID.test(id)) throw new NotFoundException('Invitation not found.');
     await this.assertAdministratorTx(manager, ctx);
     const [row] = await manager.query<InvitationRow[]>(
+      // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
       `SELECT i.*, i.email::text AS email, (i.expires_at <= now()) AS is_expired FROM core.member_invitation i
         WHERE i.id = $1 AND i.workspace_id = $2${lock ? ' FOR UPDATE' : ''}`,
       [id, ctx.workspaceId],
@@ -499,6 +502,7 @@ export class MemberInvitationService implements OnModuleInit {
   /** Live, unexpired, organisation active, workspace active. Runs under the invitation's own tenant context. */
   private async loadLive(manager: EntityManager, invitationId: string, tokenHash: string, lock: boolean): Promise<InvitationRow | null> {
     const [row] = await manager.query<InvitationRow[]>(
+      // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
       `SELECT i.*, i.email::text AS email, (i.expires_at <= now()) AS is_expired FROM core.member_invitation i
         WHERE i.id = $1 AND i.token_hash = $2${lock ? ' FOR UPDATE' : ''}`,
       [invitationId, tokenHash],

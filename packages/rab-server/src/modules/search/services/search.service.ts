@@ -164,10 +164,12 @@ export class SearchService {
     }
     const emailBranch =
       q.emailPrefix && this.memberAccess.isFieldVisible(policy, 'email')
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         ? `UNION SELECT sp.id FROM core."user" u JOIN staff_profile sp ON sp.user_id = u.id WHERE u.email::text ILIKE ${p.push(q.emailPrefix)}`
         : '';
     const lim = p.push(limit);
     const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH cand AS (
          SELECT sp.id FROM core."user" u JOIN staff_profile sp ON sp.user_id = u.id WHERE ${this.userMatch(q, 'u')}
          UNION
@@ -202,6 +204,7 @@ export class SearchService {
     const emailBranch = q.emailPrefix ? `OR u.email::text ILIKE ${p.push(q.emailPrefix)}` : '';
     const lim = p.push(limit);
     const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT mp.id, u.first_name, u.last_name,
               (${userName('u')} = ${NORM_TEXT}) AS exact,
               ts_rank_cd(u.search_vector, ${TSQ}) AS rank,
@@ -250,6 +253,7 @@ export class SearchService {
     }
     const lim = p.push(limit);
     const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT v.id, v.name,
               (${venueName('v')} = ${NORM_TEXT}) AS exact,
               ts_rank_cd(v.search_vector, ${TSQ}) AS rank,
@@ -303,6 +307,7 @@ export class SearchService {
     // wave 5 — ordering by date lets the planner stop after LIMIT rows (ranking every shift of every matched venue cost
     // ~150 ms at 50k shifts under RLS). Job-role names are not a global-search target for shifts (label = venue · date).
     const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH mv AS (
          SELECT v.id, (${venueName('v')} = ${NORM_TEXT}) AS exact, ts_rank_cd(v.search_vector, ${TSQ}) AS rank
            FROM venue v WHERE ${this.venueMatch(q, 'v', clientNameVisible)}
@@ -345,6 +350,7 @@ export class SearchService {
     }
     const lim = p.push(limit);
     const rows = await manager.query(
+      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH cand AS (
          SELECT o.id FROM job_offer o
            JOIN staff_profile sp ON sp.id = o.staff_profile_id

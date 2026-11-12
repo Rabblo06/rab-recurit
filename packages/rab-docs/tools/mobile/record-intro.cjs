@@ -71,7 +71,9 @@ const SCENES = {
     d.rec.mark('pending', { bbox: await d.box('Pending approval') });
     await pause(3.0);
   },
-  // Tuesday 11:40 — Priya opens her offer and accepts; the approved request books her straight away.
+  // Tuesday 11:40 — Priya opens her offer and accepts; it waits for a manager, who confirms it (owner rule 2026-11-06:
+  // the system never confirms — an approved request no longer books anyone on accept). The manager's confirm is the
+  // fixture server's POST /__fixture/confirm/latest, made off-camera between the two marks.
   async offer() {
     d.setDeviceTime('2026-10-20T10:40:00Z', '1140');
     await d.fixture('/__fixture/scene', { scene: 'offer' });
@@ -89,7 +91,13 @@ const SCENES = {
     d.rec.mark('details', { bbox: await d.box('Shift status') });
     await pause(2.2);
     await d.tap(/^Accept$/, { after: 2500 });
-    d.rec.mark('confirmed', { bbox: await d.box('Shift status: Confirmed') });
+    d.rec.mark('accepted', { bbox: await d.box('Awaiting manager confirmation') });
+    await pause(2.4);
+    // The Internal Manager confirms (before the approval deadline, start − 30 min). Back to Home, which re-reads the offers.
+    await d.fixture('/__fixture/confirm/latest', {});
+    d.back(); await pause(0.8);
+    d.back(); await pause(2.2);
+    d.rec.mark('confirmed', { bbox: await d.box('Next Shift') });
     await pause(3.2);
   },
   // Friday 11:47 — Priya's confirmed shift; clock-in screen, location consent, the real scanner (simulated camera).

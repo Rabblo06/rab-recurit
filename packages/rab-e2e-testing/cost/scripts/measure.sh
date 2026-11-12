@@ -17,13 +17,16 @@ OUT="${OUT:?OUT not set}"; assert_outside_main "the results directory (OUT)" "$O
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CONTAINERS="costaudit-pg costaudit-worker costaudit-api costaudit-redis costaudit-minio"
 
+# pg_stat_database counters flush within ~1 s of a transaction end (PostgreSQL 15+ cumulative statistics), so a short
+# pause before reading keeps the window edges honest.
+pg_xact() { sleep 1; q "select xact_commit + xact_rollback from pg_stat_database where datname = 'rab'"; }
 cpu_snapshot() { for c in $CONTAINERS ${EXTRA_CONTAINERS:-}; do echo "$c $(cg_cpu_usec "$c" 2>/dev/null || echo 0)"; done; }
 
 # make_worker_env: lib/worker-env.sh
 . "$COST_DIR/lib/worker-env.sh"
 # worker_up <name> [KEY=VALUE ...]: (re)creates costaudit-worker with that configuration (compose recreates it only if the
 # configuration differs from the running container).
-# If the worker does not stay up (e.g. a launcher refuses the configuration), <out>/worker-env/<name>.REFUSED records the
+# If the worker does not stay up (e.g. the Worker's runtime guard refuses the configuration), <out>/worker-env/<name>.REFUSED records the
 # last log lines (URLs redacted) and run.sh skips that configuration's window.
 worker_up() {
   local name="$1" st
@@ -42,7 +45,7 @@ worker_up() {
   esac
 }
 
-# Read-only Redis view of BullMQ repeat/job-scheduler state (interval mode should have none; a duplicate would show here).
+# Read-only Redis view of BullMQ repeat/job-scheduler state (the api registers one per scan; a duplicate would show here).
 redis_sched_keys() {
   local k
   echo "dbsize $(redis_cli DBSIZE | tr -d '\r')"
@@ -55,8 +58,8 @@ redis_sched_keys() {
     esac
   done
 }
-# Health of one worker container: the image's own health command (worker-bundle-health.cjs: fresh heartbeats of BOTH
-# children), run with docker exec, and Docker's own HEALTHCHECK status.
+# Health of one worker container: the jobs-only health command (worker-bundle-health.cjs: a fresh per-instance heartbeat
+# of the one Worker process), run with docker exec, and Docker's own health status.
 worker_probe_ok() { docker exec "$1" node /opt/crewflow-bundle/worker-bundle-health.cjs >/dev/null 2>&1; }
 docker_health() { docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || echo missing; }
 # Logs since an instant, timestamped, URLs redacted (the worker never prints credentials; this is belt and braces).
@@ -91,8 +94,8 @@ case "${1:?usage}" in
     for i in $(seq 1 30); do
       q "select pg_stat_statements_reset()" >/dev/null
       sleep 60
-      w=$(q "select coalesce(sum(rows),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ('crewflow_app','crewflow_worker')) and (query ilike 'insert%' or query ilike 'update%' or query ilike 'delete%' or query ilike 'with%insert%' or query ilike 'with%update%')")
-      t=$(q "select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ('crewflow_app','crewflow','crewflow_worker'))")
+      w=$(q "select coalesce(sum(rows),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ($(app_roles_sql))) and (query ilike 'insert%' or query ilike 'update%' or query ilike 'delete%' or query ilike 'with%insert%' or query ilike 'with%update%')")
+      t=$(q "select coalesce(sum(calls),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in ($(app_roles_sql)))")
       echo "$(date -u +%H:%M:%SZ) window=$i rowsWritten=$w topLevelStatements=$t" | tee -a "$OUT/drain-${2:-last}.log" >&2
       if [ "$w" -le 5 ]; then drained=1; break; fi
     done
@@ -105,6 +108,9 @@ case "${1:?usage}" in
     docker inspect -f '{{.Name}} {{range .Config.Env}}{{if or (eq (index (split . "=") 0) "REALTIME_ENABLED") (eq (index (split . "=") 0) "PUSH_ENABLED")}}{{.}} {{end}}{{end}}' costaudit-api costaudit-worker > "$R/flags.txt" 2>/dev/null || true
     q "select pg_stat_statements_reset()" >/dev/null
     cpu_snapshot > "$R/cpu-start.txt"; redis_cli INFO stats > "$R/redis-stats-start.txt"; date +%s > "$R/t-start"
+    # D-Q6: committed + rolled-back transactions of the measured database (pg_stat_database; every role, this harness's own
+    # start snapshot query included (the end one commits after its own read), so analyze-idle.js subtracts it; a load generator logs its own in dq6-*.gen.jsonl).
+    pg_xact > "$R/pg-xact-start.txt"
     END=$(( $(date +%s) + D )); : > "$R/dstats.txt"; : > "$R/redis-ops.txt"; : > "$R/dstats-host.txt"
     while [ "$(date +%s)" -lt "$END" ]; do
       docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' $CONTAINERS | sed "s/^/$(date +%s),/" >> "$R/dstats.txt"
@@ -115,7 +121,7 @@ case "${1:?usage}" in
       redis_cli INFO stats | grep instantaneous_ops_per_sec | tr -d '\r' | sed "s/^/$(date +%s),/" >> "$R/redis-ops.txt"
       sleep 15
     done
-    date +%s > "$R/t-end"; cpu_snapshot > "$R/cpu-end.txt"
+    date +%s > "$R/t-end"; cpu_snapshot > "$R/cpu-end.txt"; pg_xact > "$R/pg-xact-end.txt"
     redis_cli INFO stats > "$R/redis-stats-end.txt"; redis_cli INFO memory > "$R/redis-mem.txt"; redis_cli DBSIZE > "$R/redis-dbsize.txt"
     # Raw pg_stat_statements dump (full text, every role) + the compact views the analyser reads.
     q "copy (select userid::regrole::text as role, toplevel, calls, total_exec_time, rows, shared_blks_hit, shared_blks_read, query from pg_stat_statements where dbid=(select oid from pg_database where datname='rab') order by calls desc) to stdout with csv header" > "$R/pgss-raw.csv"
@@ -143,14 +149,13 @@ case "${1:?usage}" in
     ;;
   flags-up)
     # flags-up on|off: REALTIME_ENABLED and PUSH_ENABLED both true (on) or both false (off = base) on the API AND the worker;
-    # recreates both (the API first, waits for its health). Records the flags each container actually has.
+    # recreates both (the API first, waits for its health; stack.sh worker). Records the flags each container actually has.
     case "${2:?on|off}" in
       on) fname=flags-on; set -- REALTIME_ENABLED=true PUSH_ENABLED=true ;;
       off) fname=base; set -- ;;
       *) die "flags-up on|off" ;;
     esac
-    make_worker_env "$fname" "$@"
-    COST_REALTIME_ENABLED="$WRT" COST_PUSH_ENABLED="$WPU" "$HERE/stack.sh" api
+    # worker_up converges the api AND the worker with this configuration (stack.sh worker), then verifies the schedulers.
     worker_up "$fname" "$@"
     echo "$(date -u +%FT%TZ) flags-up $fname: $(docker inspect -f '{{.Name}} {{range .Config.Env}}{{if or (eq (index (split . "=") 0) "REALTIME_ENABLED") (eq (index (split . "=") 0) "PUSH_ENABLED")}}{{.}} {{end}}{{end}}' costaudit-api costaudit-worker | tr '\n' ';')" >> "$OUT/worker-configs.log"
     ;;

@@ -6,6 +6,7 @@ import { DataSource } from 'typeorm';
  * own workspace (WorkspaceExecutionContext) and revalidate it. Nothing here grants access to business rows.
  */
 
+/** 'manager_confirmation_timeout' is the historical value (reused, no migration); it now means the manager-confirmation DEADLINE (withdrawal, never confirmation). */
 export type JobType = 'manager_confirmation_timeout';
 
 export interface ClaimedPointer {

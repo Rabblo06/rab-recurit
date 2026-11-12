@@ -4,7 +4,10 @@
 //
 // Rules (lib/guard.sh, README "Safety"):
 //   - project name is crewflow-cost; every container_name starts with costaudit-
-//   - bind mounts: read-only, source inside the harness folder, never inside the main checkout, never the Docker socket
+//   - bind mounts: read-only, source inside the harness folder, never inside the main checkout, never the Docker socket.
+//     ONE exception (Phase X P0-H): the committed provider-admin SQL
+//     packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql, exactly that file (read-only, still never in the
+//     main checkout), so the stack runs the reviewed file itself instead of a copy that could drift.
 //   - named volumes: declared by this project, not external, named crewflow-cost_*
 //   - networks: only crewflow-cost-net, not external; no network_mode host/container:, no pid/ipc host, no privileged
 //   - ports: host_ip 127.0.0.1, never a dev/test/e2e port
@@ -15,6 +18,7 @@ const COST_DIR = process.env.COST_DIR_W;
 const MAIN = process.env.COST_MAIN_W;
 const RESERVED = new Set((process.env.COST_RESERVED_PORTS || '').split(/\s+/).filter(Boolean));
 if (!COST_DIR || !MAIN) { console.error('ISOLATION: COST_DIR_W / COST_MAIN_W not set'); process.exit(1); }
+const OWNER_SQL = require('path').resolve(COST_DIR, '../../rab-docker/postgres-init/owner-login/01-crewflow-owner.sql');
 
 let raw = '';
 process.stdin.on('data', (d) => (raw += d));
@@ -45,7 +49,7 @@ process.stdin.on('end', () => {
         const desc = `${svc}: bind ${v.source} -> ${v.target}${v.read_only ? ' (ro)' : ' (rw)'}`;
         if (!v.read_only) bad.push(`${desc}: bind mount is writable`);
         if (under(v.source, MAIN) || under(MAIN, v.source)) bad.push(`${desc}: source overlaps the main checkout ${MAIN}`);
-        if (!under(v.source, COST_DIR)) bad.push(`${desc}: source is outside the harness folder`);
+        if (!under(v.source, COST_DIR) && norm(v.source) !== norm(OWNER_SQL)) bad.push(`${desc}: source is outside the harness folder`);
         if (/docker\.sock|docker_engine/i.test(String(v.source))) bad.push(`${desc}: Docker socket`);
         ok.push(desc);
       } else if (v.type === 'volume') {

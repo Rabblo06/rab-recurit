@@ -1,3 +1,4 @@
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 /**
  * Phase 0b (E1, R6): catalog invariants that keep `rab_secure_owner` (NOLOGIN; owns the pre-auth tables and their SECURITY
  * DEFINER functions) from executing or depending on anything a LOGIN role controls. Read-only catalog queries; used by the
