@@ -5674,7 +5674,18 @@ writes a warning instead.
           unhealthy;
         - production Redis runs AOF with `noeviction`;
         - the API's registration step is idempotent, so any API start restores every scheduler.
-      - Recommended follow-up: alert on Worker unhealthy.
+      - Follow-up, partly done (X2.4, Twenty's model: shown in the admin panel, no external alerting). The STATE is
+        now shown, and there is still NO ALERTING.
+        - The Admin Panel Health tab shows the Worker heartbeat with per-queue failed/waiting counts.
+        - A BullMQ schedulers indicator reads `ZCARD <prefix>:<scan queue>:repeat` against the Worker's last reconcile
+          report. It turns degraded when schedulers are missing or none are left in Redis.
+        - The indicators are read-only, platform-admin only (PlatformAdminGuard + service check, 403), and audited as
+          `admin.health_viewed`.
+        - Nothing pages anyone: a lost scheduler is seen only when an operator opens the tab (or reads the Worker's
+          ERROR log).
+        - Only `/healthz` (API + database) is meant for an external uptime monitor (runbook 3.5a), and it does not
+          cover the Worker or the schedulers.
+        - Accepted as Twenty's model, 2026-11-12. "Alert on Worker unhealthy" itself stays open.
       - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
         decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
 
@@ -6555,3 +6566,17 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Residual:** a raw-SQL write to an authority table inside a transaction WITHOUT the in-transaction version bump would
   not clear the memo for later checks in that transaction. Every service writer bumps (P1D); a writer that does not is
   already a revocation defect for the auth-context cache.
+
+- **X2.4 Admin Panel health indicators (2026-11-12).** Actor: a signed-in non-platform-admin → `GET
+  /rest/v1/admin/health/report` → 403 (PlatformAdminGuard, then `assertActivePlatformAdmin` in the service for direct
+  callers); no audit row and no probe. A platform admin sees: API version/commit/Node/uptime, database connections vs
+  max_connections (from `pg_stat_database`, cluster-wide), Redis version and memory (`INFO server` / `INFO memory`),
+  per-queue BullMQ counts, scheduler counts. No tenant data, no host names, no URLs, no raw error text (fixed strings;
+  a failing probe says "Not reachable."). Every Redis call is a read command (tested against `COMMAND INFO` flags);
+  the report cache moved from Redis `SET EX` to process memory. Access audited as `admin.health_viewed` in the admin's
+  organisation: at most once per admin per API process every 5 minutes, plus every manual Refresh (owner assumption,
+  see the PR; at most one refresh row per admin per 5 s). A process restart resets the dedupe. The audit write is
+  bounded at 2 s and fails closed (best-effort is an open owner decision). `?refresh=1` re-probes only a report at
+  least 5 s old, through one shared in-flight probe set, so refreshes cannot multiply probes. The
+  `admin.health_viewed` rows are NOT visible in the Admin Panel Audit tab until a later migration adds the action to
+  the timeline function's allowlist (`ADMIN_AUDIT_ACTIONS_*`); until then they are in `core.audit_log` only.
