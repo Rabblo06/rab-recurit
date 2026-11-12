@@ -1,5 +1,5 @@
 import { EmailOutboxJobType, normalizeEmail, PermissionFlagType, UserStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -10,6 +10,7 @@ import { RefreshTokenService } from '../../../engine/core-modules/auth/token/ser
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
 import { renderEmailChangeNoticeEmail, renderEmailChangeVerificationEmail } from '../../../engine/core-modules/email/templates';
+import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -42,6 +43,13 @@ export interface EmailChangeRequestResult {
  */
 @Injectable()
 export class EmailChangeService {
+  /**
+   * Phase X SC-01: the confirmed change rewrites `user.email`, which CoreEntityCacheService's `user` display projection
+   * holds. Cleared after commit (that cache's own contract). Property-injected so the constructor is unchanged.
+   */
+  @Inject(CoreEntityCacheService)
+  private readonly entityCache!: CoreEntityCacheService;
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
@@ -180,6 +188,8 @@ export class EmailChangeService {
     });
     // A request that can no longer be honoured is cancelled (committed above) and reported exactly like an invalid link.
     if (notice.cancelled) throw new BadRequestException(INVALID_LINK);
+    // SC-01: after commit, never inside the transaction (a rolled-back change must not drop a still-valid entry).
+    await this.entityCache.invalidate('user', found.userId);
     void this.emailOutbox.tryFastPublish((id, orgId) => this.emailQueue.publish(id, orgId), notice.row);
     return { confirmed: true };
   }

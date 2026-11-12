@@ -209,6 +209,13 @@ send is this same `WORKER_FAST_PUBLISH_NOTIFY` flag, which is already `true`. It
 `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"` on rab-api and rab-worker in both compose files, and extend the gate
 (`NOTIFICATION_DELIVERY` in `scripts/compose-owner-login.cjs` and `staging/verify-image-compose.cjs`) in the same change.
 `PUSH_ENABLED=true` and a real `PUSH_PROVIDER` go in `runtime.env` (production refuses `PUSH_PROVIDER=FAKE` with push on).
+**Enforced since Phase X J2:** with `PUSH_ENABLED=true` (in `runtime.env` or a compose value) both gates refuse the
+deployment until `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS: "30"` is committed on rab-api AND rab-worker:
+`scripts/compose-owner-login.cjs` (CI, and `--lint-env-file runtime <file>`, which renders the committed compose with that
+file's switches) and `staging/verify-image-compose.cjs --environment` (the operator preflight, which reads the switch from
+the env files). With `REALTIME_ENABLED=true` they require the realtime sweep interval to be identical on both services; its
+value is a separate owner decision, not pinned. Neither interval may be set in an env file, and a switch that differs
+between the two services is refused.
 
 **Phase D switches (owner decision 2026-11-06): committed configuration.** Like notification delivery: in both compose
 files, on rab-api AND rab-worker, with the same value on both. The gate (`PHASE_D_SWITCHES` in
@@ -234,6 +241,22 @@ offer expiry and late clock-in, 2 min for the manager-confirmation withdrawal, 5
 `WORKER_TIMER_TRIGGERS: "off"` on both services in both compose files (and the gate), then redeploy. With `off` the Worker
 creates no trigger consumer, so leftover trigger jobs stay unconsumed in Redis; the scans never stopped and do the work. The scans then keep the committed (slower) intervals: whether to
 restore the code defaults with the rollback is an owner decision.
+
+**Pay-statement sweep (owner decision 2026-11-11, Phase X J1a): committed configuration.** Like notification delivery:
+in all three compose files (`docker-compose.image.yml`, `docker-compose.production.yml`, `docker-compose.local-build.yml`),
+on rab-api AND rab-worker, with the same value on both. The gate (`STATEMENT_DISPATCH` in
+`scripts/compose-owner-login.cjs`) and the verifier (`staging/verify-image-compose.cjs`) enforce it, and `runtime.env` /
+`database.env` may not re-enter it. The code default (5 s) is unchanged for development and tests.
+
+| Variable | Production value | Code default | Why |
+|---|---|---|---|
+| `WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS` | `30` | `5` (bounds 1–300) | The statement sweep was about 57 % of idle SQL at 20 organisations (Phase X S0-J SJ-01, derived from measured counts). The API registers the BullMQ scheduler with ITS value and the Worker never compares intervals, so both carry the same value. The first API start with the new value updates the same scheduler id in place. |
+
+What changes: a pay statement is generated 0–30 s after its pay record is approved (was 0–5 s). A statement whose claim
+was lost (dead Worker, Redis outage) is re-queued by the 10-minute lease up to 25 s later than before, and a failed
+statement is retried up to 25 s later. Nothing else: approval, the payroll guard, the generation fence and the consumer
+are untouched. Rollback: remove the line from both services in all three compose files and from the gate, then redeploy
+(the API re-registers the scheduler at 5 s).
 
 **Migration 1786721330000 (`WorkerDueWorkClaimsToWorkerRole`) is OBSOLETE under this design** (owner decision
 2026-11-06: keep it excluded). It stays in `core/gated-migrations/`, outside the migration glob, and must never be
@@ -317,6 +340,16 @@ login. Set it explicitly in `runtime.env`; it is never committed in a compose fi
 4. **Expand-only review of the pending list.** An expand-only lint **NEEDS OWNER APPROVAL**; until then this is a manual review.
 
    The release is rollback-safe only if every pending migration only **adds** (tables, nullable or defaulted columns, indexes, functions, policies) and drops, renames, retypes or narrows nothing the previous image uses. Otherwise rollback is a restore (3.6b). Get the owner's go-ahead.
+
+**3.2a Supported upgrade window (Phase X U-1).** The API's migrate step upgrades an existing database only when its ledger
+is at or past a supported release: R254 (rab/v0.4.0, cd7c7e32, 4c38aa1a) or R256 (0e0a6edd, main). A partial upgrade (a
+failed or interrupted earlier start) resumes. Anything older or unrecognised is refused with exit 65
+(`UnsupportedUpgradeStartError`, "Upgrades are supported only from R254, R256 or later"), nothing is applied, and the API
+stays down (restart loop) until you roll back the image: upgrade such a database with a release of the floor first, or,
+for a separated-layout database, follow OWNER-LOGIN-RECOVERY.md (transition-from-separated.sql). There is no override.
+The old manual pre-step "update the N1 list before upgrading an existing database" is GONE for owner-login deployments.
+After an upgrade that applied migrations the API bumps the entity-cache epochs once (log: "entity-cache epoch bumped"); a
+Redis problem there is only a WARNING.
 
 **3.3 BACK UP FIRST: MANDATORY before every upgrade, before 3.4.** The API applies on start, so the backup must exist **before** the new image starts. The app login cannot take a logical backup (FORCE-RLS tables dump empty), so the cluster superuser or the provider takes it.
 - **Managed provider:**

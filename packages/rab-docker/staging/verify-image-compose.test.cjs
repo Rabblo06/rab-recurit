@@ -28,7 +28,7 @@ const fresh = () => {
 /** Applies `mutate` to a fresh copy of the rendered models and returns the verifier's problems. */
 const problemsAfter = (mutate) => {
   const m = fresh();
-  mutate(m.variant, m.variantFiles);
+  mutate(m.variant, m.variantFiles, m.production);
   return checkVariant(m.variant, m.production, m.variantFiles);
 };
 const assertRefused = (problems, pattern) => {
@@ -108,6 +108,12 @@ const weakenings = [
   ['the late clock-in sweep removed from the API', (v) => { delete v.services['rab-api'].environment.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS; }, /rab-api: WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS is not "300"|rab-api\.environment\.WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS differs/],
   ['the combined shift scan committed', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }, /rab-worker: WORKER_SHIFT_SCAN_MODE is committed as "combined"/],
   ['a slower shift monitor committed', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_MONITOR_INTERVAL_SECONDS = '600'; }, /rab-api: WORKER_SHIFT_MONITOR_INTERVAL_SECONDS is committed as "600"/],
+  // Owner decision 2026-11-11 (J1a): the 30 s pay-statement sweep on both services, in both files.
+  ['the pay-statement sweep removed from the API (5 s code default)', (v) => { delete v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the pay-statement sweep removed from the Worker', (v) => { delete v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the API registers a 5 s pay-statement sweep', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['the Worker disagrees with the API on the pay-statement sweep', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '60'; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
+  ['both files drift together to 5 s', (v, _f, p) => { for (const m of [v, p]) for (const n of ['rab-api', 'rab-worker']) m.services[n].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30"/],
   ['the deprecated upgrade policy committed (O3 C3)', (v) => { v.services['rab-api'].environment.CREWFLOW_UPGRADE_FAILURE_POLICY = 'refuse'; }, /rab-api: commits the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY/],
   ['a provisioner URL on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_PROVISIONER_DATABASE_URL = 'postgresql://crewflow:x@h/rab'; }, /rab-worker: sets CREWFLOW_PROVISIONER_DATABASE_URL/],
   ['the mode switch on the API', (v) => { v.services['rab-api'].environment.CREWFLOW_DB_MODE = 'twenty'; }, /rab-api: sets CREWFLOW_DB_MODE/],
@@ -197,6 +203,8 @@ const otherWeakenings = [
   ['an override sets the API email sweep back to 2 s', (v) => { v.services['rab-api'].environment.WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS = '2'; }, /rab-api: WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the timer triggers off on the Worker', (v) => { v.services['rab-worker'].environment.WORKER_TIMER_TRIGGERS = 'off'; }, /rab-worker: WORKER_TIMER_TRIGGERS is not "on" in the deployed model/],
   ['an override sets the API offer-expiry sweep back to 60 s', (v) => { v.services['rab-api'].environment.WORKER_OFFER_EXPIRY_INTERVAL_SECONDS = '60'; }, /rab-api: WORKER_OFFER_EXPIRY_INTERVAL_SECONDS is not "300" in the deployed model/],
+  ['an override sets the API pay-statement sweep back to 5 s', (v) => { v.services['rab-api'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS = '5'; }, /rab-api: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
+  ['an override removes the Worker pay-statement sweep', (v) => { delete v.services['rab-worker'].environment.WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS; }, /rab-worker: WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS is not "30" in the deployed model/],
   ['an override turns the combined shift scan on', (v) => { v.services['rab-worker'].environment.WORKER_SHIFT_SCAN_MODE = 'combined'; }, /rab-worker\.environment\.WORKER_SHIFT_SCAN_MODE is overridden in the deployed model/],
   ['an override adds a rab-migrate (O3)', (v) => { v.services['rab-migrate'] = structuredClone(v.services['rab-ops']); delete v.services['rab-migrate'].profiles; }, /rab-migrate: present in the deployed model/],
   ['rab-worker on another image (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'9'.repeat(64)}`; }, /rab-worker: image differs from rab-api's in the deployed model/],
@@ -242,4 +250,111 @@ test('a variant file whose rab-ops reads no env file fails, whatever the Compose
   } finally {
     fsx.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Phase X J2 (S0-J SJ-03): the push / realtime sweep rule, enforced once the feature is switched on.
+test('J2 static: push on without the committed 30 s sweep is refused; with 30 s on both it passes', { skip }, () => {
+  const pushOn = (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.PUSH_ENABLED = 'true'; };
+  assertRefused(problemsAfter(pushOn), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed/);
+  assertRefused(problemsAfter(pushOn), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed/);
+  assertRefused(problemsAfter((v) => { pushOn(v); v.services['rab-api'].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; }), /rab-worker: PUSH_ENABLED=true needs/);
+  assertRefused(problemsAfter((v) => { v.services['rab-api'].environment.PUSH_ENABLED = 'true'; }), /PUSH_ENABLED differs between rab-api and rab-worker/);
+  assertRefused(problemsAfter((v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.REALTIME_ENABLED = 'true'; v.services['rab-api'].environment.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS = '5'; }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs/);
+  const ok = problemsAfter((v) => { pushOn(v); for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; });
+  assert.ok(!ok.some((p) => /PUSH_ENABLED/.test(p)), ok.join(' | '));
+});
+
+test('J2 environment mode: push switched on in runtime.env without the committed sweep is refused; an env-file interval is refused', { skip }, () => {
+  const base = { names: ['PG_DATABASE_URL', 'REDIS_URL', 'APP_SECRET', 'PUSH_ENABLED'], unfilled: [], dbUsers: { PG_DATABASE_URL: 'crewflow_owner' }, switches: { PUSH_ENABLED: 'true' } };
+  const run = (keys, mutate = () => {}) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, keys);
+  };
+  const both = { 'rab-api': base, 'rab-worker': base };
+  assertRefused(run(both), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  assertRefused(run(both), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  // The interval entered in runtime.env instead of the compose files: refused (it must be committed on both services).
+  const viaFile = { ...base, names: [...base.names, 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS'] };
+  assertRefused(run({ 'rab-api': viaFile, 'rab-worker': viaFile }), /rab-api: WORKER_PUSH_DISPATCH_INTERVAL_SECONDS is set in an env file/);
+  // Push on in one service's env file only.
+  assertRefused(run({ 'rab-api': base, 'rab-worker': { ...base, switches: {} } }), /PUSH_ENABLED differs between rab-api and rab-worker in the deployed model/);
+  // Committed 30 s on both services: the rule holds.
+  const committed = run(both, (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = '30'; });
+  assert.ok(!committed.some((p) => /PUSH_ENABLED|PUSH_DISPATCH/.test(p)), committed.join(' | '));
+  // Push off: nothing to enforce.
+  const off = { ...base, switches: { PUSH_ENABLED: 'false' } };
+  const offProblems = run({ 'rab-api': off, 'rab-worker': off });
+  assert.ok(!offProblems.some((p) => /PUSH_/.test(p)), offProblems.join(' | '));
+  // Review J2-1 (fail closed): any other text, or a value Compose would read ambiguously (null), is refused.
+  for (const value of ['TRUE', '1', '', 'yes', null]) {
+    const bad = { ...base, switches: { PUSH_ENABLED: value } };
+    assertRefused(run({ 'rab-api': bad, 'rab-worker': bad }), /rab-api: PUSH_ENABLED must be exactly true or false in the deployed model/);
+  }
+  // Realtime on: the interval must be identical on both (its value is not decided yet, so it is not pinned).
+  const rt = { ...base, names: [...base.names, 'REALTIME_ENABLED'], switches: { REALTIME_ENABLED: 'true' } };
+  assertRefused(run({ 'rab-api': rt, 'rab-worker': rt }, (v) => { v.services['rab-worker'].environment.WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS = '10'; }), /REALTIME_ENABLED=true: WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS differs between rab-api and rab-worker in the deployed model/);
+  const rtSame = run({ 'rab-api': rt, 'rab-worker': rt });
+  assert.ok(!rtSame.some((p) => /REALTIME/.test(p)), rtSame.join(' | '));
+});
+
+// Review of #97: J2-1 (switch values read as Compose reads them, fail closed), J2-2 (`export ` prefix), J2-3 (push interval gaps).
+const { readEnvFileKeys } = require('./verify-image-compose.cjs');
+const ENV_OK = 'PG_DATABASE_URL=postgresql://crewflow_owner:x@db.example:5432/crewflow?sslmode=verify-full\nREDIS_URL=redis://crewflow:x@rab-redis:6379\nAPP_SECRET=s\n';
+const deployedWith = (text, mutate = () => {}) => {
+  const m = fresh();
+  mutate(m.variantFiles);
+  const keys = { 'rab-api': readEnvFileKeys(text), 'rab-worker': readEnvFileKeys(text) };
+  return checkDeployment(m.variantFiles, m.production, keys);
+};
+const commitPush = (value) => (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = value; };
+
+test('J2-1 environment mode: a commented or quoted "true" switches push ON (as Compose gives the app); garbage is refused', { skip }, () => {
+  for (const line of ['PUSH_ENABLED=true # on', 'PUSH_ENABLED="true"', "PUSH_ENABLED='true' # on", 'export PUSH_ENABLED=true']) {
+    assert.equal(readEnvFileKeys(`${ENV_OK}${line}\n`).switches.PUSH_ENABLED, 'true', line);
+    assertRefused(deployedWith(`${ENV_OK}${line}\n`), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+    const ok = deployedWith(`${ENV_OK}${line}\n`, commitPush('30'));
+    assert.ok(!ok.some((p) => /PUSH_/.test(p)), `${line}: ${ok.join(' | ')}`);
+  }
+  for (const line of ['PUSH_ENABLED=yes', 'PUSH_ENABLED=TRUE', 'PUSH_ENABLED=1', 'PUSH_ENABLED="true', 'PUSH_ENABLED="true" x', 'PUSH_ENABLED=']) {
+    assertRefused(deployedWith(`${ENV_OK}${line}\n`), /rab-api: PUSH_ENABLED must be exactly true or false in the deployed model/);
+  }
+  const off = deployedWith(`${ENV_OK}PUSH_ENABLED=false # off\n`);
+  assert.ok(!off.some((p) => /PUSH_/.test(p)), off.join(' | '));
+});
+
+test('J2-2 environment mode: `export KEY=value` lines are read (Compose accepts them), so the older name and credential checks see them too', { skip }, () => {
+  const keys = readEnvFileKeys(`${ENV_OK}export DATABASE_URL=postgresql://crewflow_migrator:x@h:5432/rab\nexport PUSH_ENABLED=true\n  export   CREWFLOW_MIGRATION_APPROVED=x\n`);
+  assert.ok(keys.names.includes('DATABASE_URL') && keys.names.includes('CREWFLOW_MIGRATION_APPROVED') && keys.names.includes('PUSH_ENABLED'));
+  assert.equal(keys.dbUsers.DATABASE_URL, 'crewflow_migrator');
+  assert.equal(keys.dbUsers.PG_DATABASE_URL, 'crewflow_owner');
+  const problems = deployedWith(`${ENV_OK}export DATABASE_URL=postgresql://crewflow_migrator:x@h:5432/rab\n`);
+  assertRefused(problems, /rab-api: sets DATABASE_URL in the deployed model/);
+  assertRefused(deployedWith(`export PG_DATABASE_URL=postgresql://crewflow_app:x@h:5432/rab\nREDIS_URL=r\nAPP_SECRET=s\n`), /rab-api: PG_DATABASE_URL logs in as "crewflow_app"/);
+  // The unchanged cases still behave: comments are skipped, a placeholder is reported, a non-URL database value is reported.
+  const plain = readEnvFileKeys('# PUSH_ENABLED=true\nAPP_SECRET=<fill me>\nPG_DATABASE_URL=not-a-url\n');
+  assert.deepEqual(plain.names, ['APP_SECRET', 'PG_DATABASE_URL']);
+  assert.deepEqual(plain.switches, {});
+  assert.deepEqual(plain.unfilled, ['APP_SECRET', 'PG_DATABASE_URL (not a URL)']);
+});
+
+test('J2-3: with push on the verifier refuses a 2 s push sweep on either service and two different values', { skip }, () => {
+  const pushOn = (v) => { for (const s of ['rab-api', 'rab-worker']) v.services[s].environment.PUSH_ENABLED = 'true'; };
+  const set = (api, worker) => (v) => {
+    v.services['rab-api'].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = api;
+    v.services['rab-worker'].environment.WORKER_PUSH_DISPATCH_INTERVAL_SECONDS = worker;
+  };
+  // Static mode.
+  assertRefused(problemsAfter((v) => { pushOn(v); set('2', '30')(v); }), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  assertRefused(problemsAfter((v) => { pushOn(v); set('30', '2')(v); }), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  assertRefused(problemsAfter((v) => { pushOn(v); set('2', '2')(v); }), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  const differ = problemsAfter((v) => { pushOn(v); set('30', '60')(v); });
+  assertRefused(differ, /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"/);
+  // Environment mode (push switched on in the env files).
+  const on = `${ENV_OK}PUSH_ENABLED=true\n`;
+  assertRefused(deployedWith(on, set('2', '30')), /rab-api: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  assertRefused(deployedWith(on, set('30', '2')), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  assertRefused(deployedWith(on, set('30', '60')), /rab-worker: PUSH_ENABLED=true needs WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30" committed in the deployed model/);
+  const ok = deployedWith(on, set('30', '30'));
+  assert.ok(!ok.some((p) => /PUSH_/.test(p)), ok.join(' | '));
 });

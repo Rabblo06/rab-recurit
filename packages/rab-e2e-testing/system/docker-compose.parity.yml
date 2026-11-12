@@ -8,12 +8,27 @@
 #
 # The runtime flags are production's committed ones (packages/rab-docker/docker-compose.production.yml):
 #   HWS_RUNTIME_ENABLED "false" (business rows in the shared `core` tables), AI_ENABLED "false", the provisioner explicitly
-#   on at a 5 s interval, API pool 9 / Worker pool 12; and what production does NOT set stays unset here:
+#   on at a 5 s interval, API pool at the code default (10, production sets none) / Worker pool 12, and production's scan
+#   settings on BOTH services (below); what production does NOT set stays unset here:
 #   WORKSPACE_BASE_DOMAIN, workspace host routing, subdomain origin trust and the login handoff (one console host).
 # Not production: NODE_ENV/RAB_RUNTIME_ENV development (production authority needs TLS verify-full, a bound deployment
-# identity and https origins), LOGGER email sink, LOCAL storage, the `rab` superuser as the migration login.
+# identity and https origins), LOGGER email sink, LOCAL storage. The database lifecycle is production's (the base file):
+# ONE crewflow_owner login, the server migrates on start and registers the schedulers, the worker only consumes them.
 
 x-parity-env: &parity-env
+  # Production's scan and notification settings (packages/rab-docker/docker-compose.image.yml: the same values on rab-api
+  # and rab-worker). They must be on the server too: it registers the BullMQ schedulers with its own environment and the
+  # consume-only worker runs what is registered. system/lib/production-parity.selftest.ts fails CI when they drift.
+  WORKER_FAST_PUBLISH_NOTIFY: 'true'
+  WORKER_EMAIL_DISPATCH_INTERVAL_SECONDS: '30'
+  WORKER_TIMER_TRIGGERS: 'on'
+  WORKER_TIMER_TRIGGER_KINDS: offer-expiry,manager-confirmation,no-show,late-clock-in
+  WORKER_OFFER_EXPIRY_INTERVAL_SECONDS: '300'
+  WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS: '120'
+  WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS: '300'
+  # Production sets 30 s (PR #92, merged 2026-11-11). E2E_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS
+  # measures another value (server and worker get it).
+  WORKER_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS: ${E2E_SHIFT_STATEMENT_DISPATCH_INTERVAL_SECONDS:-30}
   HWS_RUNTIME_ENABLED: 'false'
   AI_ENABLED: 'false'
   WORKSPACE_BASE_DOMAIN: !reset null
@@ -38,7 +53,9 @@ services:
   server:
     environment:
       <<: *parity-env
-      PG_POOL_MAX_CONNECTIONS: '9'
+    healthcheck:
+      # Production's interval (10 s): the health ping is part of the idle SQL a window measures.
+      interval: 10s
     ports: !override
       - '127.0.0.1:${E2E_API_PORT:-3400}:3000'
 

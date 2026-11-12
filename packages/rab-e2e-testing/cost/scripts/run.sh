@@ -121,7 +121,7 @@ M="$HERE/measure.sh"; S="$HERE/stack.sh"; GUARD="$OUT/guard"
 cd "$REPO"
 exec > >(tee -a "$OUT/run.log") 2>&1
 log "run: source=$SOURCE ${TREE:+tree $TREE }commit $FULL tag $COST_TAG out $OUT idle ${IDLE_S}s heavy-run=$HEAVY label=${COST_HEAVY_LABEL:-p6} skip=${SKIP:-none} mode=shared-host (dev stack never touched)"
-[ -f "$COST_SECRETS" ] || bash "$HERE/gen-secrets.sh"
+bash "$HERE/gen-secrets.sh"  # creates the file on first use; adds CREWFLOW_OWNER_PW to a file from before the owner login
 load_secrets
 
 # Worker base configuration for every phase (Phase A): <out>/worker-env/base.env, used by every worker (re)creation.
@@ -139,10 +139,11 @@ fi
 mv "$OUT/worker-env/base.env.new" "$OUT/worker-env/base.env"
 export COST_WORKER_ENV_FILE; COST_WORKER_ENV_FILE="$(hostpath "$OUT/worker-env/base.env")"
 unset COST_REALTIME_ENABLED COST_PUSH_ENABLED
-fixed_keys="$(COST_WORKER_ENV_FILE="$(hostpath "$COST_DIR/init/empty.env")" dc config --format json worker | node -e 'let r="";process.stdin.on("data",d=>r+=d).on("end",()=>{const e=JSON.parse(r).services.worker.environment;console.log(Object.keys(e).join(" "))})')"
+. "$COST_DIR/lib/worker-env.sh"
+fixed_keys="$(fixed_env_keys)"
 while IFS='=' read -r k _; do
   [ -n "$k" ] || continue
-  [[ " $fixed_keys " != *" $k "* ]] || die "--worker-env-file: $k is set by docker-compose.cost.yml for the worker; an env-file value would be ignored"
+  [[ " $fixed_keys " != *" $k "* ]] || die "--worker-env-file: $k is set by docker-compose.cost.yml for the worker or the api; an env-file value would be ignored"
 done < "$OUT/worker-env/base.env"
 
 # ---- isolation preflight and baselines ------------------------------------------------------------------------------
@@ -332,7 +333,8 @@ if want assemble; then
     echo "docker=$(docker version -f '{{.Server.Version}}')"
     echo "vm.cpus=$(docker info -f '{{.NCPU}}') vm.memBytes=$(docker info -f '{{.MemTotal}}')"
     echo "limits.api=cpus ${COST_API_CPUS:-1} mem ${COST_API_MEM:-768m}; limits.worker=cpus ${COST_WORKER_CPUS:-1} mem ${COST_WORKER_MEM:-1g}; pg=no cpu limit, mem 1g; redis mem 256m; minio mem 384m; loadgen cpus ${COST_AC_CPUS:-2} mem 256m; pdf bench cpus 1 mem 1g"
-    echo "flags=NODE_ENV=development HWS_RUNTIME_ENABLED=false WORKER_SCHEDULER=interval STORAGE_DRIVER=S3(MinIO) EMAIL_DRIVER=LOGGER REALTIME_ENABLED=false PUSH_ENABLED=false (worker; = code defaults = production compose, which sets neither) AI_ENABLED=false caches=default(off)"
+    echo "db=owner-login (one crewflow_owner login; api migrates on start and registers the schedulers; worker consume-only) pg=$(q "show server_version")"
+    echo "flags=NODE_ENV=development HWS_RUNTIME_ENABLED=false WORKER_SCHEDULER=bullmq STORAGE_DRIVER=S3(MinIO) EMAIL_DRIVER=LOGGER REALTIME_ENABLED=false PUSH_ENABLED=false (worker; = code defaults = production compose, which sets neither) AI_ENABLED=false caches=default(off)"
     echo "phaseA.workerBaseEnvKeys=$(cut -d= -f1 "$OUT/worker-env/base.env" | tr '
 ' ' ')"
     echo "phaseA.flagsConfigs=idle-O0/O5/O20: REALTIME_ENABLED=false PUSH_ENABLED=false (API + worker); idle-O0/O5/O20-flags-on: REALTIME_ENABLED=true PUSH_ENABLED=true on the API AND the worker (${FLAGS_IDLE_S}s); idleS3Trace=${COST_IDLE_S3_TRACE:-0}"
