@@ -17,6 +17,12 @@ import { AttendancePerUserThrottleGuard } from './attendance-per-user-throttle.g
  * throw after the real `incr` ran, which is exactly the reported sequence.
  */
 const REDIS_URL = process.env.REDIS_URL;
+// Locally without Redis the suite is skipped. Under CI it must never silently skip: every CI job that runs this file sets
+// REDIS_URL (ci-server, which runs the whole rab-server suite, has a Redis service), so a missing REDIS_URL there is a broken
+// job and fails here instead of reporting a green run that tested nothing.
+if (!REDIS_URL && process.env.CI) {
+  throw new Error('attendance-per-user-throttle.guard.spec.ts needs REDIS_URL under CI (it runs against a real Redis).');
+}
 const describeIfRedis = REDIS_URL ? describe : describe.skip;
 
 const LIMIT = 10;
@@ -93,18 +99,30 @@ describeIfRedis('AttendancePerUserThrottleGuard: atomic window (X1.7, audit DUP-
     await expect(guard.canActivate(contextFor(userId))).resolves.toBe(true);
   });
 
-  it('keeps the contract: 10 clock actions per user per window, the 11th gets 429; the TTL is set once, not extended', async () => {
+  it('keeps the contract: 10 clock actions per user per window, the 11th gets 429; a new window gets a 60 s TTL', async () => {
     const { userId, key } = newUser();
     const guard = guardWith(redis);
     for (let i = 1; i <= LIMIT; i++) await expect(guard.canActivate(contextFor(userId))).resolves.toBe(true);
-    const ttlAfterTen = await redis.pttl(key);
     await expect(guard.canActivate(contextFor(userId))).rejects.toBeInstanceOf(ThrottlerException);
     expect(await redis.get(key)).toBe(String(LIMIT + 1));
-    // Fixed window: later requests never push the expiry back.
-    expect(await redis.pttl(key)).toBeLessThanOrEqual(ttlAfterTen);
+    const ttl = await redis.pttl(key);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(60_000);
     // Per user: another staff member is unaffected.
     const other = newUser();
     await expect(guard.canActivate(contextFor(other.userId))).resolves.toBe(true);
+  });
+
+  it('fixed window: a request inside a window never extends its TTL (a key with 5 s left keeps <= 5 s, not a fresh 60 s)', async () => {
+    const { userId, key } = newUser();
+    // A window already in progress: 3 hits so far, 5 s left. A script that re-armed PEXPIRE on every hit would push this
+    // back to ~60 s (a sliding window, which would keep a busy user locked out for as long as they kept retrying).
+    await redis.set(key, '3', 'PX', 5_000);
+    await expect(guardWith(redis).canActivate(contextFor(userId))).resolves.toBe(true);
+    expect(await redis.get(key)).toBe('4');
+    const ttl = await redis.pttl(key);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(5_000);
   });
 
   it('keeps the CF-17 failure policy: the store unavailable -> the request is allowed (fail open), nothing written', async () => {
