@@ -6555,3 +6555,40 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Residual:** a raw-SQL write to an authority table inside a transaction WITHOUT the in-transaction version bump would
   not clear the memo for later checks in that transaction. Every service writer bumps (P1D); a writer that does not is
   already a revocation defect for the auth-context cache.
+
+### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
+- **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
+  a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
+  path stays until X5.1.
+- **Actor → action → consequence.**
+  - A holder of the owner credential can already do everything these commands do (BC-01, BC-03, BC-16).
+  - The commands add no grant, no statement and no plan. Their cross-tenant reads and the session-row inserts still run
+    only through the frozen statement names, in a transaction narrowed to `rab_secure_owner` and verified each time.
+    The narrowed session gains nothing.
+  - **What is wider (security review L2).** The non-narrowed command code runs as `crewflow_owner`, where in the ops
+    container it ran as `crewflow_app`: RefreshTokenService, SecurityVersionService, AuditService, the HWS physical copy and
+    the tenant-context writes.
+    - That is the privilege the API already runs with (PT-01).
+    - But a bug in these commands now has the owner login's blast radius (BC-01, BC-05, BC-06), not the restricted
+      login's.
+  - **The frozen lists limit the command code, not the operator.** Whoever runs the one-off holds a login that can
+    `SET ROLE rab_secure_owner` directly (G-02). The operator is trusted exactly as far as any holder of the owner
+    credential.
+- **Controls.** Any other login is refused three times:
+  - before connecting (the URL user);
+  - at boot gate 1;
+  - on the database (`verifyOpsAppSession`).
+
+  The command body refuses to run inside the API, Worker or provisioner process. The operator label is required.
+  `SET LOCAL` ends with the transaction, and the pool's `RESET ROLE` still runs.
+- **Residual.**
+  - The label is an operator claim, not a verified identity. Accountability comes from the platform's job controls.
+  - **OPEN owner decision: read-only modes are unaudited.** `--dry-run`, `--verify` and the containment dry-run write no
+    `audit_log` row. Their only record is the console line and the operator's retained copy of stdout (the runbook
+    requires a `tee`); `--rm` with json-file logging loses the container log. Auditing them would need a new per-run
+    action and a choice of organisation, because `audit_log` is tenant-scoped. Not decided.
+  - Containment's outcome log needs the runbook's host bind-mount. Without it the log write fails after the suspensions
+    have committed, and the evidence is lost (the audit rows remain).
+  - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
+- **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
+  `__tests__/integration/ops-owner-login.integration.spec.ts`.

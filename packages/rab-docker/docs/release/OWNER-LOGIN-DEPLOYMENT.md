@@ -588,6 +588,101 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
   - Worker: 1.5 GB, with the native PDF budget rule from #61 (`PDF_NATIVE_MEMORY_BUDGET_MB`).
   - Redis: 640 MB.
 
+
+### Operations commands (containment, session backfill, HWS backfill) under the owner login
+
+The three operations commands run like `bootstrap-admin`: as a **one-off container of the API service**, from the same
+image, under the same owner login (`database.env`) and the same runtime configuration. This is the Twenty way: one image,
+one login. Nothing new is deployed. `rab-ops` is SUPERSEDED: do not use it on an owner-login deployment.
+
+| Command | What it does | Modes |
+|---|---|---|
+| `containment:suspend-test-accounts` | Incident containment: deactivates the frozen set of fixture accounts. | dry-run (default), `--execute` |
+| `user-session:backfill` | Creates `core.user_session` rows for refresh-token families created before sessions existed. Run it before `USER_SESSION_ENFORCEMENT_CUTOVER`. | `--verify`, `--dry-run` (default), `--apply` |
+| `hws:backfill` | Copies legacy workspace rows into each workspace's own schema. Run it only as an approved step of the HWS cutover (gate G4). | `--dry-run` (default), `--verify`, `--apply` / `--resume` (with `--hws-cutover` while HWS is off) |
+
+**Required on every run.**
+- **The operator label** (three flags; every run is refused without them):
+  - `--operator-source`: one of `github-actions`, `gitlab-ci` or `manual-console`;
+  - `--operator-id`: the CI OIDC subject, the run id or the deploy user. Printable, no spaces, at most 200 characters;
+  - `--change-ref`: the approved ticket, PR or change reference. At most 120 characters.
+
+  The label is an **operational claim, not a verified identity**. It is printed on the run's first console line and
+  stored verbatim in every audit row the run writes (`metadata.operationalLabel`, with `path: owner-login` and a random
+  `runId`). Accountability for who ran the command comes from the platform's own controls: protected environments,
+  required reviewers and manual approval jobs.
+- **Per-invocation command authority**, on this one-off run only: `DB_TARGET=production` and
+  `ALLOW_PRODUCTION_DB_COMMANDS=true`. Never put them in a service environment or an env file; the env-file lint refuses
+  them.
+- **The owner login only.** The command refuses any other database login, before it connects and again on the database.
+  It reads the login with the same parser as the connection, so `?user=…` and `options=-c role=…` are refused. In every
+  environment it also refuses:
+  - `DATABASE_URL*` and `DB_POOL_MAX`;
+  - the libpq `PG*` variables (`PGOPTIONS`, `PGUSER`, …);
+  - `PG_DATABASE_REPLICA_URL`;
+  - the old `CREWFLOW_OPS_*` and `PG_OPS_*` variables.
+
+  `run` uses the service's own `database.env`. If that file sets `PG_DATABASE_REPLICA_URL`, blank it on the one-off with
+  `-e PG_DATABASE_REPLICA_URL=` (an empty value counts as unset).
+- **A host directory, REQUIRED** for `--target`, `--log` and `--report-file`. rab-api runs with `read_only: true` and has
+  no tmpfs, so a path inside the container cannot be written.
+  - Mount one host directory read-write, for example `-v "$PWD/ops-run:/ops"`, and give every path under `/ops`.
+  - Without the mount, containment's JSON-lines log fails AFTER the suspensions have committed. The suspensions stay
+    done, but the run's outcome log (the evidence) is lost.
+  - Check the directory is writable by uid 1000 before you start.
+  - Containment logs hold IDs and outcomes only.
+- **A kept copy of stdout, REQUIRED.** `--rm` removes the container, and with the json-file logging driver its log goes
+  with it, including the `[ops] command=… path=owner-login run=… actor_source=… actor_id=… change_ref=…` line that is the
+  only record of a read-only run.
+  - Pipe every run through `tee` into a file in the same kept directory, e.g. `2>&1 | tee -a ops-run/<change-ref>.log`.
+  - Keep that file with the change record.
+
+**Examples** (`$P` and `$L` are the compose command and layout from step 5; the `-e` flags are the only extra environment):
+
+```bash
+mkdir -p ops-run && chown 1000:1000 ops-run    # the API image runs as uid 1000
+# Session backfill: verify first. When missing = 0, nothing else is needed.
+$P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
+  rab-api node packages/rab-server/dist/command/main.js user-session:backfill --verify \
+  --operator-source manual-console --operator-id deploy@ops-host --change-ref OPS-123 \
+  2>&1 | tee -a ops-run/OPS-123.log
+# ...then a dry run, then --apply (each run takes the same three label flags, the mount and the tee).
+
+# Containment: a dry run first. Add --execute only after the dry run matches the frozen totals.
+$P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
+  rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts \
+  --target /ops/targets.tsv --expect-orgs 389 --expect-users 698 --expect-active 645 \
+  --actor-user-id <active platform admin uuid> --log /ops/containment.jsonl \
+  --operator-source manual-console --operator-id deploy@ops-host --change-ref INC-2026-10-05 \
+  2>&1 | tee -a ops-run/INC-2026-10-05.log
+```
+
+With `tee`, the shell's exit status is tee's. Use `set -o pipefail`, or check `${PIPESTATUS[0]}`, to see the command's
+own exit code.
+
+**What runs where (minimum role per step).** One login, `crewflow_owner`. Cross-tenant reads and the session-row inserts
+use the same login, narrowed by `SET LOCAL ROLE rab_secure_owner` inside a verified transaction on its own connection:
+- the login and its facts are checked before and after narrowing;
+- the deployment identity must equal the main session's;
+- the transaction is READ ONLY for every read step;
+- only the statements on the frozen list in `command/ops/ops-statements.ts` can run.
+
+Writes that belong to a tenant use the normal tenant-context path, where FORCE RLS binds them:
+- suspensions, audit rows and HWS copies;
+- `user-session:backfill --verify` and every `hws:backfill` mode, which never narrow.
+
+**What gets audited.** Writing modes only, as before:
+- `user.suspended`, one per suspension, also carrying `actorClaim`;
+- `ops.user_session_backfill_applied`, one per organisation;
+- `ops.hws_backfill_applied`, one per workspace.
+
+Each of these rows carries the label and `databaseVerified.appLogin = crewflow_owner`, plus `elevatedLogin` and
+`elevatedRole` where the run narrowed. Read-only modes write no audit row; their record is the console line and the
+deployment platform's job log.
+
+**Exit codes.** Every refusal prints `[ops] refused: …`, `[pg-config] refused: …` or `[db-target] refused: …` (names
+only, never a value) and exits 1. A failed command body also exits 1.
+
 ## 8. Interface assumptions and test status
 
 | Assumption | Owner |
