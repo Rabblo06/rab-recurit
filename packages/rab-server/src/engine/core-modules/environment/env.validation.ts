@@ -11,6 +11,7 @@ import { PgConfigError, resolvePgEnvironmentCached } from '../../../database/pos
 import { ConnectionBudgetError, readDeploymentShape } from '../../../database/runtime/connection-budget';
 import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contract';
 import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
+import { rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
 
 /**
@@ -204,11 +205,22 @@ ${(error as Error).message}`);
   // Phase B (B1): the database rules (PG_DATABASE_URL, legacy names, URL policy, TLS, strict pool numbers). In production
   // the problem is reported with the other production refusals.
   const databaseProblem = databaseConfigurationProblem(normalised);
+  // X1.2 (audit XA-01 / DUP-03): the one rate-limit switch, RAB_DISABLE_RATE_LIMIT, is refused in a production runtime unless
+  // it is unset, blank or false (throttler/rate-limit-bypass.ts). Production = NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says so,
+  // so it is read from the RAW configuration, not the validated schema. The variable name only, never its value.
+  const rateLimitBypassProblem = rateLimitBypassProductionProblem(config as Record<string, string | undefined>);
   if (validated.NODE_ENV === 'production') {
-    const problems = [...productionConfigurationProblems(validated), ...(databaseProblem ? [databaseProblem] : [])];
+    const problems = [
+      ...productionConfigurationProblems(validated),
+      ...(databaseProblem ? [databaseProblem] : []),
+      ...(rateLimitBypassProblem ? [rateLimitBypassProblem] : []),
+    ];
     if (problems.length > 0) {
       throw new Error(`Invalid environment configuration for production:\n${problems.join('\n')}`);
     }
+  } else if (rateLimitBypassProblem) {
+    // RAB_RUNTIME_ENV or DB_TARGET says production while NODE_ENV does not: still a production runtime for this rule.
+    throw new Error(`Invalid environment configuration for production:\n${rateLimitBypassProblem}`);
   } else if (databaseProblem) {
     throw new Error(`Invalid environment configuration:\n${databaseProblem}`);
   }
