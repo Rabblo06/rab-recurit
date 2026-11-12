@@ -33,7 +33,9 @@ jobs:
       REDIS_URL: redis://localhost:6379
       EMAIL_DRIVER: LOGGER
       # X3.3 (XR-14): production runs only WORKER_SCHEDULER=bullmq (env.validation.ts refuses interval there); NODE_ENV=test
-      # would otherwise default to interval. The suites run in the production scheduler mode.
+      # would otherwise default to interval. This sets the value env validation sees; no suite boots main.ts from
+      # process.env. The bullmq scheduler path itself is covered by scheduler-registration.spec and
+      # bullmq-scheduler.integration.spec, which pass an explicit env.
       WORKER_SCHEDULER: bullmq
       # PostgreSQL (M2 CI reliability, 2026-10-28): same change as ci-server. No service volume of postgres-init (checkout
       # failed with EACCES) and no rab_owner migration run (refused at the role split). The database is started after
