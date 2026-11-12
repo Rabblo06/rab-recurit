@@ -318,7 +318,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:b2bd3bc40131df1245f60afb435e3b3d7eb8391168620e31e779078695d4b980}
     command: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
@@ -388,7 +388,7 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:b2bd3bc40131df1245f60afb435e3b3d7eb8391168620e31e779078695d4b980}
     command: ["node", "packages/rab-worker/dist/main.js"]
     working_dir: /app
     # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
@@ -468,7 +468,7 @@ services:
   # rab-ops — SUPERSEDED (separated mode), kept unchanged and never started by `up` until the final clean-up PR (#9, owner
   # approval). Do not run it against an owner-login deployment.
   rab-ops:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:b2bd3bc40131df1245f60afb435e3b3d7eb8391168620e31e779078695d4b980}
     profiles: ["ops"]
     env_file:
       - .env.ops
