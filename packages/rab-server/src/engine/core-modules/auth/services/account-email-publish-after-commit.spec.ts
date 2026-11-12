@@ -111,6 +111,8 @@ function harness(opts: { user?: Record<string, unknown> } = {}) {
   );
   const dataSource = { query: jest.fn(async (): Promise<unknown[]> => []) };
   const platformAdmin = { isPlatformAdmin: jest.fn(async () => false), isPlatformAdminTx: jest.fn(async () => false) };
+  // X1.4: the per-address forgot-password limiter admits (its own behaviour is covered by password-reset-email-limiter.service.spec.ts).
+  const passwordResetLimiter = { admit: jest.fn(async () => undefined) };
   const auth = new AuthService(
     dataSource as never,
     { runInTenantContext: jest.fn((_ctx: unknown, fn: (m: never) => Promise<unknown>) => transaction(fn)) } as never,
@@ -132,6 +134,7 @@ function harness(opts: { user?: Record<string, unknown> } = {}) {
     undefined as never,
     undefined as never,
     { recordSignInGrant: jest.fn(async () => undefined) } as never,
+    passwordResetLimiter as never,
   );
   const ctx = { organisationId: ORG, workspaceId: null, userId: 'actor-user', role: '' } as never;
   return { lifecycle, auth, transaction, manager, state, published, enqueued, emailQueue, dataSource, platformAdmin, resetTokens, ctx, user };
