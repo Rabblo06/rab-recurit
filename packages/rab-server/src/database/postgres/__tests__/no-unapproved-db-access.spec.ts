@@ -74,6 +74,14 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     hits: 9,
     why: 'owner-login lifecycle CI harness on a disposable cluster: superuser probe/seed Clients, a one-migration replay DataSource, and the legacy-chain GuardedMigrationDataSource (sets DATABASE_URL* for it, then deletes them)',
   },
+  // DB setup like Twenty (area 2): the bootstrap child, the ONLY process that connects as the database admin. Its two
+  // configs (admin session, crewflow_owner probe) come from the factory's pgClientConfig (URL policy, TLS, timeouts); the
+  // one construction exists only to set the fixed application_name crewflow-owner-bootstrap(-probe) that deploy-order B7
+  // asserts. It reads no URL variable itself (readPrimaryDatabaseUrl / planOwnerLogin).
+  'packages/rab-server/src/database/typeorm/scripts/owner-login/owner-bootstrap.ts': {
+    hits: 1,
+    why: 'bootstrap child: new Client(config) on the factory pgClientConfig, only to fix application_name',
+  },
   'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts': {
     hits: 1,
     why: 'developer fingerprint generator: one Client per throwaway database it creates and drops on a disposable cluster',

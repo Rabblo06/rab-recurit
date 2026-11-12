@@ -6602,3 +6602,73 @@ cache change. The layer-2 service checks stay in the services; this changes only
   - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
 - **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
   wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
+
+## Phase X1.2 — one explicit rate-limit switch, refused in production (cleanup audit XA-01 / DUP-03)
+
+LOW (defence in depth)
+Failure:      whoever controls a service's environment (misconfiguration, a compromised deploy config or platform) sets
+              JEST_WORKER_ID (any value) → the API boots normally → the global per-IP throttle, the per-route auth tiers,
+              the login / MFA / admin-MFA-reset limiter and the attendance per-user throttle are all skipped, silently →
+              credential stuffing and brute force unthrottled.
+Actor:        the service environment (already high privilege; not an anonymous attacker).
+Location:     throttler.module.ts:63, login-attempt-limiter.service.ts:203, attendance-per-user-throttle.guard.ts:63 (main
+              843bd3fd): three copies of `JEST_WORKER_ID !== undefined && RAB_DISABLE_RATE_LIMIT !== 'false'`.
+Root cause:   the bypass treated an environment variable as proof of a Jest run, an UNSET flag satisfied `!== 'false'`, and
+              nothing refused it at boot. The comments claimed it "can never be true outside an actual Jest run".
+Fix:          one explicit switch, engine/core-modules/throttler/rate-limit-bypass.ts isRateLimitBypassEnabled:
+              RAB_DISABLE_RATE_LIMIT exactly 'true', never active when NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says
+              production. JEST_WORKER_ID plays no part. env.validation.ts refuses to boot a production process while
+              RAB_DISABLE_RATE_LIMIT holds anything but unset, blank or false (name only). The three limiters use the helper;
+              both Jest setups set the flag to 'true'. Comments corrected.
+Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass abuse cases, the production refusal, a
+              source scan that no server/Worker source reads RAB_DISABLE_RATE_LIMIT or JEST_WORKER_ID outside the helper, and
+              that the three limiters call it); rate-limit-bypass.limiters.spec.ts and
+              attendance-per-user-throttle.bypass.spec.ts (flag unset with JEST_WORKER_ID set, flag '1', and flag 'true' in a
+              production runtime → the login/MFA/admin-MFA-reset limiter and the attendance guard reach their store);
+              env.validation.rate-limit-bypass.spec.ts (production + the flag → refused; RAB_RUNTIME_ENV=production →
+              refused; unset/blank/false/JEST_WORKER_ID accepted; development / test keep it); rate-limiting.integration.spec.ts
+              (flag 'true' still skips the auth throttle; flag UNSET under Jest → the 6th forgot-password gets 429).
+
+- **Unchanged:** every rate-limit value, key, 429 / 503 contract and Redis failure policy; InvitationRateLimitService and
+  AiQuotaService still have no bypass.
+- **Residual (accepted design, owner prompt §3):** outside production the switch is one variable. A development, QA or staging
+  service started with RAB_DISABLE_RATE_LIMIT=true runs unthrottled (before, it also needed JEST_WORKER_ID). Staging is not a
+  declared production value here unless it sets NODE_ENV / RAB_RUNTIME_ENV / DB_TARGET=production. No compose file, env
+  template or workflow sets the flag today (checked with git grep).
+
+### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
+- **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
+  a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
+  path stays until X5.1.
+- **Actor → action → consequence.**
+  - A holder of the owner credential can already do everything these commands do (BC-01, BC-03, BC-16).
+  - The commands add no grant, no statement and no plan. Their cross-tenant reads and the session-row inserts still run
+    only through the frozen statement names, in a transaction narrowed to `rab_secure_owner` and verified each time.
+    The narrowed session gains nothing.
+  - **What is wider (security review L2).** The non-narrowed command code runs as `crewflow_owner`, where in the ops
+    container it ran as `crewflow_app`: RefreshTokenService, SecurityVersionService, AuditService, the HWS physical copy and
+    the tenant-context writes.
+    - That is the privilege the API already runs with (PT-01).
+    - But a bug in these commands now has the owner login's blast radius (BC-01, BC-05, BC-06), not the restricted
+      login's.
+  - **The frozen lists limit the command code, not the operator.** Whoever runs the one-off holds a login that can
+    `SET ROLE rab_secure_owner` directly (G-02). The operator is trusted exactly as far as any holder of the owner
+    credential.
+- **Controls.** Any other login is refused three times:
+  - before connecting (the URL user);
+  - at boot gate 1;
+  - on the database (`verifyOpsAppSession`).
+
+  The command body refuses to run inside the API, Worker or provisioner process. The operator label is required.
+  `SET LOCAL` ends with the transaction, and the pool's `RESET ROLE` still runs.
+- **Residual.**
+  - The label is an operator claim, not a verified identity. Accountability comes from the platform's job controls.
+  - **OPEN owner decision: read-only modes are unaudited.** `--dry-run`, `--verify` and the containment dry-run write no
+    `audit_log` row. Their only record is the console line and the operator's retained copy of stdout (the runbook
+    requires a `tee`); `--rm` with json-file logging loses the container log. Auditing them would need a new per-run
+    action and a choice of organisation, because `audit_log` is tenant-scoped. Not decided.
+  - Containment's outcome log needs the runbook's host bind-mount. Without it the log write fails after the suspensions
+    have committed, and the evidence is lost (the audit rows remain).
+  - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
+- **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
+  `__tests__/integration/ops-owner-login.integration.spec.ts`.
