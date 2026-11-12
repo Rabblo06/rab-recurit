@@ -302,6 +302,26 @@ test('X1.8 review finding 2: a percent-encoded admin password is matched raw and
   assert.ok('X18_RAW_PW' in run.spawned.seed && 'X18_ENCODED_PW' in run.spawned.seed, 'control: the seed sees both');
 });
 
+test('X1.8 re-review: source password raw, copy percent-encoded (e.g. x18%2Dsentinel%2Dadmin%2Dpw) reaches the seed only', () => {
+  const encodedCopy = ADMIN_PW.split('-').join('%2D');
+  const run = runHarnessWithStubs({ envLines: [`X18_ENCODED_COPY=${encodedCopy}`, `X18_ENCODED_URL=postgres://x18_superuser:${encodedCopy}@127.0.0.1:15436/x18_ai_e2e`] });
+  assertOnlySeedHoldsAdmin(run);
+  for (const role of Object.keys(run.spawned).filter((r) => r !== 'seed')) {
+    assert.ok(!('X18_ENCODED_COPY' in run.spawned[role]) && !('X18_ENCODED_URL' in run.spawned[role]), `${role} child holds the encoded copy`);
+  }
+  assert.ok('X18_ENCODED_COPY' in run.spawned.seed && 'X18_ENCODED_URL' in run.spawned.seed, 'control: the seed sees both');
+});
+
+test('X1.8 re-review: a name bash cannot use as a variable (ADMIN.URL) holding the superuser URL reaches the seed only', () => {
+  const run = runHarnessWithStubs({ parentEnv: { 'ADMIN.URL': ADMIN_SENTINEL, 'X18.PW': ADMIN_PW } });
+  // Control: bash passes such names through to its children, so without the strip they would arrive.
+  assert.ok('ADMIN.URL' in run.spawned.seed && 'X18.PW' in run.spawned.seed, 'control: the seed inherits the bash-invalid names');
+  assertOnlySeedHoldsAdmin(run);
+  for (const role of Object.keys(run.spawned).filter((r) => r !== 'seed')) {
+    assert.ok(!('ADMIN.URL' in run.spawned[role]) && !('X18.PW' in run.spawned[role]), `${role} child holds a bash-invalid admin name`);
+  }
+});
+
 test('X1.8: a short admin password (fewer than 8 characters) is not substring-matched, and "postgres" never matches a URL scheme', () => {
   const script = (adminPw) =>
     [

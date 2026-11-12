@@ -50,23 +50,32 @@ ai_e2e_percent_decode() {
   printf '%b' "${s//%/\\x}"
 }
 
-# Prints, one per line, every exported name whose name is a libpq PG* variable (PGPASSWORD, PGHOST, ...), a PG_*URL other than
+# Lists the exported environment as NUL-separated NAME=value entries, straight from `env -0`: unlike `compgen -e` this includes
+# names bash itself cannot use as variables (e.g. `ADMIN.URL`, which a child still inherits).
+ai_e2e_env_entries() {
+  env -0
+}
+
+# Prints, one per line, every exported name that is a libpq PG* variable (PGPASSWORD, PGHOST, ...), a PG_*URL other than
 # PG_DATABASE_URL, or a POSTGRES_* variable (the image's POSTGRES_PASSWORD / POSTGRES_USER).
 ai_e2e_pattern_names() {
-  local name
-  while IFS= read -r name; do
+  local entry name
+  while IFS= read -r -d '' entry; do
+    name="${entry%%=*}"
     if [[ "$name" =~ ^PG[A-Z0-9]*$ ]] || [[ "$name" =~ ^POSTGRES_ ]] || { [[ "$name" =~ ^PG_.*URL$ ]] && [ "$name" != PG_DATABASE_URL ]; }; then
       printf '%s\n' "$name"
     fi
-  done < <(compgen -e)
+  done < <(ai_e2e_env_entries)
   return 0
 }
 
-# Prints, one per line, every exported name whose value equals an AI_E2E_STRIPPED_VALUE_SOURCES value or contains its password
-# (raw or decoded, AI_E2E_MIN_PASSWORD_MATCH characters or more). A leading scheme (postgres://) is ignored for the password
-# match, so a password that happens to spell "postgres" does not match every URL. Values are compared, never printed.
+# Prints, one per line, every exported name (any name, see ai_e2e_env_entries) whose value equals an
+# AI_E2E_STRIPPED_VALUE_SOURCES value or contains its password, the source's password and the value each compared both as
+# written and percent-decoded (AI_E2E_MIN_PASSWORD_MATCH characters or more). A leading scheme (postgres://) is ignored for
+# the password match, so a password that happens to spell "postgres" does not match every URL. Values are compared, never
+# printed.
 ai_e2e_admin_value_aliases() {
-  local src value name v pw needle
+  local src value entry name v dv pw needle
   local values=() needles=()
   for src in "${AI_E2E_STRIPPED_VALUE_SOURCES[@]}"; do
     value="${!src:-}"
@@ -78,17 +87,23 @@ ai_e2e_admin_value_aliases() {
     done
   done
   [ "${#values[@]}" -gt 0 ] || return 0
-  while IFS= read -r name; do
-    v="${!name:-}"
+  while IFS= read -r -d '' entry; do
+    name="${entry%%=*}"
+    v="${entry#*=}"
     [ -n "$v" ] || continue
     for value in "${values[@]}"; do
       if [ "$v" = "$value" ]; then printf '%s\n' "$name"; continue 2; fi
     done
     v="${v#*://}"
+    dv="$v"
+    if [[ "$v" == *%* ]]; then
+      dv="${v//\\/\\\\}"
+      printf -v dv '%b' "${dv//%/\\x}"
+    fi
     for needle in "${needles[@]}"; do
-      if [[ "$v" == *"$needle"* ]]; then printf '%s\n' "$name"; continue 2; fi
+      if [[ "$v" == *"$needle"* ]] || [[ "$dv" == *"$needle"* ]]; then printf '%s\n' "$name"; continue 2; fi
     done
-  done < <(compgen -e)
+  done < <(ai_e2e_env_entries)
   return 0
 }
 

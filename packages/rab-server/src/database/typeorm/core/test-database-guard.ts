@@ -408,6 +408,9 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   return resolved;
 }
 
+/** Query parameters refused on TEST_DATABASE_WORKER_URL on top of TARGET_OVERRIDE_QUERY_PARAMS (session role / settings). */
+export const WORKER_URL_REFUSED_QUERY_PARAMS: readonly string[] = ['options'];
+
 /** Names whose login the Worker-login switch may never use: the test admin / bootstrap superuser and the other admin logins. */
 export const WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES: readonly string[] = [
   TEST_DATABASE_URL_UNPOOLED,
@@ -431,6 +434,13 @@ export function resolveWorkerLoginTestDatabase(env: Record<string, string | unde
   const resolved = resolveIntegrationTestDatabase(env);
   assertNoRedirectingProcessEnv(env, resolved);
   const worker = describeDatabaseUrl(workerUrl, TEST_DATABASE_WORKER_URL);
+  // X1.8 re-review: `options` (e.g. `-c role=...`) can change the session's role after login, so the role the live check
+  // sees would not be the login's. Refused for the worker URL (the other guards keep their own query-parameter rules).
+  for (const key of WORKER_URL_REFUSED_QUERY_PARAMS) {
+    if (new URL(workerUrl).searchParams.has(key)) {
+      throw new TestDatabaseConfigError(`${TEST_DATABASE_WORKER_URL} sets "${key}" as a query parameter, which can change the session role after login. Refusing to start.`);
+    }
+  }
   for (const name of WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES) {
     const raw = present(env, name);
     if (!raw) continue;
@@ -536,15 +546,20 @@ export async function probeDatabaseIdentity(url: string, label: string): Promise
 
 /**
  * X1.8 review finding 4: the live half of the Worker-login switch, run once from the worker Jest globalSetup. When the switch
- * is on, the static rules run again, then the worker login itself connects (read-only) and must reach the TEST database as a
- * role that is neither a superuser nor BYPASSRLS. Returns false when the switch is off.
+ * is on, the static rules run again (including no `options` query parameter), then the worker login itself connects
+ * (read-only) and must reach the TEST database with a session_user that is not, and is not a member (direct or inherited)
+ * of, any superuser or BYPASSRLS role. Returns false when the switch is off.
  */
 export async function assertWorkerLoginNotPrivilegedAtRuntime(env: Record<string, string | undefined>): Promise<boolean> {
   const login = resolveWorkerLoginTestDatabase(env);
   if (!login) return false;
   const row = await withProbeClient(login.workerUrl, TEST_DATABASE_WORKER_URL, async (client) => {
+    // X1.8 re-review: judged on the LOGIN (session_user) and every role it is a member of, directly or through other
+    // roles, so neither a role switch after login nor membership in a superuser / BYPASSRLS role passes.
     const result = await client.query<{ db: string; privileged: boolean | null }>(
-      'SELECT current_database() AS db, (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user) AS privileged',
+      `SELECT current_database() AS db,
+              EXISTS (SELECT 1 FROM pg_catalog.pg_roles r
+                       WHERE (r.rolsuper OR r.rolbypassrls) AND pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER')) AS privileged`,
     );
     return result.rows[0];
   });
@@ -553,7 +568,7 @@ export async function assertWorkerLoginNotPrivilegedAtRuntime(env: Record<string
   }
   if (row.privileged !== false) {
     throw new TestDatabaseConfigError(
-      `${TEST_DATABASE_WORKER_URL} connects as a superuser or BYPASSRLS role (or one the check cannot read). The Worker runtime never runs as one. Refusing to start.`,
+      `${TEST_DATABASE_WORKER_URL} logs in as, or as a member of, a superuser or BYPASSRLS role (or one the check cannot read). The Worker runtime never runs as one. Refusing to start.`,
     );
   }
   return true;

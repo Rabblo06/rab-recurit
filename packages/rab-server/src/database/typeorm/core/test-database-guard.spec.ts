@@ -521,8 +521,54 @@ describe('integration test database guard', () => {
         expect(error).toBeInstanceOf(TestDatabaseConfigError);
         message = (error as Error).message;
       }
-      expect(message).toMatch(/connects as a superuser or BYPASSRLS role/);
+      expect(message).toMatch(/logs in as, or as a member of, a superuser or BYPASSRLS role/);
       expect(message).not.toMatch(/postgres(ql)?:\/\//);
+    });
+
+    it('re-review: a superuser URL that switches role through ?options=-c role=<restricted login> is refused', async () => {
+      const appLogin = decodeURIComponent(new URL(appUrl).username);
+      const switched = new URL(adminUrl);
+      switched.searchParams.set('options', `-c role=${appLogin}`);
+      await expect(
+        assertWorkerLoginNotPrivilegedAtRuntime({ PHASE_D_SQL_APPROVED: 'true', [TEST_DATABASE_URL]: appUrl, [TEST_DATABASE_URL_UNPOOLED]: appUrl, [TEST_DATABASE_WORKER_URL]: switched.toString() }),
+      ).rejects.toThrow(/TEST_DATABASE_WORKER_URL sets "options" as a query parameter/);
+    });
+
+    it('re-review: a non-superuser login that is a MEMBER of a superuser role is refused, live (disposable role, dropped after)', async () => {
+      // Read-write on the disposable cluster only: a NOLOGIN superuser role and a LOGIN role that is its member (with
+      // CONNECT on the test database), both dropped in finally. ci-server runs Jest --runInBand, so no posture spec runs meanwhile.
+      const { Client } = require('pg') as typeof import('pg');
+      const admin = new Client({ connectionString: adminUrl });
+      await admin.connect();
+      const suffix = `${process.pid}_${Date.now()}`;
+      const member = `x18_member_${suffix}`;
+      const superRole = `x18_super_${suffix}`;
+      const password = `x18-${require('crypto').randomBytes(16).toString('hex')}`;
+      const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
+      try {
+        const { rows } = await admin.query<{ db: string }>('SELECT current_database() AS db');
+        await admin.query(`CREATE ROLE ${ident(superRole)} NOLOGIN SUPERUSER`);
+        await admin.query(`CREATE ROLE ${ident(member)} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`);
+        await admin.query(`GRANT CONNECT ON DATABASE ${ident(rows[0].db)} TO ${ident(member)}`);
+        await admin.query(`GRANT ${ident(superRole)} TO ${ident(member)}`);
+        const memberUrl = new URL(appUrl);
+        memberUrl.username = member;
+        memberUrl.password = password;
+        let message = '';
+        try {
+          await assertWorkerLoginNotPrivilegedAtRuntime(base({ [TEST_DATABASE_WORKER_URL]: memberUrl.toString() }));
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toMatch(/logs in as, or as a member of, a superuser or BYPASSRLS role/);
+        expect(message).not.toContain(password);
+      } finally {
+        const { rows } = await admin.query<{ db: string }>('SELECT current_database() AS db');
+        await admin.query(`REVOKE ALL ON DATABASE ${ident(rows[0].db)} FROM ${ident(member)}`).catch(() => undefined);
+        await admin.query(`DROP ROLE IF EXISTS ${ident(member)}`).catch(() => undefined);
+        await admin.query(`DROP ROLE IF EXISTS ${ident(superRole)}`).catch(() => undefined);
+        await admin.end();
+      }
     });
   });
 });
