@@ -186,6 +186,23 @@ const OWNER_LOGIN = 'crewflow_owner';
 const NOT_THE_APP_LOGIN = Object.freeze(['crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator', 'rab_owner', 'rab_secure_owner', 'rab_app']);
 /** DB-SETUP: the bundled database service; its whole definition must be identical in the two compose files. */
 const DB_SERVICE = 'db';
+/**
+ * DB-SETUP PID 1 (lead decision 2026-11-12): each app service's ENTRYPOINT is its cleaning script (PID 1), which execs the
+ * image's tini only once the environment is clean; no command, no compose init (docker-init at PID 1 keeps the admin URL).
+ */
+const PID1_ENTRYPOINTS = Object.freeze({ 'rab-api': './api-prestart.sh', 'rab-worker': './worker-start.sh' });
+const hasCommand = (svc) => (Array.isArray(svc?.command) ? svc.command.length > 0 : svc?.command !== undefined && svc?.command !== null);
+function pid1Problems(services, where = '') {
+  const out = [];
+  for (const [name, script] of Object.entries(PID1_ENTRYPOINTS)) {
+    const svc = services[name];
+    if (!svc) continue;
+    if (stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
+    if (hasCommand(svc)) out.push(`${name}: has a command${where} (${script}, the entrypoint, takes none)`);
+    if (svc.init === true) out.push(`${name}: init: true${where} (docker-init would be PID 1 with the admin URL)`);
+  }
+  return out;
+}
 const DB_KEYS = [...RUNTIME_KEYS, 'image', 'environment', 'networks', 'ports', 'stop_signal', 'depends_on', 'profiles', 'env_file', 'build'];
 const OPS_ONLY = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 const LEGACY_DB = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'];
@@ -290,8 +307,8 @@ function checkVariant(variant, production, variantFiles = variant) {
     if (stable(Object.keys(vdb.networks ?? {})) !== stable(['crewflow-db'])) fail(`${DB_SERVICE}: must be on the internal crewflow-db network only`);
     if (variant?.networks?.['crewflow-db']?.internal !== true || production?.networks?.['crewflow-db']?.internal !== true) fail('network crewflow-db is not internal in both files');
   }
-  // DB-SETUP T-5: the Worker starts through worker-start.sh (the admin URL never reaches the Worker process).
-  if (stable(services['rab-worker']?.command) !== stable(['./worker-start.sh'])) fail('rab-worker: command is not exactly ./worker-start.sh (DB-SETUP T-5)');
+  // DB-SETUP T-5 / PID 1: the cleaning scripts are the entrypoints (no process keeps the admin URL).
+  for (const pr of pid1Problems(services)) fail(pr);
 
   // 1. Image-based and digest-pinned only.
   for (const [name, svc] of Object.entries(services)) {
@@ -492,7 +509,7 @@ function checkDeployment(merged, production, envFileKeys = {}) {
     for (const key of DB_KEYS.filter((k) => k !== 'environment' && k !== 'image')) if (stable(ddb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} is overridden in the deployed model`);
     if ((ddb.ports ?? []).length) fail(`${DB_SERVICE}: publishes a port in the deployed model`);
   }
-  if (stable(services['rab-worker']?.command) !== stable(['./worker-start.sh'])) fail('rab-worker: command is not exactly ./worker-start.sh in the deployed model (DB-SETUP T-5)');
+  for (const pr of pid1Problems(services, ' in the deployed model')) fail(pr);
   for (const name of ['rab-api', 'rab-worker']) {
     const a = services[name];
     const b = production?.services?.[name];

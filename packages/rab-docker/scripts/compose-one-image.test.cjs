@@ -18,13 +18,14 @@ function good() {
       db: { image: `\${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:${'f9'.repeat(32)}}` },
       'rab-api': {
         image: IMG,
+        entrypoint: ['./api-prestart.sh'],
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
         depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' } },
         stop_grace_period: '40s',
       },
       'rab-worker': {
         image: IMG,
-        command: ['./worker-start.sh'],
+        entrypoint: ['./worker-start.sh'],
         environment: { DISABLE_DB_MIGRATIONS: 'true', DISABLE_CRON_JOBS_REGISTRATION: 'true' },
         depends_on: {
           'rab-redis': { condition: 'service_healthy' },
@@ -304,10 +305,19 @@ test('DENIAL DB-SETUP: rab-api not waiting for a healthy db; the Worker started 
   m = good();
   m.services['rab-api'].depends_on.db.condition = 'service_started';
   refused(m, /rab-api: must depend on db/);
-  for (const cmd of [undefined, ['node', 'packages/rab-worker/dist/main.js'], ['sh', '-c', './worker-start.sh']]) {
+  // DB-SETUP PID 1: the cleaning scripts are the entrypoint; no command; no compose init.
+  for (const [svc, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh']]) {
+    for (const ep of [undefined, ['/sbin/tini', '-s', '--'], ['/sbin/tini', '-s', '--', script], ['sh', '-c', script], ['node', 'x.js']]) {
+      m = good();
+      m.services[svc].entrypoint = ep;
+      refused(m, new RegExp(`${svc}: entrypoint must be exactly`));
+    }
     m = good();
-    m.services['rab-worker'].command = cmd;
-    refused(m, /rab-worker: command must be exactly \["\.\/worker-start\.sh"\]/);
+    m.services[svc].command = [script];
+    refused(m, new RegExp(`${svc}: must have no command`));
+    m = good();
+    m.services[svc].init = true;
+    refused(m, new RegExp(`${svc}: init: true is refused`));
   }
 });
 

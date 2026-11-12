@@ -1,5 +1,15 @@
 #!/bin/sh
-# API start (the image's default command). Runs from /app (the image WORKDIR).
+# API start: rab-api's ENTRYPOINT in every deploy compose file (DB-SETUP; also the image's default command). Runs from /app
+# (the image WORKDIR).
+#
+# PID 1 (DB-SETUP, lead decision 2026-11-12, owner requirement #5): a container's environment is its PID 1's environment,
+# and it stays readable in /proc/1/environ to every process of the same uid for the container's whole life. So this script
+# is PID 1 itself (compose `entrypoint: ["./api-prestart.sh"]`, no compose init), cleans its environment, and only then
+# execs the init: `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`. tini (PID 1 from then on: signal forwarding,
+# zombie reaping) and main.js inherit ONLY the cleaned environment; no process of the container holds the admin URL once the
+# API runs. Run with arguments (the owner CLI one-off: `docker compose run --rm --no-deps rab-api node
+# packages/rab-server/dist/command/main.js <command>`), it does the same refusals and the same URL swap, then
+# `exec /sbin/tini -s -- "$@"`: the command runs as crewflow_owner, never as the admin, and nothing migrates or registers.
 #
 # Owner-login architecture (owner's FINAL decision 2026-11-04; M0 §7): the API, the Worker and the migrate child all use the
 # ONE database URL, PG_DATABASE_URL (the schema-owning crewflow_owner login). This script:
@@ -32,7 +42,7 @@
 #      reports 70 for one, and the relay below vetoes a 70 result that names one.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
-# The Worker never runs this, and never migrates: its command is worker-start.sh (derive + swap only, never the admin).
+# The Worker never runs this, and never migrates: its entrypoint is worker-start.sh (derive + swap only, never the admin).
 set -eu
 
 SCRIPTS=packages/rab-server/dist/database/typeorm/scripts
@@ -269,13 +279,16 @@ fi
 crewflow_bundled_db_ca
 OWNER_BOOTSTRAP="$SCRIPTS/owner-login/bootstrap-owner-login.js"
 DERIVE_RUNTIME_URL="$SCRIPTS/owner-login/derive-runtime-url.js"
-STATUS=0
-run_step node "$OWNER_BOOTSTRAP" || STATUS=$?
-case "$STATUS" in
-  0) ;;
-  64) fail_after_delay 64 "the database setup step refused (see the [owner-bootstrap] line above)" ;;
-  *) fail_after_delay "$STATUS" "the database setup step failed (see the [owner-bootstrap] lines above)" ;;
-esac
+# A one-off command (arguments given) never runs the bootstrap child: it only needs the crewflow_owner URL.
+if [ "$#" -eq 0 ]; then
+  STATUS=0
+  run_step node "$OWNER_BOOTSTRAP" || STATUS=$?
+  case "$STATUS" in
+    0) ;;
+    64) fail_after_delay 64 "the database setup step refused (see the [owner-bootstrap] line above)" ;;
+    *) fail_after_delay "$STATUS" "the database setup step failed (see the [owner-bootstrap] lines above)" ;;
+  esac
+fi
 STATUS=0
 RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
@@ -287,6 +300,12 @@ if [ -z "$RUNTIME_URL" ]; then
 fi
 export PG_DATABASE_URL="$RUNTIME_URL"
 unset RUNTIME_URL PG_DATABASE_PASSWORD
+# The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.
+if [ "$#" -gt 0 ]; then
+  trap - TERM INT
+  echo "api-prestart: one-off command: running it as crewflow_owner (no migration, no scheduler registration, no API)"
+  exec /sbin/tini -s -- "$@"
+fi
 
 # The short-lived migrate child (Agent 1). Its stdout/stderr are relayed line by line; its LAST line is
 #   TWENTY_MIGRATE_RESULT {"state":...,"applied":[...],"pending":[...],"exitCode":N,"serve":...,"policy":...,"reason":...,
@@ -414,8 +433,9 @@ else
   fi
 fi
 
+# PID 1 hand-over: tini replaces this shell as PID 1 with the cleaned environment and runs main.js as its child.
 trap - TERM INT
 if [ -n "$UPGRADE_INCOMPLETE" ]; then
-  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec node packages/rab-server/dist/main.js
+  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec /sbin/tini -s -- node packages/rab-server/dist/main.js
 fi
-exec node packages/rab-server/dist/main.js
+exec /sbin/tini -s -- node packages/rab-server/dist/main.js

@@ -69,8 +69,9 @@
 # tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions); the long-form tmpfs on rab-api's /tmp
 # makes OpenShip refuse to import this file (docs/release/OPENSHIP-COMPATIBILITY.md).
 #
-# There is no operations service: the owner CLI commands run as one-off `docker compose run --rm --no-deps rab-api ...`
-# commands under crewflow_owner (X2.2; the exact invocation is in docs/release/OWNER-LOGIN-DEPLOYMENT.md). The retired
+# There is no operations service: the owner CLI commands run as one-off `docker compose run --rm --no-deps rab-api node
+# packages/rab-server/dist/command/main.js <command>` commands under crewflow_owner (api-prestart.sh, the entrypoint, swaps
+# the admin URL for the crewflow_owner URL first) (X2.2; the exact invocation is in docs/release/OWNER-LOGIN-DEPLOYMENT.md). The retired
 # operations service, its .env.ops and every CREWFLOW_OPS_* / PG_OPS_* name stay refused by the gates and the processes.
 
 name: rab-production
@@ -237,9 +238,13 @@ services:
   rab-api:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
-    # The image's default command, stated explicitly (api-prestart.sh: env refusals, the runtime-isolation check, the
-    # migration child under the migration lock, the scheduler registration, then main.js).
-    command: ["./api-prestart.sh"]
+    # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
+    # no compose init). It runs the refusals, the runtime-isolation check, the bootstrap child, the URL swap, the migrate
+    # child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`: tini (PID 1
+    # from then on) and main.js inherit only the cleaned environment, so no process here holds the admin URL. Owner CLI
+    # one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>` (the
+    # script swaps the URL and runs the command as crewflow_owner, nothing else).
+    entrypoint: ["./api-prestart.sh"]
 
     env_file:
       - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/database.env
@@ -354,19 +359,20 @@ services:
   # ---------------------------------------------------------------------------
   # rab-worker — background jobs, ONE process as uid/gid 1000 on the same crewflow_owner login (DBA-01, the API/Worker
   # separation, is lost: runbook section 1, NEEDS OWNER APPROVAL). O1: the SAME image as rab-api, a different command. The
-  # image's ENTRYPOINT (tini -s) runs under compose's init and forwards SIGTERM; there is no root process, no capability and
+  # image's tini (exec'd by worker-start.sh, PID 1) forwards SIGTERM; there is no root process, no capability and
   # no provisioner identity (workspace provisioning runs in-process). It never migrates, never registers job schedulers
-  # (it consumes them) and starts only after a healthy API and a healthy Redis (O3 C1/C2).
+  # (it consumes them) and starts only after a healthy API and a healthy Redis (O3 C1/C2). DB-SETUP: PID 1 is worker-start.sh,
+  # then the image's tini, never compose's init (see its entrypoint).
   # ---------------------------------------------------------------------------
   rab-worker:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
-    # DB-SETUP: derives the crewflow_owner URL, unsets the admin credential, then execs node packages/rab-worker/dist/main.js.
-    command: ["./worker-start.sh"]
+    # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it derives the crewflow_owner URL, unsets the admin
+    # credential, then `exec /sbin/tini -s -- node packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog
+    # SIGKILL, ignored by the kernel for PID 1, still works) and holds only the cleaned environment. NO compose `init: true`:
+    # docker-init would be PID 1 with the container's environment, i.e. the admin URL (compose-owner-login.cjs refuses it).
+    entrypoint: ["./worker-start.sh"]
     working_dir: /app
-    # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
-    # so the Worker refuses to start as PID 1. Required (compose-owner-login.cjs).
-    init: true
     env_file:
       - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/database.env
         required: true

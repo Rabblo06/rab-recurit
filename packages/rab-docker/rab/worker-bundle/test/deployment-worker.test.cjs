@@ -73,11 +73,14 @@ function serviceEnv(rel, service, vars = {}) {
 
 const WORKER_COMMAND = ['node', 'packages/rab-worker/dist/main.js'];
 /**
- * DB-SETUP (database setup like Twenty, T-5): the two DEPLOY files run the Worker through worker-start.sh, which derives the
- * crewflow_owner URL from the admin PG_DATABASE_URL, unsets the admin credential and execs exactly WORKER_COMMAND. The dev,
- * QA and test files keep WORKER_COMMAND (they hand the Worker its own URL directly).
+ * DB-SETUP (database setup like Twenty, T-5; PID 1 lead decision 2026-11-12): the two DEPLOY files make worker-start.sh the
+ * Worker's ENTRYPOINT (PID 1, no command, no compose init). It derives the crewflow_owner URL from the admin PG_DATABASE_URL,
+ * unsets the admin credential and only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL
+ * works) with a clean environment. The dev, QA and test files keep WORKER_COMMAND under compose's init (they hand the
+ * Worker its own URL directly).
  */
-const DEPLOY_WORKER_COMMAND = ['./worker-start.sh'];
+const DEPLOY_WORKER_ENTRYPOINT = ['./worker-start.sh'];
+const TINI = ['/sbin/tini', '-s', '--'];
 const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml'];
 /** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
 const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
@@ -139,8 +142,15 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
       const { env, svc } = serviceEnv(rel, service);
       const text = JSON.stringify(svc);
       for (const retired of RETIRED) assert.ok(!text.includes(retired), `${service}: still references ${retired}`);
-      assert.deepEqual(svc.command, DEPLOY_FILES.includes(rel) ? DEPLOY_WORKER_COMMAND : WORKER_COMMAND);
-      assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
+      if (DEPLOY_FILES.includes(rel)) {
+        // DB-SETUP PID 1: the script is PID 1 and execs tini itself; docker-init would keep the admin URL at PID 1.
+        assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
+        assert.equal(svc.command, undefined, `${service}: no command (worker-start.sh takes none)`);
+        assert.notEqual(svc.init, true, `${service}: no compose init (worker-start.sh execs tini as PID 1)`);
+      } else {
+        assert.deepEqual(svc.command, WORKER_COMMAND);
+        assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
+      }
       assert.equal(String(svc.user), '1000:1000');
       assert.equal(svc.read_only, true);
       assert.deepEqual(svc.cap_drop, ['ALL']);
@@ -166,7 +176,15 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
 test('DB-SETUP: worker-start.sh execs exactly the Worker command (and nothing else starts the Worker in the deploy files)', () => {
   const script = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/worker-start.sh'), 'utf8');
   const execs = script.split(/\r?\n/).filter((l) => /^\s*exec\s/.test(l)).map((l) => l.trim());
-  assert.deepEqual(execs, [`exec ${WORKER_COMMAND.join(' ')}`]);
+  assert.deepEqual(execs, [`exec ${[...TINI, ...WORKER_COMMAND].join(' ')}`]);
+  // api-prestart.sh, rab-api's entrypoint, hands PID 1 to the same tini (main.js, and the owner CLI one-off).
+  const prestart = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/api-prestart.sh'), 'utf8');
+  const apiExecs = prestart.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).filter((l) => /\bexec \//.test(l) || /\bexec node\b/.test(l)).map((l) => l.trim());
+  assert.deepEqual(apiExecs, [
+    'exec /sbin/tini -s -- "$@"',
+    'CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
+    'exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
+  ]);
   const dockerfile = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/Dockerfile'), 'utf8');
   assert.ok(/^COPY --chmod=0555 packages\/rab-docker\/rab\/worker-start\.sh \.\/worker-start\.sh$/m.test(dockerfile), 'the image ships worker-start.sh read+execute only');
 });
@@ -215,6 +233,10 @@ test(
   { skip },
   () => {
     const svc = loadCompose('packages/rab-docker/docker-compose.production.yml').services['rab-api'];
+    // DB-SETUP PID 1: api-prestart.sh is PID 1 and hands PID 1 to tini once the environment is clean.
+    assert.deepEqual(svc.entrypoint, ['./api-prestart.sh']);
+    assert.equal(svc.command, undefined);
+    assert.notEqual(svc.init, true);
     assert.equal(svc.user, '1000:1000');
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
@@ -238,10 +260,13 @@ test(
     // Owner login (2026-11-04): the root launcher and its per-child identities are retired; the Worker runs main.js directly
     // as the image's non-root `node` user, so it needs no capability at all.
     assert.equal(svc.user, '1000:1000');
-    // DB-SETUP T-5: through worker-start.sh, which execs `node packages/rab-worker/dist/main.js` after the URL swap.
-    assert.deepEqual(svc.command, DEPLOY_WORKER_COMMAND);
-    // The watchdog's SIGKILL is ignored for PID 1: Docker's init must be PID 1.
-    assert.equal(svc.init, true);
+    // DB-SETUP T-5 / PID 1: worker-start.sh is PID 1; it execs `/sbin/tini -s -- node packages/rab-worker/dist/main.js`
+    // after the URL swap, so tini (PID 1, a clean environment) runs the Worker as its child and the watchdog's SIGKILL works.
+    // ASSERTION CHANGE (lead decision 2026-11-12): compose's init is no longer required but refused (docker-init at PID 1
+    // would keep the admin URL readable in /proc/1/environ).
+    assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
+    assert.equal(svc.command, undefined);
+    assert.notEqual(svc.init, true);
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
     assert.deepEqual(svc.cap_add ?? [], [], 'no capability: there is no identity switch any more');

@@ -442,7 +442,10 @@ test('DENIAL DB-SETUP static: the bundled db must be identical in both files, un
     ['db on the default network', (v) => { v.services.db.networks = { default: null, 'crewflow-db': null }; }, /db: must be on the internal crewflow-db network only|db\.networks differs/],
     ['db network not internal', (v) => { v.networks['crewflow-db'].internal = false; }, /crewflow-db is not internal/],
     ['db image by another digest', (v) => { v.services.db.image = `postgres@sha256:${'0'.repeat(64)}`; }, /db\.image differs/],
-    ['the Worker started without worker-start.sh', (v) => { v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }, /rab-worker: command is not exactly \.\/worker-start\.sh/],
+    ['the Worker started without worker-start.sh', (v) => { delete v.services['rab-worker'].entrypoint; v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }, /rab-worker: entrypoint is not exactly \.\/worker-start\.sh/],
+    ['the API started without api-prestart.sh as PID 1', (v) => { v.services['rab-api'].entrypoint = ['/sbin/tini', '-s', '--']; v.services['rab-api'].command = ['./api-prestart.sh']; }, /rab-api: entrypoint is not exactly \.\/api-prestart\.sh/],
+    ['compose init on the Worker (docker-init keeps the admin URL)', (v) => { v.services['rab-worker'].init = true; }, /rab-worker: init: true/],
+    ['a command on the API', (v) => { v.services['rab-api'].command = ['node', 'x.js']; }, /rab-api: has a command/],
   ]) {
     const m = fresh();
     mutate(m.variant);
@@ -474,7 +477,9 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.read_only = false; }), /db\.read_only is overridden in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.ports = [{ target: 5432, published: '5432' }]; }), /db: publishes a port in the deployed model|db\.ports is overridden/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services.db; }), /db: missing in the deployed model/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }), /rab-worker: command is not exactly \.\/worker-start\.sh in the deployed model|rab-worker\.command differs/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-worker'].entrypoint = ['node', 'packages/rab-worker/dist/main.js']; }), /rab-worker: entrypoint is not exactly \.\/worker-start\.sh in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-worker'].init = true; }), /rab-worker: init: true in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['rab-api'].entrypoint; }), /rab-api: entrypoint is not exactly \.\/api-prestart\.sh in the deployed model/);
   // The bundled db's image: the official postgres repository by digest only.
   const { checkResolvedImages } = require('./verify-image-compose.cjs');
   const d = `sha256:${'a'.repeat(64)}`;

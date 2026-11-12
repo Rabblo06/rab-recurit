@@ -430,7 +430,13 @@ services:
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
-    command: ["./api-prestart.sh"]
+    # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
+    # no compose init). It runs the refusals, the runtime-isolation check, the bootstrap child, the URL swap, the migrate
+    # child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`: tini (PID 1
+    # from then on) and main.js inherit only the cleaned environment, so no process here holds the admin URL. Owner CLI
+    # one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>` (the
+    # script swaps the URL and runs the command as crewflow_owner, nothing else).
+    entrypoint: ["./api-prestart.sh"]
     ports:
       - "${CREWFLOW_API_BIND:-127.0.0.1}:${CREWFLOW_API_HOST_PORT:-3000}:3000"
     networks: [default, crewflow-db]
@@ -507,15 +513,15 @@ services:
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7}
-    # DB-SETUP: derives the crewflow_owner URL, unsets the admin credential, then execs node packages/rab-worker/dist/main.js.
-    command: ["./worker-start.sh"]
+    # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it derives the crewflow_owner URL, unsets the admin
+    # credential, then `exec /sbin/tini -s -- node packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog
+    # SIGKILL, ignored by the kernel for PID 1, still works) and holds only the cleaned environment. NO compose `init: true`:
+    # docker-init would be PID 1 with the container's environment, i.e. the admin URL (compose-owner-login.cjs refuses it).
+    entrypoint: ["./worker-start.sh"]
     working_dir: /app
     networks: [default, crewflow-db]
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
-    # Docker's init (tini) as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1,
-    # so the Worker refuses to start as PID 1. Required (compose-owner-login.cjs).
-    init: true
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

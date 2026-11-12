@@ -21,8 +21,9 @@
  *   - rab-api's stop_grace_period is below 40 s;
  *   - DB-SETUP (owner decisions D1 a / D3): the bundled database `db` is missing, its image is not EXACTLY
  *     ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the one non-app image allowed a committed default: the official
- *     postgres repository by digest, never a tag), rab-api does not wait for it healthy, or rab-worker's command is not
- *     exactly ./worker-start.sh (the Worker must never start with the admin URL; T-5);
+ *     postgres repository by digest, never a tag), rab-api does not wait for it healthy, or the PID 1 shape is not exact:
+ *     rab-api's entrypoint ./api-prestart.sh and rab-worker's ./worker-start.sh, no command, no compose init (each script
+ *     cleans the environment, then execs the image's tini; T-5);
  *   - a `rab-ops` service, or any service under an `ops` profile, is present. The separated operations container was
  *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
  *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
@@ -134,7 +135,14 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (!DB_IMAGE_REF.test(String(db.image ?? ''))) p(`db: image must be \${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the official postgres repository by digest), got ${JSON.stringify(db.image)}`);
   }
   if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy (the bootstrap child connects first)');
-  if (JSON.stringify(worker.command ?? []) !== JSON.stringify(['./worker-start.sh'])) p('rab-worker: command must be exactly ["./worker-start.sh"] (DB-SETUP T-5: the Worker never starts with the admin URL)');
+  // DB-SETUP PID 1 (lead decision 2026-11-12): the cleaning scripts are the ENTRYPOINT (PID 1) and exec the image's tini only
+  // once the environment is clean; no command, no compose init (docker-init would keep the admin URL at PID 1).
+  for (const [name, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh']]) {
+    const s = services[name];
+    if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify([script])) p(`${name}: entrypoint must be exactly ["${script}"] (DB-SETUP: PID 1 cleans the environment before the init starts)`);
+    if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
+    if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
+  }
   return problems;
 }
 

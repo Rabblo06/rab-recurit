@@ -50,7 +50,9 @@
  *     on both (owner rule 2026-11-06); with REALTIME_ENABLED=true, WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS must be
  *     identical on both (its value is an owner decision not yet taken); neither interval may be set in an env file.
  *     `--lint-env-file runtime` renders the committed compose with the file's switches to apply the same rule;
- *   - DB-SETUP: rab-worker's command is exactly ./worker-start.sh (the Worker never sees the admin URL; T-5);
+ *   - DB-SETUP PID 1: rab-api's entrypoint is exactly ./api-prestart.sh and rab-worker's exactly ./worker-start.sh, with no
+ *     command and no compose init: each script is PID 1, cleans the environment, then execs the image's tini, so no process
+ *     of either container holds the admin URL (T-5; lead decision 2026-11-12);
  *   - the bundled PostgreSQL `db` (DB-SETUP, owner decisions D1 a / D3 / D4; docker-compose.local-db.yml is retired): an
  *     image pinned by digest, the same H1-H6 hardening as every service, no port, the internal crewflow-db network only,
  *     a health check, its two named volumes, POSTGRES_PASSWORD exactly ${PG_DATABASE_PASSWORD:?...} (T-2) and no
@@ -538,7 +540,12 @@ function checkModel(model, combo) {
 
   // rab-api: the lifecycle.
   const apiEnv = envOf(api);
-  if (JSON.stringify(api.command) !== JSON.stringify(['./api-prestart.sh'])) p('rab-api: command is not ./api-prestart.sh');
+  // DB-SETUP PID 1 (lead decision 2026-11-12): api-prestart.sh is the ENTRYPOINT (PID 1); it cleans the environment and only
+  // then execs the image's tini, so no process of the container keeps the admin URL. No command (the script refuses none,
+  // but a command would turn every start into a one-off) and no compose init (docker-init at PID 1 keeps the container env).
+  if (JSON.stringify(api.entrypoint ?? null) !== JSON.stringify(['./api-prestart.sh'])) p('rab-api: entrypoint is not exactly ./api-prestart.sh (PID 1 must clean the environment before the init starts)');
+  if (Array.isArray(api.command) ? api.command.length > 0 : (api.command !== undefined && api.command !== null)) p('rab-api: has a command (api-prestart.sh, the entrypoint, takes none: with arguments it runs a one-off, not the API)');
+  if (api.init === true) p('rab-api: init: true (docker-init would be PID 1 with the container environment, i.e. the admin URL)');
   // O3 C1: the API migrates on start, without an approval token, with a start_period long enough for a fresh install.
   if (apiEnv.CREWFLOW_MIGRATE_ON_START !== 'true') p('rab-api: CREWFLOW_MIGRATE_ON_START must be "true" (O3: the API migrates on start)');
   if (!APPROVAL_MODES.includes(String(apiEnv[APPROVAL_MODE_KEY] ?? ''))) p(`rab-api: ${APPROVAL_MODE_KEY} must render as none or token (compose.env; default none)`);
@@ -556,14 +563,16 @@ function checkModel(model, combo) {
   // rab-worker
   const workerEnv = envOf(worker);
   if (worker.user !== '1000:1000') p(`rab-worker: user is "${worker.user ?? ''}", expected 1000:1000`);
-  // DB-SETUP T-5: worker-start.sh swaps the admin URL for the derived crewflow_owner URL before it execs the Worker; any
-  // other command would start the Worker with the admin URL (it then refuses in production, but must never get there).
-  if (JSON.stringify(worker.command ?? []) !== JSON.stringify(['./worker-start.sh'])) p('rab-worker: command is not exactly ./worker-start.sh (the Worker must never start with the admin URL; T-5)');
-  if (worker.entrypoint !== undefined && worker.entrypoint !== null) p('rab-worker: overrides the image entrypoint');
+  // DB-SETUP T-5 + PID 1 (lead decision 2026-11-12): worker-start.sh is the ENTRYPOINT (PID 1); it swaps the admin URL for
+  // the derived crewflow_owner URL and only then execs the image's tini, which runs the Worker as its child. Anything else
+  // would start the Worker, or its init, with the admin URL in its environment.
+  if (JSON.stringify(worker.entrypoint ?? null) !== JSON.stringify(['./worker-start.sh'])) p('rab-worker: entrypoint is not exactly ./worker-start.sh (the Worker and its init must never start with the admin URL; T-5)');
+  if (Array.isArray(worker.command) ? worker.command.length > 0 : (worker.command !== undefined && worker.command !== null)) p('rab-worker: has a command (worker-start.sh, the entrypoint, takes none)');
   if (worker.working_dir !== '/app') p('rab-worker: working_dir is not /app');
   // The Worker's watchdog SIGKILLs itself when its event loop stalls; the kernel ignores that signal for PID 1, so the
-  // Worker refuses to start as PID 1. Docker's init (tini) must be PID 1 whatever the image entrypoint is.
-  if (worker.init !== true) p('rab-worker: init: true is missing (the Worker refuses to run as PID 1; its watchdog SIGKILL needs a real init)');
+  // Worker refuses to start as PID 1: worker-start.sh execs tini, which stays PID 1 with the Worker as its child. Compose's
+  // init must NOT be used: docker-init would be PID 1 with the container environment (the admin URL) for the Worker's life.
+  if (worker.init === true) p('rab-worker: init: true (docker-init would be PID 1 with the admin URL; worker-start.sh execs tini as PID 1 instead)');
   const tmpfs = (worker.tmpfs ?? []).map(String);
   for (const dir of ['/tmp/crewflow-jobs', '/run/crewflow-health/jobs']) if (!tmpfs.some((t) => t === dir || t.startsWith(`${dir}:`))) p(`rab-worker: tmpfs ${dir} is missing`);
   if (!tmpfs.every((t) => /uid=1000/.test(t) && /gid=1000/.test(t))) p('rab-worker: a tmpfs is not owned by 1000:1000');

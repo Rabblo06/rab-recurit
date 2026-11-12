@@ -38,7 +38,7 @@ const raw = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return '
 const admin = raw('/proc/self/environ').includes('ADMINSENTINEL') ? 'present' : 'absent';
 const admin1 = raw('/proc/1/environ').includes('ADMINSENTINEL') ? 'present' : 'absent';
 const url = require('crypto').createHash('sha256').update(process.env.PG_DATABASE_URL || '').digest('hex').slice(0, 12);
-console.log('STUB ${name} pid=' + process.pid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
+console.log('STUB ${name} pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
 process.exit(code);
 `;
 const STUBS = {
@@ -56,6 +56,24 @@ const STUBS = {
   workermain: '/app/packages/rab-worker/dist/main.js',
 };
 for (const name of Object.keys(STUBS)) fs.writeFileSync(path.join(stubs, `${name}.js`), stub(name));
+// DB-SETUP PID 1: the image's tini (node:24-alpine has none). Like the real one it stays the process it was exec'd as (PID 1
+// when the script was PID 1), runs its arguments as a CHILD, forwards TERM/INT and exits with the child's status; it
+// reports whether the ADMIN sentinel is in its own kernel environment (the value is never printed).
+const TINI = '/sbin/tini';
+fs.writeFileSync(path.join(stubs, 'tini.sh'), [
+  '#!/bin/sh',
+  '[ "$1" = -s ] && shift',
+  '[ "$1" = -- ] && shift',
+  'adm=absent; tr "\\000" "\\n" < /proc/$$/environ | grep -q ADMINSENTINEL && adm=present',
+  'pwv=absent; tr "\\000" "\\n" < /proc/$$/environ | grep -q "^PG_DATABASE_PASSWORD=" && pwv=present',
+  'echo "STUB tini pid=$$ admin=$adm pgpw=$pwv argc=$#"',
+  '"$@" &',
+  'child=$!',
+  'trap \'kill -TERM "$child" 2>/dev/null\' TERM INT',
+  'wait "$child"',
+  '',
+].join('\n'), { mode: 0o755 });
+fs.chmodSync(path.join(stubs, 'tini.sh'), 0o755);
 // DB-SETUP: the derive step. Writes /ctl/derive-url (or, when absent, PG_DATABASE_URL unchanged = pass-through) to fd 4,
 // exactly as derive-runtime-url.js does, unless /ctl/derive is non-zero or /ctl/derive-empty exists. Logs one line.
 const DERIVE = `${SCRIPTS_DIR}/owner-login/derive-runtime-url.js`;
@@ -96,9 +114,11 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
   for (const [stubName, target] of Object.entries(STUBS)) args.push('-v', `${path.join(stubs, `${stubName}.js`)}:${target}:ro`);
   args.push('-v', `${path.join(stubs, 'twentymigrate.js')}:${MIGRATE_CHILD}:ro`);
   args.push('-v', `${path.join(stubs, 'derive.js')}:${DERIVE}:ro`);
+  args.push('-v', `${path.join(stubs, 'tini.sh')}:${TINI}:ro`);
   args.push('-v', `${ctlDir}:/ctl:ro`);
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
-  args.push(IMAGE, 'sh', `/app/${entry}`);
+  const [script, ...scriptArgs] = entry.split(' ');
+  args.push(IMAGE, 'sh', `/app/${script}`, ...scriptArgs);
   const r = spawnSync('docker', args, { encoding: 'utf8' });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -127,7 +147,9 @@ let r = run('default', BASE);
 const main = line(r.out, 'main');
 check('1a default start: check ran, main started (exit 0)', r.code === 0 && line(r.out, 'check') && main, r.out);
 check('1b no migration / bootstrap entrypoint ran', noMigration(r.out), r.out);
-check('1c main.js is PID 1 after exec and keeps the runtime environment', /STUB main pid=1 /.test(main) && keysOf(main, 'self').includes('APP_SECRET') && keysOf(main, 'self').includes('PG_DATABASE_URL'), main);
+// DB-SETUP PID 1: the script execs tini (PID 1 from then on), which runs main.js as its child.
+const underTini = (out, who) => /STUB tini pid=1 /.test(out) && / ppid=1 /.test(line(out, who)) && !/ pid=1 /.test(line(out, who));
+check('1c tini is PID 1 after exec, main.js its child, with the runtime environment', underTini(r.out, 'main') && keysOf(main, 'self').includes('APP_SECRET') && keysOf(main, 'self').includes('PG_DATABASE_URL'), r.out);
 
 // 2. Pending migrations (the restricted check fails) -> refused, main never starts, still nothing migrates.
 r = run('pending', BASE, { ctl: { check: 1 } });
@@ -256,7 +278,7 @@ r = run('cfg-prod-approval-invalid', { ...BASE, CREWFLOW_MIGRATE_ON_START: 'true
 check('8c3 an invalid approval mode -> refused (64), the child never ran', r.code === 64 && /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/.test(r.out) && !migrated(r.out), r.out);
 
 r = run('migrate-ok', MIGRATE_ON, { ctl: { 'migrate-seq': '0', 'migrate-result': RESULT({ exitCode: 0, serve: true }) } });
-check('8d migrate-on-start, child exit 0 -> main starts as PID 1; the read-only check is not needed; no retired migration entrypoint ran', r.code === 0 && migrated(r.out) && /STUB main pid=1 /.test(line(r.out, 'main')) && !line(r.out, 'check') && noMigration(r.out), r.out);
+check('8d migrate-on-start, child exit 0 -> main starts under tini (PID 1); the read-only check is not needed; no retired migration entrypoint ran', r.code === 0 && migrated(r.out) && underTini(r.out, 'main') && !line(r.out, 'check') && noMigration(r.out), r.out);
 r = run('migrate-70', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
 check('8e exit 70 + CREWFLOW_UPGRADE_FAILURE unset (default continue) + a verified result -> main starts with CREWFLOW_UPGRADE_INCOMPLETE=<failedMigration> and a loud WARNING naming the reason and the migration', r.code === 0 && line(r.out, 'main') &&
   upgradeOf(r.out) === 'Broken1786730000000' &&
@@ -341,7 +363,7 @@ check('9e DISABLE_DB_MIGRATIONS=false with CREWFLOW_MIGRATE_ON_START unset -> st
 // the migrate step and before main.js, unless DISABLE_CRON_JOBS_REGISTRATION=true. A failure is a WARNING; the API starts.
 r = run('c2-register-default', BASE);
 check('10a production default (WORKER_SCHEDULER unset = bullmq): check, then the registration, then main.js', r.code === 0 && line(r.out, 'register') &&
-  before(r.out, 'STUB check ', 'STUB register ') && before(r.out, 'STUB register ', 'STUB main ') && /STUB main pid=1 /.test(line(r.out, 'main')), r.out);
+  before(r.out, 'STUB check ', 'STUB register ') && before(r.out, 'STUB register ', 'STUB main ') && underTini(r.out, 'main'), r.out);
 r = run('c2-register-after-migrate', MIGRATE_ON, { ctl: { 'migrate-seq': '0' } });
 check('10b migrate-on-start: the migrate child, then the registration, then main.js', r.code === 0 && before(r.out, 'STUB twentymigrate ', 'STUB register ') && before(r.out, 'STUB register ', 'STUB main '), r.out);
 r = run('c2-disabled', { ...BASE, DISABLE_CRON_JOBS_REGISTRATION: 'true' });
@@ -373,9 +395,10 @@ r = run('dbsetup-order', ADMIN, { ctl: DERIVED });
 const tOf = (out, who) => BigInt(field(line(out, who), 't') || '0');
 const inOrder = (out, ...who) => who.every((w) => tOf(out, w) > 0n) && who.slice(1).every((w, i) => tOf(out, who[i]) < tOf(out, w));
 check('11a admin URL: bootstrap, then derive, then the migrate child, the registration and main.js (PID 1), in that order', r.code === 0 &&
-  inOrder(r.out, 'bootstrap', 'derive', 'register', 'main') && line(r.out, 'twentymigrate') && /STUB main pid=1 /.test(line(r.out, 'main')), r.out);
+  inOrder(r.out, 'bootstrap', 'derive', 'register', 'main') && line(r.out, 'twentymigrate') && underTini(r.out, 'main'), r.out);
 check('11b the bootstrap child (and only it, with the pure derive step) receives the admin URL', field(line(r.out, 'bootstrap'), 'admin') === 'present' && field(line(r.out, 'bootstrap'), 'url') === hash(ADMIN_URL), r.out);
-check('11c no admin URL in the kernel environment of the migrate child, the registration or main.js (PID 1 after exec); they get the derived URL', !/admin=present/.test(line(r.out, 'twentymigrate')) &&
+check('11c no admin URL in the kernel environment of the migrate child, the registration, main.js or PID 1 (tini) after the hand-over; they get the derived URL', !/admin=present/.test(line(r.out, 'twentymigrate')) &&
+  /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
   ['register', 'main'].every((w) => field(line(r.out, w), 'admin') === 'absent' && field(line(r.out, w), 'url') === hash(RUNTIME_URL)) &&
   field(line(r.out, 'main'), 'admin1') === 'absent', r.out);
 check('11d PG_DATABASE_URL keeps its name (main.js reads the one variable); no admin credential variable reaches main.js', keysOf(line(r.out, 'main'), 'self').includes('PG_DATABASE_URL') && !keysOf(line(r.out, 'main'), 'self').includes('PG_DATABASE_PASSWORD') && !keysOf(line(r.out, 'main'), 'self').includes('RUNTIME_URL'), r.out);
@@ -418,8 +441,8 @@ for (const [label, url, extra, want] of [
 const W = { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), PG_DATABASE_URL: ADMIN_URL, DISABLE_DB_MIGRATIONS: 'true' };
 r = run('worker-ok', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
 const wm = line(r.out, 'workermain');
-check('12a worker-start.sh: derive, then the Worker as the exec-ed process (PID 1 here) with only the derived URL; the bootstrap child never ran', r.code === 0 &&
-  inOrder(r.out, 'derive', 'workermain') && /STUB workermain pid=1 /.test(wm) && !line(r.out, 'bootstrap') && !line(r.out, 'main') &&
+check('12a worker-start.sh: derive, then tini (PID 1, clean environment) runs the Worker as its child with only the derived URL; the bootstrap child never ran', r.code === 0 &&
+  inOrder(r.out, 'derive', 'workermain') && underTini(r.out, 'workermain') && /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) && !line(r.out, 'bootstrap') && !line(r.out, 'main') &&
   field(wm, 'admin') === 'absent' && field(wm, 'admin1') === 'absent' && field(wm, 'url') === hash(RUNTIME_URL) && field(wm, 'ca') === DB_CA, r.out);
 check('12b the Worker keeps PG_DATABASE_URL and gets no admin credential variable; nothing secret is printed', keysOf(wm, 'self').includes('PG_DATABASE_URL') && !keysOf(wm, 'self').includes('PG_DATABASE_PASSWORD') &&
   !keysOf(wm, 'self').includes('RUNTIME_URL') && !r.out.includes('ADMINSENTINEL') && !r.out.includes('derived0123'), r.out);
@@ -439,6 +462,23 @@ r = run('worker-passthrough', { ...W, PG_DATABASE_URL: RUNTIME_URL }, { entry: '
 check('12h a crewflow_owner URL (D5) reaches the Worker byte for byte', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
 r = run('worker-external', { ...W, PG_DATABASE_URL: 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
 check('12i an external host: no bundled CA is set; the admin URL still never reaches the Worker', r.code === 0 && field(line(r.out, 'workermain'), 'ca') === '-' && field(line(r.out, 'workermain'), 'admin') === 'absent', r.out);
+r = run('worker-args', W, { entry: 'worker-start.sh node x.js', ctl: { 'derive-url': RUNTIME_URL } });
+check('12m worker-start.sh with arguments -> refused (64), nothing ran', r.code === 64 && /takes no arguments/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
+
+// 13. DB-SETUP PID 1: the owner CLI one-off (`docker compose run --rm --no-deps rab-api node .../command/main.js <cmd>`):
+// api-prestart.sh, the entrypoint, keeps every refusal, swaps the URL, then execs tini with the arguments. No bootstrap
+// child, no migration, no registration, no API; the command runs as crewflow_owner with no admin URL anywhere.
+r = run('oneoff', ADMIN, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { 'derive-url': RUNTIME_URL } });
+const cmdLine = line(r.out, 'command');
+check('13a one-off: derive, then tini (PID 1, clean) runs the command as its child with only the derived URL; no bootstrap, migration, registration or API', r.code === 0 &&
+  line(r.out, 'derive') && /STUB tini pid=1 admin=absent pgpw=absent argc=3/.test(r.out) && / ppid=1 /.test(cmdLine) && field(cmdLine, 'admin') === 'absent' && field(cmdLine, 'admin1') === 'absent' &&
+  field(cmdLine, 'url') === hash(RUNTIME_URL) && !line(r.out, 'bootstrap') && !line(r.out, 'twentymigrate') && !line(r.out, 'check') && !line(r.out, 'register') && !line(r.out, 'main') &&
+  /one-off command: running it as crewflow_owner/.test(r.out), r.out);
+r = run('oneoff-forbidden', { ...ADMIN, DB_TARGET: 'production' }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { 'derive-url': RUNTIME_URL } });
+check('13b one-off: every refusal still applies (DB_TARGET refused, 64), nothing ran', r.code === 64 && !line(r.out, 'derive') && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+r = run('oneoff-derive-fails', ADMIN, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { derive: 64 } });
+check('13c one-off: a failed derive step -> refused (64); the command never runs with the admin URL', r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+
 // The bundled-db CA block is literally the same code in both scripts.
 const block = (file) => {
   const t = fs.readFileSync(file, 'utf8');

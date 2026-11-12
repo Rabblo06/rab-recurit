@@ -191,9 +191,10 @@ COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-c
 COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
-# api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the Worker's command is worker-start.sh, which
-# derives the crewflow_owner runtime URL from the admin PG_DATABASE_URL and APP_SECRET, unsets the admin credential and
-# execs `node packages/rab-worker/dist/main.js` (it never connects as the admin; DB-SETUP-PLAN §5.3).
+# api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
+# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1): each derives the crewflow_owner runtime URL from the admin
+# PG_DATABASE_URL and APP_SECRET, unsets the admin credential and only then execs `/sbin/tini -s -- node ...`, so tini (PID 1)
+# and the runtime process inherit only the cleaned environment (DB-SETUP-PLAN §5.3; lead decision 2026-11-12).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/worker-start.sh ./worker-start.sh
 COPY --chmod=0555 packages/rab-docker/rab/start.sh ./start.sh
@@ -275,6 +276,7 @@ EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "-s", "--"]
 # The default command is the API: api-prestart.sh (env refusals, the runtime-isolation check, the owner-login migration
 # child when CREWFLOW_MIGRATE_ON_START=true or the read-only code<->schema compatibility check otherwise, then main.js).
-# The Worker runs the SAME image with `./worker-start.sh` (which execs `node packages/rab-worker/dist/main.js`). Real shell
-# scripts rather than command strings, so platforms that do not shell-parse a command field behave the same.
+# The deploy compose files override this ENTRYPOINT with ./api-prestart.sh (rab-api) and ./worker-start.sh (rab-worker),
+# which exec this same tini once the environment is clean. Real shell scripts rather than command strings, so platforms
+# that do not shell-parse a command field behave the same.
 CMD ["./api-prestart.sh"]

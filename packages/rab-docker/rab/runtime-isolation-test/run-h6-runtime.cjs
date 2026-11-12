@@ -168,7 +168,7 @@ function procTable(id) {
     return { pid: Number(pid), uid: Number(uid), cmd: cmd.join('|').trim() };
   });
 }
-/** O1: the Worker container's processes: compose's init (PID 1), the image's tini, and the ONE Worker node process. */
+/** The Worker container's processes: tini (PID 1 since DB-SETUP: exec'd by worker-start.sh) and the ONE Worker node process. */
 const INIT_RE = /\b(docker-init|tini)\b/;
 function workerPids(id) {
   const t = procTable(id);
@@ -455,7 +455,9 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     }
     assert(!m.hostConfig['rab-api'].CapAdd, 'rab-api CapAdd');
     assert(!m.hostConfig['rab-worker'].CapAdd || m.hostConfig['rab-worker'].CapAdd.length === 0, `rab-worker CapAdd ${JSON.stringify(m.hostConfig['rab-worker'].CapAdd)}`);
-    assert(m.hostConfig['rab-worker'].Init === true, 'rab-worker without init (the watchdog SIGKILL is ignored for PID 1)');
+    // DB-SETUP PID 1 (lead decision 2026-11-12): no compose init; worker-start.sh (PID 1) execs the image's tini, which stays
+    // PID 1 with a clean environment and runs the Worker as its child (the watchdog SIGKILL still works).
+    assert(m.hostConfig['rab-worker'].Init !== true, 'rab-worker with compose init (docker-init at PID 1 keeps the admin URL)');
     // Writable paths: the API only the kernel's /dev/shm (+ /dev/mqueue is skipped as pseudo); the Worker only its jobs dirs.
     assert(JSON.stringify(m.writable['rab-api uid 1000']) === '["/dev/shm"]', `rab-api writable: ${m.writable['rab-api uid 1000']}`);
     assert(JSON.stringify(m.writable['rab-worker uid 1000 (jobs)']) === '["/dev/shm","/run/crewflow-health/jobs","/tmp/crewflow-jobs"]', `jobs writable: ${m.writable['rab-worker uid 1000 (jobs)']}`);

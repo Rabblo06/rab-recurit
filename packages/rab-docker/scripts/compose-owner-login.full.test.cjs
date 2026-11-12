@@ -78,12 +78,26 @@ test('DENIAL DB-SETUP: the bundled db password reaches no container except db (P
   assertRefused(problemsAfter(EXT, (s) => { for (const svc of APP) s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /PG_DATABASE_URL carries the bundled db's password/);
 });
 
-test('DENIAL DB-SETUP T-5: rab-worker must run exactly ./worker-start.sh (never the Worker main with the admin URL)', { skip }, () => {
+test('DENIAL DB-SETUP T-5 / PID 1: rab-worker\'s entrypoint is exactly ./worker-start.sh, no command, no compose init', { skip }, () => {
   for (const c of [REL, EXT, 'staging']) {
-    for (const cmd of [['node', 'packages/rab-worker/dist/main.js'], ['sh', '-c', './worker-start.sh'], ['./worker-start.sh', 'x'], ['./api-prestart.sh']]) {
-      assertRefused(problemsAfter(c, (s) => { s['rab-worker'].command = cmd; }), /rab-worker: command is not exactly \.\/worker-start\.sh/);
+    for (const ep of [undefined, ['node', 'packages/rab-worker/dist/main.js'], ['/sbin/tini', '-s', '--', './worker-start.sh'], ['sh', '-c', './worker-start.sh'], ['./worker-start.sh', 'x'], ['./api-prestart.sh']]) {
+      assertRefused(problemsAfter(c, (s) => { s['rab-worker'].entrypoint = ep; }), /rab-worker: entrypoint is not exactly \.\/worker-start\.sh/);
     }
-    assertRefused(problemsAfter(c, (s) => { s['rab-worker'].entrypoint = ['node']; }), /rab-worker: overrides the image entrypoint/);
+    // The pre-PID-1 shape (the script as the command under the image's tini) keeps the admin URL in tini's environment.
+    assertRefused(problemsAfter(c, (s) => { delete s['rab-worker'].entrypoint; s['rab-worker'].command = ['./worker-start.sh']; }), /rab-worker: entrypoint is not exactly/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }), /rab-worker: has a command/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-worker'].init = true; }), /rab-worker: init: true \(docker-init would be PID 1 with the admin URL/);
+  }
+});
+
+test('DENIAL DB-SETUP PID 1: rab-api\'s entrypoint is exactly ./api-prestart.sh, no command, no compose init', { skip }, () => {
+  for (const c of [REL, EXT, 'staging']) {
+    for (const ep of [undefined, ['/sbin/tini', '-s', '--'], ['/sbin/tini', '-s', '--', './api-prestart.sh'], ['node', 'packages/rab-server/dist/main.js'], ['./worker-start.sh']]) {
+      assertRefused(problemsAfter(c, (s) => { s['rab-api'].entrypoint = ep; }), /rab-api: entrypoint is not exactly \.\/api-prestart\.sh/);
+    }
+    assertRefused(problemsAfter(c, (s) => { delete s['rab-api'].entrypoint; s['rab-api'].command = ['./api-prestart.sh']; }), /rab-api: entrypoint is not exactly/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-api'].command = ['node', 'packages/rab-server/dist/command/main.js', 'x']; }), /rab-api: has a command/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-api'].init = true; }), /rab-api: init: true/);
   }
 });
 
@@ -273,8 +287,10 @@ test('the Worker: never migrates, consume-only, no schema wait, waits for a heal
   assertRefused(problemsAfter(DEF, (s) => { delete s['rab-worker'].depends_on['rab-redis']; }), /rab-worker: does not wait for a healthy rab-redis/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].image = `x/y@sha256:${'9'.repeat(64)}`; }), /rab-worker: image differs from rab-api/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].user = '10001:10001'; }), /rab-worker: user is "10001:10001"/);
-  for (const c of ['default', 'external', 'staging']) assertRefused(problemsAfter(c, (s) => { delete s['rab-worker'].init; }), /rab-worker: init: true is missing/);
-  assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].command = ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']; }), /command is not exactly \.\/worker-start\.sh/);
+  // ASSERTION CHANGE (DB-SETUP PID 1, lead decision 2026-11-12): compose's init is now REFUSED; worker-start.sh execs the
+  // image's tini as PID 1 (the watchdog SIGKILL still needs a real init, and gets one, with a clean environment).
+  for (const c of ['default', 'external', 'staging']) assertRefused(problemsAfter(c, (s) => { s['rab-worker'].init = true; }), /rab-worker: init: true \(docker-init/);
+  assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].entrypoint = ['node', '/opt/crewflow-bundle/start-worker-bundle.cjs']; }), /entrypoint is not exactly \.\/worker-start\.sh/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].tmpfs = []; }), /tmpfs \/tmp\/crewflow-jobs is missing/);
   assertRefused(problemsAfter(DEF, (s) => { s['rab-worker'].healthcheck.test = ['CMD', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']; }), /not jobs-only/);
   assertRefused(problemsAfter(DEF, (s) => { delete s['rab-worker'].depends_on['rab-api']; }), /does not wait for a healthy rab-api/);
