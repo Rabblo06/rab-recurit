@@ -408,6 +408,48 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   return resolved;
 }
 
+/** Names whose login the Worker-login switch may never use: the test admin / bootstrap superuser and the other admin logins. */
+export const WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES: readonly string[] = [
+  TEST_DATABASE_URL_UNPOOLED,
+  'MIGRATION_SECURITY_ADMIN_URL',
+  TEST_DATABASE_CREWFLOW_URL,
+];
+
+export interface WorkerLoginTestDatabase {
+  workerUrl: string;
+  worker: TestDatabaseIdentity;
+  resolved: ResolvedTestDatabase;
+}
+
+/**
+ * The static rules of the Worker-login switch, without changing anything. Returns null when the switch is off
+ * (PHASE_D_SQL_APPROVED is not exactly "true", or TEST_DATABASE_WORKER_URL is empty). NODE_ENV is never read.
+ */
+export function resolveWorkerLoginTestDatabase(env: Record<string, string | undefined>): WorkerLoginTestDatabase | null {
+  const workerUrl = present(env, TEST_DATABASE_WORKER_URL);
+  if (env.PHASE_D_SQL_APPROVED !== 'true' || !workerUrl) return null;
+  const resolved = resolveIntegrationTestDatabase(env);
+  assertNoRedirectingProcessEnv(env, resolved);
+  const worker = describeDatabaseUrl(workerUrl, TEST_DATABASE_WORKER_URL);
+  for (const name of WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES) {
+    const raw = present(env, name);
+    if (!raw) continue;
+    let other: TestDatabaseIdentity;
+    try {
+      other = describeDatabaseUrl(raw, name);
+    } catch {
+      throw new TestDatabaseConfigError(`${name} is set and is not a valid postgres URL (value not shown); the Worker-login check cannot compare against it. Refusing to start.`);
+    }
+    // The login is compared, never shown.
+    if (other.login === worker.login) {
+      throw new TestDatabaseConfigError(
+        `${TEST_DATABASE_WORKER_URL} uses the same login as ${name} (an admin / migration login). The Worker runtime never connects as that login. Refusing to start.`,
+      );
+    }
+  }
+  return { workerUrl, worker, resolved };
+}
+
 /**
  * X1.8 (audit XD-03): the Worker-login switch used by the Phase D worker specs
  * (rab-worker/src/__tests__/integration/helpers/worker-login-env.ts). When PHASE_D_SQL_APPROVED=true and
@@ -417,21 +459,15 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
  *   - the TEST pair is required and valid (loopback unless ALLOW_REMOTE_TEST_DATABASE=true, never the development database);
  *   - TEST_DATABASE_WORKER_URL names its login and the TEST database on the same endpoint (resolveIntegrationTestDatabase);
  *   - no inherited database URL or libpq variable redirects a connection (assertNoRedirectingDatabaseEnv, `.env` included);
- *   - it is not the TEST admin login (the disposable cluster's bootstrap superuser): the Worker runtime never connects as it.
+ *   - its login is none of WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES (the test admin / bootstrap superuser, the migration admin,
+ *     the crewflow login), compared by name; the live rolsuper / rolbypassrls check is assertWorkerLoginNotPrivilegedAtRuntime,
+ *     run once from the worker Jest globalSetup.
  * On any refusal nothing is changed. Returns false (and changes nothing) when the switch is off. Errors never echo a URL.
  */
 export function applyWorkerLoginTestDatabaseEnv(env: NodeJS.ProcessEnv): boolean {
-  const workerUrl = present(env, TEST_DATABASE_WORKER_URL);
-  if (env.PHASE_D_SQL_APPROVED !== 'true' || !workerUrl) return false;
-  const resolved = resolveIntegrationTestDatabase(env);
-  assertNoRedirectingProcessEnv(env, resolved);
-  const worker = describeDatabaseUrl(workerUrl, TEST_DATABASE_WORKER_URL);
-  if (worker.login === resolved.admin.login) {
-    throw new TestDatabaseConfigError(
-      `${TEST_DATABASE_WORKER_URL} uses the same login as ${TEST_DATABASE_URL_UNPOOLED} (the test admin / bootstrap superuser). The Worker runtime never connects as that login. Refusing to start.`,
-    );
-  }
-  env.DATABASE_URL = workerUrl;
+  const login = resolveWorkerLoginTestDatabase(env);
+  if (!login) return false;
+  env.DATABASE_URL = login.workerUrl;
   env.WORKER_CLAIM_MODE = 'global';
   return true;
 }
@@ -462,11 +498,27 @@ export interface DatabaseIdentityProbe {
  */
 export const DISPOSABLE_TEST_DATABASE_SETTING = 'crewflow.disposable_test_database';
 
-/** Read-only identity probe: which database and which cluster a connection really reached. */
-export async function probeDatabaseIdentity(url: string, label: string): Promise<DatabaseIdentityProbe> {
+/**
+ * The one place this module opens a connection (read-only probes only). The driver error is never rethrown verbatim: it can
+ * echo connection details.
+ */
+async function withProbeClient<T>(url: string, label: string, run: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ connectionString: url, connectionTimeoutMillis: 10_000 });
   try {
     await client.connect();
+    return await run(client);
+  } catch (error) {
+    if (error instanceof TestDatabaseConfigError) throw error;
+    const code = (error as { code?: string }).code ?? 'unknown';
+    throw new TestDatabaseConfigError(`Cannot reach ${label} for the identity check (driver code ${code}).`);
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
+/** Read-only identity probe: which database and which cluster a connection really reached. */
+export async function probeDatabaseIdentity(url: string, label: string): Promise<DatabaseIdentityProbe> {
+  return withProbeClient(url, label, async (client) => {
     const result = await client.query<{ db: string; sid: string; marker: string | null }>(
       // Read the DATABASE-level setting from the catalog, not current_setting(): a connection string can set any session
       // value (options=-c ...), so only what was stored with ALTER DATABASE counts.
@@ -479,13 +531,32 @@ export async function probeDatabaseIdentity(url: string, label: string): Promise
     const row = result.rows[0];
     if (!row) throw new Error('empty identity probe');
     return { database: row.db, systemIdentifier: row.sid, disposableMarker: row.marker };
-  } catch (error) {
-    // Never rethrow the driver error verbatim: it can echo connection details.
-    const code = (error as { code?: string }).code ?? 'unknown';
-    throw new TestDatabaseConfigError(`Cannot reach ${label} for the identity check (driver code ${code}).`);
-  } finally {
-    await client.end().catch(() => undefined);
+  });
+}
+
+/**
+ * X1.8 review finding 4: the live half of the Worker-login switch, run once from the worker Jest globalSetup. When the switch
+ * is on, the static rules run again, then the worker login itself connects (read-only) and must reach the TEST database as a
+ * role that is neither a superuser nor BYPASSRLS. Returns false when the switch is off.
+ */
+export async function assertWorkerLoginNotPrivilegedAtRuntime(env: Record<string, string | undefined>): Promise<boolean> {
+  const login = resolveWorkerLoginTestDatabase(env);
+  if (!login) return false;
+  const row = await withProbeClient(login.workerUrl, TEST_DATABASE_WORKER_URL, async (client) => {
+    const result = await client.query<{ db: string; privileged: boolean | null }>(
+      'SELECT current_database() AS db, (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user) AS privileged',
+    );
+    return result.rows[0];
+  });
+  if (!row || row.db !== login.resolved.app.database) {
+    throw new TestDatabaseConfigError(`${TEST_DATABASE_WORKER_URL} did not reach the test database "${login.resolved.app.database}". Refusing to start.`);
   }
+  if (row.privileged !== false) {
+    throw new TestDatabaseConfigError(
+      `${TEST_DATABASE_WORKER_URL} connects as a superuser or BYPASSRLS role (or one the check cannot read). The Worker runtime never runs as one. Refusing to start.`,
+    );
+  }
+  return true;
 }
 
 /**

@@ -6,6 +6,7 @@
  */
 import {
   assertSameDatabaseAtRuntime,
+  assertWorkerLoginNotPrivilegedAtRuntime,
   resolveForJestGlobalSetup,
 } from '@rab/server/database/typeorm/core/test-database-guard';
 
@@ -13,6 +14,9 @@ export default async function globalSetup(): Promise<void> {
   // X1.2: NODE_ENV=test, the TEST pair, and no inherited database URL / libpq variable that would redirect a connection.
   const resolved = resolveForJestGlobalSetup(process.env);
   const identity = await assertSameDatabaseAtRuntime(resolved);
+  // X1.8: when the Phase D worker-login switch is on (PHASE_D_SQL_APPROVED=true + TEST_DATABASE_WORKER_URL), that login
+  // must pass the static rules and, live, be neither a superuser nor BYPASSRLS before any spec routes the Worker to it.
+  await assertWorkerLoginNotPrivilegedAtRuntime(process.env);
   // eslint-disable-next-line no-console
   console.log(
     `[test-db-guard] worker: application and admin connections agree: database=${identity.database} cluster=${identity.systemIdentifier} endpoint=${resolved.app.endpointKey} remote=${resolved.app.remote}`,

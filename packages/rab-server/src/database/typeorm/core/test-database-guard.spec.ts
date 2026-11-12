@@ -6,6 +6,7 @@ import {
   TestDatabaseConfigError,
   applyIntegrationTestDatabaseEnv,
   applyWorkerLoginTestDatabaseEnv,
+  assertWorkerLoginNotPrivilegedAtRuntime,
   isLoopbackAlias,
   laterDotenvValues,
   resolveForJestGlobalSetup,
@@ -370,7 +371,17 @@ describe('integration test database guard', () => {
     describe('X1.8 NODE_ENV-independent refusal', () => {
       const NODE_ENVS: Array<string | undefined> = [undefined, '', 'development', 'production', 'staging'];
 
-      it.each(NODE_ENVS)('under Jest with NODE_ENV=%p the development database is refused, and nothing is routed', (nodeEnv) => {
+      // The database rules themselves never read NODE_ENV: the development database is refused BY THE DEVELOPMENT-DATABASE
+      // RULE whatever NODE_ENV says (review finding 5: asserted on the rule's own message, not on the NODE_ENV refusal).
+      it.each(NODE_ENVS)('with NODE_ENV=%p the database rules refuse the development database by the development-database rule', (nodeEnv) => {
+        const message = expectRefused(
+          { NODE_ENV: nodeEnv, [TEST_DATABASE_URL]: DEV_DB, [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab` },
+          /development database \(rab-devdb\)/,
+        );
+        expect(message).not.toMatch(/NODE_ENV/);
+      });
+
+      it.each(NODE_ENVS)('under Jest with NODE_ENV=%p the development database is refused (here first by the NODE_ENV rule), nothing routed', (nodeEnv) => {
         expectApplyRefused(
           jestEnv({ NODE_ENV: nodeEnv, [TEST_DATABASE_URL]: DEV_DB, [TEST_DATABASE_URL_UNPOOLED]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab`, DATABASE_URL: DEV_DB }),
           /Refusing to start/,
@@ -465,11 +476,53 @@ describe('integration test database guard', () => {
         expectWorkerRefused(workerEnv({ [TEST_DATABASE_WORKER_URL]: LOCAL_ADMIN }), /same login as TEST_DATABASE_URL_UNPOOLED/);
       });
 
+      it('review finding 4: refuses the MIGRATION_SECURITY_ADMIN_URL and TEST_DATABASE_CREWFLOW_URL logins too (and an unparseable admin URL)', () => {
+        const migrationAdmin = `postgres://postgres:${SECRET}@127.0.0.1:55462/postgres`;
+        expectWorkerRefused(
+          workerEnv({ MIGRATION_SECURITY_ADMIN_URL: migrationAdmin, [TEST_DATABASE_WORKER_URL]: `postgres://postgres:${SECRET}@127.0.0.1:55462/rab_test_a` }),
+          /same login as MIGRATION_SECURITY_ADMIN_URL/,
+        );
+        const crewflow = `postgres://crewflow:${SECRET}@127.0.0.1:55462/rab_test_a`;
+        expectWorkerRefused(workerEnv({ TEST_DATABASE_CREWFLOW_URL: crewflow, [TEST_DATABASE_WORKER_URL]: crewflow }), /same login as TEST_DATABASE_CREWFLOW_URL/);
+        expectWorkerRefused(workerEnv({ MIGRATION_SECURITY_ADMIN_URL: `not a url ${SECRET}` }), /MIGRATION_SECURITY_ADMIN_URL is set and is not a valid postgres URL/);
+        // Other logins on the same cluster do not block a distinct worker login.
+        expect(applyWorkerLoginTestDatabaseEnv(workerEnv({ MIGRATION_SECURITY_ADMIN_URL: migrationAdmin, TEST_DATABASE_CREWFLOW_URL: crewflow }))).toBe(true);
+      });
+
       it('refuses a redirecting inherited URL or libpq variable, as the setupFiles guard does', () => {
         expectWorkerRefused(workerEnv({ PG_DATABASE_URL: DEV_DB }), /PG_DATABASE_URL is set/);
         expectWorkerRefused(workerEnv({ PGHOST: 'elsewhere' }), /libpq variable\(s\) PGHOST are set/);
         expectWorkerRefused(workerEnv({ DATABASE_DIRECT_URL: LOCAL_ADMIN }), /DATABASE_DIRECT_URL is set/);
       });
+    });
+  });
+
+  // ---- X1.8 review finding 4: the live rolsuper / rolbypassrls check, against this run's real TEST database (read-only).
+  describe('X1.8 Worker-login live privilege check (assertWorkerLoginNotPrivilegedAtRuntime)', () => {
+    const appUrl = process.env[TEST_DATABASE_URL] as string;
+    const adminUrl = process.env[TEST_DATABASE_URL_UNPOOLED] as string;
+    const base = (over: Record<string, string | undefined>) => ({ PHASE_D_SQL_APPROVED: 'true', [TEST_DATABASE_URL]: appUrl, [TEST_DATABASE_URL_UNPOOLED]: adminUrl, ...over });
+
+    it('is off without the switch', async () => {
+      await expect(assertWorkerLoginNotPrivilegedAtRuntime(base({ PHASE_D_SQL_APPROVED: undefined, [TEST_DATABASE_WORKER_URL]: appUrl }))).resolves.toBe(false);
+    });
+
+    it('accepts the restricted TEST application login as the worker login', async () => {
+      await expect(assertWorkerLoginNotPrivilegedAtRuntime(base({ [TEST_DATABASE_WORKER_URL]: appUrl }))).resolves.toBe(true);
+    });
+
+    it('refuses, live, a superuser worker login that no name rule catches (the admin URL under the application name)', async () => {
+      // The superuser is named as the WORKER login while the admin slot holds the application login, so only the live
+      // rolsuper check can refuse it. Read-only: one SELECT on pg_roles.
+      let message = '';
+      try {
+        await assertWorkerLoginNotPrivilegedAtRuntime({ PHASE_D_SQL_APPROVED: 'true', [TEST_DATABASE_URL]: appUrl, [TEST_DATABASE_URL_UNPOOLED]: appUrl, [TEST_DATABASE_WORKER_URL]: adminUrl });
+      } catch (error) {
+        expect(error).toBeInstanceOf(TestDatabaseConfigError);
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/connects as a superuser or BYPASSRLS role/);
+      expect(message).not.toMatch(/postgres(ql)?:\/\//);
     });
   });
 });
