@@ -1,7 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 
 import { AuditAction } from '../audit/audit.service';
-import { ADMIN_HEALTH_AUDIT_INTERVAL_MS, ADMIN_HEALTH_CACHE_MS, AdminHealthReport, AdminHealthService } from './admin-health.service';
+import { ADMIN_HEALTH_AUDIT_INTERVAL_MS, ADMIN_HEALTH_CACHE_MS, ADMIN_HEALTH_REFRESH_MIN_AGE_MS, AdminHealthReport, AdminHealthService } from './admin-health.service';
 import { DATABASE_INDICATOR_SQL } from './indicators/database.indicator';
 
 /**
@@ -11,7 +11,7 @@ import { DATABASE_INDICATOR_SQL } from './indicators/database.indicator';
  */
 const READ_ONLY = new Set(['info', 'get', 'hgetall', 'llen', 'zcard']);
 
-function setup(opts: { redisDown?: boolean; dbDown?: boolean; admin?: boolean; auditFails?: boolean } = {}) {
+function setup(opts: { redisDown?: boolean; dbDown?: boolean; admin?: boolean; auditFails?: boolean; auditHangs?: boolean; slowDbMs?: number } = {}) {
   const redisCalls: string[] = [];
   const answers: Record<string, (arg: string) => unknown> = {
     info: (section) => (section === 'server' ? 'redis_version:7.2.4\r\n' : 'used_memory:1024\r\nmaxmemory:0\r\n'),
@@ -33,11 +33,13 @@ function setup(opts: { redisDown?: boolean; dbDown?: boolean; admin?: boolean; a
   });
   const query = jest.fn(async (sql: string) => {
     if (opts.dbDown) throw new Error('ECONNREFUSED planted-db-host:5432');
-    if (sql === DATABASE_INDICATOR_SQL) return [{ connections: 5, max_connections: 100, reserved_connections: 3, server_version_num: 160004 }];
+    if (opts.slowDbMs) await new Promise((r) => setTimeout(r, opts.slowDbMs));
+    if (sql === DATABASE_INDICATOR_SQL) return [{ connections: 5, max_connections: 100, superuser_reserved_connections: 3, reserved_connections: 0, server_version_num: 160004 }];
     return [];
   });
   const env: Record<string, unknown> = { APP_VERSION: '2.4.0', REDIS_URL: 'redis://:pw@redis:6379', EMAIL_DRIVER: 'LOGGER', STORAGE_DRIVER: 'LOCAL', NODE_ENV: 'test', WORKER_SCHEDULER: 'interval' };
   const record = jest.fn(async () => {
+    if (opts.auditHangs) await new Promise<void>(() => undefined);
     if (opts.auditFails) throw new Error('audit insert failed');
   });
   const runInTenantContext = jest.fn(async (_ctx: unknown, fn: (m: unknown) => Promise<unknown>) => fn({}));
@@ -69,7 +71,7 @@ describe('AdminHealthService (X2.4)', () => {
     const { service } = setup();
     const report = await service.report(actor);
     expect(report.cards.map((c) => c.key)).toEqual(['api', 'database', 'redis', 'worker', 'scheduler', 'provisioner', 'email', 'storage']);
-    expect(card(report, 'database').detail).toContain('5 of 100 connections (5%)');
+    expect(card(report, 'database').detail).toContain('5 of 97 usable connections (5%)');
     expect(card(report, 'redis').detail).toContain('Redis 7.2.4');
   });
 
@@ -110,14 +112,52 @@ describe('AdminHealthService (X2.4)', () => {
     expect(record).toHaveBeenCalledTimes(3);
   });
 
-  it('a manual Refresh always writes a row (even inside the 5 minutes) and skips the cache', async () => {
+  it('a manual Refresh writes a refresh row even inside the 5 minutes (at most one per admin per 5 s) and re-probes only a report >= 5 s old', async () => {
     const { service, record, query } = setup();
     await service.report(actor);
+    expect(query).toHaveBeenCalledTimes(1);
+    now += 1_000;
+    // Cache 1 s old: Refresh is audited but returns the cached report (no re-probe).
     await service.report(actor, { refresh: true });
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenLastCalledWith({}, actor, AuditAction.ADMIN_HEALTH_VIEWED, { metadata: { refresh: true } });
+    expect(query).toHaveBeenCalledTimes(1);
+    // A second Refresh inside the same 5 s: no new row, no probe.
+    now += 1_000;
+    await service.report(actor, { refresh: true });
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(1);
+    // 5 s after the first: the report is old enough to re-probe, and a new refresh row is due.
+    now += ADMIN_HEALTH_REFRESH_MIN_AGE_MS;
     await service.report(actor, { refresh: true });
     expect(record).toHaveBeenCalledTimes(3);
-    expect(record).toHaveBeenLastCalledWith({}, actor, AuditAction.ADMIN_HEALTH_VIEWED, { metadata: { refresh: true } });
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it('R2 single-flight: N concurrent refresh calls (cold cache) produce exactly ONE probe set', async () => {
+    const { service, query, healthProbe } = setup({ slowDbMs: 50 });
+    const admins = Array.from({ length: 8 }, (_, i) => ({ ...actor, userId: `1111111${i}-1111-4111-8111-111111111111` }));
+    const reports = await Promise.all(admins.map((a) => service.report(a, { refresh: true })));
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(healthProbe).toHaveBeenCalledTimes(1);
+    expect(new Set(reports).size).toBe(1);
+    // A burst of refreshes right after: still served from the < 5 s report.
+    await Promise.all(admins.map((a) => service.report(a, { refresh: true })));
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('R1: an audit write that HANGS fails the request within about 2 s (fail-closed, bounded), nothing probed', async () => {
+    jest.mocked(Date.now).mockRestore();
+    const { service, query, record } = setup({ auditHangs: true });
+    const started = Date.now();
+    await expect(service.report(actor)).rejects.toThrow('timeout');
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(1_900);
+    expect(elapsed).toBeLessThan(3_500);
+    expect(query).not.toHaveBeenCalled();
+    // The dedupe was not marked: the next view tries the audit again.
+    await expect(service.report(actor)).rejects.toThrow('timeout');
+    expect(record).toHaveBeenCalledTimes(2);
   });
 
   it('the audit write fails closed (the request fails, nothing probed) and the dedupe is not marked', async () => {

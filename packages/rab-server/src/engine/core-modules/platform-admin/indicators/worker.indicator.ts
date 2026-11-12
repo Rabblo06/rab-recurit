@@ -8,7 +8,8 @@ import type { HealthRedisReader } from './health-redis-reader';
  * status source, unchanged). The queue counts are read with plain read-only commands on BullMQ's own keys — `LLEN` of
  * the `wait` / `paused` / `active` lists and `ZCARD` of the `prioritized` / `delayed` / `failed` sets — instead of
  * BullMQ's `getJobCounts` script, so the read path provably issues no write (no Lua, no `CLIENT SETNAME` from a new
- * Queue connection). waiting = wait + paused + prioritized, as BullMQ counts it.
+ * Queue connection). waiting = wait + paused, as BullMQ's `getWaitingCount` counts it; prioritized jobs are shown
+ * separately, as the queue table below the cards shows them.
  *
  * Counts never change the status (Twenty's per-queue failure rate needs BullMQ metrics, shown in the queue chart
  * below the cards); they are shown for the operator.
@@ -21,6 +22,7 @@ export interface HealthQueueRef {
 export interface QueueCounts {
   failed: number;
   waiting: number;
+  prioritized: number;
   active: number;
   delayed: number;
 }
@@ -35,7 +37,7 @@ export async function readQueueCounts(client: HealthRedisReader, queue: HealthQu
     client.zcard(key('delayed')),
     client.zcard(key('failed')),
   ]);
-  return { failed: Number(failed), waiting: Number(wait) + Number(paused) + Number(prioritized), active: Number(active), delayed: Number(delayed) };
+  return { failed: Number(failed), waiting: Number(wait) + Number(paused), prioritized: Number(prioritized), active: Number(active), delayed: Number(delayed) };
 }
 
 /** Heartbeat age in seconds from a `Date.now()` value stored as text; null when missing or not a number. */
@@ -57,7 +59,7 @@ export async function workerIndicator(
     { label: 'Heartbeat', value: age === null ? 'Not seen' : `${age} s ago${age > input.heartbeatTtlSeconds ? ' (stale)' : ''}` },
     ...input.queues.map((q, i) => ({
       label: q.name,
-      value: `${counts[i]!.failed} failed · ${counts[i]!.waiting} waiting · ${counts[i]!.active} active · ${counts[i]!.delayed} delayed`,
+      value: `${counts[i]!.failed} failed · ${counts[i]!.waiting} waiting · ${counts[i]!.prioritized} prioritized · ${counts[i]!.active} active · ${counts[i]!.delayed} delayed`,
     })),
   ];
   if (age === null) return { key: 'worker', status: 'unavailable', detail: `No worker heartbeat seen. · ${queueText}`, latencyMs: null, facts };

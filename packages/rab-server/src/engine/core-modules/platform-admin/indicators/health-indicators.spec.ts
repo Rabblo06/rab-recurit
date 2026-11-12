@@ -85,15 +85,27 @@ describe('api indicator (Twenty app.health.ts)', () => {
 
 describe('database indicator (Twenty database.health.ts)', () => {
   it('connections vs max_connections from ONE read-only statistics SELECT', async () => {
-    const query = jest.fn().mockResolvedValue([{ connections: 12, max_connections: '100', reserved_connections: 3, server_version_num: '160004' }]);
+    const query = jest.fn().mockResolvedValue([{ connections: 12, max_connections: '100', superuser_reserved_connections: 3, reserved_connections: '0', server_version_num: '160004' }]);
     const card = await databaseIndicator({ query, driver: {} } as unknown as DataSource);
     expect(query).toHaveBeenCalledTimes(1);
     expect(query).toHaveBeenCalledWith(DATABASE_INDICATOR_SQL);
     expect(DATABASE_INDICATOR_SQL).toMatch(/^SELECT\b/);
     expect(DATABASE_INDICATOR_SQL).not.toMatch(/\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|SET\s)/i);
     expect(card.status).toBe('healthy');
-    expect(card.detail).toMatch(/^PostgreSQL 16 · \d+ ms · 12 of 100 connections \(12%\)$/);
-    expect(card.facts).toContainEqual({ label: 'Connections', value: '12 of 100 (12%)' });
+    // Utilisation against the slots an ordinary role can use: 100 − 3 superuser-reserved − 0 reserved = 97.
+    expect(card.detail).toMatch(/^PostgreSQL 16 · \d+ ms · 12 of 97 usable connections \(12%\)$/);
+    expect(card.facts).toEqual(
+      expect.arrayContaining([
+        { label: 'Connections', value: '12 of 97 usable (12%)' },
+        { label: 'max_connections', value: '100' },
+        { label: 'Reserved slots', value: '3 superuser · 0 reserved' },
+      ]),
+    );
+  });
+  it('PostgreSQL 16 reserved_connections are taken out of the usable slots too', async () => {
+    const query = jest.fn().mockResolvedValue([{ connections: 45, max_connections: 100, superuser_reserved_connections: 3, reserved_connections: 7, server_version_num: 160004 }]);
+    const card = await databaseIndicator({ query, driver: {} } as unknown as DataSource);
+    expect(card.facts).toContainEqual({ label: 'Connections', value: '45 of 90 usable (50%)' });
   });
   it('an unexpected row throws (the probe wrapper turns it into a fixed "unavailable" card)', async () => {
     await expect(databaseIndicator({ query: jest.fn().mockResolvedValue([{}]), driver: {} } as unknown as DataSource)).rejects.toThrow();
@@ -109,6 +121,13 @@ describe('redis indicator (Twenty redis.health.ts + parse-redis-memory-info)', (
     expect(card.detail).toMatch(/^Redis 7\.2\.4 · 1\.0 MB of 64\.0 MB \(2%\) · \d+ ms$/);
     expect(card.facts).toEqual(expect.arrayContaining([{ label: 'Eviction policy', value: 'noeviction' }, { label: 'Peak memory', value: '2.0 MB' }]));
     expect(JSON.stringify(card)).not.toMatch(/planted/);
+  });
+  it('INFO memory without used_memory/maxmemory: warning "memory not reported", version kept (Redis answered: never "Not reachable")', async () => {
+    const { client } = fakeRedis({ info: { server: INFO_SERVER, memory: '# Memory\r\nused_memory_human:1.00M\r\n' } });
+    const card = await redisIndicator(client, true);
+    expect(card.status).toBe('warning');
+    expect(card.detail).toMatch(/^Redis 7\.2\.4 · memory not reported · \d+ ms$/);
+    expect(card.facts).toContainEqual({ label: 'Version', value: '7.2.4' });
   });
   it('no maxmemory limit is said in words; no password keeps the existing warning', async () => {
     const { client } = fakeRedis({ info: { server: INFO_SERVER, memory: 'used_memory:2048\r\nmaxmemory:0\r\n' } });
@@ -129,14 +148,14 @@ describe('worker indicator (Twenty worker.health.ts)', () => {
     lists: { 'bull:rab-email:wait': 3, 'bull:rab-email:paused': 1, 'bull:rab-email:active': 2, 'crewflow:test:bull:crewflow-scan-offers:wait': 1 },
     zsets: { 'bull:rab-email:prioritized': 1, 'bull:rab-email:delayed': 4, 'bull:rab-email:failed': 7, 'crewflow:test:bull:crewflow-scan-offers:failed': 2 },
   };
-  it('heartbeat + per-queue failed / waiting (wait + paused + prioritized) / active / delayed, read with LLEN/ZCARD/GET only', async () => {
+  it('heartbeat + per-queue failed / waiting (wait + paused, as BullMQ) / prioritized / active / delayed, read with LLEN/ZCARD/GET only', async () => {
     const { client, calls } = fakeRedis(data);
     const card = await workerIndicator(client, { heartbeatKey: 'rab:worker:heartbeat', heartbeatTtlSeconds: 30, queues, nowMs: () => 1_000_000 });
-    expect(card).toMatchObject({ key: 'worker', status: 'healthy', detail: 'Heartbeat 4 s ago · 9 failed · 6 waiting across 2 queues' });
+    expect(card).toMatchObject({ key: 'worker', status: 'healthy', detail: 'Heartbeat 4 s ago · 9 failed · 5 waiting across 2 queues' });
     expect(card.facts).toEqual([
       { label: 'Heartbeat', value: '4 s ago' },
-      { label: 'rab-email', value: '7 failed · 5 waiting · 2 active · 4 delayed' },
-      { label: 'crewflow-scan-offers', value: '2 failed · 1 waiting · 0 active · 0 delayed' },
+      { label: 'rab-email', value: '7 failed · 4 waiting · 1 prioritized · 2 active · 4 delayed' },
+      { label: 'crewflow-scan-offers', value: '2 failed · 1 waiting · 0 prioritized · 0 active · 0 delayed' },
     ]);
     expect(new Set(calls.map((c) => c.split(' ')[0]))).toEqual(new Set(['get', 'llen', 'zcard']));
   });

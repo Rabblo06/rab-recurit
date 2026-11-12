@@ -43,10 +43,18 @@ export interface AdminHealthReport {
   attention: number;
 }
 
-/** X2.4: the report is cached IN THIS PROCESS for 10 s (no Redis write: the health page is read-only on Redis). */
+/** X2.4: the report is cached IN THIS PROCESS for 10 s (the indicators never write to Redis). */
 export const ADMIN_HEALTH_CACHE_MS = 10_000;
+/**
+ * X2.4 review R2: a manual Refresh re-probes only when the cached report is at least this old; a younger report is
+ * returned as is. Together with the single in-flight probe set this bounds `?refresh=1` to one probe set per 5 s per
+ * process, however many requests arrive.
+ */
+export const ADMIN_HEALTH_REFRESH_MIN_AGE_MS = 5_000;
 /** X2.4 (owner assumption, see the PR): one `admin.health_viewed` row per admin per process at most every 5 minutes, plus every manual Refresh. */
 export const ADMIN_HEALTH_AUDIT_INTERVAL_MS = 5 * 60_000;
+/** X2.4 review R1: the audit write is bounded too, so the page can never hang on it (still fail-closed). */
+export const ADMIN_HEALTH_AUDIT_TIMEOUT_MS = 2_000;
 const AUDIT_DEDUPE_MAX_ENTRIES = 1_000;
 export const ADMIN_HEALTH_PROBE_TIMEOUT_MS = 2_000;
 const SLOW_MS = 500;
@@ -70,8 +78,13 @@ const SLOW_MS = 500;
  * in `./indicators/`), and a label in the front's `CARD_LABEL`. Nothing else registers it.
  *
  * Access is audited: `admin.health_viewed` in the admin's organisation, at most once per admin per process every
- * 5 minutes (the tab polls every 15 s), and on every manual Refresh (`?refresh=1`, which also skips the cache). The audit
- * write fails closed, like every other audited admin read.
+ * 5 minutes (the tab polls every 15 s), and on a manual Refresh (`?refresh=1`; at most one refresh row per admin per
+ * 5 s). The audit write is bounded at 2 s and fails closed: when it fails or times out, the request fails. (The panel's
+ * other audited reads are the ones that show a person's data, such as a user search or a user summary; this one shows
+ * none. Whether this view should be best-effort instead is an open owner decision.)
+ *
+ * A Refresh re-probes only when the cached report is at least 5 s old, and every caller that needs a live report shares
+ * ONE in-flight probe set, so `?refresh=1` cannot multiply probes.
  */
 @Injectable()
 export class AdminHealthService {
@@ -88,13 +101,26 @@ export class AdminHealthService {
   ) {}
 
   private cache: { at: number; report: AdminHealthReport } | null = null;
+  /** X2.4 review R2: the one probe set in flight, shared by every caller that needs a live report. */
+  private inflight: Promise<AdminHealthReport> | null = null;
   /** X2.4 audit dedupe: the acting admin's user id -> when this process last wrote their `admin.health_viewed` row. */
   private readonly lastAudited = new Map<string, number>();
+  /** X2.4 review R2: the acting admin's user id -> when this process last wrote their REFRESH row. */
+  private readonly lastRefreshAudited = new Map<string, number>();
 
   async report(actor: Pick<AuthContext, 'userId' | 'organisationId' | 'inspectedBy'>, opts: { refresh?: boolean } = {}): Promise<AdminHealthReport> {
     await assertActivePlatformAdmin(this.platformAdmin, actor);
-    await this.auditView(actor, opts.refresh === true);
-    if (!opts.refresh && this.cache && Date.now() - this.cache.at < ADMIN_HEALTH_CACHE_MS) return this.cache.report;
+    const refresh = opts.refresh === true;
+    await this.auditView(actor, refresh);
+    const age = this.cache ? Date.now() - this.cache.at : Number.POSITIVE_INFINITY;
+    if (this.cache && age < (refresh ? ADMIN_HEALTH_REFRESH_MIN_AGE_MS : ADMIN_HEALTH_CACHE_MS)) return this.cache.report;
+    this.inflight ??= this.probeAll().finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  private async probeAll(): Promise<AdminHealthReport> {
     const cards = await Promise.all([
       this.probe('api', async () => apiIndicator({ version: this.env.get('APP_VERSION') || 'dev', commit: this.env.get('APP_GIT_COMMIT') ?? null, nodeVersion: process.version, uptimeSeconds: process.uptime() })),
       this.probe('database', () => databaseIndicator(this.dataSource)),
@@ -111,23 +137,27 @@ export class AdminHealthService {
   }
 
   /**
-   * X2.4: `admin.health_viewed` in the admin's own organisation — always on a manual Refresh, otherwise at most once per
-   * admin per process every 5 minutes. Runs before any probe and fails closed (a failed audit write fails the request,
-   * and the dedupe is only marked after the row is written). A process restart resets the dedupe.
+   * X2.4: `admin.health_viewed` in the admin's own organisation — on a manual Refresh (at most one refresh row per admin
+   * per 5 s), otherwise at most once per admin per process every 5 minutes. Runs before any probe, is bounded at 2 s and
+   * fails closed (a failed or timed-out audit write fails the request, and the dedupe is only marked after the row is
+   * written). A process restart resets the dedupe.
    */
   private async auditView(actor: Pick<AuthContext, 'userId' | 'organisationId' | 'inspectedBy'>, refresh: boolean): Promise<void> {
     const who = actor.inspectedBy ?? actor.userId;
     const now = Date.now();
     const last = this.lastAudited.get(who);
-    if (!refresh && last !== undefined && now - last < ADMIN_HEALTH_AUDIT_INTERVAL_MS) return;
-    await this.tenantContext.runInTenantContext({ organisationId: actor.organisationId, workspaceId: null, userId: actor.userId, role: '' }, (manager) =>
-      this.audit.record(manager, actor, AuditAction.ADMIN_HEALTH_VIEWED, { metadata: { refresh } }),
+    const lastRefresh = this.lastRefreshAudited.get(who);
+    const refreshDue = refresh && (lastRefresh === undefined || now - lastRefresh >= ADMIN_HEALTH_REFRESH_MIN_AGE_MS);
+    const viewDue = last === undefined || now - last >= ADMIN_HEALTH_AUDIT_INTERVAL_MS;
+    if (!refreshDue && !viewDue) return;
+    await withTimeout(
+      this.tenantContext.runInTenantContext({ organisationId: actor.organisationId, workspaceId: null, userId: actor.userId, role: '' }, (manager) =>
+        this.audit.record(manager, actor, AuditAction.ADMIN_HEALTH_VIEWED, { metadata: { refresh: refreshDue } }),
+      ),
+      ADMIN_HEALTH_AUDIT_TIMEOUT_MS,
     );
-    if (this.lastAudited.size >= AUDIT_DEDUPE_MAX_ENTRIES) {
-      for (const [id, at] of this.lastAudited) if (now - at >= ADMIN_HEALTH_AUDIT_INTERVAL_MS) this.lastAudited.delete(id);
-      if (this.lastAudited.size >= AUDIT_DEDUPE_MAX_ENTRIES) this.lastAudited.clear();
-    }
-    this.lastAudited.set(who, now);
+    mark(this.lastAudited, who, now, ADMIN_HEALTH_AUDIT_INTERVAL_MS);
+    if (refreshDue) mark(this.lastRefreshAudited, who, now, ADMIN_HEALTH_REFRESH_MIN_AGE_MS);
   }
 
   /** The registry's consumer queues (BullMQ's default `bull` prefix) and, in bullmq mode, the scan queues. */
@@ -218,4 +248,13 @@ export class AdminHealthService {
     const driver = this.env.get('STORAGE_DRIVER');
     return { key: 'storage', status: latencyMs > SLOW_MS * 2 ? 'warning' : 'healthy', detail: `${driver === 'S3' ? 'S3-compatible' : 'Local disk'} · probe ${latencyMs} ms`, latencyMs };
   }
+}
+
+/** Records `who` at `now` in a bounded dedupe map (expired entries pruned first; cleared if still full). */
+function mark(map: Map<string, number>, who: string, now: number, windowMs: number): void {
+  if (map.size >= AUDIT_DEDUPE_MAX_ENTRIES) {
+    for (const [id, at] of map) if (now - at >= windowMs) map.delete(id);
+    if (map.size >= AUDIT_DEDUPE_MAX_ENTRIES) map.clear();
+  }
+  map.set(who, now);
 }

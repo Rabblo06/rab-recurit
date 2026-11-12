@@ -19,7 +19,19 @@ export async function redisIndicator(client: HealthRedisReader, passwordSet: boo
   const mem = parseRedisMemoryInfo(memory);
   const peak = readRedisInfoInteger(memory, 'used_memory_peak');
   const policy = readRedisInfoToken(memory, 'maxmemory_policy');
-  if (!mem) throw new Error('redis indicator: INFO memory without used_memory/maxmemory');
+  if (!mem) {
+    // Review: Redis answered, so it is reachable; only its memory figures are missing from INFO memory.
+    return {
+      key: 'redis',
+      status: 'warning',
+      detail: `Redis ${version} · memory not reported · ${latencyMs} ms${passwordSet ? '' : ' · no password set'}`,
+      latencyMs,
+      facts: [
+        { label: 'Version', value: version },
+        { label: 'Memory used', value: 'Not reported' },
+      ],
+    };
+  }
 
   const limited = mem.maxMemoryBytes > 0;
   const percent = limited ? Math.round((mem.usedMemoryBytes / mem.maxMemoryBytes) * 100) : null;

@@ -345,13 +345,17 @@ describeIfDb('admin panel routes (integration)', () => {
 
   it('health probes: bounded at 2 s, fixed detail text — a hung or failing probe never leaks its error text', async () => {
     const files = app.get(FileService);
-    // X2.4: the report cache is in process memory now (no Redis key to delete); `?refresh=1` skips it.
+    // X2.4: the report cache is in process memory now (no Redis key to delete); `?refresh=1` re-probes only a report at
+    // least 5 s old, so drop this process's cached report first.
+    (app.get(AdminHealthService) as unknown as { cache: unknown }).cache = null;
     const failing = jest.spyOn(files, 'healthProbe').mockRejectedValueOnce(new Error('ECONNREFUSED planted-storage-host.internal:9000 key=planted-key'));
     let res = await http().get('/rest/v1/admin/health/report?refresh=1').set(bearer(adminToken));
     expect(res.status).toBe(200);
     expect(JSON.stringify(res.body)).not.toMatch(/planted|ECONNREFUSED/);
     expect(res.body.cards.find((c: { key: string }) => c.key === 'storage')).toMatchObject({ status: 'unavailable', detail: 'Not reachable.' });
     failing.mockRestore();
+    // A Refresh re-probes only a report >= 5 s old (X2.4 review R2): drop this process's cached report first.
+    (app.get(AdminHealthService) as unknown as { cache: unknown }).cache = null;
     const hung = jest.spyOn(files, 'healthProbe').mockImplementationOnce(() => new Promise<void>(() => undefined));
     const started = Date.now();
     res = await http().get('/rest/v1/admin/health/report?refresh=1').set(bearer(adminToken));

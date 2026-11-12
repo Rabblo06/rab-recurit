@@ -8,7 +8,9 @@ import type { AdminHealthCard } from '../admin-health.service';
  * answer). Re-implemented as ONE read-only SELECT on statistics views and settings — no table, no tenant data, no write:
  *  - connections = `sum(numbackends)` over `pg_stat_database` (client backends of every database in the cluster, which
  *    is what `max_connections` limits);
- *  - `max_connections` and `superuser_reserved_connections` from `current_setting`;
+ *  - `max_connections`, `superuser_reserved_connections` and (PostgreSQL 16+) `reserved_connections` from
+ *    `current_setting`; utilisation is computed against the slots an ordinary role can use:
+ *    max_connections − superuser_reserved_connections − reserved_connections;
  *  - the server's major version from `server_version_num`.
  * The API's own pool (in use of max) is read from the driver in process, as before. The `warning` for a slow answer
  * (> 500 ms) is the existing Crewflow rule, unchanged; utilisation itself never changes the status (Twenty has no
@@ -17,7 +19,8 @@ import type { AdminHealthCard } from '../admin-health.service';
 export const DATABASE_INDICATOR_SQL = `SELECT
   (SELECT coalesce(sum(numbackends), 0) FROM pg_catalog.pg_stat_database)::int AS connections,
   current_setting('max_connections')::int AS max_connections,
-  current_setting('superuser_reserved_connections')::int AS reserved_connections,
+  current_setting('superuser_reserved_connections')::int AS superuser_reserved_connections,
+  coalesce(current_setting('reserved_connections', true), '0')::int AS reserved_connections,
   current_setting('server_version_num')::int AS server_version_num`;
 
 const SLOW_MS = 500;
@@ -25,6 +28,7 @@ const SLOW_MS = 500;
 interface DatabaseIndicatorRow {
   connections: number | string;
   max_connections: number | string;
+  superuser_reserved_connections: number | string;
   reserved_connections: number | string;
   server_version_num: number | string;
 }
@@ -35,10 +39,13 @@ export async function databaseIndicator(dataSource: DataSource): Promise<AdminHe
   const latencyMs = Date.now() - started;
   const connections = toInt(row?.connections);
   const max = toInt(row?.max_connections);
-  const reserved = toInt(row?.reserved_connections);
+  const superuserReserved = toInt(row?.superuser_reserved_connections) ?? 0;
+  const reserved = toInt(row?.reserved_connections) ?? 0;
   const versionNum = toInt(row?.server_version_num);
   if (connections === null || max === null || max <= 0) throw new Error('database indicator: unexpected statistics row');
-  const percent = Math.round((connections / max) * 100);
+  // The slots an ordinary (non-superuser, non-reserved) role such as crewflow_owner can actually take.
+  const usable = Math.max(1, max - superuserReserved - reserved);
+  const percent = Math.round((connections / usable) * 100);
   const major = versionNum !== null ? Math.floor(versionNum / 10_000) : null;
 
   const pool = (dataSource.driver as unknown as { master?: { totalCount?: number; idleCount?: number; options?: { max?: number } } }).master;
@@ -49,11 +56,12 @@ export async function databaseIndicator(dataSource: DataSource): Promise<AdminHe
   return {
     key: 'database',
     status: latencyMs > SLOW_MS ? 'warning' : 'healthy',
-    detail: `PostgreSQL${major !== null ? ` ${major}` : ''} · ${latencyMs} ms · ${connections} of ${max} connections (${percent}%)${poolText ? ` · pool ${poolText}` : ''}`,
+    detail: `PostgreSQL${major !== null ? ` ${major}` : ''} · ${latencyMs} ms · ${connections} of ${usable} usable connections (${percent}%)${poolText ? ` · pool ${poolText}` : ''}`,
     latencyMs,
     facts: [
-      { label: 'Connections', value: `${connections} of ${max} (${percent}%)` },
-      ...(reserved !== null ? [{ label: 'Reserved for superusers', value: String(reserved) }] : []),
+      { label: 'Connections', value: `${connections} of ${usable} usable (${percent}%)` },
+      { label: 'max_connections', value: String(max) },
+      { label: 'Reserved slots', value: `${superuserReserved} superuser · ${reserved} reserved` },
       ...(poolText ? [{ label: 'This API process pool', value: poolText }] : []),
       ...(major !== null ? [{ label: 'Version', value: `PostgreSQL ${major}` }] : []),
     ],
