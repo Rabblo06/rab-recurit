@@ -79,12 +79,17 @@ describe('PasswordResetEmailLimiterService (X1.4)', () => {
     expect(res.body).toMatchObject({ code: 'RATE_LIMIT_UNAVAILABLE' });
   });
 
-  it('is skipped under Jest unless RAB_DISABLE_RATE_LIMIT is "false" (the same switch as the login limiter)', async () => {
-    const { limiter, client } = make(async () => [0, 1, 1_000]);
+  it('uses the one bypass switch (X1.2): skipped only when RAB_DISABLE_RATE_LIMIT is exactly "true", enforced when unset', async () => {
+    const skipped = make(async () => [0, 1, 1_000]);
     process.env.RAB_DISABLE_RATE_LIMIT = 'true';
     try {
-      await expect(limiter.admit('person@example.test')).resolves.toBeUndefined();
-      expect(client.eval).not.toHaveBeenCalled();
+      await expect(skipped.limiter.admit('person@example.test')).resolves.toBeUndefined();
+      expect(skipped.client.eval).not.toHaveBeenCalled();
+      // The old hidden bypass (JEST_WORKER_ID set, flag unset) no longer skips: the store is reached.
+      delete process.env.RAB_DISABLE_RATE_LIMIT;
+      const enforced = make(async () => [1, 0, 0]);
+      await enforced.limiter.admit('person@example.test');
+      expect(enforced.client.eval).toHaveBeenCalledTimes(1);
     } finally {
       process.env.RAB_DISABLE_RATE_LIMIT = 'false';
     }

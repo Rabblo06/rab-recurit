@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 
 import { EnvironmentService } from '../../environment/environment.service';
 import { TOKEN_BUCKET_SCRIPT } from '../../rate-limit/token-bucket';
+import { isRateLimitBypassEnabled } from '../../throttler/rate-limit-bypass';
 import { AuthCacheRedisClientProvider } from './auth-cache-redis-client.provider';
 
 /**
@@ -42,9 +43,9 @@ const UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
  * `password-reset-email:<email>`; the address is hashed, like every other Crewflow token-bucket key, so no email
  * address appears in Redis.
  *
- * Jest: skipped exactly like `LoginAttemptLimiterService` (JEST_WORKER_ID set AND RAB_DISABLE_RATE_LIMIT !== 'false'),
- * because many suites request resets for the same fixture address. `forgot-password-email-limit.integration.spec.ts`
- * turns the real limiter on.
+ * Bypass: the one switch every limiter uses (`isRateLimitBypassEnabled`, rate-limit-bypass.ts; X1.2), exactly like
+ * `LoginAttemptLimiterService`: never in a production runtime. The Jest setup turns it on because many suites request
+ * resets for the same fixture address; `forgot-password-email-limit.integration.spec.ts` turns the real limiter on.
  */
 @Injectable()
 export class PasswordResetEmailLimiterService {
@@ -87,7 +88,7 @@ export class PasswordResetEmailLimiterService {
   }
 
   private skipped(): boolean {
-    return process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false';
+    return isRateLimitBypassEnabled(process.env);
   }
 
   private unavailable(error: unknown): ServiceUnavailableException {
