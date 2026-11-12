@@ -6398,3 +6398,20 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   F5 token mode, N1 on the legacy and CLI paths.
 - **Tests:** `release-floor.spec.ts` (31), `release-floor.integration.spec.ts` (9, real PostgreSQL); container cases in
   U-1b (`deploy-order-tests/run-upgrade-with-data-tests.cjs`, PG16 + PG18).
+
+## CONFIG — the push and realtime sweep rule is enforced by the deployment gates (branch phase-x/j2-push-realtime-gate, 2026-11-11, PR #97)
+
+Phase X J2 (S0-J SJ-03). Gate-only: no runtime, code default, migration, role, grant or RLS change; push and realtime stay
+off. Before this, the owner rule "push's sweep goes to 30 s on both services when `PUSH_ENABLED` is turned on" (2026-11-06)
+was a compose comment, so switching push on in `runtime.env` silently registered a 2 s push scheduler.
+
+- **Asset:** the delivery cadence of other people's push notifications and live updates. **Actor:** an operator enabling
+  push or realtime, or an override that configures one service differently from the other.
+- **Control:** `scripts/compose-owner-login.cjs` (full mode, and `--lint-env-file runtime`, which renders the committed
+  compose with the file's switches) and `staging/verify-image-compose.cjs` (static and `--environment`) refuse: a
+  `PUSH_ENABLED` / `REALTIME_ENABLED` value that differs between rab-api and rab-worker; `PUSH_ENABLED=true` without
+  `WORKER_PUSH_DISPATCH_INTERVAL_SECONDS="30"` committed on both; `REALTIME_ENABLED=true` with a realtime interval that
+  differs between the services; either interval in an env file. "On" is exactly the string `true` (the environment's own
+  parse). The verifier's env-file reader records only those two non-secret switch values in addition to names.
+- **Residual:** the realtime interval value is not pinned (no owner decision yet); the gate guarantees only that both
+  services agree. Deciding it is a precondition of turning realtime on.
