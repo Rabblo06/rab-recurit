@@ -37,6 +37,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  E3 a rolled-back transaction ships no event — a TypeORM rollback and a raw ROLLBACK TO SAVEPOINT alike.
  *  E4 a sink failure neither blocks nor rolls back the action, and the Worker's BullMQ retry delivers once the sink is back.
  *  E5 a queue (Redis) failure neither blocks nor rolls back the action.
+ *  E6 ABUSE (real RLS): a forged organisationId / auditLogId pair ships nothing (both cross-tenant directions, unknown id).
  */
 jest.setTimeout(120_000);
 const RUN = Boolean(process.env.DATABASE_URL);
@@ -308,6 +309,36 @@ describeIfDb('X1.1 security audit events: after commit, BullMQ, sink (integratio
     const delivered = outcomes.find((o) => o.jobId === jobId && o.outcome === 'shipped');
     expect(delivered!.attemptsMade).toBeGreaterThanOrEqual(1); // delivered on a retry, not the first attempt
     expect(await committedRows(marker)).toHaveLength(1); // the action is untouched
+  });
+
+  it('E6 ABUSE (real RLS): a forged organisationId / auditLogId pair ships nothing — cross-tenant both ways, and an unknown id', async () => {
+    // A second organisation with its own committed security row (its manager's sign-in records auth.login there).
+    const otherOrg = await factory.createOrganisation('x11-other');
+    const otherOwner = await factory.createInternalManager(otherOrg, { permissions: 'production' });
+    await factory.signedInContext(otherOwner);
+    const [otherRow] = await admin.query<Array<{ id: string }>>(`SELECT id FROM core.audit_log WHERE organisation_id = $1 AND action = 'auth.login' ORDER BY created_at DESC LIMIT 1`, [otherOrg.id]);
+    const ownMarker = `e6-${randomUUID()}`;
+    await record(AuditAction.USER_DELETED, ownMarker);
+    const [ownRow] = await committedRows(ownMarker);
+    expect(otherRow).toBeDefined();
+    expect(ownRow).toBeDefined();
+    const linesBefore = workerLines.length;
+    const forged = [
+      { organisationId: otherOrg.id, auditLogId: ownRow!.id }, // the other organisation's scope, my row
+      { organisationId: ctx.organisationId, auditLogId: otherRow!.id }, // my scope, the other organisation's row
+      { organisationId: ctx.organisationId, auditLogId: randomUUID() }, // an id that does not exist
+    ];
+    for (const f of forged) await queue.add('audit-event-ship', f, { jobId: `forged.${randomUUID()}`, attempts: 1 });
+    const seen = await eventually(
+      () => outcomes.filter((o) => o.jobId.startsWith('forged.')),
+      (v) => v.length >= forged.length && v.every((o) => o.outcome !== undefined || o.error !== undefined),
+    );
+    expect(seen.map((o) => o.outcome)).toEqual(['not-found', 'not-found', 'not-found']);
+    // The legitimate jobs for those rows ship them under their OWN organisation only; nothing crossed tenants.
+    const crossed = workerLines
+      .slice(linesBefore)
+      .filter((l) => (l.event.detail.auditLogId === ownRow!.id && l.event.organisationId !== ctx.organisationId) || (l.event.detail.auditLogId === otherRow!.id && l.event.organisationId !== otherOrg.id));
+    expect(crossed).toEqual([]);
   });
 
   it('E5 a queue (Redis) failure neither blocks nor rolls back the action', async () => {

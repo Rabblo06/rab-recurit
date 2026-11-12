@@ -5,7 +5,7 @@
  * and the queue registry.
  *
  * The flow (Twenty's event-logs: the event is built after the action, handed to a queue, and a sink writes it):
- *   1. `AuditService.record` (and the direct `INSERT INTO core.audit_log` sites) write the row inside the business
+ *   1. `AuditService.record` (and the few raw audit-table writers, listed in security-audit-event-catalogue.spec.ts) write the row inside the business
  *      transaction, exactly as before. `core.audit_log` stays the record.
  *   2. AFTER COMMIT (the engine AfterCommitPublisher) one job is added to `crewflow-audit-events` for a row whose action is
  *      in the security catalogue (security-audit-event-catalogue.ts). The payload is identifiers only.

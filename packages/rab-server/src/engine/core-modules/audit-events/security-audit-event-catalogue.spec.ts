@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 
 import { AuditAction } from '../audit/audit.service';
 import { PRIVILEGED_COPY_AUDIT_ACTION, PRIVILEGED_COPY_SKIPPED_AUDIT_ACTION } from '../../../database/typeorm/workspace-schema/backfill/privileged-copy';
@@ -11,7 +11,40 @@ import { classifyAuditAction, LOGIN_FAILED_EVENT_TYPE, NOT_SHIPPED_AUDIT_ACTIONS
  * approval, account deletion, suspension, security configuration) is covered.
  */
 const shipped = Object.keys(SHIPPED_AUDIT_ACTIONS);
-const repoFile = (rel: string) => readFileSync(join(__dirname, '../../../../../..', rel), 'utf8');
+const REPO = join(__dirname, '../../../../../..');
+const repoFile = (rel: string) => readFileSync(join(REPO, rel), 'utf8');
+
+/** Every production source file of every package (tests, specs, builds and dependencies excluded). */
+function productionSources(): string[] {
+  const out: string[] = [];
+  const skip = new Set(['node_modules', 'dist', 'dist-cjs', 'dist-esm', '__tests__', 'coverage', '.nx', 'build']);
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      if (skip.has(name) || name.startsWith('.')) continue;
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.(ts|tsx|js|cjs|mjs|sql)$/.test(name) && !/\.(spec|test)\.[a-z]+$/.test(name)) out.push(relative(REPO, full).split(sep).join('/'));
+    }
+  };
+  walk(join(REPO, 'packages'));
+  return out;
+}
+
+/** A raw insert into core.audit_log, whatever the case, quoting or whitespace. */
+const RAW_AUDIT_INSERT = /insert\s+into\s+(?:"?core"?\s*\.\s*)?"?audit_log"?/i;
+
+/**
+ * The ONLY production files allowed to write core.audit_log without AuditService.record, and how each reaches the off-host
+ * path. A new raw insert anywhere in packages/ fails here until it is routed (shipAuditRowAfterCommit) and listed.
+ */
+const DIRECT_WRITERS: Record<string, { shippedBy: string | null }> = {
+  'packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts': { shippedBy: 'packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts' },
+  'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts': { shippedBy: 'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts' },
+  // core.replay_failed_email (frozen with its migration): its caller ships the row it wrote.
+  'packages/rab-server/src/database/typeorm/core/outbox-retention-sql.ts': { shippedBy: 'packages/rab-server/src/engine/core-modules/platform-admin/outbox-operations.service.ts' },
+  // Frozen with the applied one-off migration HwsHistoricalRowsPrivilegedCopy1786719520000: never shipped (documented).
+  'packages/rab-server/src/database/typeorm/workspace-schema/backfill/privileged-copy.ts': { shippedBy: null },
+};
 
 describe('security audit event catalogue (X1.1)', () => {
   it('every AuditAction is classified exactly once: shipped XOR deliberately not shipped', () => {
@@ -20,6 +53,12 @@ describe('security audit event catalogue (X1.1)', () => {
     expect(shipped.filter((a) => notShipped.has(a))).toEqual([]); // no overlap
     const unclassified = Object.values(AuditAction).filter((a) => !notShipped.has(a) && !(a in SHIPPED_AUDIT_ACTIONS));
     expect(unclassified).toEqual([]);
+  });
+
+  it('every raw INSERT INTO core.audit_log in any production source file is a known, routed writer', () => {
+    const writers = productionSources().filter((f) => RAW_AUDIT_INSERT.test(readFileSync(join(REPO, f), 'utf8')));
+    expect(writers.sort()).toEqual(Object.keys(DIRECT_WRITERS).sort());
+    for (const { shippedBy } of Object.values(DIRECT_WRITERS)) if (shippedBy) expect([shippedBy, repoFile(shippedBy).includes('shipAuditRowAfterCommit(')]).toEqual([shippedBy, true]);
   });
 
   it('the actions the Worker and SQL write directly (not AuditAction constants) are classified too', () => {

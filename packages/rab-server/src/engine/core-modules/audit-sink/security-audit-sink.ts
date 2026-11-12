@@ -31,9 +31,10 @@ import { isAbsolute } from 'node:path';
  *     delivery job then completes without a retry).
  *
  * Redaction (always, before anything leaves the process): keys that look like secrets (password, secret, token, hash,
- * totp, recovery, cookie, authorization, apiKey, key) are replaced by "[REDACTED]"; values are limited to strings,
- * numbers, booleans and null, strings cut at 256 characters, nesting at depth 3, at most 50 keys; e-mail addresses in
- * strings are masked (`a***@example.com`); a postgres:// URL is replaced. The event carries ids, types and counts —
+ * totp, recovery, cookie, authorization, apiKey, key, private key, jwt, bearer, named one-time codes; a bare `code` holding
+ * digits) are replaced by "[REDACTED]"; values are limited to strings, numbers, booleans and null, strings cut at 256
+ * characters, nesting at depth 3, at most 50 keys; e-mail-like tokens in strings are masked (`a***@example.com`, Unicode
+ * aware); a postgres:// URL is replaced; `token=` / `code=`-style URL parameters, bearer values and JWTs are replaced. The event carries ids, types and counts —
  * never row data.
  */
 export type AuditSinkMode = 'none' | 'stdout' | 'file';
@@ -101,23 +102,54 @@ export function securityAuditSinkConfig(env: Record<string, string | undefined> 
   return { mode, file, failure, production };
 }
 
-const SECRET_KEY = /pass(word)?|secret|token|hash|totp|recovery|cookie|authori[sz]ation|api_?key|^key$|credential|signature|otp/i;
-const EMAIL = /([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+/**
+ * Keys whose VALUE is never shipped. X1.1 review (defence in depth) added private keys, JWTs, bearer values and named
+ * one-time codes. A bare `code` key stays: in today's metadata it is an ERROR code (report.integrity_failed, shift
+ * statements, e-mail attachments); it is redacted only when its value looks like a one-time code (OTP_CODE_VALUE).
+ */
+const SECRET_KEY =
+  /pass(word)?|secret|token|hash|totp|recovery|cookie|authori[sz]ation|api_?key|^key$|private_?key|credential|signature|otp|jwt|bearer|(mfa|otp|totp|verification|auth|security|one_?time|second_?factor|reset)_?code/i;
+const OTP_CODE_KEY = /^code$/i;
+const OTP_CODE_VALUE = /^\s*\d{4,10}\s*$/;
+/**
+ * An e-mail-like token: any run of non-space, non-@ characters, one or more @, then the rest of the token. Unicode-aware
+ * (IDN domains, apostrophes, accented local parts): `jöhn@exämple.com` → `j***@exämple.com`, `o'brien@x.ie` → `o***@x.ie`.
+ * Deliberately broad: over-masking (a URL with credentials, an @handle) is acceptable, an unmasked address is not.
+ */
+const EMAIL = /([^\s@]+)@+([^\s@]*)/gu;
 const PG_URL = /postgres(?:ql)?:\/\/\S+/gi;
+/** Secret-bearing URL query / fragment parameters (a reset or invite link's `token=` / `code=`). */
+const SECRET_QUERY = /([?&#;](?:[a-z0-9_]*token|code|key|api_?key|secret|password|pwd|signature|sig|otp|jwt|auth|session)=)[^&#\s]*/gi;
+const BEARER = /\bbearer\s+[^\s,;]+/gi;
+const JWT = /\beyJ[\w-]{4,}\.[\w-]{4,}\.[\w-]*/g;
+
+/** The string redaction every shipped value goes through (exported for its unit test). */
+export function redactString(value: string): string {
+  return value
+    .replace(PG_URL, '[url]')
+    .replace(SECRET_QUERY, '$1[REDACTED]')
+    .replace(BEARER, '[bearer]')
+    .replace(JWT, '[jwt]')
+    .replace(EMAIL, (_m, local: string, domain: string) => `${Array.from(local)[0]}***@${domain}`)
+    .slice(0, 256);
+}
 
 function redactValue(value: unknown, depth: number): unknown {
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'string') return value.replace(PG_URL, '[url]').replace(EMAIL, '$1***@$2').slice(0, 256);
+  if (typeof value === 'string') return redactString(value);
   if (Array.isArray(value)) return depth >= 3 ? '[depth]' : value.slice(0, 50).map((v) => redactValue(v, depth + 1));
   if (typeof value === 'object') return depth >= 3 ? '[depth]' : redactObject(value as Record<string, unknown>, depth + 1);
   return '[unsupported]';
 }
 
+const isSecretEntry = (key: string, value: unknown): boolean =>
+  SECRET_KEY.test(key) || (OTP_CODE_KEY.test(key) && (typeof value === 'string' || typeof value === 'number') && OTP_CODE_VALUE.test(String(value)));
+
 function redactObject(input: Record<string, unknown>, depth: number): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(input).slice(0, 50)) out[key] = SECRET_KEY.test(key) ? '[REDACTED]' : redactValue(input[key], depth);
+  for (const key of Object.keys(input).slice(0, 50)) out[key] = isSecretEntry(key, input[key]) ? '[REDACTED]' : redactValue(input[key], depth);
   return out;
 }
 

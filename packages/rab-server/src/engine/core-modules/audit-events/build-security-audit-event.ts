@@ -58,7 +58,8 @@ export function buildAuditRowSecurityEvent(row: AuditLogShippingRow, processLabe
   };
 }
 
-const EMAIL_SHAPE = /^([^\s@])[^\s@]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})$/;
+/** Unicode-aware (IDN domains, apostrophes, accented local parts); the first CODE POINT is kept, never half a pair. */
+const EMAIL_SHAPE = /^([^\s@])[^\s@]*@([^\s@]+\.[^\s@]+)$/u;
 
 /** `a***@example.com` for an e-mail shape; `[not-an-email]` for anything else (never the raw input). */
 export function maskEmailForAudit(raw: unknown): string {
