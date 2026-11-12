@@ -32,13 +32,13 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { Client } from 'pg';
 
-import { compareWithGolden } from '../core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
 
 class Refusal extends Error {}
 
@@ -55,7 +55,8 @@ const DEPLOY_PREPARE = join(DIST, 'deploy-prepare.js');
 const OWNER_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql');
 const TRANSITION_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql');
 const MIGRATIONS_DIR = join(__dirname, '..', 'core', 'migrations');
-const GOLDEN = readFileSync(join(__dirname, '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 const RUN_ID = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
 
 /** Seam targets (reviewed by name in the report). */
