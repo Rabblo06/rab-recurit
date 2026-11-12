@@ -1,10 +1,9 @@
-import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
 
 import { EnvironmentService } from '../environment/environment.service';
-import { resolveClientIp } from '../../utils/client-ip.util';
+import { rabThrottlerOptions } from './throttler-options.factory';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
 import { RabThrottlerGuard } from './rab-throttler.guard';
@@ -38,30 +37,8 @@ import { RabThrottlerGuard } from './rab-throttler.guard';
     ThrottlerModule.forRootAsync({
       imports: [ThrottlerRedisClientModule],
       inject: [ThrottlerRedisClientProvider, EnvironmentService],
-      useFactory: (redis: ThrottlerRedisClientProvider, environmentService: EnvironmentService) => ({
-        throttlers: [{ name: 'default', ttl: 60_000, limit: 120 }],
-        storage: new ThrottlerStorageRedisService(redis.client),
-        // SEC-03 / PHASE 11 EDGE-01: the tracker's identity is only as
-        // trustworthy as `resolveClientIp`'s own trusted-proxy check — see
-        // that function's doc comment. Typed `Record<string, any>` to match
-        // Nest's own (transport-agnostic) `ThrottlerGetTrackerFunction`
-        // signature — an actual Express request is what's passed at
-        // runtime; `resolveClientIp` only reads the fields it declares.
-        getTracker: (req: Record<string, any>) =>
-          resolveClientIp(req as { headers: Record<string, any>; ip?: string; socket?: { remoteAddress?: string } }, environmentService.trustedProxyCidrs),
-        // The integration suite shares one IP (the local supertest client)
-        // across many spec files that each call /auth/login, /auth/refresh
-        // etc. repeatedly within the same 60s window — none of that is the
-        // abuse this guard exists to catch. Deliberately keyed off
-        // JEST_WORKER_ID (Jest always and only sets this, unlike NODE_ENV,
-        // which this toolchain sets inconsistently across nx/jest/dotenv
-        // layering) rather than a plain env flag, so this can never be
-        // mistakenly left on outside an actual Jest run even if
-        // RAB_DISABLE_RATE_LIMIT ends up set somewhere it shouldn't be.
-        // `rate-limiting.integration.spec.ts` is the one file that flips the
-        // flag back off, to exercise the real throttle end-to-end.
-        skipIf: () => process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false',
-      }),
+      // X1.2: the options live in throttler-options.factory.ts so the skip predicate has a behavioural unit test.
+      useFactory: rabThrottlerOptions,
     }),
   ],
   // CF-17: explicit Redis-outage policy (credential routes fail closed, ordinary routes stay available).

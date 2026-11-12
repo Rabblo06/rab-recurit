@@ -177,6 +177,26 @@ const SENTINEL_OPS_PW = 'SENTINEL-IMAGE-OPS-PW-93ad'; // gitleaks:allow (synthet
 const SENTINEL_OWNER_PW = 'SENTINEL-IMAGE-OWNER-PW-c41d'; // gitleaks:allow (synthetic marker planted by this check)
 const SENTINEL_RUNTIME_REDIS_URL = 'redis://crewflow:sentinel-runtime-c41d@rab-redis:6379'; // gitleaks:allow (synthetic)
 const SENTINEL_DIGEST = `sha256:${'5e'.repeat(32)}`;
+/**
+ * Interpolation values for docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, `${KEY:?}`; owner request
+ * 2026-11-12: OpenShip shows every variable), so the reference model renders. Dummies, never secrets. The variant reads
+ * these names from its env files (an interpolation value never reaches an env_file entry).
+ */
+const PRODUCTION_REQUIRED_DUMMIES = Object.freeze({
+  PG_DATABASE_URL: `postgresql://${OWNER_LOGIN}:dummy@db-direct.example:5432/rab?sslmode=verify-full`,
+  APP_SECRET: 'dummy-production-required-app-secret',
+  APP_URL: 'https://app.example.com',
+  ACCOUNTS_URL: 'https://app.example.com',
+  CORS_ORIGINS: 'https://app.example.com',
+  TRUSTED_PROXY_CIDRS: '10.0.0.1/32',
+  EMAIL_DRIVER: 'SMTP',
+  S3_BUCKET: 'dummy',
+  S3_REGION: 'auto',
+  S3_ENDPOINT: 'https://s3.example.com',
+  S3_ACCESS_KEY_ID: 'dummy',
+  S3_SECRET_ACCESS_KEY: 'dummy',
+  CREWFLOW_AUDIT_SINK: 'stdout',
+});
 
 const stable = (v) => JSON.stringify(v ?? null, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x));
 const envOf = (svc) => svc?.environment ?? {};
@@ -511,6 +531,7 @@ function renderModels(variantPath = VARIANT) {
     const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|DATABASE_|REDIS_URL|PG_|COMPOSE_|DB_TARGET)/.test(k)));
     const env = {
       ...base,
+      ...PRODUCTION_REQUIRED_DUMMIES,
       CREWFLOW_IMAGE_TAG: SENTINEL_DIGEST,
       CREWFLOW_REDIS_IMAGE: `redis@sha256:${'0c'.repeat(32)}`,
       CREWFLOW_SECRETS_DIR: secrets.split(path.sep).join('/'),

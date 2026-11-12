@@ -66,6 +66,21 @@ const DUMMY_ENV = {
   QA_CREWFLOW_PASSWORD: 'dummy',
   QA_CREWFLOW_APP_PASSWORD: 'dummy',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
+  // docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, owner request 2026-11-12: OpenShip shows every
+  // variable). The owner-login URL shape, never the migrator login or a sentinel.
+  PG_DATABASE_URL: 'postgresql://crewflow_owner:dummy@db-direct.example:5432/rab?sslmode=verify-full',
+  APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
+  APP_URL: 'https://app.example.com',
+  ACCOUNTS_URL: 'https://app.example.com',
+  CORS_ORIGINS: 'https://app.example.com',
+  TRUSTED_PROXY_CIDRS: '10.0.0.1/32',
+  EMAIL_DRIVER: 'SMTP',
+  S3_BUCKET: 'dummy',
+  S3_REGION: 'auto',
+  S3_ENDPOINT: 'https://s3.example.com',
+  S3_ACCESS_KEY_ID: 'dummy',
+  S3_SECRET_ACCESS_KEY: 'dummy',
+  CREWFLOW_AUDIT_SINK: 'stdout',
 };
 
 let failures = 0;

@@ -10,7 +10,7 @@
 const crypto = require('crypto');
 const { Client } = require('pg');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { renderHtmlToPdf } = require('/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js');
+const { renderReportPdf } = require('/app/packages/rab-worker/dist/queues/rab-reports/render-pdf.util.js');
 const { renderFinalTimesheetHtml } = require('/app/packages/rab-server/dist/modules/attendance/templates/final-timesheet.html.js');
 const { documentFooterTemplate } = require('/app/packages/rab-server/dist/modules/attendance/templates/adolphus-document.js');
 
@@ -38,7 +38,7 @@ function uuidFrom(name) {
   const info = { venueName: 'Venue 01-1', venueAddress: '1 Example Street, London E1 1AA', roleName: 'Bartender', startsAt, endsAt, shiftReference: 'SH-20261020-0001', workspaceName: 'CostAudit Workspace 01', timezone: 'Europe/London', generatedAt: '2026-10-20T17:00:00.000Z' };
   const staff = Array.from({ length: 5 }, (_, i) => ({ name: `Sam Staff01${i}`, staffRef: `CA01-00${i}`, roleName: 'Bartender', scheduledStart: startsAt, scheduledEnd: endsAt, clockInAt: startsAt, clockOutAt: endsAt, breakMinutes: 30, workedMinutes: 450, status: 'approved', corrected: false }));
   const html = renderFinalTimesheetHtml({ ...info, staff, unsigned: true, finalisedByName: 'Morgan Manager011', finalisedAt: '2026-10-20T17:00:00.000Z' });
-  const pdf = await renderHtmlToPdf(html, { footerTemplate: documentFooterTemplate(info), landscape: true });
+  const pdf = await renderReportPdf({ kind: 'final-timesheet', data: { ...info, staff, unsigned: true, finalisedByName: 'Morgan Manager011', finalisedAt: '2026-10-20T17:00:00.000Z' } });
   const sha = crypto.createHash('sha256').update(pdf).digest('hex');
 
   const shifts = (await c.query(`
