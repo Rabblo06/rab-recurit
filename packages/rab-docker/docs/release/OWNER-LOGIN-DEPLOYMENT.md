@@ -593,7 +593,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 The three operations commands run like `bootstrap-admin`: as a **one-off container of the API service**, from the same
 image, under the same owner login (`database.env`) and the same runtime configuration. This is the Twenty way: one image,
-one login. Nothing new is deployed. There is no separate operations container any more (PR 2 #<PR2> removed it from
+one login. Nothing new is deployed. There is no separate operations container any more (PR 2 #124 removed it from
 every compose file); its old `CREWFLOW_OPS_*` / `PG_OPS_*` variables are refused everywhere.
 
 | Command | What it does | Modes |

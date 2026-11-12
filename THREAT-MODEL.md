@@ -4134,7 +4134,7 @@ databases only.
   step as a release job and promote only on exit 0.
 - **Owner decision (implemented, B7 below; superseded by X2.2):** the owner CLI commands `containment`, `hws:backfill` and
   `user-session:backfill` run as one-off CLI commands of the API image under `crewflow_owner` (X2.2, #116; rab-ops
-  removed in PR 2 #<PR2>).
+  removed in PR 2 #124).
 
 ### B4: read replica — permission lag
 
@@ -4172,7 +4172,7 @@ databases only.
 ### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill — SUPERSEDED (history)
 
 - **Status: SUPERSEDED (2026-11-12) by "X2.2 (PR #116): ops commands from the API image under crewflow_owner" below;
-  the container was removed in PR 2 #<PR2>.**
+  the container was removed in PR 2 #124.**
   - **Now:** the three commands run as a one-off of the API service, from the same image, under the one owner login.
   - **PR 2 removed:**
     - the `rab-ops` service from the three compose files, and `.env.ops.example`;
@@ -4362,7 +4362,7 @@ databases only.
   `core/nx-dotenv-files.ts` lists every file Nx loads for every rab-server and rab-worker target under the repository root
   and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule) and `readRuntimeDotenvValues`
   (API / Worker / provisioner, core.datasource, check-pending-migrations) read all of them. The ops container's own
-  dotenv refusal (`assertOpsValuesNotFromDotenv`) was removed with the container in PR 2 #<PR2>. An ops variable that
+  dotenv refusal (`assertOpsValuesNotFromDotenv`) was removed with the container in PR 2 #124. An ops variable that
   reaches a process's environment, Nx's dotenv injection included, is still refused by `pg-config.ts` in every process
   and by `ops-run.ts` (B7 status). `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals
   Nx's own function for every target; target list pinned to both project.json files, no configurations; a production
@@ -6676,7 +6676,7 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
 ### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
 - **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
   a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
-  path was removed in PR 2 #<PR2> (B7, now SUPERSEDED).
+  path was removed in PR 2 #124 (B7, now SUPERSEDED).
 - **Actor → action → consequence.**
   - A holder of the owner credential can already do everything these commands do (BC-01, BC-03, BC-16).
   - The commands add no grant, no statement and no plan. Their cross-tenant reads and the session-row inserts still run
