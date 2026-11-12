@@ -61,7 +61,7 @@ export interface HwsBackfillReport {
  * organisation) carrying the operational label.
  *
  * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner,
- * with the label flags required (--operator-source / --operator-id / --change-ref). Every mode then runs on the CLI's own
+ * with the label flags required (--operator "<name>" and --change-ref; --operator-source optional). Every mode then runs on the CLI's own
  * owner-login DataSource (FORCE RLS binds it on every workspace table, as it bound crewflow_app); no narrowed session is
  * opened for this command.
  *

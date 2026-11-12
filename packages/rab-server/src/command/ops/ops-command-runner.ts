@@ -1,6 +1,6 @@
 import { CommandRunner, Option } from 'nest-commander';
 
-import { OPS_ACTOR_SOURCES, OpsLabelFlags } from './ops-run';
+import { OPS_ACTOR_SOURCES, OPS_DEFAULT_OPERATOR_SOURCE, OpsLabelFlags } from './ops-run';
 
 /**
  * Phase X2.2: the base class of the three ops commands. It declares the operator label flags once (nest-commander reads
@@ -12,23 +12,26 @@ import { OPS_ACTOR_SOURCES, OpsLabelFlags } from './ops-run';
  * in one place, ops-run.ts validateOpsLabel, the same as for the container variables.
  */
 export abstract class OpsCommandRunner extends CommandRunner {
-  @Option({ flags: '--operator-source <source>', description: `operator label, required: who launched the run (${OPS_ACTOR_SOURCES.join(' | ')})` })
-  parseOperatorSource(value: string): string {
+  @Option({ flags: '--operator <name>', description: 'operator label, REQUIRED: who runs this (a name, spaces allowed; recorded as a claim, not verified)' })
+  parseOperator(value: string): string {
     return value;
   }
 
-  @Option({ flags: '--operator-id <id>', description: 'operator label, required: the CI OIDC subject, run id or deploy user (recorded, not verified)' })
-  parseOperatorId(value: string): string {
-    return value;
-  }
-
-  @Option({ flags: '--change-ref <ref>', description: 'operator label, required: the approved ticket / PR / change reference' })
+  @Option({ flags: '--change-ref <ref>', description: 'operator label, REQUIRED: the approved ticket / PR / change reference' })
   parseChangeRef(value: string): string {
+    return value;
+  }
+
+  @Option({
+    flags: '--operator-source <source>',
+    description: `operator label, optional (default ${OPS_DEFAULT_OPERATOR_SOURCE}): ${OPS_ACTOR_SOURCES.join(' | ')}`,
+  })
+  parseOperatorSource(value: string): string {
     return value;
   }
 }
 
 /** The label flags out of a command's parsed options (nothing else is read). */
 export function opsLabelFlagsOf(options: OpsLabelFlags | undefined): OpsLabelFlags {
-  return { operatorSource: options?.operatorSource, operatorId: options?.operatorId, changeRef: options?.changeRef };
+  return { operator: options?.operator, changeRef: options?.changeRef, operatorSource: options?.operatorSource };
 }

@@ -4,6 +4,7 @@ import {
   assertOpsPlacement,
   assertOpsRun,
   assertOpsValuesNotFromDotenv,
+  describeOpsLabel,
   OPS_COMMANDS,
   OPS_LABEL_NOTE,
   opsAuditMetadata,
@@ -24,7 +25,7 @@ const OPS_ENV = { CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP, ...
 // X2.2 owner-login path: the one login, and the label as flags.
 const OWNER = 'postgres://crewflow_owner:pw-own-1@localhost:5432/rab';
 const OWNER_ENV = { PG_DATABASE_URL: OWNER, DB_TARGET: 'local' };
-const FLAGS = { operatorSource: 'manual-console', operatorId: 'deploy-user@host-1', changeRef: 'OPS-42' };
+const FLAGS = { operator: 'Jane O\'Neil (on-call)', changeRef: 'OPS-42' };
 
 afterEach(() => setPgProcessRole('api'));
 
@@ -136,34 +137,73 @@ describe('the operator label (operational, not database-verified)', () => {
   });
 });
 
-describe('X2.2: the operator label as flags (owner-login path)', () => {
-  it('is required: each missing flag is named, for every ops command', () => {
+describe('X2.2: the operator label as flags (owner-login path; owner decision G1 option c)', () => {
+  it('--operator and --change-ref are required: each missing one is named, for every ops command', () => {
     for (const command of OPS_COMMANDS) {
-      for (const [key, flag] of [['operatorSource', '--operator-source'], ['operatorId', '--operator-id'], ['changeRef', '--change-ref']] as const) {
-        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: undefined }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}`));
-        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: '   ' }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}`));
+      for (const [key, flag] of [['operator', '--operator'], ['changeRef', '--change-ref']] as const) {
+        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: undefined }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}\\)`));
+        expect(() => readOpsLabelFromFlags({ ...FLAGS, [key]: '   ' }, command, 'dry-run')).toThrow(new RegExp(`missing: ${flag}\\)`));
       }
-      expect(() => readOpsLabelFromFlags({}, command, 'dry-run')).toThrow(/missing: --operator-source, --operator-id, --change-ref/);
+      expect(() => readOpsLabelFromFlags({}, command, 'dry-run')).toThrow(/requires the operator label --operator, --change-ref \(missing: --operator, --change-ref\)/);
     }
   });
 
-  it('applies the same value rules as the container variables', () => {
+  it('--operator-source is optional (default manual-console) but validated when given', () => {
+    expect(readOpsLabelFromFlags(FLAGS, 'hws:backfill', 'dry-run').actorSource).toBe('manual-console');
+    expect(readOpsLabelFromFlags({ ...FLAGS, operatorSource: 'github-actions' }, 'hws:backfill', 'dry-run').actorSource).toBe('github-actions');
     expect(() => readOpsLabelFromFlags({ ...FLAGS, operatorSource: 'laptop' }, 'hws:backfill', 'dry-run')).toThrow(/--operator-source must be one of github-actions, gitlab-ci, manual-console/);
-    expect(() => readOpsLabelFromFlags({ ...FLAGS, operatorId: 'alice smith' }, 'hws:backfill', 'dry-run')).toThrow(/--operator-id must be/);
-    expect(() => readOpsLabelFromFlags({ ...FLAGS, changeRef: '-rf' }, 'hws:backfill', 'dry-run')).toThrow(/--change-ref must be/);
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, operatorSource: '' }, 'hws:backfill', 'dry-run')).toThrow(/--operator-source must be one of/);
   });
 
-  it('records the owner-login path in the label', () => {
+  it('--operator accepts a name with spaces (and non-ASCII letters), trimmed', () => {
+    expect(readOpsLabelFromFlags({ ...FLAGS, operator: '  Jane Smith  ' }, 'hws:backfill', 'dry-run').actorId).toBe('Jane Smith');
+    expect(readOpsLabelFromFlags({ ...FLAGS, operator: 'José Ñúñez' }, 'hws:backfill', 'dry-run').actorId).toBe('José Ñúñez');
+    expect(readOpsLabelFromFlags({ ...FLAGS, operator: 'repo:org/repo:environment:production' }, 'hws:backfill', 'dry-run').actorId).toBe(
+      'repo:org/repo:environment:production',
+    );
+    expect(readOpsLabelFromFlags({ ...FLAGS, operator: 'a'.repeat(200) }, 'hws:backfill', 'dry-run').actorId).toHaveLength(200);
+  });
+
+  it.each<[string, string]>([
+    ['a newline', 'Jane\nSmith'],
+    ['a carriage return', 'Jane\rSmith'],
+    ['a tab', 'Jane\tSmith'],
+    ['a NUL', 'Jane\u0000Smith'],
+    ['an escape sequence', 'Jane\u001b[31mSmith'],
+    ['a DEL', 'Jane\u007fSmith'],
+    ['a C1 control', 'Jane\u0085Smith'],
+    ['a bidi override', 'Jane\u202eSmith'],
+    ['a zero-width joiner', 'Jane\u200dSmith'],
+    ['a line separator', 'Jane\u2028Smith'],
+    ['a double quote', 'Jane "x" Smith'],
+    ['a semicolon (SQL-looking)', "x'; DROP TABLE core.audit_log; --"],
+    ['a leading punctuation', '-rf'],
+    ['201 characters', 'a'.repeat(201)],
+  ])('--operator refuses %s', (_name, value) => {
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, operator: value }, 'hws:backfill', 'dry-run')).toThrow(/--operator must be 1-200 characters/);
+  });
+
+  it('--change-ref keeps the strict reference rule', () => {
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, changeRef: '-rf' }, 'hws:backfill', 'dry-run')).toThrow(/--change-ref must be/);
+    expect(() => readOpsLabelFromFlags({ ...FLAGS, changeRef: 'OPS 1' }, 'hws:backfill', 'dry-run')).toThrow(/--change-ref must be/);
+  });
+
+  it('records the owner-login path and the operator name, marked as a claim, not a verified identity', () => {
     expect(readOpsLabelFromFlags(FLAGS, 'containment:suspend-test-accounts', 'execute')).toMatchObject({
       kind: 'operational-label',
       note: OPS_LABEL_NOTE,
       actorSource: 'manual-console',
-      actorId: 'deploy-user@host-1',
+      actorId: "Jane O'Neil (on-call)",
       changeRef: 'OPS-42',
       command: 'containment:suspend-test-accounts',
       mode: 'execute',
       path: 'owner-login',
     });
+    expect(OPS_LABEL_NOTE).toBe('operational label, not database-verified identity');
+  });
+
+  it('the console line JSON-quotes the operator name', () => {
+    expect(describeOpsLabel(readOpsLabelFromFlags(FLAGS, 'hws:backfill', 'dry-run'))).toContain(`operator="Jane O'Neil (on-call)"`);
   });
 });
 
@@ -194,7 +234,7 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
     setPgProcessRole('cli');
     const resolved = resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' });
     for (const command of OPS_COMMANDS) {
-      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: true }, resolved, OWNER_ENV)).toThrow(/requires the operator label --operator-source, --operator-id, --change-ref/);
+      expect(() => assertOpsRun(command, 'dry-run', { needsElevated: true }, resolved, OWNER_ENV)).toThrow(/requires the operator label --operator, --change-ref/);
       expect(() => assertOpsRun(command, 'apply', { needsElevated: false }, resolved, OWNER_ENV, { ...FLAGS, changeRef: undefined })).toThrow(/missing: --change-ref/);
     }
   });
@@ -238,7 +278,7 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
   it('the ops container refuses the label flags (its label comes from its variables only)', () => {
     setPgProcessRole('ops');
     expect(() => assertOpsRun('hws:backfill', 'dry-run', { needsElevated: false }, resolvePgEnvironment(OPS_ENV, { processRole: 'ops' }), OPS_ENV, FLAGS)).toThrow(
-      /remove --operator-source \/ --operator-id \/ --change-ref/,
+      /remove --operator \/ --change-ref \/ --operator-source/,
     );
   });
 

@@ -58,7 +58,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  *
  * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner
  * (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts
- * --operator-source … --operator-id … --change-ref … …`). There the reads use crewflow_owner narrowed by `SET LOCAL ROLE
+ * --operator "<name>" --change-ref … …`). There the reads use crewflow_owner narrowed by `SET LOCAL ROLE
  * rab_secure_owner` (READ ONLY, the same frozen statements, verified per transaction) and the writes use the CLI's own
  * owner-login DataSource in each target's tenant context (FORCE RLS binds it). The label flags are required.
  */

@@ -33,8 +33,8 @@
  *   - the CLI boot gates (gate 1: session_user = current_user = crewflow_owner, plus the owner-login posture) run before
  *     any command body, as for every CLI command;
  *   - layer 2 (assertOpsRun, the first statement of run()): the CLI process, PG_DATABASE_URL = crewflow_owner, no second
- *     endpoint, and the operator label from the command's own flags (--operator-source / --operator-id / --change-ref,
- *     the same values and validation as the container variables); then each command re-verifies the login ON the database
+ *     endpoint, and the operator label from the command's own flags (`--operator "<name>"` and `--change-ref`, required;
+ *     `--operator-source` optional, default manual-console); then each command re-verifies the login ON the database
  *     (elevated-ops-session.ts verifyOpsAppSession) before its first data statement.
  * The cross-tenant steps keep the FROZEN statement lists (ops-statements.ts): crewflow_owner narrows itself with
  * `SET LOCAL ROLE rab_secure_owner` (a role it already holds with SET; no grant is added) in a verified transaction on its
@@ -76,15 +76,30 @@ export const OPS_LABEL_NOTE = 'operational label, not database-verified identity
  */
 export type OpsRunPath = 'ops-container' | 'owner-login';
 
-/** The owner-login path's operator label flags (the same three values as OPS_ACTOR_ENV_NAMES, in the same order). */
-export const OPS_LABEL_FLAGS = ['--operator-source', '--operator-id', '--change-ref'] as const;
+/**
+ * The owner-login path's operator label flags (owner decision 2026-11-12, G1 option c): `--operator "<name>"` and
+ * `--change-ref <ref>` are REQUIRED; `--operator-source` is optional and defaults to `manual-console`.
+ */
+export const OPS_LABEL_FLAGS = ['--operator', '--change-ref', '--operator-source'] as const;
+export const OPS_REQUIRED_LABEL_FLAGS = ['--operator', '--change-ref'] as const;
+export const OPS_DEFAULT_OPERATOR_SOURCE: OpsActorSource = 'manual-console';
 
 /** The parsed label flags (nest-commander camel-cases the flag names). */
 export interface OpsLabelFlags {
-  operatorSource?: string;
-  operatorId?: string;
+  operator?: string;
   changeRef?: string;
+  operatorSource?: string;
 }
+
+/**
+ * `--operator "<name>"`: a person's or job's name, spaces allowed. After trimming: 1-200 characters (code points); the first
+ * a letter or digit; then only letters, combining marks, digits, spaces and . _ : @ / + = ' , ( ) -. So no newline, tab or
+ * other control character, no format character (bidi overrides, zero-width), no quote that could break a log line. The
+ * value is only ever stored as data (a field of the audit row's jsonb metadata, written through a bound parameter) and
+ * printed JSON-quoted; it is never interpolated into SQL.
+ */
+const OPERATOR_NAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} ._:@/+=',()-]*$/u;
+const OPERATOR_NAME_MAX = 200;
 
 /** A CI OIDC subject (`repo:org/repo:environment:production`), a run id, a deploy user: printable, no whitespace. */
 const ACTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/+=-]{0,199}$/;
@@ -193,6 +208,7 @@ export interface OpsOperationalLabel {
   kind: 'operational-label';
   note: typeof OPS_LABEL_NOTE;
   actorSource: OpsActorSource;
+  /** Owner-login path: the `--operator "<name>"` value; ops container: CREWFLOW_OPS_ACTOR_ID. An operator CLAIM (see `note`). */
   actorId: string;
   changeRef: string;
   command: OpsCommand;
@@ -203,61 +219,64 @@ export interface OpsOperationalLabel {
   runId: string;
 }
 
-/**
- * Validates the three label values (the same rules on both paths). `names` are how the operator supplied them (the
- * container variables or the flags) and appear in refusal messages; the values themselves are never echoed.
- */
-function validateOpsLabel(
-  values: readonly [string | undefined, string | undefined, string | undefined],
-  names: readonly [string, string, string],
-  command: OpsCommand,
-  mode: string,
-  path: OpsRunPath,
-): OpsOperationalLabel {
-  const trimmed = values.map((v) => (v !== undefined && v.trim() !== '' ? v.trim() : undefined));
-  const missing = names.filter((_, i) => trimmed[i] === undefined);
-  if (missing.length > 0) {
-    throw new OpsRunError(
-      `every ops command requires the operator label ${names.join(', ')} (missing: ${missing.join(', ')}). Set them from the deployment platform's job identity and the approved change reference.`,
-    );
-  }
-  const [actorSource, actorId, changeRef] = trimmed as [string, string, string];
-  const [sourceName, idName, refName] = names;
-  if (!(OPS_ACTOR_SOURCES as readonly string[]).includes(actorSource)) {
-    throw new OpsRunError(`${sourceName} must be one of ${OPS_ACTOR_SOURCES.join(', ')}.`);
-  }
-  if (!ACTOR_ID_PATTERN.test(actorId)) {
-    throw new OpsRunError(`${idName} must be 1-200 printable characters without whitespace (letters, digits, . _ : @ / + = -), starting with a letter or digit.`);
-  }
-  if (!CHANGE_REF_PATTERN.test(changeRef)) {
-    throw new OpsRunError(`${refName} must be 1-120 characters (letters, digits, . _ : # / + -), starting with a letter or digit.`);
-  }
-  return {
-    kind: 'operational-label',
-    note: OPS_LABEL_NOTE,
-    actorSource: actorSource as OpsActorSource,
-    actorId,
-    changeRef,
-    command,
-    mode,
-    path,
-    runId: randomUUID(),
-  };
+function presentValue(value: string | undefined): string | undefined {
+  return value !== undefined && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function missingLabel(names: readonly string[], missing: readonly string[]): never {
+  throw new OpsRunError(
+    `every ops command requires the operator label ${names.join(', ')} (missing: ${missing.join(', ')}). Set them from the deployment platform's job identity and the approved change reference.`,
+  );
+}
+
+function assertActorSource(value: string, name: string): OpsActorSource {
+  if (!(OPS_ACTOR_SOURCES as readonly string[]).includes(value)) throw new OpsRunError(`${name} must be one of ${OPS_ACTOR_SOURCES.join(', ')}.`);
+  return value as OpsActorSource;
+}
+
+function assertChangeRef(value: string, name: string): string {
+  if (!CHANGE_REF_PATTERN.test(value)) throw new OpsRunError(`${name} must be 1-120 characters (letters, digits, . _ : # / + -), starting with a letter or digit.`);
+  return value;
+}
+
+function label(actorSource: OpsActorSource, actorId: string, changeRef: string, command: OpsCommand, mode: string, path: OpsRunPath): OpsOperationalLabel {
+  return { kind: 'operational-label', note: OPS_LABEL_NOTE, actorSource, actorId, changeRef, command, mode, path, runId: randomUUID() };
 }
 
 /** The ops container: reads and validates the three label variables. Refuses absent or malformed values (names only in the message). */
 export function readOpsOperationalLabel(env: Record<string, string | undefined>, command: OpsCommand, mode: string): OpsOperationalLabel {
   const [sourceVar, idVar, refVar] = OPS_ACTOR_ENV_NAMES;
-  return validateOpsLabel([env[sourceVar], env[idVar], env[refVar]], OPS_ACTOR_ENV_NAMES, command, mode, 'ops-container');
+  const values = [presentValue(env[sourceVar]), presentValue(env[idVar]), presentValue(env[refVar])];
+  const missing = OPS_ACTOR_ENV_NAMES.filter((_, i) => values[i] === undefined);
+  if (missing.length > 0) missingLabel(OPS_ACTOR_ENV_NAMES, missing);
+  const [source, actorId, changeRef] = values as [string, string, string];
+  if (!ACTOR_ID_PATTERN.test(actorId)) {
+    throw new OpsRunError(`${idVar} must be 1-200 printable characters without whitespace (letters, digits, . _ : @ / + = -), starting with a letter or digit.`);
+  }
+  return label(assertActorSource(source, sourceVar), actorId, assertChangeRef(changeRef, refVar), command, mode, 'ops-container');
 }
 
-/** X2.2 owner-login path: reads and validates the label from the command's flags (the same rules as the container variables). */
+/**
+ * X2.2 owner-login path: the label from the command's flags. `--operator` and `--change-ref` are required;
+ * `--operator-source` defaults to manual-console. The operator name is recorded as `actorId` (the same audit field as the
+ * container's CREWFLOW_OPS_ACTOR_ID), with the fixed note that it is an operator claim, not a verified identity.
+ */
 export function readOpsLabelFromFlags(flags: OpsLabelFlags, command: OpsCommand, mode: string): OpsOperationalLabel {
-  return validateOpsLabel([flags.operatorSource, flags.operatorId, flags.changeRef], OPS_LABEL_FLAGS, command, mode, 'owner-login');
+  const operator = presentValue(flags.operator);
+  const changeRef = presentValue(flags.changeRef);
+  const missing = OPS_REQUIRED_LABEL_FLAGS.filter((_, i) => [operator, changeRef][i] === undefined);
+  if (missing.length > 0) missingLabel(OPS_REQUIRED_LABEL_FLAGS, missing);
+  if ([...operator!].length > OPERATOR_NAME_MAX || !OPERATOR_NAME_PATTERN.test(operator!)) {
+    throw new OpsRunError(
+      `--operator must be 1-${OPERATOR_NAME_MAX} characters: a letter or digit first, then letters, digits, spaces and . _ : @ / + = ' , ( ) - only (no newline, tab or other control character).`,
+    );
+  }
+  const source = flags.operatorSource === undefined ? OPS_DEFAULT_OPERATOR_SOURCE : assertActorSource(flags.operatorSource.trim(), '--operator-source');
+  return label(source, operator!, assertChangeRef(changeRef!, '--change-ref'), command, mode, 'owner-login');
 }
 
 function anyLabelFlag(flags: OpsLabelFlags): boolean {
-  return [flags.operatorSource, flags.operatorId, flags.changeRef].some((v) => v !== undefined);
+  return [flags.operator, flags.changeRef, flags.operatorSource].some((v) => v !== undefined);
 }
 
 /**
@@ -351,7 +370,7 @@ function assertOwnerLoginOpsRun(
 
 /** One sanitised console line: the label (it is not secret) and the run id. */
 export function describeOpsLabel(label: OpsOperationalLabel): string {
-  return `[ops] command=${label.command} mode=${label.mode} path=${label.path} run=${label.runId} actor_source=${label.actorSource} actor_id=${label.actorId} change_ref=${label.changeRef} (${OPS_LABEL_NOTE})`;
+  return `[ops] command=${label.command} mode=${label.mode} path=${label.path} run=${label.runId} actor_source=${label.actorSource} operator=${JSON.stringify(label.actorId)} change_ref=${label.changeRef} (${OPS_LABEL_NOTE})`;
 }
 
 /** What the run verified on its database sessions (these ARE database facts, unlike the label). */

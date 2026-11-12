@@ -28,13 +28,23 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { ContainmentSuspendCommand } from '../../command/containment.command';
 import { HwsBackfillCommand } from '../../command/hws-backfill.command';
-import { ElevatedOpsSession, ElevatedOpsSessionError, ElevatedTransactionRecord, verifyOpsAppSession } from '../../command/ops/elevated-ops-session';
+import {
+  assertOpsActingFacts,
+  assertOwnerLoginFacts,
+  ElevatedOpsSession,
+  ElevatedOpsSessionError,
+  ElevatedTransactionRecord,
+  OPS_SESSION_FACTS_SQL,
+  parseOpsSessionFacts,
+  verifyOpsAppSession,
+} from '../../command/ops/elevated-ops-session';
 import { OPS_ELEVATED_PLANS, OpsStatementName } from '../../command/ops/ops-statements';
 import { OpsRunError } from '../../command/ops/ops-run';
 import { UserSessionBackfillCommand } from '../../command/user-session-backfill.command';
 import { currentPgProcessRole, PgProcessRole, resolvePgEnvironment, setPgProcessRole } from '../../database/postgres';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { HwsBackfillService } from '../../database/typeorm/workspace-schema/backfill/hws-backfill.service';
+import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { AuditAction, AuditService } from '../../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { SecurityVersionService } from '../../engine/core-modules/auth/services/security-version.service';
@@ -54,7 +64,9 @@ jest.setTimeout(180_000);
 const OWNER_LOGIN = 'crewflow_owner';
 const LEGACY_NAMES = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'] as const;
 const CHANGE_REF = `X22-${randomBytes(4).toString('hex')}`;
-const LABEL = { operatorSource: 'manual-console', operatorId: 'x22-integration@disposable', changeRef: CHANGE_REF };
+// Owner decision G1 (c): --operator "<name>" (spaces allowed) and --change-ref required; --operator-source optional.
+const OPERATOR = "X22 Integration (O'Disposable)";
+const LABEL = { operator: OPERATOR, changeRef: CHANGE_REF };
 
 function userOf(url: string): string {
   return decodeURIComponent(new URL(url).username);
@@ -119,7 +131,7 @@ function userOf(url: string): string {
       kind: 'operational-label',
       note: 'operational label, not database-verified identity',
       actorSource: 'manual-console',
-      actorId: 'x22-integration@disposable',
+      actorId: OPERATOR,
       changeRef: CHANGE_REF,
       command,
       mode,
@@ -140,6 +152,9 @@ function userOf(url: string): string {
     await admin.initialize();
     adminClient = new Client({ connectionString: adminUrl });
     await adminClient.connect();
+    // D4: workspace fingerprints differ between PostgreSQL 16 and 18; select the server's table as the runner does, so the
+    // workspace fixture below provisions on either major (this suite runs on PG16 in ci-server and PG16/PG18 in ci-twenty-tests).
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await adminClient.query(sql)).rows);
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource: admin, tenantContext, passwordHashing: moduleRef.get(PasswordHashingService) });
 
     containment = new ContainmentSuspendCommand(
@@ -192,9 +207,13 @@ function userOf(url: string): string {
       const before = await auditCountForChangeRef();
       for (const [name, command, options] of commands()) {
         await expect(asOneOffCli(() => command().run([], { ...options } as never))).rejects.toThrow(
-          /requires the operator label --operator-source, --operator-id, --change-ref \(missing: --operator-source, --operator-id, --change-ref\)/,
+          /requires the operator label --operator, --change-ref \(missing: --operator, --change-ref\)/,
         );
-        await expect(asOneOffCli(() => command().run([], { ...options, ...LABEL, operatorId: undefined } as never))).rejects.toThrow(/missing: --operator-id/);
+        await expect(asOneOffCli(() => command().run([], { ...options, ...LABEL, operator: undefined } as never))).rejects.toThrow(/missing: --operator\)/);
+        await expect(asOneOffCli(() => command().run([], { ...options, ...LABEL, changeRef: undefined } as never))).rejects.toThrow(/missing: --change-ref\)/);
+        await expect(asOneOffCli(() => command().run([], { ...options, ...LABEL, operator: 'Jane\nSmith' } as never))).rejects.toThrow(
+          /--operator must be 1-200 characters/,
+        );
         await expect(asOneOffCli(() => command().run([], { ...options, ...LABEL, operatorSource: 'laptop' } as never))).rejects.toThrow(
           /--operator-source must be one of/,
         );
@@ -304,6 +323,132 @@ function userOf(url: string): string {
         }
       });
     });
+
+    // ---- G3: the live cases of ops-elevated-session.integration.spec.ts, ported to the owner-login path (same assertions) ----
+
+    it('live facts: after SET LOCAL ROLE rab_secure_owner crewflow_owner holds no crewflow privilege; unnarrowed / wrong role / read-write refuse', async () => {
+      const raw = new Client({ connectionString: appUrl });
+      await raw.connect();
+      const database = new URL(appUrl).pathname.slice(1);
+      const expect_ = { expectedLogin: OWNER_LOGIN, expectedDatabase: database, role: 'rab_secure_owner' as const, readOnly: true };
+      const facts = async () => parseOpsSessionFacts((await raw.query(OPS_SESSION_FACTS_SQL, ['rab_secure_owner'])).rows[0]);
+      try {
+        await raw.query('BEGIN READ ONLY');
+        const before = await facts();
+        expect(before).toMatchObject({ login: OWNER_LOGIN, acting: OWNER_LOGIN, canSetRole: true, actingHasCrewflow: true, loginExempt: false });
+        expect(() => assertOwnerLoginFacts(before, expect_)).not.toThrow();
+        expect(() => assertOpsActingFacts(before, expect_)).toThrow(/unnarrowed or wrong role/);
+        await raw.query('SET LOCAL ROLE crewflow');
+        const asCrewflow = await facts();
+        expect(() => assertOpsActingFacts(asCrewflow, expect_)).toThrow(/current_user is "crewflow"/);
+        // A session already acting as another role is refused before narrowing.
+        expect(() => assertOwnerLoginFacts(asCrewflow, expect_)).toThrow(/already acting as another role/);
+        await raw.query('ROLLBACK');
+
+        await raw.query('BEGIN READ ONLY');
+        await raw.query('SET LOCAL ROLE rab_secure_owner');
+        const narrowed = await facts();
+        expect(narrowed).toMatchObject({ acting: 'rab_secure_owner', actingHasCrewflow: false, actingExempt: false, readOnly: true });
+        expect(() => assertOpsActingFacts(narrowed, expect_)).not.toThrow();
+        // READ ONLY is a real boundary: a write is refused by PostgreSQL itself.
+        await expect(raw.query(`UPDATE core.organisation SET name = name WHERE false`)).rejects.toThrow(/read-only transaction/);
+        await raw.query('ROLLBACK');
+
+        await raw.query('BEGIN');
+        await raw.query('SET LOCAL ROLE rab_secure_owner');
+        const readWrite = await facts();
+        expect(readWrite.readOnly).toBe(false);
+        expect(() => assertOpsActingFacts(readWrite, expect_)).toThrow(/requires READ ONLY/);
+        await raw.query('ROLLBACK');
+        // LOCAL: the role is gone after the transaction.
+        expect((await raw.query('SELECT current_user::text AS u')).rows[0].u).toBe(OWNER_LOGIN);
+      } finally {
+        await raw.query('ROLLBACK').catch(() => undefined);
+        await raw.end();
+      }
+    });
+
+    it('refuses the wrong session_user: the narrowed session opens only on PG_DATABASE_URL naming crewflow_owner', async () => {
+      await asOneOffCli(async () => {
+        const resolved = resolvePgEnvironment({ PG_DATABASE_URL: appUrl, DB_TARGET: process.env.DB_TARGET }, { processRole: 'cli' });
+        const proof = await verifyOpsAppSession(dataSource, resolved, process.env, 'test');
+        // Another login's URL (the cluster superuser) with a proof from the owner session: refused before any connection.
+        const other = resolvePgEnvironment({ PG_DATABASE_URL: adminUrl, DB_TARGET: process.env.DB_TARGET }, { processRole: 'cli' });
+        await expect(ElevatedOpsSession.open({ plan: OPS_ELEVATED_PLANS.containment, resolved: other, env: process.env, app: proof })).rejects.toThrow(
+          /needs PG_DATABASE_URL naming crewflow_owner/,
+        );
+        // A proof that names another login: refused too.
+        await expect(
+          ElevatedOpsSession.open({ plan: OPS_ELEVATED_PLANS.containment, resolved, env: process.env, app: { ...proof, login: userOf(adminUrl) } }),
+        ).rejects.toThrow(/needs PG_DATABASE_URL naming crewflow_owner/);
+        // And on the database, before narrowing: a session_user other than crewflow_owner is refused (live facts).
+        const raw = new Client({ connectionString: adminUrl });
+        await raw.connect();
+        try {
+          await raw.query('BEGIN READ ONLY');
+          const facts = parseOpsSessionFacts((await raw.query(OPS_SESSION_FACTS_SQL, ['rab_secure_owner'])).rows[0]);
+          expect(() =>
+            assertOwnerLoginFacts(facts, { expectedLogin: OWNER_LOGIN, expectedDatabase: proof.database, role: 'rab_secure_owner', readOnly: true }),
+          ).toThrow(new RegExp(`session_user is "${userOf(adminUrl)}", not the owner login crewflow_owner`));
+        } finally {
+          await raw.query('ROLLBACK').catch(() => undefined);
+          await raw.end();
+        }
+      });
+    });
+
+    it('refuses a login whose rab_secure_owner membership lacks the SET option (live facts from a test role that never outlives its transaction)', async () => {
+      // crewflow_owner's own grants are never touched. A throw-away role is created, granted and used INSIDE one transaction
+      // of the cluster superuser (SET LOCAL SESSION AUTHORIZATION), then rolled back: a crash cannot leave it behind.
+      const raw = new Client({ connectionString: adminUrl });
+      await raw.connect();
+      const role = `x22_noset_${randomBytes(4).toString('hex')}`;
+      try {
+        await raw.query('BEGIN');
+        await raw.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE INHERIT`);
+        await raw.query(`GRANT rab_secure_owner TO ${role} WITH INHERIT TRUE, SET FALSE`);
+        await raw.query(`GRANT crewflow TO ${role} WITH INHERIT TRUE, SET TRUE`);
+        await raw.query(`SET LOCAL SESSION AUTHORIZATION ${role}`);
+        const facts = parseOpsSessionFacts((await raw.query(OPS_SESSION_FACTS_SQL, ['rab_secure_owner'])).rows[0]);
+        expect(facts).toMatchObject({ login: role, acting: role, loginMemberSecureOwner: true, loginMemberCrewflow: true, canSetRole: false });
+        // The decision on the live SET=false fact (the name rule is satisfied on purpose, so this rule is what refuses).
+        expect(() =>
+          assertOwnerLoginFacts(
+            { ...facts, login: OWNER_LOGIN, acting: OWNER_LOGIN, readOnly: true },
+            { expectedLogin: OWNER_LOGIN, expectedDatabase: facts.database, role: 'rab_secure_owner', readOnly: true },
+          ),
+        ).toThrow(/may not SET ROLE rab_secure_owner/);
+        // PostgreSQL agrees: the narrowing itself is refused for such a login.
+        await raw.query('SAVEPOINT s');
+        await expect(raw.query('SET LOCAL ROLE rab_secure_owner')).rejects.toThrow(/permission denied/);
+        await raw.query('ROLLBACK TO SAVEPOINT s');
+      } finally {
+        await raw.query('ROLLBACK').catch(() => undefined);
+        await raw.end();
+      }
+      const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_roles WHERE rolname = $1`, [role]);
+      expect(n).toBe(0);
+    });
+
+    it('the apply plan: a READ WRITE transaction is verified as read-write and still narrowed; a non-plan name inside it is refused', async () => {
+      await asOneOffCli(async () => {
+        const records: ElevatedTransactionRecord[] = [];
+        const session = await openNarrowed(OPS_ELEVATED_PLANS['user-session-apply'], records);
+        try {
+          // Bind a non-existent identity and roll back by throwing: the write path opens, verifies and runs only plan names.
+          await expect(
+            session.transaction('read-write', async (run) => {
+              await run('user-session-backfill.bind-family', ['00000000-0000-0000-0000-000000000000', '00000000-0000-0000-0000-000000000000']);
+              await expect(run('containment.target-users' as OpsStatementName, [[]])).rejects.toThrow(ElevatedOpsSessionError);
+              throw new Error('rollback');
+            }),
+          ).rejects.toThrow('rollback');
+          expect(records[0]).toMatchObject({ access: 'read-write', login: OWNER_LOGIN, acting: 'rab_secure_owner' });
+        } finally {
+          await session.destroy();
+        }
+      });
+    });
   });
 
   describe('each command runs and audits as crewflow_owner', () => {
@@ -311,6 +456,12 @@ function userOf(url: string): string {
       const label = `x22-hws-${randomBytes(4).toString('hex')}`;
       const ws = await seedWorkspace(adminClient, label);
       expect(await provisionTypeScript(adminUrl, ws)).toBeTruthy();
+      // A dry run is the default: no mode flag → report only, no audit row.
+      const dryReport = join(scratch, 'hws-dry-report.json');
+      await asOneOffCli(() => hws.run([], { workspaceId: ws.id, reportFile: dryReport, ...LABEL }));
+      expect(JSON.parse(readFileSync(dryReport, 'utf8'))).toMatchObject({ mode: 'dry-run', workspacesSelected: 1 });
+      expect(await auditRows(ws.org, AuditAction.OPS_HWS_BACKFILL_APPLIED)).toHaveLength(0);
+
       const reportFile = join(scratch, 'hws-report.json');
       await asOneOffCli(() => hws.run([], { apply: true, hwsCutover: true, workspaceId: ws.id, reportFile, ...LABEL }));
       const report = JSON.parse(readFileSync(reportFile, 'utf8'));
@@ -336,6 +487,11 @@ function userOf(url: string): string {
          VALUES (gen_random_uuid(), $1, $2, $3, 'manager_web', $4, NULL, 'x22', NULL, $5, NULL, $6, $7)`,
         [orgId, platformAdmin.userId, randomBytes(32).toString('hex'), familyId, new Date(now + 3_600_000), new Date(now - 60_000), new Date(now + 86_400_000)],
       );
+      // A dry run is the default: no mode flag → nothing inserted, no audit row.
+      await asOneOffCli(() => userSessions.run([], { batch: 500, ...LABEL }));
+      expect(await admin.query(`SELECT 1 FROM core.user_session WHERE id = $1`, [familyId])).toHaveLength(0);
+      expect(await auditRows(orgId, AuditAction.OPS_USER_SESSION_BACKFILL_APPLIED)).toHaveLength(0);
+
       await asOneOffCli(() => userSessions.run([], { apply: true, batch: 500, ...LABEL }));
 
       const [session] = await admin.query(`SELECT organisation_id, user_id FROM core.user_session WHERE id = $1`, [familyId]);
@@ -359,6 +515,23 @@ function userOf(url: string): string {
       const targetFile = join(scratch, 'targets.tsv');
       writeFileSync(targetFile, ['organisation_id\tuser_id', ...targets.map((t) => `${t.organisation_id}\t${t.id}`)].join('\n') + '\n');
       const logFile = join(scratch, 'containment.log');
+      const baseOptions = {
+        target: targetFile,
+        expectOrgs: String(ids.length),
+        expectUsers: String(users.length),
+        expectActive: String(targets.length),
+        actorUserId: platformAdmin.userId!,
+        ...LABEL,
+      };
+
+      // A dry run is the default: without --execute nobody is suspended and no audit row is written.
+      await asOneOffCli(() => containment.run([], { ...baseOptions, log: join(scratch, 'containment-dry.log') }));
+      for (const t of targets) {
+        const [row] = await admin.query(`SELECT status FROM core."user" WHERE id = $1`, [t.id]);
+        expect(row.status).toBe('active');
+      }
+      expect(await auditRows(orgId, 'user.suspended')).toHaveLength(0);
+      expect(readFileSync(join(scratch, 'containment-dry.log'), 'utf8')).toContain('"mode":"dry-run"');
 
       await asOneOffCli(() =>
         containment.run([], {

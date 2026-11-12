@@ -43,7 +43,7 @@ interface Options extends OpsLabelFlags {
  * (ops-statements.ts). `DB_TARGET` and the boot gates already ran in `command/main.ts`.
  *
  * Phase X2.2 (owner decision 2026-11-12): it also runs as a one-off of the API service under the owner login crewflow_owner,
- * with the label flags required (--operator-source / --operator-id / --change-ref). --verify runs on that login; --dry-run
+ * with the label flags required (--operator "<name>" and --change-ref; --operator-source optional). --verify runs on that login; --dry-run
  * and --apply use crewflow_owner narrowed by `SET LOCAL ROLE rab_secure_owner` (no second credential), with the same
  * verification and the same frozen statements per transaction; the per-organisation audit rows go through the CLI's own
  * owner-login DataSource in tenant context.
