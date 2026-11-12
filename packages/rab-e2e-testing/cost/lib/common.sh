@@ -55,6 +55,9 @@ node_env() { local s="$1"; shift; COST_SECRETS="$(hostpath "$COST_SECRETS")" COS
 # Superuser psql INSIDE the disposable Postgres container (unix socket; no host client needed, never another DB).
 psql_su() { docker exec -i costaudit-pg psql -X -v ON_ERROR_STOP=1 -U rab -d rab -Atq "$@"; }
 q() { psql_su -c "$1"; }
+# The application's roles as an SQL list ('crewflow_owner','crewflow',...): ONE definition, lib/sql-families.js
+# APPLICATION_ROLES, shared with every JS filter.
+app_roles_sql() { node -e 'process.stdout.write(require(process.argv[1]).APPLICATION_ROLES_SQL)' "$(hostpath "$COST_DIR/lib/sql-families.js")"; }
 
 redis_cli() { docker exec costaudit-redis redis-cli -a "$REDIS_PW" --no-auth-warning "$@"; }
 
