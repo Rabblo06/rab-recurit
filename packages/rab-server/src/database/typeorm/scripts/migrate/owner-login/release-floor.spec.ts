@@ -136,7 +136,7 @@ describe('assertSupportedUpgradeStart: the decision table', () => {
   it('an existing R254 database upgrades (the published v0.4.0 / cd7c7e32 / 4c38aa1a set)', () => {
     const d = assertSupportedUpgradeStart({ ...prod, state: 'CHAIN-PARTIAL', applied: R254 });
     expect(d).toMatchObject({ allowed: true, release: 'R254' });
-    expect(d.reason).toMatch(/contains R254; 2 migration\(s\) to apply/);
+    expect(d.reason).toContain(`contains R254; ${CODE.length - 254} migration(s) to apply`);
   });
 
   it('a partial upgrade past R254 resumes', () => {

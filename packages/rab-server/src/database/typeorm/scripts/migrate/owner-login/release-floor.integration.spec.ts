@@ -27,7 +27,7 @@ import Redis from 'ioredis';
 import { Client } from 'pg';
 
 import { GuardedTarget, LockedMigrationOptions, runLockedMigrations } from '../locked-migration-runner';
-import { runMigrateOnStart } from './migrate-on-start';
+import { codeMigrationNames, runMigrateOnStart } from './migrate-on-start';
 import { RELEASE_MANIFESTS } from './release-floor';
 
 jest.setTimeout(900_000);
@@ -48,6 +48,8 @@ const describeIfOwnerCluster = RUN ? describe : describe.skip;
 const MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
 const R254 = RELEASE_MANIFESTS.find((m) => m.id === 'R254')!.names;
 const NEWER = ['OutboxClaimIndexes1786721440000', 'RefreshTokenReplacedByIndex1786721450000'];
+/** Everything this code ships after R254 (NEWER today, plus any later migration such as U-2's ledger): what an R254 database applies. */
+const AFTER_R254 = codeMigrationNames().slice(254);
 const filesThrough = (lastTimestamp: number) =>
   readdirSync(MIGRATIONS_DIR)
     .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f) && Number(f.slice(0, 13)) <= lastTimestamp)
@@ -185,19 +187,19 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       }
     });
 
-    it('R254: applies exactly the two newer migrations, keeps the tenant rows, bumps the entity-cache epoch only', async () => {
+    it('R254: applies exactly the migrations after R254, keeps the tenant rows, bumps the entity-cache epoch only', async () => {
       const before = await tenantRows(db);
       expect(before.named).toBe(1);
       const env: Record<string, string> = REDIS_URL ? { REDIS_URL, NODE_ENV: ns } : {};
       const { result, lines } = await migrateOnStart(db, env);
       expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'CHAIN-PARTIAL' });
-      expect(result.applied).toEqual(NEWER);
-      expect(lines.join('\n')).toMatch(/upgrade floor: upgrade floor passed: the ledger contains R254; 2 migration\(s\) to apply/);
+      expect(result.applied).toEqual(AFTER_R254);
+      expect(lines.join('\n')).toContain(`upgrade floor: upgrade floor passed: the ledger contains R254; ${AFTER_R254.length} migration(s) to apply`);
       expect(lines.join('\n')).toMatch(/fresh install not proven/);
-      expect(await ledger(db)).toEqual([...R254, ...NEWER]);
+      expect(await ledger(db)).toEqual([...R254, ...AFTER_R254]);
       expect(await tenantRows(db)).toEqual(before);
       if (redis) {
-        expect(lines.join('\n')).toMatch(/entity-cache epoch bumped after 2 applied migration/);
+        expect(lines.join('\n')).toContain(`entity-cache epoch bumped after ${AFTER_R254.length} applied migration`);
         expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('4');
         expect(await redis.get(k('entitycache:user:u1:v3'))).toBe('{"cached":true}');
         expect(await redis.get(`bull:${ns}:queue:1`)).toBe('job');
@@ -218,7 +220,7 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       await adminQuery(db, `INSERT INTO core.migrations (timestamp, name) VALUES (1799999999999, 'FutureRelease1799999999999')`);
       const { result } = await migrateOnStart(db);
       expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'AHEAD', applied: [] });
-      expect(await ledger(db)).toEqual([...R254, ...NEWER, 'FutureRelease1799999999999']);
+      expect(await ledger(db)).toEqual([...R254, ...AFTER_R254, 'FutureRelease1799999999999']);
     });
 
     it('the locked session on another database than the guarded one: identity (67), never a migration failure', async () => {
@@ -244,7 +246,7 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
     });
     expect(await ledger(db)).toEqual([...R254, NEWER[0]]);
     const { result, lines } = await migrateOnStart(db);
-    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: [NEWER[1]] });
+    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: AFTER_R254.slice(1) });
     expect(lines.join('\n')).toMatch(/plus 1 later migration\(s\) \(resuming a partial upgrade\)/);
     expect((await tenantRows(db)).named).toBe(1);
   });

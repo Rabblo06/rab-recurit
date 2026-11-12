@@ -416,6 +416,9 @@ execute|register_workspace_schema(uuid)|crewflow|true
 execute|reinstate_workspace_membership(uuid)|PUBLIC|false
 execute|reinstate_workspace_membership(uuid)|crewflow_app|true
 execute|reinstate_workspace_membership(uuid)|crewflow|true
+execute|release_upgrade_record(text,uuid,text,integer,text,text,text,integer,text,integer,integer,text,text,boolean,text,text,text)|PUBLIC|false
+execute|release_upgrade_record(text,uuid,text,integer,text,text,text,integer,text,integer,integer,text,text,boolean,text,text,text)|crewflow_app|false
+execute|release_upgrade_record(text,uuid,text,integer,text,text,text,integer,text,integer,integer,text,text,boolean,text,text,text)|crewflow|false
 execute|released_host_label_guard()|crewflow_app|false
 execute|released_host_label_guard()|crewflow|false
 execute|replay_failed_email(uuid,boolean)|crewflow_app|true
@@ -640,6 +643,7 @@ owner|function|purge_terminal_worker_event(interval,integer)|crewflow|definer=tr
 owner|function|record_workspace_schema_drift(uuid)|crewflow|definer=false
 owner|function|register_workspace_schema(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|reinstate_workspace_membership(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|release_upgrade_record(text,uuid,text,integer,text,text,text,integer,text,integer,integer,text,text,boolean,text,text,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|released_host_label_guard()|rab_secure_owner|definer=false
 owner|function|replay_failed_email(uuid,boolean)|crewflow|definer=false
 owner|function|reset_attendance_post_shift()|crewflow|definer=false
@@ -740,6 +744,7 @@ owner|table|push_delivery|crewflow
 owner|table|push_device|crewflow
 owner|table|realtime_event|crewflow
 owner|table|refresh_token|rab_secure_owner
+owner|table|release_upgrade_event|rab_secure_owner
 owner|table|released_host_label|rab_secure_owner
 owner|table|replacement_request|crewflow
 owner|table|reserved_host_label|crewflow
@@ -828,6 +833,7 @@ rls|push_delivery|enable=true|force=true
 rls|push_device|enable=true|force=true
 rls|realtime_event|enable=true|force=true
 rls|refresh_token|enable=true|force=true
+rls|release_upgrade_event|enable=true|force=true
 rls|released_host_label|enable=true|force=true
 rls|replacement_request|enable=true|force=true
 rls|reserved_host_label|enable=true|force=true
@@ -981,6 +987,8 @@ table|realtime_event|crewflow_app|S,I,U
 table|realtime_event|crewflow|S,I,U,D,T,R,G
 table|refresh_token|crewflow_app|S,I,U,D
 table|refresh_token|crewflow|S,I,U,D
+table|release_upgrade_event|crewflow_app|
+table|release_upgrade_event|crewflow|
 table|released_host_label|crewflow_app|
 table|released_host_label|crewflow|
 table|replacement_request|crewflow_app|S,I,U,D
