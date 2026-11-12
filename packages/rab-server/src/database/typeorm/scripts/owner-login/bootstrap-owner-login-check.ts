@@ -1,0 +1,689 @@
+/**
+ * DB setup like Twenty (area 2): the real-database harness of the bootstrap child (DB-SETUP-PLAN §10, B3 / B4 / B5, the
+ * idempotent restart, APP_SECRET rotation, concurrent starts, pass-through, and log hygiene). Disposable loopback
+ * PostgreSQL ONLY (crewflow.disposable_cluster=on). It spawns the REAL child (bootstrap-owner-login, dist when built, else
+ * the source through ts-node) as a separate process with only PG_DATABASE_URL + APP_SECRET, and asserts the database state
+ * read as the cluster superuser, never the exit code alone.
+ *
+ *   MIGRATION_SECURITY_ADMIN_URL=<superuser of a DISPOSABLE loopback cluster> \
+ *   [OWNER_BOOTSTRAP_PG_CONTAINER=<docker container of that cluster, started with -c log_statement=all>] \
+ *     ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
+ *       packages/rab-server/src/database/typeorm/scripts/owner-login/bootstrap-owner-login-check.ts [--source] [--report <file.json>]
+ *
+ * On a PostgreSQL 15 cluster it runs only B4(c) ("PostgreSQL 16 or later is required"); on 16+ every other scenario.
+ * crewflow_owner is CLUSTER-wide, so scenarios run one after another and each starts from no crewflow_owner. The harness
+ * refuses a cluster that already has a crewflow_owner it did not create.
+ *
+ * Secrets are generated here (random per run) and never printed: every child's stdout+stderr, and (with
+ * OWNER_BOOTSTRAP_PG_CONTAINER) the server log, are searched for them in memory. rolpassword is compared by SHA-256 only.
+ * Output: scenario ids, PASS/FAIL, counts.
+ */
+import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+
+import { buildRuntimeDatabaseUrl, deriveOwnerPassword, scramSha256Verifier } from '../../../owner-login/owner-credential';
+import { createPgClientForUrl } from '../../../postgres';
+import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
+
+class Refusal extends Error {}
+class Failed extends Error {}
+
+const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..', '..');
+const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
+const DIST_ENTRY = join(REPO_ROOT, 'packages', 'rab-server', 'dist', 'database', 'typeorm', 'scripts', 'owner-login', 'bootstrap-owner-login.js');
+const SOURCE_ENTRY = join(__dirname, 'bootstrap-owner-login.ts');
+const RUN = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
+const OWNER = 'crewflow_owner';
+
+const log = (m: string) => process.stdout.write(`[owner-bootstrap-check] ${m}\n`);
+const secret = () => randomBytes(24).toString('hex');
+const appSecret = () => randomBytes(32).toString('hex');
+
+/** Every secret this run created or derived, searched for in every output (never printed). */
+const SECRETS = new Set<string>();
+/** Database and login names this run created: never in the child output (they may appear in the server log). */
+const NAMES = new Set<string>();
+const remember = <T extends string>(v: T): T => {
+  SECRETS.add(v);
+  return v;
+};
+
+function ident(name: string): string {
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(name)) throw new Refusal('refusing: not a plain lower-case identifier');
+  return `"${name}"`;
+}
+
+interface Admin {
+  url: URL;
+}
+
+function parseAdmin(raw: string | undefined): Admin {
+  let url: URL;
+  try {
+    url = new URL(raw ?? '');
+  } catch {
+    throw new Refusal('MIGRATION_SECURITY_ADMIN_URL is not a valid URL');
+  }
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Refusal('the admin URL is not a loopback disposable cluster. Refusing.');
+  remember(decodeURIComponent(url.password));
+  remember(url.toString());
+  return { url };
+}
+
+function urlFor(admin: Admin, user: string, password: string, db: string): string {
+  const u = new URL(admin.url.toString());
+  u.username = user;
+  u.password = encodeURIComponent(password);
+  u.pathname = `/${db}`;
+  u.search = '';
+  return remember(u.toString());
+}
+
+type Row = Record<string, unknown>;
+
+async function sql(admin: Admin, db: string, text: string, values: unknown[] = []): Promise<Row[]> {
+  const c = createPgClientForUrl(urlFor(admin, decodeURIComponent(admin.url.username), decodeURIComponent(admin.url.password), db), 'MIGRATION_SECURITY_ADMIN_URL', { purpose: 'check' }, {});
+  await c.connect();
+  try {
+    return (await c.query(text, values)).rows as Row[];
+  } finally {
+    await c.end();
+  }
+}
+
+/** Sets crewflow_owner's password to a verifier of `password`, as the superuser, with the value never in statement text. */
+async function setOwnerPassword(admin: Admin, password: string): Promise<void> {
+  const c = createPgClientForUrl(urlFor(admin, decodeURIComponent(admin.url.username), decodeURIComponent(admin.url.password), 'postgres'), 'MIGRATION_SECURITY_ADMIN_URL', { purpose: 'check' }, {});
+  await c.connect();
+  try {
+    await c.query(`SET log_statement = 'none'`);
+    await c.query(`SET log_parameter_max_length = 0`);
+    await c.query(`SELECT pg_catalog.set_config('obc.v', $1, false)`, [scramSha256Verifier(password)]);
+    await c.query(`DO $$ BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', pg_catalog.current_setting('obc.v')); END $$`);
+  } finally {
+    await c.end();
+  }
+}
+
+async function canLogin(admin: Admin, user: string, password: string, db: string): Promise<{ ok: boolean; code: string | null; sessionUser?: string }> {
+  const c = createPgClientForUrl(urlFor(admin, user, password, db), 'MIGRATION_SECURITY_ADMIN_URL', { purpose: 'check' }, {});
+  c.on('error', () => undefined);
+  try {
+    await c.connect();
+    const r = await c.query<{ s: string; u: string }>('SELECT session_user::text AS s, current_user::text AS u');
+    return { ok: true, code: null, sessionUser: r.rows[0]?.s };
+  } catch (error) {
+    return { ok: false, code: String((error as { code?: unknown }).code ?? 'no-code') };
+  } finally {
+    await c.end().catch(() => undefined);
+  }
+}
+
+interface OwnerState {
+  exists: boolean;
+  oid?: string;
+  attrs?: string;
+  passwordHash?: string;
+  passwordIsScram?: boolean;
+  memberships?: string;
+}
+
+async function ownerState(admin: Admin): Promise<OwnerState> {
+  const rows = await sql(
+    admin,
+    'postgres',
+    `SELECT a.oid::text AS oid,
+            concat_ws(',', CASE WHEN a.rolcanlogin THEN 'LOGIN' ELSE 'NOLOGIN' END, CASE WHEN a.rolsuper THEN 'SUPERUSER' ELSE 'NOSUPERUSER' END,
+              CASE WHEN a.rolbypassrls THEN 'BYPASSRLS' ELSE 'NOBYPASSRLS' END, CASE WHEN a.rolreplication THEN 'REPLICATION' ELSE 'NOREPLICATION' END,
+              CASE WHEN a.rolcreatedb THEN 'CREATEDB' ELSE 'NOCREATEDB' END, CASE WHEN a.rolcreaterole THEN 'CREATEROLE' ELSE 'NOCREATEROLE' END,
+              CASE WHEN a.rolinherit THEN 'INHERIT' ELSE 'NOINHERIT' END, 'VALID UNTIL ' || coalesce(a.rolvaliduntil::text, 'none')) AS attrs,
+            a.rolpassword AS pw,
+            (SELECT string_agg(r.rolname, ',' ORDER BY r.rolname) FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid = m.roleid WHERE m.member = a.oid) AS member_of
+       FROM pg_catalog.pg_authid a WHERE a.rolname = 'crewflow_owner'`,
+  );
+  const r = rows[0];
+  if (!r) return { exists: false };
+  const pw = typeof r.pw === 'string' ? r.pw : '';
+  return {
+    exists: true,
+    oid: String(r.oid),
+    attrs: String(r.attrs),
+    passwordHash: createHash('sha256').update(pw).digest('hex'),
+    passwordIsScram: pw.startsWith('SCRAM-SHA-256$4096:'),
+    memberships: String(r.member_of ?? ''),
+  };
+}
+
+async function dbFacts(admin: Admin, db: string): Promise<{ acl: string; grant: boolean }> {
+  const rows = await sql(
+    admin,
+    'postgres',
+    `SELECT coalesce(datacl::text, '') AS acl,
+            (SELECT bool_and(pg_catalog.has_database_privilege('crewflow_owner', $1, p)) FROM unnest(ARRAY['CONNECT WITH GRANT OPTION','CREATE WITH GRANT OPTION','TEMPORARY WITH GRANT OPTION']) p) AS grant
+       FROM pg_catalog.pg_database WHERE datname = $1`,
+    [db],
+  );
+  return { acl: String(rows[0]?.acl), grant: rows[0]?.grant === true };
+}
+
+const EXACT_01 = 'LOGIN,NOSUPERUSER,NOBYPASSRLS,NOREPLICATION,NOCREATEDB,CREATEROLE,INHERIT,VALID UNTIL none';
+
+interface ChildRun {
+  code: number | null;
+  out: string;
+  result: OwnerBootstrapResult | null;
+}
+
+let ENTRY = existsSync(DIST_ENTRY) ? DIST_ENTRY : SOURCE_ENTRY;
+
+function runChild(databaseUrl: string, secretValue: string | undefined, extraEnv: Record<string, string> = {}): Promise<ChildRun> {
+  const env: Record<string, string> = { PG_DATABASE_URL: databaseUrl, NODE_ENV: 'test', ...extraEnv };
+  if (secretValue !== undefined) env.APP_SECRET = secretValue;
+  for (const k of ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE']) if (process.env[k]) env[k] = process.env[k]!;
+  const argv = ENTRY.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY] : [ENTRY];
+  return new Promise((done) => {
+    const child = spawn(process.execPath, argv, { env, stdio: ['ignore', 'pipe', 'pipe'], cwd: REPO_ROOT });
+    let out = '';
+    child.stdout.on('data', (d) => (out += String(d)));
+    child.stderr.on('data', (d) => (out += String(d)));
+    child.on('close', (code) => {
+      const line = out.split('\n').find((l) => l.startsWith(`${OWNER_BOOTSTRAP_RESULT_PREFIX} `));
+      let result: OwnerBootstrapResult | null = null;
+      try {
+        result = line ? (JSON.parse(line.slice(OWNER_BOOTSTRAP_RESULT_PREFIX.length + 1)) as OwnerBootstrapResult) : null;
+      } catch {
+        result = null;
+      }
+      done({ code, out, result });
+    });
+  });
+}
+
+/** Never print the output itself: only whether a secret (or a forbidden shape) appeared. */
+function assertCleanOutput(run: ChildRun, extraForbidden: string[] = []): void {
+  for (const s of [...SECRETS, ...NAMES, ...extraForbidden]) {
+    if (s && run.out.includes(s)) throw new Failed('a secret, URL, database name or login name appeared in the child output (not shown)');
+  }
+  if (/postgres(ql)?:\/\//i.test(run.out)) throw new Failed('a URL shape appeared in the child output (not shown)');
+  if (run.out.includes('SCRAM-SHA-256$')) throw new Failed('a verifier appeared in the child output (not shown)');
+  if (/\n\s+at /.test(run.out)) throw new Failed('a stack trace appeared in the child output');
+}
+
+function expect(cond: unknown, what: string): void {
+  if (!cond) throw new Failed(what);
+}
+
+function expectResult(run: ChildRun, exitCode: number, outcome: OwnerBootstrapResult['outcome'], what: string): void {
+  expect(run.code === exitCode, `${what}: exit ${run.code}, expected ${exitCode}`);
+  expect(run.result?.outcome === outcome, `${what}: outcome ${run.result?.outcome ?? 'none'}, expected ${outcome}`);
+  expect(run.result?.exitCode === exitCode, `${what}: result exitCode mismatch`);
+}
+
+function expectLine(run: ChildRun, message: string, what: string): void {
+  expect(run.out.includes(message), `${what}: the expected fixed message is missing`);
+}
+
+interface Ctx {
+  admin: Admin;
+  suUser: string;
+  suPassword: string;
+  dbs: string[];
+  roles: string[];
+  serverVersionNum: number;
+}
+
+async function createDb(ctx: Ctx, tag: string, owner?: string): Promise<string> {
+  const db = `obc_${tag}_${RUN}`;
+  await sql(ctx.admin, 'postgres', `CREATE DATABASE ${ident(db)}${owner ? ` OWNER ${ident(owner)}` : ''}`);
+  ctx.dbs.push(db);
+  NAMES.add(db);
+  return db;
+}
+
+async function createAdminRole(ctx: Ctx, tag: string, attrs: string): Promise<{ name: string; password: string }> {
+  const name = `obc_${tag}_${RUN}`;
+  const password = remember(secret());
+  await sql(ctx.admin, 'postgres', `CREATE ROLE ${ident(name)} ${attrs}`);
+  const c = createPgClientForUrl(urlFor(ctx.admin, ctx.suUser, ctx.suPassword, 'postgres'), 'MIGRATION_SECURITY_ADMIN_URL', { purpose: 'check' }, {});
+  await c.connect();
+  try {
+    await c.query(`SET log_statement = 'none'`);
+    await c.query(`SELECT pg_catalog.set_config('obc.v', $1, false)`, [scramSha256Verifier(password)]);
+    await c.query(`DO $$ BEGIN EXECUTE pg_catalog.format('ALTER ROLE %I PASSWORD %L', '${name}', pg_catalog.current_setting('obc.v')); END $$`);
+  } finally {
+    await c.end();
+  }
+  ctx.roles.push(name);
+  NAMES.add(name);
+  return { name, password };
+}
+
+/** Back to "no crewflow_owner": drop this run's databases first (their ACLs), then the role, then this run's other roles. */
+async function reset(ctx: Ctx): Promise<void> {
+  for (const db of ctx.dbs.splice(0)) await sql(ctx.admin, 'postgres', `DROP DATABASE IF EXISTS ${ident(db)} WITH (FORCE)`);
+  await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS crewflow_owner`);
+  for (const role of ctx.roles.splice(0).reverse()) await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS ${ident(role)}`);
+}
+
+/** crewflow_owner made by the SUPERUSER with the 01 attributes (+ extra), the grant, and a password. */
+async function presetOwner(ctx: Ctx, db: string, extra: string, password: string): Promise<void> {
+  // The 01 attributes with `extra` replacing its counterpart (SUPERUSER replaces NOSUPERUSER, NOLOGIN replaces LOGIN, ...).
+  const base = ['LOGIN', 'NOSUPERUSER', 'NOBYPASSRLS', 'NOREPLICATION', 'NOCREATEDB', 'CREATEROLE', 'INHERIT'];
+  const bare = (a: string) => a.replace(/^NO/, '');
+  const attrs = extra ? [...base.filter((a) => bare(a) !== bare(extra)), extra] : base;
+  if (!attrs.every((a) => /^[A-Z]+$/.test(a))) throw new Refusal('refusing: not a role attribute');
+  await sql(ctx.admin, 'postgres', `CREATE ROLE crewflow_owner ${attrs.join(' ')}`);
+  await sql(ctx.admin, 'postgres', `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${ident(db)} TO crewflow_owner WITH GRANT OPTION`);
+  await setOwnerPassword(ctx.admin, password);
+}
+
+interface Scenario {
+  id: string;
+  covers: string;
+  run(ctx: Ctx): Promise<string[]>;
+}
+
+const suUrl = (ctx: Ctx, db: string) => urlFor(ctx.admin, ctx.suUser, ctx.suPassword, db);
+
+/** Fresh as `adminUrl`: created, exact 01 attributes, the grant, the derived login works (also via the runtime URL). */
+async function assertFreshCreated(ctx: Ctx, db: string, adminUrl: string, s: string, label: string): Promise<{ state: OwnerState; acl: string }> {
+  const run = await runChild(adminUrl, s);
+  assertCleanOutput(run);
+  expectResult(run, 0, 'created', label);
+  const state = await ownerState(ctx.admin);
+  expect(state.exists && state.attrs === EXACT_01, `${label}: attributes are not exactly the 01 attributes`);
+  expect(state.passwordIsScram, `${label}: rolpassword is not a SCRAM-SHA-256 verifier`);
+  const facts = await dbFacts(ctx.admin, db);
+  expect(facts.grant, `${label}: CONNECT/CREATE/TEMPORARY WITH GRANT OPTION missing`);
+  const pw = remember(deriveOwnerPassword(s));
+  const login = await canLogin(ctx.admin, OWNER, pw, db);
+  expect(login.ok && login.sessionUser === OWNER, `${label}: the derived crewflow_owner login does not work`);
+  // The exact URL the runtime will get (area 1) also logs in: same host/port/db/TLS, user crewflow_owner.
+  const runtime = remember(buildRuntimeDatabaseUrl(adminUrl, pw));
+  const viaRuntime = createPgClientForUrl(runtime, 'the runtime URL', { purpose: 'check' }, {});
+  await viaRuntime.connect();
+  const su = (await viaRuntime.query<{ s: string }>('SELECT session_user::text AS s')).rows[0]?.s;
+  await viaRuntime.end();
+  expect(su === OWNER, `${label}: the runtime URL does not log in as crewflow_owner`);
+  return { state, acl: facts.acl };
+}
+
+async function assertRestartUnchanged(ctx: Ctx, db: string, adminUrl: string, s: string, before: { state: OwnerState; acl: string }, label: string): Promise<void> {
+  const run = await runChild(adminUrl, s);
+  assertCleanOutput(run);
+  expectResult(run, 0, 'unchanged', label);
+  const after = await ownerState(ctx.admin);
+  expect(after.oid === before.state.oid, `${label}: role oid changed (role recreated)`);
+  expect(after.passwordHash === before.state.passwordHash, `${label}: rolpassword changed on a restart`);
+  expect(after.attrs === before.state.attrs, `${label}: attributes changed`);
+  expect((await dbFacts(ctx.admin, db)).acl === before.acl, `${label}: database ACL changed`);
+}
+
+async function assertRotation(ctx: Ctx, db: string, adminUrl: string, oldSecret: string, before: { state: OwnerState; acl: string }, label: string): Promise<string> {
+  const next = remember(appSecret());
+  const run = await runChild(adminUrl, next);
+  assertCleanOutput(run);
+  expectResult(run, 0, 'updated', label);
+  expect(run.result?.passwordSet === true && run.result.grantAdded === false && run.result.created === false, `${label}: expected only the password to be set`);
+  const after = await ownerState(ctx.admin);
+  expect(after.oid === before.state.oid && after.attrs === EXACT_01, `${label}: role recreated or attributes changed`);
+  expect(after.passwordHash !== before.state.passwordHash, `${label}: rolpassword did not change`);
+  expect((await dbFacts(ctx.admin, db)).acl === before.acl, `${label}: database ACL changed (a second grant?)`);
+  expect((await canLogin(ctx.admin, OWNER, remember(deriveOwnerPassword(next)), db)).ok, `${label}: the new derived password does not log in`);
+  const old = await canLogin(ctx.admin, OWNER, deriveOwnerPassword(oldSecret), db);
+  expect(!old.ok && old.code === '28P01', `${label}: the old derived password still logs in`);
+  const again = await runChild(adminUrl, next);
+  assertCleanOutput(again);
+  expectResult(again, 0, 'unchanged', `${label} (restart after rotation)`);
+  return next;
+}
+
+const SCENARIOS: Scenario[] = [
+  {
+    id: 'superuser-fresh-restart-rotation',
+    covers: 'B1-equivalent (bundled superuser admin), B2 restart, B6 rotation',
+    async run(ctx) {
+      const db = await createDb(ctx, 'su');
+      const s = remember(appSecret());
+      const url = suUrl(ctx, db);
+      const fresh = await assertFreshCreated(ctx, db, url, s, 'fresh');
+      await assertRestartUnchanged(ctx, db, url, s, fresh, 'restart');
+      await assertRotation(ctx, db, url, s, fresh, 'rotation');
+      return ['created with exactly the 01 attributes + grant; restart byte-identical (rolpassword, oid, ACL); rotation set only the password'];
+    },
+  },
+  {
+    id: 'nonsuper-createrole-db-owner',
+    covers: 'B3: NOSUPERUSER CREATEROLE admin that owns the database (neondb_owner / RDS master / doadmin shape)',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'adm', 'LOGIN NOSUPERUSER CREATEROLE NOCREATEDB NOBYPASSRLS NOREPLICATION');
+      const db = await createDb(ctx, 'nsowner', adm.name);
+      const url = urlFor(ctx.admin, adm.name, adm.password, db);
+      const s = remember(appSecret());
+      const fresh = await assertFreshCreated(ctx, db, url, s, 'fresh');
+      await assertRestartUnchanged(ctx, db, url, s, fresh, 'restart');
+      await assertRotation(ctx, db, url, s, fresh, 'rotation');
+      return ['fresh, restart and rotation all pass with a non-superuser admin'];
+    },
+  },
+  {
+    id: 'nonsuper-createrole-grant-option',
+    covers: 'B3 variant: CREATEROLE + CONNECT/CREATE/TEMPORARY WITH GRANT OPTION, not the database owner',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'adm', 'LOGIN NOSUPERUSER CREATEROLE');
+      const db = await createDb(ctx, 'nsgrant');
+      await sql(ctx.admin, 'postgres', `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${ident(db)} TO ${ident(adm.name)} WITH GRANT OPTION`);
+      const url = urlFor(ctx.admin, adm.name, adm.password, db);
+      const s = remember(appSecret());
+      const fresh = await assertFreshCreated(ctx, db, url, s, 'fresh');
+      await assertRestartUnchanged(ctx, db, url, s, fresh, 'restart');
+      return ['created and idempotent with grant-option rights only'];
+    },
+  },
+  {
+    id: 'owner-created-by-another-login',
+    covers: 'B3 variant: no ADMIN OPTION -> clear refusal only when a reset is needed',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'adm', 'LOGIN NOSUPERUSER CREATEROLE');
+      const db = await createDb(ctx, 'foreign', adm.name);
+      const s = remember(appSecret());
+      await presetOwner(ctx, db, '', remember(secret()));
+      const before = await ownerState(ctx.admin);
+      const url = urlFor(ctx.admin, adm.name, adm.password, db);
+      const refused = await runChild(url, s);
+      assertCleanOutput(refused);
+      expectResult(refused, 64, 'refused', 'reset needed');
+      expectLine(refused, OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption, 'reset needed');
+      const untouched = await ownerState(ctx.admin);
+      expect(untouched.passwordHash === before.passwordHash && untouched.attrs === before.attrs, 'the role was touched by a refused run');
+      await setOwnerPassword(ctx.admin, remember(deriveOwnerPassword(s)));
+      const ok = await runChild(url, s);
+      assertCleanOutput(ok);
+      expectResult(ok, 0, 'unchanged', 'password already right');
+      return ['refused (no ADMIN OPTION) while a reset was needed, role untouched; accepted unchanged once the password matched'];
+    },
+  },
+  {
+    id: 'admin-without-createrole',
+    covers: 'B4(a): admin owns the database but has no CREATEROLE',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'adm', 'LOGIN NOSUPERUSER NOCREATEROLE');
+      const db = await createDb(ctx, 'nocr', adm.name);
+      const run = await runChild(urlFor(ctx.admin, adm.name, adm.password, db), remember(appSecret()));
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'no CREATEROLE');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.adminCannotCreateRoles, 'no CREATEROLE');
+      expect(!(await ownerState(ctx.admin)).exists, 'crewflow_owner was created anyway');
+      return ['exit 64, fixed message, nothing created'];
+    },
+  },
+  {
+    id: 'admin-cannot-grant',
+    covers: 'B4(b): CREATEROLE but cannot grant on the database',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'adm', 'LOGIN NOSUPERUSER CREATEROLE');
+      const db = await createDb(ctx, 'nogrant');
+      const run = await runChild(urlFor(ctx.admin, adm.name, adm.password, db), remember(appSecret()));
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'cannot grant');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.adminCannotGrantDb, 'cannot grant');
+      expect(!(await ownerState(ctx.admin)).exists, 'crewflow_owner was created anyway');
+      return ['exit 64, fixed message, nothing created'];
+    },
+  },
+  ...(
+    [
+      ['SUPERUSER', 'SUPERUSER', ['SUPERUSER']],
+      ['BYPASSRLS', 'BYPASSRLS', ['BYPASSRLS']],
+      ['REPLICATION', 'REPLICATION', ['REPLICATION']],
+      ['CREATEDB', 'CREATEDB', ['CREATEDB']],
+      ['NOLOGIN', 'NOLOGIN', ['NOLOGIN']],
+      ['NOINHERIT', 'NOINHERIT', ['NOINHERIT']],
+    ] as Array<[string, string, string[]]>
+  ).map(
+    ([tag, extra, names]): Scenario => ({
+      id: `privileged-owner-${tag.toLowerCase()}`,
+      covers: `B5: an existing crewflow_owner with ${tag} is refused and left untouched`,
+      async run(ctx) {
+        const db = await createDb(ctx, `p${tag.toLowerCase()}`);
+        await presetOwner(ctx, db, extra, remember(secret()));
+        const before = await ownerState(ctx.admin);
+        const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+        assertCleanOutput(run);
+        expectResult(run, 64, 'refused', tag);
+        expectLine(run, OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(names), tag);
+        const after = await ownerState(ctx.admin);
+        expect(JSON.stringify(after) === JSON.stringify(before), `${tag}: the role changed`);
+        return ['exit 64, exact message, role byte-identical'];
+      },
+    }),
+  ),
+  {
+    id: 'privileged-owner-memberships-and-expiry',
+    covers: 'B5: member of a BYPASSRLS role / of pg_write_all_data; expired VALID UNTIL',
+    async run(ctx) {
+      const notes: string[] = [];
+      const cases: Array<[string, (db: string) => Promise<void>, string]> = [
+        [
+          'member of a BYPASSRLS role',
+          async () => {
+            const r = `obc_bypass_${RUN}`;
+            await sql(ctx.admin, 'postgres', `CREATE ROLE ${ident(r)} NOLOGIN BYPASSRLS`);
+            ctx.roles.push(r);
+            await sql(ctx.admin, 'postgres', `GRANT ${ident(r)} TO crewflow_owner`);
+          },
+          OWNER_BOOTSTRAP_MESSAGES.privilegedMembership,
+        ],
+        ['member of pg_write_all_data', async () => void (await sql(ctx.admin, 'postgres', `GRANT pg_write_all_data TO crewflow_owner`)), OWNER_BOOTSTRAP_MESSAGES.privilegedMembership],
+        ['expired VALID UNTIL', async () => void (await sql(ctx.admin, 'postgres', `ALTER ROLE crewflow_owner VALID UNTIL '2000-01-01'`)), OWNER_BOOTSTRAP_MESSAGES.expired],
+      ];
+      for (const [what, arrange, message] of cases) {
+        await reset(ctx);
+        const db = await createDb(ctx, 'pm');
+        await presetOwner(ctx, db, '', remember(secret()));
+        await arrange(db);
+        const before = await ownerState(ctx.admin);
+        const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+        assertCleanOutput(run);
+        expectResult(run, 64, 'refused', what);
+        expectLine(run, message, what);
+        expect(JSON.stringify(await ownerState(ctx.admin)) === JSON.stringify(before), `${what}: the role changed`);
+        notes.push(`${what}: refused, untouched`);
+      }
+      return notes;
+    },
+  },
+  {
+    id: 'nocreaterole-owner-accepted',
+    covers: 'D2: an existing NOCREATEROLE (hardened) crewflow_owner is accepted with one note',
+    async run(ctx) {
+      const db = await createDb(ctx, 'd2');
+      const s = remember(appSecret());
+      await presetOwner(ctx, db, '', remember(deriveOwnerPassword(s)));
+      await sql(ctx.admin, 'postgres', `ALTER ROLE crewflow_owner NOCREATEROLE`);
+      const run = await runChild(suUrl(ctx, db), s);
+      assertCleanOutput(run);
+      expectResult(run, 0, 'unchanged', 'NOCREATEROLE');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened, 'NOCREATEROLE');
+      return ['exit 0 unchanged, D2 note printed'];
+    },
+  },
+  {
+    id: 'grant-missing-only',
+    covers: 'an existing correct crewflow_owner without the database grant gets only the grant',
+    async run(ctx) {
+      const db = await createDb(ctx, 'gr');
+      const s = remember(appSecret());
+      await sql(ctx.admin, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+      await setOwnerPassword(ctx.admin, remember(deriveOwnerPassword(s)));
+      const before = await ownerState(ctx.admin);
+      const run = await runChild(suUrl(ctx, db), s);
+      assertCleanOutput(run);
+      expectResult(run, 0, 'updated', 'grant only');
+      expect(run.result?.grantAdded === true && run.result.passwordSet === false, 'grant only: wrong flags');
+      const after = await ownerState(ctx.admin);
+      expect(after.passwordHash === before.passwordHash, 'grant only: the password was touched');
+      expect((await dbFacts(ctx.admin, db)).grant, 'grant only: grant missing');
+      return ['only the grant was added; rolpassword byte-identical'];
+    },
+  },
+  {
+    id: 'concurrent-starts',
+    covers: 'two API replicas on one database (advisory lock) and two databases on one cluster (CREATE ROLE race)',
+    async run(ctx) {
+      const a = await createDb(ctx, 'ca');
+      const b = await createDb(ctx, 'cb');
+      const s = remember(appSecret());
+      const runs = await Promise.all([runChild(suUrl(ctx, a), s), runChild(suUrl(ctx, a), s), runChild(suUrl(ctx, b), s), runChild(suUrl(ctx, b), s)]);
+      for (const r of runs) {
+        assertCleanOutput(r);
+        expect(r.code === 0, `a concurrent start exited ${r.code}`);
+      }
+      const state = await ownerState(ctx.admin);
+      expect(state.exists && state.attrs === EXACT_01, 'concurrent: attributes not exact');
+      for (const db of [a, b]) {
+        expect((await dbFacts(ctx.admin, db)).grant, 'concurrent: a grant is missing');
+        expect((await canLogin(ctx.admin, OWNER, deriveOwnerPassword(s), db)).ok, 'concurrent: the derived login does not work');
+      }
+      const again = await runChild(suUrl(ctx, a), s);
+      expectResult(again, 0, 'unchanged', 'after the concurrent starts');
+      return [`4 concurrent starts on 2 databases: all exit 0 (${runs.map((r) => r.result?.outcome).join(', ')}); then unchanged`];
+    },
+  },
+  {
+    id: 'pass-through',
+    covers: '§7.1: a crewflow_owner URL never connects (unreachable port) and needs no APP_SECRET',
+    async run(ctx) {
+      const run = await runChild(urlFor(ctx.admin, OWNER, remember(secret()), 'crewflow').replace(/:\d+\//, ':1/'), undefined);
+      assertCleanOutput(run);
+      expectResult(run, 0, 'pass-through', 'pass-through');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.passThrough, 'pass-through');
+      return ['exit 0 without a connection'];
+    },
+  },
+  {
+    id: 'refusals-before-connecting',
+    covers: 'missing / short APP_SECRET, sslrootcert, ?host= and a wrong admin password: exit 64, no echo',
+    async run(ctx) {
+      const db = await createDb(ctx, 'rf');
+      const notes: string[] = [];
+      const cases: Array<[string, string, string | undefined]> = [
+        ['missing APP_SECRET', suUrl(ctx, db), undefined],
+        ['short APP_SECRET', suUrl(ctx, db), 'short-secret'],
+        ['sslrootcert', `${suUrl(ctx, db)}?sslrootcert=/etc/ssl/x.pem`, remember(appSecret())],
+        ['?host=', `${suUrl(ctx, db)}?host=elsewhere`, remember(appSecret())],
+        ['wrong admin password', urlFor(ctx.admin, ctx.suUser, remember(secret()), db), remember(appSecret())],
+      ];
+      for (const [what, url, s] of cases) {
+        const run = await runChild(url, s);
+        assertCleanOutput(run);
+        expectResult(run, 64, 'refused', what);
+        notes.push(`${what}: 64`);
+      }
+      expect(!(await ownerState(ctx.admin)).exists, 'a refused run created crewflow_owner');
+      return notes;
+    },
+  },
+];
+
+const PG15_SCENARIO: Scenario = {
+  id: 'postgres-15-refused',
+  covers: 'B4(c): a PostgreSQL 15 server -> "PostgreSQL 16 or later is required."',
+  async run(ctx) {
+    const db = await createDb(ctx, 'pg15');
+    const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+    assertCleanOutput(run);
+    expectResult(run, 64, 'refused', 'PG15');
+    expectLine(run, OWNER_BOOTSTRAP_MESSAGES.pgTooOld, 'PG15');
+    expect(!(await ownerState(ctx.admin)).exists, 'PG15: crewflow_owner was created');
+    return ['exit 64, fixed message, nothing created'];
+  },
+};
+
+/** With OWNER_BOOTSTRAP_PG_CONTAINER: the server log (log_statement=all on the test cluster) never holds a password. */
+function scanServerLog(container: string, nonSuperuserVerifierAllowed: boolean): string {
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(container)) throw new Refusal('OWNER_BOOTSTRAP_PG_CONTAINER is not a container name');
+  const r = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  if (r.status !== 0) throw new Failed('docker logs failed');
+  const lines = `${r.stdout}\n${r.stderr}`.split('\n');
+  for (const s of SECRETS) if (s && s.length >= 12 && lines.some((l) => l.includes(s))) throw new Failed('a password, URL or derived password appeared in the server log (not shown)');
+  const verifierLines = lines.filter((l) => l.includes('SCRAM-SHA-256$'));
+  for (const l of verifierLines) if (!/parameters: \$1 = /.test(l)) throw new Failed('a verifier appeared in the server log outside a bind-parameter line');
+  if (!nonSuperuserVerifierAllowed && verifierLines.length > 0) throw new Failed('a verifier appeared in the server log');
+  return `server log: ${lines.length} lines scanned; no password; ${verifierLines.length} bind-parameter line(s) with a verifier (non-superuser admin residual, §3.6)`;
+}
+
+async function main(): Promise<number> {
+  const args = process.argv.slice(2);
+  if (args.includes('--source')) ENTRY = SOURCE_ENTRY;
+  const reportAt = args.indexOf('--report');
+  const reportFile = reportAt >= 0 ? args[reportAt + 1] : undefined;
+  const admin = parseAdmin(process.env.MIGRATION_SECURITY_ADMIN_URL);
+  const ctx: Ctx = {
+    admin,
+    suUser: decodeURIComponent(admin.url.username),
+    suPassword: decodeURIComponent(admin.url.password),
+    dbs: [],
+    roles: [],
+    serverVersionNum: 0,
+  };
+  const pre = (
+    await sql(
+      admin,
+      'postgres',
+      `SELECT r.rolsuper, current_setting('crewflow.disposable_cluster', true) AS marker, current_setting('server_version_num')::int AS v,
+              EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner') AS owner_exists
+         FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`,
+    )
+  )[0];
+  if (pre?.rolsuper !== true) throw new Refusal('the admin URL is not a superuser. Refusing.');
+  if (pre.marker !== 'on') throw new Refusal('the cluster is not marked disposable (crewflow.disposable_cluster = on). Refusing.');
+  if (pre.owner_exists === true) throw new Refusal('crewflow_owner already exists on this cluster; this harness only runs on a cluster without it. Refusing.');
+  ctx.serverVersionNum = Number(pre.v);
+  log(`PostgreSQL server_version_num=${ctx.serverVersionNum}; child: ${ENTRY.endsWith('.ts') ? 'source via ts-node' : 'dist'}; run ${RUN}`);
+
+  const scenarios = ctx.serverVersionNum < 160000 ? [PG15_SCENARIO] : SCENARIOS;
+  const report: Array<{ id: string; covers: string; status: 'PASS' | 'FAIL'; notes: string[]; ms: number }> = [];
+  for (const sc of scenarios) {
+    const t0 = Date.now();
+    try {
+      await reset(ctx);
+      const notes = await sc.run(ctx);
+      report.push({ id: sc.id, covers: sc.covers, status: 'PASS', notes, ms: Date.now() - t0 });
+      log(`PASS ${sc.id} (${Date.now() - t0} ms)`);
+    } catch (error) {
+      const why = error instanceof Failed || error instanceof Refusal ? error.message : `unexpected ${(error as { code?: unknown }).code ?? (error as Error).name}`;
+      report.push({ id: sc.id, covers: sc.covers, status: 'FAIL', notes: [why], ms: Date.now() - t0 });
+      log(`FAIL ${sc.id}: ${why}`);
+    }
+  }
+  await reset(ctx);
+  const container = process.env.OWNER_BOOTSTRAP_PG_CONTAINER;
+  if (container) {
+    try {
+      const line = scanServerLog(container, true);
+      report.push({ id: 'server-log-hygiene', covers: 'B9 (server log, log_statement=all)', status: 'PASS', notes: [line], ms: 0 });
+      log(`PASS server-log-hygiene: ${line}`);
+    } catch (error) {
+      report.push({ id: 'server-log-hygiene', covers: 'B9', status: 'FAIL', notes: [(error as Error).message], ms: 0 });
+      log(`FAIL server-log-hygiene: ${(error as Error).message}`);
+    }
+  }
+  const failed = report.filter((r) => r.status === 'FAIL').length;
+  log(`${report.length - failed}/${report.length} passed`);
+  if (reportFile) writeFileSync(reportFile, `${JSON.stringify({ serverVersionNum: ctx.serverVersionNum, child: ENTRY.endsWith('.ts') ? 'source' : 'dist', report }, null, 2)}\n`);
+  return failed === 0 ? 0 : 1;
+}
+
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (error: unknown) => {
+      log(`REFUSED/FAILED: ${error instanceof Refusal || error instanceof Failed ? error.message : (error as Error).name}`);
+      process.exit(2);
+    },
+  );
+}
