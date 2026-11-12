@@ -6,7 +6,7 @@
  * whose transport records every envelope in memory instead of sending it. Every synthetic secret is a unique marker, so a
  * leak anywhere in the serialised envelope is detected.
  */
-import { ArgumentsHost, HttpStatus, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { ArgumentsHost, HttpStatus, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import * as Sentry from '@sentry/node';
 
 import { AllExceptionsFilter } from '../../filters/all-exceptions.filter';
@@ -22,7 +22,7 @@ const { buildSentryOptions } = require('../../../instrument') as typeof import('
 /** The shape of a captured envelope: [headers, [[itemHeader, payload], …]]. */
 type Envelope = [Record<string, unknown>, Array<[{ type?: string }, unknown]>];
 
-const DSN = 'https://public-key@sentry.example.test/1';
+const DSN = 'https://publickey@sentry.example.test/1';
 const JWT =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ4MzItc2VudHJ5LWp3dC1tYXJrZXIifQ.eDMyLXNlbnRyeS1qd3Qtc2lnbmF0dXJl';
 const SECRETS = {
@@ -75,7 +75,7 @@ function startCapturingClient(send?: () => Promise<never>): { envelopes: Envelop
 }
 
 /** What other code (another integration, a breadcrumb, a stray setExtra) may have put on the scope before the error. */
-function pollutedScope(): void {
+function pollutedScope(client: Sentry.NodeClient): void {
   Sentry.getIsolationScope().setUser({ id: 'user-1', email: SECRETS.email, ip_address: SECRETS.ip, username: SECRETS.email });
   Sentry.getIsolationScope().setExtra('mfa', {
     mfaCode: SECRETS.mfaCode,
@@ -87,7 +87,7 @@ function pollutedScope(): void {
   });
   Sentry.getIsolationScope().setExtra('auth', { password: SECRETS.password, refreshToken: SECRETS.refreshToken });
   // An integration attaching the full request (the restricted RequestData never does; this proves beforeSend strips it).
-  Sentry.getIsolationScope().addEventProcessor((event) => ({
+  client.addEventProcessor((event) => ({
     ...event,
     request: {
       method: 'POST',
@@ -110,7 +110,10 @@ function hostFor(request: unknown) {
 
 const loginRequest = { method: 'POST', url: `/rest/v1/auth/login?token=${SECRETS.queryToken}`, route: { path: '/rest/v1/auth/login' } };
 
+beforeEach(() => jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined));
+
 afterEach(async () => {
+  jest.restoreAllMocks();
   await Sentry.getClient()?.close(0);
   Sentry.getIsolationScope().clear();
   Sentry.getCurrentScope().clear();
@@ -188,7 +191,7 @@ describe('createExceptionHandlerDriver: Sentry off is a no-op', () => {
 describe('Sentry egress: a 500 is reported as a scrubbed event (instrument.ts beforeSend)', () => {
   it('a 500 through AllExceptionsFilter sends exactly one event, with no header, cookie, body, token, password, email or MFA value', async () => {
     const { envelopes, client } = startCapturingClient();
-    pollutedScope();
+    pollutedScope(client);
     const service = new ExceptionHandlerService(new ExceptionHandlerSentryDriver());
     const { host, status, json } = hostFor(loginRequest);
     const error = new Error(

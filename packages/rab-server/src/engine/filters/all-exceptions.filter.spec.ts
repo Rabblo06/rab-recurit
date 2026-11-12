@@ -4,6 +4,7 @@ import {
   ConflictException,
   ForbiddenException,
   HttpStatus,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -15,6 +16,9 @@ import { ExceptionHandlerService } from '../core-modules/exception-handler/excep
 import { WorkspaceRoutingError } from '../core-modules/tenant/schema-resolver.service';
 
 describe('AllExceptionsFilter', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+
   function run(
     exception: unknown,
     handler: Pick<ExceptionHandlerService, 'captureExceptions'> = { captureExceptions: jest.fn(() => []) },
@@ -64,7 +68,7 @@ describe('AllExceptionsFilter', () => {
   describe('Phase X3.2: the 500 branch reports to the exception handler (Sentry)', () => {
     it('a 500 calls the handler once with the exception and the route PATTERN (never the path or query string)', () => {
       const error = new Error('relation "core.shift" does not exist');
-      const captureExceptions = jest.fn(() => ['event-1']);
+      const captureExceptions = jest.fn<string[], [ReadonlyArray<unknown>, unknown?]>(() => ['event-1']);
       const { status } = run(error, { captureExceptions });
       expect(status).toHaveBeenCalledWith(HttpStatus.INTERNAL_SERVER_ERROR);
       expect(captureExceptions).toHaveBeenCalledTimes(1);
