@@ -1,14 +1,39 @@
 name: rab
 
+# OWNER-LOGIN LIFECYCLE, the production one (docker-compose.image.yml + docker-compose.local-db.yml; Phase X X2.3, the same
+# pattern as the e2e system and cost harnesses, P0-H #94). Like Twenty, dev runs the lifecycle production runs:
+#   - devdb: on a FRESH (empty) data volume its only init step is the committed one-time provider-admin SQL,
+#     postgres-init/owner-login/01-crewflow-owner.sql, which creates the ONE application login crewflow_owner with the
+#     password read from /run/secrets/crewflow-owner-password (a compose secret fed from DEVDB_CREWFLOW_OWNER_PASSWORD,
+#     never a command line). postgres-init/01-roles.sql (rab_owner / rab_app / crewflow_app / crewflow_worker) and
+#     transition-from-separated.sql are no longer mounted. An already initialised volume never re-runs any init script.
+#   - server: the image's own start, ./api-prestart.sh with CREWFLOW_MIGRATE_ON_START=true: the migration child (lock,
+#     classifier, whole chain, post-checks; a first-install failure never serves), the BullMQ job-scheduler registration
+#     (WORKER_SCHEDULER=bullmq), then main.js.
+#   - worker: consume-only, never migrates and never registers schedulers, starts after a healthy server.
+#   - ONE PG_DATABASE_URL, crewflow_owner, on the server and the worker, built here from the password below:
+#     postgres://crewflow_owner:<DEVDB_CREWFLOW_OWNER_PASSWORD>@devdb:5432/rab. No migration login, no runtime-role login.
+#   - migrate (the separated-mode one-off deploy-prepare step) is kept for ONE cycle behind the `migrate` profile only; it is
+#     never started by `up` and nothing depends on it.
+#
+# SECRETS (packages/rab-docker/.env, git-ignored; letters and digits only, e.g. `openssl rand -hex 32`):
+#   DEVDB_SUPERUSER_PASSWORD        the `rab` bootstrap superuser (initdb and DBA tasks only, never an app login)
+#   DEVDB_CREWFLOW_OWNER_PASSWORD   crewflow_owner, the ONE application login (at least 24 characters)
+# Fresh machine: `docker volume create rab_devdb_data`, set both, then `docker compose up -d --build` (the server applies
+# the whole chain on its first start; its health check allows 600 s). First platform admin, after the server is healthy:
+#   docker compose exec -e DB_TARGET=local -e BOOTSTRAP_ADMIN_EMAIL=you@example.test server \
+#     node packages/rab-server/dist/command/main.js bootstrap-admin
+# EXISTING VOLUME (initialised before this change with postgres-init/01-roles.sql, separated logins): nothing here changes
+# its data, and no init script runs on it. It has no crewflow_owner unless an operator created one, so devdb stays unhealthy
+# (the health check below requires the role) and server/worker do not start: fail closed. The cut-over is the owner's
+# decision (D7): a fresh volume, or the reviewed one-time transition step on the existing one.
+
 services:
-  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker [jobs + provisioner], front). Exactly one server
+  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker, front). Exactly one server
   # per volume — two servers on one data directory corrupt it (2026-10-15 incident):
   #  - `container_name` makes `--scale devdb=2` (or a second copy of this service) fail instead of starting a twin;
   #  - the volume is `external`, so `docker compose down -v` can never delete it, and no other service in this file (or in
   #    docker-compose.qa.yml / docker-compose.production.yml) mounts it.
-  # Fresh machine: `docker volume create rab_devdb_data`, put the generated development secrets in
-  # packages/rab-docker/.env (git-ignored; see DOCKER_FACTORY_RESET_AND_CLEAN_INSTALL_REPORT.md), start devdb, then
-  # initialise the schema ONLY through the explicit `migrate` job below (rab_owner phase, then bootstrap phase).
   devdb:
     image: postgres:16-alpine
     container_name: rab-devdb
@@ -25,14 +50,23 @@ services:
       # via `localhost` from the host. Host-side tools (packages/rab-server/.env, packages/rab-worker/.env.provisioner,
       # psql from a host shell) use localhost:15432; containers use devdb:5432 on the compose network.
       - '127.0.0.1:15432:5432'
+    secrets:
+      - crewflow-owner-password
     volumes:
       - rab-devdb-data:/var/lib/postgresql/data
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      # File by file, never the directory: postgres-init/ also holds the retired separated-mode 01-roles.sql, and
+      # owner-login/ holds transition-from-separated.sql, which must never run on a fresh cluster. Runs only on an EMPTY
+      # data volume (the image's entrypoint skips every init script on an initialised one).
+      - ./postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
+      # Ready AND the one-time owner step completed: a half-initialised volume (or an old one) without crewflow_owner stays
+      # unhealthy, as docker-compose.local-db.yml checks it.
+      test:
+        - CMD-SHELL
+        - "pg_isready -U rab -d rab && psql -X -U rab -d rab -Atc \"select 1 from pg_roles where rolname = 'crewflow_owner' and rolcanlogin\" | grep -qx 1"
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
     # Lane A (2026-10-24): devdb and redis were left DOWN after a Docker Desktop restart while server/worker/front came
     # back (they had unless-stopped, these did not), so the app restart-looped against missing dependencies. Same policy
     # as the services that depend on them; `docker compose stop` still stops them.
@@ -106,21 +140,25 @@ services:
     env_file:
       - ../rab-server/.env
     environment:
-      # THE API NEVER MIGRATES (Phase B P7). This service runs `main.js` directly; schema changes go only through the
-      # `migrate` service below, which compose runs to completion first (depends_on: service_completed_successfully).
-      #
-      # Runtime credential only: PG_DATABASE_URL is the restricted runtime role `crewflow_app` (no ownership, no DDL;
-      # assert-runtime-db-role.ts refuses anything else), supplied by the operator as
-      #   DEVDB_URL=postgres://crewflow_app:<password>@devdb:5432/rab
-      # Unset → empty → the API refuses to boot (fail closed). The deprecated names are blanked so ../rab-server/.env's own
-      # URLs never reach this process (PG_DATABASE_URL next to a DATABASE_URL naming another target refuses to start).
-      # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only). The API refuses to start
-      # with it (security review L-4, never-in-runtime-env.ts), so it is blanked here in case ../rab-server/.env sets it;
-      # run a CLI command in this container with `-e DB_TARGET=local` (the `devdb` service is a local docker hostname).
+      # The ONE application login (owner-login architecture), identical on the server and the worker. Missing password =
+      # compose refuses to render (fail closed). The deprecated names are blanked so ../rab-server/.env's own URLs never
+      # reach this process (api-prestart.sh refuses a second database URL).
+      # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only). api-prestart.sh and the API
+      # refuse to start with it (security review L-4, never-in-runtime-env.ts), so it is blanked here in case
+      # ../rab-server/.env sets it; run a CLI command in this container with `-e DB_TARGET=local` (the `devdb` service is a
+      # local docker hostname).
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       DB_TARGET: ''
-      PG_DATABASE_URL: ${DEVDB_URL:-}
+      PG_DATABASE_URL: postgres://crewflow_owner:${DEVDB_CREWFLOW_OWNER_PASSWORD:?set DEVDB_CREWFLOW_OWNER_PASSWORD in packages/rab-docker/.env}@devdb:5432/rab
+      # O3 C1 (production's lifecycle): the server migrates on start, under the migration lock (approval mode none, the
+      # production default). A failed first install never serves; a failed upgrade starts degraded (C3), as in production.
+      CREWFLOW_MIGRATE_ON_START: 'true'
+      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+      # O3 C2 (production's scheduler mode): the server registers the BullMQ job schedulers in api-prestart.sh; the worker
+      # only consumes them. The same value (and the same BULLMQ_PREFIX) on both.
+      WORKER_SCHEDULER: bullmq
+      BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       DATABASE_URL: ''
       DATABASE_URL_UNPOOLED: ''
       # Phase D (E-1): the same WORKER_DISPATCH_MODE as the worker — event makes this API's sessions carry
@@ -179,7 +217,9 @@ services:
       STORAGE_KEY_PREFIX: dev
     volumes:
       - rab-local-storage:/app/storage
-    command: node packages/rab-server/dist/main.js
+    # The image's default command, stated as production states it: env refusals, the migration child, the scheduler
+    # registration, then main.js.
+    command: ['./api-prestart.sh']
     ports:
       - '127.0.0.1:3000:3000'
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
@@ -190,23 +230,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      # Phase B P7: never started onto a schema the migration step did not check (exit 0) — see `migrate` below.
-      migrate:
-        condition: service_completed_successfully
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
       interval: 5s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      # A fresh install applies the whole chain before main.js listens.
+      start_period: 600s
 
   # Worker SERVICE (O1, one image): the SAME image as `server` (rab/Dockerfile), a different command:
   # `node packages/rab-worker/dist/main.js`, ONE process as uid/gid 1000 under compose's init, with workspace provisioning
   # in-process (owner-login architecture). The retired root launcher, its provisioner child (uid 10001) and the
   # CREWFLOW_PROVISIONER_DATABASE_URL hand-off are gone; the runtime guard refuses that variable in this process.
-  # KNOWN GAP (pre-existing since #72, not changed here): this dev stack's database settings are still the separated ones
-  # (DEVDB_URL = crewflow_app); the runtime now requires the owner login (crewflow_owner), so point DEVDB_URL /
-  # DEVDB_WORKER_URL at it. Rebuilding the dev stack for the owner login is a separate change.
+  # O3 C1/C2 (production's lifecycle): it never migrates, only consumes the job schedulers the server registered, and starts
+  # after a healthy server, on the same ONE owner login.
   worker:
     build:
       context: ../..
@@ -217,10 +254,12 @@ services:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       # Explicitly overridden so ../rab-server/.env's own URLs (possibly a real remote database) can never leak through.
-      # Phase D: the jobs child may instead log in as the operator-created Worker-only crewflow_worker login — set
-      # DEVDB_WORKER_URL to it (same container name PG_DATABASE_URL; the server keeps DEVDB_URL = crewflow_app and refuses
-      # crewflow_worker). Unset = DEVDB_URL, exactly as before.
-      PG_DATABASE_URL: ${DEVDB_WORKER_URL:-${DEVDB_URL:-}}
+      # The same ONE owner login as the server (PG_DATABASE_URL is also the session-lock connection: direct).
+      PG_DATABASE_URL: postgres://crewflow_owner:${DEVDB_CREWFLOW_OWNER_PASSWORD:?set DEVDB_CREWFLOW_OWNER_PASSWORD in packages/rab-docker/.env}@devdb:5432/rab
+      # O3 C1/C2: never migrates, only consumes the schedulers the server registered, starts after a healthy server.
+      DISABLE_DB_MIGRATIONS: 'true'
+      DISABLE_CRON_JOBS_REGISTRATION: 'true'
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
       # Command authority: the runtime guard refuses it in a long-running process (security review L-4); blanked in case
       # ../rab-server/.env sets it.
       DB_TARGET: ''
@@ -244,14 +283,12 @@ services:
       AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
-      # Lane A (BullMQ migration): scan scheduler mode for the jobs child — interval (default) unless the shell running
-      # `docker compose up` sets WORKER_SCHEDULER=bullmq for a deliberate trial. Rollback: unset it and recreate `worker`
-      # (optionally then remove the inert schedulers: packages/rab-worker/dist/tools/remove-crewflow-schedulers.js).
-      WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
+      # O3 C2: production's scheduler mode, the same value (and BULLMQ_PREFIX) as the server, which registers the schedulers.
+      WORKER_SCHEDULER: bullmq
       BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       # Phase D (D1/D2): dispatch claims and wake-ups for a deliberate local trial; unset = the code defaults (per_scope /
-      # poll; backstop 30 s, reconciliation 900 s, batch 100). global needs DEVDB_WORKER_URL (crewflow_worker); event needs
-      # global. The Worker refuses any other combination.
+      # poll; backstop 30 s, reconciliation 900 s, batch 100), as in production. event needs global. The Worker refuses any
+      # other combination.
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
@@ -292,27 +329,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
       server:
         condition: service_healthy
 
-  # Database migrations (Phase B P7): the one-off release step, `deploy-prepare.js`. Compose runs it to completion BEFORE
-  # `server` and `worker` (they depend on it with service_completed_successfully); restart 'no'. Without
-  # CREWFLOW_MIGRATION_APPROVED it only checks: exit 0 when nothing is pending (the stack starts), exit 3 when something
-  # is (the stack does not start until an approved run; the log lists the pending migrations and prints the approval
-  # token for exactly that set), exit 1 on any refusal. It applies ONLY with CREWFLOW_MIGRATION_APPROVED=<that token>,
-  # recomputed after the migration lock (final review F5: a stale token, one for another set, or the retired
-  # `apply-pending-migrations` is refused, nothing applied). The migration login comes ONLY from
-  # packages/rab-docker/.env.migrate (git-ignored; template .env.migrate.example, DB_TARGET=local values) as
-  # PG_DATABASE_URL, or for one run from the shell as
-  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate   (exit 3)
+  # SUPERSEDED, KEPT FOR ONE CYCLE (Phase X X2.3): the separated-mode one-off release step, `deploy-prepare.js`, behind the
+  # `migrate` profile only. `up` never starts it and nothing depends on it: the server migrates on start (above). It is
+  # here only for a volume still on the separated logins, run explicitly:
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose --profile migrate run --rm migrate   (exit 3)
   #   CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256> \
-  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate
-  # DEV IMPACT: `docker compose up` now needs that migration login (it checks the schema before starting the API). The
-  # runner enforces the identity itself (DB_TARGET guard, deployment identity marker, CF-41). Back up first, rebuild the
-  # image first if migrations changed, and never pass the migration URL to `server` or `worker`.
+  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose --profile migrate run --rm migrate
+  # Without CREWFLOW_MIGRATION_APPROVED it only checks (exit 0 nothing pending, 3 pending + the list and the token, 1
+  # refused). The migration login comes ONLY from packages/rab-docker/.env.migrate (git-ignored; template
+  # .env.migrate.example) as PG_DATABASE_URL, or for one run from the shell as above; never pass it to `server` or `worker`.
+  # Removed in the next cycle.
   migrate:
+    profiles: ['migrate']
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
@@ -409,6 +440,12 @@ services:
     depends_on:
       devdb:
         condition: service_healthy
+
+secrets:
+  # The crewflow_owner password for 01-crewflow-owner.sql, mounted into devdb at /run/secrets/crewflow-owner-password (the
+  # file the SQL reads by default), from packages/rab-docker/.env; never on a command line. Read only on a fresh volume.
+  crewflow-owner-password:
+    environment: DEVDB_CREWFLOW_OWNER_PASSWORD
 
 volumes:
   # External: created once by hand (see the `devdb` service), never created or removed by compose. The retired

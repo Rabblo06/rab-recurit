@@ -16,7 +16,11 @@
  *     CREWFLOW_MIGRATION_DATABASE_URL, ALLOW_PRODUCTION_DB_COMMANDS, DATABASE_URL_UNPOOLED with a value);
  *   - the production file (O3, owner decisions C1-C5: the API migrates on start): there is NO migration service, nothing
  *     names .env.migrate, nothing depends on a rab-migrate, and the runtime services carry no migration credential or
- *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key. The dev and QA files keep their one-off `migrate`.
+ *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key.
+ *   - the dev and QA files (Phase X X2.3, production's lifecycle): server and worker share ONE PG_DATABASE_URL, the
+ *     crewflow_owner login; the server migrates on start and the worker never migrates nor registers schedulers
+ *     (WORKER_SCHEDULER=bullmq on both); the separated-mode one-off `migrate` is kept for one cycle behind the `migrate`
+ *     profile only (rendered with --profile migrate) and nothing depends on it.
  *
  * Phase B (ops, owner decision): the one-off owner operations container `rab-ops` (production file, profile "ops") reads
  * packages/rab-docker/.env.ops only. A sentinel .env.ops (ops crewflow_app URL with its own sentinel password, a migrator
@@ -60,11 +64,12 @@ const FILES = [
 const DUMMY_ENV = {
   CREWFLOW_IMAGE_TAG: `sha256:${'0'.repeat(64)}`,
   DEVDB_SUPERUSER_PASSWORD: 'dummy',
-  DEVDB_URL: 'postgres://crewflow_app:dummy-app@devdb:5432/rab',
+  DEVDB_CREWFLOW_OWNER_PASSWORD: 'dummy-owner',
   CREWFLOW_BOOTSTRAP_PASSWORD: 'dummy',
   QA_POSTGRES_SUPERUSER_PASSWORD: 'dummy',
   QA_CREWFLOW_PASSWORD: 'dummy',
   QA_CREWFLOW_APP_PASSWORD: 'dummy',
+  QA_CREWFLOW_OWNER_PASSWORD: 'dummy-owner',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
 };
 
@@ -98,7 +103,7 @@ function render(rel) {
   try {
     const out = execFileSync(
       'docker',
-      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', 'ops', 'config', '--format', 'json'],
+      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', 'ops', '--profile', 'migrate', 'config', '--format', 'json'],
       { env: { ...process.env, ...DUMMY_ENV, CREWFLOW_MIGRATION_DATABASE_URL: '', CREWFLOW_MIGRATION_APPROVED: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     return JSON.parse(out);
@@ -196,6 +201,24 @@ function main() {
         if (raw) check(namesMigrateFile(migrateName), `${rel}: ${migrateName} names .env.migrate as its env_file`);
       }
       check(String(migrate.restart ?? 'no') === 'no', `${rel}: ${migrateName} restart is "no"`);
+      if (!production) {
+        // X2.3: kept for one cycle, never started by `up`.
+        check(JSON.stringify(migrate.profiles ?? []) === '["migrate"]', `${rel}: ${migrateName} has only the "migrate" profile (never started by up)`);
+      }
+    }
+    if (!production) {
+      // X2.3: production's lifecycle on the one owner login (names only are printed, never a value).
+      const [apiName, workerName] = runtimeNames;
+      const api = envOf(services[apiName] ?? {});
+      const worker = envOf(services[workerName] ?? {});
+      const url = String(api.PG_DATABASE_URL ?? '');
+      check(url !== '' && url === String(worker.PG_DATABASE_URL ?? ''), `${rel}: ${apiName} and ${workerName} share ONE PG_DATABASE_URL`);
+      check(/^postgres(ql)?:\/\/crewflow_owner:/.test(url), `${rel}: that PG_DATABASE_URL is the crewflow_owner login`);
+      check(api.CREWFLOW_MIGRATE_ON_START === 'true' && String(api.DISABLE_DB_MIGRATIONS ?? '') !== 'true', `${rel}: ${apiName} migrates on start`);
+      check(String(api.DISABLE_CRON_JOBS_REGISTRATION ?? '') !== 'true', `${rel}: ${apiName} registers the job schedulers`);
+      check(worker.DISABLE_DB_MIGRATIONS === 'true' && worker.DISABLE_CRON_JOBS_REGISTRATION === 'true', `${rel}: ${workerName} never migrates and only consumes the schedulers`);
+      check(api.WORKER_SCHEDULER === 'bullmq' && worker.WORKER_SCHEDULER === 'bullmq', `${rel}: WORKER_SCHEDULER is bullmq on ${apiName} and ${workerName}`);
+      check(JSON.stringify(services[apiName]?.command ?? []) === '["./api-prestart.sh"]', `${rel}: ${apiName} runs ./api-prestart.sh`);
     }
     for (const name of runtimeNames) {
       const svc = services[name];
@@ -210,8 +233,8 @@ function main() {
       const authority = MIGRATION_AUTHORITY.filter((k) => String(env[k] ?? '').trim() !== '');
       check(authority.length === 0, `${rel}: ${name} holds no migration authority${authority.length ? ` (${authority.join(', ')})` : ''}`);
       if (migrateName) {
-        const dep = (svc.depends_on ?? {})[migrateName];
-        check(dep?.condition === 'service_completed_successfully', `${rel}: ${name} depends on ${migrateName} completing successfully`);
+        // X2.3: the server migrates on start; nothing waits for the superseded one-off step.
+        check(!(svc.depends_on ?? {})[migrateName], `${rel}: ${name} does not depend on ${migrateName} (X2.3: the server migrates on start)`);
       } else {
         check(!(svc.depends_on ?? {})['rab-migrate'], `${rel}: ${name} does not depend on a rab-migrate (O3)`);
       }

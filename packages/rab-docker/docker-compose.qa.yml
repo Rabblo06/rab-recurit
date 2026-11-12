@@ -4,62 +4,53 @@ name: rab-qa
 # host ports. It shares nothing at runtime with the dev stack (docker-compose.yml, project `rab`, rab_devdb_data) and
 # never touches Neon, OpenShip or any remote database.
 #
-# TOPOLOGY: mirrors the INTENDED PRODUCTION topology (docker-compose.production.yml), not the dev stack:
-#   - rab-api  (`server`): main.js only, restricted `crewflow_app` login, no migration or provisioning credential.
+# TOPOLOGY: mirrors the PRODUCTION owner-login topology (docker-compose.image.yml + docker-compose.local-db.yml; Phase X
+# X2.3, the same pattern as the e2e system and cost harnesses, P0-H #94), not the dev stack:
+#   - postgres: on a FRESH (empty) volume its only init step is the committed one-time provider-admin SQL,
+#     postgres-init/owner-login/01-crewflow-owner.sql, which creates the ONE application login crewflow_owner with the
+#     password read from /run/secrets/crewflow-owner-password (a compose secret fed from QA_CREWFLOW_OWNER_PASSWORD, never
+#     a command line). postgres-init/01-roles.sql and transition-from-separated.sql are never mounted.
+#   - rab-api (`server`): the image's own start, ./api-prestart.sh with CREWFLOW_MIGRATE_ON_START=true: the migration child
+#     (lock, classifier, whole chain, post-checks; a first-install failure never serves), the BullMQ job-scheduler
+#     registration (WORKER_SCHEDULER=bullmq), then main.js.
 #   - rab-worker (`worker`): O1, the SAME image as `server`, run as `node packages/rab-worker/dist/main.js`, ONE process
-#     as uid 1000 under compose's init with the production security settings. It logs in through PG_DATABASE_URL
-#     (direct) and provisions workspaces in-process; the retired launcher and its provisioner child are gone.
+#     as uid 1000 under compose's init with the production security settings. Consume-only: it never migrates, never
+#     registers schedulers, and starts after a healthy server. It provisions workspaces in-process.
+#   - ONE PG_DATABASE_URL, crewflow_owner, on the server and the worker, built here from the password below:
+#     postgres://crewflow_owner:<QA_CREWFLOW_OWNER_PASSWORD>@postgres:5432/rab_manual_qa. No migration login, no
+#     runtime-role login.
 #   - Redis, plus object storage through the S3 driver (MinIO stands in for R2, with SSE header NONE as on R2). There is
 #     no shared volume between api and worker, as in production.
-#   - Migrations ONLY through the one-off `migrate` step (deploy-prepare.js), which server and worker depend on
-#     (service_completed_successfully), as production rab-migrate. It applies only with
-#     CREWFLOW_MIGRATION_APPROVED=<the token its check run printed for the exact pending set> (final review F5);
-#     otherwise it checks (exit 0 nothing pending, 3 pending + the list and the token).
 #   - HWS runtime routing OFF (HWS_RUNTIME_ENABLED=false on api and jobs), as in production until gate G4. The dev
 #     stack runs HWS on; QA deliberately does not, so it tests what production will run.
+#   - migrate (the separated-mode one-off deploy-prepare step) is kept for ONE cycle behind the `migrate` profile only; it
+#     is never started by `up` and nothing depends on it.
 #
 # KNOWN DIFFERENCES FROM PRODUCTION (unavoidable; see WAVE1_LANE_D_REPORT.md):
 #   - NODE_ENV/RAB_RUNTIME_ENV = development. NODE_ENV=production needs TLS verify-full and a database bound to the
 #     production deployment identity, which a local QA database is not. `development` is the strictest non-production mode: it refuses
 #     any non-local database host. Production config refusals (https URLs, TRUSTED_PROXY_CIDRS, real email) are
 #     therefore not exercised here, and email uses the LOGGER driver.
-#   - Migrations run with DB_TARGET=local, which the N1 production approval list does not restrict. QA therefore
-#     applies every migration on the branch, including 1786719500000 (server-path `core.provision_workspace`, G1).
-#     Production does not have G1 (not on the N1 list). In QA the API provisions new workspaces itself, and the worker's
-#     in-process provisioner remains the fallback and the path for `createFor` workspaces.
-#   - The database is a local postgres:16-alpine with a superuser. Neon has none, so the production phase-B identity
-#     (neondb_owner) is not reproduced.
+#   - The database is a local postgres:16-alpine with the image's default pg_hba and a `rab` superuser (initdb and DBA
+#     tasks only, never an app login); production's local-db/pg_hba.conf and TLS are not reproduced.
 #
-# SECRETS: none are committed. Put these four variables in packages/rab-docker/.env.qa.local, which is git-ignored by
-# `.env.*.local`. Use letters and digits only, for example `openssl rand -hex 32`, because the role-creating migrations
-# reject other characters:
-#   QA_POSTGRES_SUPERUSER_PASSWORD   the `rab` superuser (initdb only; phase-B migration identity)
-#   QA_CREWFLOW_PASSWORD             becomes `crewflow`'s password (migration 1786682000000)
-#   QA_CREWFLOW_APP_PASSWORD         becomes `crewflow_app`'s password (migration 1786687000000), api + jobs login
+# SECRETS: none are committed. Put these variables in packages/rab-docker/.env.qa.local, which is git-ignored by
+# `.env.*.local`. Use letters and digits only, for example `openssl rand -hex 32`:
+#   QA_POSTGRES_SUPERUSER_PASSWORD   the `rab` superuser (initdb only)
+#   QA_CREWFLOW_OWNER_PASSWORD       crewflow_owner, the ONE application login (at least 24 characters)
 #   QA_APP_SECRET                    QA-only application secret (32+ characters)
 # The variables are required (`:?`), so the stack fails closed without them. Passing `--env-file` also stops Compose
-# from reading the dev stack's packages/rab-docker/.env.
+# from reading the dev stack's packages/rab-docker/.env. QA_CREWFLOW_PASSWORD / QA_CREWFLOW_APP_PASSWORD are read only by
+# the superseded `migrate` profile.
 #
 # FIRST RUN (fresh volume). C is shorthand for the compose prefix:
 #   C="docker compose --env-file packages/rab-docker/.env.qa.local -f packages/rab-docker/docker-compose.qa.yml"
-#   $C up -d postgres redis minio minio-init
-#   $C build server migrate
-#   # Each phase below: run it once WITHOUT CREWFLOW_MIGRATION_APPROVED first (exit 3: it lists the pending migrations
-#   # and prints "approval token for exactly this set: pending-<count>-<sha256>"), then again with that token. The token
-#   # names one pending set, so phase B (after phase A applied part of it) needs its own check run and token.
-#   # Phase A: the pre-split owner `rab_owner` (dev-only password from postgres-init/01-roles.sql). Phase A is expected
-#   # to stop with exit 1 at CrewflowSingleCredentialRoleArchitecture1786682000000 (no bootstrap password in phase A).
-#   CREWFLOW_MIGRATION_APPROVED=<phase A token> CREWFLOW_MIGRATION_PHASE=A \
-#   CREWFLOW_MIGRATION_DATABASE_URL='postgres://rab_owner:<dev-only password>@postgres:5432/rab_manual_qa' \
-#     $C run --rm migrate
-#   # Phase B: the bootstrap superuser `rab`. This creates crewflow/crewflow_app with the QA_* passwords above.
-#   CREWFLOW_MIGRATION_APPROVED=<phase B token> CREWFLOW_MIGRATION_PHASE=B \
-#   CREWFLOW_MIGRATION_DATABASE_URL='postgres://rab:<QA_POSTGRES_SUPERUSER_PASSWORD>@postgres:5432/rab_manual_qa' \
-#     $C run --rm migrate
-#   # Every later `up` runs the migrate step first in check mode, so it needs the migration login again (shell, as above,
-#   # or packages/rab-docker/.env.migrate): CREWFLOW_MIGRATION_DATABASE_URL='postgres://rab:...@postgres:5432/rab_manual_qa'
-#   $C up -d server worker front
-# Later migrations: phase B again. Reset: `$C down -v` (QA data is disposable; this never touches dev volumes).
+#   $C up -d --build        # the server applies the whole chain on its first start (health check allows 600 s)
+#   # First platform admin, after the server is healthy (DB_TARGET=local on that run only):
+#   $C exec -e DB_TARGET=local -e BOOTSTRAP_ADMIN_EMAIL=you@example.test server #     node packages/rab-server/dist/command/main.js bootstrap-admin
+# Later releases: `$C up -d --build` again (the server migrates on start). An existing QA volume initialised before this
+# change (separated logins, no crewflow_owner) keeps postgres unhealthy, by design: reset it with `$C down -v`.
+# Reset: `$C down -v` (QA data is disposable; this never touches dev volumes).
 
 services:
   postgres:
@@ -71,14 +62,22 @@ services:
       POSTGRES_INITDB_ARGS: --data-checksums
     ports:
       - '127.0.0.1:55433:5432'
+    secrets:
+      - crewflow-owner-password
     volumes:
       - rab-qa-postgres-data:/var/lib/postgresql/data
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      # File by file, never the directory: postgres-init/ also holds the retired separated-mode 01-roles.sql, and
+      # owner-login/ holds transition-from-separated.sql, which must never run on a fresh cluster.
+      - ./postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U rab -d rab_manual_qa']
+      # Ready AND the one-time owner step completed: a half-initialised volume (or an old one) without crewflow_owner stays
+      # unhealthy, as docker-compose.local-db.yml checks it.
+      test:
+        - CMD-SHELL
+        - "pg_isready -U rab -d rab_manual_qa && psql -X -U rab -d rab_manual_qa -Atc \"select 1 from pg_roles where rolname = 'crewflow_owner' and rolcanlogin\" | grep -qx 1"
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
   # No host port, as in production: only server/worker reach it on the compose network.
   redis:
@@ -126,11 +125,9 @@ services:
       mc encrypt set sse-s3 localqa/rab-qa &&
       echo bucket-ready"
 
-  # rab-api equivalent. Runtime only: it never migrates, never bootstraps an admin, and holds no privileged credential.
-  # DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_TARGET and CREWFLOW_* are deliberately absent, as on production
-  # rab-api. The runtime guard refuses DATABASE_URL_UNPOOLED and CREWFLOW_* if they are present. assert-runtime-db-role
-  # refuses any login other than crewflow_app. An existing QA volume that predates crewflow_app (old `crewflow` URL)
-  # fails to boot by design: reset it with `down -v`, then rerun both migration phases.
+  # rab-api equivalent: migrates on start (O3 C1), registers the job schedulers (C2), then main.js, on the ONE owner login.
+  # DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_TARGET and every role password are deliberately absent, as
+  # on production rab-api; api-prestart.sh refuses them if they are present.
   server:
     build:
       context: ../..
@@ -140,7 +137,15 @@ services:
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      PG_DATABASE_URL: postgres://crewflow_app:${QA_CREWFLOW_APP_PASSWORD:?set QA_CREWFLOW_APP_PASSWORD (see the header of docker-compose.qa.yml)}@postgres:5432/rab_manual_qa
+      # The ONE application login (owner-login architecture), identical on the server and the worker.
+      PG_DATABASE_URL: postgres://crewflow_owner:${QA_CREWFLOW_OWNER_PASSWORD:?set QA_CREWFLOW_OWNER_PASSWORD (see the header of docker-compose.qa.yml)}@postgres:5432/rab_manual_qa
+      # O3 C1 (production's lifecycle): the server migrates on start, under the migration lock (approval mode none, the
+      # production default). A failed first install never serves; a failed upgrade starts degraded (C3), as in production.
+      CREWFLOW_MIGRATE_ON_START: 'true'
+      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+      # O3 C2 (production's scheduler mode): the server registers the BullMQ job schedulers in api-prestart.sh; the worker
+      # only consumes them. The same value on both.
+      WORKER_SCHEDULER: bullmq
       # Phase D (E-1): same value as the worker; event = this API's sessions NOTIFY the Worker. Default poll = no NOTIFY.
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
@@ -163,7 +168,9 @@ services:
       S3_SECRET_ACCESS_KEY: rab_qa_minio_dev_only_secret
       S3_FORCE_PATH_STYLE: 'true'
       S3_SERVER_SIDE_ENCRYPTION: NONE
-    command: node packages/rab-server/dist/main.js
+    # The image's default command, stated as production states it: env refusals, the migration child, the scheduler
+    # registration, then main.js.
+    command: ['./api-prestart.sh']
     ports:
       - '127.0.0.1:3101:3000'
     depends_on:
@@ -173,22 +180,20 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      migrate:
-        condition: service_completed_successfully
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
       interval: 5s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      # A fresh install applies the whole chain before main.js listens.
+      start_period: 600s
     restart: unless-stopped
 
   # rab-worker equivalent (O1, one image): the SAME image as `server` (rab/Dockerfile), a different command, with the
   # production rab-worker's security settings: ONE process as uid/gid 1000 under compose's init, workspace provisioning
   # in-process. The retired root launcher, its provisioner child (uid 10001) and CREWFLOW_PROVISIONER_DATABASE_URL are
-  # gone. PG_DATABASE_URL is a direct connection (it is also the session-lock connection), as in production.
-  # KNOWN GAP (pre-existing since #72, not changed here): this QA stack's database logins are still the separated ones
-  # (crewflow_app); the runtime now requires the owner login (crewflow_owner). Rebuilding QA for it is a separate change.
+  # gone. PG_DATABASE_URL is a direct connection (it is also the session-lock connection), as in production. O3 C1/C2: it
+  # never migrates, only consumes the job schedulers the server registered, and starts after a healthy server.
   worker:
     build:
       context: ../..
@@ -208,7 +213,11 @@ services:
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      PG_DATABASE_URL: postgres://crewflow_app:${QA_CREWFLOW_APP_PASSWORD:?set QA_CREWFLOW_APP_PASSWORD}@postgres:5432/rab_manual_qa
+      # The same ONE owner login as the server.
+      PG_DATABASE_URL: postgres://crewflow_owner:${QA_CREWFLOW_OWNER_PASSWORD:?set QA_CREWFLOW_OWNER_PASSWORD}@postgres:5432/rab_manual_qa
+      DISABLE_DB_MIGRATIONS: 'true'
+      DISABLE_CRON_JOBS_REGISTRATION: 'true'
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
       # Phase B (B5): the Worker runtime pool size, as in production.
       PG_POOL_MAX_CONNECTIONS: '12'
       REDIS_URL: redis://redis:6379
@@ -217,10 +226,10 @@ services:
       # In-process provisioning, the same pinned 5 s as production (the code default is 60 s), so QA tests what production
       # runs.
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'
-      # Lane A (BullMQ migration): historical per-replica timers unless a QA run deliberately sets WORKER_SCHEDULER=bullmq.
-      WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
-      # Phase D (D1/D2): per_scope / poll (the code defaults) unless a QA run deliberately sets them. global needs
-      # PG_DATABASE_URL above to log in as crewflow_worker (operator-created); event needs global.
+      # O3 C2: production's scheduler mode, the same value as the server, which registers the schedulers.
+      WORKER_SCHEDULER: bullmq
+      # Phase D (D1/D2): per_scope / poll (the code defaults, as in production) unless a QA run deliberately sets them;
+      # event needs global.
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       EMAIL_DRIVER: LOGGER
@@ -254,20 +263,21 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
       server:
         condition: service_healthy
     restart: unless-stopped
 
-  # Migrations (Phase B P7): the one-off `migrate` step (deploy-prepare.js), run to completion before server and worker.
-  # It applies only with CREWFLOW_MIGRATION_APPROVED=<token of the exact pending set> (final review F5); otherwise it
-  # checks: exit 0 nothing pending, exit 3 pending (the stack does not start; the log prints the list and the token), exit
-  # 1 refused (a stale, mismatched or malformed approval, or the retired apply-pending-migrations, included). It is the only service that ever holds a migration
-  # identity: PG_DATABASE_URL from packages/rab-docker/.env.migrate, or CREWFLOW_MIGRATION_DATABASE_URL from the
-  # operator's shell for one run. The runner enforces the rest: DB_TARGET=local refuses a non-local host, the deployment
-  # identity marker, CREWFLOW_MIGRATION_PHASE (A: the session must be rab_owner; B: never a runtime/owner login), and CF-41.
+  # SUPERSEDED, KEPT FOR ONE CYCLE (Phase X X2.3): the separated-mode one-off `migrate` step (deploy-prepare.js), behind the
+  # `migrate` profile only. `up` never starts it and nothing depends on it: the server migrates on start (above). Run it
+  # explicitly (`$C --profile migrate run --rm migrate`) only against a volume still on the separated logins. It applies
+  # only with CREWFLOW_MIGRATION_APPROVED=<token of the exact pending set> (final review F5); otherwise it checks: exit 0
+  # nothing pending, exit 3 pending (the log prints the list and the token), exit 1 refused. It is the only service that
+  # ever holds a migration identity: PG_DATABASE_URL from packages/rab-docker/.env.migrate, or
+  # CREWFLOW_MIGRATION_DATABASE_URL from the operator's shell for one run. The runner enforces the rest: DB_TARGET=local
+  # refuses a non-local host, the deployment identity marker, CREWFLOW_MIGRATION_PHASE (A: the session must be rab_owner;
+  # B: never a runtime/owner login), and CF-41. Removed in the next cycle.
   migrate:
+    profiles: ['migrate']
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
@@ -282,10 +292,10 @@ services:
       CREWFLOW_MIGRATION_APPROVED: ${CREWFLOW_MIGRATION_APPROVED:-}
       CREWFLOW_MIGRATION_PHASE: ${CREWFLOW_MIGRATION_PHASE:-}
       CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
-      # Read only by the two role-creating migrations, in phase B on a fresh volume. They become the passwords that the
-      # server/worker URLs above log in with. Phase A unsets them before the runner starts.
-      CREWFLOW_BOOTSTRAP_PASSWORD: ${QA_CREWFLOW_PASSWORD:?set QA_CREWFLOW_PASSWORD}
-      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${QA_CREWFLOW_APP_PASSWORD:?set QA_CREWFLOW_APP_PASSWORD}
+      # Read only by the two role-creating migrations, in phase B on a separated-mode volume. Phase A unsets them before
+      # the runner starts. Optional here (`:-`), so the default `up` never needs them; the migrations refuse an empty one.
+      CREWFLOW_BOOTSTRAP_PASSWORD: ${QA_CREWFLOW_PASSWORD:-}
+      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${QA_CREWFLOW_APP_PASSWORD:-}
     restart: 'no'
     depends_on:
       postgres:
@@ -325,6 +335,12 @@ services:
       timeout: 5s
       retries: 15
       start_period: 30s
+
+secrets:
+  # The crewflow_owner password for 01-crewflow-owner.sql, mounted into postgres at /run/secrets/crewflow-owner-password (the
+  # file the SQL reads by default), from the env file; never on a command line. Read only on a fresh volume.
+  crewflow-owner-password:
+    environment: QA_CREWFLOW_OWNER_PASSWORD
 
 volumes:
   rab-qa-postgres-data:

@@ -28,8 +28,8 @@ Runtime guards refuse to boot the API or Worker when:
 | File | Where | Topology |
 | --- | --- | --- |
 | `packages/rab-docker/docker-compose.production.yml` | Production: OpenShip on an Oracle VPS (arm64). The database is a managed PostgreSQL provider, the web console is on Vercel. | `rab-api`, `rab-worker` (bundle), `rab-redis`, plus the one-off `rab-migrate` release step they wait for. HWS runtime routing is off until the production rehearsal. |
-| `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Mirrors the production topology (restricted logins, Worker bundle, S3 storage through MinIO, HWS off, explicit migrations), with a local database and loopback-only ports. |
-| `packages/rab-docker/docker-compose.yml` | Local development | Same services. HWS is on, for development only. |
+| `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Mirrors the production owner-login lifecycle (one `crewflow_owner` login created on a fresh volume by `postgres-init/owner-login/01-crewflow-owner.sql`, the API migrates on start and registers the BullMQ schedulers, a consume-only Worker, S3 storage through MinIO, HWS off), with a local database and loopback-only ports. |
+| `packages/rab-docker/docker-compose.yml` | Local development | The same lifecycle and login. HWS is on, for development only. |
 
 Workspace provisioning in production runs in the Worker's provisioner process. Server-path provisioning, where the API calls `core.provision_workspace` (migration `1786719500000`), is not yet approved for production. Until it is, a new workspace is built by the provisioner.
 
