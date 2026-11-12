@@ -1,9 +1,10 @@
 import { EMAIL_UNAVAILABLE_CODE, EMAIL_UNAVAILABLE_MESSAGE, isEmailUnavailableViolation } from './email-unavailable';
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { MulterError } from 'multer';
 import { EntityNotFoundError } from 'typeorm';
 
+import { ExceptionHandlerService, shouldCaptureException } from '../core-modules/exception-handler/exception-handler.service';
 import { WorkspaceRoutingError } from '../core-modules/tenant/schema-resolver.service';
 
 /**
@@ -40,10 +41,19 @@ import { WorkspaceRoutingError } from '../core-modules/tenant/schema-resolver.se
  * Anything else (a raw driver error, an unexpected null-pointer bug) is
  * logged here in full and converted to a generic 500 — the client never
  * sees `error.message`/`error.stack`/a raw Postgres error.
+ *
+ * Phase X3.2: that 500 branch, and only that branch, also reports the
+ * exception through `ExceptionHandlerService` (Sentry when SENTRY_DSN is
+ * set, a no-op otherwise — Twenty's http-exception-handler.service.ts →
+ * handleException → captureExceptions). Every 4xx above returns before it.
+ * The report never changes the response: the service never throws, and the
+ * call is guarded here as well.
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly exceptionHandler: ExceptionHandlerService) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const response = host.switchToHttp().getResponse<Response>();
@@ -93,9 +103,31 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     this.logger.error('Unhandled exception', exception instanceof Error ? exception.stack : String(exception));
+    this.report(exception, host);
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
       message: 'Internal server error',
     });
   }
+
+  /** Best effort: a failure here is swallowed so the generic 500 is always sent, unchanged. */
+  private report(exception: unknown, host: ArgumentsHost): void {
+    try {
+      if (!shouldCaptureException(exception, HttpStatus.INTERNAL_SERVER_ERROR)) return;
+      this.exceptionHandler.captureExceptions([exception], { operation: { type: 'http', name: routePattern(host) } });
+    } catch {
+      // Reporting must never change the response.
+    }
+  }
+}
+
+/**
+ * `GET /rest/v1/shifts/:id` — the method and Express's matched route PATTERN, never the request path, so no identifier,
+ * email or token in a URL becomes the operation name. `unmatched` when no route matched.
+ */
+function routePattern(host: ArgumentsHost): string {
+  const request = host.switchToHttp().getRequest<Request | undefined>();
+  const method = typeof request?.method === 'string' ? request.method.slice(0, 16) : 'UNKNOWN';
+  const route: unknown = (request as { route?: { path?: unknown } } | undefined)?.route?.path;
+  return `${method} ${typeof route === 'string' ? route.slice(0, 256) : 'unmatched'}`;
 }

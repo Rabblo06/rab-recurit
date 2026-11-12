@@ -769,6 +769,32 @@ describe('instrument.ts — Sentry privacy options', () => {
       const out = instrument.scrubData({ [key]: 'HASH-VALUE-s3cr', keep: 1 });
       expect(out).toEqual({ [key]: '[Filtered]', keep: 1 });
     });
+
+    // Phase X3.2: MFA fields never leave the process, whatever their value looks like.
+    it.each([
+      ['mfaCode', '123456'],
+      ['mfa_code', '123456'],
+      ['totpCode', '654321'],
+      ['otp', '111222'],
+      ['totpSecret', 'JBSWY3DPEHPK3PXP'],
+      ['totp_secret_encrypted', 'v1:abc'],
+      ['mfaSecret', 'JBSWY3DPEHPK3PXP'],
+      ['challengeToken', 'opaque-challenge-s3cr'],
+      ['manualKey', 'JBSW Y3DP EHPK 3PXP'],
+      ['otpauthUri', 'otpauth://totp/Crewflow:bob%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Crewflow'],
+      ['qrDataUrl', 'data:image/png;base64,iVBORw0KGgo'],
+      ['recoveryCodes', ['ABCD-EFGH', 'IJKL-MNOP']],
+      ['recovery_codes', ['ABCD-EFGH']],
+      ['backupCodes', ['ABCD-EFGH']],
+    ])('scrubData filters the MFA field %s (X3.2)', (key, value) => {
+      const out = instrument.scrubData({ [key]: value, keep: 1 });
+      expect(out).toEqual({ [key]: '[Filtered]', keep: 1 });
+    });
+
+    it('keeps MFA status fields that hold no secret (X3.2)', () => {
+      const status = { totpEnabled: true, recoveryCodesRemaining: 7, mfa_enabled_at: '2026-11-12' };
+      expect(instrument.scrubData(status)).toEqual(status);
+    });
   });
 
   // Security review S-1: every string is capped before any regex runs and every pattern is linear. Each case runs in a

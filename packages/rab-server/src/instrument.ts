@@ -130,9 +130,15 @@ export function stripUrlQueryAndFragment(url: string): string {
 // Structured data (extra, tags, contexts, breadcrumb data, span attributes)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Object keys whose value is replaced wholesale, whatever it is (`password_hash`, `passwordHash`, `oldPassword`, …). */
+/**
+ * Object keys whose value is replaced wholesale, whatever it is (`password_hash`, `passwordHash`, `oldPassword`, …).
+ * Phase X3.2 adds the MFA enrolment fields whose values carry the TOTP secret or a one-time code but whose names the
+ * older list missed: `otpauthUri` (the secret and the URL-encoded account email), `manualKey` (the base32 secret),
+ * `qrDataUrl` (the secret as an image), `recoveryCodes` / `backupCodes` and `totpCode`. `recoveryCodesRemaining` (a
+ * count) is not matched.
+ */
 const SENSITIVE_KEY_RE =
-  /pass(word|wd|phrase)|^pwd$|^pass$|secret|token|authori[sz]ation|cookie|api[-_]?key|private[-_]?key|credential|^otp$|^mfa[-_]?code$|^session([-_]?(id|token))?$|^jwt$|^signature$/i;
+  /pass(word|wd|phrase)|^pwd$|^pass$|secret|token|authori[sz]ation|cookie|api[-_]?key|private[-_]?key|credential|^otp$|^mfa[-_]?code$|^session([-_]?(id|token))?$|^jwt$|^signature$|otpauth|manual[-_]?key|qr[-_]?data[-_]?url|recovery[-_]?codes?$|backup[-_]?codes?$|^totp[-_]?code$/i;
 
 /**
  * Attributes that are dropped: SQL text, raw query strings/fragments, request/response headers and bodies, client IPs,
