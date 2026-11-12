@@ -27,7 +27,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  - every tab view, page sizes 1 / 4 / 50, every offset page AND every keyset (cursor) page to the end;
  *  - every seeded id (in scope, another venue, another requester, a manager-created shift, an unknown id);
  *  - an empty result (a venue manager with no requests) still returns the tab counts;
- *  - another venue manager's scope.
+ *  - another venue manager's scope; a second organisation's requests (one carrying this manager's user id) never appear;
  * Then through the service and HTTP: one classified statement per call (was two), totals/counts/ids as the legacy pair.
  */
 const RUN = Boolean(process.env.DATABASE_URL);
@@ -55,6 +55,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     idle: TestIdentity & { token: string };
     staff: string[];
     ids: string[];
+    otherOrgIds: string[];
   }
   let fx: Fixture;
 
@@ -119,7 +120,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     const idle = await withToken(await factory.createVenueManager(org, { owner: manager, venueIds: [venueA] }));
     const staff: string[] = [];
     for (let i = 0; i < 6; i++) staff.push((await factory.createStaff(org, { owner: manager, label: `xp05-${i}` })).profileId!);
-    fx = { org, manager, venueA, venueB, jobRoleId: role!.id, vm, vm2, idle, staff, ids: [] };
+    fx = { org, manager, venueA, venueB, jobRoleId: role!.id, vm, vm2, idle, staff, ids: [], otherOrgIds: [] };
 
     const V = fx.vm.userId;
     const tie = '2026-06-01T10:00:00.123456Z';
@@ -149,6 +150,27 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     ids.push(await request_({ requestedBy: fx.vm2.userId, venueId: venueA, status: 'offered', offers: [{ staff: 4, offer: 'pending', seat: 'offered' }] }));
     ids.push(await request_({ requestedBy: fx.vm2.userId, venueId: venueB, status: 'pending_manager_approval' }));
     ids.push(await request_({ requestedBy: null, venueId: venueA, status: 'offered' }));
+
+    // A second organisation: one request by its own manager, and one carrying THIS venue manager's user id (only the
+    // organisation predicate and RLS keep it out).
+    const org2 = await factory.createOrganisation('xp05-sent-other');
+    const manager2 = await factory.createInternalManager(org2, { permissions: 'production' });
+    const venue2 = await tenantContext.runInTenantContext(
+      { organisationId: org2.id, workspaceId: manager2.workspaceId, userId: manager2.userId, role: '' },
+      (m) => m.save(Venue, { organisationId: org2.id, name: 'XP05 Other Org Venue', workspaceId: manager2.workspaceId!, createdBy: manager2.userId }),
+    );
+    const [role2] = await sql<{ id: string }>(
+      `INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
+      [org2.id, `Role-${randomUUID().slice(0, 8)}`, manager2.userId, manager2.workspaceId],
+    );
+    for (const requestedBy of [manager2.userId, V]) {
+      const [s2] = await sql<{ id: string }>(
+        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by)
+         VALUES ($1, $2, $3, now() + interval '3 days', now() + interval '3 days 4 hours', 1, 1500, $4, $5, 'pending_manager_approval', $6) RETURNING id`,
+        [org2.id, venue2.id, role2!.id, manager2.userId, manager2.workspaceId, requestedBy],
+      );
+      fx.otherOrgIds.push(s2!.id);
+    }
   });
 
   afterAll(async () => {
@@ -242,6 +264,29 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
       expect(r.legacyRows).toEqual([]);
       expect(r.result[0]!.tab_counts).toEqual({ all: 0, pending: 0, accepted: 0, confirmed: 0, declined: 0, expired: 0, submitted: 0 });
       expectEquivalent(await both(fx.vm2, { view, take: 2, skip: 0 }));
+    }
+  });
+
+  it('a request in another organisation is in neither the rows nor the tab counts (same requester id included)', async () => {
+    for (const view of VIEWS) {
+      const r = await both(fx.vm, { view, take: 500, skip: 0 });
+      const rows = expectEquivalent(r);
+      for (const other of fx.otherOrgIds) expect(rows.map((row) => row.id)).not.toContain(other);
+    }
+    for (const id of fx.otherOrgIds) {
+      const r = await both(fx.vm, { id, take: 50, skip: 0 });
+      expectEquivalent(r);
+      expect(r.legacyRows).toEqual([]);
+    }
+    const { result } = await both(fx.vm, { take: 1, skip: 0 });
+    expect((result[0]!.tab_counts as Record<string, number>).submitted).toBe(14);
+    const http = (path: string) => request(app.getHttpServer()).get(path).set({ Authorization: `Bearer ${fx.vm.token}` });
+    const list = await http('/rest/v1/shifts/sent?limit=50');
+    expect(list.status).toBe(200);
+    expect(list.body.counts.submitted).toBe(14);
+    for (const other of fx.otherOrgIds) {
+      expect(list.body.data.map((d: { id: string }) => d.id)).not.toContain(other);
+      expect((await http(`/rest/v1/shifts/sent/${other}`)).status).toBe(404);
     }
   });
 
