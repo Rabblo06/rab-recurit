@@ -73,8 +73,9 @@ const byRole = {};
 for (const r of app) { const k = `${r.role}${r.toplevel ? '' : ' (nested)'}`; byRole[k] = (byRole[k] || 0) + r.calls; }
 const sql = {
   windowSeconds: windowS,
-  runtimeStatements: sum(app.filter((r) => r.role === 'crewflow_app' || r.role === 'crewflow')),
-  runtimeStatementsPerMin: +(sum(app.filter((r) => r.role === 'crewflow_app' || r.role === 'crewflow')) / mins).toFixed(1),
+  // crewflow_owner: the one login (owner-login stack); crewflow_app / crewflow: pre-P0-H result directories.
+  runtimeStatements: sum(app.filter((r) => ['crewflow_owner', 'crewflow_app', 'crewflow'].includes(r.role))),
+  runtimeStatementsPerMin: +(sum(app.filter((r) => ['crewflow_owner', 'crewflow_app', 'crewflow'].includes(r.role))) / mins).toFixed(1),
   provisionerRoleStatements: sum(app.filter((r) => r.role === 'crewflow')),
   provisionerRoleStatementsPerMin: +(sum(app.filter((r) => r.role === 'crewflow')) / mins).toFixed(1),
   nestedDefinerStatements: sum(app.filter((r) => r.role === 'rab_secure_owner')),

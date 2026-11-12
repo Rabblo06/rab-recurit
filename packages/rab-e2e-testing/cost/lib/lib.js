@@ -39,11 +39,11 @@ async function loginWeb(email) {
   return { cookie: cookies.join('; ') };
 }
 
-async function loginMobile(email) {
+async function loginMobile(email, applicationTarget = 'staff_app') {
   const res = await fetch(`${BASE}/rest/v1/auth/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'cf-connecting-ip': nextIp(), 'x-client-platform': 'mobile' },
-    body: JSON.stringify({ email, password: secrets.SEED_PW, applicationTarget: 'staff_app' }),
+    body: JSON.stringify({ email, password: secrets.SEED_PW, applicationTarget }),
   });
   if (res.status !== 200) throw new Error(`mobile login ${email}: ${res.status} ${(await res.text()).slice(0, 300)}`);
   const j = await res.json();
