@@ -24,7 +24,7 @@ type Envelope = [Record<string, unknown>, Array<[{ type?: string }, unknown]>];
 
 const DSN = 'https://publickey@sentry.example.test/1';
 const JWT =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ4MzItc2VudHJ5LWp3dC1tYXJrZXIifQ.eDMyLXNlbnRyeS1qd3Qtc2lnbmF0dXJl';
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ4MzItc2VudHJ5LWp3dC1tYXJrZXIifQ.eDMyLXNlbnRyeS1qd3Qtc2lnbmF0dXJl'; // gitleaks:allow (synthetic scrubber marker, not a credential)
 const SECRETS = {
   jwt: JWT,
   jwtPayload: 'eyJzdWIiOiJ4MzItc2VudHJ5LWp3dC1tYXJrZXIifQ',
@@ -37,7 +37,7 @@ const SECRETS = {
   email: 'carol.x32-marker@example.com',
   ip: '203.0.113.77',
   mfaCode: '918273',
-  totpSecret: 'JBSWY3DPX32TOTPSECRET',
+  totpSecret: 'JBSWY3DPX32TOTPSECRET', // gitleaks:allow (synthetic scrubber marker, not a credential)
   manualKey: 'JBSW Y3DP X32M ANUA',
   recoveryCode: 'X32R-ECOV-ERY0',
   otpauthSecret: 'OTPAUTHX32SECRETVALUE',
