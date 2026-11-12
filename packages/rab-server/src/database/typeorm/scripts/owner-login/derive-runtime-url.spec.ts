@@ -95,6 +95,30 @@ describe('runDeriveRuntimeUrl', () => {
     ]);
   });
 
+  it('ignores the legacy DATABASE_URL in production too, and trims PG_DATABASE_URL like every other reader', () => {
+    const legacy = capture();
+    expect(
+      runDeriveRuntimeUrl(
+        { NODE_ENV: 'production', DATABASE_URL: OWNER_URL, APP_SECRET },
+        legacy.io,
+      ),
+    ).toBe(DERIVE_EXIT.refused);
+    expect(legacy.written).toEqual([]);
+    const padded = capture();
+    expect(
+      runDeriveRuntimeUrl(
+        {
+          PG_DATABASE_URL: `  ${OWNER_URL}
+`,
+        },
+        padded.io,
+      ),
+    ).toBe(DERIVE_EXIT.ok);
+    expect(padded.written.length === 1 && padded.written[0] === OWNER_URL).toBe(
+      true,
+    );
+  });
+
   it.each([
     [
       'missing APP_SECRET',

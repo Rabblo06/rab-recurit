@@ -7,12 +7,14 @@
  *   RUNTIME_URL="$(node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2)"
  *
  * api-prestart.sh (after the bootstrap child) and worker-start.sh both run it, so both build byte-identical URLs.
- * Pass-through (§7.1): a crewflow_owner `PG_DATABASE_URL` is written back unchanged, byte for byte, and APP_SECRET is not
+ * Pass-through (§7.1): a crewflow_owner `PG_DATABASE_URL` is written back unchanged (byte for byte once surrounding
+ * whitespace is trimmed, as every reader of the variable trims it), and APP_SECRET is not
  * read. Exit codes: 0 written, 64 refusal (fixed message on stderr), 70 unexpected. Output is fixed text only: never the
  * URL, a password, a host or a database name. No trailing newline on fd 4 (the value is exactly the URL).
  */
 import { writeSync } from 'node:fs';
 
+import { readPrimaryDatabaseUrl } from '../../../postgres/pg-config';
 import {
   OwnerCredentialError,
   type OwnerLoginPlan,
@@ -47,15 +49,22 @@ const processIo: DeriveIo = {
   error: (line) => process.stderr.write(`${line}\n`),
 };
 
-/** The whole step, testable: returns the exit code. Reads ONLY PG_DATABASE_URL and APP_SECRET from `env`. */
+/**
+ * The whole step, testable: returns the exit code. Reads ONLY PG_DATABASE_URL (through readPrimaryDatabaseUrl, so the value
+ * is trimmed) and APP_SECRET from `env`.
+ */
 export function runDeriveRuntimeUrl(
   env: Record<string, string | undefined>,
   io: DeriveIo = processIo,
 ): number {
   let plan: OwnerLoginPlan;
   try {
+    // The shared reader (pure: pg-config imports no driver). Only PG_DATABASE_URL counts here: the legacy DATABASE_URL
+    // fallback it offers outside production is not a deployment variable, and the shell exports PG_DATABASE_URL only.
+    const primary = readPrimaryDatabaseUrl(env);
     plan = planOwnerLogin({
-      databaseUrl: env.PG_DATABASE_URL,
+      databaseUrl:
+        primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined,
       appSecret: env.APP_SECRET,
     });
   } catch (error) {
