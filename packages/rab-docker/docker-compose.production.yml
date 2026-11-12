@@ -318,12 +318,21 @@ services:
   # server key stays in the data volume (0600, never shared); the CA certificate goes to the crewflow-db-ca volume, which
   # rab-api and rab-worker mount read-only (api-prestart.sh / worker-start.sh point PG_SSL_CA_CERT_PATH at it when the URL's
   # host is `db`): sslmode=verify-full holds with no client step. A regenerated certificate reaches the app at its next start.
-  # The image reads the superuser password ONLY when the data volume is empty (first start): changing PG_DATABASE_PASSWORD
-  # later does not change it (ALTER ROLE postgres PASSWORD ... in the db container first).
+  # AUTHENTICATION: initdb gets SCRAM for socket AND TCP logins (no trust, no peer): even a process inside this container
+  # needs the password (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, PGPASSWORD = PG_DATABASE_PASSWORD).
+  # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
+  # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
   # EXTERNAL DATABASE: set PG_DATABASE_URL to your database's admin URL (direct host, sslmode=verify-full); the app then
   # ignores this service, which still runs idle and still needs a PG_DATABASE_PASSWORD (any strong value).
-  # Image: postgres:16 (Debian, 16.15), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name another Debian
-  # postgres:16 or :17 image by digest (the volume layout below is theirs; postgres:18 moved its data directory).
+  # Image: postgres:16 (Debian, 16.15), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name a Debian
+  # postgres:16, :17 or :18 image by digest. VOLUME LAYOUT, the same for all three (a fresh named volume takes the ownership
+  # of the image directory it is mounted on, and as uid 999 the db can only use volumes whose root it can write):
+  #   crewflow-db-data -> /var/lib/postgresql (postgres-owned in every major): PGDATA=pgdata/ (fixed, so a changed major
+  #                       refuses to start on the old files instead of initialising an empty cluster), the TLS key in tls/;
+  #   crewflow-db-ca   -> /var/tmp (world-writable with the sticky bit in every major; nothing else uses it): ca.crt only;
+  #   /var/lib/postgresql/data, the 16/17 images' default data directory and VOLUME, is an empty read-only tmpfs, so no
+  #   anonymous volume is ever created there and nothing can be written to it by mistake.
+  # A major upgrade is a dump/restore (or pg_upgrade) into a new volume, never a silent image change.
   # ---------------------------------------------------------------------------
   db:
     image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
@@ -332,16 +341,16 @@ services:
       - -c
       - |
         set -eu
-        # The two volume roots arrive world-writable (copied from the image): only postgres may write them.
-        chmod 0755 /var/lib/postgresql /var/lib/postgresql/data
-        cd /var/lib/postgresql/data
-        if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/lib/postgresql/ca.crt ] &&
-          openssl verify -CAfile /var/lib/postgresql/ca.crt tls/server.crt >/dev/null 2>&1 &&
+        # The data volume root arrives world-writable (copied from the image): only postgres may write it.
+        chmod 0755 /var/lib/postgresql
+        cd /var/lib/postgresql
+        if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/tmp/ca.crt ] &&
+          openssl verify -CAfile /var/tmp/ca.crt tls/server.crt >/dev/null 2>&1 &&
           openssl x509 -checkend 2592000 -noout -in tls/server.crt >/dev/null 2>&1; }; then
           echo 'crewflow-db: creating the bundled database CA and server certificate (CN/SAN db)'
-          rm -rf /var/lib/postgresql/data/tls.new
-          ( umask 077; mkdir /var/lib/postgresql/data/tls.new )
-          cd /var/lib/postgresql/data/tls.new
+          rm -rf /var/lib/postgresql/tls.new
+          ( umask 077; mkdir /var/lib/postgresql/tls.new )
+          cd /var/lib/postgresql/tls.new
           openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ca.key -out ca.crt -days 3650 -subj '/CN=crewflow bundled db CA' -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null
           openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout server.key -out server.csr -subj '/CN=db' 2>/dev/null
           printf 'subjectAltName=DNS:db\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > server.ext
@@ -349,13 +358,13 @@ services:
           rm -f ca.key ca.srl server.csr server.ext
           chmod 0600 server.key
           chmod 0644 server.crt ca.crt
-          if [ "$$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/data/tls.new; fi
-          cd /var/lib/postgresql/data
-          rm -rf /var/lib/postgresql/data/tls
+          if [ "$$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/tls.new; fi
+          cd /var/lib/postgresql
+          rm -rf /var/lib/postgresql/tls
           mv tls.new tls
-          cp tls/ca.crt /var/lib/postgresql/ca.crt.new
-          chmod 0644 /var/lib/postgresql/ca.crt.new
-          mv /var/lib/postgresql/ca.crt.new /var/lib/postgresql/ca.crt
+          cp tls/ca.crt /var/tmp/ca.crt.new
+          chmod 0644 /var/tmp/ca.crt.new
+          mv /var/tmp/ca.crt.new /var/tmp/ca.crt
         fi
         exec docker-entrypoint.sh "$$@"
       - crewflow-db
@@ -364,9 +373,9 @@ services:
       - -c
       - ssl=on
       - -c
-      - ssl_cert_file=/var/lib/postgresql/data/tls/server.crt
+      - ssl_cert_file=/var/lib/postgresql/tls/server.crt
       - -c
-      - ssl_key_file=/var/lib/postgresql/data/tls/server.key
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
       - -c
       - ssl_min_protocol_version=TLSv1.2
       - -c
@@ -376,15 +385,16 @@ services:
       POSTGRES_DB: crewflow
       # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
       POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also when PG_DATABASE_URL names your own database}
-      POSTGRES_INITDB_ARGS: --auth-local=peer --data-checksums
-      # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/).
-      PGDATA: /var/lib/postgresql/data/pgdata
-      # psql history and the like never land in /var/lib/postgresql (the crewflow-db-ca volume the app mounts).
+      # SCRAM for socket and TCP logins alike: no trust (the image default for loopback TCP) and no peer.
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256 --data-checksums
+      # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/); fixed for every major.
+      PGDATA: /var/lib/postgresql/pgdata
+      # psql history and the like go to the private tmpfs, never to a volume.
       HOME: /tmp
     volumes:
-      - crewflow-db-data:/var/lib/postgresql/data
-      # Holds only ca.crt (and the empty mount point of the data volume): mounted read-only by rab-api and rab-worker.
-      - crewflow-db-ca:/var/lib/postgresql
+      - crewflow-db-data:/var/lib/postgresql
+      # Holds only ca.crt: mounted read-only by rab-api and rab-worker.
+      - crewflow-db-ca:/var/tmp
     networks: [crewflow-db]
     healthcheck:
       # TCP, not the socket: the image's first-start init runs a socket-only temporary server, which must not count.
@@ -406,6 +416,8 @@ services:
     tmpfs:
       - /var/run/postgresql:uid=999,gid=999,mode=2775
       - /tmp:uid=999,gid=999,mode=0700
+      # The 16/17 images' default data directory (their VOLUME): empty and read-only, never an anonymous volume.
+      - /var/lib/postgresql/data:uid=999,gid=999,mode=0555,size=64k
     shm_size: 256m
     pids_limit: 256
     mem_limit: ${CREWFLOW_POSTGRES_MEM_LIMIT:-1024m}
