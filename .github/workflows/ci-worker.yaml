@@ -32,6 +32,9 @@ jobs:
       DB_TARGET: local
       REDIS_URL: redis://localhost:6379
       EMAIL_DRIVER: LOGGER
+      # X3.3 (XR-14): production runs only WORKER_SCHEDULER=bullmq (env.validation.ts refuses interval there); NODE_ENV=test
+      # would otherwise default to interval. The suites run in the production scheduler mode.
+      WORKER_SCHEDULER: bullmq
       # PostgreSQL (M2 CI reliability, 2026-10-28): same change as ci-server. No service volume of postgres-init (checkout
       # failed with EACCES) and no rab_owner migration run (refused at the role split). The database is started after
       # checkout and built by the restricted-migrator fresh install; tests get TEST_DATABASE_URL (crewflow_app),
@@ -125,6 +128,8 @@ jobs:
       DB_TARGET: local
       REDIS_URL: redis://localhost:6379
       EMAIL_DRIVER: LOGGER
+      # X3.3 (XR-14): the production scheduler mode, as in the test job above.
+      WORKER_SCHEDULER: bullmq
       PHASE_D_SQL_APPROVED: 'true'
       PHASE_D_D5: before
     steps:
