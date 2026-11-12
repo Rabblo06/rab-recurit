@@ -1,7 +1,7 @@
 import AuthLayout from './AuthLayout';
 import { safeApplicationTarget, loginDestination } from './authErrors';
 import { useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../../shared/api';
 import { s, ease, fadeIn, stepVariants } from './authStyles';
@@ -9,10 +9,22 @@ import { getApiErrorMessage, getApiErrorStatus } from '../../shared/lib/apiError
 
 const SEND_FAILED = 'We couldn’t send the request. Check your connection and try again.';
 
+/**
+ * The address the sign-in / security screen handed over, if any. It travels in router state (`<Link state={{ email }}>`),
+ * never in the URL (XA-08): a query string lands in browser history, server and proxy access logs and any Referer, and
+ * an address is personal data. A legacy `?email=` link is deliberately ignored, not read.
+ */
+function handedOverEmail(state: unknown): string {
+  if (typeof state !== 'object' || state === null) return '';
+  const email = (state as { email?: unknown }).email;
+  return typeof email === 'string' ? email : '';
+}
+
 export default function ForgotPassword() {
   const [params] = useSearchParams();
+  const location = useLocation();
   const applicationTarget = safeApplicationTarget(params.get('applicationTarget')) ?? 'manager_web';
-  const [email, setEmail] = useState(params.get('email') ?? '');
+  const [email, setEmail] = useState(() => handedOverEmail(location.state));
   const [loading, setLoading] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState('');
