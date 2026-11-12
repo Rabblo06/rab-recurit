@@ -6493,3 +6493,84 @@ cache change.
   inspect: one effective-set query for the target; next-request revoke; 401; inspect-header disclosure);
   `permissions.service.spec.ts` (routing: snapshot of this identity → 0 transactions; inspect / mismatched user,
   organisation or workspace / no snapshot → one live read; a failed read propagates).
+
+## SC-03 — permission overrides are part of the auth-context version vector (branch phase-x/c-fix-3-override-fingerprint, 2026-11-11, PR #101)
+
+Phase X Stage 0 finding SC-03 (`docs/plans/phase-x0/S0-C-caches.md`). Owner decision: the code fingerprint option, no
+database triggers. No migration, role, grant, RLS or env change; `AUTH_CONTEXT_CACHE_ENABLED` stays off everywhere.
+
+- **Asset:** the cached request security snapshot (effective permissions) when the auth-context cache is switched on.
+  **Actor:** anyone who changes a `core.user_permission_override` row: a future service writer, operator SQL, a
+  migration. (No production writer exists today.)
+- **Before:** the cache key is the PostgreSQL version vector (session, user, SUM(role permission_version), workspace
+  membership, platform admin, organisation). Overrides decide effective permissions (an override beats every role) but
+  had no version column, so a revoke by override kept the cached grant for up to 900 s.
+- **Control:** `SecurityVersionService.readVector` reads, in its single statement and under RLS, a CONTENT fingerprint of
+  the user's override rows: `<count>-<md5 of (permission_id, effect) ordered by permission_id | 0>`. It is part of the
+  auth-context cache key and of the realtime connection's vector comparison. Any INSERT, UPDATE of `effect` or DELETE, by
+  any path, changes it: there is no bump for a writer to forget. An unreadable value is `'x'`, which no cached key has.
+  Same mechanism as the AI access fingerprint.
+- **Revocation guarantee:** the vector is read from PostgreSQL inside the request's own transaction before any lookup, so
+  the next request after a committed override change computes a new key and rebuilds from PostgreSQL, with the cache warm,
+  with the cache's Redis unreachable (a miss, never a stale hit), and after Redis returns (the old granting entry stays
+  under the old, unreachable key).
+- **Writers:** a static test lists every writer of `core.user_permission_override` in the whole repository (production:
+  none; one e2e fixture seed) and every SECURITY DEFINER function in migrations that writes it (none), with a fixture
+  test per write form, so a new writer is reviewed as a permission write path (layer-2 check, audit, step-up). It also
+  proves the fingerprint feeds the cache key (vectors differing only in it give different keys) and pins it into
+  readVector and the realtime comparison.
+- **Status:** SC-03 is only PARTLY closed: the override half. See Residual.
+- **Residual:** role grants (`user_role`, `role_permission`) still rely on the in-transaction version bumps every service
+  writer makes; operator SQL on those tables without a bump, and the two bump-less additive grants (SC-04, a stale DENY
+  only), keep a ≤ 900 s window once the cache is on. A content hash of the role grants is a possible follow-up (owner call).
+
+## C5 — layer-2 permission checks share a transaction-local effective-permission set (branch phase-x/c5-tx-permission-set, 2026-11-11, PR #103)
+
+Phase X Stage 0 §C5 / XP-04 (`docs/plans/phase-x0/S0-C-caches.md`). Code only: no migration, role, grant, RLS, env or
+cache change. The layer-2 service checks stay in the services; this changes only how many statements they cost.
+
+- **Asset:** every layer-2 authorisation decision made through `PermissionsService.userHasPermissionTx`.
+  **Actor:** any request or Worker job that checks permissions inside a tenant transaction; any code that changes
+  roles, grants or overrides in that same transaction.
+- **Control:** inside an OPEN transaction on the PRIMARY DataSource, the first check for an identity reads that identity's
+  whole effective set in one statement (role grants visible under RLS, minus `revoke` overrides, plus `grant`
+  overrides) and memoises it on that transaction's QueryRunner. Rules:
+  - never across transactions (per QueryRunner, dropped on TypeORM commit/rollback events, savepoints included, and on
+    any raw statement starting with ROLLBACK, RELEASE, COMMIT, ABORT or END, so a raw `ROLLBACK TO SAVEPOINT` sent
+    through `manager.query` also drops it);
+  - keyed by user, organisation, workspace, actor type and inspected-by;
+  - memoised only when the transaction's bound `rab.organisation_id` / `rab.workspace_id` (what role RLS reads) equal the
+    identity's, read in the same statement; a rebound transaction answers but memoises nothing;
+  - never filled on the read replica;
+  - cleared by every in-transaction security-version bump and by every ORM write to `user_role`, `role_permission`,
+    `role`, `user_permission_override`, `permission`;
+  - account status and workspace membership are not in the set and stay live (request snapshot guards,
+    `resolve_membership_for_session`).
+- **Not a cache:** nothing outlives the transaction, nothing is in Redis, and the guard snapshot is never reused.
+- **Tests:** `tx-permission-memo.spec.ts` (unit) and `c5-tx-permission-set.integration.spec.ts` (46-flag equivalence with
+  the per-flag lookup; isolation across transactions and identities; ORM write, raw SQL + bump and savepoint rollback all
+  seen by the next check; rebound workspace not memoised; one fill on `/dashboard/summary`).
+- **Known (no change):** a memo read does not re-check the binding after a LATER rebind in the same transaction
+  (`assignOwnWorkspace`, `manager-workspace.service.ts:468`); no current path checks a permission after a rebind.
+- **Residual:** a raw-SQL write to an authority table inside a transaction WITHOUT the in-transaction version bump would
+  not clear the memo for later checks in that transaction. Every service writer bumps (P1D); a writer that does not is
+  already a revocation defect for the auth-context cache.
+
+## Phase X1.7 — attendance per-user throttle: atomic window (cleanup audit DUP-02)
+
+- **Asset:** a staff member's ability to clock in / out (attendance feeds payroll). **Actor:** not an attacker: a Redis
+  command timeout, dropped connection or process crash between two commands.
+- **Before (reproduced 2026-11-02 against a disposable `redis:7-alpine`):** `AttendancePerUserThrottleGuard` ran `INCR`
+  and then, separately, `EXPIRE` when the count was 1. With `INCR` succeeding and `EXPIRE` failing, the guard failed open
+  (correct, CF-17) but left `attendance-clock-throttle:<userId>` with no TTL (`PTTL = -1`); every later request
+  incremented it, so from the 11th on that user got 429 on Clock In / Clock Out / geofence exit permanently, until someone
+  deleted the key.
+- **Control:** one Lua script (`ATTENDANCE_THROTTLE_SCRIPT`), the way Twenty runs every throttle step
+  (`throttler.service.ts`, try-consume-token-buckets script): `INCR`, then `PEXPIRE 60 s` whenever the key has no TTL,
+  atomically. The window stays fixed from its first request (never extended); a key already stuck without a TTL is healed
+  on its next request. Unchanged: key name (no namespace added, so live counters and the heal both apply), 10 per user per
+  60 s, `ThrottlerException` (429) contract, the throttler Redis client, and the fail-OPEN policy on any store error or an
+  unexpected reply (owner decision CF-17).
+- **Regression tests:** `attendance-per-user-throttle.guard.spec.ts` against real Redis (CI's service; skipped without
+  `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
+  10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
