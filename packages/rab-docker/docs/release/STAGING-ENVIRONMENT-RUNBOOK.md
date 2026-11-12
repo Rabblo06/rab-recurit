@@ -1,5 +1,8 @@
 # Isolated staging environment runbook (owner decision R4)
 
+> **Upgrade gate (Phase X U-1, 2026-11-11):** N1 applies only to the legacy CF-41 layout; owner-login deployments use the
+> upgrade floor (`OWNER-LOGIN-DEPLOYMENT.md` §3.2a).
+
 > **OUTDATED for deploying (2026-11-11).** Production now deploys exactly like Twenty: one image variable,
 > `CREWFLOW_IMAGE_TAG` (a `sha256:` digest), and one command. **Deploy the API and Worker together, from the same image
 > tag, with `docker compose pull && docker compose up -d`. The API starts first and migrates; the Worker starts when the

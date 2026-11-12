@@ -11,7 +11,8 @@
  *      migration advisory lock on it (migration-lock.ts: bounded wait, logged).
  *   3. With the lock held, re-run every gate, so a run that waited behind another acts on the state that run left:
  *      the target guard again, the locked session's database name against the guarded one, N1 production approval
- *      (production-migration-approval.ts) and CF-41 migration identity (migration-identity.ts), computed exactly as
+ *      (production-migration-approval.ts; legacy path) or the upgrade floor (owner-login/release-floor.ts; owner login)
+ *      and CF-41 migration identity (migration-identity.ts), computed exactly as
  *      GuardedMigrationDataSource computes them (same queries, same pure decisions, same order: approval, then identity).
  *   3b. Phase B schema compatibility (src/database/boot-checks/schema-compatibility.ts), ledger part: unknown ledger names
  *      interleaved with this code's migrations (not RETIRED_MIGRATIONS) refuse in both modes; a ledger AHEAD of the code
@@ -27,28 +28,35 @@
  *   6. Unlock, release, destroy. A holder that dies at any point (signal, crash, pg_terminate_backend) loses its session:
  *      PostgreSQL rolls back the open migration transaction and frees the lock together; earlier migrations of that run
  *      stay committed with their ledger rows, so a re-run continues from exactly there. (A `transaction = false` migration
- *      that dies mid-way can leave partial DDL without a ledger row; each of them is written to be re-run safely:
- *      1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000, 1786721090000, 1786721320000,
- *      1786721440000, 1786721450000.)
+ *      that dies mid-way can leave partial DDL without a ledger row; each of them is written to be re-run safely. The
+ *      list is owner-login/upgrade-failure-policy.ts NON_TRANSACTIONAL_MIGRATIONS, ten today, checked against the
+ *      migration sources by its spec: 1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000,
+ *      1786721090000, 1786721320000, 1786721430000, 1786721440000, 1786721450000.)
  *
  * Owner-login architecture (owner decision 2026-11-04, PR 3): the path is chosen by the SESSION LOGIN, never by an
  * environment switch.
  *   - `crewflow_owner` (OWNER_LOGIN): the owner-login lifecycle. After the lock the database is classified
  *     (owner-login/fresh-install.ts; FOREIGN refuses), the exact owner-login identity rule replaces CF-41
  *     (owner-login/owner-login-identity.ts), PostgreSQL below 16 or without reviewed workspace fingerprints is refused (D4),
- *     the N1 production list is waived ONLY on a proven fresh install, an EMPTY / BOOTSTRAP-PARTIAL database is bootstrapped
+ *     the UPGRADE FLOOR (owner-login/release-floor.ts, Phase X U-1, owner decision 2026-11-11) replaces N1 on this path: a
+ *     production database that is not a proven fresh install may upgrade only from a supported release (R254 or later,
+ *     a partial upgrade resumed included; an older or unknown history refuses with UnsupportedUpgradeStartError, exit 65),
+ *     an EMPTY / BOOTSTRAP-PARTIAL database is bootstrapped
  *     (owner-login/bootstrap.ts) and the chain is applied by owner-login/owner-login-chain.ts (phase A as rab_owner, the
  *     pre-0b CREATE window, phase B as crewflow_owner, the fresh-only ROW_COPY shim). With nothing pending, a ledger AHEAD of
  *     the code is a warning, never a refusal (C-1), so an image rollback stays healthy.
  *   - any other login (the CF-41 superuser of a disposable/local cluster, or a restricted migrator): the LEGACY path,
  *     unchanged, logged loudly. RETAINED ONLY UNTIL PR #9 (REMOVE AFTER VERIFIED REPLACEMENT): today's production and
  *     every existing CI / compose flow still build and migrate through it.
- * The approval gate is the same for both: N1 (unless fresh, owner login only), then F5 as before — approvePending when the
+ * The approval gate: the upgrade floor (owner login, unless fresh) or N1 (legacy path, unchanged until the clean-up PR), then
+ * F5 as before — approvePending when the
  * caller supplies it, required for a production apply run unless `approvalMode: 'none'` (the migrate-on-start child with
  * CREWFLOW_MIGRATION_APPROVAL_MODE=none; never deploy-prepare).
  *
- * CF-41, M2 (read-only pending computation: the ledger is never created before the identity check), N1 and DB_TARGET are
- * enforced by the same functions as before; nothing here widens them. Workspace schemas are migrated, as before, by the core
+ * CF-41, M2 (read-only pending computation: the ledger is never created before the identity check), N1 (legacy path) and
+ * DB_TARGET are enforced by the same functions as before. On the owner-login path N1 is REPLACED by the upgrade floor
+ * (owner decision 2026-11-11, Phase X U-1): an existing production database at or past a supported release upgrades
+ * without a per-migration approval list; every other gate is unchanged. Workspace schemas are migrated, as before, by the core
  * migrations that ship each module (migrate-workspace-schemas.ts remains the operator's resume tool).
  */
 import type { ClientConfig } from 'pg';
@@ -68,6 +76,7 @@ import {
   ROLE_SPLIT_MIGRATION,
 } from '../../core/migration-identity';
 import { assertProductionMigrationApproval } from '../../core/production-migration-approval';
+import { assertSupportedUpgradeStart } from './owner-login/release-floor';
 import { OWNER_LOGIN } from './owner-login/bootstrap';
 import {
   assertFingerprintsComplete,
@@ -171,8 +180,8 @@ export interface LockedMigrationOptions {
   onSession?: (pid: number) => void;
   /**
    * F5 approval policy of an apply run. 'token' (default; deploy-prepare, setup-db): approvePending when supplied, required
-   * for a production apply. 'none': the migrate-on-start child with CREWFLOW_MIGRATION_APPROVAL_MODE=none — no token; N1
-   * still applies to every database that is not a proven fresh install. Honoured for the owner login only.
+   * for a production apply. 'none': the migrate-on-start child with CREWFLOW_MIGRATION_APPROVAL_MODE=none — no token; the
+   * upgrade floor still applies to every database that is not a proven fresh install. Honoured for the owner login only.
    */
   approvalMode?: 'none' | 'token';
   /**
@@ -394,14 +403,13 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     const lockedGuardEnv = options.refreshGuardEnv ? targetGuardEnv(await options.refreshGuardEnv(), connection.url) : guardEnv;
     const guarded = await assertTarget('migrations', lockedGuardEnv, dotenvValues, DEFER_UNREADABLE_MARKER);
     const [{ db }] = (await query('SELECT current_database() AS "db"')) as Array<{ db: string }>;
-    if (db !== guarded.app.database) {
-      throw new Error(`the migration session is connected to database "${db}", not the guarded "${guarded.app.database}". Refusing.`);
-    }
+    if (db !== guarded.app.database) throw new MigrationSessionDatabaseError(db, guarded.app.database);
     const pendingBefore = await pendingMigrationNames(query, dataSource);
     let ownerState: { classification: Classification; proof: FreshInstallProof } | null = null;
     if (ownerLogin) {
-      // Classify first (FOREIGN refuses before any other decision), then the exact identity rule, then N1 unless this is a
-      // proven fresh install (owner rule: on EMPTY the full chain is allowed under the shim; never on an existing database).
+      // Classify first (FOREIGN refuses before any other decision), then the exact identity rule, then the upgrade floor
+      // unless this is a proven fresh install (owner rule: on EMPTY the full chain is allowed under the shim). Phase X U-1
+      // (owner decision 2026-11-11): the floor replaces N1 on this path only; the legacy branch below keeps N1.
       const expected = dataSource.migrations.map((m) => m.name || m.constructor.name);
       const classification = await classifyDatabaseState(query, expected);
       const proof = await readFreshInstallProof(query, classification.state);
@@ -414,7 +422,16 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         classification.state === 'BOOTSTRAP-PARTIAL' ||
         pendingBefore.some((n) => (timestampOrNull(n) ?? 0) <= LAST_ROLE_MIGRATION_TIMESTAMP);
       assertOwnerLoginMigrationIdentity(identity, { needCreateRole: roleWork && mode === 'apply' });
-      if (!proof.fresh) assertProductionMigrationApproval({ target: guarded.target, pendingMigrationNames: pendingBefore });
+      if (!proof.fresh) {
+        const floor = assertSupportedUpgradeStart({
+          target: guarded.target,
+          state: classification.state,
+          fresh: proof.fresh,
+          applied: classification.applied,
+          code: expected,
+        });
+        log(`upgrade floor: ${floor.reason}`);
+      }
       ownerState = { classification, proof };
     } else {
       assertProductionMigrationApproval({ target: guarded.target, pendingMigrationNames: pendingBefore });
@@ -464,8 +481,8 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       );
     }
     if (approval === 'none-mode') {
-      // The migrate-on-start child with approval mode none: N1 above is the gate on an existing database (ST-3).
-      log(`approval mode none: ${ownerState?.proof.fresh ? 'proven fresh install' : 'N1 production list checked'}; no per-release token`);
+      // The migrate-on-start child with approval mode none: the upgrade floor above is the gate on an existing database (ST-3).
+      log(`approval mode none: ${ownerState?.proof.fresh ? 'proven fresh install' : 'upgrade floor checked'}; no per-release token`);
     } else if (mode === 'apply') {
       if (options.approvePending) options.approvePending(pendingBefore);
       else if (ownerLogin && ownerState?.proof.fresh) log('proven fresh install: the full chain is allowed without a per-release token (owner rule)');
@@ -494,7 +511,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     // 5. Post-run, lock still held.
     if (mode === 'apply') {
       const still = await pendingMigrationNames(query, dataSource);
-      if (still.length) throw new Error(`${still.length} migration(s) are still pending after the run: ${still.join(', ')}`);
+      if (still.length) throw new MigrationsStillPendingError(still);
     }
     // BC-17 (owner decision 2026-11-05): an owner-login install ends with the legacy logins crewflow / crewflow_app NOLOGIN
     // PASSWORD NULL (crewflow_owner created them, so it holds ADMIN). Run on every fresh install AND after any run that
@@ -532,6 +549,28 @@ export class DatabaseStateError extends Error {
   constructor(readonly classification: Classification) {
     super(`refusing a ${classification.state} database: ${classification.reason}. Nothing was changed.`);
     this.name = 'DatabaseStateError';
+  }
+}
+
+/**
+ * SU-07: the locked session is not on the database the target guard checked. Nothing was changed. Named so migrate-on-start
+ * maps it to `identity` (exit 67, fail closed under every policy); as a plain Error it was a "migration failure".
+ */
+export class MigrationSessionDatabaseError extends Error {
+  constructor(actual: string, guarded: string) {
+    super(`the migration session is connected to database "${actual}", not the guarded "${guarded}". Refusing.`);
+    this.name = 'MigrationSessionDatabaseError';
+  }
+}
+
+/**
+ * SU-07: the run finished but migrations of this code are still pending on the locked session. Named so migrate-on-start
+ * maps it to `postCheck` (exit 68, fail closed under every policy); as a plain Error it was a "migration failure".
+ */
+export class MigrationsStillPendingError extends Error {
+  constructor(readonly still: readonly string[]) {
+    super(`${still.length} migration(s) are still pending after the run: ${still.join(', ')}`);
+    this.name = 'MigrationsStillPendingError';
   }
 }
 

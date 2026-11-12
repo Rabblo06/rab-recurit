@@ -154,9 +154,9 @@ export class AuthController {
       // Display hint for a Venue Manager's "Assigned staff" tab in the organisation Managers list (overrides honoured). The
       // org-admin Assigned Staff routes keep their own PermissionGuard and VenueManagerService re-check.
       PermissionFlag.MANAGER_MANAGE];
-    const entries = await Promise.all(flags.map(async (flag) =>
-      [flag, await this.permissions.userHasPermission(ctx, flag)] as const));
-    return Object.fromEntries(entries);
+    // SC-05: from the request's already-resolved permission set (0 extra transactions; Admin Inspect resolves the TARGET's
+    // set in one transaction). Same keys, same booleans as one userHasPermission per flag.
+    return this.permissions.displayHints(ctx, flags);
   }
 
   /**

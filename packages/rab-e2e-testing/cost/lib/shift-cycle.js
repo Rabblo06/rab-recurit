@@ -8,6 +8,7 @@
 //   node lib/shift-cycle.js collect          -> waits for completion, writes $COST_OUT/shift-cycle.json
 const fs = require('fs');
 const path = require('path');
+const { APPLICATION_ROLES_SQL } = require('./sql-families');
 const { OUT, psql, cgroupUsec, writeJson, sleep } = require('./lib');
 
 const mode = process.argv[2];
@@ -42,7 +43,7 @@ const mode = process.argv[2];
     const snap = JSON.parse(fs.readFileSync(path.join(OUT, 'shift-cycle.prepare.json'), 'utf8'));
     const list = `'${snap.shiftIds.join("','")}'`;
     let rendered = 0;
-    const deadline = Date.now() + 15 * 60_000; // the roster scheduler runs every 5 min (interval mode)
+    const deadline = Date.now() + 15 * 60_000; // the roster scheduler runs every 5 min
     while (Date.now() < deadline) {
       rendered = Number(psql(`select count(*) from core.shift_report where shift_id in (${list}) and pre_shift_pdf_generated_at is not null`));
       if (rendered >= snap.shifts) break;
@@ -62,7 +63,7 @@ const mode = process.argv[2];
     const emails = psql(`select status||'|'||count(*)||'|'||count(attachment_file_id) from core.email_outbox where created_at >= '${snap.at}' group by status order by status`).split('\n').filter(Boolean).map((l) => { const [status, n, withAttachment] = l.split('|'); return { status, n: +n, withAttachment: +withAttachment }; });
     const files = psql(`select kind||'|'||count(*)||'|'||round(avg(size_bytes)) from core.stored_file where created_at >= '${snap.at}' group by kind order by kind`).split('\n').filter(Boolean).map((l) => { const [kind, n, avgBytes] = l.split('|'); return { kind, n: +n, avgBytes: +avgBytes }; });
     const renders = Number(psql(`select count(*) from core.stored_file where created_at >= '${snap.at}' and kind = 'SHIFT_ROSTER_PDF'`));
-    const sql = psql(`select coalesce(sum(calls),0)||'|'||coalesce(sum(calls) filter (where toplevel),0) from pg_stat_statements where userid in ('crewflow_app'::regrole,'crewflow'::regrole)`).split('|').map(Number);
+    const sql = psql(`select coalesce(sum(calls),0)||'|'||coalesce(sum(calls) filter (where toplevel),0) from pg_stat_statements where userid in (select oid from pg_roles where rolname in (${APPLICATION_ROLES_SQL}))`).split('|').map(Number);
     // Per-fingerprint dump of the whole window (every role, nested or not; pg_stat_statements was reset at `prepare`), for
     // attributing statements per roster email (enqueue in the scheduler, revalidation in the send processor). Compared
     // across runs by normalised query text, because queryid depends on relation OIDs.
