@@ -12,7 +12,7 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
  *
  * The order now:
  *   1. `server.close()`: no new connection is accepted (a client gets a connection refusal and retries another replica);
- *      Node also closes idle keep-alive sockets at once.
+ *      Node also closes idle keep-alive sockets at once, and every response still to be sent says `Connection: close`.
  *   2. Wait, at most `drainMs`, until every response still in flight has finished. Server-sent-event streams
  *      (`text/event-stream`, the realtime gateway and the AI stream) never finish on their own and are not waited for.
  *   3. `server.closeAllConnections()`: ends the streams (their clients reconnect elsewhere) and any request still running
@@ -34,15 +34,31 @@ const SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGINT'];
 /** The responses an `http.Server` is still writing. Install before the server accepts its first request. */
 export interface InFlightResponses {
   pending(): ServerResponse[];
+  /** From now on every response that has not sent its headers yet asks the client to close the connection. */
+  beginClosing(): void;
+}
+
+function askToClose(response: ServerResponse): void {
+  if (!response.headersSent) response.setHeader('connection', 'close');
 }
 
 export function trackInFlightResponses(server: Server): InFlightResponses {
   const inFlight = new Set<ServerResponse>();
+  let closing = false;
   server.on('request', (_request: IncomingMessage, response: ServerResponse) => {
     inFlight.add(response);
     response.once('close', () => inFlight.delete(response));
+    // A request that still arrives on a kept-alive connection during the drain is served (Redis is still up) and its
+    // response closes that connection, so the client's next request opens a new one and meets the closed listener.
+    if (closing) askToClose(response);
   });
-  return { pending: () => [...inFlight] };
+  return {
+    pending: () => [...inFlight],
+    beginClosing: () => {
+      closing = true;
+      inFlight.forEach(askToClose);
+    },
+  };
 }
 
 function isEventStream(response: ServerResponse): boolean {
@@ -58,6 +74,7 @@ export interface HttpStopResult {
 
 /** Steps 1–3 above. Never throws: a server that is already closed just has nothing left to drain. */
 export async function stopHttpListener(server: Server, inFlight: InFlightResponses, drainMs: number): Promise<HttpStopResult> {
+  inFlight.beginClosing();
   server.close();
   const deadline = Date.now() + drainMs;
   let drained = inFlight.pending().every(isEventStream);

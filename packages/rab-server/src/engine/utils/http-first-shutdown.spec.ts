@@ -137,6 +137,31 @@ describe('HTTP-first API shutdown (XR-09)', () => {
     }
   });
 
+  it('a response finished during the drain closes its kept-alive connection (Connection: close)', async () => {
+    let release!: () => void;
+    const h = await startHarness((path, res) => {
+      if (path === '/slow') {
+        release = () => res.writeHead(200).end('slow');
+        return;
+      }
+      res.writeHead(200).end('fast');
+    });
+    const { shutdown } = installHttpFirstShutdown(h.app, { listen: false, reraise: noReraise, log: () => undefined, drainMs: 5_000 });
+    const headers = new Promise<string | undefined>((resolve, reject) => {
+      httpRequest({ host: '127.0.0.1', port: h.port, path: '/slow' }, (res) => {
+        resolve(res.headers.connection);
+        res.resume();
+      })
+        .on('error', reject)
+        .end();
+    });
+    await waitFor(() => typeof release === 'function');
+    const done = shutdown('SIGTERM');
+    release();
+    expect(await headers).toBe('close');
+    await done;
+  });
+
   it('an open server-sent-event stream does not hold the shutdown: it is closed, then the app closes', async () => {
     const h = await startHarness((path, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -212,7 +237,7 @@ describe('HTTP-first API shutdown (XR-09)', () => {
     signals.forEach((signal, i) => added[i]!.forEach((listener) => process.removeListener(signal, listener as () => void)));
   });
 
-  it('stopHttpListener on an already-closed server resolves at once (nothing to drain)', async () => {
+  it('stopHttpListener on a server that is not listening resolves at once (nothing to drain)', async () => {
     const server = createServer();
     const inFlight = trackInFlightResponses(server);
     await expect(stopHttpListener(server, inFlight, 1_000)).resolves.toEqual({ drained: true, closedOpen: 0 });
