@@ -5,7 +5,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 
 import { EnvironmentService } from '../environment/environment.service';
 import { resolveClientIp } from '../../utils/client-ip.util';
-import { isTestRateLimitBypassActive } from './rate-limit-test-bypass';
+import { isRateLimitBypassEnabled } from './rate-limit-bypass';
 import { ThrottlerRedisClientModule } from './throttler-redis-client.module';
 import { ThrottlerRedisClientProvider } from './throttler-redis-client.provider';
 import { RabThrottlerGuard } from './rab-throttler.guard';
@@ -50,13 +50,11 @@ import { RabThrottlerGuard } from './rab-throttler.guard';
         // runtime; `resolveClientIp` only reads the fields it declares.
         getTracker: (req: Record<string, any>) =>
           resolveClientIp(req as { headers: Record<string, any>; ip?: string; socket?: { remoteAddress?: string } }, environmentService.trustedProxyCidrs),
-        // The integration suite shares one IP (the local supertest client) across many spec files that each call
-        // /auth/login, /auth/refresh etc. repeatedly within the same 60s window: none of that is the abuse this guard exists
-        // to catch. The skip is the ONE shared predicate (rate-limit-test-bypass.ts, X1.4): RAB_DISABLE_RATE_LIMIT exactly
-        // 'true' AND JEST_WORKER_ID set, never in a production runtime. Both are ordinary environment variables, not proof
-        // of a Jest run, which is why production also refuses to boot while either is present (env.validation.ts).
-        // `rate-limiting.integration.spec.ts` flips the flag to 'false' to exercise the real throttle end-to-end.
-        skipIf: () => isTestRateLimitBypassActive(process.env),
+        // The ONE rate-limit switch (rate-limit-bypass.ts, X1.2): RAB_DISABLE_RATE_LIMIT exactly 'true', never in a production
+        // runtime, and production refuses to boot with it set. The Jest setup sets it because the integration suite shares one
+        // IP (the local supertest client) across many spec files that each call /auth/login, /auth/refresh etc. repeatedly
+        // within the same 60s window; `rate-limiting.integration.spec.ts` sets it to 'false' to exercise the real throttle.
+        skipIf: () => isRateLimitBypassEnabled(process.env),
       }),
     }),
   ],
