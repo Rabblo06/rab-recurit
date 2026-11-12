@@ -15,10 +15,19 @@
  *   - rab-worker does not wait for a HEALTHY rab-api with `restart: true` (Compose then stops the old Worker before it
  *     replaces the API, so an old Worker never runs beside a new API), or for a healthy rab-redis;
  *   - rab-api runs with the Worker-only switches (it must migrate and register the schedulers), or rab-worker without them;
- *   - rab-api's stop_grace_period is below 40 s.
+ *   - rab-api's stop_grace_period is below 40 s;
+ *   - a Redis service (rab-redis, or any service whose name or image names redis) can be reached from the host: it has
+ *     `ports:` in either syntax (short "6379:6379" / "127.0.0.1:6379:6379" / "6379", or long `target:`/`published:`; a
+ *     loopback bind is refused too), an `expose:` list, or a `network_mode` (host would bind Redis on the host's
+ *     interfaces; service:/container: would put it in another container's namespace). X1.6 (owner decision 2026-11-12):
+ *     the production Redis has no password and is protected by the private Compose network only, exactly as Twenty's
+ *     packages/twenty-docker/docker-compose.yml `redis` service (no ports, no password); so it must never be published.
+ *     `expose:` alone does not publish to the host; it is refused anyway so a Redis service carries no port declaration at
+ *     all and the rule stays a one-line review.
  * Scope (owner decision D): the DEPLOY files only. The test-only compose files (system e2e, H6 runtime test, cost harness,
  * BullMQ integration, the weakened rehearsal) and the dev stacks (docker-compose.yml, docker-compose.qa.yml,
- * docker-compose.local-build.yml) are deliberately not checked.
+ * docker-compose.local-build.yml) are deliberately not checked, except that docker-compose.local-build.yml (the former
+ * production file, treated as production by compose-credential-isolation.cjs) gets the Redis rule (REDIS_ONLY_COMBOS).
  */
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
@@ -32,6 +41,15 @@ const DEPLOY_COMBOS = Object.freeze([
   ['docker-compose.image.yml', 'docker-compose.local-db.yml'],
   ['docker-compose.image.yml', 'staging/docker-compose.staging.yml'],
   ['docker-compose.image.yml', 'staging/rehearsal/docker-compose.image-rehearsal.yml'],
+]);
+
+/**
+ * X1.6: files that get ONLY the Redis rule (checkRedisPrivate). docker-compose.local-build.yml builds from source, so the
+ * one-image rules do not apply to it, but it is the former production file and compose-credential-isolation.cjs treats it
+ * as a production file; its Redis is just as unauthenticated, so it must not publish a port either.
+ */
+const REDIS_ONLY_COMBOS = Object.freeze([
+  ['docker-compose.local-build.yml'],
 ]);
 
 const IMAGE_VAR = 'CREWFLOW_IMAGE_TAG';
@@ -94,12 +112,52 @@ function checkModel(model, label) {
     if (String(workerEnv[k]) !== 'true') p(`rab-worker: ${k} must be "true" (the Worker never migrates or registers schedulers)`);
   }
   if (!(durationSeconds(api.stop_grace_period) >= MIN_API_STOP_GRACE_S)) p(`rab-api: stop_grace_period below ${MIN_API_STOP_GRACE_S}s`);
+
+  return problems.concat(checkRedisPrivate(model, label));
+}
+
+/** X1.6: Redis is never reachable from the host (private Compose network only, as in Twenty). */
+function checkRedisPrivate(model, label) {
+  const services = model?.services ?? {};
+  const problems = [];
+  if (!services['rab-redis']) problems.push(`${label}: rab-redis is missing`);
+  for (const name of redisServiceNames(services)) {
+    for (const problem of redisHostExposureProblems(services[name])) problems.push(`${label}: ${name}: ${problem}`);
+  }
+  return problems;
+}
+
+/** rab-redis plus any other service whose name or image names redis (a renamed or second Redis gets the same rule). */
+function redisServiceNames(services) {
+  return Object.keys(services).filter((name) => /redis/i.test(name) || /redis/i.test(String(services[name]?.image ?? '')));
+}
+
+/** One rendered (non-interpolated) port entry, short string or long mapping, for the message. Ports are not secrets. */
+function describePort(entry) {
+  if (typeof entry === 'string' || typeof entry === 'number') return `short syntax "${entry}"`;
+  const e = entry ?? {};
+  const host = e.published === undefined || e.published === '' ? 'a random host port' : `host ${e.host_ip ? `${e.host_ip}:` : ''}${e.published}`;
+  return `long syntax target ${e.target} -> ${host}`;
+}
+
+/** Problems that make a Redis service reachable from outside the private Compose network. */
+function redisHostExposureProblems(service) {
+  const problems = [];
+  const s = service ?? {};
+  for (const entry of Array.isArray(s.ports) ? s.ports : s.ports ? [s.ports] : []) {
+    problems.push(`publishes a port (${describePort(entry)}); Redis is never published (X1.6: private Compose network only, as in Twenty)`);
+  }
+  const expose = Array.isArray(s.expose) ? s.expose : s.expose ? [s.expose] : [];
+  if (expose.length) problems.push(`declares expose (${expose.join(', ')}); a Redis service carries no port declaration (X1.6)`);
+  if (s.network_mode !== undefined && s.network_mode !== null && String(s.network_mode) !== '') {
+    problems.push(`sets network_mode "${s.network_mode}"; Redis stays on the private Compose network only (X1.6)`);
+  }
   return problems;
 }
 
 function render(files) {
   const args = ['compose', '--project-directory', DOCKER_DIR];
-  for (const f of files) args.push('-f', path.join(DOCKER_DIR, f));
+  for (const f of files) args.push('-f', path.resolve(DOCKER_DIR, f)); // relative to packages/rab-docker, or absolute
   args.push('--profile', 'ops', 'config', '--no-interpolate', '--no-env-resolution', '--format', 'json');
   return JSON.parse(execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 }
@@ -119,10 +177,23 @@ function main() {
     console.log(`[compose-one-image] ${found.length ? 'FAIL' : 'PASS'} ${label}`);
     problems = problems.concat(found);
   }
+  for (const combo of REDIS_ONLY_COMBOS) {
+    const label = `${combo.join(' + ')} (Redis rule only)`;
+    let model;
+    try {
+      model = render(combo);
+    } catch (e) {
+      problems.push(`${label}: docker compose config failed: ${String(e.stderr || e.message).trim().slice(0, 400)}`);
+      continue;
+    }
+    const found = checkRedisPrivate(model, label);
+    console.log(`[compose-one-image] ${found.length ? 'FAIL' : 'PASS'} ${label}`);
+    problems = problems.concat(found);
+  }
   for (const msg of problems) console.error(`[compose-one-image] ${msg}`);
   if (problems.length) process.exit(1);
-  console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after`);
+  console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after; no Redis port is reachable from the host in any of the ${DEPLOY_COMBOS.length + REDIS_ONLY_COMBOS.length} combinations`);
 }
 
-module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF };
+module.exports = { checkModel, checkRedisPrivate, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF };
 if (require.main === module) main();
