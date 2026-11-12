@@ -4,8 +4,11 @@
  * and the Worker together from ONE image variable (CREWFLOW_IMAGE_TAG = a sha256 digest); the API starts first, migrates and
  * becomes healthy; the Worker starts after it; an old Worker never runs beside a new API (depends_on restart: true).
  *
- * The production files UNCHANGED (docker-compose.image.yml + docker-compose.local-db.yml) plus the test-only infrastructure
- * overlay deploy-order-tests/docker-compose.deploy-order.yml, deployed with THE documented command, exactly:
+ * The production file UNCHANGED (docker-compose.image.yml, with its bundled `db` service since DB-SETUP) plus the test-only
+ * overlays deploy-order-tests/docker-compose.deploy-order.yml (infrastructure) and docker-compose.deploy-order-owner.yml (the
+ * db's first start runs the shipped 01-crewflow-owner.sql: the hand-made crewflow_owner of an R254/R256 deployment, whose
+ * URL the app services get as the PG_DATABASE_URL interpolation value: the DB-SETUP pass-through path, D5), deployed with
+ * THE documented command, exactly:
  *
  *   docker compose pull && docker compose up -d
  *
@@ -13,8 +16,13 @@
  * registry (never Docker Hub) so each has a real registry digest:
  *
  *   DOT_REPOSITORY=127.0.0.1:5055/adolphus DOT_PREV_DIGEST=sha256:<previous release> DOT_NEW_DIGEST=sha256:<new release> \
- *   DOT_PG_IMAGE=postgres@sha256:<16 or 18> DOT_REDIS_IMAGE=redis@sha256:<7> \
- *     node packages/rab-docker/deploy-order-tests/run-deploy-order-tests.cjs <16|18> <out-dir> [--keep] [--only=T1,T2,...]
+ *   DOT_PG_IMAGE=postgres@sha256:<DEBIAN postgres 16, 17 or 18> DOT_REDIS_IMAGE=redis@sha256:<7> [DOT_PREV_PRE_DB_SETUP=1] \
+ *     node packages/rab-docker/deploy-order-tests/run-deploy-order-tests.cjs <16|17|18> <out-dir> [--keep] [--only=T1,T2,...]
+ *
+ * DOT_PG_IMAGE is the bundled db's image (CREWFLOW_POSTGRES_IMAGE): a Debian postgres image (the db service runs as 999:999
+ * with the Debian volume layout). DOT_PREV_PRE_DB_SETUP (default 1): the previous digest predates DB-SETUP (no
+ * worker-start.sh), so its deploys add docker-compose.deploy-order-prev.yml (the previous release's own rab-worker
+ * command); set 0 once the previous release ships worker-start.sh.
  *
  * Cases (T1-T3 share one project dot-pg<major>, T4 runs its own dot-pg<major>-t4):
  *   T1 fresh deploy of the previous digest: rab-api healthy BEFORE rab-worker starts (docker events + inspect);
@@ -25,9 +33,9 @@
  *      that the schema is AHEAD and serves;
  *   T4 an API that fails its health check: the Worker never starts and compose reports the dependency failure.
  *
- * At most five of this run's containers at once (rab-postgres, rab-redis, rab-api, rab-worker + the registry the operator
- * started). Every data directory is a tmpfs; no Docker volume. Cleanup removes only this run's projects (`down` by project
- * name; never a prune, never another project). Secrets are generated per run under <out-dir>/secrets (outside the
+ * At most five of this run's containers at once (db, rab-redis, rab-api, rab-worker + the registry the operator started).
+ * Redis data is a tmpfs; the db's data and CA are the project's own named volumes. Cleanup removes only this run's projects
+ * (`down --volumes` by project name; never a prune, never another project). Secrets are generated per run under <out-dir>/secrets (outside the
  * repository), reach the containers only through env files, and every captured output is redacted before it is written.
  * Results: <out-dir>/RESULTS.json and SUMMARY.md; raw evidence under <out-dir>/evidence.
  */
@@ -36,14 +44,16 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const L = require('./upgrade-lib.cjs');
+
 const RD = path.resolve(__dirname, '..'); // packages/rab-docker
 const argv = process.argv.slice(2);
 const MAJOR = argv[0];
 const OUT = argv[1] ? path.resolve(argv[1]) : '';
 const KEEP = argv.includes('--keep');
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
-if (!['16', '18'].includes(MAJOR) || !OUT) {
-  console.error('usage: run-deploy-order-tests.cjs <16|18> <out-dir> [--keep] [--only=T1,T2,T3,T4]');
+if (!['16', '17', '18'].includes(MAJOR) || !OUT) {
+  console.error('usage: run-deploy-order-tests.cjs <16|17|18> <out-dir> [--keep] [--only=T1,T2,T3,T4]');
   process.exit(2);
 }
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -61,18 +71,20 @@ const REPO = process.env.DOT_REPOSITORY;
 const PREV = process.env.DOT_PREV_DIGEST;
 const NEW = process.env.DOT_NEW_DIGEST;
 const OVERLAY = 'deploy-order-tests/docker-compose.deploy-order.yml';
+const OWNER_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-owner.yml';
+const PREV_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-prev.yml';
+const PREV_PRE_DB_SETUP = (process.env.DOT_PREV_PRE_DB_SETUP ?? '1') !== '0';
 const T4_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-t4.yml';
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
 const MAX_CONTAINERS = 5;
 
 fs.mkdirSync(path.join(OUT, 'evidence'), { recursive: true });
-const secrets = {};
+const secrets = L.secrets;
 const results = [];
 const logLines = [];
 let peak = { count: 0, at: '', names: [] };
 
 const hex = (n) => crypto.randomBytes(n).toString('hex');
-const b64 = (n) => crypto.randomBytes(n).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, Math.ceil((n * 4) / 3) - 2);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function redact(text) {
@@ -105,6 +117,7 @@ class Project {
   constructor(name, secretsDir, files) {
     this.name = name;
     this.secretsDir = secretsDir;
+    this.baseFiles = files;
     this.files = files;
   }
   get envFile() {
@@ -137,7 +150,7 @@ class Project {
     return waitFor(`${service} healthy`, () => this.health(service).startsWith('healthy|'), timeoutMs);
   }
   psql(sql) {
-    const r = run('docker', ['exec', '-i', this.container('rab-postgres'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow'], { input: sql, timeout: 120_000 });
+    const r = run('docker', ['exec', '-i', this.container('db'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow'], { input: sql, timeout: 120_000 });
     if (r.code !== 0) throw new Error(`psql failed (${r.code}): ${redact(r.out).slice(0, 600)}`);
     return r.stdout.trim();
   }
@@ -183,8 +196,8 @@ class Project {
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   }
   down() {
-    // This run's own disposable project only: its containers and its network (no volumes exist: every data dir is a tmpfs).
-    return this.compose(['down', '--timeout', '60', '--remove-orphans'], { timeout: 300_000 });
+    // This run's own disposable project only: its containers, networks and its OWN named volumes (the bundled db's).
+    return this.compose(['down', '--timeout', '60', '--remove-orphans', '--volumes'], { timeout: 300_000 });
   }
 }
 
@@ -223,82 +236,14 @@ function startPeakSampler(projects) {
 }
 
 // ------------------------------------------------------------------------------------------------------------ secrets
-function ossl(dir, args) {
-  const r = run('openssl', args, { cwd: dir });
-  if (r.code !== 0) throw new Error(`openssl ${args[0]} failed: ${r.out.slice(0, 400)}`);
+/** Secrets and env files from the SHIPPED templates (upgrade-lib.cjs; SMTP and S3 point at names that do not resolve). */
+function writeSecrets(dir, opts = {}) {
+  L.writeSecrets(dir, opts);
 }
-function writeSecrets(dir, { expectedDatabase } = {}) {
-  fs.mkdirSync(path.join(dir, 'pg-tls'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'postgres-superuser-password'), secrets.superuser);
-  fs.writeFileSync(path.join(dir, 'crewflow-owner-password'), secrets.owner);
-  const acl = fs
-    .readFileSync(path.join(RD, 'env/redis-users.acl.example'), 'utf8')
-    .split('\n')
-    .filter((l) => l.trim() && !l.startsWith('#'))
-    .map((l) => l.replace('<sha256-hex-of-the-redis-app-password>', crypto.createHash('sha256').update(secrets.redis).digest('hex')))
-    .join('\n');
-  fs.writeFileSync(path.join(dir, 'redis-users.acl'), `${acl}\n`);
-  const tls = path.join(dir, 'pg-tls');
-  ossl(tls, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=deploy-order test CA', '-keyout', 'ca.key', '-out', 'ca.crt']);
-  ossl(tls, ['req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=rab-postgres', '-keyout', 'server.key', '-out', 'server.csr']);
-  fs.writeFileSync(path.join(tls, 'ext.cnf'), 'subjectAltName=DNS:rab-postgres\nextendedKeyUsage=serverAuth\n');
-  ossl(tls, ['x509', '-req', '-in', 'server.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '2', '-extfile', 'ext.cnf', '-out', 'server.crt']);
-  fs.copyFileSync(path.join(tls, 'ca.crt'), path.join(dir, 'pg-ca.crt'));
-  for (const f of ['ca.key', 'server.csr', 'ext.cnf', 'ca.srl']) fs.rmSync(path.join(tls, f), { force: true });
-  // database.env and runtime.env from the SHIPPED templates (env/*.env.example), only the operator values filled in. SMTP
-  // and S3 point at names that do not resolve: no sink container is needed for start-up order, and nothing leaves the host.
-  const host = 'deploy-order.example.com';
-  const values = {
-    '<crewflow_owner-password>': secrets.owner,
-    '<db-direct-host>': 'rab-postgres',
-    '<db-name>': 'crewflow',
-    '<redis-app-password>': secrets.redis,
-    '<app-secret>': secrets.appSecret,
-    '<app-host>': host,
-    '<edge-proxy-cidr>': '10.255.255.1/32',
-    '<smtp-host>': 'smtp.deploy-order.invalid',
-    '<smtp-user>': 'dot',
-    '<smtp-password>': secrets.smtp,
-    '<sender-address>': `Crewflow deploy-order <no-reply@${host}>`,
-    '<bucket>': 'dot',
-    '<region-or-auto>': 'eu-west-2',
-    'https://<s3-compatible-endpoint>': 'http://s3.deploy-order.invalid:9000',
-    '<bucket-scoped-key-id>': `dot${secrets.s3key}`,
-    '<bucket-scoped-secret>': secrets.s3secret,
-  };
-  const lineOverrides = { EMAIL_SMTP_PORT: '2525', ...(expectedDatabase ? { PG_EXPECTED_DATABASE_NAME: expectedDatabase } : {}) };
-  for (const name of ['database.env', 'runtime.env']) {
-    const out = [];
-    for (const raw of fs.readFileSync(path.join(RD, 'env', `${name}.example`), 'utf8').split(/\r?\n/)) {
-      if (!raw.trim() || raw.trim().startsWith('#')) continue;
-      let line = raw;
-      for (const [k, v] of Object.entries(values)) line = line.split(k).join(v);
-      const key = line.split('=')[0];
-      if (lineOverrides[key] !== undefined) line = `${key}=${lineOverrides[key]}`;
-      if (/<[a-z0-9_-]+>/i.test(line)) throw new Error(`template ${name}: unfilled placeholder in ${key}`);
-      out.push(line);
-    }
-    fs.writeFileSync(path.join(dir, name), `${out.join('\n')}\n`);
-  }
-}
+/** compose.env with the pass-through crewflow_owner URL; a pre-DB-SETUP PREV digest also gets its own rab-worker command. */
 function writeComposeEnv(project, digest) {
-  const S = project.secretsDir.replace(/\\/g, '/');
-  const lines = {
-    CREWFLOW_IMAGE_REPOSITORY: REPO,
-    CREWFLOW_IMAGE_TAG: digest,
-    CREWFLOW_REDIS_IMAGE: process.env.DOT_REDIS_IMAGE,
-    CREWFLOW_POSTGRES_IMAGE: process.env.DOT_PG_IMAGE,
-    CREWFLOW_SECRETS_DIR: S,
-    CREWFLOW_PG_CA_FILE: `${S}/pg-ca.crt`,
-    CREWFLOW_API_MEM_LIMIT: '1024m',
-    CREWFLOW_API_CPUS: '2',
-    CREWFLOW_WORKER_MEM_LIMIT: '1536m',
-    CREWFLOW_WORKER_CPUS: '2',
-    CREWFLOW_REDIS_MAXMEMORY: '128mb',
-    CREWFLOW_POSTGRES_MEM_LIMIT: '768m',
-    CREWFLOW_POSTGRES_CPUS: '2',
-  };
-  fs.writeFileSync(project.envFile, `${Object.entries(lines).map(([k, v]) => `${k}=${v}`).join('\n')}\n`);
+  project.files = [...project.baseFiles, ...(PREV_PRE_DB_SETUP && digest === PREV ? [PREV_OVERLAY] : [])];
+  L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE });
 }
 
 // ------------------------------------------------------------------------------------------------------------- cases
@@ -356,9 +301,9 @@ function redeployOrder(check, evs, before, after) {
 }
 
 async function main() {
-  Object.assign(secrets, { superuser: hex(24), owner: hex(32), redis: hex(24), appSecret: b64(48), smtp: hex(16), s3key: hex(8), s3secret: hex(24) });
-  const main = new Project(`dot-pg${MAJOR}`, path.join(OUT, 'secrets'), ['docker-compose.image.yml', 'docker-compose.local-db.yml', OVERLAY]);
-  const t4 = new Project(`dot-pg${MAJOR}-t4`, path.join(OUT, 'secrets-t4'), ['docker-compose.image.yml', 'docker-compose.local-db.yml', OVERLAY, T4_OVERLAY]);
+  L.newSecrets();
+  const main = new Project(`dot-pg${MAJOR}`, path.join(OUT, 'secrets'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY]);
+  const t4 = new Project(`dot-pg${MAJOR}-t4`, path.join(OUT, 'secrets-t4'), ['docker-compose.image.yml', OVERLAY, OWNER_OVERLAY, T4_OVERLAY]);
   const stopSampler = startPeakSampler([main, t4]);
   note(`projects ${main.name}, ${t4.name}; PostgreSQL ${process.env.DOT_PG_IMAGE}; previous ${imageRef(PREV)}; new ${imageRef(NEW)}`);
   writeSecrets(main.secretsDir);

@@ -1,12 +1,20 @@
 'use strict';
 /**
- * Deploy-order real-container tests (TEST-ONLY): the shared machinery of run-upgrade-with-data-tests.cjs. One disposable
- * Compose project per case, the production files UNCHANGED (docker-compose.image.yml + docker-compose.local-db.yml) plus the
- * test-only infrastructure overlay(s) of this folder, deployed with THE documented command `docker compose pull && docker
- * compose up -d`. Secrets are generated per run under <out>/secrets-<project> (outside the repository), reach the
- * containers only through env files, and every captured output is redacted before it is written or printed.
+ * Deploy-order real-container tests (TEST-ONLY): the shared machinery of run-upgrade-with-data-tests.cjs and
+ * run-db-setup-tests.cjs. One disposable Compose project per case, the production file docker-compose.image.yml UNCHANGED
+ * (with its bundled `db` service, DB-SETUP) plus the test-only overlay(s) of this folder, deployed with THE documented
+ * command `docker compose pull && docker compose up -d`. Secrets are generated per run under <out>/secrets-<project>
+ * (outside the repository), reach the containers only through env files, and every captured output is redacted before it
+ * is written or printed.
  *
- * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers unchanged.)
+ * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
+ * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
+ * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
+ * interpolation value PG_DATABASE_URL (image.yml commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-<bundled admin URL>}` on both
+ * app services, so a database.env URL would be overridden). An image older than DB-SETUP has no worker-start.sh: its
+ * deploys add PREV_OVERLAY, the previous release's own rab-worker command.
+ *
+ * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
  */
 const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -14,9 +22,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const RD = path.resolve(__dirname, '..'); // packages/rab-docker
+const BASE = 'docker-compose.image.yml';
 const OVERLAY = 'deploy-order-tests/docker-compose.deploy-order.yml';
+const OWNER_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-owner.yml';
+const PREV_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-prev.yml';
 const SHORT_HEALTH_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-t4.yml';
+const DB_SERVICE = 'db';
 const MIGRATION_LOCK_KEY_SQL = "x'637265776d696772'::bigint";
+/** application_name of the test's own psql sessions, so the admin-connection audit can tell them apart. */
+const TEST_APP_NAME = 'dot-test';
+/** DB-SETUP's derivation (owner-credential.ts): hex(HKDF-SHA256(APP_SECRET, salt = empty, info, 32)). */
+const OWNER_PASSWORD_HKDF_INFO = 'crewflow-owner-db-password-v1';
 
 const secrets = {};
 const hex = (n) => crypto.randomBytes(n).toString('hex');
@@ -25,8 +41,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
 function newSecrets() {
-  Object.assign(secrets, { superuser: hex(24), owner: hex(32), redis: hex(24), appSecret: b64(48), smtp: hex(16), s3key: hex(8), s3secret: hex(24) });
+  Object.assign(secrets, { dbPassword: hex(32), owner: hex(32), redis: hex(24), appSecret: b64(48), smtp: hex(16), s3key: hex(8), s3secret: hex(24) });
   return secrets;
+}
+
+/** The crewflow_owner password DB-SETUP derives from an APP_SECRET (never printed; registered for redaction). */
+function derivedOwnerPassword(appSecret) {
+  const v = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(appSecret, 'utf8'), Buffer.alloc(0), OWNER_PASSWORD_HKDF_INFO, 32)).toString('hex');
+  secrets[`derived:${crypto.createHash('sha256').update(v).digest('hex').slice(0, 8)}`] = v;
+  return v;
 }
 
 function redact(text) {
@@ -41,7 +64,7 @@ function run(cmd, args, opts = {}) {
     env: { ...process.env, MSYS_NO_PATHCONV: '1', ...(opts.env ?? {}) },
     encoding: 'utf8',
     timeout: opts.timeout ?? 600_000,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: 256 * 1024 * 1024,
     input: opts.input,
   });
   return { code: r.status ?? (r.error ? -1 : 0), out: `${r.stdout ?? ''}${r.stderr ?? ''}`, stdout: r.stdout ?? '', error: r.error };
@@ -73,14 +96,33 @@ async function waitFor(label, fn, timeoutMs, everyMs = 3000) {
 }
 
 class Project {
-  constructor(name, out, { shortHealth = false } = {}) {
+  /**
+   * `ownerInit`: the db's first start runs 01-crewflow-owner.sql (an existing crewflow_owner: pass-through scenarios).
+   * `extra`: further test-only overlays (relative to packages/rab-docker).
+   */
+  constructor(name, out, { shortHealth = false, ownerInit = true, extra = [] } = {}) {
     this.name = name;
     this.secretsDir = path.join(out, `secrets-${name}`);
-    this.setShortHealth(shortHealth);
+    this.ownerInit = ownerInit;
+    this.extra = extra;
+    this.prev = false;
+    this.shortHealth = shortHealth;
+    /** The crewflow_owner password the test logs in with (psqlOwner); the manual one until a DB-SETUP reset. */
+    this.ownerPassword = undefined;
+    this.refreshFiles();
+  }
+  refreshFiles() {
+    this.files = [BASE, OVERLAY, ...(this.ownerInit ? [OWNER_OVERLAY] : []), ...this.extra, ...(this.prev ? [PREV_OVERLAY] : []), ...(this.shortHealth ? [SHORT_HEALTH_OVERLAY] : [])];
   }
   /** The T4 overlay: an API health window of about a minute (refusal cases), instead of the production 900 s start period. */
   setShortHealth(on) {
-    this.files = ['docker-compose.image.yml', 'docker-compose.local-db.yml', OVERLAY, ...(on ? [SHORT_HEALTH_OVERLAY] : [])];
+    this.shortHealth = on;
+    this.refreshFiles();
+  }
+  /** An image older than DB-SETUP (no worker-start.sh): its deploys use the previous release's rab-worker command. */
+  setPrev(on) {
+    this.prev = on;
+    this.refreshFiles();
   }
   get envFile() {
     return path.join(this.secretsDir, 'compose.env');
@@ -121,28 +163,49 @@ class Project {
     const s = this.inspect(service, '{{.State.StartedAt}}');
     return !s || s.startsWith('0001-01-01');
   }
-  /** psql as the PostgreSQL superuser (local socket, peer), database crewflow. */
+  /**
+   * psql as the PostgreSQL superuser over the db container's local socket (peer: the container user is the postgres OS
+   * user), database crewflow. The session first turns statement logging off (a superuser may), so no test statement (a
+   * test role's password, for instance) ever reaches the server log the log-scan cases read.
+   */
   psql(sql, { db = 'crewflow' } = {}) {
-    const r = run('docker', ['exec', '-i', this.container('rab-postgres'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', db], { input: sql, timeout: 300_000 });
+    const r = run('docker', ['exec', '-i', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', db], {
+      input: `SET log_statement = 'none';\nSET log_min_error_statement = 'panic';\n${sql}`,
+      timeout: 300_000,
+    });
     if (r.code !== 0) throw new Error(`psql failed (${r.code}): ${redact(r.out).slice(0, 800)}`);
     return r.stdout.trim();
   }
   psqlFile(file) {
     return this.psql(fs.readFileSync(path.join(__dirname, file), 'utf8'));
   }
-  /** psql as crewflow_owner over TLS (the runtime login), for the RLS checks. */
-  psqlOwner(sql) {
+  /**
+   * psql as crewflow_owner over TLS (verify-full against the db's own CA), from inside the db container but to its NETWORK
+   * address (the service name `db`), so the password is really checked: the postgres image's initdb leaves 127.0.0.1 on
+   * `trust` (only `--auth-local=peer` is set), so a loopback login would succeed with ANY password.
+   */
+  psqlOwner(sql, password = this.ownerPassword ?? secrets.owner) {
     const r = run(
       'docker',
-      ['exec', '-i', '-e', 'PGPASSWORD', this.container('rab-postgres'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'],
-      { input: sql, env: { PGPASSWORD: secrets.owner }, timeout: 120_000 },
+      ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/lib/postgresql/ca.crt dbname=crewflow user=crewflow_owner'],
+      { input: sql, env: { PGPASSWORD: password }, timeout: 120_000 },
     );
     if (r.code !== 0) throw new Error(`psql (owner) failed (${r.code}): ${redact(r.out).slice(0, 800)}`);
     return r.stdout.trim();
   }
+  /** Whether `password` logs in as crewflow_owner over TLS (never printed). */
+  ownerLoginWorks(password) {
+    try {
+      this.lastOwnerLoginError = '';
+      return this.psqlOwner('SELECT session_user', password) === 'crewflow_owner';
+    } catch (e) {
+      this.lastOwnerLoginError = redact(e && e.message ? e.message : String(e)).slice(0, 300);
+      return false;
+    }
+  }
   /** An idle superuser transaction holding `lockSql` until release() (stdin kept open; no statement keeps a snapshot). */
   async holdLock(lockSql) {
-    const h = runAsync('docker', ['exec', '-i', this.container('rab-postgres'), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow']);
+    const h = runAsync('docker', ['exec', '-i', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'crewflow']);
     h.child.stdin.write(`SELECT 'holder-pid|' || pg_backend_pid();\nBEGIN;\n${lockSql};\nSELECT 'holder-ready';\n`);
     await waitFor('the lock holder', () => /holder-ready/.test(h.output()), 60_000, 500);
     const pid = (h.output().match(/holder-pid\|(\d+)/) || [])[1];
@@ -169,7 +232,7 @@ class Project {
     return { code: r.code, body: r.stdout.trim() };
   }
   logs(service) {
-    return run('docker', ['logs', this.container(service)], { timeout: 60_000 }).out;
+    return run('docker', ['logs', this.container(service)], { timeout: 120_000 }).out;
   }
   events(since, until) {
     const r = run('docker', ['events', '--since', String(since), '--until', String(until), '--filter', `label=com.docker.compose.project=${this.name}`, '--filter', 'type=container', '--format', '{{json .}}']);
@@ -181,20 +244,16 @@ class Project {
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   }
   down() {
-    // This run's own disposable project only (no volumes exist: every data dir is a tmpfs). Never a prune.
-    return this.compose(['down', '--timeout', '60', '--remove-orphans'], { timeout: 300_000 });
+    // This run's own disposable project only: its containers, its networks and its OWN named volumes (the bundled db's
+    // data and CA volumes, `<project>_crewflow-db-*`). Never a prune, never another project.
+    return this.compose(['down', '--timeout', '60', '--remove-orphans', '--volumes'], { timeout: 300_000 });
   }
 }
 
-function ossl(dir, args) {
-  const r = run('openssl', args, { cwd: dir });
-  if (r.code !== 0) throw new Error(`openssl ${args[0]} failed: ${r.out.slice(0, 400)}`);
-}
-
-/** Secrets, TLS and the two env files from the SHIPPED templates (env/*.env.example), as run-deploy-order-tests.cjs does. */
-function writeSecrets(dir) {
-  fs.mkdirSync(path.join(dir, 'pg-tls'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'postgres-superuser-password'), secrets.superuser);
+/** Secrets and the two env files from the SHIPPED templates (env/*.env.example), as run-deploy-order-tests.cjs does. */
+function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, caPath = '/run/crewflow/db-ca/ca.crt' } = {}) {
+  fs.mkdirSync(dir, { recursive: true });
+  // The hand-made crewflow_owner password (01-crewflow-owner.sql reads it at the db's first start; OWNER_OVERLAY only).
   fs.writeFileSync(path.join(dir, 'crewflow-owner-password'), secrets.owner);
   const acl = fs
     .readFileSync(path.join(RD, 'env/redis-users.acl.example'), 'utf8')
@@ -203,20 +262,11 @@ function writeSecrets(dir) {
     .map((l) => l.replace('<sha256-hex-of-the-redis-app-password>', crypto.createHash('sha256').update(secrets.redis).digest('hex')))
     .join('\n');
   fs.writeFileSync(path.join(dir, 'redis-users.acl'), `${acl}\n`);
-  const tls = path.join(dir, 'pg-tls');
-  ossl(tls, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2', '-subj', '/CN=deploy-order test CA', '-keyout', 'ca.key', '-out', 'ca.crt']);
-  ossl(tls, ['req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=rab-postgres', '-keyout', 'server.key', '-out', 'server.csr']);
-  fs.writeFileSync(path.join(tls, 'ext.cnf'), 'subjectAltName=DNS:rab-postgres\nextendedKeyUsage=serverAuth\n');
-  ossl(tls, ['x509', '-req', '-in', 'server.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-days', '2', '-extfile', 'ext.cnf', '-out', 'server.crt']);
-  fs.copyFileSync(path.join(tls, 'ca.crt'), path.join(dir, 'pg-ca.crt'));
-  for (const f of ['ca.key', 'server.csr', 'ext.cnf', 'ca.srl']) fs.rmSync(path.join(tls, f), { force: true });
   const host = 'deploy-order.example.com';
   const values = {
-    '<crewflow_owner-password>': secrets.owner,
-    '<db-direct-host>': 'rab-postgres',
     '<db-name>': 'crewflow',
     '<redis-app-password>': secrets.redis,
-    '<app-secret>': secrets.appSecret,
+    '<app-secret>': appSecret,
     '<app-host>': host,
     '<edge-proxy-cidr>': '10.255.255.1/32',
     '<smtp-host>': 'smtp.deploy-order.invalid',
@@ -229,7 +279,10 @@ function writeSecrets(dir) {
     '<bucket-scoped-key-id>': `dot${secrets.s3key}`,
     '<bucket-scoped-secret>': secrets.s3secret,
   };
-  const lineOverrides = { EMAIL_SMTP_PORT: '2525' };
+  const lineOverrides = { EMAIL_SMTP_PORT: '2525', ...(expectedDatabase ? { PG_EXPECTED_DATABASE_NAME: expectedDatabase } : {}) };
+  // A pre-DB-SETUP image has no bundled-db CA rule: it needs PG_SSL_CA_CERT_PATH spelled out (the db's own CA, mounted
+  // read-only from the crewflow-db-ca volume). `caPath: null` leaves it out (the bundled default needs nothing).
+  const appended = { 'database.env': caPath ? [`PG_SSL_CA_CERT_PATH=${caPath}`] : [], 'runtime.env': [] };
   for (const name of ['database.env', 'runtime.env']) {
     const out = [];
     for (const raw of fs.readFileSync(path.join(RD, 'env', `${name}.example`), 'utf8').split(/\r?\n/)) {
@@ -241,11 +294,21 @@ function writeSecrets(dir) {
       if (/<[a-z0-9_-]+>/i.test(line)) throw new Error(`template ${name}: unfilled placeholder in ${key}`);
       out.push(line);
     }
+    out.push(...appended[name]);
     fs.writeFileSync(path.join(dir, name), `${out.join('\n')}\n`);
   }
 }
 
-function writeComposeEnv(project, { repository, digest, pgImage, redisImage }) {
+/** The pass-through URL: the hand-made crewflow_owner at the bundled db, verify-full (as every R254/R256 deployment has). */
+function ownerUrl(password = secrets.owner) {
+  return `postgresql://crewflow_owner:${password}@db:5432/crewflow?sslmode=verify-full`;
+}
+
+/**
+ * compose.env. `databaseUrl`: the PG_DATABASE_URL interpolation value (default: the pass-through crewflow_owner URL);
+ * `null` leaves it out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD.
+ */
+function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
   const lines = {
     CREWFLOW_IMAGE_REPOSITORY: repository,
@@ -253,7 +316,8 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage }) {
     CREWFLOW_REDIS_IMAGE: redisImage,
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
-    CREWFLOW_PG_CA_FILE: `${S}/pg-ca.crt`,
+    PG_DATABASE_PASSWORD: secrets.dbPassword,
+    ...(databaseUrl ? { PG_DATABASE_URL: databaseUrl } : {}),
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',
@@ -265,19 +329,84 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage }) {
   fs.writeFileSync(project.envFile, `${Object.entries(lines).map(([k, v]) => `${k}=${v}`).join('\n')}\n`);
 }
 
+// --------------------------------------------------------------------------------------------- seeded-data comparators
+/** The tables the seed writes: their row sets (count + md5 of ids) per organisation must not change across an upgrade. */
+const SEEDED_TABLES = [
+  'attendance', 'job_offer', 'job_role', 'manager_profile', 'manager_workspace', 'payroll_calendar', 'payroll_calendar_period', 'payroll_record',
+  'payroll_run', 'payroll_run_line', 'role', 'shift', 'shift_assignment', 'staff_profile', 'user', 'venue', 'workspace_membership',
+];
+
+function facts(p) {
+  const lines = p.psqlFile('data-facts.sql').split('\n').filter(Boolean);
+  const map = new Map(lines.map((l) => [l.slice(0, l.lastIndexOf('|')), l.slice(l.lastIndexOf('|') + 1)]));
+  return { lines, map };
+}
+
+/** Seeded row sets, row CONTENT and money equal; every FK holds; every cross-table organisation_id agrees. */
+function compareFacts(check, before, after, label) {
+  const seeded = [...before.map.keys()].filter((k) => k.startsWith('rows|') && SEEDED_TABLES.includes(k.split('|')[1]));
+  const changed = seeded.filter((k) => before.map.get(k) !== after.map.get(k));
+  check(seeded.length === SEEDED_TABLES.length * 2 && changed.length === 0, `${label}: the seeded row sets of ${SEEDED_TABLES.length} tables x 2 organisations are identical (count + md5 of ids)${changed.length ? `; changed: ${changed.join(', ')}` : ''}`);
+  const content = [...before.map.keys()].filter((k) => k.startsWith('content|'));
+  const contentChanged = content.filter((k) => before.map.get(k) !== after.map.get(k));
+  check(content.length === SEEDED_TABLES.length * 2 && contentChanged.length === 0, `${label}: the seeded rows' CONTENT is identical (status, money, minutes, tenant keys, references, key timestamps; ${content.length} hashes)${contentChanged.length ? `; changed: ${contentChanged.join(', ')}` : ''}`);
+  const nonZero = (k) => [...before.map.keys()].filter((key) => key.startsWith('rows|') && key.split('|')[1] === k && !before.map.get(key).startsWith('0:'));
+  check(nonZero('payroll_record').length === 2 && nonZero('attendance').length === 2, `${label}: the seed is really there (payroll and attendance rows in both organisations)`);
+  const money = [...before.map.keys()].filter((k) => k.startsWith('money|'));
+  const moneyChanged = money.filter((k) => before.map.get(k) !== after.map.get(k));
+  check(money.length === 6 && moneyChanged.length === 0, `${label}: payroll pence and worked minutes unchanged (${money.map((k) => `${k.slice(6)}=${after.map.get(k)}`).join(', ')})`);
+  const fkBad = [...after.map.entries()].filter(([k, v]) => k.startsWith('fk|') && v !== '0');
+  const fkCount = [...after.map.keys()].filter((k) => k.startsWith('fk|')).length;
+  check(fkCount > 100 && fkBad.length === 0, `${label}: all ${fkCount} core foreign keys hold row by row${fkBad.length ? `; orphans: ${fkBad.map(([k, v]) => `${k}=${v}`).join(', ')}` : ''}`);
+  const ownBad = [...after.map.entries()].filter(([k, v]) => k.startsWith('own|') && v !== '0');
+  const ownCount = [...after.map.keys()].filter((k) => k.startsWith('own|')).length;
+  check(ownCount > 20 && ownBad.length === 0, `${label}: tenant ownership holds on ${ownCount} cross-table references (child organisation_id = parent's)${ownBad.length ? `; violations: ${ownBad.map(([k, v]) => `${k}=${v}`).join(', ')}` : ''}`);
+}
+
+/** RLS regression as the runtime login: no context -> zero rows; organisation A's context -> exactly A's rows, none of B's. */
+function rlsCheck(p, check, label, { tamperExpected = false } = {}) {
+  const ids = p
+    .psql(`SELECT o.slug || ' ' || o.id || ' ' || w.id || ' ' || w.owner_user_id FROM core.organisation o JOIN core.manager_workspace w ON w.organisation_id = o.id WHERE o.slug::text LIKE 'dot-seed-%' ORDER BY o.slug`)
+    .split('\n')
+    .map((l) => l.split(' '));
+  const [a, b] = ids;
+  const uuid = /^[0-9a-f-]{36}$/;
+  if (!a || !b || ![...a.slice(1), ...b.slice(1)].every((v) => uuid.test(v))) throw new Error('cannot read the seeded organisation ids');
+  const tables = ['shift', 'shift_assignment', 'job_offer', 'attendance', 'payroll_record', 'payroll_run_line', 'staff_profile', 'venue'];
+  const counts = (where = '') => tables.map((t) => `(SELECT count(*) FROM core.${t}${where})`).join(" || ',' || ");
+  const none = p.psqlOwner(`SELECT ${counts()};`);
+  check(/^0(,0)*$/.test(none) && none.split(',').length === tables.length, `${label}: crewflow_owner with NO tenant context reads 0 rows from ${tables.length} tenant tables (${none})`);
+  const ctx = (org, ws, user) => `BEGIN; SELECT set_config('rab.organisation_id', '${org}', true), set_config('rab.workspace_id', '${ws}', true), set_config('rab.user_id', '${user}', true);`;
+  const own = p.psqlOwner(`${ctx(a[1], a[2], a[3])}\nSELECT 'A|' || ${counts()} || '|B|' || ${counts(` WHERE organisation_id = '${b[1]}'`)};\nCOMMIT;`).split('\n').pop();
+  const real = p.psql(`SELECT ${counts(` WHERE organisation_id = '${a[1]}'`)}`);
+  // Self-check only (review note 2): a deliberately wrong expectation must make this check FAIL.
+  const expected = tamperExpected ? real.replace(/^\d+/, (x) => String(Number(x) + 1)) : real;
+  check(own === `A|${expected}|B|${tables.map(() => '0').join(',')}`, `${label}: in organisation A's context it reads exactly A's rows (${expected}) and none of B's`);
+  const mixed = p.psqlOwner(`${ctx(a[1], b[2], a[3])}\nSELECT ${counts()};\nCOMMIT;`).split('\n').pop();
+  check(/^0(,0)*$/.test(mixed), `${label}: organisation A with organisation B's workspace reads 0 rows (${mixed})`);
+}
+
 const iso = (ns) => new Date(Number(ns / 1_000_000n)).toISOString().replace('Z', `${String(ns % 1_000_000n).padStart(6, '0')}Z`);
 const fmtEvents = (evs) => evs.map((e) => `${iso(e.t)} ${e.action.padEnd(24)} ${String(e.service).padEnd(12)} ${e.id} ${e.image ?? ''}`).join('\n');
 
 module.exports = {
+  DB_SERVICE,
   MIGRATION_LOCK_KEY_SQL,
   Project,
+  SEEDED_TABLES,
+  TEST_APP_NAME,
   b64,
+  compareFacts,
+  derivedOwnerPassword,
+  facts,
   fmtEvents,
   hex,
   iso,
   newSecrets,
   nowS,
+  ownerUrl,
   redact,
+  rlsCheck,
   run,
   runAsync,
   secrets,

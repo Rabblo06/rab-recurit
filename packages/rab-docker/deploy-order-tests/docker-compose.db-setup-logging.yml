@@ -1,0 +1,28 @@
+# DB-SETUP real-container tests (run-db-setup-tests.cjs) - TEST-ONLY overlay: the bundled db with WORST-CASE server
+# logging, so the log-scan cases (owner's test 8, plan B9) look at every statement and every connection:
+#   log_statement=all, log_min_error_statement=info, log_connections=on, and a line prefix with the session user and
+#   application_name (the admin-connection audit, plan B7: no admin backend other than crewflow-owner-bootstrap).
+# The command is the production file's db command (docker-compose.image.yml) plus those four settings; nothing else changes.
+
+services:
+  db:
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/data/tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/data/tls/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - log_statement=all
+      - -c
+      - log_min_error_statement=info
+      - -c
+      - log_connections=on
+      - -c
+      - 'log_line_prefix=%m [%p] user=%u db=%d app=%a '

@@ -1,0 +1,21 @@
+# Deploy-order real-container tests - TEST-ONLY overlay for an image OLDER than DB-SETUP (R254 cd7c7e32, R256 0e0a6edd):
+# such an image has no worker-start.sh and an api-prestart.sh that is not meant to be the entrypoint, so its deploys use
+# the previous release's OWN start-up, exactly as that release's docker-compose.image.yml declared it
+# (`git show 0e0a6edd:packages/rab-docker/docker-compose.image.yml`): the image's ENTRYPOINT (tini -s), rab-api command
+# ./api-prestart.sh, rab-worker command `node packages/rab-worker/dist/main.js` under compose's init. The drivers add this
+# file only while CREWFLOW_IMAGE_TAG is such a digest, and always with the pass-through crewflow_owner URL (those images
+# read PG_DATABASE_URL as their runtime login and cannot use an admin URL).
+#
+# Consequence measured by run-db-setup-tests.cjs S7: rolling back to a pre-DB-SETUP digest with THIS release's compose files
+# alone leaves rab-worker unable to start (./worker-start.sh is not in the old image): a rollback across DB-SETUP uses the
+# previous release's compose files.
+
+services:
+  rab-api:
+    entrypoint: ["/sbin/tini", "-s", "--"]
+    command: ["./api-prestart.sh"]
+
+  rab-worker:
+    entrypoint: ["/sbin/tini", "-s", "--"]
+    command: ["node", "packages/rab-worker/dist/main.js"]
+    init: true
