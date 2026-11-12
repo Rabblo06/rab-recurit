@@ -602,10 +602,12 @@ one login. Nothing new is deployed. `rab-ops` is SUPERSEDED: do not use it on an
 | `hws:backfill` | Copies legacy workspace rows into each workspace's own schema. Run it only as an approved step of the HWS cutover (gate G4). | `--dry-run` (default), `--verify`, `--apply` / `--resume` (with `--hws-cutover` while HWS is off) |
 
 **Required on every run.**
-- **The operator label** (three flags; every run is refused without them):
-  - `--operator-source`: one of `github-actions`, `gitlab-ci` or `manual-console`;
-  - `--operator-id`: the CI OIDC subject, the run id or the deploy user. Printable, no spaces, at most 200 characters;
-  - `--change-ref`: the approved ticket, PR or change reference. At most 120 characters.
+- **The operator label** (every run is refused without `--operator` and `--change-ref`):
+  - `--operator "<name>"` (required): the person's or job's name. Spaces are allowed. 1-200 characters: a letter or
+    digit first, then only letters, digits, spaces and `. _ : @ / + = ' , ( ) -` (no control or format character);
+  - `--change-ref` (required): the approved ticket, PR or change reference. A letter or digit first, then letters,
+    digits and `. _ : # / + -`, at most 120 characters;
+  - `--operator-source` (optional): one of `github-actions`, `gitlab-ci` or `manual-console`. Default `manual-console`.
 
   The label is an **operational claim, not a verified identity**. It is printed on the run's first console line and
   stored verbatim in every audit row the run writes (`metadata.operationalLabel`, with `path: owner-login` and a random
@@ -632,7 +634,7 @@ one login. Nothing new is deployed. `rab-ops` is SUPERSEDED: do not use it on an
   - Check the directory is writable by uid 1000 before you start.
   - Containment logs hold IDs and outcomes only.
 - **A kept copy of stdout, REQUIRED.** `--rm` removes the container, and with the json-file logging driver its log goes
-  with it, including the `[ops] command=… path=owner-login run=… actor_source=… actor_id=… change_ref=…` line that is the
+  with it, including the `[ops] command=… path=owner-login run=… actor_source=… operator="…" change_ref=…` line that is the
   only record of a read-only run.
   - Pipe every run through `tee` into a file in the same kept directory, e.g. `2>&1 | tee -a ops-run/<change-ref>.log`.
   - Keep that file with the change record.
@@ -644,16 +646,16 @@ mkdir -p ops-run && chown 1000:1000 ops-run    # the API image runs as uid 1000
 # Session backfill: verify first. When missing = 0, nothing else is needed.
 $P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
   rab-api node packages/rab-server/dist/command/main.js user-session:backfill --verify \
-  --operator-source manual-console --operator-id deploy@ops-host --change-ref OPS-123 \
+  --operator "deploy@ops-host" --change-ref OPS-123 \
   2>&1 | tee -a ops-run/OPS-123.log
-# ...then a dry run, then --apply (each run takes the same three label flags, the mount and the tee).
+# ...then a dry run, then --apply (each run takes the same label flags, the mount and the tee).
 
 # Containment: a dry run first. Add --execute only after the dry run matches the frozen totals.
 $P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
   rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts \
   --target /ops/targets.tsv --expect-orgs 389 --expect-users 698 --expect-active 645 \
   --actor-user-id <active platform admin uuid> --log /ops/containment.jsonl \
-  --operator-source manual-console --operator-id deploy@ops-host --change-ref INC-2026-10-05 \
+  --operator "deploy@ops-host" --change-ref INC-2026-10-05 \
   2>&1 | tee -a ops-run/INC-2026-10-05.log
 ```
 
