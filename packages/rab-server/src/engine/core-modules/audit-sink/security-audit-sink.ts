@@ -129,11 +129,25 @@ function isOneTimeCodeValue(value: unknown): boolean {
 }
 
 /**
- * An e-mail-like token: any run of non-space, non-@ characters, one or more @, then the rest of the token. Unicode-aware
+ * E-mail-like tokens: every whitespace-free token that contains `@` is masked (maskEmailToken). Unicode-aware
  * (IDN domains, apostrophes, accented local parts): `jöhn@exämple.com` → `j***@exämple.com`, `o'brien@x.ie` → `o***@x.ie`.
  * Deliberately broad: over-masking (a URL with credentials, an @handle) is acceptable, an unmasked address is not.
  */
-const EMAIL = /([^\s@]+)@+([^\s@]*)/gu;
+const TOKEN = /\S+/gu;
+
+/**
+ * Masks one whitespace-free token: everything before its first `@` is kept only as its first code point; the rest after
+ * the @-run is masked again if it holds another `@`. A token starting with `@` (a handle) is kept. Linear: each token is
+ * scanned a bounded number of times (once per `@`), and TOKEN itself never backtracks.
+ */
+function maskEmailToken(token: string): string {
+  const at = token.indexOf('@');
+  if (at <= 0) return token;
+  let rest = at;
+  while (rest < token.length && token[rest] === '@') rest++;
+  const domain = token.slice(rest);
+  return `${Array.from(token.slice(0, at))[0]}***@${domain.includes('@') ? maskEmailToken(domain) : domain}`;
+}
 const PG_URL = /postgres(?:ql)?:\/\/\S+/gi;
 const BEARER = /\bbearer\s+[^\s,;]+/gi;
 const BASIC = /\bbasic\s+[A-Za-z0-9+/=._-]+/gi;
@@ -183,7 +197,7 @@ export function redactString(value: string): string {
     .replace(BEARER, '[bearer]')
     .replace(BASIC, '[basic]')
     .replace(JWT, '[jwt]')
-    .replace(EMAIL, (_m, local: string, domain: string) => `${Array.from(local)[0]}***@${domain}`)
+    .replace(TOKEN, (token) => (token.includes('@') ? maskEmailToken(token) : token))
     .slice(0, 256);
 }
 

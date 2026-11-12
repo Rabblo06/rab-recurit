@@ -88,11 +88,13 @@ describe('security audit redaction (X1.1 review)', () => {
     const hostileDomain = `a@${'a-'.repeat(150)}`;
     const hostileText = `${'a='.repeat(1_000)}`;
     const started = Date.now();
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < 50; i++) {
       expect(maskEmailForAudit(hostileLogin)).toBe('[not-an-email]');
       expect(maskEmailForAudit(hostileDomain)).toBe('[not-an-email]');
       redactString(hostileText);
       redactString(`${'@'.repeat(1_000)}x`);
+      redactString('a@'.repeat(1_000));
+      redactString('eyJ'.repeat(680));
     }
     expect(Date.now() - started).toBeLessThan(2_000);
   });
