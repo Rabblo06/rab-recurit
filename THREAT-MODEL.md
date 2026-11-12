@@ -6589,7 +6589,11 @@ cache change. The layer-2 service checks stay in the services; this changes only
   - The default is still an immutable, gate-verified index digest, never a mutable tag.
   - `compose-one-image.cjs` accepts a default only in production.yml, only as a full `sha256:<64 lowercase hex>`, and
     the same expression on every service. `docker-compose.image.yml` stays strict (`:?`, no default).
-  - Branch protection on `main` (changes only through reviewed PRs) is the control this relies on.
+  - Branch protection on `main` (changes only through reviewed PRs, required gates) is the control this relies on.
+    **It is NOT enabled yet** (2026-11-12: no protection rule or ruleset; a write collaborator pushed the reverted files
+    directly). Until the owner enables it, any write account can change the pinned digest without CI.
+  - The pinned default is the newest published release (`0e0a6edd`, 2026-11-11), which predates later fixes (#31, #93,
+    #96, #98, #99, #101, #103). It is meant for a fresh install; publish a new image from main and bump the default.
 - **Accepted risk: OpenShip service-scoped values override any committed value, pinned ones included.** No repository
   gate can see that. The listing only makes more names visible; it is how OpenShip already worked.
 - **Residual.**
