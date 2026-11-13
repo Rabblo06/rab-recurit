@@ -223,11 +223,13 @@ export function isLoopbackHost(host: string): boolean {
 /**
  * Final review F4: the ONLY single-label host names that count as local — the database services of this repository's own
  * compose files and harnesses, where Docker's embedded DNS resolves the name to a container on the same compose network:
- *   devdb     packages/rab-docker/docker-compose.yml (the development database)
- *   postgres  packages/rab-docker/docker-compose.qa.yml, packages/rab-e2e-testing/system/docker-compose.e2e.yml
+ *   devdb     the PREVIOUS development stack's database (container rab-devdb); no committed file names it since Part F2
+ *             (X2.3), kept until the owner's dev cut-over (D7)
+ *   postgres  packages/rab-e2e-testing/system/docker-compose.e2e.yml
  *   pg        packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml
- *   db        packages/rab-docker/docker-compose.production.yml, docker-compose.image.yml (the bundled database, DB-SETUP;
- *             the owner's Twenty-like service name, lead decision 2026-11-12)
+ *   db        packages/rab-docker/docker-compose.production.yml, docker-compose.image.yml, and since Part F2 (X2.3) the dev
+ *             docker-compose.yml and QA docker-compose.qa.yml (the bundled database, DB-SETUP; the owner's Twenty-like
+ *             service name, lead decision 2026-11-12)
  * (O1, one image: `pg-other`, the second cluster of the retired launcher's bundle-test harness, is no longer listed.)
  * CI reaches its disposable cluster on 127.0.0.1 (.github/actions/disposable-postgres). Any OTHER single-label name is
  * remote: outside a compose network it is resolved through a DNS search domain or a Kubernetes namespace and may reach a

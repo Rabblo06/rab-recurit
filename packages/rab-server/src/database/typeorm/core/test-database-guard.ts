@@ -64,8 +64,9 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 export const TARGET_OVERRIDE_QUERY_PARAMS: readonly string[] = ['host', 'hostaddr', 'port', 'user', 'dbname', 'database', 'service'];
 
 /**
- * The development database (packages/rab-docker/docker-compose.yml service `devdb`, published on 127.0.0.1:15432). Never a
- * test target, whatever markers it carries.
+ * The PREVIOUS development database (container rab-devdb: compose host `devdb`, published on 127.0.0.1:15432). Never a
+ * test target, whatever markers it carries. Since Part F2 (X2.3) docker-compose.yml runs the bundled `db` instead, which is
+ * not published; these stay until the owner's dev cut-over (D7) retires rab-devdb.
  */
 export const DEVELOPMENT_DATABASE_HOSTS: readonly string[] = ['devdb'];
 export const DEVELOPMENT_DATABASE_LOOPBACK_PORTS: readonly string[] = ['15432'];

@@ -100,6 +100,7 @@ const vol = (source, target, readOnly) => ({ type: 'volume', source, target, ...
 const partA = () => ({
   db: { image: 'postgres@sha256:x', environment: { POSTGRES_PASSWORD: 'p' } },
   'db-setup': {
+    image: 'app@sha256:1',
     entrypoint: ['./db-setup.sh'],
     restart: 'no',
     user: '1000:1000',
@@ -109,12 +110,14 @@ const partA = () => ({
     depends_on: { db: { condition: 'service_healthy' } },
   },
   server: {
+    image: 'app@sha256:1',
     entrypoint: ['./api-prestart.sh'],
     environment: { PG_DATABASE_URL: '', NODE_ENV: 'development' },
     volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true), vol('crewflow-db-target', '/run/crewflow/db-target', true)],
     depends_on: { 'db-setup': { condition: 'service_completed_successfully' } },
   },
   worker: {
+    image: 'app@sha256:1',
     entrypoint: ['./worker-start.sh'],
     environment: { PG_DATABASE_URL: '' },
     volumes: [vol('crewflow-db-target', '/run/crewflow/db-target', true)],
@@ -169,14 +172,127 @@ test('DENIAL (Part F2): an app service with a database URL, the wrong PID 1, com
   refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), /server starts only after db-setup completed successfully/);
 });
 
+// The rendered model shape bundledDbParityChecks compares: the db service, the crewflow-db network, the three db volumes.
+const P = 'compose-isolation-check';
+const dbModel = () => ({
+  services: { db: { image: 'postgres@sha256:x', command: ['postgres', '-c', 'ssl=on'], user: '999:999', read_only: true } },
+  networks: { 'crewflow-db': { name: `${P}_crewflow-db`, internal: true, ipam: {} } },
+  volumes: Object.fromEntries(['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target'].map((k) => [k, { name: `${P}_${k}` }])),
+});
+
 test('DENIAL (Part F2): a dev/QA db that renders differently from production (or is missing) fails the parity check', () => {
-  const prod = { image: 'postgres@sha256:x', command: ['postgres', '-c', 'ssl=on'], user: '999:999', read_only: true };
-  assert.deepEqual(failedLabels(isolation.bundledDbParityChecks('dev.yml', { db: structuredClone(prod) }, prod)), []);
-  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, command: ['postgres'] } }, prod), /differs in command/);
-  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, ports: [{ target: 5432 }] } }, prod), /differs in ports/);
-  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, read_only: false } }, prod), /differs in read_only/);
-  refusedBy(isolation.bundledDbParityChecks('dev.yml', {}, prod), /has a bundled db rendered like/);
-  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: prod }, null), /has a bundled db rendered like/);
+  const prod = dbModel();
+  assert.deepEqual(failedLabels(isolation.bundledDbParityChecks('dev.yml', dbModel(), prod)), []);
+  for (const [edit, re] of [
+    [(m) => { m.services.db.command = ['postgres']; }, /differs in command/],
+    [(m) => { m.services.db.ports = [{ target: 5432 }]; }, /differs in ports/],
+    [(m) => { m.services.db.read_only = false; }, /differs in read_only/],
+  ]) {
+    const m = dbModel();
+    edit(m);
+    refusedBy(isolation.bundledDbParityChecks('dev.yml', m, prod), re);
+  }
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', { services: {} }, prod), /has a bundled db rendered like/);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', dbModel(), null), /has a bundled db rendered like/);
+});
+
+test("DENIAL (security review L2-1): the crewflow-db network or a db volume that is not production's (not internal, external, custom name, missing)", () => {
+  const prod = dbModel();
+  for (const [edit, re] of [
+    [(m) => { m.networks['crewflow-db'].internal = false; }, /crewflow-db network is production's/],
+    [(m) => { m.networks['crewflow-db'] = { name: 'shared-db-net', external: true }; }, /crewflow-db network is production's/],
+    [(m) => { delete m.networks['crewflow-db']; }, /crewflow-db network is production's/],
+    [(m) => { m.volumes['crewflow-db-data'] = { name: 'rab_devdb_data', external: true }; }, /crewflow-db-data volume is production's/],
+    [(m) => { m.volumes['crewflow-db-ca'].name = 'some-other-ca'; }, /crewflow-db-ca volume is production's/],
+    [(m) => { delete m.volumes['crewflow-db-target']; }, /crewflow-db-target volume is production's/],
+  ]) {
+    const m = dbModel();
+    edit(m);
+    refusedBy(isolation.bundledDbParityChecks('dev.yml', m, prod), re);
+  }
+});
+
+test('DENIAL (security review L2-2): only db mounts the data volume; only db-setup and the API/Worker mount the setup volume', () => {
+  const ok = { ...partA(), db: { volumes: [vol('crewflow-db-data', '/var/lib/postgresql')] } };
+  assert.deepEqual(failedLabels(isolation.dbVolumeMountChecks('f.yml', ok, RUNTIME)), []);
+  for (const [svc, source] of [['front', 'crewflow-db-target'], ['adminer', 'crewflow-db-data'], ['server', 'crewflow-db-data'], ['db', 'crewflow-db-target']]) {
+    const s = structuredClone(ok);
+    s[svc] = s[svc] ?? {};
+    s[svc].volumes = [...(s[svc].volumes ?? []), vol(source, '/x', true)];
+    refusedBy(isolation.dbVolumeMountChecks('f.yml', s, RUNTIME), new RegExp(`${svc} mounts ${source}`));
+  }
+});
+
+test('DENIAL (security review L2-3, L4): dev/QA db-setup URL interpolating PG_DATABASE_URL or not on host db; a file naming PG_DATABASE_PASSWORD', () => {
+  const services = (url) => ({ 'db-setup': { environment: { PG_DATABASE_URL: url } } });
+  const raw = (url) => ({ services: { 'db-setup': { environment: { PG_DATABASE_URL: url } }, db: { environment: { POSTGRES_PASSWORD: '${CREWFLOW_DEV_DB_PASSWORD:?hex}' } } } });
+  const good = 'postgresql://postgres:${CREWFLOW_DEV_DB_PASSWORD:?hex}@db:5432/crewflow?sslmode=verify-full';
+  const rendered = 'postgresql://postgres:x@db:5432/crewflow';
+  assert.deepEqual(failedLabels(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw(good))), []);
+  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw('${PG_DATABASE_URL:-postgresql://postgres:x@db:5432/crewflow}')), /db-setup's PG_DATABASE_URL is pinned/);
+  for (const host of ['devdb', 'rab-devdb', 'db.example.com', '127.0.0.1']) {
+    refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(`postgresql://postgres:x@${host}:5432/rab`), raw(good)), /host is exactly db/);
+  }
+  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services('not a url'), raw(good)), /host is exactly db/);
+  const named = raw(good);
+  named.services.db.environment.POSTGRES_PASSWORD = '${PG_DATABASE_PASSWORD:?x}';
+  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), named), /never names PG_DATABASE_PASSWORD/);
+});
+
+test("DENIAL (security review L2-4): the committed db text must equal production's (after $$ -> $ and the password variable)", () => {
+  const prod = [
+    'services:',
+    '  db:',
+    '    entrypoint:',
+    '      - |',
+    '        if [ "$$(id -u)" = 0 ]; then chown x; fi',
+    '        exec docker-entrypoint.sh "$$@"',
+    '    environment:',
+    '      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?required}',
+    '',
+    '  rab-redis:',
+    '    image: r',
+  ].join('\n');
+  const dev = prod.replace('${PG_DATABASE_PASSWORD:?required}', '${CREWFLOW_DEV_DB_PASSWORD:?set it, hex only}').replace('  rab-redis:', '  redis:');
+  assert.deepEqual(failedLabels(isolation.rawDbTextParityChecks('dev.yml', dev, prod)), []);
+  // $$ and $ are the same text after compose's escaping: both spellings compare equal.
+  assert.deepEqual(failedLabels(isolation.rawDbTextParityChecks('dev.yml', dev.split('$$').join('$'), prod)), []);
+  refusedBy(isolation.rawDbTextParityChecks('dev.yml', dev.replace('exec docker-entrypoint.sh', 'exec postgres'), prod), /word for word/);
+  refusedBy(isolation.rawDbTextParityChecks('dev.yml', dev.replace('    environment:', '    ports: ["5432:5432"]\n    environment:'), prod), /word for word/);
+  refusedBy(isolation.rawDbTextParityChecks('dev.yml', 'services:\n  redis: {}\n', prod), /word for word/);
+});
+
+test('DENIAL (security review M1): a db entrypoint without the one-server lock, or taking it too late, fails', () => {
+  const lock = ['exec 8>/var/lib/postgresql/.crewflow-server.lock', "flock -n 8 || { echo 'crewflow-db: another server already holds this data volume - refusing' >&2; exit 1; }"];
+  const rest = ['openssl req -x509', "printf 'local all all scram-sha-256' > f", 'exec docker-entrypoint.sh "$@"'];
+  const model = (lines) => ({ db: { entrypoint: ['/bin/sh', '-c', ['set -eu', 'chmod 0755 /var/lib/postgresql', ...lines].join('\n'), 'crewflow-db'] } });
+  assert.deepEqual(failedLabels(isolation.dbServerLockChecks('f.yml', model([...lock, ...rest]))), []);
+  refusedBy(isolation.dbServerLockChecks('f.yml', model(rest)), /one-server lock/);
+  refusedBy(isolation.dbServerLockChecks('f.yml', model([lock[0], ...rest])), /one-server lock/);
+  refusedBy(isolation.dbServerLockChecks('f.yml', model([...rest.slice(0, 2), ...lock, rest[2]])), /one-server lock/);
+  refusedBy(isolation.dbServerLockChecks('f.yml', model([lock[0], 'flock 8', ...rest])), /one-server lock/);
+  refusedBy(isolation.dbServerLockChecks('f.yml', {}), /one-server lock/);
+});
+
+test('DENIAL (security review I6): db-setup, the API and the Worker must run one image', () => {
+  const s = partA();
+  s.worker.image = 'other@sha256:2';
+  refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), /run the same image/);
+  const n = partA();
+  for (const k of ['db-setup', 'server', 'worker']) delete n[k].image;
+  refusedBy(isolation.dbSetupContractChecks('f.yml', n, RUNTIME), /run the same image/);
+});
+
+test('the committed dev and QA db text equals production\'s and takes the one-server lock (static, no docker)', () => {
+  const fs = require('node:fs');
+  const read = (rel) => fs.readFileSync(path.join(REPO, rel), 'utf8');
+  const prod = read(isolation.PRODUCTION_FILE);
+  assert.match(isolation.rawDbServiceText(prod), /flock -n 8 \|\|/);
+  for (const rel of ['packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml']) {
+    assert.deepEqual(failedLabels(isolation.rawDbTextParityChecks(rel, read(rel), prod)), [], rel);
+    // Production's compose escaping is kept literally ($$), not only after normalisation (review I2).
+    assert.ok(read(rel).includes('exec docker-entrypoint.sh "$$@"'), `${rel}: keeps "$$@"`);
+  }
 });
 
 test('a compose file the parser cannot read is a FAILED check, not a skip', (t) => {

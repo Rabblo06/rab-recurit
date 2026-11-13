@@ -152,6 +152,10 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
         assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
         assert.equal(svc.command, undefined, `${service}: no command (worker-start.sh takes none)`);
         assert.notEqual(svc.init, true, `${service}: no compose init (worker-start.sh execs tini as PID 1)`);
+        // Security review of F2, L3: production's rab-worker sizing in every file whose Worker runs like production's.
+        assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit >= 768 && svc.pids_limit <= 4096, `${service}: pids_limit ${svc.pids_limit}`);
+        const mem = sizeMiB(interpolate(svc.mem_limit, {}));
+        assert.ok(mem >= 1024 && mem <= 8192, `${service}: mem_limit ${mem} MiB`);
       } else {
         assert.deepEqual(svc.command, WORKER_COMMAND);
         assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
@@ -192,6 +196,18 @@ test('DB-SETUP: worker-start.sh execs exactly the Worker command (and nothing el
   ]);
   const dockerfile = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/Dockerfile'), 'utf8');
   assert.ok(/^COPY --chmod=0555 packages\/rab-docker\/rab\/worker-start\.sh \.\/worker-start\.sh$/m.test(dockerfile), 'the image ships worker-start.sh read+execute only');
+});
+
+test('Part F2 (security review L3): dev and QA size db-setup and the Worker exactly like production', { skip }, () => {
+  const prod = loadCompose('packages/rab-docker/docker-compose.production.yml').services;
+  for (const rel of ['packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml']) {
+    const s = loadCompose(rel).services;
+    for (const key of ['pids_limit', 'mem_limit', 'cpus']) {
+      assert.equal(String(s['db-setup'][key]), String(prod['db-setup'][key]), `${rel}: db-setup ${key}`);
+    }
+    assert.equal(s.worker.pids_limit, prod['rab-worker'].pids_limit, `${rel}: worker pids_limit`);
+    assert.equal(sizeMiB(s.worker.mem_limit), sizeMiB(interpolate(prod['rab-worker'].mem_limit, {})), `${rel}: worker mem_limit`);
+  }
 });
 
 test('production and image compose: the Worker provisions in-process at the pinned 5 s', { skip }, () => {

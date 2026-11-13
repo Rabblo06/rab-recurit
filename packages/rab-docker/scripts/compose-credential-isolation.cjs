@@ -42,7 +42,13 @@
  * ./api-prestart.sh / ./worker-start.sh (no compose init), with no database URL anywhere in their environment (an empty
  * PG_DATABASE_URL only) and db-setup's target volume mounted read-only; the API waits for db-setup to complete. And the dev
  * and QA `db` services must render EXACTLY as production's `db` (bundledDbParityChecks, pure): they are verbatim copies,
- * so a drift in either direction (TLS, authentication, hardening, image) fails here.
+ * so a drift in either direction (TLS, authentication, hardening, image) fails here. db-setup, the API and the Worker run
+ * one image.
+ * Security review of F2 (pure parts, each with denial tests): the crewflow-db network and the three db volumes match
+ * production's (internal; never external or custom-named); the committed db TEXT matches production's (rawDbTextParityChecks);
+ * only db mounts the data volume and only db-setup + the API/Worker the setup volume (dbVolumeMountChecks); in dev and QA
+ * db-setup's URL is pinned to host `db` and the file never names PG_DATABASE_PASSWORD (nonProductionDbSetupChecks); and the
+ * db entrypoint takes the one-server-per-volume kernel lock before anything else (dbServerLockChecks, M1).
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  *
@@ -102,9 +108,11 @@ const DUMMY_ENV = {
   S3_ACCESS_KEY_ID: 'dummy',
   S3_SECRET_ACCESS_KEY: 'dummy',
   CREWFLOW_AUDIT_SINK: 'stdout',
-  // DB-SETUP: the bundled db's password (production.yml's, the dev and the QA db require it); a sentinel so its spread is
-  // checked.
+  // DB-SETUP: the bundled db's password; a sentinel so its spread is checked. Production names it PG_DATABASE_PASSWORD; dev
+  // and QA have their own variables (security review L4), given the SAME sentinel so the db services render identically.
   PG_DATABASE_PASSWORD: DB_SENTINEL_PASSWORD,
+  CREWFLOW_DEV_DB_PASSWORD: DB_SENTINEL_PASSWORD,
+  CREWFLOW_QA_DB_PASSWORD: DB_SENTINEL_PASSWORD,
 };
 
 let failures = 0;
@@ -232,20 +240,128 @@ function dbSetupContractChecks(rel, services, [apiName, workerName]) {
   if (services[apiName]) {
     out.push([services[apiName].depends_on?.['db-setup']?.condition === 'service_completed_successfully', `${rel}: ${apiName} starts only after db-setup completed successfully`]);
   }
+  // Security review I6: db-setup, the API and the Worker run ONE image (they cannot drift apart).
+  const images = [setup, services[apiName], services[workerName]].map((s) => String(s?.image ?? ''));
+  out.push([images[0] !== '' && images.every((i) => i === images[0]), `${rel}: db-setup, ${apiName} and ${workerName} run the same image`]);
+  return out;
+}
+
+/** The throw-away Compose project every file is rendered under (render()). */
+const RENDER_PROJECT = 'compose-isolation-check';
+/** The bundled db's top-level resources, compared with production's (security review of F2, L2-1). */
+const DB_NETWORK = 'crewflow-db';
+const DB_VOLUME_KEYS = Object.freeze(['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target']);
+/** Strips the throw-away project prefix from a rendered resource name, so a custom `name:` stands out. */
+const unprefixed = (resource) => {
+  if (!resource || typeof resource !== 'object') return resource ?? null;
+  const out = { ...resource };
+  if (typeof out.name === 'string' && out.name.startsWith(`${RENDER_PROJECT}_`)) out.name = out.name.slice(RENDER_PROJECT.length + 1);
+  return out;
+};
+
+/**
+ * Part F2 (X2.3): the dev and QA `db` services are verbatim copies of production's. Pure: [ok, label] pairs comparing the
+ * two rendered models (same throw-away project, dummy values and password sentinel, so identical text renders
+ * identically): the `db` service; the crewflow-db network (internal, no custom name); and the three db volumes (never
+ * external, no custom name). Names the differing keys only, never a value.
+ */
+function bundledDbParityChecks(rel, model, productionModel) {
+  const db = model?.services?.db;
+  const productionDb = productionModel?.services?.db;
+  if (!db || !productionDb) return [[false, `${rel}: has a bundled db rendered like ${PRODUCTION_FILE}'s (missing: ${!db ? rel : PRODUCTION_FILE})`]];
+  const out = [];
+  const keys = [...new Set([...Object.keys(db), ...Object.keys(productionDb)])].sort();
+  const differ = keys.filter((k) => JSON.stringify(db[k] ?? null) !== JSON.stringify(productionDb[k] ?? null));
+  out.push([differ.length === 0, `${rel}: db renders exactly as ${PRODUCTION_FILE}'s db${differ.length ? ` (differs in ${differ.join(', ')})` : ''}`]);
+  const net = unprefixed(model.networks?.[DB_NETWORK]);
+  out.push([
+    Boolean(net) && net.internal === true && !net.external && net.name === DB_NETWORK && JSON.stringify(net) === JSON.stringify(unprefixed(productionModel.networks?.[DB_NETWORK])),
+    `${rel}: the ${DB_NETWORK} network is production's (internal, not external, no custom name)`,
+  ]);
+  for (const key of DB_VOLUME_KEYS) {
+    const vol = unprefixed(model.volumes?.[key]);
+    out.push([
+      Boolean(vol) && !vol.external && vol.name === key && JSON.stringify(vol) === JSON.stringify(unprefixed(productionModel.volumes?.[key])),
+      `${rel}: the ${key} volume is production's (project-scoped, not external, no custom name)`,
+    ]);
+  }
   return out;
 }
 
 /**
- * Part F2 (X2.3): the dev and QA `db` services are verbatim copies of production's. Pure: one [ok, label] pair comparing
- * the two rendered services (same throw-away project and dummy values, so identical text renders identically). Names the
- * differing keys only, never a value.
+ * Part F2 security review, L2-4: the committed TEXT of a file's `db` service (from `  db:` to the next service or top-level
+ * key), normalised: `$$` -> `$`, and the POSTGRES_PASSWORD interpolation (dev and QA use their own variable name, L4)
+ * replaced by a placeholder. Returns null when the file has no `db` service.
  */
-function bundledDbParityChecks(rel, services, productionDb) {
-  const db = services.db;
-  if (!db || !productionDb) return [[false, `${rel}: has a bundled db rendered like ${PRODUCTION_FILE}'s (missing: ${!db ? rel : PRODUCTION_FILE})`]];
-  const keys = [...new Set([...Object.keys(db), ...Object.keys(productionDb)])].sort();
-  const differ = keys.filter((k) => JSON.stringify(db[k] ?? null) !== JSON.stringify(productionDb[k] ?? null));
-  return [[differ.length === 0, `${rel}: db renders exactly as ${PRODUCTION_FILE}'s db${differ.length ? ` (differs in ${differ.join(', ')})` : ''}`]];
+function rawDbServiceText(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.indexOf('  db:');
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && !/^( {2}\S|\S)/.test(lines[end])) end += 1;
+  while (end > start + 1 && lines[end - 1].trim() === '') end -= 1;
+  return lines
+    .slice(start, end)
+    .join('\n')
+    .split('$$')
+    .join('$')
+    .replace(/^(\s*POSTGRES_PASSWORD: )\$\{[A-Z0-9_]+:\?[^}\n]*\}$/m, '$1${PASSWORD}');
+}
+
+/** Pure: [ok, label] comparing two committed `db` texts (rawDbServiceText of each). */
+function rawDbTextParityChecks(rel, text, productionText) {
+  const mine = rawDbServiceText(text);
+  const theirs = rawDbServiceText(productionText);
+  return [[mine !== null && theirs !== null && mine === theirs, `${rel}: the committed db service text is ${PRODUCTION_FILE}'s, word for word (after $$ -> $ and the password variable)`]];
+}
+
+/**
+ * Part F2 security review, L2-2: only db mounts the data volume; only db-setup and the API/Worker mount the setup (target)
+ * volume. Pure: [ok, label] pairs over a rendered model's services.
+ */
+function dbVolumeMountChecks(rel, services, runtimeNames) {
+  const allowed = { 'crewflow-db-data': ['db'], 'crewflow-db-target': ['db-setup', ...runtimeNames] };
+  const violations = [];
+  for (const [name, svc] of Object.entries(services)) {
+    for (const [source, who] of Object.entries(allowed)) {
+      const mounts = (svc?.volumes ?? []).some((v) => v && typeof v === 'object' && v.source === source);
+      if (mounts && !who.includes(name)) violations.push(`${name} mounts ${source}`);
+    }
+  }
+  return [[violations.length === 0, `${rel}: only db mounts crewflow-db-data and only db-setup, ${runtimeNames.join(', ')} mount crewflow-db-target${violations.length ? ` (${violations.join('; ')})` : ''}`]];
+}
+
+/**
+ * Part F2 security review, L2-3 and L4: in a NON-production file db-setup's URL is pinned to the bundled db (never the
+ * `${PG_DATABASE_URL...}` interpolation production offers for an external database; rendered host exactly `db`), and the
+ * file never names PG_DATABASE_PASSWORD (dev and QA have their own hex-only variable). `rawDoc` is the parsed, uninterpolated
+ * YAML (comments are not part of it). Pure; labels never print a value.
+ */
+function nonProductionDbSetupChecks(rel, services, rawDoc) {
+  const out = [];
+  const rawUrl = String(rawDoc?.services?.['db-setup']?.environment?.PG_DATABASE_URL ?? '');
+  out.push([rawUrl !== '' && !rawUrl.includes('${PG_DATABASE_URL'), `${rel}: db-setup's PG_DATABASE_URL is pinned (no \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  let host = null;
+  try {
+    host = new URL(String(services['db-setup']?.environment?.PG_DATABASE_URL ?? '')).hostname;
+  } catch {
+    host = null;
+  }
+  out.push([host === 'db', `${rel}: db-setup's rendered PG_DATABASE_URL host is exactly db (the bundled database)`]);
+  out.push([!JSON.stringify(rawDoc ?? {}).includes('PG_DATABASE_PASSWORD'), `${rel}: never names PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
+  return out;
+}
+
+/**
+ * Part F2 security review, M1: ONE server per data volume. The rendered db entrypoint takes a kernel lock on a file in the
+ * data volume (`flock -n` on fd 8) before it touches the volume or starts the image's entrypoint. Pure.
+ */
+function dbServerLockChecks(rel, services) {
+  const entry = (services.db?.entrypoint ?? []).map(String).join('\n');
+  const lockAt = entry.indexOf('exec 8>/var/lib/postgresql/.crewflow-server.lock');
+  const flockAt = entry.search(/flock -n 8 \|\| \{[^}]*exit 1; \}/);
+  const firstUse = Math.min(...['openssl', 'printf', 'exec docker-entrypoint.sh'].map((m) => (entry.indexOf(m) < 0 ? Infinity : entry.indexOf(m))));
+  return [[lockAt >= 0 && flockAt > lockAt && flockAt < firstUse, `${rel}: db takes the one-server lock (flock -n on the data volume) before it touches the volume or starts postgres`]];
 }
 
 /** The YAML parser (the root devDependency `yaml`), or null when it cannot be loaded. `requireFn` is the test seam. */
@@ -293,7 +409,8 @@ function main(options = {}) {
     console.error('[compose-isolation] docker compose is not available');
     return 2;
   }
-  let productionDb = null;
+  let productionModel = null;
+  let productionText = null;
   for (const [rel, migrateName, runtimeNames, production, dbSetup] of FILES) {
     let model;
     try {
@@ -319,8 +436,17 @@ function main(options = {}) {
     for (const [ok, label] of dbPasswordChecks(rel, services)) check(ok, label);
     if (dbSetup) {
       for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames)) check(ok, label);
-      if (rel === PRODUCTION_FILE) productionDb = services.db ?? null;
-      else for (const [ok, label] of bundledDbParityChecks(rel, services, productionDb)) check(ok, label);
+      for (const [ok, label] of dbVolumeMountChecks(rel, services, runtimeNames)) check(ok, label);
+      for (const [ok, label] of dbServerLockChecks(rel, services)) check(ok, label);
+      const text = fs.readFileSync(path.join(REPO, rel), 'utf8');
+      if (rel === PRODUCTION_FILE) {
+        productionModel = model;
+        productionText = text;
+      } else {
+        for (const [ok, label] of bundledDbParityChecks(rel, model, productionModel)) check(ok, label);
+        for (const [ok, label] of rawDbTextParityChecks(rel, text, productionText ?? '')) check(ok, label);
+        for (const [ok, label] of nonProductionDbSetupChecks(rel, services, YAML.parse(text, { merge: true }))) check(ok, label);
+      }
     }
     const migrate = migrateName ? services[migrateName] : undefined;
     // A migration service (none is committed today): on an owner-login file nothing may read .env.migrate.
@@ -388,6 +514,11 @@ module.exports = {
   dbPasswordChecks,
   dbSetupContractChecks,
   bundledDbParityChecks,
+  rawDbServiceText,
+  rawDbTextParityChecks,
+  dbVolumeMountChecks,
+  nonProductionDbSetupChecks,
+  dbServerLockChecks,
   PRODUCTION_FILE,
   DB_SENTINEL_PASSWORD,
   render,

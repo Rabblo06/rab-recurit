@@ -27,9 +27,10 @@ name: rab-qa
 #     uses the LOGGER driver.
 #   - Built from source (production pulls the gated image by digest).
 #
-# SECRETS: none are committed. Put these in packages/rab-docker/.env.qa.local (git-ignored by `.env.*.local`); letters and
-# digits only, for example `openssl rand -hex 32`:
-#   PG_DATABASE_PASSWORD   the bundled db's superuser (read by `db` on its volume's first start, and by db-setup's URL only)
+# SECRETS: none are committed. Put these in packages/rab-docker/.env.qa.local (git-ignored by `.env.*.local`):
+#   CREWFLOW_QA_DB_PASSWORD   the bundled db's superuser (read by `db` on its volume's first start, and by db-setup's URL
+#                             only). HEX ONLY: it is interpolated unencoded into db-setup's admin URL. Not production's
+#                             variable name, so a value meant for one never configures the other.
 #   QA_APP_SECRET          QA-only application secret (32+ characters)
 # Both are required (`:?`), so the stack fails closed without them. Passing `--env-file` also stops Compose from reading the
 # dev stack's packages/rab-docker/.env.
@@ -40,7 +41,7 @@ name: rab-qa
 # First platform admin, once the server is healthy:
 #   $C run --rm --no-deps -e DB_TARGET=local -e BOOTSTRAP_ADMIN_EMAIL=you@example.test server \
 #     node packages/rab-server/dist/command/main.js bootstrap-admin
-# psql: `$C exec -e PGPASSWORD db psql -U postgres -d crewflow` (PGPASSWORD = PG_DATABASE_PASSWORD).
+# psql: `$C exec -e PGPASSWORD db psql -U postgres -d crewflow` (PGPASSWORD = CREWFLOW_QA_DB_PASSWORD).
 # Reset: `$C down -v` (QA data is disposable; this never touches dev volumes).
 #
 # PORTS (loopback only): server 3101, front 5174, MinIO 9010/9011. The database and Redis are not published.
@@ -65,6 +66,11 @@ services:
         set -eu
         # The data volume root arrives world-writable (copied from the image): only postgres may write it.
         chmod 0755 /var/lib/postgresql
+        # ONE server per data volume (2026-10-15 incident: two postgres servers on one data directory corrupt it). A kernel
+        # lock on the volume itself, taken before anything here touches the volume, held by the server for its whole life (fd 8
+        # survives every exec and is inherited by every postgres process); any second container on this volume refuses.
+        exec 8>/var/lib/postgresql/.crewflow-server.lock
+        flock -n 8 || { echo 'crewflow-db: another server already holds this data volume - refusing' >&2; exit 1; }
         cd /var/lib/postgresql
         if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/tmp/ca.crt ] &&
           openssl verify -CAfile /var/tmp/ca.crt tls/server.crt >/dev/null 2>&1 &&
@@ -80,7 +86,7 @@ services:
           rm -f ca.key ca.srl server.csr server.ext
           chmod 0600 server.key
           chmod 0644 server.crt ca.crt
-          if [ "$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/tls.new; fi
+          if [ "$$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/tls.new; fi
           cd /var/lib/postgresql
           rm -rf /var/lib/postgresql/tls
           mv tls.new tls
@@ -92,9 +98,9 @@ services:
         # SCRAM over the socket; every TCP login must be TLS (hostssl) and SCRAM; there is no plain `host` line at all.
         printf 'local all all scram-sha-256\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\n' > /var/lib/postgresql/tls/pg_hba.conf.new
         chmod 0600 /var/lib/postgresql/tls/pg_hba.conf.new
-        if [ "$(id -u)" = 0 ]; then chown postgres:postgres /var/lib/postgresql/tls/pg_hba.conf.new; fi
+        if [ "$$(id -u)" = 0 ]; then chown postgres:postgres /var/lib/postgresql/tls/pg_hba.conf.new; fi
         mv /var/lib/postgresql/tls/pg_hba.conf.new /var/lib/postgresql/tls/pg_hba.conf
-        exec docker-entrypoint.sh "$@"
+        exec docker-entrypoint.sh "$$@"
       - crewflow-db
     command:
       - postgres
@@ -114,7 +120,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: crewflow
       # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
-      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also with your own database}
+      POSTGRES_PASSWORD: ${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD in packages/rab-docker/.env.qa.local (hex only, openssl rand -hex 32)}
       # SCRAM for socket and TCP logins alike: no trust (the image default for loopback TCP) and no peer.
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256 --data-checksums
       # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/); fixed for every major.
@@ -209,9 +215,11 @@ services:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
+    # One image for db-setup, server and worker (built once, never drifting between them).
+    image: crewflow-qa/rab:local
     entrypoint: ['./db-setup.sh']
     environment:
-      PG_DATABASE_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:?set PG_DATABASE_PASSWORD (see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
+      PG_DATABASE_URL: postgresql://postgres:${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
     networks: [default, crewflow-db]
@@ -229,6 +237,7 @@ services:
     security_opt: ['no-new-privileges:true']
     pids_limit: 64
     mem_limit: 256m
+    cpus: 1
     stop_grace_period: 40s
 
   # rab-api equivalent: migrates on start, registers the job schedulers, then serves. It holds no database URL (pinned
@@ -238,6 +247,8 @@ services:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
+    # One image for db-setup, server and worker (built once, never drifting between them).
+    image: crewflow-qa/rab:local
     entrypoint: ['./api-prestart.sh']
     environment:
       NODE_ENV: development
@@ -310,6 +321,9 @@ services:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    # One image for db-setup, server and worker (built once, never drifting between them).
+    image: crewflow-qa/rab:local
     entrypoint: ['./worker-start.sh']
     user: '1000:1000'
     read_only: true
@@ -319,6 +333,9 @@ services:
       - /tmp/crewflow-jobs:uid=1000,gid=1000,mode=0700
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
     stop_grace_period: 45s
+    # Production's rab-worker sizing (H6): native PDF threads x 384 MB must fit half of this memory limit.
+    pids_limit: 1024
+    mem_limit: 1536m
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development

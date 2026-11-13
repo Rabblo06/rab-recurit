@@ -574,6 +574,12 @@ function bundledDbProblems(services, model, p) {
   if (!entry.includes(DB_HBA_PRINTF) || /\bhost(nossl)?\s+all\b/.test(entry) || /\b(trust|peer|ident|md5)\b/.test(entry)) {
     p(`${DB_SERVICE}: the entrypoint does not write exactly the TLS-only pg_hba.conf (local scram-sha-256; hostssl scram-sha-256 for every TCP login; no plain host, trust, peer, ident or md5)`);
   }
+  // Security review of F2, M1: ONE server per data volume (the 2026-10-15 two-servers-one-volume corruption). The kernel lock
+  // on a file in the data volume is taken first, before the entrypoint touches the volume or starts postgres.
+  const lockAt = entry.search(/exec 8>\/var\/lib\/postgresql\/\.crewflow-server\.lock\n\s*flock -n 8 \|\| \{[^}]*exit 1; \}/);
+  if (lockAt < 0 || lockAt > entry.indexOf('openssl') || lockAt > entry.indexOf('exec docker-entrypoint.sh')) {
+    p(`${DB_SERVICE}: the entrypoint does not take the one-server lock (flock -n on /var/lib/postgresql/.crewflow-server.lock) before it touches the volume or starts postgres`);
+  }
   if ((db.volumes ?? []).some((v) => String(v.target ?? '').startsWith('/docker-entrypoint-initdb.d'))) p(`${DB_SERVICE}: mounts an init script (the API creates crewflow_owner itself)`);
   if (JSON.stringify(Object.keys(db.networks ?? {})) !== JSON.stringify(['crewflow-db'])) p(`${DB_SERVICE}: must be on the internal crewflow-db network only`);
   if (model?.networks?.['crewflow-db']?.internal !== true) p('network crewflow-db is not internal');
