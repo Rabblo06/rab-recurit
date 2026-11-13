@@ -123,8 +123,9 @@ const MSG = {
   // decision A3.1: the file's password no longer logs in -> 64 with the fix
   wrongPasswordFix: /delete the password file/i,
   readyCreated: /crewflow_owner is ready \(created/,
-  readyUnchanged: /crewflow_owner is ready \((pass-through, )?unchanged\)/,
+  readyUnchanged: /crewflow_owner is ready \((existing crewflow_owner URL, )?unchanged/,
   readyReset: /crewflow_owner is ready \(password (set|reset)/,
+  passwordFileRace: /Another db-setup stored a crewflow_owner password at the same moment/,
   // api-prestart.sh / worker-start.sh: any non-empty PG_DATABASE_URL, any login.
   entrypointRefusal: /PG_DATABASE_URL must never be set on the (api|worker) service/,
   // runtime-db-config.ts checkRuntimeLogin
@@ -510,7 +511,7 @@ function checkPasswordFile(p, check, n, label, { random = true, healthCheck = fa
   const setupMount = targetMount(p, 'db-setup');
   check(setupMount === 'rw' || setupMount === 'absent', `${label}: only db-setup mounts it read-write (${setupMount}; absent = its container is gone)`);
   const envFiles = ['compose.env', 'database.env', 'runtime.env'].map((x) => fs.readFileSync(path.join(p.secretsDir, x), 'utf8'));
-  check(!envFiles.some((e) => e.includes(pw) || /PASSWORD_FILE|crewflow-owner-password/i.test(e)), `${label}: no env file holds the password or a password-file setting`);
+  check(!envFiles.some((e) => e.includes(pw) || /PASSWORD_FILE|owner-password/i.test(e)), `${label}: no env file holds the password or a password-file setting`);
   for (const svc of ['db-setup', 'rab-api', 'rab-worker', L.DB_SERVICE]) {
     const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 30_000 });
     if (def.code !== 0) continue;
@@ -532,7 +533,7 @@ function checkImage(p, check, n, label) {
   const ref = imageRef(NEW);
   const base = path.posix.basename(L.OWNER_PASSWORD_FILE);
   const insp = L.run('docker', ['image', 'inspect', '-f', '{{json .Config.Env}}|{{json .Config.Volumes}}', ref], { timeout: 60_000 });
-  check(insp.code === 0 && !/PASSWORD_FILE|crewflow-owner-password/i.test(insp.stdout) && !insp.stdout.includes(base), `${label}: \`docker image inspect\`: no password-file setting in the image's Env or Volumes`);
+  check(insp.code === 0 && !/PASSWORD_FILE|owner-password/i.test(insp.stdout) && !insp.stdout.includes(base), `${label}: \`docker image inspect\`: no password-file setting in the image's Env or Volumes`);
   const hist = L.run('docker', ['history', '--no-trunc', '--format', '{{.CreatedBy}}', ref], { timeout: 60_000 });
   check(hist.code === 0 && !hist.stdout.includes(base), `${label}: \`docker history\`: no layer command names the password file`);
   const name = `${p.name}-imagecheck`;
@@ -1250,13 +1251,19 @@ async function blockRace() {
     slogs.forEach((l, i) => evidence(`S9-db-setup-${i + 1}.log`, l));
     const sboot = slogs.map((l) => bootstrapLines(l));
     n(`db-setup 1: ${sboot[0].join(' / ')} || db-setup 2: ${sboot[1].join(' / ')}`);
-    const created = slogs.filter((l) => l.includes(MSG.ready('created'))).length;
-    // Area 2 (388630e3): the bootstrap child re-plans under its advisory lock, so the run that waited reports what it did.
-    check(sr.every((r) => r.code === 0) && slogs.every((l) => /\[owner-bootstrap\] crewflow_owner is ready \(/.test(l)) && created === 1, `two db-setup runs at once: both exit 0, both report crewflow_owner ready, exactly one says "created" (exits ${sr.map((r) => r.code).join(', ')}; created: ${created})`);
+    const created = slogs.filter((l) => MSG.readyCreated.test(l)).length;
+    // The Helm design stores the password file exclusively BEFORE the transaction: the run that loses the race refuses
+    // (the password-file race message) having changed nothing, or (if it came later) finds the role ready.
+    const okRuns = sr.filter((r) => r.code === 0).length;
+    const lostRace = slogs.filter((l, i) => sr[i].code !== 0 && MSG.passwordFileRace.test(l)).length;
+    n(`exits ${sr.map((r) => r.code).join(', ')}; created ${created}; lost the race with the fixed message: ${lostRace}`);
+    check(created === 1 && okRuns >= 1 && okRuns + lostRace === 2, `two db-setup runs at once: exactly one creates crewflow_owner; the other succeeds or refuses with the password-file race message (exits ${sr.map((r) => r.code).join(', ')})`);
     check(exactly01(role(p)), `one crewflow_owner, exactly the 01 attributes (${roleShape(role(p))})`);
-    // The Helm design writes the password file BEFORE the transaction: after two racing runs, the file and the role must agree.
     const pf = p.readPasswordFile();
     check(pf && pf.mode === '400 1000:1000' && p.ownerLoginWorks(pf.password), `after the race the password file (${pf ? pf.mode : 'absent'}) logs in as crewflow_owner: the file and the role agree`);
+    const again = L.run('docker', ['compose', 'run', '--rm', '--no-deps', '-T', 'db-setup'], { env: p.composeEnv(), timeout: 300_000 });
+    keep(p, 'S9-db-setup-again', again.out);
+    check(again.code === 0 && MSG.readyUnchanged.test(again.out), `a third db-setup afterwards: exit ${again.code}, unchanged (the "start again" advice works)`);
     for (const c of setups) L.run('docker', ['rm', '-f', c], { timeout: 120_000 });
     const holder = await p.holdLock(`SELECT pg_advisory_lock(${L.MIGRATION_LOCK_KEY_SQL})`);
     const names = [`${p.name}-race-1`, `${p.name}-race-2`];

@@ -44,7 +44,7 @@ const TEST_APP_NAME = 'dot-test';
  */
 const TARGET_DIR = '/run/crewflow/db-target';
 const TARGET_FILE = `${TARGET_DIR}/target.json`;
-const OWNER_PASSWORD_FILE = process.env.DOT_OWNER_PASSWORD_FILE || `${TARGET_DIR}/crewflow-owner-password`;
+const OWNER_PASSWORD_FILE = process.env.DOT_OWNER_PASSWORD_FILE || `${TARGET_DIR}/owner-password`;
 
 const secrets = {};
 const hex = (n) => crypto.randomBytes(n).toString('hex');

@@ -115,7 +115,7 @@ redacted, never printed); `DOT_OWNER_PASSWORD_FILE` overrides its path.
 | S10A | a | The admin URL forced into the apps: the entrypoints (64) and every runtime process refuse before connecting. |
 | S8 | a | No log holds a password (admin, crewflow_owner, the hand-changed one), an APP_SECRET, a credentialed URL or a verifier. |
 | S11 | dep | `depends_on` ignored: rab-api / rab-worker started before db-setup on a fresh db wait without connecting, then become healthy once db-setup has run. |
-| S9 | race | Two db-setup at once: exactly one creates crewflow_owner; afterwards the password file logs in (file and role agree). Then two API starts at once: one migrate child applies, the other finds CURRENT. |
+| S9 | race | Two db-setup at once: exactly one creates crewflow_owner; the other succeeds or refuses with the password-file race message having changed nothing; afterwards the password file logs in (file and role agree) and a third db-setup is "unchanged". Then two API starts at once: one migrate child applies, the other finds CURRENT. |
 | S4 | ext | An existing SUPERUSER / BYPASSRLS crewflow_owner on the admin path: 64, untouched, nothing created. |
 | S3 | ext | An external non-superuser admin URL: no CREATEROLE / cannot grant -> 64. CREATEROLE + owns the database -> created; restart and APP_SECRET change unchanged; lost file -> reset. A second admin without ADMIN OPTION + lost file -> 64. The admin URL is absent from every app process, `docker exec` process and definition. |
 | M1 | ext | An admin URL naming a missing database: 64 with a clear message, no database created. |
@@ -135,7 +135,7 @@ redacted, never printed); `DOT_OWNER_PASSWORD_FILE` overrides its path.
 ```bash
 DOT_REPOSITORY=127.0.0.1:5055/adolphus DOT_NEW_DIGEST=sha256:<new> DOT_R256_DIGEST=sha256:<0e0a6edd re-pushed> \
 DOT_PG_IMAGE=postgres@sha256:<Debian 16|17|18> DOT_PG15_IMAGE=postgres@sha256:<Debian 15> DOT_REDIS_IMAGE=redis@sha256:<7> \
-[DOT_PROJECT_PREFIX=dbs] [DOT_OWNER_PASSWORD_FILE=/run/crewflow/db-target/<file>] \
+[DOT_PROJECT_PREFIX=dbs] [DOT_OWNER_PASSWORD_FILE=/run/crewflow/db-target/owner-password] \
   node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15] [--only=S1,P1,...]
 ```
 
