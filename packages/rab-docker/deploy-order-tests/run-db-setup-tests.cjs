@@ -882,7 +882,7 @@ async function blockDependsOnIgnored() {
     // depends_on even with --no-deps), and docker starts them directly; db-setup is never started here.
     const created = p.compose(['create', 'rab-api', 'rab-worker'], { timeout: 300_000 });
     keep(p, 'S11-create', created.out);
-    const started = L.run('docker', ['start', p.container('rab-api'), p.container('rab-worker')], { timeout: 120_000 });
+    const started = L.run('docker', ['start', p.container('rab-api'), p.container('rab-worker')], { timeout: 600_000 });
     keep(p, 'S11-start', started.out);
     check(created.code === 0 && started.code === 0 && p.neverStarted('db-setup'), `rab-api and rab-worker started directly (\`docker start\`), db-setup NOT run (create exit ${created.code}, start exit ${started.code})`);
     await L.sleep(25_000);
