@@ -28,16 +28,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { DB_SETUP_LOCK_MESSAGES, dbSetupLockPath } from '../../../owner-login/db-setup-lock';
 import { type DbTarget } from '../../../owner-login/db-target';
 import { readDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
 
 import { buildRuntimeDatabaseUrl, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { ownerPasswordFilePath, ownerPasswordNextFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
-import { Client } from 'pg';
-
 import { createPgClientForUrl, resolvePgEnvironment } from '../../../postgres';
 import { DERIVE_EXIT, runDeriveRuntimeUrl } from './derive-runtime-url';
-import { bootstrapDriverConfigs, OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
+import { bootstrapDriverConfigs, connectSession, OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
 import { OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_BOOTSTRAP_Q4C_DO } from './owner-bootstrap-sql';
 
 /**
@@ -51,6 +50,8 @@ const TARGET_FILE = join(TARGET_DIR, 'target.json');
 const PASSWORD_FILE = ownerPasswordFilePath(TARGET_FILE);
 /** The pending NEW password (security review L1): never left behind by a run that succeeded. */
 const NEXT_FILE = ownerPasswordNextFilePath(PASSWORD_FILE);
+/** The per-volume run lock (F1): never left behind by a run that ended. */
+const LOCK_DIR = dbSetupLockPath(TARGET_FILE);
 const STALE_TARGET: DbTarget = { v: 1, host: 'stale.invalid', port: 1, database: 'stale', params: {} };
 
 class Refusal extends Error {}
@@ -322,6 +323,7 @@ async function reset(ctx: Ctx): Promise<void> {
   writeDbTargetFile(TARGET_FILE, STALE_TARGET);
   rmSync(PASSWORD_FILE, { force: true }); // each scenario starts with no stored password (a fresh setup volume)
   rmSync(NEXT_FILE, { force: true });
+  rmSync(LOCK_DIR, { recursive: true, force: true });
   for (const db of ctx.dbs.splice(0)) await sql(ctx.admin, 'postgres', `DROP DATABASE IF EXISTS ${ident(db)} WITH (FORCE)`);
   await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS crewflow_owner`);
   for (const role of ctx.roles.splice(0).reverse()) await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS ${ident(role)}`);
@@ -530,6 +532,37 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    id: 'l1-concurrent-same-volume',
+    covers: 'security re-review F1: two db-setup runs on the SAME volume while the password file is missing (A4), with a pause between storing the pending password and BEGIN -> one run resets, the other stops (lock, 70) or finds it done; the stored password logs in; a third run is unchanged',
+    async run(ctx) {
+      const db = await createDb(ctx, 'samevol');
+      const url = suUrl(ctx, db);
+      const fresh = await assertFreshCreated(ctx, db, url, 'fresh');
+      rmSync(PASSWORD_FILE, { force: true });
+      const seam = { CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '3000' };
+      const runs = await Promise.all([runChild(url, seam), runChild(url, seam)]);
+      for (const r of runs) assertCleanOutput(r);
+      const updated = runs.filter((r) => r.code === 0 && r.result?.outcome === 'updated');
+      const others = runs.filter((r) => !updated.includes(r));
+      expect(updated.length === 1, `expected exactly one reset, got ${runs.map((r) => `${r.code}/${r.result?.outcome}`).join(', ')}`);
+      for (const o of others) {
+        const locked = o.code === 70 && o.out.includes(DB_SETUP_LOCK_MESSAGES.held);
+        const after = o.code === 0 && o.result?.outcome === 'unchanged';
+        expect(locked || after, `the second run neither stopped on the lock nor found the reset done (${o.code}/${o.result?.outcome})`);
+      }
+      expect(!existsSync(NEXT_FILE), 'a pending password file was left behind');
+      expect(!existsSync(LOCK_DIR), 'the run lock was left behind');
+      const pw = storedPassword('after the race');
+      expect(pw !== fresh.password, 'the stored password was not reset');
+      expect((await canLogin(ctx.admin, OWNER, pw, db)).ok, 'after the race: the stored password does not log in (F1 mismatch)');
+      await assertDeriveFromTargetLogsIn(ctx, db, 'after the race');
+      const third = await runChild(url);
+      assertCleanOutput(third);
+      expectResult(third, 0, 'unchanged', 'third run');
+      return [`one reset, the other: ${others.map((o) => (o.code === 70 ? 'stopped on the lock (70)' : 'unchanged')).join(', ')}; stored password logs in; third run unchanged`];
+    },
+  },
+  {
     id: 'l4-second-deployment-refused',
     covers: 'security review L4 (owner-approved, read-only): two databases on one cluster; db-setup on A, then a FRESH volume on B -> B refuses 64 (one deployment per cluster); A untouched, its password still logs in',
     async run(ctx) {
@@ -565,13 +598,12 @@ const SCENARIOS: Scenario[] = [
         resolvePgEnvironment({ PG_DATABASE_URL: ownerUrl, NODE_ENV: 'test' }, { processRole: 'migrate' }),
         remember(buildRuntimeDatabaseUrl(ownerUrl, fresh.password)),
       );
-      const ro = new Client(configs.ownerUrl);
-      ro.on('error', () => undefined);
-      await ro.connect();
+      // The bootstrap child's own connection code (connectSession) on its own config: no second connection path here.
+      const ro = await connectSession(configs.ownerUrl);
       let code: string | null = null;
       let setting = '';
       try {
-        setting = String((await ro.query<{ v: string }>('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
+        setting = String((await ro.query('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
         try {
           await ro.query('CREATE TABLE public.cf_i1_write_probe (x integer)');
         } catch (error) {
@@ -583,12 +615,10 @@ const SCENARIOS: Scenario[] = [
       expect(setting === 'on', 'the owner-URL session is not read-only');
       expect(code === '25006', `a write on the owner-URL session did not fail with 25006 (got ${code ?? 'no error'})`);
       expect((await sql(ctx.admin, db, `SELECT pg_catalog.to_regclass('public.cf_i1_write_probe') IS NULL AS gone`))[0]?.gone === true, 'the probe table exists');
-      const rw = new Client(configs.admin);
-      rw.on('error', () => undefined);
-      await rw.connect();
+      const rw = await connectSession(configs.admin);
       let adminSetting = '';
       try {
-        adminSetting = String((await rw.query<{ v: string }>('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
+        adminSetting = String((await rw.query('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
       } finally {
         await rw.end().catch(() => undefined);
       }

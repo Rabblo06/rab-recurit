@@ -10,9 +10,11 @@
  * Two files (security review L1):
  *   - `owner-password`: the password crewflow_owner logs in with (the one the apps read);
  *   - `owner-password.next`: a NEW password (first start, or A4 after a lost file), stored exclusively BEFORE the transaction
- *     that sets it, and promoted (renamed over `owner-password`) only after the COMMIT and a successful login with it. A run
- *     that fails in between leaves the role and `owner-password` as they were; the next start promotes `.next` if it logs in,
- *     and deletes it otherwise.
+ *     that sets it, and promoted (renamed over `owner-password`) only after the COMMIT and a successful login with it, and
+ *     only when it still holds THIS run's password (compared in constant time; security re-review F1). A run that fails in
+ *     between leaves `owner-password` as it was; the next start promotes `.next` if it logs in, deletes it only on 28P01
+ *     (or when it is not a usable file), and keeps it on any other error. Runs never overlap on one volume
+ *     (db-setup-lock.ts).
  *
  * Writing is ATOMIC and complete: a new temp file in the SAME directory (exclusive create, mode 0400 set on the descriptor,
  * every byte written, fsync), then renamed (or, exclusive, linked) into place, then the directory fsynced; a reader sees the
@@ -26,7 +28,7 @@
  * FIFO, a wrong owner or mode, a newline or control character, oversized, unreadable — is an OwnerPasswordFileError (exit 64).
  * Errors carry fixed text only, never a value or a path.
  */
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -52,7 +54,26 @@ export const OWNER_PASSWORD_FILE_MESSAGES = {
   badOwnerOrMode: 'The crewflow_owner password file is not owned by this process or is readable by group/other (expected mode 0400). Refusing.',
   invalid: `The crewflow_owner password file does not hold a valid password (1-${OWNER_PASSWORD_MAX_LENGTH} characters, no control characters, no newline, not empty). Refusing.`,
   shortWrite: 'Writing the crewflow_owner password file did not complete. Refusing.',
+  notThisRun: "The pending crewflow_owner password file no longer holds this run's password. Not promoted. Refusing.",
 } as const;
+
+/** The pending file holds another password than the one this run set (F1): never promoted. */
+export class OwnerPasswordMismatchError extends Error {
+  constructor() {
+    super(OWNER_PASSWORD_FILE_MESSAGES.notThisRun);
+    this.name = 'OwnerPasswordMismatchError';
+  }
+}
+
+/**
+ * Constant-time equality of the raw password bytes. The length check first is not a useful leak: the pending password is
+ * always a password this process generated (64 hex characters), so both sides have a fixed, public length.
+ */
+function samePassword(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
+}
 
 /** The password file of a target file path: the same directory, `owner-password`. */
 export function ownerPasswordFilePath(targetFilePath: string): string {
@@ -164,8 +185,16 @@ export function writeOwnerPasswordFile(path: string, password: string, options: 
   }
 }
 
-/** Renames `from` over `to` (the `.next` promotion) and fsyncs the directory. */
-export function promoteOwnerPasswordFile(from: string, to: string, io: OwnerPasswordFs = realFs): void {
+/**
+ * Renames `from` over `to` (the `.next` promotion) and fsyncs the directory. With `expected` (always, in db-setup), `from`
+ * is first read with the strict reader and must hold exactly that password (constant time); otherwise
+ * OwnerPasswordMismatchError (or OwnerPasswordFileError) and nothing is renamed.
+ */
+export function promoteOwnerPasswordFile(from: string, to: string, options: { expected?: string } = {}, io: OwnerPasswordFs = realFs): void {
+  if (options.expected !== undefined) {
+    const pending = readOwnerPasswordFile(from, io);
+    if (pending.state !== 'ready' || !samePassword(pending.password, options.expected)) throw new OwnerPasswordMismatchError();
+  }
   try {
     io.renameSync(from, to);
   } catch (error) {

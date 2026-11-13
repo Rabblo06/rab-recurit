@@ -6,7 +6,7 @@ import { EntityManager } from 'typeorm';
 import { AfterCommitPublisher } from '../after-commit/after-commit-publisher';
 import { EnvironmentService } from '../environment/environment.service';
 import { scanJobTemplate } from '../../worker-shared/queue-enqueue';
-import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+import { boundedPublish, closeQueueProducer, createQueueProducerConnection, ProducerRedisConnection } from '../../worker-shared/queue-producer-connection';
 import { resolveScanPrefix, SCAN_JOB_DATA, SCAN_QUEUES } from '../../worker-shared/queue-registry';
 
 /** The scan queue and job the wake adds: the Worker's own, unchanged statement dispatcher (scan-jobs.ts). */
@@ -55,7 +55,7 @@ export class ShiftStatementWakeService implements OnModuleDestroy {
     if (env.get('WORKER_SCHEDULER') !== 'bullmq') return;
     const prefix = resolveScanPrefix(String(env.get('NODE_ENV') ?? 'development'), env.get('BULLMQ_PREFIX'));
     this.connection = createQueueProducerConnection(env.get('REDIS_URL'));
-    this.queue = new Queue(STATEMENT_WAKE_QUEUE, { connection: this.connection, prefix });
+    this.queue = new Queue(STATEMENT_WAKE_QUEUE, { connection: this.connection, prefix }, ProducerRedisConnection);
     this.queue.on('error', () => undefined);
   }
 

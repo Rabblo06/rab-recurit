@@ -7,7 +7,9 @@
  * The production file UNCHANGED (docker-compose.image.yml, with its bundled `db` service since DB-SETUP) plus the test-only
  * overlays deploy-order-tests/docker-compose.deploy-order.yml (infrastructure) and docker-compose.deploy-order-owner.yml (the
  * db's first start runs the shipped 01-crewflow-owner.sql: the hand-made crewflow_owner of an R254/R256 deployment, whose
- * URL the app services get as the PG_DATABASE_URL interpolation value: the DB-SETUP pass-through path, D5), deployed with
+ * URL compose.env holds as PG_DATABASE_URL: the DB-SETUP pass-through path, D5; PR #125 the Twenty Helm way: only db-setup
+ * reads it, checks it read-only and copies its password into the setup volume's password file; the password is never
+ * changed, so T3's rollback uses the same crewflow_owner URL), deployed with
  * THE documented command, exactly:
  *
  *   docker compose pull && docker compose up -d
@@ -79,7 +81,8 @@ const PREFIX = process.env.DOT_PROJECT_PREFIX || 'dot';
 if (!/^[a-z][a-z0-9-]{0,15}$/.test(PREFIX)) fail('DOT_PROJECT_PREFIX must match ^[a-z][a-z0-9-]{0,15}$');
 const T4_OVERLAY = 'deploy-order-tests/docker-compose.deploy-order-t4.yml';
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
-const MAX_CONTAINERS = 5;
+// + the one-shot db-setup (PR #125 options A and 2), which runs again on every `up -d` while the old stack may still run.
+const MAX_CONTAINERS = 6;
 
 fs.mkdirSync(path.join(OUT, 'evidence'), { recursive: true });
 const secrets = L.secrets;
@@ -90,10 +93,9 @@ let peak = { count: 0, at: '', names: [] };
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** upgrade-lib's redaction: every per-run secret AND every crewflow_owner password read from the password file, plus URLs. */
 function redact(text) {
-  let s = String(text ?? '');
-  for (const v of Object.values(secrets)) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
-  return s.replace(/postgres(ql)?:\/\/[^\s'"]+/g, 'postgres://<redacted>').replace(/redis:\/\/[^\s'"]+/g, 'redis://<redacted>');
+  return L.redact(text);
 }
 function note(line) {
   const l = redact(line);
@@ -191,6 +193,7 @@ class Project {
   }
   /** Container events of this project between two unix-second marks, oldest first. */
   events(since, until) {
+    if (since && since.watcher) return since.stop();
     const r = run('docker', ['events', '--since', String(since), '--until', String(until), '--filter', `label=com.docker.compose.project=${this.name}`, '--filter', 'type=container', '--format', '{{json .}}']);
     return r.stdout
       .split('\n')
@@ -198,6 +201,19 @@ class Project {
       .map((l) => JSON.parse(l))
       .map((e) => ({ t: BigInt(e.timeNano), action: e.Action, service: e.Actor?.Attributes?.['com.docker.compose.service'], id: String(e.Actor?.ID ?? e.id ?? '').slice(0, 12), image: e.Actor?.Attributes?.image }))
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+  }
+  /** psql as crewflow_owner over TLS / the password that logs in now / the password file: upgrade-lib's. */
+  psqlOwner(sql, password) {
+    return L.Project.prototype.psqlOwner.call(this, sql, password ?? this.ownerPasswordNow());
+  }
+  ownerLoginWorks(password) {
+    return L.Project.prototype.ownerLoginWorks.call(this, password);
+  }
+  ownerPasswordNow() {
+    return L.Project.prototype.ownerPasswordNow.call(this);
+  }
+  readPasswordFile() {
+    return L.Project.prototype.readPasswordFile.call(this);
   }
   down() {
     // This run's own disposable project only: its containers, networks and its OWN named volumes (the bundled db's).
@@ -244,10 +260,16 @@ function startPeakSampler(projects) {
 function writeSecrets(dir, opts = {}) {
   L.writeSecrets(dir, opts);
 }
-/** compose.env with the pass-through crewflow_owner URL; a pre-DB-SETUP PREV digest also gets its own rab-worker command. */
-function writeComposeEnv(project, digest) {
-  project.files = [...project.baseFiles, ...(PREV_PRE_DB_SETUP && digest === PREV ? [PREV_OVERLAY] : [])];
-  L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE });
+/**
+ * compose.env with the pass-through crewflow_owner URL; a pre-DB-SETUP PREV digest also gets its own start-up (prev overlay).
+ * PR #125 (the Twenty Helm way): the NEW image's db-setup uses that URL unchanged (read-only checks, its password copied into
+ * the setup volume's password file), so the same URL serves NEW and a rollback to PREV.
+ */
+function writeComposeEnv(project, digest, urlOverride = null) {
+  const prev = PREV_PRE_DB_SETUP && digest === PREV;
+  project.files = [...project.baseFiles, ...(prev ? [PREV_OVERLAY] : [])];
+  const databaseUrl = urlOverride ?? (prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl());
+  L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl });
 }
 
 // ------------------------------------------------------------------------------------------------------------- cases
@@ -316,7 +338,7 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T1
   await step('T1', 'fresh deploy (previous digest) with the one command: rab-api healthy BEFORE rab-worker starts', async (check, n) => {
     writeComposeEnv(main, PREV);
-    const since = nowS() - 1;
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T1-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -358,7 +380,7 @@ async function main() {
   await step('T2', 'deploy the NEW digest with the same command: both recreated on the same new digest; the old Worker stops before the new API starts; the new Worker runs the new code', async (check, n) => {
     const before = appState(main);
     writeComposeEnv(main, NEW);
-    const since = nowS() - 1;
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T2-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -373,6 +395,14 @@ async function main() {
       check(after[s].image === imageRef(NEW), `${s} runs the NEW digest ${after[s].image}`);
     }
     state.t2order = redeployOrder(check, evs, before, after);
+    // PR #125 (the Twenty Helm way): compose.env holds the hand-made crewflow_owner URL; db-setup (its only reader) checks it
+    // read-only and copies its password into the setup volume's password file; the apps build their URL from the target
+    // file + that password file. The password is never changed.
+    const sl = main.logs('db-setup');
+    evidence('T2-db-setup.log', sl);
+    check(main.inspect('db-setup', '{{.State.ExitCode}}') === '0' && /\[owner-bootstrap\] crewflow_owner is ready/.test(sl), 'db-setup used the crewflow_owner URL and exited 0');
+    const pf = main.readPasswordFile();
+    check(pf && pf.password === secrets.owner && main.ownerLoginWorks(secrets.owner), 'the password file holds the URL\'s own (hand-made) password, which still logs in: nothing changed for a rollback');
     const ledger = main.psql('SELECT count(*) FROM core.migrations');
     n(`ledger: ${state.prevLedger} -> ${ledger} migrations (the new API migrated on start)`);
     check(Number(ledger) > Number(state.prevLedger), 'the new API applied the new release\'s migrations on start');
@@ -399,8 +429,16 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T3
   await step('T3', 'rollback to the previous digest with the same command: both go back together; the old API warns the schema is AHEAD and serves', async (check, n) => {
     const before = appState(main);
-    writeComposeEnv(main, PREV);
-    const since = nowS() - 1;
+    // The documented "print the crewflow_owner URL" command (DB-SETUP-LEAD.md, operator command 1), with the CURRENT image,
+    // BEFORE the compose files are switched; its output (SENSITIVE, memory only) is the rollback's PG_DATABASE_URL.
+    const pr = L.printOwnerUrl(main, imageRef(NEW));
+    n(`print command (redacted): ${pr.command}`);
+    const q = pr.parsed;
+    check(pr.code === 0 && pr.lines === 1 && q && q.user === 'crewflow_owner' && q.host === 'db' && q.db === 'crewflow' && main.ownerLoginWorks(q.password), `the documented print command: exit ${pr.code}, one crewflow_owner URL for db/crewflow that logs in (value not shown)`);
+    check(q && !pr.stderr.includes(q.password) && L.run('docker', ['inspect', pr.name], { timeout: 30_000 }).code !== 0, 'nothing but the fixed status line on stderr; the container is gone (--rm, --log-driver none)');
+    writeComposeEnv(main, PREV, q ? pr.url : null);
+    n('the rollback compose.env holds the URL the documented print command produced');
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T3-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -439,7 +477,7 @@ async function main() {
     writeSecrets(t4.secretsDir, { expectedDatabase: 'crewflow_wrong_on_purpose' });
     writeComposeEnv(t4, NEW);
     n('the T4 database.env names PG_EXPECTED_DATABASE_NAME=crewflow_wrong_on_purpose (the API refuses to start on it); the T4 overlay shortens the API health window only');
-    const since = nowS() - 1;
+    const since = L.watchEvents(t4.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = t4.deploy(900_000);
     evidence('T4-deploy.log', d.out);
     check(d.code !== 0, `\`docker compose pull && docker compose up -d\` FAILED as it must (exit ${d.code}) after ${Math.round(d.ms / 1000)} s`);

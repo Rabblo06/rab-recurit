@@ -12,13 +12,16 @@
  *     equivalent is the app user's own secret (twentyhq/twenty@eedb0a73 helm/twenty/templates/secret-db-url.yaml:3-8). It is
  *     NEVER removed by this process;
  *   - `owner-password.next`: a NEW password, stored exclusively before any database change and renamed over
- *     `owner-password` only after the COMMIT and a login with it; a later start promotes it if it logs in and deletes it
- *     otherwise (security review L1).
+ *     `owner-password` only after the COMMIT and a login with it, and only while it still holds this run's password; a
+ *     later start promotes it if it logs in, deletes it on 28P01, keeps it on any other error (security review L1, F1);
+ *   - `.db-setup.lock/`: the per-volume run lock (db-setup-lock.ts, F1): a second run on the same volume stops (exit 70).
+ *     Taken before anything else; the previous target and leftover temp files are removed only while it is held.
  *
  * Exit: 0 ok, 64 refusal, 70 unexpected. Prints fixed `[owner-bootstrap] ...` lines and exactly one `OWNER_BOOTSTRAP_RESULT
  * {...}` line (enums, booleans, a SQLSTATE). Never a URL, a password, a verifier, a host, a database, a login name or a
  * file path. Deliberately does NOT import dotenv: the deployment environment is the only source.
  */
+import { acquireDbSetupLock, type DbSetupLock, DbSetupLockError, removeLeftoverTempFiles } from '../../../owner-login/db-setup-lock';
 import { DbTargetError } from '../../../owner-login/db-target';
 import { dbTargetFilePath, removeDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
 import {
@@ -29,7 +32,7 @@ import {
   removeOwnerPasswordFile,
   writeOwnerPasswordFile,
 } from '../../../owner-login/owner-password-file';
-import { failureResult, OWNER_BOOTSTRAP_LOG_PREFIX, OwnerBootstrapRefusal, resultLine, runOwnerBootstrap } from './owner-bootstrap';
+import { failureResult, OWNER_BOOTSTRAP_LOG_PREFIX, OWNER_BOOTSTRAP_MESSAGES, OwnerBootstrapFailure, OwnerBootstrapRefusal, resultLine, runOwnerBootstrap } from './owner-bootstrap';
 
 async function main(): Promise<number> {
   const log = (line: string) => process.stdout.write(`${OWNER_BOOTSTRAP_LOG_PREFIX} ${line}\n`);
@@ -43,6 +46,36 @@ async function main(): Promise<number> {
     process.stdout.write(`${resultLine(refused)}\n`);
     return refused.exitCode;
   }
+  // Security re-review F1/R1/R2: one run per setup volume (db-setup-lock.ts: db-setup.sh's kernel lock on fd 9, plus the
+  // lock directory). Under it, the previous target and any temp files a killed run left are removed first (db-setup.sh no
+  // longer touches them before the lock is held).
+  let lock: DbSetupLock | null = null;
+  try {
+    lock = acquireDbSetupLock(targetFile, process.env);
+    removeDbTargetFile(targetFile);
+    removeLeftoverTempFiles(targetFile);
+  } catch (error) {
+    // A lock this process took (the cleanup after it failed) is released here; db-setup.sh releases its own on exit.
+    if (lock && !lock.releasedByShell) lock.release();
+    const failure =
+      error instanceof DbSetupLockError
+        ? new OwnerBootstrapFailure(error.message, 'LOCKED')
+        : new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected((error as NodeJS.ErrnoException | null)?.code ?? 'lock'), 'LOCK');
+    log(failure.message);
+    const failed = failureResult(failure);
+    process.stdout.write(`${resultLine(failed)}\n`);
+    return failed.exitCode;
+  }
+  const held = lock as DbSetupLock; // set: the catch above returned otherwise
+  try {
+    return await runLocked(targetFile, log);
+  } finally {
+    // db-setup.sh passed its token: it releases the lock on exit, after its own checks. Otherwise (a direct run) here.
+    if (!held.releasedByShell) held.release();
+  }
+}
+
+async function runLocked(targetFile: string, log: (line: string) => void): Promise<number> {
   const passwordFile = ownerPasswordFilePath(targetFile);
   const nextFile = ownerPasswordNextFilePath(passwordFile);
   const result = await runOwnerBootstrap(process.env, {
@@ -52,7 +85,7 @@ async function main(): Promise<number> {
       readNext: () => readOwnerPasswordFile(nextFile),
       writeMain: (password) => writeOwnerPasswordFile(passwordFile, password),
       writeNextExclusive: (password) => writeOwnerPasswordFile(nextFile, password, { exclusive: true }),
-      promoteNext: () => promoteOwnerPasswordFile(nextFile, passwordFile),
+      promoteNext: (expected) => promoteOwnerPasswordFile(nextFile, passwordFile, { expected }),
       removeNext: () => removeOwnerPasswordFile(nextFile),
     },
     publishTarget: (target) => writeDbTargetFile(targetFile, target),

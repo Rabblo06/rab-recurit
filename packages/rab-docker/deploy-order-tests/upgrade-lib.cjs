@@ -10,10 +10,15 @@
  * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
  * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
  * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
- * interpolation value PG_DATABASE_URL (image.yml commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-}` on rab-api / rab-worker,
- * and db-setup, which then does nothing; PR #125 option A: an admin URL goes in PG_DATABASE_ADMIN_URL and reaches only the
- * one-shot db-setup; a database.env URL would be overridden). An image older than DB-SETUP has no worker-start.sh: its
- * deploys add PREV_OVERLAY, the previous release's own rab-worker command.
+ * interpolation value PG_DATABASE_URL. PR #125, the Twenty Helm way (OWNER-DB-FINAL.md Part A, 2026-11-13):
+ * PG_DATABASE_URL is the ONE database setting (an admin URL, an existing crewflow_owner URL, or unset = the bundled db) and
+ * is interpolated into the one-shot db-setup ONLY. db-setup keeps crewflow_owner's password in a file on its setup volume
+ * (OWNER_PASSWORD_FILE, 0400 1000:1000; random for the bundled db / an admin URL, the URL's own password for a crewflow_owner
+ * URL, which is never changed); rab-api / rab-worker pin `PG_DATABASE_URL: ""` and build the crewflow_owner URL from the
+ * credential-free target file + that password file, both mounted read-only. Project.readPasswordFile() reads it into
+ * memory only (registered for redaction, never printed); Project.ownerPasswordNow() finds the password that logs in. An
+ * image older than DB-SETUP has no worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up,
+ * which also gives its rab-api / rab-worker the PG_DATABASE_URL interpolation value back, as that release's compose files did.
  *
  * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
  */
@@ -32,8 +37,14 @@ const DB_SERVICE = 'db';
 const MIGRATION_LOCK_KEY_SQL = "x'637265776d696772'::bigint";
 /** application_name of the test's own psql sessions, so the admin-connection audit can tell them apart. */
 const TEST_APP_NAME = 'dot-test';
-/** DB-SETUP's derivation (owner-credential.ts): hex(HKDF-SHA256(APP_SECRET, salt = empty, info, 32)). */
-const OWNER_PASSWORD_HKDF_INFO = 'crewflow-owner-db-password-v1';
+/**
+ * The setup volume (crewflow-db-target): db-setup writes the credential-free target and crewflow_owner's password file
+ * there; rab-api / rab-worker mount it read-only. DOT_OWNER_PASSWORD_FILE overrides the file's path (interface of the
+ * CODE agent's owner-password-file.ts).
+ */
+const TARGET_DIR = '/run/crewflow/db-target';
+const TARGET_FILE = `${TARGET_DIR}/target.json`;
+const OWNER_PASSWORD_FILE = process.env.DOT_OWNER_PASSWORD_FILE || `${TARGET_DIR}/owner-password`;
 
 const secrets = {};
 const hex = (n) => crypto.randomBytes(n).toString('hex');
@@ -46,19 +57,16 @@ function newSecrets() {
   return secrets;
 }
 
-/** Derived crewflow_owner passwords seen in this run: redacted like every secret, kept apart from `secrets`. */
-const derivedValues = new Set();
-
-/** The crewflow_owner password DB-SETUP derives from an APP_SECRET (never printed; registered for redaction). */
-function derivedOwnerPassword(appSecret) {
-  const v = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(appSecret, 'utf8'), Buffer.alloc(0), OWNER_PASSWORD_HKDF_INFO, 32)).toString('hex');
-  derivedValues.add(v);
+/** Secrets the containers made (crewflow_owner passwords read from the password file): redacted like every secret. */
+const runtimeSecrets = new Set();
+function rememberSecret(v) {
+  if (v && v.length >= 8) runtimeSecrets.add(v);
   return v;
 }
 
 function redact(text) {
   let s = String(text ?? '');
-  for (const v of [...Object.values(secrets), ...derivedValues]) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
+  for (const v of [...Object.values(secrets), ...runtimeSecrets]) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
   return s.replace(/postgres(ql)?:\/\/[^\s'"]+/g, 'postgres://<redacted>').replace(/rediss?:\/\/[^\s'"]+/g, 'redis://<redacted>');
 }
 
@@ -82,6 +90,52 @@ function runAsync(cmd, args, opts = {}) {
   child.stderr.on('data', (b) => (out += b.toString('utf8')));
   const done = new Promise((resolve) => child.on('close', (code) => resolve({ code: code ?? -1, out })));
   return { child, done, output: () => out };
+}
+
+/** Container events of a project, parsed and sorted (oldest first). */
+function parseEvents(text) {
+  return String(text)
+    .split('\n')
+    .filter((l) => l.trim().startsWith('{'))
+    .map((l) => JSON.parse(l))
+    .map((e) => ({ t: BigInt(e.timeNano), action: e.Action, service: e.Actor?.Attributes?.['com.docker.compose.service'], id: String(e.Actor?.ID ?? e.id ?? '').slice(0, 12), image: e.Actor?.Attributes?.image }))
+    .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+}
+/**
+ * A LIVE stream of a project's container events, started before a deploy. `docker events --since` only replays the daemon's
+ * small in-memory buffer, which other projects' health-check exec events overflow on a busy host; a stream sees every event.
+ * Pass it to Project.events(watcher) to stop it and get the events.
+ */
+const liveWatchers = new Set();
+process.on('exit', () => {
+  for (const c of liveWatchers) {
+    try {
+      c.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+});
+function watchEvents(projectName) {
+  const child = spawn('docker', ['events', '--filter', `label=com.docker.compose.project=${projectName}`, '--filter', 'type=container', '--format', '{{json .}}'], { env: { ...process.env, MSYS_NO_PATHCONV: '1' }, stdio: ['ignore', 'pipe', 'ignore'] });
+  let buf = '';
+  child.stdout.on('data', (b) => (buf += b.toString('utf8')));
+  // Never keeps the run alive or outlives it: unref'd, and killed at exit if a failed case never stopped it.
+  child.unref();
+  child.stdout.unref();
+  liveWatchers.add(child);
+  child.on('exit', () => liveWatchers.delete(child));
+  return {
+    watcher: true,
+    stop() {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      return parseEvents(buf);
+    },
+  };
 }
 
 async function waitFor(label, fn, timeoutMs, everyMs = 3000) {
@@ -137,8 +191,8 @@ class Project {
   compose(args, opts = {}) {
     return run('docker', ['compose', ...args], { ...opts, env: { ...this.composeEnv(), ...(opts.env ?? {}) } });
   }
-  composeAsync(args) {
-    return runAsync('docker', ['compose', ...args], { env: this.composeEnv() });
+  composeAsync(args, env = {}) {
+    return runAsync('docker', ['compose', ...args], { env: { ...this.composeEnv(), ...env } });
   }
   /** THE documented deploy, exactly. */
   deploy(timeoutMs = 1_500_000) {
@@ -189,11 +243,11 @@ class Project {
    * psql as crewflow_owner over TLS (verify-full against the db's own CA), from inside the db container but to its NETWORK
    * address (the service name `db`), the path the app containers take.
    */
-  psqlOwner(sql, password = this.ownerPassword ?? secrets.owner) {
+  psqlOwner(sql, password = this.ownerPasswordNow()) {
     const r = run(
       'docker',
       ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/tmp/ca.crt dbname=crewflow user=crewflow_owner'],
-      { input: sql, env: { PGPASSWORD: password }, timeout: 120_000 },
+      { input: sql, env: { PGPASSWORD: password }, timeout: 240_000 },
     );
     if (r.code !== 0) throw new Error(`psql (owner) failed (${r.code}): ${redact(r.out).slice(0, 800)}`);
     return r.stdout.trim();
@@ -207,6 +261,51 @@ class Project {
       this.lastOwnerLoginError = redact(e && e.message ? e.message : String(e)).slice(0, 300);
       return false;
     }
+  }
+  /**
+   * crewflow_owner's password file on the setup volume, as rab-api sees it (uid 1000, read-only mount): `null` when it is
+   * not there, else { password, mode: '<octal> <uid>:<gid>' }. Read in memory only: the value is registered for redaction
+   * and never written or printed. Uses the running rab-api when there is one, else a one-off rab-api container (no deps).
+   */
+  readPasswordFile() {
+    const script = `f=${OWNER_PASSWORD_FILE}; [ -f "$f" ] || { echo ABSENT; exit 0; }; stat -c '%a %u:%g' "$f"; cat "$f"`;
+    const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
+    const r = running
+      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
+      : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
+    if (r.code !== 0) throw new Error(`reading the password file failed (${r.code}): ${redact(r.out).slice(0, 300)}`);
+    const lines = r.stdout.split('\n');
+    if (lines[0].trim() === 'ABSENT') return null;
+    const mode = lines[0].trim();
+    const password = rememberSecret(lines.slice(1).join('\n').replace(/\n$/, ''));
+    return { password, mode };
+  }
+  /** Whether a path exists on the setup volume (as rab-api sees it; the running one, else a one-off). */
+  setupPathExists(file) {
+    const script = `[ -e '${file}' ] && echo YES || echo NO`;
+    const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
+    const r = running
+      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
+      : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
+    if (r.code !== 0) throw new Error(`checking ${file} failed (${r.code})`);
+    return r.stdout.trim() === 'YES';
+  }
+  /**
+   * The crewflow_owner password that logs in NOW. Tried in order: the one the test last set, the password file's, the
+   * hand-made one (01-crewflow-owner.sql). With the db not running: the one the test last set, else the hand-made one.
+   */
+  ownerPasswordNow() {
+    if (this.inspect(DB_SERVICE, '{{.State.Running}}') !== 'true') return this.ownerPassword ?? secrets.owner;
+    let filePw = null;
+    try {
+      const f = this.readPasswordFile();
+      filePw = f && f.password;
+    } catch {
+      filePw = null;
+    }
+    const candidates = [...new Set([this.ownerPassword, filePw, secrets.owner].filter(Boolean))];
+    for (const c of candidates) if (this.ownerLoginWorks(c)) return c;
+    return this.ownerPassword ?? secrets.owner;
   }
   /** An idle superuser transaction holding `lockSql` until release() (stdin kept open; no statement keeps a snapshot). */
   async holdLock(lockSql) {
@@ -233,13 +332,14 @@ class Project {
     });
   }
   healthz() {
-    const r = run('docker', ['exec', this.container('rab-api'), 'wget', '-qO-', 'http://localhost:3000/healthz'], { timeout: 30_000 });
+    const r = run('docker', ['exec', this.container('rab-api'), 'wget', '-qO-', 'http://localhost:3000/healthz'], { timeout: 120_000 });
     return { code: r.code, body: r.stdout.trim() };
   }
   logs(service) {
     return run('docker', ['logs', this.container(service)], { timeout: 120_000 }).out;
   }
   events(since, until) {
+    if (since && since.watcher) return since.stop();
     const r = run('docker', ['events', '--since', String(since), '--until', String(until), '--filter', `label=com.docker.compose.project=${this.name}`, '--filter', 'type=container', '--format', '{{json .}}']);
     return r.stdout
       .split('\n')
@@ -304,16 +404,77 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
   }
 }
 
+/**
+ * The documented "print the crewflow_owner URL" command (OWNER-LOGIN-DEPLOYMENT.md §3.6 / DB-SETUP-LEAD.md operator
+ * command 1; CREWFLOW_RUNTIME_URL_FD=4 since f11bfb54), preceded by its `docker volume inspect` check, run exactly as
+ * documented plus `--name` (every container of these suites is named): the CURRENT image, the project's setup volume
+ * read-only, no network, read-only root, uid 1000, `--log-driver none`. stdout (the URL, SENSITIVE) stays in memory; the
+ * documented `2>/dev/null` is stderr, which is captured here only to prove it carries no URL. Returns { code, url, stderr,
+ * parsed } (parsed: user/host/port/db/password, password registered for redaction).
+ */
+function printOwnerUrl(project, imageRef) {
+  const name = `${project.name}-print-url`;
+  const volume = `${project.name}_crewflow-db-target`;
+  // The runbook's first line: the volume must exist (a typo in -v silently creates a new, EMPTY volume).
+  const vi = run('docker', ['volume', 'inspect', volume], { timeout: 60_000 });
+  if (vi.code !== 0) return { code: -2, url: '', lines: 0, stderr: `docker volume inspect ${volume} failed`, parsed: null, name, command: `docker volume inspect ${volume}` };
+  const r = spawnSync(
+    'docker',
+    [
+      'run', '--rm', '--pull', 'never', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only',
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000',
+      '-v', `${volume}:${TARGET_DIR}:ro`,
+      '-e', `CREWFLOW_DB_TARGET_FILE=${TARGET_FILE}`,
+      '--entrypoint', 'sh', imageRef,
+      // Exactly the runbook (OWNER-LOGIN-DEPLOYMENT.md §3.6): CREWFLOW_RUNTIME_URL_FD=4 states that fd 4 is the caller's
+      // pipe; no -t (derive never writes the URL to a terminal). spawnSync's stdout is a pipe.
+      '-c', 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2',
+    ],
+    { cwd: RD, env: { ...process.env, MSYS_NO_PATHCONV: '1' }, encoding: 'utf8', timeout: 180_000 },
+  );
+  const url = (r.stdout || '').trim();
+  let parsed = null;
+  try {
+    const u = new URL(url);
+    parsed = { protocol: u.protocol, user: decodeURIComponent(u.username), password: rememberSecret(decodeURIComponent(u.password)), host: u.hostname, port: u.port || '5432', db: u.pathname.slice(1), params: [...u.searchParams.keys()] };
+  } catch {
+    parsed = null;
+  }
+  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --pull never --name ${name} --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -v ${volume}:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
+}
+
+/**
+ * The documented "change the password on purpose" removal (DB-SETUP-LEAD.md, Helm model, operator command 2; env-free):
+ * `docker run --rm --pull never --network none --log-driver none --read-only --cap-drop ALL --security-opt no-new-privileges
+ * --user 1000:1000 -v <project>_crewflow-db-target:/v <IMAGE> rm -f /v/owner-password /v/owner-password.next`, plus `--name`. `script` replaces the rm (test-only file states, e.g. an empty file). No env, no
+ * database connection, no secret in the command.
+ */
+function onSetupVolume(project, imageRef, args, label = 'setup-volume') {
+  const name = `${project.name}-${label}`;
+  const cmd = ['run', '--rm', '--pull', 'never', '--name', name, '--network', 'none', '--log-driver', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000', '-v', `${project.name}_crewflow-db-target:/v`, imageRef, ...args];
+  const r = run('docker', cmd, { timeout: 180_000 });
+  return { ...r, command: `docker ${cmd.join(' ').replace(imageRef, '<IMAGE>')}` };
+}
+function removePasswordFile(project, imageRef) {
+  const base = path.posix.basename(OWNER_PASSWORD_FILE);
+  return onSetupVolume(project, imageRef, ['rm', '-f', `/v/${base}`, `/v/${base}.next`], 'rm-password-file');
+}
+
+/** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
+function dbUrl(user, password, database = 'crewflow') {
+  return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/${database}?sslmode=verify-full`;
+}
+
 /** The pass-through URL: the hand-made crewflow_owner at the bundled db, verify-full (as every R254/R256 deployment has). */
 function ownerUrl(password = secrets.owner) {
-  return `postgresql://crewflow_owner:${password}@db:5432/crewflow?sslmode=verify-full`;
+  return dbUrl('crewflow_owner', password);
 }
 
 /**
  * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
- * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125 option A: a
- * crewflow_owner URL is written as PG_DATABASE_URL (rab-api / rab-worker receive it: pass-through), any other login as
- * PG_DATABASE_ADMIN_URL (interpolated into the one-shot db-setup only).
+ * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125: whatever
+ * the login (an admin, crewflow_owner), it is written as PG_DATABASE_URL, the ONE database setting, which the compose
+ * files interpolate into the one-shot db-setup only (there is no second, admin-only variable any more).
  */
 function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
@@ -324,7 +485,7 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage, dat
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
     PG_DATABASE_PASSWORD: secrets.dbPassword,
-    ...(databaseUrl ? { [/^postgres(ql)?:\/\/crewflow_owner[:@]/.test(databaseUrl) ? 'PG_DATABASE_URL' : 'PG_DATABASE_ADMIN_URL']: databaseUrl } : {}),
+    ...(databaseUrl ? { PG_DATABASE_URL: databaseUrl } : {}),
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',
@@ -403,8 +564,15 @@ module.exports = {
   SEEDED_TABLES,
   TEST_APP_NAME,
   b64,
+  OWNER_PASSWORD_FILE,
+  TARGET_DIR,
+  TARGET_FILE,
   compareFacts,
-  derivedOwnerPassword,
+  dbUrl,
+  onSetupVolume,
+  printOwnerUrl,
+  rememberSecret,
+  removePasswordFile,
   facts,
   fmtEvents,
   hex,
@@ -412,6 +580,7 @@ module.exports = {
   newSecrets,
   nowS,
   ownerUrl,
+  parseEvents,
   redact,
   rlsCheck,
   run,
@@ -419,6 +588,7 @@ module.exports = {
   secrets,
   sleep,
   waitFor,
+  watchEvents,
   writeComposeEnv,
   writeSecrets,
 };
