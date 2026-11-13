@@ -15,14 +15,22 @@ function good() {
   return {
     services: {
       'rab-redis': { image: 'redis@sha256:x' },
+      db: { image: `\${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:${'f9'.repeat(32)}}` },
       'rab-api': {
         image: IMG,
+        entrypoint: ['./api-prestart.sh'],
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
-        depends_on: { 'rab-redis': { condition: 'service_healthy' } },
+        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
         stop_grace_period: '40s',
+      },
+      'db-setup': {
+        image: IMG,
+        entrypoint: ['./db-setup.sh'],
+        depends_on: { db: { condition: 'service_healthy' } },
       },
       'rab-worker': {
         image: IMG,
+        entrypoint: ['./worker-start.sh'],
         environment: { DISABLE_DB_MIGRATIONS: 'true', DISABLE_CRON_JOBS_REGISTRATION: 'true' },
         depends_on: {
           'rab-redis': { condition: 'service_healthy' },
@@ -421,7 +429,7 @@ const { allowsDefaultDigest, PINNED_DIGEST_IMAGE_REF } = require('./compose-one-
 const DIGEST = `sha256:${'d7'.repeat(32)}`;
 const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
 const allImages = (m, image) => {
-  for (const n of ['rab-api', 'rab-worker']) m.services[n].image = image;
+  for (const n of ['rab-api', 'rab-worker', 'db-setup']) m.services[n].image = image;
   return m;
 };
 const PROD = { allowDefaultDigest: true };
@@ -481,7 +489,7 @@ test('DENIAL: one service with the default, another without (one expression for 
 test('only the production.yml combination may carry a default', () => {
   const allowed = DEPLOY_COMBOS.filter(allowsDefaultDigest).map((c) => c.join(' + '));
   assert.deepEqual(allowed, ['docker-compose.production.yml']);
-  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'docker-compose.local-db.yml']), false);
+  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'staging/docker-compose.staging.yml']), false);
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(withDefault(DIGEST)));
 });
 
@@ -489,7 +497,7 @@ test('committed files: production.yml pins one full digest on every app service;
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
   const prod = imageLines(read('docker-compose.production.yml'));
-  assert.equal(prod.length, 2, 'rab-api and rab-worker (rab-ops was removed)');
+  assert.equal(prod.length, 3, 'rab-api, rab-worker and db-setup (rab-ops was removed)');
   assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
   const image = imageLines(read('docker-compose.image.yml'));
@@ -498,6 +506,57 @@ test('committed files: production.yml pins one full digest on every app service;
     assert.ok(!/CREWFLOW_IMAGE_TAG:?-/.test(line), `docker-compose.image.yml must keep no default: ${line}`);
     assert.ok(/CREWFLOW_IMAGE_TAG:\?/.test(line), `docker-compose.image.yml must require the digest: ${line}`);
   }
+});
+
+// DB-SETUP (owner decisions D1 a / D3, T-5): the bundled db and the Worker wrapper.
+test('DENIAL DB-SETUP: no bundled db, a db image by tag / from another repository / without the digest default', () => {
+  let m = good();
+  delete m.services.db;
+  refused(m, /db: the bundled database service is missing/);
+  for (const image of ['postgres:16', 'postgres:16@sha256:' + 'f9'.repeat(32), '${CREWFLOW_POSTGRES_IMAGE:-postgres:16}', '${CREWFLOW_POSTGRES_IMAGE:?x}',
+    `\${CREWFLOW_POSTGRES_IMAGE:-evil/postgres@sha256:${'f9'.repeat(32)}}`, `\${OTHER_IMAGE:-postgres@sha256:${'f9'.repeat(32)}}`, `\${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:${'f9'.repeat(31)}}`]) {
+    m = good();
+    m.services.db.image = image;
+    refused(m, /db: image must be/);
+  }
+  m = good();
+  m.services.db.build = { context: '.' };
+  refused(m, /db: has a build section/);
+});
+
+test('DENIAL DB-SETUP: rab-api not waiting for a healthy db; the Worker started without worker-start.sh', () => {
+  let m = good();
+  delete m.services['rab-api'].depends_on.db;
+  refused(m, /rab-api: must depend on db with condition service_healthy/);
+  m = good();
+  m.services['rab-api'].depends_on.db.condition = 'service_started';
+  refused(m, /rab-api: must depend on db/);
+  // DB-SETUP PID 1: the cleaning scripts are the entrypoint; no command; no compose init.
+  for (const [svc, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh']]) {
+    for (const ep of [undefined, ['/sbin/tini', '-s', '--'], ['/sbin/tini', '-s', '--', script], ['sh', '-c', script], ['node', 'x.js']]) {
+      m = good();
+      m.services[svc].entrypoint = ep;
+      refused(m, new RegExp(`${svc}: entrypoint must be exactly`));
+    }
+    m = good();
+    m.services[svc].command = [script];
+    refused(m, new RegExp(`${svc}: must have no command`));
+    m = good();
+    m.services[svc].init = true;
+    refused(m, new RegExp(`${svc}: init: true is refused`));
+  }
+});
+
+test('committed files: production.yml and image.yml pin the SAME bundled db image (one digest)', () => {
+  const { DB_IMAGE_REF } = require('./compose-one-image.cjs');
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const dbImage = (text) => [...text.matchAll(/^\s+image:\s*(\$\{CREWFLOW_POSTGRES_IMAGE[^}]*\})\s*$/gm)].map((x) => x[1]);
+  const prod = dbImage(read('docker-compose.production.yml'));
+  const image = dbImage(read('docker-compose.image.yml'));
+  assert.equal(prod.length, 1);
+  assert.deepEqual(image, prod);
+  assert.ok(DB_IMAGE_REF.test(prod[0]), prod[0]);
+  assert.ok(!fs.existsSync(path.join(__dirname, '..', 'docker-compose.local-db.yml')), 'docker-compose.local-db.yml is retired (DB-SETUP D3)');
 });
 
 // ---- Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
@@ -513,10 +572,10 @@ test('DENIAL: a service with any non-empty profiles, whatever its name or profil
   assert.ok(!checkModel(m, 'fixture').some((p) => /has profiles/.test(p)));
 });
 
-/** A copy of a committed deploy file with `rab-maint` (profile "maint", reading .env.ops) added before `volumes:`. */
+/** A copy of a committed deploy file with `rab-maint` (profile "maint", reading .env.ops) added before the top-level `networks:` (DB-SETUP added it before `volumes:`). */
 function withMaintService(file) {
   const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
-  const weakened = src.replace(/\nvolumes:\n/, [
+  const weakened = src.replace(/\nnetworks:\n/, [
     '',
     '  rab-maint:',
     '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
@@ -524,7 +583,7 @@ function withMaintService(file) {
     '    env_file:',
     '      - .env.ops',
     '',
-    'volumes:',
+    'networks:',
     '',
   ].join('\n'));
   assert.notEqual(weakened, src, `${file}: the fixture edit did not apply`);
@@ -545,3 +604,43 @@ for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']
     }
   });
 }
+
+// DB-SETUP + PR #124: the bundled db is an always-on service (no profile), so the any-profile rule accepts it; a profiled db
+// is refused like every other profile-gated service.
+test('DB-SETUP + PR #124: the bundled db has no profile and passes the any-profile rule; a profiled db is refused', () => {
+  assert.ok(!checkModel(good(), 'fixture').some((p) => /has profiles/.test(p)));
+  const m = good();
+  m.services.db.profiles = ['db'];
+  refused(m, /db: has profiles/);
+  for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    const dbBlock = text.slice(text.indexOf('\n  db:\n'), text.indexOf('\n  rab-', text.indexOf('\n  db:\n')));
+    assert.ok(dbBlock.length > 100 && !/^\s+profiles\s*:/m.test(dbBlock), `${f}: the committed db has no profiles key`);
+  }
+});
+
+// PR #125 option A: the one-shot db-setup runs the same image and rab-api waits for it.
+test('DENIAL option A: db-setup missing, on another image, with another entrypoint, or not waited for', () => {
+  let m = good();
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+  delete m.services['db-setup'];
+  refused(m, /db-setup is missing/);
+  m = good();
+  m.services['db-setup'].image = IMG.replace('CREWFLOW_IMAGE_TAG', 'CREWFLOW_SETUP_TAG');
+  refused(m, /db-setup: image/);
+  m = good();
+  m.services['db-setup'].entrypoint = ['./api-prestart.sh'];
+  refused(m, /db-setup: entrypoint must be exactly \["\.\/db-setup\.sh"\]/);
+  m = good();
+  m.services['db-setup'].init = true;
+  refused(m, /db-setup: init: true is refused/);
+  m = good();
+  delete m.services['rab-api'].depends_on['db-setup'];
+  refused(m, /rab-api: must depend on db-setup with condition service_completed_successfully/);
+  m = good();
+  m.services['rab-api'].depends_on['db-setup'].condition = 'service_started';
+  refused(m, /rab-api: must depend on db-setup/);
+  m = good();
+  delete m.services['db-setup'].depends_on;
+  refused(m, /db-setup: must depend on db with condition service_healthy/);
+});

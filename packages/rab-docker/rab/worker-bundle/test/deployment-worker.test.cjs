@@ -72,6 +72,20 @@ function serviceEnv(rel, service, vars = {}) {
 }
 
 const WORKER_COMMAND = ['node', 'packages/rab-worker/dist/main.js'];
+/**
+ * DB-SETUP (database setup like Twenty, T-5; PID 1 lead decision 2026-11-12): the two DEPLOY files make worker-start.sh the
+ * Worker's ENTRYPOINT (PID 1, no command, no compose init). It derives the crewflow_owner URL from the admin PG_DATABASE_URL,
+ * unsets the admin credential and only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL
+ * works) with a clean environment. The dev, QA and test files keep WORKER_COMMAND under compose's init (they hand the
+ * Worker its own URL directly).
+ */
+const DEPLOY_WORKER_ENTRYPOINT = ['./worker-start.sh'];
+const TINI = ['/sbin/tini', '-s', '--'];
+const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml'];
+/** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
+const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
+/** PR #125 option A: db-setup's target file, read-only (the crewflow_owner URL is built from it). */
+const DB_TARGET_MOUNT = 'crewflow-db-target:/run/crewflow/db-target:ro';
 const JOBS_HEALTH = ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs'];
 const JOBS_ENV = {
   HOME: '/nonexistent',
@@ -130,8 +144,15 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
       const { env, svc } = serviceEnv(rel, service);
       const text = JSON.stringify(svc);
       for (const retired of RETIRED) assert.ok(!text.includes(retired), `${service}: still references ${retired}`);
-      assert.deepEqual(svc.command, WORKER_COMMAND);
-      assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
+      if (DEPLOY_FILES.includes(rel)) {
+        // DB-SETUP PID 1: the script is PID 1 and execs tini itself; docker-init would keep the admin URL at PID 1.
+        assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
+        assert.equal(svc.command, undefined, `${service}: no command (worker-start.sh takes none)`);
+        assert.notEqual(svc.init, true, `${service}: no compose init (worker-start.sh execs tini as PID 1)`);
+      } else {
+        assert.deepEqual(svc.command, WORKER_COMMAND);
+        assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
+      }
       assert.equal(String(svc.user), '1000:1000');
       assert.equal(svc.read_only, true);
       assert.deepEqual(svc.cap_drop, ['ALL']);
@@ -153,6 +174,22 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
     });
   }
 }
+
+test('DB-SETUP: worker-start.sh execs exactly the Worker command (and nothing else starts the Worker in the deploy files)', () => {
+  const script = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/worker-start.sh'), 'utf8');
+  const execs = script.split(/\r?\n/).filter((l) => /^\s*exec\s/.test(l)).map((l) => l.trim());
+  assert.deepEqual(execs, [`exec ${[...TINI, ...WORKER_COMMAND].join(' ')}`]);
+  // api-prestart.sh, rab-api's entrypoint, hands PID 1 to the same tini (main.js, and the owner CLI one-off).
+  const prestart = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/api-prestart.sh'), 'utf8');
+  const apiExecs = prestart.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).filter((l) => /\bexec \//.test(l) || /\bexec node\b/.test(l)).map((l) => l.trim());
+  assert.deepEqual(apiExecs, [
+    'exec /sbin/tini -s -- "$@"',
+    'CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
+    'exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
+  ]);
+  const dockerfile = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/Dockerfile'), 'utf8');
+  assert.ok(/^COPY --chmod=0555 packages\/rab-docker\/rab\/worker-start\.sh \.\/worker-start\.sh$/m.test(dockerfile), 'the image ships worker-start.sh read+execute only');
+});
 
 test('production and image compose: the Worker provisions in-process at the pinned 5 s', { skip }, () => {
   for (const rel of ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml']) {
@@ -176,14 +213,18 @@ function sizeMiB(value) {
   return Number(m[1]) * (m[2].toLowerCase() === 'g' ? 1024 : 1);
 }
 
-/** No privileged mode, host namespace, device, host mount (Docker socket included) or extra capability source. */
+/**
+ * No privileged mode, host namespace, device, host mount (Docker socket included) or extra capability source. DB-SETUP
+ * (D1 a): the volumes allowed are the bundled db's CA volume and (option A) db-setup's target volume, both read-only (named
+ * volumes, never a host path).
+ */
 function assertNoHostAccess(name, svc) {
   assert.notEqual(svc.privileged, true, `${name}: privileged`);
   for (const key of ['network_mode', 'pid', 'ipc', 'uts', 'userns_mode', 'cgroup']) {
     assert.ok(!/^host$/i.test(String(svc[key] ?? '')), `${name}: ${key}=host`);
   }
   assert.equal(svc.devices, undefined, `${name}: devices`);
-  assert.equal(svc.volumes, undefined, `${name}: volumes (no host mount, no Docker socket)`);
+  assert.deepEqual(svc.volumes ?? [], [DB_CA_MOUNT, DB_TARGET_MOUNT], `${name}: volumes (no host mount, no Docker socket; only the bundled db's CA and db-setup's target, read-only)`);
   assert.equal(svc.volumes_from, undefined, `${name}: volumes_from`);
   for (const opt of svc.security_opt ?? []) {
     assert.ok(!/unconfined|label[:=]disable/i.test(opt), `${name}: security_opt ${opt}`);
@@ -195,6 +236,10 @@ test(
   { skip },
   () => {
     const svc = loadCompose('packages/rab-docker/docker-compose.production.yml').services['rab-api'];
+    // DB-SETUP PID 1: api-prestart.sh is PID 1 and hands PID 1 to tini once the environment is clean.
+    assert.deepEqual(svc.entrypoint, ['./api-prestart.sh']);
+    assert.equal(svc.command, undefined);
+    assert.notEqual(svc.init, true);
     assert.equal(svc.user, '1000:1000');
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
@@ -218,9 +263,13 @@ test(
     // Owner login (2026-11-04): the root launcher and its per-child identities are retired; the Worker runs main.js directly
     // as the image's non-root `node` user, so it needs no capability at all.
     assert.equal(svc.user, '1000:1000');
-    assert.deepEqual(svc.command, ['node', 'packages/rab-worker/dist/main.js']);
-    // The watchdog's SIGKILL is ignored for PID 1: Docker's init must be PID 1.
-    assert.equal(svc.init, true);
+    // DB-SETUP T-5 / PID 1: worker-start.sh is PID 1; it execs `/sbin/tini -s -- node packages/rab-worker/dist/main.js`
+    // after the URL swap, so tini (PID 1, a clean environment) runs the Worker as its child and the watchdog's SIGKILL works.
+    // ASSERTION CHANGE (lead decision 2026-11-12): compose's init is no longer required but refused (docker-init at PID 1
+    // would keep the admin URL readable in /proc/1/environ).
+    assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
+    assert.equal(svc.command, undefined);
+    assert.notEqual(svc.init, true);
     assert.equal(svc.read_only, true);
     assert.deepEqual(svc.cap_drop, ['ALL']);
     assert.deepEqual(svc.cap_add ?? [], [], 'no capability: there is no identity switch any more');
@@ -245,12 +294,27 @@ test(
   },
 );
 
-test('H6 production file: nothing but rab-api publishes a port, and no PostgreSQL service is defined in it', { skip }, () => {
-  const services = loadCompose('packages/rab-docker/docker-compose.production.yml').services;
+// ASSERTION CHANGE (owner decisions D1 a / D3, DB-SETUP 2026-11-12): the production file now bundles ONE PostgreSQL, `db`
+// (Twenty's model). It is the only PostgreSQL service, never published, on the internal crewflow-db network only, as non-root
+// 999:999 with a read-only root, no capability and no-new-privileges.
+test('H6 production file: nothing but rab-api publishes a port; the only PostgreSQL service is the bundled db, unpublished and internal', { skip }, () => {
+  const doc = loadCompose('packages/rab-docker/docker-compose.production.yml');
+  const services = doc.services;
   for (const [name, svc] of Object.entries(services)) {
     if (name !== 'rab-api') assert.equal(svc.ports, undefined, `${name} publishes a port`);
-    assert.ok(!/postgres/i.test(String(svc.image ?? '')), `${name} runs PostgreSQL inside this stack`);
+    if (name !== 'db') assert.ok(!/postgres/i.test(String(svc.image ?? '')), `${name} runs PostgreSQL inside this stack`);
   }
+  const db = services.db;
+  assert.ok(db, 'the bundled db');
+  assert.match(String(db.image), /^\$\{CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:[0-9a-f]{64}\}$/);
+  assert.deepEqual(db.networks, ['crewflow-db']);
+  assert.equal(doc.networks?.['crewflow-db']?.internal, true);
+  assert.equal(String(db.user), '999:999');
+  assert.equal(db.read_only, true);
+  assert.deepEqual(db.cap_drop, ['ALL']);
+  assert.equal(db.cap_add, undefined);
+  assert.ok((db.security_opt ?? []).includes('no-new-privileges:true'));
+  assert.equal(db.privileged, undefined);
 });
 
 test('H6 CREWFLOW_RUNTIME_ISOLATION in the production file: unset (= warn) or a strict value on rab-api / rab-worker', { skip }, () => {

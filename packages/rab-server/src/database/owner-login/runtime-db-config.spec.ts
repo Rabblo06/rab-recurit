@@ -110,6 +110,9 @@ const CASES: Array<[string, Env]> = [
   ['provisioning deferral seam in production', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'production', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['provisioning deferral seam under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'test', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
+  // DB-SETUP (plan §2.2): the prestart shell holds the database ADMIN URL until the swap, so neither copy applies the
+  // runtime-login rule (checkRuntimeLogin; runtime-login.spec.ts) — both accept it here.
+  ['production with an admin PG_DATABASE_URL (runtime-login rule is not part of this parser)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', PG_DATABASE_URL: 'postgres://doadmin:S3cret@db:5432/crewflow?sslmode=verify-full' }],
   ['DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS are outside this parser (CLI authority; the runtime guard refuses them)', { CREWFLOW_MIGRATE_ON_START: 'false', DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }],
 ];
 

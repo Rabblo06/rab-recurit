@@ -28,6 +28,12 @@
  *     local-build.yml) no service has any profile at all (every service starts with the stack);
  *   - no service names .env.ops, carries a value of the ops sentinel, or holds any ops-only name (CREWFLOW_OPS_*, PG_OPS_*).
  * opsRefusalChecks() is the pure part; compose-credential-isolation.ops.test.cjs proves each refusal.
+ *
+ * DB-SETUP (owner decisions D1 a / D4, T-2): the bundled database's superuser password, PG_DATABASE_PASSWORD, is a compose
+ * interpolation value only. Rendered with a sentinel value (and PG_DATABASE_URL unset, so the bundled default is rendered),
+ * in every file: no service has a PG_DATABASE_PASSWORD key, and the sentinel appears only in the bundled `db` service's
+ * POSTGRES_PASSWORD and, inside the default admin URL, in the one-shot `db-setup` service's PG_DATABASE_URL (PR #125 option
+ * A: rab-api and rab-worker never carry it, nor any database URL). dbPasswordChecks() is the pure part.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  *
@@ -49,6 +55,8 @@ const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_
 // Phase B (ops): the one-off operations container. Its own sentinel password marks every value that came from .env.ops.
 const OPS_SENTINEL_PASSWORD = 'SENTINEL-OPS-APP-PW-7c21de'; // gitleaks:allow (synthetic marker, not a credential)
 const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}@db-direct.example:5432/rab?sslmode=verify-full`;
+// DB-SETUP: the bundled db's superuser password (synthetic marker, not a credential).
+const DB_SENTINEL_PASSWORD = 'SENTINELDBPW0b7e41c9d2a8f3561e'; // gitleaks:allow (synthetic marker, not a credential)
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 
 /** [compose file, migration service (null = none, O3), runtime services, production?] */
@@ -71,8 +79,8 @@ const DUMMY_ENV = {
   QA_CREWFLOW_APP_PASSWORD: 'dummy',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
   // docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, owner request 2026-11-12: OpenShip shows every
-  // variable). The owner-login URL shape, never the migrator login or a sentinel.
-  PG_DATABASE_URL: 'postgresql://crewflow_owner:dummy@db-direct.example:5432/rab?sslmode=verify-full',
+  // variable). PG_DATABASE_URL is deliberately NOT set: db-setup then renders the bundled default admin URL, built from
+  // the PG_DATABASE_PASSWORD sentinel below, so its spread is checked (option A).
   APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
   APP_URL: 'https://app.example.com',
   ACCOUNTS_URL: 'https://app.example.com',
@@ -85,6 +93,8 @@ const DUMMY_ENV = {
   S3_ACCESS_KEY_ID: 'dummy',
   S3_SECRET_ACCESS_KEY: 'dummy',
   CREWFLOW_AUDIT_SINK: 'stdout',
+  // DB-SETUP: the bundled db's password (production.yml's db requires it); a sentinel so its spread is checked.
+  PG_DATABASE_PASSWORD: DB_SENTINEL_PASSWORD,
 };
 
 let failures = 0;
@@ -148,6 +158,27 @@ function opsRefusalChecks(rel, services, raw, { production = false } = {}) {
     out.push([!values.some((v) => v.includes(OPS_SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the ops environment`]);
     const held = OPS_ONLY_NAMES.filter((k) => String(env[k] ?? '').trim() !== '');
     out.push([held.length === 0, `${rel}: ${name} holds no ops-only variable${held.length ? ` (${held.join(', ')})` : ''}`]);
+  }
+  return out;
+}
+
+/**
+ * DB-SETUP: where the bundled db's password may appear in one rendered model. Pure: [ok, label] pairs. Only the `db`
+ * service's POSTGRES_PASSWORD and (option A) the `db-setup` service's PG_DATABASE_URL may hold it; no service may have a
+ * PG_DATABASE_PASSWORD key; nothing else in any other service's definition (health check, command, labels) holds it.
+ */
+function dbPasswordChecks(rel, services) {
+  const out = [];
+  for (const [name, svc] of Object.entries(services)) {
+    const env = envOf(svc ?? {});
+    out.push([!Object.prototype.hasOwnProperty.call(env, 'PG_DATABASE_PASSWORD'), `${rel}: ${name} has no PG_DATABASE_PASSWORD variable (a compose interpolation value only)`]);
+    const allowedKey = name === 'db' ? 'POSTGRES_PASSWORD' : name === 'db-setup' ? 'PG_DATABASE_URL' : null;
+    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && k !== allowedKey).map(([k]) => k);
+    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's PG_DATABASE_URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    // Outside the environment (health check, command, entrypoint, labels): never, in any service.
+    const rest = { ...(svc ?? {}) };
+    delete rest.environment;
+    out.push([!JSON.stringify(rest).includes(DB_SENTINEL_PASSWORD), `${rel}: ${name} carries the bundled db's password nowhere outside its environment (health check, command, labels)`]);
   }
   return out;
 }
@@ -219,6 +250,7 @@ function main(options = {}) {
     const namesMigrateFile = (name) => (raw[name] ?? []).some((f) => /(^|\/)\.env\.migrate$/.test(f));
     // rab-ops removal (PR 2): no service (runtime, migrate, or the dev/QA files) carries anything of the ops environment.
     for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
+    for (const [ok, label] of dbPasswordChecks(rel, services)) check(ok, label);
     const migrate = migrateName ? services[migrateName] : undefined;
     // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
     const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml' || rel === 'packages/rab-docker/docker-compose.local-build.yml';
@@ -282,6 +314,8 @@ module.exports = {
   main,
   FILES,
   opsRefusalChecks,
+  dbPasswordChecks,
+  DB_SENTINEL_PASSWORD,
   render,
   OPS_ONLY_NAMES,
   OPS_SENTINEL_PASSWORD,

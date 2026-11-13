@@ -32,7 +32,15 @@
  *
  * Values are compared exactly (case-sensitive, no trimming); unset and blank are the same thing (a compose `KEY=` line).
  * A refusal names the variable and the allowed values and never echoes the value.
+ *
+ * DB-SETUP (plan §2.2, 2026-11-12): checkRuntimeLogin is the runtime-login rule — in production the API, the Worker and the
+ * migrate child refuse any PG_DATABASE_URL login other than crewflow_owner BEFORE connecting. It parses the URL with the
+ * policy parser (owner-credential.ts isOwnerLoginUrl) but is still pure: no I/O, no connection, no logging. It is a separate function on
+ * purpose (see its comment): the prestart shell copy and the bootstrap child legitimately hold the admin URL.
  */
+
+import { readPrimaryDatabaseUrl } from '../postgres/pg-config';
+import { isOwnerLoginUrl, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
 
 export type MigrationApprovalMode = 'none' | 'token';
 export type UpgradeFailurePolicy = 'continue' | 'refuse';
@@ -193,6 +201,68 @@ export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOption
     migrateOnStart: readMigrateOnStart(env, options),
     migrationApprovalMode: readMigrationApprovalMode(env, options),
     upgradeFailurePolicy: readUpgradeFailurePolicy(env),
+  };
+}
+
+/**
+ * DB-SETUP (plan §2.2 / §5.2, "database setup like Twenty"): the ONE login a runtime process may connect as is
+ * owner-credential.ts OWNER_LOGIN (crewflow_owner). In a deployment, `PG_DATABASE_URL` in the container definition is the
+ * database ADMIN URL; api-prestart.sh (after the bootstrap child) and worker-start.sh replace it with the derived
+ * crewflow_owner URL before any runtime process starts. A crewflow_owner URL is passed through unchanged (owner decision D5),
+ * so it is accepted here exactly as before.
+ */
+export type RuntimeLoginProcess = 'api' | 'worker' | 'migrate';
+
+/**
+ * Production for this rule, fail closed: NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says production (trimmed, any case). A
+ * superset of pg-config.ts isPgProductionEnvironment and never-in-runtime-env.ts, so a half-declared or mis-cased production
+ * never falls into the warning branch.
+ */
+function looksLikeProduction(env: Env): boolean {
+  return ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'].some((name) => env[name]?.trim().toLowerCase() === 'production');
+}
+
+export interface RuntimeLoginCheck {
+  /** Outside production only: a non-crewflow_owner login is allowed (dev and test suites use other logins) but reported. */
+  warning: string | null;
+}
+
+/**
+ * The runtime-login rule (plan §2.2): in production, a runtime process whose `PG_DATABASE_URL` login is anything other than
+ * crewflow_owner is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened. Pure: it parses the URL with the
+ * same policy parser every connection uses (owner-credential.ts isOwnerLoginUrl -> pg-url-policy.ts parsePgUrl) and never connects, logs, or echoes a value (not
+ * the URL, not the login). Outside production it returns a warning instead.
+ *
+ * Deliberately NOT part of readRuntimeDbConfig and NOT in api-prestart.sh's literal shell copy: the prestart shell and the
+ * bootstrap child hold the ADMIN URL by design until the swap, and CLI commands validate their environment through
+ * env.validation.ts. Callers: runtime-database-guard.ts resolveRuntimeDatabase (API and Worker, also run by
+ * check-pending-migrations.ts) and the migrate child (twenty-migrate.ts). The superseded separate provisioner process is left
+ * exactly as it was (it is unused; removed in the final clean-up PR).
+ *
+ * An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it in production with its own message). A
+ * present but unparseable one is refused in production (fail closed) with the policy parser's value-free message.
+ */
+export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): RuntimeLoginCheck {
+  // The factory's own reader (pg-config.ts): PG_DATABASE_URL, or outside production the deprecated DATABASE_URL; trimmed.
+  const value = readPrimaryDatabaseUrl(env)?.value ?? '';
+  if (value === '') return { warning: null };
+  const production = looksLikeProduction(env);
+  let owner: boolean;
+  try {
+    owner = isOwnerLoginUrl(value);
+  } catch (error) {
+    if (!(error instanceof OwnerCredentialError)) throw error;
+    if (production) throw new RuntimeDbConfigError(`The ${processName} process: ${error.message}`);
+    return { warning: null };
+  }
+  if (owner) return { warning: null };
+  if (production) {
+    throw new RuntimeDbConfigError(
+      `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}. In production a runtime process connects ONLY as ${OWNER_LOGIN}; this process was not started through api-prestart.sh / worker-start.sh, which replace the database admin URL with the derived ${OWNER_LOGIN} URL before any runtime process starts (login not shown). Refusing to start before connecting.`,
+    );
+  }
+  return {
+    warning: `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN} (login not shown). Allowed outside production only; production refuses it before connecting.`,
   };
 }
 

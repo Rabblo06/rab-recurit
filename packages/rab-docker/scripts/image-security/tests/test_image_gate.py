@@ -549,3 +549,18 @@ class PdfRenderers(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CredentialMountDir(unittest.TestCase):
+    """DB-SETUP (Twenty Helm model): the crewflow_owner password file never ships in the image."""
+
+    def test_policy_names_the_db_setup_mount_point(self):
+        self.assertIn('/run/crewflow/db-target', g.role_policy('image')['credential_mount_dirs'])
+
+    def test_a_file_under_the_mount_point_fails_and_the_empty_directory_passes(self):
+        dirs = ['/run/crewflow/db-target']
+        self.assertEqual(g.credential_dir_problems({'/run/crewflow/db-target': None, '/run/crewflow': None}, dirs), [])
+        problems = g.credential_dir_problems({'/run/crewflow/db-target': None, '/run/crewflow/db-target/owner-password': None,
+                                              '/run/crewflow/db-target-other/x': None}, dirs)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('/run/crewflow/db-target/owner-password', problems[0])

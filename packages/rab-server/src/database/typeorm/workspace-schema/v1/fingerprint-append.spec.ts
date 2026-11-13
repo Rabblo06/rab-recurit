@@ -9,18 +9,24 @@ import {
   missingVersions,
   planAppend,
 } from './fingerprint-append';
-import { EXPECTED_WORKSPACE_FINGERPRINTS, EXPECTED_WORKSPACE_FINGERPRINTS_PG16, EXPECTED_WORKSPACE_FINGERPRINTS_PG18 } from './expected-fingerprints';
+import {
+  EXPECTED_WORKSPACE_FINGERPRINTS,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG18,
+} from './expected-fingerprints';
 
 const h = (c: string) => c.repeat(64);
 const COMMITTED = { 14: h('a'), 15: h('b'), 16: h('c'), 17: h('d'), 18: h('e'), 19: h('f') };
 
-describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQL 16 and 18)', () => {
+describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQL 16 and 18; 17 since DB-SETUP §6)', () => {
   it('missing versions are exactly the absent ones from 14 to LATEST', () => {
     expect(missingVersions(COMMITTED, 19)).toEqual([]);
     expect(missingVersions(COMMITTED, 20)).toEqual([20]);
     expect(missingVersions({}, 16)).toEqual([14, 15, 16]);
     expect(missingVersions(EXPECTED_WORKSPACE_FINGERPRINTS_PG16, 19)).toEqual([]);
     expect(missingVersions(EXPECTED_WORKSPACE_FINGERPRINTS_PG18, 19)).toEqual([]);
+    expect(missingVersions(EXPECTED_WORKSPACE_FINGERPRINTS_PG17, 19)).toEqual([]);
   });
 
   it('the throwaway build keeps every committed value and fills only the gaps (reference major, else the placeholder)', () => {
@@ -48,6 +54,7 @@ describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQ
   it('appends lines to the real table sources without touching any existing line', () => {
     for (const [file, name] of [
       ['expected-fingerprints.ts', 'EXPECTED_WORKSPACE_FINGERPRINTS_PG16'],
+      ['expected-fingerprints-pg17.ts', 'EXPECTED_WORKSPACE_FINGERPRINTS_PG17'],
       ['expected-fingerprints-pg18.ts', 'EXPECTED_WORKSPACE_FINGERPRINTS_PG18'],
     ] as const) {
       const before = readFileSync(join(__dirname, file), 'utf8');
