@@ -249,7 +249,8 @@ async function bootstrap(): Promise<void> {
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
   // DB-SETUP §4: after an APP_SECRET rotation the API resets crewflow_owner's password on its next start; until then this
-  // first login fails with 28P01. That one failure is retried, bounded (120 s, fixed message); anything else refuses at once.
+  // first login fails with 28P01. That one failure is retried, bounded (120 s, one fixed message; past the bound it exits
+  // non-zero with its own message); anything else refuses at once. Every boot gate below still runs after it succeeds.
   await retryWhileOwnerPasswordStale(() => assertRuntimeDatabaseIdentity('worker')).catch(refuseStartup);
   // Owner-login architecture: the Worker NEVER migrates (the API start or the release step does). While the only schema
   // finding is "pending" — that migration still running — it waits, bounded (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS), instead
