@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
@@ -16,6 +16,7 @@ import { schedulerIndicator } from '../../engine/core-modules/platform-admin/ind
 import { workerIndicator } from '../../engine/core-modules/platform-admin/indicators/worker.indicator';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
@@ -58,8 +59,7 @@ describeIfDb('admin health indicators (X2.4, integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
