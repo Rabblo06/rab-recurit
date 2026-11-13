@@ -15,8 +15,9 @@ import {
   getLastAttemptedInstanceStep,
   instanceVersions,
   isLastAttemptCompleted,
-  Query,
   upgradeLedgerExists,
+  upgradeSessionOf,
+  UpgradeSession,
   withUpgradeScope,
 } from './upgrade-migration.service';
 import { lastStepOfVersion, stepsForVersion } from './upgrade-sequence';
@@ -44,10 +45,10 @@ export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean;
   return 'behind';
 }
 
-export async function readUpgradeStatus(query: Query, appVersion: string): Promise<UpgradeStatus> {
+export async function readUpgradeStatus(session: UpgradeSession, appVersion: string): Promise<UpgradeStatus> {
   const empty: UpgradeStatus = { appVersion, state: 'none', step: null, executedByVersion: null, attempt: null, forced: null, at: null };
-  if (!(await upgradeLedgerExists(query))) return empty;
-  return withUpgradeScope(query, 'status', async (q) => {
+  if (!(await upgradeLedgerExists(session.query))) return empty;
+  return withUpgradeScope(session, 'status', async (q) => {
     const last = await getLastAttemptedInstanceStep(q);
     const versions = await instanceVersions(q);
     const appComplete = await isLastAttemptCompleted(q, { name: lastStepOfVersion(appVersion), workspaceId: null });
@@ -80,11 +81,22 @@ export class UpgradeStatusService {
   static readonly CACHE_MS = 30_000;
   private readonly logger = new Logger(UpgradeStatusService.name);
   private cached: { at: number; value: UpgradeStatus } | null = null;
+  /** Security review L5: ONE read in flight; concurrent callers on an expired cache share it (one connection, not N). */
+  private inFlight: Promise<UpgradeStatus> | null = null;
 
   constructor(private readonly dataSource: DataSource) {}
 
   async status(): Promise<UpgradeStatus> {
     if (this.cached && Date.now() - this.cached.at < UpgradeStatusService.CACHE_MS) return this.cached.value;
+    if (!this.inFlight) {
+      this.inFlight = this.read().finally(() => {
+        this.inFlight = null;
+      });
+    }
+    return this.inFlight;
+  }
+
+  private async read(): Promise<UpgradeStatus> {
     let value: UpgradeStatus;
     let appVersion: string | null = null;
     try {
@@ -92,7 +104,7 @@ export class UpgradeStatusService {
       const runner = this.dataSource.createQueryRunner();
       await runner.connect();
       try {
-        value = await readUpgradeStatus((sql, params) => runner.query(sql, params) as Promise<unknown[]>, appVersion);
+        value = await readUpgradeStatus(upgradeSessionOf(runner), appVersion);
       } finally {
         await runner.release();
       }

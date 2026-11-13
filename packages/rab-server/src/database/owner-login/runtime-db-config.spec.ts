@@ -94,6 +94,10 @@ const CASES: Array<[string, Env]> = [
   ['test seam STOP_BEFORE in production', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: '1786700000000' }],
   ['test seam FAIL_AT in development', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'development', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' }],
   ['test seam FAIL_AT with NODE_ENV unset', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'x' }],
+  // Security review L1 (Part B): the upgrade logbook's probe-command seams.
+  ['upgrade probe commands seam in production', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_TEST_UPGRADE_COMMANDS: 'Probe' }],
+  ['upgrade fail-command seam in production', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: 'Probe' }],
+  ['upgrade seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_TEST_UPGRADE_COMMANDS: 'Probe', CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: 'Probe' }],
   ['provisioning deferral seam in production', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'production', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['provisioning deferral seam under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'test', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
@@ -135,7 +139,7 @@ describe('runtime-db-config (owner-login architecture)', () => {
   });
 
   it('migration test seams: allowed only under NODE_ENV=test; refused in production and everywhere else with an actionable message', () => {
-    for (const name of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING']) {
+    for (const name of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_UPGRADE_COMMANDS', 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING']) {
       expect(runtimeDbConfigProblems({ NODE_ENV: 'test', [name]: '1786700000000' })).toEqual([]);
       for (const NODE_ENV of ['production', 'development', undefined]) {
         expect(runtimeDbConfigProblems({ NODE_ENV, [name]: '1786700000000' })).toEqual([

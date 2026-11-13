@@ -97,15 +97,22 @@ function findRootPackageJson(start: string): string | null {
 /**
  * The code's release version: `CREWFLOW_APP_VERSION` (baked into the image) when set, otherwise the root package.json
  * `version`. Anything that is not a strict MAJOR.MINOR.PATCH refuses (fail closed): the upgrade check cannot run on an
- * unknown version.
+ * unknown version. Security review I3: a set CREWFLOW_APP_VERSION that differs from the root package.json shipped with
+ * the code refuses too (a runtime override could otherwise claim another release and skip or fake the version check).
  */
 export function readAppVersion(env: Record<string, string | undefined> = process.env, start: string = __dirname): string {
   const baked = env[CREWFLOW_APP_VERSION_VAR]?.trim();
+  const file = findRootPackageJson(start);
   if (baked) {
     if (!isVersion(baked)) throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} must be MAJOR.MINOR.PATCH (no leading zeros). Refusing.`);
+    if (file) {
+      const shipped = (JSON.parse(readFileSync(file, 'utf8')) as { version?: unknown }).version;
+      if (shipped !== baked) {
+        throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} (${baked}) differs from this code's release version (${String(shipped).slice(0, 20)}). Remove the override. Refusing.`);
+      }
+    }
     return baked;
   }
-  const file = findRootPackageJson(start);
   if (!file) throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} is not set and the root package.json was not found. Refusing.`);
   const version = (JSON.parse(readFileSync(file, 'utf8')) as { version?: unknown }).version;
   if (!isVersion(version)) throw new AppVersionError(`the root package.json version is not MAJOR.MINOR.PATCH. Refusing.`);

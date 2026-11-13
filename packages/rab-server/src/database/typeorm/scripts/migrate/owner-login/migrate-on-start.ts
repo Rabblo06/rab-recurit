@@ -62,6 +62,7 @@ import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
 import { runCacheFlush } from '../../cache-flush';
 import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
 import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
@@ -425,15 +426,15 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
       // OWNER-DB-ULTIMATE Part B: the upgrade logbook (engine/core-modules/upgrade/upgrade-runner.ts), hook calls only.
-      beforeApply: async ({ query, classification: c, proof: p, code, guarded }) => {
+      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded }) => {
         const fresh = c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p.fresh;
-        await run.beforeApply(query, {
+        await run.beforeApply(upgradeSessionOf(locked), {
           fresh,
           attribution: fresh ? null : attributeLedger(c.applied, code),
           unrestrictedTarget: guarded.target === 'local' || guarded.target === 'test',
         });
       },
-      onApplyFailure: ({ query, error }) => run.onApplyFailure(query, error),
+      onApplyFailure: ({ queryRunner: locked, error }) => run.onApplyFailure(upgradeSessionOf(locked), error),
       afterMigrations: async ({ queryRunner, applied: done, guarded }) => {
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
@@ -443,11 +444,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
         if (blocking.length) {
           const failure = new PostCheckFailure(blocking);
-          await run.onApplyFailure(query, failure);
+          await run.onApplyFailure(upgradeSessionOf(queryRunner), failure);
           throw failure;
         }
         log(`post-checks passed (${done.length} applied)`);
-        await run.afterApply(query);
+        await run.afterApply(upgradeSessionOf(queryRunner));
         await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
       },
     });

@@ -60,9 +60,15 @@ export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.f
 /**
  * Agent 1's migration test seams (the migrate child honours them only with NODE_ENV=test AND the server-side
  * crewflow.disposable_test_database=true AND a non-production target). This is the second layer: outside NODE_ENV=test they
- * are refused everywhere this parser runs (env validation, the runtime guard, api-prestart.sh).
+ * are refused everywhere this parser runs (env validation, the runtime guard, api-prestart.sh). OWNER-DB-ULTIMATE Part B
+ * (security review L1): the upgrade logbook's probe-command seams are held to the same second layer.
  */
-export const MIGRATION_TEST_SEAM_VARS = Object.freeze(['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT'] as const);
+export const MIGRATION_TEST_SEAM_VARS = Object.freeze([
+  'CREWFLOW_MIGRATION_TEST_STOP_BEFORE',
+  'CREWFLOW_MIGRATION_TEST_FAIL_AT',
+  'CREWFLOW_TEST_UPGRADE_COMMANDS',
+  'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND',
+] as const);
 /**
  * Every test seam refused outside NODE_ENV=test: Agent 1's migration seams, and the server-path provisioning deferral seam
  * (modules/manager-workspace/services/workspace-provisioning-test-seam.ts; itself effective only with NODE_ENV=test AND a

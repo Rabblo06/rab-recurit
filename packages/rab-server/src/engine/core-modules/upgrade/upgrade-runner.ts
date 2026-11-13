@@ -25,8 +25,8 @@ import {
   instanceVersions,
   isLastAttemptCompleted,
   markAsInstanceInitial,
-  Query,
   recordUpgradeMigration,
+  UpgradeSession,
   upgradeLedgerExists,
   withUpgradeScope,
 } from './upgrade-migration.service';
@@ -73,11 +73,11 @@ export class UpgradeRun {
   }
 
   /** Step 1. Throws UpgradeVersionTooOldError (65) or AppVersionError (64) before anything is applied. */
-  async beforeApply(query: Query, input: { fresh: boolean; attribution: LedgerAttribution | null; unrestrictedTarget: boolean }): Promise<UpgradeStartDecision> {
+  async beforeApply(session: UpgradeSession, input: { fresh: boolean; attribution: LedgerAttribution | null; unrestrictedTarget: boolean }): Promise<UpgradeStartDecision> {
     const { codeVersion, force, log } = this.options;
-    const ledgerExists = await upgradeLedgerExists(query);
+    const ledgerExists = await upgradeLedgerExists(session.query);
     const facts = ledgerExists
-      ? await withUpgradeScope(query, 'status', async (q) => {
+      ? await withUpgradeScope(session, 'status', async (q) => {
           const instance = await hasInstanceRows(q);
           const complete: Record<string, boolean> = {};
           for (const v of versionsToCheck(codeVersion)) complete[v] = await isLastAttemptCompleted(q, { name: lastStepOfVersion(v, this.registry), workspaceId: null });
@@ -105,52 +105,52 @@ export class UpgradeRun {
   }
 
   /** Step 3, after the migrations applied and the post-checks passed. Never throws for a failed COMMAND (reported instead). */
-  async afterApply(query: Query): Promise<void> {
+  async afterApply(session: UpgradeSession): Promise<void> {
     const { codeVersion, force, log } = this.options;
     const decision = this.decision;
     if (!decision) throw new Error('upgrade run: afterApply before beforeApply');
     if (decision.kind === 'rollback') return;
-    if (!(await upgradeLedgerExists(query))) throw new Error('upgrade run: core.upgrade_migration does not exist after the migrations');
-    await withUpgradeScope(query, 'upgrade', async (q) => {
+    if (!(await upgradeLedgerExists(session.query))) throw new Error('upgrade run: core.upgrade_migration does not exist after the migrations');
+    await withUpgradeScope(session, 'upgrade', async (q) => {
       if (decision.kind === 'adopt' && (await markAsInstanceInitial(q, { name: decision.initialName, executedByVersion: decision.initialVersion }))) {
         log(`adopted: is_initial row ${decision.initialName}`);
       }
     });
     const migrationsStep = migrationsStepName(codeVersion);
-    await this.recordIfIncomplete(query, migrationsStep, 'completed');
+    await this.recordIfIncomplete(session, migrationsStep, 'completed');
     for (const command of commandsForVersion(codeVersion, this.registry)) {
       const name = commandStepName(codeVersion, command);
-      const done = await withUpgradeScope(query, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
+      const done = await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
       if (done) continue;
       try {
         if (this.options.testFailCommand && this.options.testFailCommand === command.name) throw Object.assign(new Error('test seam: forced command failure'), { name: 'TestCommandFailure' });
         log(`upgrade command ${name}: running`);
-        await command.run({ query, log });
+        await command.run({ query: session.query, log });
       } catch (error) {
-        const attempt = await withUpgradeScope(query, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
+        const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
         this.report.recorded.push({ name, status: 'failed', attempt });
         this.report.commandFailure = { name, errorName: error instanceof Error ? error.name : 'Error' };
         log(`ERROR: upgrade command ${name} FAILED (attempt ${attempt}); the schema matches this code, so the API serves with upgrade:"failed" (exit 70). The next start retries it.`);
         return;
       }
-      const attempt = await withUpgradeScope(query, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
+      const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
       this.report.recorded.push({ name, status: 'completed', attempt });
     }
     log(`upgrade logbook: ${codeVersion} complete`);
   }
 
   /** A migration or post-check failure (lock still held). Records `<v>_TypeOrmMigrations` failed when the table exists. Never throws. */
-  async onApplyFailure(query: Query, error: unknown): Promise<void> {
+  async onApplyFailure(session: UpgradeSession, error: unknown): Promise<void> {
     const { codeVersion, force, log } = this.options;
     if (!this.decision || this.decision.kind === 'rollback') return;
     try {
-      await query('ROLLBACK').catch(() => undefined); // a failed migration may leave the session in an aborted transaction
-      if (!(await upgradeLedgerExists(query))) {
+      await session.query('ROLLBACK').catch(() => undefined); // a failed migration may leave the session in an aborted transaction
+      if (!(await upgradeLedgerExists(session.query))) {
         log('the migration failure could not be recorded: core.upgrade_migration does not exist yet (it is created by a later migration)');
         return;
       }
       const name = migrationsStepName(codeVersion);
-      const attempt = await withUpgradeScope(query, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
+      const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
       this.report.recorded.push({ name, status: 'failed', attempt });
       log(`upgrade logbook: ${name} failed (attempt ${attempt}); the next start retries it`);
     } catch (recordError) {
@@ -158,9 +158,9 @@ export class UpgradeRun {
     }
   }
 
-  private async recordIfIncomplete(query: Query, name: string, status: 'completed'): Promise<void> {
+  private async recordIfIncomplete(session: UpgradeSession, name: string, status: 'completed'): Promise<void> {
     const { codeVersion, force } = this.options;
-    const attempt = await withUpgradeScope(query, 'upgrade', async (q) => {
+    const attempt = await withUpgradeScope(session, 'upgrade', async (q) => {
       if (await isLastAttemptCompleted(q, { name, workspaceId: null })) return null;
       return recordUpgradeMigration(q, { name, status, executedByVersion: codeVersion, forced: force });
     });

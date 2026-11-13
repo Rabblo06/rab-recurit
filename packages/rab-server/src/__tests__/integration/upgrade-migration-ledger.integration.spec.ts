@@ -3,6 +3,8 @@ import { Client } from 'pg';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { markNewWorkspaceInitial } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { bindGucsSql } from '../../engine/core-modules/tenant/tenant-context.service';
 
 /**
  * OWNER-DB-ULTIMATE Part B (UpgradeMigrationLedger1786721470000, owner-approved SQL incl. REVISED 2): core.upgrade_migration
@@ -31,6 +33,7 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
   let app: Client;
   let ws: SeededWorkspace;
   let other: SeededWorkspace;
+  let third: SeededWorkspace;
 
   const tx = async <T>(c: Client, fn: () => Promise<T>): Promise<T> => {
     await c.query('BEGIN');
@@ -71,11 +74,12 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
     await app.connect();
     ws = await seedWorkspace(admin, `upgr-a-${SFX}`);
     other = await seedWorkspace(admin, `upgr-b-${SFX}`);
+    third = await seedWorkspace(admin, `upgr-c-${SFX}`);
   });
 
   afterAll(async () => {
     await admin.query(`DELETE FROM core.upgrade_migration WHERE name LIKE $1`, [`0.6.0_Itest%${SFX}`]).catch(() => undefined);
-    for (const w of [ws, other]) {
+    for (const w of [ws, other, third]) {
       if (!w) continue;
       await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [w.id]).catch(() => undefined);
       await admin.query('DELETE FROM core."user" WHERE id = $1', [w.owner]).catch(() => undefined);
@@ -145,6 +149,39 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
     expect(await sqlstate(init(other, other.org, false))).toBe('42501');
     expect(await sqlstate(init(other, other.org))).toBe('ok');
     expect(await sqlstate(init(ws, ws.org))).toBe('23505');
+  });
+
+  it('L2(b): the tenant binding clears rab.upgrade_scope: status scope, then a tenant bound in the same transaction -> 0 rows', async () => {
+    const seen = await tx(app, async () => {
+      await scope(app, 'status');
+      await app.query(bindGucsSql(), [ws.org, ws.id, ws.owner, 'CEO', 'user']);
+      const s = (await app.query(`SELECT COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS s`)).rows[0].s;
+      const n = Number((await app.query('SELECT pg_catalog.count(*)::int AS n FROM core.upgrade_migration')).rows[0].n);
+      return { s, n };
+    });
+    expect(seen).toEqual({ s: '', n: 0 });
+  });
+
+  it('L3: markNewWorkspaceInitial clears the scope and restores rab.workspace_id; a failing INSERT surfaces its original error', async () => {
+    const q = (sql: string, params?: unknown[]) => app.query(sql, params).then((r) => r.rows as unknown[]);
+    const after = await tx(app, async () => {
+      await tenant(app, third.org);
+      await app.query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [ws.id]);
+      const wrote = await markNewWorkspaceInitial(q, { id: third.id, organisationId: third.org });
+      const row = (await app.query(
+        `SELECT COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS s, pg_catalog.current_setting('rab.workspace_id', true) AS w`,
+      )).rows[0];
+      return { wrote, s: row.s, w: row.w };
+    });
+    expect(after).toEqual({ wrote: true, s: '', w: ws.id });
+    expect(await count('workspace_id = $1 AND is_initial', [third.id])).toBe(1);
+    // A lying entity (another organisation's workspace under the bound organisation): the policy refuses the INSERT and the
+    // caller sees that original 42501, not 25P02 from a restore statement run on the aborted transaction.
+    const err = await sqlstate(tx(app, async () => {
+      await tenant(app, ws.org);
+      await markNewWorkspaceInitial(q, { id: other.id, organisationId: ws.org });
+    }));
+    expect(err).toBe('42501');
   });
 
   it('nobody may UPDATE or TRUNCATE it, the owner role included (42501)', async () => {
