@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Sourced by run-ai-e2e.sh (and by run-ai-e2e-env.test.cjs, which runs these exact functions). Audit DBT-12 / X1.3 / X1.8.
 #
-# The env file run-ai-e2e.sh sources (`set -a`) holds the disposable cluster's test credentials: TEST_DATABASE_URL_UNPOOLED is
-# its bootstrap SUPERUSER. The seed needs that admin connection (fixtures, the disposable-marker proof) and keeps it. Every
+# The env file run-ai-e2e.sh sources (`set -a`) holds the disposable cluster's test credentials: TEST_DATABASE_ADMIN_URL (or its
+# deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7) is its bootstrap SUPERUSER. The seed needs that admin connection (fixtures, the disposable-marker proof) and keeps it. Every
 # long-running child (the API, the rab-ai consumer, Vite, Playwright) is started through one of the functions below, which
 # remove these names from that child's environment, so no superuser URL, role bootstrap password or command authority sits in
 # a runtime process (readable through /proc/<pid>/environ, crash dumps or anything the process spawns). The API and the
@@ -16,7 +16,7 @@
 
 # Never in any child but the seed.
 AI_E2E_STRIPPED_NAMES=(
-  TEST_DATABASE_URL TEST_DATABASE_URL_UNPOOLED TEST_DATABASE_CREWFLOW_URL TEST_DATABASE_WORKER_URL
+  TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL TEST_DATABASE_URL_UNPOOLED TEST_DATABASE_CREWFLOW_URL TEST_DATABASE_WORKER_URL
   MIGRATION_SECURITY_ADMIN_URL
   CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_MIGRATOR_PASSWORD
   DATABASE_URL DATABASE_URL_UNPOOLED DATABASE_DIRECT_URL
@@ -28,7 +28,7 @@ AI_E2E_CLIENT_STRIPPED_NAMES=(PG_DATABASE_URL APP_SECRET)
 
 # X1.8: the admin (superuser) connection values. Any OTHER exported name holding one of these values, or (when it is 8 or more
 # characters) the password inside one of them, raw or percent-decoded, is removed from every child but the seed too.
-AI_E2E_STRIPPED_VALUE_SOURCES=(TEST_DATABASE_URL_UNPOOLED MIGRATION_SECURITY_ADMIN_URL)
+AI_E2E_STRIPPED_VALUE_SOURCES=(TEST_DATABASE_ADMIN_URL TEST_DATABASE_URL_UNPOOLED MIGRATION_SECURITY_ADMIN_URL)
 AI_E2E_MIN_PASSWORD_MATCH=8
 
 # Prints the password part of a postgres URL (as written, possibly percent-encoded), or nothing.

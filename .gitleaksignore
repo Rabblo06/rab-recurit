@@ -33,3 +33,8 @@ f78d830d32a21d0e24af019136c45dc451dfbca9:.gitleaksignore:generic-api-key:19
 # cover the commit that introduced them. Reviewed 2026-11-12.
 ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:jwt:27
 ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:generic-api-key:40
+
+# X3.5-S7 (PR #126): runtime-child-env.spec.ts planted synthetic sentinel passwords to prove spec-spawned children never
+# receive role passwords. Not credentials. Commit 496a424c builds every sentinel at run time (tag + randomUUID()), so the
+# current file holds no literal; this entry covers only the earlier commit that introduced the literal. Reviewed 2026-11-13.
+42287a242e935be9d2928a7457139e0855b1c76b:packages/rab-worker/src/__tests__/integration/helpers/runtime-child-env.spec.ts:generic-api-key:31

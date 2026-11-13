@@ -8,7 +8,8 @@
  * Emits:
  *   TEST_DATABASE_URL                  crewflow_owner — under Option A the API's runtime login IS the owner login
  *   TEST_DATABASE_TWENTY_OWNER_URL     the same URL, named, so a suite can refuse when it is anything else
- *   TEST_DATABASE_URL_UNPOOLED         the disposable cluster's superuser (fixtures only; never given to a child process)
+ *   TEST_DATABASE_ADMIN_URL            the disposable cluster's superuser (fixtures only; never given to a child process). X3.5-S7
+ *                                      release 1: also emitted, same value, as the deprecated TEST_DATABASE_URL_UNPOOLED
  *   TEST_DATABASE_SEPARATED_APP_URL    crewflow_app, ONLY for --source fixture (a separated-built chain) — the negative controls
  *   TWENTY_MODE_TESTS=true, TWENTY_DB_SOURCE=<source>
  *   TEST_DATABASE_WORKER_URL           ONLY with --worker-login-is-owner: the same crewflow_owner URL. Phase D under one login
@@ -69,7 +70,7 @@ if (source === 'fixture' && process.env.CREWFLOW_APP_BOOTSTRAP_PASSWORD) {
 const q = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 process.stderr.write(`::add-mask::${admin}\n::add-mask::${owner}\n${app ? `::add-mask::${app}\n` : ''}`);
 process.stdout.write(
-  `export TEST_DATABASE_URL_UNPOOLED=${q(admin)}\nexport TEST_DATABASE_URL=${q(owner)}\nexport TEST_DATABASE_TWENTY_OWNER_URL=${q(owner)}\n` +
+  `export TEST_DATABASE_ADMIN_URL=${q(admin)}\nexport TEST_DATABASE_URL_UNPOOLED=${q(admin)}\nexport TEST_DATABASE_URL=${q(owner)}\nexport TEST_DATABASE_TWENTY_OWNER_URL=${q(owner)}\n` +
     (app ? `export TEST_DATABASE_SEPARATED_APP_URL=${q(app)}\n` : '') +
     `export TWENTY_MODE_TESTS=true\nexport TWENTY_DB_SOURCE=${source}\n` +
     (workerIsOwner ? `export TEST_DATABASE_WORKER_URL=${q(owner)}\n` : ''),

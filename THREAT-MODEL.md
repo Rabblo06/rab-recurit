@@ -7032,6 +7032,36 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
 
+## X3.5-S7 / DEAD-07 — the test admin URL is renamed, and no integration suite can skip silently (branches cleanup/x35-s7-test-admin-url, cleanup/x35-dead07-helper, 2026-11-13, PRs #126 and #127)
+- **Asset:** the disposable test cluster's bootstrap SUPERUSER URL (fixtures, identity probes, in-Jest migrations), and
+  the guarantee that the RLS / tenant / payroll integration suites actually run.
+- **S7 (release 1):** the admin URL is `TEST_DATABASE_ADMIN_URL`. The old name `TEST_DATABASE_URL_UNPOOLED` is still
+  accepted.
+  - Two different values are refused, compared as written, names only.
+  - Every X1.8 / X1.9 rule applies to whichever name supplied it.
+  - setupFiles writes the validated value under both names, so a later dotenv load cannot add a second value.
+  - The Worker-login switch refuses the admin login under either name.
+  - Every committed child-process strip list removes both names. A static spec checks this, and both CI helpers emit both
+    names with one value.
+  - Abuse cases: `test-database-guard.spec.ts` (X3.5-S7 block), `test-database-admin-url-names.spec.ts`,
+    `run-ai-e2e-env.test.cjs` (the new name and an alias of its value reach the AI e2e seed only).
+- **DEAD-07:** ~280 specs used to skip when the legacy primary URL was absent. Under Jest that branch was dead, but a
+  routing change (S6 / S8) would have turned every RLS, tenant and payroll suite into a silent skip.
+  - They now gate on `integrationTestDatabaseReady()`, which throws (never returns false) unless NODE_ENV=test and the
+    validated TEST pair are present.
+  - An AST scan fails CI if any spec skip-conditional depends on a routing connection name again
+    (`integration-test-database-gate.spec.ts`).
+- **Spec-spawned runtime children** (`runtimeChildBaseEnv`, provisioner / Worker / API spawned by worker specs) no longer
+  inherit either admin name, any `TEST_DATABASE_*` URL, `DATABASE_URL_UNPOOLED`, `MIGRATION_SECURITY_ADMIN_URL`, the role
+  bootstrap / owner / migrator passwords, or any variable holding an admin URL's password; a spec re-adds the one URL a child
+  needs after the base (`runtime-child-env.spec.ts`).
+- **Specs take the admin URL from the validated pair** (`integrationTestDatabase().adminUrl`), never from the environment;
+  a scan fails CI on any spec or test helper reading `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_ADMIN_URL` or
+  `DATABASE_URL_UNPOOLED` from `process.env` (aliases, destructuring and computed keys included).
+- **Residual:** `rab-worker/.../helpers/email-process-child.cjs:33` (a forked fixture child) still reads the legacy
+  `DATABASE_URL_UNPOOLED` the Jest guard writes; it moves with S6 (the parent passes the admin URL explicitly).
+- **Release 2 (S8):** the old name is refused; the strip lists keep both names permanently.
+
 - **X2.4 Admin Panel health indicators (2026-11-12).** Actor: a signed-in non-platform-admin → `GET
   /rest/v1/admin/health/report` → 403 (PlatformAdminGuard, then `assertActivePlatformAdmin` in the service for direct
   callers); no audit row and no probe. A platform admin sees: API version/commit/Node/uptime, database connections vs

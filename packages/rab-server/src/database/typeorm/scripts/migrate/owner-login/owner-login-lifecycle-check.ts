@@ -42,6 +42,7 @@ import { compareWithGolden } from '../../../core/security-posture';
 import { secureOwnerInvariantViolations } from '../../../core/secure-owner-invariants';
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import { runLockedMigrations } from '../locked-migration-runner';
+import { TEST_DATABASE_ADMIN_URL_NAMES } from '../../../core/test-database-guard';
 import { MIGRATION_LOCK_KEY } from '../migration-lock';
 import { installSigtermSelfCancel, MigrateOnStartResult, RESULT_LINE_PREFIX, runMigrateOnStart, StartupOutcome } from './migrate-on-start';
 import { parseUpgradeFailurePolicy, UpgradeFailurePolicy } from './upgrade-failure-policy';
@@ -346,7 +347,8 @@ async function postInstallChecks(db: string, label: string): Promise<void> {
 async function rlsGateAsOwner(db: string, label: string): Promise<void> {
   const env: NodeJS.ProcessEnv = { ...process.env, PG_DATABASE_URL: dbUrl(db, 'owner') };
   for (const k of ['OWNER_LOGIN_CHECK_ADMIN_URL', 'FINGERPRINT_ADMIN_URL', 'MIGRATION_SECURITY_ADMIN_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED',
-    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'TEST_DATABASE_WORKER_URL', 'APP_SECRET', 'RAB_APP_ROLE',
+    // X3.5-S7: the test admin URL under every name it can carry (the shared list, so a rename cannot be missed here).
+    'TEST_DATABASE_URL', ...TEST_DATABASE_ADMIN_URL_NAMES, 'TEST_DATABASE_CREWFLOW_URL', 'TEST_DATABASE_WORKER_URL', 'APP_SECRET', 'RAB_APP_ROLE',
     'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD']) delete env[k];
   const r = spawnSync('yarn', ['check-rls'], { cwd: ROOT, env, encoding: 'utf8', shell: process.platform === 'win32' });
   check(r.status === 0, `${label}: RLS coverage gate passes as crewflow_owner`, sanitise(`${r.stdout ?? ''}${r.stderr ?? ''}`).trim().split('\n').slice(-8));
