@@ -759,7 +759,8 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
   });
 
   it('the option-2 statements carry no value; the self ALTER only through %L of the bind-parameter setting; CONTEXT stripped', () => {
-    for (const text of OWNER_SELF_STATEMENTS) expect(text).not.toMatch(/postgres:\/\/|\$4096:/);
+    // No value, and not even the verifier prefix (the server-log scans search for it).
+    for (const text of OWNER_SELF_STATEMENTS) expect(text).not.toMatch(/postgres:\/\/|\$4096:|SCRAM-SHA-256\$/);
     expect(OWNER_SELF_O4C_DO).toContain("pg_catalog.current_setting('crewflow_bootstrap.verifier')");
     expect(OWNER_SELF_O4C_DO).toContain("EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);");
     expect(OWNER_SELF_O4C_DO).toContain("RAISE EXCEPTION 'crewflow_owner password reset failed (%)', SQLSTATE USING ERRCODE = SQLSTATE;");

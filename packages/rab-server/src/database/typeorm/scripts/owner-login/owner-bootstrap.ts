@@ -64,6 +64,15 @@ export const ADMIN_CONNECT_RETRY_INTERVAL_MS = 2_000;
 export const MAX_ATTEMPTS = 3;
 export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', 'XX000', '40001', '40P01']);
 
+/**
+ * The one working path when a provider refuses a pre-hashed (SCRAM verifier) password, the only form the bootstrap ever
+ * sends: the operator sets crewflow_owner's password to the DERIVED one by hand, as the database admin (01-crewflow-owner.sql
+ * for a new role, ALTER ROLE for an existing one; the server hashes it), and keeps that crewflow_owner URL in
+ * PG_DATABASE_URL: db-setup then takes step a (the derived password works) and writes nothing.
+ */
+const PREHASHED_REFUSED_FALLBACK =
+  "Then set crewflow_owner's password by hand, as the database admin (01-crewflow-owner.sql, or ALTER ROLE for an existing crewflow_owner), to the password in the crewflow_owner URL the documented derive command prints for this APP_SECRET, and put that crewflow_owner URL in PG_DATABASE_URL: db-setup then only checks it and changes nothing.";
+
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it, and giving it the password derived from APP_SECRET if it does not have it yet.',
@@ -71,9 +80,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   ownerNoDbGrant:
     'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_DATABASE_URL. Refusing.',
   ownerNoPassword:
-    "crewflow_owner's password matches neither the one derived from APP_SECRET nor the one in PG_DATABASE_URL (after an APP_SECRET change: put the database admin URL in PG_DATABASE_URL, or crewflow_owner's current password). Refusing.",
+    "crewflow_owner's password matches neither the one derived from APP_SECRET nor the one in PG_DATABASE_URL. After an APP_SECRET change, put in PG_DATABASE_URL for one start either the database admin URL, or the crewflow_owner URL the documented derive command printed with the PREVIOUS APP_SECRET. Refusing.",
   ownerWriteRefused: (sqlstate: string) =>
-    `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}); the provider may refuse a pre-hashed password. Put the database admin URL in PG_DATABASE_URL instead. Refusing.`,
+    `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}); the provider may refuse a pre-hashed password (for example credcheck.encrypted_password_allowed = off). ${PREHASHED_REFUSED_FALLBACK} Refusing.`,
   pgTooOld: 'PostgreSQL 16 or later is required.',
   privilegedAttributes: (attributes: readonly string[]) =>
     // sql-injection-reviewed: an error MESSAGE (printed, never executed); attributes are the fixed attribute names of the facts row.
@@ -98,7 +107,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
   adminConnectFailed: (code: string) => `Connecting with PG_DATABASE_URL failed (${code}).`,
   writeRefused: (sqlstate: string) =>
-    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_DATABASE_URL login lacks a needed right, or the provider refuses a pre-hashed password (then set crewflow_owner up by hand with 01-crewflow-owner.sql and put its URL in PG_DATABASE_URL). Refusing.`,
+    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_DATABASE_URL login lacks a needed right, or the provider refuses a pre-hashed password (for example credcheck.encrypted_password_allowed = off). In the second case: ${PREHASHED_REFUSED_FALLBACK} Refusing.`,
   writeFailed: (sqlstate: string) => `Setting up crewflow_owner failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: 'crewflow_owner was being created by another start at the same moment; reading the facts again.',
