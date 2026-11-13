@@ -25,6 +25,7 @@
  */
 import { Client } from 'pg';
 
+import { type DbTarget, DbTargetError, dbTargetFromPlan } from '../../../owner-login/db-target';
 import { OwnerCredentialError, type OwnerLoginPlan, planOwnerLogin, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { pgClientConfig, PgConfigError, PgDriverConfig, readPrimaryDatabaseUrl, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import {
@@ -93,6 +94,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   raceExhausted: 'crewflow_owner kept changing while this start tried to set it up. Giving up (the restart policy retries).',
   unexpected: (code: string) => `Unexpected failure (${code}). Nothing secret is printed; see the database log for the SQLSTATE.`,
   ready: (what: string) => `crewflow_owner is ready (${what}).`,
+  targetPublished: 'The database target (host, port, database, TLS parameters; no credential) was published for the API and the Worker.',
+  targetPublishFailed: (code: string) => `Publishing the database target failed (${code}); the API and the Worker keep waiting.`,
+  targetWithdrawFailed: (code: string) => `Removing the previous database target failed (${code}); the API and the Worker may start on it.`,
 });
 
 export type OwnerBootstrapOutcome = 'pass-through' | 'unchanged' | 'created' | 'updated' | 'refused' | 'failed';
@@ -447,6 +451,14 @@ function openClient(config: PgDriverConfig): Client {
 
 export interface RunOwnerBootstrapOptions {
   log?: (line: string) => void;
+  /**
+   * Option A (PR #125): publish the credential-free database target after a SUCCESSFUL bootstrap-mode run (the entry writes
+   * CREWFLOW_DB_TARGET_FILE atomically). A throw here turns the run into a failure (exit 70) and the target is withdrawn.
+   * Never called in pass-through mode.
+   */
+  publishTarget?: (target: DbTarget) => void;
+  /** Option A: remove any stale target after a refusal or failure, so the apps keep waiting. Never called in pass-through. */
+  withdrawTarget?: () => void;
   /** Test seam (integration harness): a shorter connect-retry window. */
   retryWindowMs?: number;
 }
@@ -457,6 +469,7 @@ export interface RunOwnerBootstrapOptions {
  */
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
   const log = options.log ?? (() => undefined);
+  let passThrough = false;
   try {
     // Area 1's single decision (owner-credential.ts), shared with the derive step so the two can never disagree. Pure:
     // pass-through for a crewflow_owner URL (APP_SECRET not read), else the derived password and runtime URL, refused
@@ -470,6 +483,7 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       throw error;
     }
     if (plan.mode === 'pass-through') {
+      passThrough = true;
       log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
       return { outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
     }
@@ -486,6 +500,14 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
     if (resolved.primary.target.sessionRoleOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
     if (!sameTarget(resolved.primary.target, plan.adminTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
     const ownerPassword = plan.ownerPassword;
+    // Computed BEFORE anything connects: a target that cannot be described credential-free refuses here.
+    let target: DbTarget;
+    try {
+      target = dbTargetFromPlan(plan);
+    } catch (error) {
+      if (error instanceof DbTargetError) throw new OwnerBootstrapRefusal(error.message);
+      throw error;
+    }
 
     const adminConfig: PgDriverConfig = {
       ...pgClientConfig(resolved, {
@@ -543,11 +565,26 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       now: () => Date.now(),
     };
     const result = await bootstrapOwnerWithIo(io, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
+    if (options.publishTarget) {
+      try {
+        options.publishTarget(target);
+      } catch (error) {
+        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.targetPublishFailed(errorCode(error)), errorCode(error));
+      }
+      log(OWNER_BOOTSTRAP_MESSAGES.targetPublished);
+    }
     log(OWNER_BOOTSTRAP_MESSAGES.ready(describeReady(result)));
     return result;
   } catch (error) {
     if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) log(error.message);
     else log(OWNER_BOOTSTRAP_MESSAGES.unexpected(errorCode(error)));
+    if (!passThrough && options.withdrawTarget) {
+      try {
+        options.withdrawTarget();
+      } catch (removeError) {
+        log(OWNER_BOOTSTRAP_MESSAGES.targetWithdrawFailed(errorCode(removeError)));
+      }
+    }
     return failureResult(error);
   }
 }

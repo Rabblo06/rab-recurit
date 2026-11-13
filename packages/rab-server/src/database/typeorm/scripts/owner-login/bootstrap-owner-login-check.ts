@@ -22,12 +22,25 @@
 import { spawn } from 'node:child_process';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+
+import { type DbTarget, serializeDbTarget } from '../../../owner-login/db-target';
+import { readDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
 
 import { buildRuntimeDatabaseUrl, deriveOwnerPassword, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { createPgClientForUrl } from '../../../postgres';
+import { DERIVE_EXIT, runDeriveRuntimeUrl } from './derive-runtime-url';
 import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
+
+/**
+ * Option A (PR #125): every child writes the credential-free target here (CREWFLOW_DB_TARGET_FILE). reset() seeds a STALE
+ * target before each scenario, so a refusal must remove it, a success must replace it, and pass-through must leave it.
+ */
+const TARGET_DIR = mkdtempSync(join(tmpdir(), 'obc-target-'));
+const TARGET_FILE = join(TARGET_DIR, 'target.json');
+const STALE_TARGET: DbTarget = { v: 1, host: 'stale.invalid', port: 1, database: 'stale', params: {} };
 
 class Refusal extends Error {}
 class Failed extends Error {}
@@ -181,7 +194,7 @@ interface ChildRun {
 let ENTRY = existsSync(DIST_ENTRY) ? DIST_ENTRY : SOURCE_ENTRY;
 
 function runChild(databaseUrl: string, secretValue: string | undefined, extraEnv: Record<string, string> = {}): Promise<ChildRun> {
-  const env: Record<string, string> = { PG_DATABASE_URL: databaseUrl, NODE_ENV: 'test', ...extraEnv };
+  const env: Record<string, string> = { PG_DATABASE_URL: databaseUrl, NODE_ENV: 'test', CREWFLOW_DB_TARGET_FILE: TARGET_FILE, ...extraEnv };
   if (secretValue !== undefined) env.APP_SECRET = secretValue;
   for (const k of ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE']) if (process.env[k]) env[k] = process.env[k]!;
   const argv = ENTRY.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY] : [ENTRY];
@@ -221,6 +234,33 @@ function expectResult(run: ChildRun, exitCode: number, outcome: OwnerBootstrapRe
   expect(run.code === exitCode, `${what}: exit ${run.code}, expected ${exitCode}`);
   expect(run.result?.outcome === outcome, `${what}: outcome ${run.result?.outcome ?? 'none'}, expected ${outcome}`);
   expect(run.result?.exitCode === exitCode, `${what}: result exitCode mismatch`);
+  // Option A: the target file follows the outcome.
+  if (exitCode !== 0) {
+    expect(!existsSync(TARGET_FILE), `${what}: a refusal/failure left a database target file (stale not removed)`);
+  } else if (outcome === 'pass-through') {
+    expect(readFileSync(TARGET_FILE, 'utf8') === serializeDbTarget(STALE_TARGET), `${what}: pass-through touched the database target file`);
+  } else {
+    const read = readDbTargetFile(TARGET_FILE);
+    expect(read.state === 'ready' && read.target.host !== STALE_TARGET.host, `${what}: no fresh database target was published`);
+    const text = readFileSync(TARGET_FILE, 'utf8');
+    for (const s of SECRETS) expect(!(s && text.includes(s)), `${what}: the database target file holds a secret (not shown)`);
+    expect(!/user|password|@/i.test(text), `${what}: the database target file holds a credential-shaped value`);
+  }
+}
+
+/** Option A: the apps' derive step builds the crewflow_owner URL from the published target; it must log in. */
+async function assertDeriveFromTargetLogsIn(ctx: Ctx, db: string, s: string, label: string): Promise<void> {
+  const written: string[] = [];
+  const code = runDeriveRuntimeUrl(
+    { CREWFLOW_DB_TARGET_FILE: TARGET_FILE, APP_SECRET: s },
+    { writeRuntimeUrl: (u) => void written.push(remember(u)), log: () => undefined, error: () => undefined },
+  );
+  expect(code === DERIVE_EXIT.ok && written.length === 1, `${label}: derive from the target file did not produce a URL (exit ${code})`);
+  const c = createPgClientForUrl(written[0] as string, 'the URL derived from the target', { purpose: 'check' }, {});
+  await c.connect();
+  const row = (await c.query<{ s: string; d: string }>('SELECT session_user::text AS s, current_database()::text AS d')).rows[0];
+  await c.end();
+  expect(row?.s === OWNER && row.d === db, `${label}: the URL derived from the target does not log in as crewflow_owner to the database`);
 }
 
 function expectLine(run: ChildRun, message: string, what: string): void {
@@ -264,6 +304,7 @@ async function createAdminRole(ctx: Ctx, tag: string, attrs: string): Promise<{ 
 
 /** Back to "no crewflow_owner": drop this run's databases first (their ACLs), then the role, then this run's other roles. */
 async function reset(ctx: Ctx): Promise<void> {
+  writeDbTargetFile(TARGET_FILE, STALE_TARGET);
   for (const db of ctx.dbs.splice(0)) await sql(ctx.admin, 'postgres', `DROP DATABASE IF EXISTS ${ident(db)} WITH (FORCE)`);
   await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS crewflow_owner`);
   for (const role of ctx.roles.splice(0).reverse()) await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS ${ident(role)}`);
@@ -309,6 +350,7 @@ async function assertFreshCreated(ctx: Ctx, db: string, adminUrl: string, s: str
   const su = (await viaRuntime.query<{ s: string }>('SELECT session_user::text AS s')).rows[0]?.s;
   await viaRuntime.end();
   expect(su === OWNER, `${label}: the runtime URL does not log in as crewflow_owner`);
+  await assertDeriveFromTargetLogsIn(ctx, db, s, label);
   return { state, acl: facts.acl };
 }
 
@@ -668,6 +710,7 @@ async function main(): Promise<number> {
     }
   }
   await reset(ctx);
+  rmSync(TARGET_DIR, { recursive: true, force: true });
   const container = process.env.OWNER_BOOTSTRAP_PG_CONTAINER;
   if (container) {
     try {
