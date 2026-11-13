@@ -11,6 +11,10 @@ import { TIMER_TRIGGER_MAX_PER_TRANSACTION, TimerTriggerArm, TimerTriggerQueueSe
  *  - Redis down: the publish fails fast and is swallowed (the backstop scan handles the subject).
  */
 const UNREACHABLE = 'redis://127.0.0.1:1';
+// Each case waits up to 1 s for the unreachable client (settle) and "Redis down" spends ~4 s by design (the 3 s bounded
+// publish + settle), which left it 1 s from Jest's default 5 s on a starved runner. A generous per-test ceiling; the
+// "resolves false quickly" bound (< 5 s) is asserted inside the test and unchanged.
+jest.setTimeout(20_000);
 const ORG = '11111111-1111-4111-8111-111111111111';
 const WS = '33333333-3333-4333-8333-333333333333';
 const OFFER = '44444444-4444-4444-8444-444444444444';
