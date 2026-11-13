@@ -2,7 +2,7 @@ import { ApplicationTarget } from '../../application-access';
 import { absoluteSessionTtlMsFor, idleOverrideMsFor, idleSessionTimeoutMsFor } from '../../session-policy';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { EntityManager } from 'typeorm';
+import { EntityManager, IsNull } from 'typeorm';
 
 import { WEB_SESSION_TOKEN_PREFIX } from '../../constants/web-session-cookie.constants';
 import { RefreshToken, UserSession } from '../../../../../modules/identity/entities';
@@ -290,9 +290,13 @@ export class RefreshTokenService {
    * forbidden by the P1B brief). `WHERE revoked_at IS NULL` on the session update is a CAS: the
    * FIRST revocation's reason/timestamp wins and is never overwritten by a later, redundant
    * revoke call (e.g. logout racing reuse-detection).
+   *
+   * XP-09 Q6 (owner decision 2026-11-13): the token rows follow the same rule — only rows with no `revoked_at` yet are
+   * stamped; a row already revoked (rotated, or revoked earlier) keeps its FIRST revocation time. Rewriting it would restart
+   * the 181-day retention clock (core.worker_cleanup_auth_tokens) and erase when the token actually stopped being valid.
    */
   async revokeFamily(manager: EntityManager, familyId: string, reason = 'unspecified'): Promise<void> {
-    await manager.update(RefreshToken, { familyId }, { revokedAt: new Date() });
+    await manager.update(RefreshToken, { familyId, revokedAt: IsNull() }, { revokedAt: new Date() });
     await manager.query(
       `UPDATE core.user_session
           SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
@@ -309,10 +313,10 @@ export class RefreshTokenService {
    * when a password changes (self-service or admin-triggered): the old
    * password shouldn't keep a session alive anywhere once it's no longer
    * valid. P1B: the matching `core.user_session` rows are revoked in the same transaction,
-   * same CAS-on-revoked_at-IS-NULL idiom as `revokeFamily`.
+   * same CAS-on-revoked_at-IS-NULL idiom as `revokeFamily`, and (XP-09 Q6) the token rows too: first revocation wins.
    */
   async revokeAllForUser(manager: EntityManager, userId: string, reason = 'unspecified'): Promise<void> {
-    await manager.update(RefreshToken, { userId }, { revokedAt: new Date() });
+    await manager.update(RefreshToken, { userId, revokedAt: IsNull() }, { revokedAt: new Date() });
     await manager.query(
       `UPDATE core.user_session
           SET revoked_at = now(), revoked_reason = $2, security_version = security_version + 1
