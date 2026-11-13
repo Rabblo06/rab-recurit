@@ -226,8 +226,8 @@ ${(error as Error).message}`);
   }
 
   // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): the remaining database start-up settings (DISABLE_DB_MIGRATIONS,
-  // CREWFLOW_MIGRATE_ON_START, the approval mode, CREWFLOW_UPGRADE_FAILURE and its deprecated alias) and the removed mode
-  // switch (CREWFLOW_DB_MODE), through the one shared parser
+  // CREWFLOW_MIGRATE_ON_START, the approval mode) and the removed names (CREWFLOW_DB_MODE, CREWFLOW_UPGRADE_FAILURE,
+  // CREWFLOW_UPGRADE_FAILURE_POLICY), through the one shared parser
   // (database/owner-login/runtime-db-config.ts) — the same rules api-prestart.sh and the runtime guard apply. Read from the
   // RAW configuration (a blank value is unset). Names and allowed values only, never a value.
   const runtimeDbProblems = runtimeDbConfigProblems(config as Record<string, string | undefined>);
