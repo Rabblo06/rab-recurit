@@ -47,20 +47,26 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
   const TPL256 = cl.dbName('tpl256');
   const V = B1.currentVersion;
   const commands = B1.upgradeCommands();
+  /**
+   * 0.6.0 ships no real upgrade command (UPGRADE_COMMANDS['0-6'] is empty), so the command cases use B1's test probes
+   * (interface §4): two no-op commands appended to the code version; the LAST one is the one made to fail.
+   */
+  const PROBES = ['B2ProbeAlpha', 'B2ProbeOmega'] as const;
+  const probeEnv = B1.seams.probeEnv(PROBES);
+  const failEnv = { ...probeEnv, ...B1.seams.failCommandEnv(PROBES[1]) };
   const lastCommand = () => {
-    if (!commands.length) throw new Error(`not runnable: UPGRADE_COMMANDS has no command for ${V} (0-6 is empty), so "only a command fails" cannot happen on this release; B1's planned CREWFLOW_UPGRADE_TEST_FAIL_COMMAND seam needs a test-only command to fail`);
-    const s = B1.stepsOf(V);
+    const s = B1.stepsOf(V, PROBES);
     return s[s.length - 1]!;
   };
 
   /** B1's isVersionComplete as crewflow_owner on `db` (one transaction, rolled back). */
-  async function complete(db: string, version = V): Promise<boolean> {
+  async function complete(db: string, version = V, probes: readonly string[] = []): Promise<boolean> {
     const c = new Client({ connectionString: withDatabase(env.appUrl, db), application_name: 'b2-ledger-upgrade-spec' });
     await c.connect();
     try {
       await c.query('BEGIN');
       const q: Query = async (sql, params) => (await c.query(sql, params as unknown[])).rows;
-      return await B1.isVersionComplete(q, version);
+      return await B1.isVersionComplete(q, version, probes);
     } finally {
       await c.query('ROLLBACK').catch(() => undefined);
       await c.end();
@@ -166,21 +172,23 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     const command = lastCommand();
     const db = cl.dbName('cmdfail');
     await cl.createDatabase(db, TPL256);
-    const failEnv = B1.seams.failCommandEnv(command);
     const first = await B1.start(db, { env: failEnv });
     expect([first.exitCode, first.serve, first.upgradeStatus]).toEqual([EXIT.commandFailedServing, true, 'failed']);
     expect(of(await cl.ledger(db), command)).toEqual([['failed', 1]]);
     expect((await cl.ledger(db)).find((r) => r.name === command)!.error_message).toBeTruthy();
-    expect(await complete(db)).toBe(false);
+    expect(await complete(db, V, PROBES)).toBe(false);
+    // The first probe (before the failing one) completed once and is not re-run or re-recorded.
+    expect(of(await cl.ledger(db), B1.stepsOf(V, PROBES).at(-2)!)).toEqual([['completed', 1]]);
     const second = await B1.start(db, { env: failEnv });
     expect([second.exitCode, second.serve]).toEqual([EXIT.commandFailedServing, true]);
     expect(of(await cl.ledger(db), command)).toEqual([['failed', 1], ['failed', 2]]);
-    const fixed = await B1.start(db);
+    const fixed = await B1.start(db, { env: probeEnv });
     expect([fixed.exitCode, fixed.serve, fixed.upgradeStatus]).toEqual([EXIT.ok, true, 'ok']);
     const all = await cl.ledger(db);
     expect(of(all, command)).toEqual([['failed', 1], ['failed', 2], ['completed', 3]]);
+    expect(of(all, B1.stepsOf(V, PROBES).at(-2)!)).toEqual([['completed', 1]]);
     expect(attemptProblems(all)).toEqual([]);
-    expect(await complete(db)).toBe(true);
+    expect(await complete(db, V, PROBES)).toBe(true);
   });
 
   // ------------------------------------------------------------------------------------------------------------ LU-5
@@ -216,22 +224,30 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     const command = lastCommand();
     const db = cl.dbName('racefail');
     await cl.createDatabase(db, TPL256);
-    const failEnv = B1.seams.failCommandEnv(command);
     await Promise.all([B1.start(db, { env: failEnv }), B1.start(db, { env: failEnv })]);
     expect(of(await cl.ledger(db), command).map((x) => x[1]).sort()).toEqual([1, 2]);
     expect(attemptProblems(await cl.ledger(db))).toEqual([]);
   });
 
   // ------------------------------------------------------------------------------------------------------------ LU-7
-  it('LU-7 every upgrade command of the current version run twice is idempotent', async () => {
-    lastCommand();
+  it('LU-7 every upgrade command run twice is idempotent; a whole upgrade run twice records nothing new', async () => {
     const db = await upgradedFrom(TPL256, 'idem');
+    // The real commands of this release, each run alone twice (none in 0.6.0: UPGRADE_COMMANDS['0-6'] is empty).
     for (const cmd of commands) {
       await B1.runCommand(db, cmd.name);
       const once = await cl.facts(db);
       await B1.runCommand(db, cmd.name);
       expect([cmd.name, factDifferences(once, await cl.facts(db))]).toEqual([cmd.name, []]);
     }
+    // The whole start path with the probe commands, twice: the second run re-runs nothing and records nothing.
+    const first = await B1.start(db, { env: probeEnv });
+    expect([first.exitCode, first.serve]).toEqual([EXIT.ok, true]);
+    const once = { ids: ids(await cl.ledger(db)), facts: await cl.facts(db) };
+    const second = await B1.start(db, { env: probeEnv });
+    expect([second.exitCode, second.serve]).toEqual([EXIT.ok, true]);
+    expect(ids(await cl.ledger(db))).toEqual(once.ids);
+    expect(factDifferences(once.facts, await cl.facts(db))).toEqual([]);
+    for (const step of B1.stepsOf(V, PROBES).slice(1)) expect([step, of(await cl.ledger(db), step)]).toEqual([step, [['completed', 1]]]);
   });
 
   // ------------------------------------------------------------------------------------------------- LU-8 / LU-9 / LU-12

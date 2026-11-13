@@ -133,7 +133,9 @@ function project(kind, opts) {
   L.writeSecrets(p.secretsDir);
   return p;
 }
+/** R254 and R256 predate DB-SETUP (upgrade-lib's PREV overlay: their own rab-worker command). */
 function use(p, digest, pgImage = process.env.ULT_PG_IMAGE) {
+  p.setPrev(digest === IMG.r254 || digest === IMG.r256);
   L.writeComposeEnv(p, { repository: REPO, digest, pgImage, redisImage: process.env.ULT_REDIS_IMAGE });
 }
 
@@ -468,17 +470,22 @@ async function main() {
     check(l11.psql("SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL") === instance, 'instance rows untouched');
     // Owner-required test: a direct DELETE as crewflow_owner, and after SET ROLE rab_secure_owner (the table owner, bound by
     // FORCE RLS, no DELETE policy), removes 0 rows. Checked with and without the upgrade scope. psql without -q prints tags.
-    const ownerDelete = (prelude) =>
-      L.run('docker', ['exec', '-i', '-e', 'PGPASSWORD', l11.container('rab-postgres'), 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'], {
-        input: `BEGIN;
+    // As the runtime login over TLS (upgrade-lib psqlOwner); a data-modifying CTE reports how many rows each DELETE removed.
+    const ownerDelete = (prelude) => {
+      try {
+        const out = l11.psqlOwner(
+          `BEGIN;
 ${prelude}
-DELETE FROM core.upgrade_migration;
-DELETE FROM core.upgrade_migration WHERE workspace_id = '${other}';
-COMMIT;
-`,
-        env: { PGPASSWORD: L.secrets.owner },
-        timeout: 120_000,
-      });
+WITH d AS (DELETE FROM core.upgrade_migration RETURNING 1) SELECT 'all=' || count(*) FROM d;
+` +
+            `WITH d AS (DELETE FROM core.upgrade_migration WHERE workspace_id = '${other}' RETURNING 1) SELECT 'one=' || count(*) FROM d;
+COMMIT;`,
+        );
+        return { refused: false, out };
+      } catch (e) {
+        return { refused: /permission denied/i.test(String(e && e.message)), out: L.redact(String(e && e.message)).slice(0, 300) };
+      }
+    };
     const total = () => l11.psql('SELECT count(*) FROM core.upgrade_migration');
     for (const [label, prelude] of [
       ['crewflow_owner, no scope', ''],
@@ -489,9 +496,8 @@ COMMIT;
       const before = total();
       const r = ownerDelete(prelude);
       evidence(`L11-delete-${label.replace(/\W+/g, '-')}.log`, r.out);
-      const tags = (r.out.match(/^DELETE \d+$/gm) || []).join(',');
-      const refused = r.code !== 0 && /permission denied/i.test(r.out);
-      check((refused || tags === 'DELETE 0,DELETE 0') && total() === before, `${label}: a direct DELETE removes 0 rows (${refused ? 'refused' : tags || r.out.trim().slice(0, 120)}; ${before} rows before and after)`);
+      const counts = (r.out.match(/^(all|one)=\d+$/gm) || []).join(',');
+      check((r.refused || counts === 'all=0,one=0') && total() === before, `${label}: a direct DELETE removes 0 rows (${r.refused ? 'refused' : counts || r.out.trim().slice(0, 120)}; ${before} rows before and after)`);
     }
   }, l11);
 

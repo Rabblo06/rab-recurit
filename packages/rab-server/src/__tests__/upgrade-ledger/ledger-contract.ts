@@ -124,10 +124,13 @@ export class InterfaceGap extends Error {
 
 export interface B1Interface {
   currentVersion: string;
-  /** stepsForVersion(v) names: the migrations step first, then the version's commands in timestamp order. */
-  stepsOf(version: string): string[];
+  /**
+   * stepsForVersion(v) names: the migrations step first, then the version's commands in timestamp order, then (interface
+   * §4) the test probe commands `<v>_<Name>_<1799999990000+i>` when `probes` are given.
+   */
+  stepsOf(version: string, probes?: readonly string[]): string[];
   /** Twenty isLastAttemptCompleted on the version's last step (instance scope), through B1's service on `query`. */
-  isVersionComplete(query: Query, version: string): Promise<boolean>;
+  isVersionComplete(query: Query, version: string, probes?: readonly string[]): Promise<boolean>;
   /** The start path (the migrate-on-start child twenty-migrate.ts) as a CHILD PROCESS; `killOnStep` SIGKILLs it on the step's start event. */
   start(db: string, opts?: { env?: Record<string, string>; killOnMigration?: string; asSuperuser?: boolean }): Promise<StartOutcome & { killed: boolean }>;
   /**
@@ -143,7 +146,13 @@ export interface B1Interface {
   upgradeCommands(): { name: string; timestamp: number }[];
   /** Runs one command alone on `db` (run-twice idempotence). */
   runCommand(db: string, name: string): Promise<void>;
-  seams: { failMigrationEnv(migrationClass: string): Record<string, string>; failCommandEnv(command: string): Record<string, string> };
+  seams: {
+    failMigrationEnv(migrationClass: string): Record<string, string>;
+    /** CREWFLOW_TEST_UPGRADE_COMMANDS: no-op probe commands appended to the code version (interface §4). */
+    probeEnv(names: readonly string[]): Record<string, string>;
+    /** CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: that command fails (recorded failed; exit 70, serves). */
+    failCommandEnv(command: string): Record<string, string>;
+  };
 }
 
 /** Connection URLs, set by the spec (never printed). */
@@ -288,15 +297,18 @@ export function b1(): B1Interface | null {
   const registry = load<{ UPGRADE_COMMANDS: Record<string, { name: string; timestamp: number }[]> }>(join('upgrade-commands', 'registry'));
   const migrateEntry = join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'twenty', 'twenty-migrate.ts');
   const currentVersion = version.readAppVersion(process.env);
-  const stepsOf = (v: string) => sequence.stepsForVersion(v).map((s) => (typeof s === 'string' ? s : s.name));
+  const stepsOf = (v: string, probes: readonly string[] = []) => [
+    ...sequence.stepsForVersion(v).map((s) => (typeof s === 'string' ? s : s.name)),
+    ...(v === currentVersion ? probes.map((name, i) => `${v}_${name}_${1799999990000 + i}`) : []),
+  ];
   return {
     currentVersion,
     stepsOf,
-    isVersionComplete: async (query, v) => {
+    isVersionComplete: async (query, v, probes = []) => {
       // The caller holds an open transaction; the `status` scope (read only) is what the upgrade code reads under.
       // (B1's withUpgradeScope opens and COMMITs its own transaction, which would commit a spec's rolled-back fixture.)
       await query('SELECT pg_catalog.set_config($1, $2, true)', [UPGRADE_SCOPE_SETTING, 'status']);
-      const steps = stepsOf(v);
+      const steps = stepsOf(v, probes);
       return service.isLastAttemptCompleted(query, { name: steps[steps.length - 1]!, workspaceId: null });
     },
     start: async (db, opts = {}) => {
@@ -342,7 +354,8 @@ export function b1(): B1Interface | null {
     },
     seams: {
       failMigrationEnv: (migrationClass) => ({ CREWFLOW_MIGRATION_TEST_FAIL_AT: migrationClass }),
-      failCommandEnv: (command) => ({ CREWFLOW_UPGRADE_TEST_FAIL_COMMAND: command }),
+      probeEnv: (names) => ({ CREWFLOW_TEST_UPGRADE_COMMANDS: names.join(',') }),
+      failCommandEnv: (command) => ({ CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: command }),
     },
   };
 }
