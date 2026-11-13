@@ -13,9 +13,14 @@
  *     when it is unset, so `.env`'s `NODE_ENV=development` used to reach the test process. This guard then returned early,
  *     every test file's application connection followed `.env` while the fixtures went to the TEST admin URL. Refused now:
  *     in every test file (setupFiles: JEST_WORKER_ID set and NODE_ENV not `test`) and in globalSetup (the Jest parent).
- *   - TEST_DATABASE_URL (application role) and TEST_DATABASE_URL_UNPOOLED (admin role: the disposable cluster's bootstrap
+ *   - TEST_DATABASE_URL (application role) and TEST_DATABASE_ADMIN_URL (admin role: the disposable cluster's bootstrap
  *     superuser) must BOTH be set, and each must name its login in the URL. No fallback to DATABASE_URL or
  *     DATABASE_URL_UNPOOLED, which may come from `.env`.
+ *   - X3.5-S7 (audit DBT-08), release 1: TEST_DATABASE_URL_UNPOOLED is the deprecated name of TEST_DATABASE_ADMIN_URL. It
+ *     is still accepted (globalSetup prints one name-only deprecation line), every check above applies to whichever name
+ *     supplied the URL, and both names set to different values is refused (compared as written after trimming, so even a
+ *     different password is a refusal). After validation both names hold the validated value, so a later dotenv load
+ *     cannot bring a different admin URL in under either name. Release 2 refuses the old name.
  *   - Both must name the same logical database on the same endpoint. Hostnames are NOT compared literally, because a pooled
  *     and a direct Neon URL legitimately differ by the `-pooler` suffix. TEST_DATABASE_CREWFLOW_URL and
  *     TEST_DATABASE_WORKER_URL, when set, must name that same database and endpoint too.
@@ -52,7 +57,18 @@ import { parse as parseDotenv } from 'dotenv';
 import { Client } from 'pg';
 
 export const TEST_DATABASE_URL = 'TEST_DATABASE_URL';
+/** The test admin connection: the disposable cluster's bootstrap superuser (fixtures, identity probes, migrations only). */
+export const TEST_DATABASE_ADMIN_URL = 'TEST_DATABASE_ADMIN_URL';
+/**
+ * Deprecated name of TEST_DATABASE_ADMIN_URL (X3.5-S7 release 1: accepted with a deprecation line; refused next release).
+ * It never meant "unpooled": the guard used to map it onto DATABASE_URL_UNPOOLED.
+ */
 export const TEST_DATABASE_URL_UNPOOLED = 'TEST_DATABASE_URL_UNPOOLED';
+/**
+ * Every name that can carry the test admin (superuser) URL, new name first. A child-process strip list must remove ALL of
+ * them (test-database-admin-url-names.spec.ts checks the committed strip lists) and keeps the old name after release 2 too.
+ */
+export const TEST_DATABASE_ADMIN_URL_NAMES: readonly string[] = [TEST_DATABASE_ADMIN_URL, TEST_DATABASE_URL_UNPOOLED];
 /** The `crewflow` login (worker provisioner tests). Optional; when set it must name the TEST database. */
 export const TEST_DATABASE_CREWFLOW_URL = 'TEST_DATABASE_CREWFLOW_URL';
 /** Phase D: the `crewflow_worker` login (worker claim tests). Optional; when set it must name the TEST database. */
@@ -135,7 +151,10 @@ export interface ResolvedTestDatabase {
   appUrl: string;
   adminUrl: string;
   app: TestDatabaseIdentity;
+  /** `admin.label` is the name that supplied the admin URL (TEST_DATABASE_ADMIN_URL, or the deprecated name). */
   admin: TestDatabaseIdentity;
+  /** True when the admin URL came ONLY from the deprecated TEST_DATABASE_URL_UNPOOLED (globalSetup prints a notice). */
+  adminFromDeprecatedName: boolean;
 }
 
 /** Parses a connection string into printable identity fields. Throws without ever echoing the raw value. */
@@ -226,24 +245,46 @@ function developmentDatabaseRefusal(id: TestDatabaseIdentity, env: Record<string
 }
 
 /**
+ * X3.5-S7: the admin URL from TEST_DATABASE_ADMIN_URL or its deprecated name. When both are set (non-empty) they must be the
+ * very same value after trimming, otherwise refused, naming both variables and no value. Pure.
+ */
+export function resolveTestDatabaseAdminUrl(
+  env: Record<string, string | undefined>,
+): { url: string; label: string; fromDeprecatedName: boolean } | null {
+  const current = present(env, TEST_DATABASE_ADMIN_URL);
+  const deprecated = present(env, TEST_DATABASE_URL_UNPOOLED);
+  if (current !== undefined && deprecated !== undefined && current !== deprecated) {
+    throw new TestDatabaseConfigError(
+      `${TEST_DATABASE_ADMIN_URL} and its deprecated name ${TEST_DATABASE_URL_UNPOOLED} are both set, to different values (values not shown). ` +
+        `Set only ${TEST_DATABASE_ADMIN_URL}. Refusing to start.`,
+    );
+  }
+  if (current !== undefined) return { url: current, label: TEST_DATABASE_ADMIN_URL, fromDeprecatedName: false };
+  if (deprecated !== undefined) return { url: deprecated, label: TEST_DATABASE_URL_UNPOOLED, fromDeprecatedName: true };
+  return null;
+}
+
+/**
  * Resolves the integration-test database from TEST_* variables only. Never reads DATABASE_URL or DATABASE_URL_UNPOOLED.
  * Pure function: pass any env-like object (tests pass explicit objects).
  */
 export function resolveIntegrationTestDatabase(env: Record<string, string | undefined>): ResolvedTestDatabase {
   const appUrl = env[TEST_DATABASE_URL]?.trim();
-  const adminUrl = env[TEST_DATABASE_URL_UNPOOLED]?.trim();
   if (!appUrl) {
     throw new TestDatabaseConfigError(
       `${TEST_DATABASE_URL} is required for integration tests. DATABASE_URL is never used as a fallback.`,
     );
   }
-  if (!adminUrl) {
+  const adminSource = resolveTestDatabaseAdminUrl(env);
+  if (!adminSource) {
     throw new TestDatabaseConfigError(
-      `${TEST_DATABASE_URL_UNPOOLED} is required for integration tests. DATABASE_URL_UNPOOLED is never used as a fallback.`,
+      `${TEST_DATABASE_ADMIN_URL} is required for integration tests (its deprecated name ${TEST_DATABASE_URL_UNPOOLED} is still accepted this release). ` +
+        'DATABASE_URL_UNPOOLED is never used as a fallback.',
     );
   }
+  const adminUrl = adminSource.url;
   const app = describeDatabaseUrl(appUrl, TEST_DATABASE_URL);
-  const admin = describeDatabaseUrl(adminUrl, TEST_DATABASE_URL_UNPOOLED);
+  const admin = describeDatabaseUrl(adminUrl, adminSource.label);
   for (const id of [app, admin]) {
     // A URL without its login takes PGUSER or the operating-system user: not a credential this guard can reason about.
     if (!id.hasUser) {
@@ -283,7 +324,16 @@ export function resolveIntegrationTestDatabase(env: Record<string, string | unde
       );
     }
   }
-  return { appUrl, adminUrl, app, admin };
+  return { appUrl, adminUrl, app, admin, adminFromDeprecatedName: adminSource.fromDeprecatedName };
+}
+
+/**
+ * X3.5-S7: the one name-only line globalSetup prints when the admin URL came from the deprecated name; null otherwise.
+ * Never contains a value.
+ */
+export function testDatabaseAdminNameNotice(resolved: ResolvedTestDatabase): string | null {
+  if (!resolved.adminFromDeprecatedName) return null;
+  return `[test-db-guard] ${TEST_DATABASE_URL_UNPOOLED} is deprecated: rename it to ${TEST_DATABASE_ADMIN_URL} (same value). The old name is refused in the next release.`;
 }
 
 /** Prints NODE_ENV only when it is one of the declared values; anything else is not echoed. */
@@ -391,7 +441,9 @@ function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, 
  * Called from Jest setupFiles (every test file, every worker) and from the e2e seed scripts. Under NODE_ENV=test it validates
  * the TEST_* pair and the inherited environment, then points the normal DATABASE_URL names at that same validated pair, so
  * every module that reads them (core datasource, Nest ConfigModule, which never overrides an already-set variable) uses the
- * test database and nothing else.
+ * test database and nothing else. X3.5-S7: both admin names (TEST_DATABASE_ADMIN_URL and the deprecated
+ * TEST_DATABASE_URL_UNPOOLED) are set to the validated admin URL, so a spec reading either name gets the checked value and a
+ * later dotenv load cannot add a different one under the other name.
  *
  * Outside NODE_ENV=test it returns null and changes nothing (runtime and CLI processes are unaffected), EXCEPT under Jest
  * (JEST_WORKER_ID set), where any other NODE_ENV is refused (DBT-01): a test file never runs unrouted.
@@ -405,6 +457,7 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   assertNoRedirectingProcessEnv(env, resolved);
   env.DATABASE_URL = resolved.appUrl;
   env.DATABASE_URL_UNPOOLED = resolved.adminUrl;
+  for (const name of TEST_DATABASE_ADMIN_URL_NAMES) env[name] = resolved.adminUrl;
   return resolved;
 }
 
@@ -413,7 +466,7 @@ export const WORKER_URL_REFUSED_QUERY_PARAMS: readonly string[] = ['options'];
 
 /** Names whose login the Worker-login switch may never use: the test admin / bootstrap superuser and the other admin logins. */
 export const WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES: readonly string[] = [
-  TEST_DATABASE_URL_UNPOOLED,
+  ...TEST_DATABASE_ADMIN_URL_NAMES,
   'MIGRATION_SECURITY_ADMIN_URL',
   TEST_DATABASE_CREWFLOW_URL,
 ];
@@ -580,7 +633,7 @@ export async function assertWorkerLoginNotPrivilegedAtRuntime(env: Record<string
  */
 export async function assertSameDatabaseAtRuntime(resolved: ResolvedTestDatabase): Promise<DatabaseIdentityProbe> {
   const app = await probeDatabaseIdentity(resolved.appUrl, TEST_DATABASE_URL);
-  const admin = await probeDatabaseIdentity(resolved.adminUrl, TEST_DATABASE_URL_UNPOOLED);
+  const admin = await probeDatabaseIdentity(resolved.adminUrl, resolved.admin.label);
   if (app.database !== admin.database || app.systemIdentifier !== admin.systemIdentifier) {
     throw new TestDatabaseConfigError(
       `Runtime identity mismatch: application connection reached database "${app.database}" (cluster ${app.systemIdentifier}), admin connection reached "${admin.database}" (cluster ${admin.systemIdentifier}). Refusing to start.`,

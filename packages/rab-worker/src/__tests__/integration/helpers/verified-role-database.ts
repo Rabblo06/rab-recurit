@@ -6,7 +6,6 @@ import {
   probeDatabaseIdentity,
   resolveIntegrationTestDatabase,
   TEST_DATABASE_URL,
-  TEST_DATABASE_URL_UNPOOLED,
   TestDatabaseConfigError,
 } from '@rab/server/database/typeorm/core/test-database-guard';
 
@@ -18,7 +17,7 @@ import {
  * Checks, all of which must pass:
  *   - the value comes from the named TEST_* environment variable only;
  *   - it parses, and a remote host is refused unless ALLOW_REMOTE_TEST_DATABASE=true (same rule as test-database-guard.ts);
- *   - live probe: it reaches the SAME database in the SAME cluster as TEST_DATABASE_URL_UNPOOLED, the admin connection the
+ *   - live probe: it reaches the SAME database in the SAME cluster as TEST_DATABASE_ADMIN_URL, the admin connection the
  *     fixtures are written through;
  *   - live probe: it authenticates as exactly `expectedRole`, which is neither superuser nor BYPASSRLS.
  *
@@ -43,7 +42,8 @@ export async function resolveVerifiedRoleDatabaseUrl(
   }
   const [mine, admin] = await Promise.all([
     probeDatabaseIdentity(url, envVar),
-    probeDatabaseIdentity(resolved.adminUrl, TEST_DATABASE_URL_UNPOOLED),
+    // X3.5-S7: labelled with the name that supplied the admin URL (TEST_DATABASE_ADMIN_URL or the deprecated name).
+    probeDatabaseIdentity(resolved.adminUrl, resolved.admin.label),
   ]);
   if (
     mine.database !== admin.database ||
