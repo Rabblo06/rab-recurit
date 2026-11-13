@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import path from 'node:path';
 import { fixtures } from './support/crewflow-fixtures';
-import { advance, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
+import { advance, advanceUntil, freezeTime, releaseTime, useVirtualTime } from './support/virtual-time';
 
 /**
  * Crewflow UI corrections (2026-10-20) — FIXTURE evidence (mocked API on the isolated Vite :5174): selection colours,
@@ -79,6 +79,8 @@ test('account menu: real profile, permitted actions with icons, opens upward', a
 });
 
 test('Operations + : categories, search, each category, duplicate refusal, link validation, add, remove', async ({ page }) => {
+  // Virtual time (support/virtual-time.ts) for the one step whose result depends on a timer chain (see the Record step).
+  await useVirtualTime(page);
   await fixtures(page);
   await page.goto('/');
   const plus = page.getByRole('button', { name: 'Add menu item' });
@@ -109,11 +111,22 @@ test('Operations + : categories, search, each category, duplicate refusal, link 
   await pop.locator('.add-menu-row', { hasText: 'Offers · Pending' }).click();
   await pop.getByRole('button', { name: 'Add' }).click();
 
-  // Record (server-scoped search)
+  // Record (server-scoped search). The result needs a chain of page timers: the step transition's frames, the 250 ms
+  // search debounce, then React Query's setTimeout(0) notifications around the /search response. The fixtures pin the
+  // date, which puts every page timer on Playwright's emulated clock; on a loaded 2-vCPU CI runner that clock fell
+  // seconds behind real time (measured locally under CPU throttling: a 100 ms timer took 2 s right after the dashboard
+  // loads), so this wall-clock 5 s wait failed with the list stuck on "Searching…" (CI runs 43358200457, 43376519328,
+  // 43479941901, 43481793846). The chain now runs on virtual time: frozen, then advanced frame by frame until the result
+  // is painted (up to 10 s of VIRTUAL time), so the machine's speed can no longer decide the outcome.
   await plus.click();
+  await expect(pop.getByRole('button', { name: /^Record/ })).toBeVisible();
+  await freezeTime(page);
   await pop.getByRole('button', { name: /^Record/ }).click();
   await pop.getByRole('textbox', { name: /Search/ }).fill('Staff');
-  await expect(pop.locator('.add-menu-row', { hasText: 'Staff Test 1' })).toBeVisible();
+  const staffRow = pop.locator('.add-menu-row', { hasText: 'Staff Test 1' });
+  await advanceUntil(page, () => staffRow.isVisible());
+  await releaseTime(page);
+  await expect(staffRow).toBeVisible();
   await page.screenshot({ path: path.join(OUT, '5d-record.png'), clip: { x: 0, y: 250, width: 560, height: 520 } });
   await pop.locator('.add-menu-row', { hasText: 'Staff Test 1' }).click();
   await pop.getByRole('button', { name: 'Add' }).click();
