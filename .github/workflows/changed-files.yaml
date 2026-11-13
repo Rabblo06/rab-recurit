@@ -58,6 +58,9 @@ jobs:
               - *shared
               - *server
               - 'packages/rab-worker/**'
+              # X3.3: a change to the Worker CI itself (or to this filter) must run the Worker CI.
+              - '.github/workflows/ci-worker.yaml'
+              - '.github/workflows/changed-files.yaml'
             front:
               - *shared
               - *ui
