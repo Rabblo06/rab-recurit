@@ -55,7 +55,8 @@ describe('env validation: owner-login database start-up settings', () => {
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toMatch(new RegExp(`${name} must be exactly`));
+      // Part B3: the two removed names are refused as removed (any value), the others for a value outside their set.
+      expect(message).toMatch(new RegExp(name.startsWith('CREWFLOW_UPGRADE_FAILURE') ? `${name} was removed \\(OWNER-DB-ULTIMATE Part B3\\)` : `${name} must be exactly`));
       expect(message).not.toContain('S3cret');
     }
   });
