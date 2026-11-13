@@ -6,7 +6,7 @@ import { EntityManager } from 'typeorm';
 import { AfterCommitPublisher } from '../after-commit/after-commit-publisher';
 import { EnvironmentService } from '../environment/environment.service';
 import { enqueueRegisteredJob, registeredJob } from '../../worker-shared/queue-enqueue';
-import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+import { boundedPublish, closeQueueProducer, createQueueProducerConnection, ProducerRedisConnection } from '../../worker-shared/queue-producer-connection';
 import {
   resolveTimerTriggerSettings,
   TIMER_TRIGGER_JOB_NAMES,
@@ -66,7 +66,7 @@ export class TimerTriggerQueueService implements OnModuleDestroy {
     this.settings = resolveTimerTriggerSettings({ get: (key) => env.get(key as never) });
     if (this.settings.mode !== 'off') {
       this.connection = createQueueProducerConnection(env.get('REDIS_URL'));
-      this.queue = new Queue<TimerTriggerJobData>(TIMER_TRIGGER_QUEUE_NAME, { connection: this.connection });
+      this.queue = new Queue<TimerTriggerJobData>(TIMER_TRIGGER_QUEUE_NAME, { connection: this.connection }, ProducerRedisConnection);
       this.queue.on('error', () => undefined);
     }
   }
