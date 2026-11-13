@@ -7032,6 +7032,26 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
 
+## /healthz databaseLogin — the health check notices a refused runtime login (branch fix/api-health-db-login, 2026-11-13, PR #133)
+- **Asset:** availability signal of the API; the runtime login `crewflow_owner`.
+- **Before:** /healthz only pinged through the pool (`SELECT 1` on an existing connection), so a changed or revoked login stayed
+  invisible until the pool needed a new connection (observed live in the #125 deliberate-password-change test).
+- **Control:** a new indicator opens ONE fresh runtime-login connection through the connection factory (same target, login,
+  TLS and startup options as the runtime pool; read-only session; `application_name` ending `-health`), runs `SELECT 1`,
+  closes it. Single flight; result (up or down) cached 5 s on a monotonic clock; connect 2.5 s / query 1.5 s / whole probe 3 s.
+  Response: `status` plus the fixed text "database login failed" only (no URL, login, SQLSTATE or driver message); one log
+  line per state change with the SQLSTATE only. The connection budget counts one probe connection per API instance.
+- **Accepted signal:** /healthz is public and unauthenticated, so a caller can now tell "database reachable but the runtime
+  login is refused" from "database down" (owner decision: notice lost logins). It reveals when credentials are rotated or
+  revoked, nothing more.
+- **Residual:** under severe CPU starvation the 3 s deadline can briefly report the login down (compose marks the container
+  unhealthy only after 15 consecutive failures; `restart: unless-stopped` does not restart unhealthy containers). Behind a
+  transaction pooler with its own auth file, client auth can succeed on a stale password; only the primary endpoint is probed.
+- **Tests:** `database-login.health.spec.ts` (up; 28P01 with no leak; query failure; factory refusal fails closed; deadline;
+  single flight under 25 concurrent; cache up/down; clock jump backwards re-probes), connection-budget spec (probe slots),
+  `healthz-database-login.integration.spec.ts` (password changed → 503 while the pooled ping is up; NOLOGIN; burst of 50
+  opens one login; read-only `-health` session).
+
 ## X3.5-S7 / DEAD-07 — the test admin URL is renamed, and no integration suite can skip silently (branches cleanup/x35-s7-test-admin-url, cleanup/x35-dead07-helper, 2026-11-13, PRs #126 and #127)
 - **Asset:** the disposable test cluster's bootstrap SUPERUSER URL (fixtures, identity probes, in-Jest migrations), and
   the guarantee that the RLS / tenant / payroll integration suites actually run.
