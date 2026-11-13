@@ -16,6 +16,7 @@ import { TenantContextService } from '../tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
 import { organisationIds, storageScopes } from '../../worker-shared/maintenance-catalogue';
 import { WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY, WORKER_STATS_KEY } from '../../worker-shared/heartbeat.constants';
+import { ProducerRedisConnection } from '../../worker-shared/queue-producer-connection';
 import { OutboxKind } from './dto/outbox-operations.dto';
 import { optionalReason, refuseInspection, requireReason } from './admin-actor';
 import { recordAdminPanelAudit } from './admin-panel-audit-actions';
@@ -320,7 +321,8 @@ export class OutboxOperationsService implements OnModuleDestroy {
     if (!queue) {
       this.queueConnection ??= new Redis(this.env.get('REDIS_URL'), { maxRetriesPerRequest: null, connectTimeout: 1_000, lazyConnect: true });
       this.queueConnection.on('error', () => undefined);
-      queue = new Queue(name, { connection: this.queueConnection });
+      // ProducerRedisConnection: closing this queue while its lazy client is still connecting never leaks an unhandled 'error'.
+      queue = new Queue(name, { connection: this.queueConnection }, ProducerRedisConnection);
       this.queues.set(name, queue);
     }
     return queue;
